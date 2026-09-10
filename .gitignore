@@ -1,0 +1,14 @@
+target/
+.issues/
+.zcode/
+
+# 本地 manox 联动开发：.cargo/config.toml 的 [patch] 覆盖不提交
+.cargo/config.toml
+
+# cx 运行时产物（原 cx 仓库 .gitignore 条目）
+.omx/
+.remora/
+cx.db
+cx-stats.jpg
+cx-stats.png
+cx-stats.svg
