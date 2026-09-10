@@ -14,11 +14,9 @@ use crate::{
 use crate::probe::types::{ProbeCellResult, ProbeRow, ProbeStatus};
 
 pub mod db;
-pub mod tui;
 pub mod types;
-pub mod view;
 
-pub(crate) fn runtime() -> &'static Runtime {
+pub fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| Runtime::new().unwrap())
 }
@@ -131,20 +129,7 @@ pub fn run_probe_auto(config: &CxConfig, provider_filter: Option<String>) -> Res
     Ok(())
 }
 
-/// 运行 Probe TUI
-pub fn run_probe_tui(config: &CxConfig, provider_filter: Option<String>) -> Result<()> {
-    let db_path = cx_state_dir()?.join("cx.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .with_context(|| format!("打开数据库失败: {}", db_path.display()))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-    db::init_probe_schema(&conn)?;
-
-    let rows = build_probe_rows(config, &conn, provider_filter)?;
-
-    tui::run_tui(rows, config, &conn)
-}
-
-pub(crate) fn build_probe_rows(
+pub fn build_probe_rows(
     config: &CxConfig,
     conn: &rusqlite::Connection,
     provider_filter: Option<String>,
@@ -213,7 +198,7 @@ pub(crate) fn build_probe_rows(
     Ok(rows)
 }
 
-pub(crate) fn probe_result_key(provider_name: &str, model_id: &str, wire_api: WireApi) -> String {
+pub fn probe_result_key(provider_name: &str, model_id: &str, wire_api: WireApi) -> String {
     format!("{}\0{}\0{}", provider_name, wire_api.display(), model_id)
 }
 

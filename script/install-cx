@@ -34,7 +34,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 install_root="${CX_INSTALL_DIR:-$HOME/.local}"
-cargo install --path crates/cx --root "$install_root" --locked
+cargo install --path crates/cx-cli --root "$install_root" --locked
 
 echo "Installed: $install_root/bin/cx"
 echo "Make sure $install_root/bin is on your PATH."

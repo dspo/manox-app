@@ -3,8 +3,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
 use super::tui::ProbeApp;
-use super::types::{ProbeRow, ProbeStatus};
-use crate::WireApi;
+use cx::WireApi;
+use cx::probe::types::{ProbeRow, ProbeStatus};
 
 pub fn draw(f: &mut ratatui::Frame, app: &mut ProbeApp) {
     let area = f.area();
@@ -163,7 +163,7 @@ fn check_all_failed(row: &ProbeRow) -> bool {
 }
 
 fn format_cell(
-    result: Option<&super::types::ProbeCellResult>,
+    result: Option<&cx::probe::types::ProbeCellResult>,
     spinner_tick: usize,
 ) -> (String, Style) {
     match result {
@@ -272,7 +272,7 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, _app: &ProbeApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::types::{ProbeCellResult, ProbeStatus};
+    use cx::probe::types::{ProbeCellResult, ProbeStatus};
 
     #[test]
     fn test_check_all_failed() {

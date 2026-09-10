@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Build and install manox on Linux (deb-based distros).
+#
+# Usage: script/bundle-deb [options]
+# Options:
+#   -d    Compile in debug mode
+#   -o    Open (launch) after installing
+#   -i    Install the binary to /usr/local/bin and register a desktop entry
+#   -h    Display this help and exit
+
+build_flag="--release"
+target_dir="release"
+open_result=false
+install_result=false
+
+help_info() {
+    echo "
+Usage: ${0##*/} [options]
+Build and install manox for Linux.
+
+Options:
+  -d    Compile in debug mode
+  -o    Open (launch) manox after installing
+  -i    Install binary to /usr/local/bin and register a .desktop entry
+  -h    Display this help and exit
+"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d) build_flag=""; target_dir="debug";;
+        -o) open_result=true;;
+        -i) install_result=true;;
+        -h|--help) help_info; exit 0;;
+        *) echo "Error: unknown option '$1'"; help_info; exit 1;;
+    esac
+    shift
+done
+
+# --- Detect target triple ---
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+if [[ "$target_triple" != *-linux-* ]]; then
+    echo "Error: this script only runs on Linux (detected $target_triple)"
+    exit 1
+fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+app_version=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
+                   p=[x for x in pkgs if x['name']=='manox']; \
+                   print(p[0]['version'] if p else '0.1.0')")
+
+# --- Build ---
+echo "Building manox (${build_flag:-debug})..."
+cargo build ${build_flag} --package manox --target "$target_triple"
+
+binary_path="target/${target_triple}/${target_dir}/manox"
+echo "Binary: ${binary_path}"
+
+if [[ "$install_result" = true ]]; then
+    echo "Installing to /usr/local/bin/manox"
+    sudo install -m 755 "${binary_path}" /usr/local/bin/manox
+    echo "Installed: /usr/local/bin/manox"
+
+    # --- .desktop entry ---
+    desktop_dir="${HOME}/.local/share/applications"
+    mkdir -p "${desktop_dir}"
+
+    icon_dest="${HOME}/.local/share/icons/hicolor/256x256/apps"
+    mkdir -p "${icon_dest}"
+
+    # Use the PNG icon; fall back to a bundled asset if available
+    icon_src="${ROOT}/apps/desktop/manox/resources/app-icon.png"
+    if [[ -f "$icon_src" ]]; then
+        cp "$icon_src" "${icon_dest}/manox.png"
+        echo "Icon installed: ${icon_dest}/manox.png"
+    fi
+
+    desktop_file="${desktop_dir}/manox.desktop"
+    cat > "${desktop_file}" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Manox
+Comment=Manox AI Agent Desktop
+Exec=/usr/local/bin/manox
+Icon=manox
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+DESKTOP
+    echo "Desktop entry: ${desktop_file}"
+fi
+
+echo ""
+echo "Build complete: ${binary_path}"
+
+if [[ "$open_result" = true ]]; then
+    echo "Launching manox..."
+    "${binary_path}" &
+fi

@@ -12,9 +12,9 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::probe::db;
-use crate::probe::types::{ProbeCellResult, ProbeRow, ProbeStatus};
-use crate::{CopilotAuth, CxConfig, WireApi};
+use cx::probe::db;
+use cx::probe::types::{ProbeCellResult, ProbeRow, ProbeStatus};
+use cx::{CopilotAuth, CxConfig, WireApi};
 
 pub struct ProbeApp {
     pub rows: Vec<ProbeRow>,
@@ -236,7 +236,7 @@ fn start_probing(
             *count += 1;
             drop(count);
 
-            let result = super::do_probe(&provider, &url, wire_api, &model_id, auth);
+            let result = cx::probe::do_probe(&provider, &url, wire_api, &model_id, auth);
             let _ = tx.send(ProbeResultItem {
                 row_idx,
                 wire_api,
