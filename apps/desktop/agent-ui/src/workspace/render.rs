@@ -98,12 +98,12 @@ impl Workspace {
             let icon = Icon::new(IconName::SquareTerminal)
                 .small()
                 .into_any_element();
+            // Bind the column before the shell call: its builder borrows `cx`
+            // for the sidebar-toggle listener, which would collide with
+            // `shell_root`'s `cx` argument inside a single call expression.
+            let column = self.render_terminal_column(icon, title_text, terminal, cx);
             return self
-                .shell_root(
-                    self.sidebar.clone(),
-                    self.render_terminal_column(icon, title_text, terminal),
-                    cx,
-                )
+                .shell_root(self.sidebar.clone(), column, cx)
                 .on_action(
                     cx.listener(|this, _: &crate::ToggleCockpitTasks, _window, cx| {
                         this.context_rail.update(cx, |r, cx| {
@@ -141,12 +141,11 @@ impl Workspace {
                     .size(px(16.))
                     .text_color(cx.theme().muted_foreground)
                     .into_any_element();
+                // Bind the column before the shell call (same `cx` borrow
+                // reason as the Terminal mode above).
+                let column = self.render_terminal_column(icon, title, terminal, cx);
                 return self
-                    .shell_root(
-                        self.sidebar.clone(),
-                        self.render_terminal_column(icon, title, terminal),
-                        cx,
-                    )
+                    .shell_root(self.sidebar.clone(), column, cx)
                     .into_any_element();
             }
             // No live session matches the recorded id (closed underneath us).
@@ -204,7 +203,7 @@ impl Workspace {
         let main_body_w = window.bounds().size.width
             - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
             - px(CARD_BORDER)
-            - self.sidebar_width
+            - self.effective_sidebar_width()
             - if right_pane_open {
                 editor_width + px(EDITOR_DIVIDER_WIDTH)
             } else {
@@ -619,6 +618,22 @@ impl Workspace {
             .child(
                 TitleBar::new()
                     .child(
+                        h_flex().items_center().pl_2().child(
+                            Button::new("sidebar-toggle")
+                                .ghost()
+                                .xsmall()
+                                .icon(if self.sidebar_visible {
+                                    IconName::PanelLeftClose
+                                } else {
+                                    IconName::PanelLeftOpen
+                                })
+                                .tooltip(i18n::t("sidebar-toggle"))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.toggle_sidebar(cx);
+                                })),
+                        ),
+                    )
+                    .child(
                         h_flex()
                             .gap_2()
                             .items_center()
@@ -921,7 +936,7 @@ impl Workspace {
                     let dynamic_max = e.bounds.size.width
                         - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
                         - px(CARD_BORDER)
-                        - this.sidebar_width
+                        - this.effective_sidebar_width()
                         - px(EDITOR_DIVIDER_WIDTH)
                         - px(MAIN_MIN_WIDTH);
                     let max_w = dynamic_max
@@ -933,6 +948,26 @@ impl Workspace {
             ));
         root.into_any_element()
     }
+    /// The width the sidebar slot actually claims in the shell layout: zero
+    /// while collapsed, the remembered drag width otherwise. Every width
+    /// budget (drag clamps, the rail gate, the turn-navigator insets) goes
+    /// through this so a collapsed sidebar never reserves space.
+    pub(super) fn effective_sidebar_width(&self) -> Pixels {
+        if self.sidebar_visible {
+            self.sidebar_width
+        } else {
+            px(0.)
+        }
+    }
+
+    /// Collapse/expand the sidebar slot (the TitleBar's panel-left toggle).
+    /// The drag width survives the round trip; hiding only drops the slot
+    /// and its resize handle from the shell layout.
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
     /// The shared window shell every full-window `ViewMode` renders through:
     /// a gutter around an `sidebar slot | main card` pair — `SHELL_PAD_LEFT`
     /// on the left (the sidebar's seamless outer edge), `SHELL_PAD_EDGE` on
@@ -953,6 +988,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let theme = cx.theme().clone();
+        // The collapse gate hides the conversation sidebar; the Settings nav
+        // is exempt — its back control is the only way out of the Settings
+        // page, so hiding it would strand the user there.
+        let sidebar_shown =
+            self.sidebar_visible || matches!(self.view_mode, ViewMode::Settings);
         // The divider is the (invisible) drag handle for resizing the sidebar.
         // Double-click resets to the default `SIDEBAR_WIDTH` for symmetry with
         // the editor pane.
@@ -989,9 +1029,14 @@ impl Workspace {
                     }
                 }),
             );
-        // The gutter strip above the card is not part of any in-card title
-        // bar, so it gets its own window-drag hot zone to keep the top edge
-        // of the window draggable.
+        // Window-drag hot zones for everything above/outside the card's own
+        // title bar: the slim full-width strip over the top gutter, plus the
+        // sidebar slot's whole top region up to the same height as the
+        // in-card title bar — dragging there feels identical to dragging the
+        // title bar (the seamless sidebar shows no bar of its own). macOS
+        // traffic lights float over this zone and keep their native click
+        // handling. While the sidebar is collapsed the zone shrinks to the
+        // left gutter strip.
         let top_drag_gutter = gpui::div()
             .id("window-drag-gutter")
             .absolute()
@@ -999,6 +1044,23 @@ impl Workspace {
             .left_0()
             .right_0()
             .h(px(SHELL_PAD_EDGE))
+            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                window.start_window_move();
+            });
+        let sidebar_drag_zone = gpui::div()
+            .id("sidebar-drag-zone")
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(
+                px(SHELL_PAD_LEFT)
+                    + if sidebar_shown {
+                        self.sidebar_width
+                    } else {
+                        px(0.)
+                    },
+            )
+            .h(px(SHELL_PAD_EDGE) + TITLE_BAR_HEIGHT)
             .on_mouse_down(MouseButton::Left, |_, window, _| {
                 window.start_window_move();
             });
@@ -1039,10 +1101,11 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &CloseTerminalTab, _window, cx| {
                 this.close_terminal_tab(cx);
             }))
-            .child(sidebar)
+            .children(sidebar_shown.then_some(sidebar))
             .child(main_card)
-            .child(sidebar_divider)
+            .children(sidebar_shown.then_some(sidebar_divider))
             .child(top_drag_gutter)
+            .child(sidebar_drag_zone)
             .on_drag_move(cx.listener(
                 move |this, e: &DragMoveEvent<DraggedSidebarDivider>, _window, cx| {
                     // The root fills the window; the sidebar slot starts one
@@ -1073,14 +1136,17 @@ impl Workspace {
     }
 
     /// The terminal-style main column shared by the built-in Terminal tab and
-    /// external agent CLI sessions: a TitleBar (leading icon + title) over a
-    /// full-bleed terminal view. One shape for both, so the two terminal
-    /// surfaces read as peers inside the shared shell.
+    /// external agent CLI sessions: a TitleBar (sidebar toggle + leading icon
+    /// + title) over a full-bleed terminal view. One shape for both, so the
+    /// two terminal surfaces read as peers inside the shared shell — and the
+    /// sidebar toggle stays reachable while a collapsed sidebar persists
+    /// across mode switches.
     fn render_terminal_column(
         &self,
         icon: AnyElement,
         title: SharedString,
         content: impl IntoElement,
+        cx: &mut Context<Self>,
     ) -> gpui::Div {
         v_flex()
             .flex_1()
@@ -1088,23 +1154,40 @@ impl Workspace {
             .min_w_0()
             .relative()
             .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .flex_1()
-                        .min_w_0()
-                        .child(icon)
-                        .child(
-                            gpui::div()
-                                .text_sm()
-                                .text_left()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(title),
+                TitleBar::new()
+                    .child(
+                        h_flex().items_center().pl_2().child(
+                            Button::new("sidebar-toggle")
+                                .ghost()
+                                .xsmall()
+                                .icon(if self.sidebar_visible {
+                                    IconName::PanelLeftClose
+                                } else {
+                                    IconName::PanelLeftOpen
+                                })
+                                .tooltip(i18n::t("sidebar-toggle"))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.toggle_sidebar(cx);
+                                })),
                         ),
-                ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_1()
+                            .min_w_0()
+                            .child(icon)
+                            .child(
+                                gpui::div()
+                                    .text_sm()
+                                    .text_left()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(title),
+                            ),
+                    ),
             )
             .child(v_flex().flex_1().h_full().w_full().child(content))
     }

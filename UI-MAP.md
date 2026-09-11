@@ -59,7 +59,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### MessageColumn
 
-- [MessageColumn](#messagecolumn) · [TitleBar](#titlebar) · [TitleBarThreadTitle](#titlebarthreadtitle) · [TitleBarMenuButton](#titlebarmenubutton) · [RightPaneToggleBtn](#rightpanetogglebtn) · [Body](#body)
+- [MessageColumn](#messagecolumn) · [TitleBar](#titlebar) · [TitleBarThreadTitle](#titlebarthreadtitle) · [TitleBarMenuButton](#titlebarmenubutton) · [SidebarToggleBtn](#sidebartogglebtn) · [RightPaneToggleBtn](#rightpanetogglebtn) · [Body](#body)
 
 ### ContextRail
 
@@ -188,7 +188,7 @@ Every non-Settings `ViewMode` renders through one shared shell ([WorkspaceShell]
 
 #### WorkspaceShell
 
-The shared window shell built by `Workspace::shell_root(sidebar, main)`: an `h_flex` root with an asymmetric gutter (`SHELL_PAD_LEFT` 10px on the left, `SHELL_PAD_EDGE` 4px on the top/bottom/right), holding `sidebar-slot | main card` flush against each other plus the mode-switching actions (`FocusConversation` / `FocusTerminal` / `NewTerminalTab` / `CloseTerminalTab`) and the sidebar drag/reset handling. The main slot is wrapped in the shell's card chrome (`border_1` + `rounded(theme.radius_lg)` + `bg:background` + `overflow_hidden`), and an invisible absolute [SidebarDivider](#sidebardivider) strip overlays the sidebar/card boundary; a window-drag hot zone on the top gutter strip keeps the window's top edge draggable. Every full-window `ViewMode` routes through it — the sidebar slot is the conversation `Sidebar` for Workspace / Terminal / ExternalSession modes and the [SettingsLeftNav](#settingsleftnav) for Settings; the Workspace mode chains the conversation-only actions (settings / editor / browser / completion / archive…) and the turn-navigator overlay onto it, and passes a [MainView](#mainview) (message column + right side view) as the main slot; the Terminal and ExternalSession modes pass a single-column [TerminalColumn](#terminalcolumn) instead. The divider drag/double-click-reset writes one shared width (`Workspace::sidebar_width`) and syncs it to both the `Sidebar` entity and the `SettingsView`, so the Settings page resizes its sidebar exactly like the app page. Terminal-style main views are built by `Workspace::render_terminal_column` ([TerminalColumn](#terminalcolumn)).
+The shared window shell built by `Workspace::shell_root(sidebar, main)`: an `h_flex` root with an asymmetric gutter (`SHELL_PAD_LEFT` 10px on the left, `SHELL_PAD_EDGE` 4px on the top/bottom/right), holding `sidebar-slot | main card` flush against each other plus the mode-switching actions (`FocusConversation` / `FocusTerminal` / `NewTerminalTab` / `CloseTerminalTab`) and the sidebar drag/reset handling. The main slot is wrapped in the shell's card chrome (`border_1` + `rounded(theme.radius_lg)` + `bg:background` + `overflow_hidden`), and an invisible absolute [SidebarDivider](#sidebardivider) strip overlays the sidebar/card boundary. Window-drag hot zones cover everything outside the card's own title bar: a slim full-width strip on the top gutter, plus the sidebar slot's whole top region up to the in-card title bar's height (`SHELL_PAD_EDGE + TITLE_BAR_HEIGHT`) — dragging there feels identical to dragging the title bar even though the seamless sidebar shows no bar (macOS traffic lights float over this zone and keep their native click handling); while the sidebar is collapsed the zone shrinks to the left gutter strip. Every full-window `ViewMode` routes through it — the sidebar slot is the conversation `Sidebar` for Workspace / Terminal / ExternalSession modes and the [SettingsLeftNav](#settingsleftnav) for Settings; the Workspace mode chains the conversation-only actions (settings / editor / browser / completion / archive…) and the turn-navigator overlay onto it, and passes a [MainView](#mainview) (message column + right side view) as the main slot; the Terminal and ExternalSession modes pass a single-column [TerminalColumn](#terminalcolumn) instead. The divider drag/double-click-reset writes one shared width (`Workspace::sidebar_width`) and syncs it to both the `Sidebar` entity and the `SettingsView`, so the Settings page resizes its sidebar exactly like the app page. Terminal-style main views are built by `Workspace::render_terminal_column` ([TerminalColumn](#terminalcolumn)).
 
 > Source: `apps/desktop/agent-ui/src/workspace/render.rs`
 
@@ -316,6 +316,12 @@ Thread title text, clickable → opens [TitleMenu](#titlemenu).
 #### TitleBarMenuButton
 
 "..." button → opens [TitleMenu](#titlemenu) popup.
+
+> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+
+#### SidebarToggleBtn
+
+Ghost icon button at the TitleBar's left edge toggling the sidebar slot's visibility (`Workspace::toggle_sidebar`, state `sidebar_visible`, in-memory only). The icon is `IconName::PanelLeftClose` while the sidebar is shown and `IconName::PanelLeftOpen` while collapsed (the lucide panel-left pair, mirroring the right pane's toggle). Collapsing drops the sidebar slot and its resize handle from the shell layout — the main card takes the full width and every width budget (`effective_sidebar_width()` → 0) follows — while the remembered drag width survives the round trip. The Settings page is exempt: its nav carries the only back control, so it stays visible regardless of the gate. The same button leads the [TerminalColumn](#terminalcolumn) TitleBar so a collapsed sidebar can be re-expanded from the terminal and external-session modes too.
 
 > Source: `apps/desktop/agent-ui/src/workspace/render.rs`
 

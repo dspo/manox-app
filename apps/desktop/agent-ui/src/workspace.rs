@@ -679,6 +679,11 @@ pub struct Workspace {
     /// In-memory only; never persisted so the user's drag state stays
     /// session-local.
     sidebar_width: Pixels,
+    /// Sidebar collapse gate (the TitleBar's panel-left toggle): collapsed
+    /// hides the sidebar slot and its resize handle so the main card takes
+    /// the full width; the remembered `sidebar_width` survives the round
+    /// trip. In-memory only, like the width.
+    sidebar_visible: bool,
     /// A pending `AskUserQuestion` card rendered inline in the message list.
     pending_ask: Option<PendingAsk>,
     pending_auth: Option<PendingAuth>,
@@ -1154,6 +1159,7 @@ impl Workspace {
             browser_views: BTreeMap::new(),
             editor_width: px(EDITOR_PANEL_WIDTH),
             sidebar_width: px(SIDEBAR_WIDTH),
+            sidebar_visible: true,
             pending_ask: None,
             pending_auth: None,
             ask_snapshot_item: None,
@@ -2466,7 +2472,7 @@ impl Workspace {
         let navigator = self.turn_navigator.clone()?;
         let layout = turn_navigator_layout(
             window.bounds().size.width,
-            self.sidebar_width,
+            self.effective_sidebar_width(),
             right_pane_open.then_some(self.editor_width),
             show_context_rail,
         );
