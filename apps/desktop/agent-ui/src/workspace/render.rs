@@ -1153,8 +1153,8 @@ impl Workspace {
     }
 
     /// The terminal-style main column shared by the built-in Terminal tab and
-    /// external agent CLI sessions: a TitleBar (sidebar toggle + leading icon
-    /// + title) over a full-bleed terminal view. One shape for both, so the
+    /// external agent CLI sessions: a TitleBar (sidebar toggle, leading icon,
+    /// title) over a full-bleed terminal view. One shape for both, so the
     /// two terminal surfaces read as peers inside the shared shell — and the
     /// sidebar toggle stays reachable while a collapsed sidebar persists
     /// across mode switches.
