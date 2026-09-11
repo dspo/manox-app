@@ -84,10 +84,11 @@ pub fn spawn_pump(cx: &mut App) {
     .detach();
 }
 
-/// Decode the embedded app icon and resize it to a square tray-sized RGBA
-/// bitmap. Shared by every backend; each converts to its wire format.
-fn app_icon_rgba(size: u32) -> anyhow::Result<Vec<u8>> {
-    let img = image::load_from_memory(include_bytes!("../resources/app-icon.png"))?;
+/// Decode the embedded tray icon — a white glyph on transparency, distinct
+/// from the app icon — and resize it to a square tray-sized RGBA bitmap.
+/// Shared by every backend; each converts to its wire format.
+fn tray_icon_rgba(size: u32) -> anyhow::Result<Vec<u8>> {
+    let img = image::load_from_memory(include_bytes!("../resources/tray-icon.png"))?;
     let img = img.resize_exact(size, size, image::imageops::FilterType::Lanczos3);
     Ok(img.into_rgba8().into_raw())
 }
@@ -100,7 +101,7 @@ fn app_icon_rgba(size: u32) -> anyhow::Result<Vec<u8>> {
 /// [`super::spawn_pump`].
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod backend {
-    use super::{OPEN_ID, QUIT_ID, TrayCmd, app_icon_rgba};
+    use super::{OPEN_ID, QUIT_ID, TrayCmd, tray_icon_rgba};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -120,7 +121,7 @@ mod backend {
     }
 
     pub fn install() -> anyhow::Result<()> {
-        let rgba = app_icon_rgba(ICON_PX)?;
+        let rgba = tray_icon_rgba(ICON_PX)?;
         let icon = Icon::from_rgba(rgba, ICON_PX, ICON_PX)
             .map_err(|e| anyhow::anyhow!("invalid tray icon: {e}"))?;
         let builder = TrayIconBuilder::new()
@@ -132,6 +133,11 @@ mod backend {
         // pops the menu.
         #[cfg(not(target_os = "macos"))]
         let builder = builder.with_menu_on_left_click(false);
+        // The white glyph doubles as the macOS template image: template
+        // rendering consumes only the alpha channel and the system tints it
+        // to match the menu bar's light/dark appearance.
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_as_template(true);
         let tray = builder.build()?;
         TRAY.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -197,7 +203,7 @@ mod backend {
 /// gpui's event loop.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod backend {
-    use super::{TrayCmd, app_icon_rgba};
+    use super::{TrayCmd, tray_icon_rgba};
     use ksni::blocking::TrayMethods;
     use ksni::menu::{MenuItem, StandardItem};
     use std::sync::{Mutex, OnceLock, mpsc};
@@ -276,7 +282,7 @@ mod backend {
     }
 
     fn make_icon() -> anyhow::Result<ksni::Icon> {
-        let rgba = app_icon_rgba(ICON_PX)?;
+        let rgba = tray_icon_rgba(ICON_PX)?;
         // RGBA -> ARGB32, network byte order (A R G B per pixel).
         let mut data = Vec::with_capacity(rgba.len());
         for chunk in rgba.chunks_exact(4) {
