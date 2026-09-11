@@ -122,6 +122,7 @@ impl ClientStoreHandle {
         self.outbound = Some(outbound);
     }
 
+    /// The sanctioned sole-writer exception: the workspace mirrors a mode
     /// switch onto the store immediately so the chip reflects the click
     /// without waiting for the journal echo.
     pub fn set_permission_mode_optimistic(&mut self, mode: manox_agent::thread::PermissionMode) {

@@ -2767,9 +2767,10 @@ impl Workspace {
     }
 
     /// Apply `mode` and immediately send `prompt` as a user turn — the
-    /// `/mode <name> [prompt]` form. Slash dispatch only fires while idle
-    /// (the submit gate); `/mode` typed mid-turn parks in the follow-up
-    /// queue as raw text like any other message.
+    /// `/mode <name> [prompt]` form. `/mode` dispatches even mid-turn (mode
+    /// switches are hot), so the mode applies right away while the prompt
+    /// half parks in the follow-up queue like any message sent while
+    /// running.
     pub(crate) fn start_mode_turn(
         &mut self,
         mode: PermissionMode,

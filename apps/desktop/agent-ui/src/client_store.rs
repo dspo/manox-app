@@ -617,6 +617,41 @@ mod tests {
         assert_eq!(store.id.0, "s1");
     }
 
+    /// The optimistic mirror contract: the workspace writes the mode field
+    /// directly on a click (chip flips without the journal echo), and any
+    /// later projection merge — the authoritative echo — overwrites it. A
+    /// stale in-flight frame may bounce the field once; the echo corrects.
+    #[test]
+    fn optimistic_permission_mode_is_overwritten_by_the_echo() {
+        let mut store = ClientStore::default();
+        assert_eq!(
+            store.permission_mode,
+            manox_agent::thread::PermissionMode::WorkspaceWrite
+        );
+        store.set_permission_mode_optimistic(manox_agent::thread::PermissionMode::ReadOnly);
+        assert_eq!(
+            store.permission_mode,
+            manox_agent::thread::PermissionMode::ReadOnly
+        );
+        // A stale in-flight frame carrying the pre-switch value bounces the
+        // mirror (the optimistic write owns no projections slot).
+        store.merge_projection(
+            "permission_mode",
+            Value::String("workspace-write".into()),
+            1,
+        );
+        assert_eq!(
+            store.permission_mode,
+            manox_agent::thread::PermissionMode::WorkspaceWrite
+        );
+        // The authoritative echo at a higher seq settles the field for good.
+        store.merge_projection("permission_mode", Value::String("read-only".into()), 2);
+        assert_eq!(
+            store.permission_mode,
+            manox_agent::thread::PermissionMode::ReadOnly
+        );
+    }
+
     #[test]
     fn projections_materialize_mirror_fields() {
         let mut store = ClientStore::default();
