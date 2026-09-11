@@ -52,13 +52,13 @@ impl Workspace {
         let plan_chip = self.render_plan_chip(theme, cx);
         let access = self.render_access_placeholder(theme, cx);
         let model = self.render_model_selector_pi(theme, cx);
-        let send = self.render_send_button(
-            running
-                && self.pending_plan_review.is_none()
-                && self.pending_ask.is_none()
-                && self.pending_auth.is_none(),
-            cx,
-        );
+        // Absolute cancel priority: the stop form is driven by the raw
+        // running edge alone — a pending ask/approve/plan card never swaps
+        // the control into a send glyph the user cannot fire (the deadlock
+        // class: stop became an empty-input-disabled send exactly when
+        // the user most needed to interrupt). Ask supplement input keeps
+        // its own path: Enter.
+        let send = self.render_send_button(running, cx);
         // The completion popover overlays the composer; anchoring it on the
         // composer's own v_flex keeps it glued to the input bar in both hero
         // and footer, with a single mount point and ElementId.
@@ -621,19 +621,40 @@ impl Workspace {
         self.plus_menu_sub = None;
     }
 
+    /// The send/stop control's single click dispatch. The running edge is
+    /// re-read from the leaf store — never the render-time glyph — so
+    /// running ⟹ cancel holds unconditionally (absolute cancel priority);
+    /// a pending ask's supplement text keeps its own path through Enter
+    /// (`submit_input`), never this control.
+    pub(crate) fn send_button_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A click with no foreground store is the teardown window: leave a
+        // trace and drop the note, never a panic on the click path.
+        let Some(running) = self.store.as_ref().map(|s| s.read(cx).store.running) else {
+            tracing::warn!("send/stop dropped: no foreground store bound");
+            return;
+        };
+        if running {
+            self.cancel_turn(cx);
+        } else {
+            self.submit_input(window, cx);
+        }
+    }
+
     /// Circular icon-only send/stop button.
     ///
     /// The composer's primary action control, reused across the hero and footer
     /// layouts. The box is pinned to `SEND_BTN_SIZE` so the icon, spinner, hover
     /// border, and disabled tint never perturb the composer row's geometry.
     ///
-    /// States are kept visually disjoint: while a turn is running (and no
-    /// plan/ask awaits input) the button is a stop control — Pause glyph, danger
-    /// tint, always enabled so cancel stays reachable. When idle it is a send
-    /// control — ArrowUp glyph, accent tint — and goes inert (`disabled`) the
-    /// moment the composer has no text and no pending attachments, so an empty
-    /// input never reads as a ready-to-fire primary. The follow-up queue is
-    /// driven by Enter, not by this button, so running never disables stop.
+    /// States are kept visually disjoint: while a turn is running the button
+    /// is a stop control — Pause glyph, danger tint, always enabled — under
+    /// any pending plan/ask/auth card (absolute cancel priority: interrupting
+    /// a parked turn is never blocked by an unanswered interaction). When idle
+    /// it is a send control — ArrowUp glyph, accent tint — and goes inert
+    /// (`disabled`) the moment the composer has no text and no pending
+    /// attachments, so an empty input never reads as a ready-to-fire primary.
+    /// The follow-up queue is driven by Enter, not by this button, so running
+    /// never disables stop.
     pub(super) fn render_send_button(&self, running: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let disabled = !self.composer_can_submit(running, cx);
@@ -674,18 +695,7 @@ impl Workspace {
             })
             .disabled(disabled)
             .on_click(cx.listener(|this, _, window, cx| {
-                if this
-                    .store
-                    .as_ref()
-                    .map(|s| s.read(cx).store.running)
-                    .expect("foreground store present")
-                    && this.pending_plan_review.is_none()
-                    && this.pending_ask.is_none()
-                {
-                    this.cancel_turn(cx);
-                } else {
-                    this.submit_input(window, cx);
-                }
+                this.send_button_clicked(window, cx);
             }))
             .into_any_element()
     }

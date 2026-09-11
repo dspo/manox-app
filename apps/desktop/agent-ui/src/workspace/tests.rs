@@ -2380,3 +2380,404 @@ fn turn_navigator_layout_compensates_shell_gutter_and_card_border() {
     let l = turn_navigator_layout(px(290.), px(260.), None, true);
     assert_eq!(l.panel_width, px(0.));
 }
+
+/// Absolute cancel priority (the deadlock class): while the leaf runs, the
+/// send/stop control dispatches `cancel_turn` whatever interaction cards are
+/// surfaced — the regression swapped it into an empty-input-disabled send,
+/// physically unreachable exactly when the user most needed to interrupt.
+/// And when not running, the same control keeps the ask supplement path
+/// (`submit_input` answers the card via Enter-semantics).
+#[gpui::test]
+fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path = std::env::temp_dir().join(format!("manox-cancel-priority-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    // The AgentServer runs on the real tokio runtime and replies to the
+    // gpui store pump across threads. That cross-thread wake is legitimate
+    // production behavior, but the deterministic test scheduler flags it
+    // unless parking is allowed.
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(1_120.), gpui::px(780.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    let ask_payload = serde_json::json!({
+        "questions": [
+            { "question": "Which one?", "header": "Pick",
+              "options": [{ "label": "A" }, { "label": "B" }] }
+        ]
+    });
+    // The running edge + a pending ask + a pending generic approval + text in
+    // the composer: the worst-case shape of the repro.
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.pending_ask = super::parse_pending_ask("ask1".into(), ask_payload.clone());
+            assert!(ws.pending_ask.is_some(), "ask payload must parse");
+            ws.pending_auth = Some(super::PendingAuth {
+                id: "call_9".into(),
+                tool_name: "Edit".into(),
+                summary: "escalate sandbox to danger-full-access".into(),
+            });
+            ws.input_state
+                .update(cx, |s, cx| s.replace("hello", window, cx));
+            let store = ws.store.as_ref().expect("landing store bound");
+            store.update(cx, |h, _| h.store.running = true);
+        });
+    });
+
+    // Enabled stop form: `running` alone drives the control, so the card +
+    // empty-input disables from the regression can never gate it.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert!(
+                ws.composer_can_submit(true, cx),
+                "running ⟹ the stop control is never disabled"
+            );
+        });
+    });
+
+    // Click: cancel, not answer. The pending cards stay (their retirement is
+    // the projection reconcile's job, not a side effect of the click) and the
+    // composer text is untouched — `submit_input` would have consumed both.
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.send_button_clicked(window, cx));
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert!(
+                ws.pending_ask.is_some(),
+                "a running-turn click cancels; it must never answer the ask card"
+            );
+            assert!(ws.pending_auth.is_some());
+            assert_eq!(
+                ws.input_state.read(cx).value(),
+                "hello",
+                "cancel consumes no composer input"
+            );
+            let store = ws.store.as_ref().expect("landing store bound");
+            store.update(cx, |h, _| h.store.running = false);
+        });
+    });
+
+    // Idle: the same control keeps the supplement path — it resolves the ask
+    // with the composer text (Enter-semantics, cleared input, card gone).
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.send_button_clicked(window, cx));
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert!(
+                ws.pending_ask.is_none(),
+                "idle dispatch keeps the ask-supplement path"
+            );
+            assert!(
+                ws.input_state.read(cx).value().is_empty(),
+                "the supplement was submitted, so the input cleared"
+            );
+        });
+    });
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// W2 (the deadlocked-conversation live edge): a `ToolCallAuthorization` must
+/// surface the interactive question card on the same event edge — it can never
+/// wait for the journal's `tool_use` fold to arrive through the stream (that
+/// lag is what left the ask unrenderable and the turn deadlocked). The gateway
+/// re-delivers a parked question on re-own (§D.6 replay), so a re-delivery of
+/// the SAME id must not churn the walk the user is mid-way through answering,
+/// while a new id is a fresh adjudication that restarts it.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn live_tool_call_authorization_synthesizes_card_and_redelivery_is_idempotent(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path = std::env::temp_dir().join(format!("manox-live-ask-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    // Cross-thread AgentServer replies need the scheduler's parking
+    // allowance (see the gateway flow tests' note).
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(1_120.), gpui::px(780.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    let tid = ws.read_with(&visual.cx, |ws, _| ws.thread.read(|t| t.id.0.clone()));
+    let ask_payload = |q: &str| {
+        serde_json::json!({
+            "questions": [{ "question": q, "header": "Pick",
+                             "options": [{ "label": "A" }, { "label": "B" }] }]
+        })
+    };
+    let emit_auth = |ws: &gpui::Entity<Workspace>,
+                     visual: &mut gpui::VisualTestContext,
+                     id: &str,
+                     summary: &str,
+                     q: &str| {
+        ws.update(&mut visual.cx, |ws, cx| {
+            ws.diagnostic_emit_event(
+                &tid,
+                manox_agent::ThreadEvent::ToolCallAuthorization {
+                    id: id.into(),
+                    tool_name: "AskUserQuestion".into(),
+                    summary: summary.into(),
+                    input: ask_payload(q),
+                },
+                cx,
+            );
+        });
+    };
+
+    // The live edge on a fresh conversation (no ask `ToolCall` row yet): the
+    // pending state AND a synthesized interactive card land on this event, and
+    // the walk starts.
+    emit_auth(&ws, &mut visual, "ask1", "clarify the target", "Which one?");
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        Some("ask1".to_string()),
+        "the live event surfaces the question card"
+    );
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, cx| ws
+            .diagnostic_tool_call_count("ask1", cx)),
+        1,
+        "the card row is synthesized on the same edge, without the journal fold"
+    );
+    assert!(
+        ws.read_with(&visual.cx, |ws, cx| ws
+            .diagnostic_ask_card_interactive("ask1", cx)),
+        "the synthesized card carries the interactive snapshot"
+    );
+    let walk_gen = ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen());
+    assert!(walk_gen > 0, "the first request starts the walk");
+
+    // §D.6 re-delivery of the same id (a re-own replay): pending state and the
+    // walk survive untouched — only the card row is re-adoption-safe to ensure.
+    emit_auth(&ws, &mut visual, "ask1", "clarify the target", "Which one?");
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        Some("ask1".to_string())
+    );
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, cx| ws
+            .diagnostic_tool_call_count("ask1", cx)),
+        1,
+        "re-delivery must not stack a second card"
+    );
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen()),
+        walk_gen,
+        "re-delivery must not restart the walk the user is answering"
+    );
+
+    // The fold confirms ask1 — the card arms in the reconcile. An armed flag
+    // is a fact about THIS card's lifetime, not workspace-wide state.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.diagnostic_merge_projection(
+                "pending_auth",
+                serde_json::json!({ "ask1": true }),
+                10,
+                cx,
+            );
+            ws.diagnostic_reconcile_pending_with_projections(cx);
+        });
+    });
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        Some("ask1".to_string()),
+        "an armed, still-pending card stays"
+    );
+
+    // A different id is a new adjudication: pending replaces, the walk
+    // restarts, and the new card is synthesized too.
+    emit_auth(&ws, &mut visual, "ask2", "second question", "And now?");
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        Some("ask2".to_string())
+    );
+    assert!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen()) > walk_gen,
+        "a new id churns the walk"
+    );
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, cx| ws
+            .diagnostic_tool_call_count("ask2", cx)),
+        1
+    );
+
+    // ask2's Request can outrun its own fold: the projection still names only
+    // ask1, yet the freshly-installed card must not be retired for mere
+    // absence — the previous card's armed flag must not carry over.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.diagnostic_reconcile_pending_with_projections(cx)
+        });
+    });
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        Some("ask2".to_string()),
+        "a new card never inherits the previous card's armed flag"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// W1 (the remote-settle half of the repro): a card parked with no local way
+/// out — the gateway settled it elsewhere and the wire's `pending_auth`
+/// projection moved on. The leaf projection is the authoritative pending view:
+/// an id confirmed in it and then vanished must retire the local card, while
+/// an id never yet confirmed (the `Request` frame can outrun the projection
+/// fold) must never be cleared for mere absence.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn armed_then_gone_projection_retires_the_local_card(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path =
+        std::env::temp_dir().join(format!("manox-projection-reconcile-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    // Cross-thread AgentServer replies need the scheduler's parking
+    // allowance (see the gateway flow tests' note).
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(1_120.), gpui::px(780.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    let ask_payload = serde_json::json!({
+        "questions": [{ "question": "Which one?", "header": "Pick",
+                         "options": [{ "label": "A" }, { "label": "B" }] }]
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.diagnostic_seed_ask("ask1", ask_payload.clone(), cx);
+            // The MsgId the live `Request` frame registered for the reply leg.
+            ws.diagnostic_seed_store_pending_auth("ask1", "q1", cx);
+        });
+    });
+
+    // Startup race: the projection has not folded the park yet — reconcile must
+    // not mistake "never confirmed" for "settled".
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.diagnostic_reconcile_pending_with_projections(cx)
+        });
+    });
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        Some("ask1".to_string()),
+        "an id never yet confirmed in the projection must not be cleared"
+    );
+
+    // The fold confirms the park: the id arms the reconcile; a confirmed-pending
+    // card stays.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.diagnostic_merge_projection(
+                "pending_auth",
+                serde_json::json!({ "ask1": true }),
+                10,
+                cx,
+            );
+            ws.diagnostic_reconcile_pending_with_projections(cx);
+        });
+    });
+    let walk_gen = ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen());
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        Some("ask1".to_string()),
+        "a confirmed-pending card stays"
+    );
+
+    // Remote settle: the server's fold REMOVES the key on decision (a real
+    // settle frame carries an empty map, never `{id: false}`) — the id is gone
+    // from the live set. The local card retires with it, and the dead call's
+    // MsgId leaves the store so a stale click cannot reply to it.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.diagnostic_merge_projection("pending_auth", serde_json::json!({}), 11, cx);
+            ws.diagnostic_reconcile_pending_with_projections(cx);
+        });
+    });
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        None,
+        "armed-then-gone settles the dead interaction out of the composer"
+    );
+    assert!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_auth())
+            .is_none(),
+        "the generic approval card retires alongside the ask"
+    );
+    assert_eq!(
+        ws.read_with(&visual.cx, |ws, cx| ws
+            .diagnostic_store_pending_auth_ids(cx)),
+        Vec::<String>::new(),
+        "the retired call's MsgId must not linger in the leaf store"
+    );
+    assert!(
+        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen()) > walk_gen,
+        "retiring churns the card state once"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}
