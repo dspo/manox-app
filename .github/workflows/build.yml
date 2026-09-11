@@ -57,7 +57,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Restore target cache
-        uses: actions/cache/restore
+        uses: actions/cache/restore@v4
         continue-on-error: true
         with:
           path: target/
@@ -78,7 +78,7 @@ jobs:
       - name: Save target cache
         if: github.event_name == 'push' && success()
         continue-on-error: true
-        uses: actions/cache/save
+        uses: actions/cache/save@v4
         with:
           path: target/
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
