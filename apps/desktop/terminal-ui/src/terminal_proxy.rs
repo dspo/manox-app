@@ -137,16 +137,22 @@ impl TerminalProxy {
     }
 
     // ── Mutation forwarding ───────────────────────────────────────────────
-    // `with_mut` takes the write lock and broadcasts the events the mutation
-    // buffered, so these mirror the old `entity.update(cx, |t, cx| …)` calls
-    // with no `cx` of their own.
+    // PTY-write forwarders (`input`, `paste`, `alternate_scroll`,
+    // `mouse_wheel`) only enqueue bytes on the source's writer thread — no
+    // `Terminal` state changes, no buffered events — so they take the shared
+    // `read` lock. The UI thread can still queue behind the pump's per-chunk
+    // write lock, but only for one bounded output chunk at a time, never
+    // indefinitely behind a lock holder blocked on the PTY. Grid-state
+    // mutations (`resize`, scroll, selection, vi) go through `with_mut`,
+    // which broadcasts the events the mutation buffered; both mirror the old
+    // `entity.update(cx, |t, cx| …)` calls with no `cx` of their own.
 
     pub fn input(&self, bytes: &[u8]) -> std::io::Result<()> {
-        self.handle.with_mut(|t| t.input(bytes))
+        self.handle.read(|t| t.input(bytes))
     }
 
     pub fn paste(&self, text: &str) -> std::io::Result<()> {
-        self.handle.with_mut(|t| t.paste(text))
+        self.handle.read(|t| t.paste(text))
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
@@ -162,7 +168,7 @@ impl TerminalProxy {
     }
 
     pub fn alternate_scroll(&self, delta_lines: i32) {
-        self.handle.with_mut(|t| t.alternate_scroll(delta_lines));
+        self.handle.read(|t| t.alternate_scroll(delta_lines));
     }
 
     pub fn mouse_wheel(
@@ -173,7 +179,7 @@ impl TerminalProxy {
         modifiers: &manox_terminal::Modifiers,
     ) {
         self.handle
-            .with_mut(|t| t.mouse_wheel(row, col, delta_lines, modifiers));
+            .read(|t| t.mouse_wheel(row, col, delta_lines, modifiers));
     }
 
     pub fn start_selection(
