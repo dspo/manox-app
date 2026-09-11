@@ -462,6 +462,9 @@ impl Workspace {
             .h_full()
             .flex_shrink_0()
             .bg(theme.background)
+            // The card-wide title bar overlays the pane's top strip; keep the
+            // tab bar and content below it.
+            .pt(TITLE_BAR_HEIGHT)
             .child(
                 h_flex().w_full().px_2().pt_1().items_center().child(
                     TabBar::new("right-tabs")
@@ -603,6 +606,58 @@ impl Workspace {
         // would collide with `shell_root`'s `&mut self` receiver inside a
         // single call expression.
         self.sync_ask_card_snapshots(cx);
+        // Title-bar overlay for the whole main card: mounted on `main_view`
+        // (not the conversation column) so it spans the message column and
+        // the right pane alike; painted last so the "..." menu isn't covered
+        // by either column's content.
+        let title_bar_overlay = gpui::div()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .right(px(0.))
+            .h(TITLE_BAR_HEIGHT)
+            .child(
+                TitleBar::new()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_1()
+                            .min_w_0()
+                            .pr_4()
+                            .child(
+                                gpui::svg()
+                                    .path("icons/manox.svg")
+                                    .size(px(16.))
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                gpui::div()
+                                    .text_sm()
+                                    .text_left()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(title_text),
+                            ),
+                    )
+                    .child(
+                        h_flex().items_center().pr_2().child(
+                            Button::new("right-pane-toggle")
+                                .ghost()
+                                .xsmall()
+                                .icon(if right_pane_open {
+                                    Icon::new(IconName::PanelRight)
+                                } else {
+                                    Icon::default().path("icons/panel-right-dashed.svg")
+                                })
+                                .tooltip(i18n::t("right-pane-toggle"))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.toggle_right_pane(cx);
+                                })),
+                        ),
+                    ),
+            );
         let conversation_column = {
             v_flex()
                 .flex_1()
@@ -738,59 +793,6 @@ impl Workspace {
                         // Question card overlay (if any)
                         .children(overlay)
                 })
-                // Title-bar overlay: absolute top of the conversation column,
-                // painted after the body so the "..." menu isn't covered by
-                // the conversation list.
-                .child(
-                    gpui::div()
-                        .absolute()
-                        .top(px(0.))
-                        .left(px(0.))
-                        .right(px(0.))
-                        .h(TITLE_BAR_HEIGHT)
-                        .child(
-                            TitleBar::new()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .pr_4()
-                                        .child(
-                                            gpui::svg()
-                                                .path("icons/manox.svg")
-                                                .size(px(16.))
-                                                .text_color(theme.muted_foreground),
-                                        )
-                                        .child(
-                                            gpui::div()
-                                                .text_sm()
-                                                .text_left()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(title_text),
-                                        ),
-                                )
-                                .child(
-                                    h_flex().items_center().pr_2().child(
-                                        Button::new("right-pane-toggle")
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(if right_pane_open {
-                                                Icon::new(IconName::PanelRight)
-                                            } else {
-                                                Icon::default().path("icons/panel-right-dashed.svg")
-                                            })
-                                            .tooltip(i18n::t("right-pane-toggle"))
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.toggle_right_pane(cx);
-                                            })),
-                                    ),
-                                ),
-                        ),
-                )
                 // Floating context card: absolute top-right of the
                 // conversation column, below the title bar. Its own `Render`
                 // positions it (`top` clears the title bar, `right` + the
@@ -813,7 +815,10 @@ impl Workspace {
             .child(conversation_column)
             .when(right_pane_open, |this| {
                 this.child(editor_divider).child(editor_pane)
-            });
+            })
+            // Card-wide title bar, painted after both columns so it spans
+            // (and overlays) the message column and the right pane alike.
+            .child(title_bar_overlay);
         let mut root = self.shell_root(self.sidebar.clone(), main_view, cx);
         root = root
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {

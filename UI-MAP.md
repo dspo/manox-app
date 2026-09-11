@@ -173,13 +173,14 @@ Every non-Settings `ViewMode` renders through one shared shell ([WorkspaceShell]
 ┌──────────────────────────────────────────────┐ ← window (native decorations)
 │ ╭──────────┬───────────────────────────────╮ │
 │ │ Sidebar  ┊Main card (bordered, rounded)  │ │
-│ │ (seamless┊ ┌──────────────┬──┬─────────┐ │ │
-│ │  slot)   ┊ │ MessageColumn│▌ │RightPane│ │ │
-│ │          ┊ │ TitleBar     │  │(editor/ │ │ │
-│ │ invisible┊ │ conversation │  │browser) │ │ │
-│ │ drag     ┊ │              │  │         │ │ │
-│ │ handle on┊ │ ContextRail  │  │         │ │ │
-│ │ boundary ┊ │ float overlay│  │         │ │ │
+│ │ (seamless┊ ┌───────────────────────────┐ │ │
+│ │  slot)   ┊ │TitleBar (spans whole card)│ │ │
+│ │          ┊ ├──────────────┬──┬─────────┤ │ │
+│ │ invisible┊ │ MessageColumn│▌ │RightPane│ │ │
+│ │ drag     ┊ │ conversation │  │TabBar   │ │ │
+│ │ handle on┊ │              │  │(editor/ │ │ │
+│ │ boundary ┊ │ ContextRail  │  │browser) │ │ │
+│ │          ┊ │ float overlay│  │         │ │ │
 │ │          ┊ └──────────────┴──┴─────────┘ │ │
 │ ╰──────────┴───────────────────────────────╯ │
 └──────────────────────────────────────────────┘
@@ -193,7 +194,7 @@ The shared window shell built by `Workspace::shell_root(sidebar, main)`: an `h_f
 
 #### MainView
 
-The Workspace mode's main slot: an `h_flex` container holding the [MessageColumn](#messagecolumn) and, when any right-pane tab is open, the [EditorDivider](#editordivider) + [RightPane](#rightpane) as sub-columns. Nesting the right pane inside the main view keeps the shell uniformly `sidebar | divider | main view` across every view mode — the right pane is no longer a third top-level shell column. The right side view's contents are per-thread: switching threads stashes the outgoing editor draft and restores the incoming one, so no thread ever shows another thread's right-side content, and returning to a thread recovers its editor text.
+The Workspace mode's main slot: an `h_flex` container holding the [MessageColumn](#messagecolumn) and, when any right-pane tab is open, the [EditorDivider](#editordivider) + [RightPane](#rightpane) as sub-columns, with the card-wide [TitleBar](#titlebar) overlay mounted last so it spans (and paints over) both. Nesting the right pane inside the main view keeps the shell uniformly `sidebar | main card` across every view mode — the right pane is no longer a third top-level shell column. The right side view's contents are per-thread: switching threads stashes the outgoing editor draft and restores the incoming one, so no thread ever shows another thread's right-side content, and returning to a thread recovers its editor text.
 
 > Source: `apps/desktop/agent-ui/src/workspace/render.rs`
 
@@ -292,7 +293,7 @@ Invisible 6px drag handle overlaying the Sidebar/main-card boundary (absolute st
 
 ### 3.2 MessageColumn
 
-Central conversation column, flex-1 — the left sub-column of the [MainView](#mainview) (not a sibling of the shell root). Under the shared [TitleBar](#titlebar) overlay that spans the whole message column (not a top-level column itself). The [ContextRail](#contextrail) floats over this column's top-right as an absolute overlay (not a flex sibling); the conversation body reserves `ENV_CONTENT_INSET` right padding when the card is shown so the message list clears it. The composer no longer spans underneath the card.
+Central conversation column, flex-1 — the left sub-column of the [MainView](#mainview) (not a sibling of the shell root). Under the card-wide [TitleBar](#titlebar) overlay that spans the whole main card (mounted on the MainView, not on this column). The [ContextRail](#contextrail) floats over this column's top-right as an absolute overlay (not a flex sibling); the conversation body reserves `ENV_CONTENT_INSET` right padding when the card is shown so the message list clears it. The composer no longer spans underneath the card.
 
 #### MessageColumn
 
@@ -302,7 +303,7 @@ Vertical flex container, fills remaining width.
 
 #### TitleBar
 
-Absolute-positioned top bar at the message-column level (not the conversation body), height `TITLE_BAR_HEIGHT`, spans both [MessageColumn](#messagecolumn) and the [ContextRail](#contextrail) card so the pair reads as one message column under a single bar. Contains thread title, the "..." menu, and the [RightPaneToggleBtn](#rightpanetogglebtn) at its right edge.
+Absolute-positioned top bar at the [MainView](#mainview) level, height `TITLE_BAR_HEIGHT`, spanning the entire main card — the [MessageColumn](#messagecolumn) (with the [ContextRail](#contextrail) card floating under it) and the [RightPane](#rightpane) alike, painted after both columns so the whole card reads under a single bar. Contains thread title, the "..." menu, and the [RightPaneToggleBtn](#rightpanetogglebtn) at its right edge. The right pane reserves `pt(TITLE_BAR_HEIGHT)` so its [RightTabBar](#righttabbar) sits below the bar as a second row.
 
 > Source: `apps/desktop/agent-ui/src/workspace/render.rs`
 
@@ -734,7 +735,7 @@ Right side view of the [MainView](#mainview), shown when any right-pane tab is o
 
 #### RightPane
 
-Vertical flex, right sub-column of the [MainView](#mainview). A tab container holding the markdown editor, the [LauncherTab](#launchertab), browser views, sub-agent observers, and embedded [SessionTab](#sessiontab) terminals as peer tab types. Visibility is the `right_pane_visible` gate AND a non-empty `right_tabs` — the [RightPaneToggleBtn](#rightpanetogglebtn) hides/shows without discarding tabs, and closing the last tab hides the pane automatically. The active tab's content fills the body. The pane state (tab list, active tab, visibility) is **per-thread**: `attach_thread` stashes the outgoing pane into an in-session map (`right_pane_by_thread`, live tabs keep their webview/panel entities) and restores the incoming one, and every mutation persists the foreground thread's snapshot to `threads.db` (`thread_right_pane` — one opaque UI-layer-owned JSON row keyed by thread id). Subagent tabs are ephemeral — cleared on switch, never stashed or persisted. Browser tabs persist as their URL (rebuilt as fresh webviews after a restart, re-registered in the host routing table + title poll); Session tabs restore only while the external session is still alive — after a restart they drop (the sidebar's resumable rows remain the external-session recovery surface). The retired team-member observation tab (old `RightTab::Member` + `MemberPanel`) was removed with the `Entity<Team>` cleanup.
+Vertical flex, right sub-column of the [MainView](#mainview), topped by `pt(TITLE_BAR_HEIGHT)` so the card-wide [TitleBar](#titlebar) overlays its top strip and the [RightTabBar](#righttabbar) reads as a second row below it. A tab container holding the markdown editor, the [LauncherTab](#launchertab), browser views, sub-agent observers, and embedded [SessionTab](#sessiontab) terminals as peer tab types. Visibility is the `right_pane_visible` gate AND a non-empty `right_tabs` — the [RightPaneToggleBtn](#rightpanetogglebtn) hides/shows without discarding tabs, and closing the last tab hides the pane automatically. The active tab's content fills the body. The pane state (tab list, active tab, visibility) is **per-thread**: `attach_thread` stashes the outgoing pane into an in-session map (`right_pane_by_thread`, live tabs keep their webview/panel entities) and restores the incoming one, and every mutation persists the foreground thread's snapshot to `threads.db` (`thread_right_pane` — one opaque UI-layer-owned JSON row keyed by thread id). Subagent tabs are ephemeral — cleared on switch, never stashed or persisted. Browser tabs persist as their URL (rebuilt as fresh webviews after a restart, re-registered in the host routing table + title poll); Session tabs restore only while the external session is still alive — after a restart they drop (the sidebar's resumable rows remain the external-session recovery surface). The retired team-member observation tab (old `RightTab::Member` + `MemberPanel`) was removed with the `Entity<Team>` cleanup.
 
 > Source: `apps/desktop/agent-ui/src/workspace/render.rs`
 
