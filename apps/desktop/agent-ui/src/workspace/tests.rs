@@ -2333,3 +2333,50 @@ fn launcher_cascade_builds_inside_workspace_update(cx: &mut gpui::TestAppContext
     });
     let _ = std::fs::remove_file(&db_path);
 }
+
+/// `turn_navigator_layout` matrix: the gutter/border compensation must keep
+/// the overlay centered over the message column's card interior at every
+/// combination of sidebar collapse, right pane, and context rail.
+#[test]
+fn turn_navigator_layout_compensates_shell_gutter_and_card_border() {
+    use super::{CARD_BORDER, SHELL_PAD_EDGE, SHELL_PAD_LEFT, turn_navigator_layout};
+    use gpui::px;
+
+    let rail_inset = px(crate::views::context_rail::ENV_CONTENT_INSET);
+    let half_border = px(CARD_BORDER / 2.);
+
+    // Default: expanded sidebar (260), no right pane, no rail. The insets are
+    // gutter + card border on each side; the wide leftover clamps to 480.
+    let l = turn_navigator_layout(px(1200.), px(260.), None, false);
+    assert_eq!(l.left_inset, px(SHELL_PAD_LEFT) + px(260.) + half_border);
+    assert_eq!(l.right_inset, px(SHELL_PAD_EDGE) + half_border);
+    assert_eq!(l.panel_width, px(480.));
+
+    // Collapsed sidebar: the left inset is just the gutter + border.
+    let l = turn_navigator_layout(px(1200.), px(0.), None, false);
+    assert_eq!(l.left_inset, px(SHELL_PAD_LEFT) + half_border);
+    assert_eq!(l.panel_width, px(480.));
+
+    // Right pane open: its width + editor divider join the right inset and
+    // the available span shrinks below the 480 cap.
+    let l = turn_navigator_layout(px(1200.), px(260.), Some(px(640.)), false);
+    assert_eq!(
+        l.right_inset,
+        px(SHELL_PAD_EDGE) + half_border + px(640.) + px(super::EDITOR_DIVIDER_WIDTH)
+    );
+    assert!(l.panel_width < px(480.) && l.panel_width > px(0.));
+
+    // Context rail shown: its content inset joins the right side instead.
+    let l = turn_navigator_layout(px(1200.), px(260.), None, true);
+    assert_eq!(l.right_inset, px(SHELL_PAD_EDGE) + half_border + rail_inset);
+
+    // Narrow window: the panel takes whatever fits, then floors at zero —
+    // never negative (a negative width would poison the overlay layout).
+    let l = turn_navigator_layout(px(400.), px(260.), None, false);
+    assert_eq!(
+        l.panel_width,
+        px(400.) - l.left_inset - l.right_inset - px(24.)
+    );
+    let l = turn_navigator_layout(px(290.), px(260.), None, true);
+    assert_eq!(l.panel_width, px(0.));
+}

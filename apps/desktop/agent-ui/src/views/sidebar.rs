@@ -1118,11 +1118,7 @@ impl Render for Sidebar {
             gen_id: self.select_gen,
         };
 
-        let top_inset = if cfg!(target_os = "macos") {
-            px(28.)
-        } else {
-            px(8.)
-        };
+        let top_inset = crate::workspace::sidebar_top_inset();
 
         // Sticky overlay pinned above the scroll body: while the current
         // section's header would scroll out of view, an overlay copy takes its
@@ -1170,12 +1166,13 @@ impl Render for Sidebar {
             })
             .collect();
 
+        // Seamless slot: no own background or border — the shell's gutter
+        // background shows through and the main card's left border is the
+        // only visible boundary.
         v_flex()
             .h_full()
             .w(self.width)
-            .bg(theme.background)
-            .border_r_1()
-            .border_color(theme.border)
+            .flex_shrink_0()
             .relative()
             .child(
                 v_flex()

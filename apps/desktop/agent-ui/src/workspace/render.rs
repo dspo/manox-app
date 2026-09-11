@@ -9,6 +9,20 @@
 
 use super::*;
 
+/// The in-card title bar: gpui-component's `TitleBar` chrome minus the
+/// macOS traffic-light left padding (hardcoded `pl(80)` there) — a card
+/// title bar never sits at the window's left edge (the sidebar slot does),
+/// so the reservation would just push the leading controls away from the
+/// edge. Leading children bring their own `pl_2`.
+fn card_title_bar() -> TitleBar {
+    let bar = TitleBar::new();
+    if cfg!(target_os = "macos") {
+        bar.pl(px(0.))
+    } else {
+        bar
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_manox(window, cx)
@@ -26,7 +40,7 @@ impl Workspace {
         // of a visible right pane) — an inactive tab would otherwise paint
         // over the pane's content.
         self.sync_browser_visibility(cx);
-        // Settings reuses the shared shell (`sidebar | divider | main`) — the
+        // Settings reuses the shared shell (`sidebar slot | main card`) — the
         // same layout container as the app page, only with the settings nav in
         // the sidebar slot and the settings panel as the main column. The
         // underlying Workspace state (conversation sidebar, composer) is
@@ -98,12 +112,12 @@ impl Workspace {
             let icon = Icon::new(IconName::SquareTerminal)
                 .small()
                 .into_any_element();
+            // Bind the column before the shell call: its builder borrows `cx`
+            // for the sidebar-toggle listener, which would collide with
+            // `shell_root`'s `cx` argument inside a single call expression.
+            let column = self.render_terminal_column(icon, title_text, terminal, cx);
             return self
-                .shell_root(
-                    self.sidebar.clone(),
-                    self.render_terminal_column(icon, title_text, terminal),
-                    cx,
-                )
+                .shell_root(self.sidebar.clone(), column, cx)
                 .on_action(
                     cx.listener(|this, _: &crate::ToggleCockpitTasks, _window, cx| {
                         this.context_rail.update(cx, |r, cx| {
@@ -141,12 +155,11 @@ impl Workspace {
                     .size(px(16.))
                     .text_color(cx.theme().muted_foreground)
                     .into_any_element();
+                // Bind the column before the shell call (same `cx` borrow
+                // reason as the Terminal mode above).
+                let column = self.render_terminal_column(icon, title, terminal, cx);
                 return self
-                    .shell_root(
-                        self.sidebar.clone(),
-                        self.render_terminal_column(icon, title, terminal),
-                        cx,
-                    )
+                    .shell_root(self.sidebar.clone(), column, cx)
                     .into_any_element();
             }
             // No live session matches the recorded id (closed underneath us).
@@ -202,8 +215,9 @@ impl Workspace {
         let loading = false;
         let composer_placement = composer_placement(editor_open && right_pane_open, first_screen);
         let main_body_w = window.bounds().size.width
-            - self.sidebar_width
-            - px(SIDEBAR_DIVIDER_WIDTH)
+            - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
+            - px(CARD_BORDER)
+            - self.effective_sidebar_width()
             - if right_pane_open {
                 editor_width + px(EDITOR_DIVIDER_WIDTH)
             } else {
@@ -461,6 +475,9 @@ impl Workspace {
             .h_full()
             .flex_shrink_0()
             .bg(theme.background)
+            // The card-wide title bar overlays the pane's top strip; keep the
+            // tab bar and content below it.
+            .pt(TITLE_BAR_HEIGHT)
             .child(
                 h_flex().w_full().px_2().pt_1().items_center().child(
                     TabBar::new("right-tabs")
@@ -602,6 +619,74 @@ impl Workspace {
         // would collide with `shell_root`'s `&mut self` receiver inside a
         // single call expression.
         self.sync_ask_card_snapshots(cx);
+        // Title-bar overlay for the whole main card: mounted on `main_view`
+        // (not the conversation column) so it spans the message column and
+        // the right pane alike; painted last so the "..." menu isn't covered
+        // by either column's content.
+        let title_bar_overlay = gpui::div()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .right(px(0.))
+            .h(TITLE_BAR_HEIGHT)
+            .child(
+                card_title_bar()
+                    .child(
+                        h_flex().items_center().pl_2().child(
+                            Button::new("sidebar-toggle")
+                                .ghost()
+                                .xsmall()
+                                .icon(if self.sidebar_visible {
+                                    IconName::PanelLeftClose
+                                } else {
+                                    IconName::PanelLeftOpen
+                                })
+                                .tooltip(i18n::t("sidebar-toggle"))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.toggle_sidebar(cx);
+                                })),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_1()
+                            .min_w_0()
+                            .pr_4()
+                            .child(
+                                gpui::svg()
+                                    .path("icons/manox.svg")
+                                    .size(px(16.))
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                gpui::div()
+                                    .text_sm()
+                                    .text_left()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(title_text),
+                            ),
+                    )
+                    .child(
+                        h_flex().items_center().pr_2().child(
+                            Button::new("right-pane-toggle")
+                                .ghost()
+                                .xsmall()
+                                .icon(if right_pane_open {
+                                    Icon::new(IconName::PanelRight)
+                                } else {
+                                    Icon::default().path("icons/panel-right-dashed.svg")
+                                })
+                                .tooltip(i18n::t("right-pane-toggle"))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.toggle_right_pane(cx);
+                                })),
+                        ),
+                    ),
+            );
         let conversation_column = {
             v_flex()
                 .flex_1()
@@ -737,59 +822,6 @@ impl Workspace {
                         // Question card overlay (if any)
                         .children(overlay)
                 })
-                // Title-bar overlay: absolute top of the conversation column,
-                // painted after the body so the "..." menu isn't covered by
-                // the conversation list.
-                .child(
-                    gpui::div()
-                        .absolute()
-                        .top(px(0.))
-                        .left(px(0.))
-                        .right(px(0.))
-                        .h(TITLE_BAR_HEIGHT)
-                        .child(
-                            TitleBar::new()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .pr_4()
-                                        .child(
-                                            gpui::svg()
-                                                .path("icons/manox.svg")
-                                                .size(px(16.))
-                                                .text_color(theme.muted_foreground),
-                                        )
-                                        .child(
-                                            gpui::div()
-                                                .text_sm()
-                                                .text_left()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(title_text),
-                                        ),
-                                )
-                                .child(
-                                    h_flex().items_center().pr_2().child(
-                                        Button::new("right-pane-toggle")
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(if right_pane_open {
-                                                Icon::new(IconName::PanelRight)
-                                            } else {
-                                                Icon::default().path("icons/panel-right-dashed.svg")
-                                            })
-                                            .tooltip(i18n::t("right-pane-toggle"))
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.toggle_right_pane(cx);
-                                            })),
-                                    ),
-                                ),
-                        ),
-                )
                 // Floating context card: absolute top-right of the
                 // conversation column, below the title bar. Its own `Render`
                 // positions it (`top` clears the title bar, `right` + the
@@ -802,7 +834,7 @@ impl Workspace {
         // right side view (editor / launcher / browser / session tabs) as its
         // sub-columns. Nesting the right pane inside the main view keeps the
         // shell uniformly
-        // `sidebar | divider | main view` across every view mode (Terminal /
+        // `sidebar slot | main card` across every view mode (Terminal /
         // ExternalSession / Settings pass a single-column main).
         let main_view = h_flex()
             .flex_1()
@@ -812,7 +844,10 @@ impl Workspace {
             .child(conversation_column)
             .when(right_pane_open, |this| {
                 this.child(editor_divider).child(editor_pane)
-            });
+            })
+            // Card-wide title bar, painted after both columns so it spans
+            // (and overlays) the message column and the right pane alike.
+            .child(title_bar_overlay);
         let mut root = self.shell_root(self.sidebar.clone(), main_view, cx);
         root = root
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
@@ -898,21 +933,26 @@ impl Workspace {
             .children(turn_navigator_overlay)
             .on_drag_move(cx.listener(
                 |this, e: &DragMoveEvent<DraggedEditorDivider>, _window, cx| {
-                    // The root fills the window, so its right edge is the
-                    // window's right edge and the editor pane's width is the
-                    // distance from the cursor to that edge. Clamp both to a
-                    // minimum and to leave the message column at least
-                    // `MAIN_MIN_WIDTH` (sidebar + divider + main view sit
-                    // left of the editor), so dragging wide never overflows
-                    // the window or collapses the conversation column. The
+                    // The root fills the window, but the card interior ends
+                    // one gutter inset (+1px border) before the window's right
+                    // edge, so the editor pane's width is the distance from
+                    // the cursor to that inset edge. Clamp both to a minimum
+                    // and to leave the message column at least
+                    // `MAIN_MIN_WIDTH` (sidebar + main view sit left of the
+                    // editor), so dragging wide never overflows the card or
+                    // collapses the conversation column. The
                     // context card is hidden while the editor is open, so it
                     // does not claim a width here — the conversation alone
                     // holds the message column. `sidebar_width` is read live
                     // so a wide sidebar correctly shrinks the available
                     // editor envelope.
-                    let new_w = e.bounds.right() - e.event.position.x;
+                    let new_w = e.bounds.right()
+                        - e.event.position.x
+                        - px(SHELL_PAD_EDGE + CARD_BORDER / 2.);
                     let dynamic_max = e.bounds.size.width
-                        - this.sidebar_width
+                        - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
+                        - px(CARD_BORDER)
+                        - this.effective_sidebar_width()
                         - px(EDITOR_DIVIDER_WIDTH)
                         - px(MAIN_MIN_WIDTH);
                     let max_w = dynamic_max
@@ -924,15 +964,39 @@ impl Workspace {
             ));
         root.into_any_element()
     }
+    /// The width the sidebar slot actually claims in the shell layout: zero
+    /// while collapsed, the remembered drag width otherwise. Every width
+    /// budget (drag clamps, the rail gate, the turn-navigator insets) goes
+    /// through this so a collapsed sidebar never reserves space.
+    pub(super) fn effective_sidebar_width(&self) -> Pixels {
+        if self.sidebar_visible {
+            self.sidebar_width
+        } else {
+            px(0.)
+        }
+    }
+
+    /// Collapse/expand the sidebar slot (the TitleBar's panel-left toggle).
+    /// The drag width survives the round trip; hiding only drops the slot
+    /// and its resize handle from the shell layout.
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
     /// The shared window shell every full-window `ViewMode` renders through:
-    /// `sidebar | sidebar-divider | main`, plus the mode-switching actions and
-    /// the sidebar drag/reset handling. The divider (drag handle, double-click
-    /// reset, width clamp + sync) lives here once, so the conversation,
-    /// built-in terminal, external-session, and Settings pages all resize
-    /// their sidebar identically — only the sidebar slot and main column
-    /// differ per mode. The Settings page passes its own nav as the sidebar
-    /// slot; dragging the divider there updates the same width state so the
-    /// layout container behaves identically across pages.
+    /// a gutter around an `sidebar slot | main card` pair — `SHELL_PAD_LEFT`
+    /// on the left (the sidebar's seamless outer edge), `SHELL_PAD_EDGE` on
+    /// the top/bottom/right card sides.
+    /// The sidebar slot is visually seamless (no border or own background —
+    /// the shell's background shows through); the main slot is wrapped in a
+    /// bordered, rounded card. The two sit flush (no layout gap): the resize
+    /// handle is an invisible absolute strip overlaying their boundary, so
+    /// the conversation, built-in terminal, external-session, and Settings
+    /// pages all resize the sidebar identically — only the sidebar slot and
+    /// the card's content differ per mode. The Settings page passes its own
+    /// nav as the sidebar slot; dragging the handle there updates the same
+    /// width state so the layout behaves identically across pages.
     fn shell_root(
         &mut self,
         sidebar: impl IntoElement,
@@ -940,9 +1004,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let theme = cx.theme().clone();
-        // The divider is the visual separator and the drag handle for resizing
-        // the sidebar. Double-click resets to the default `SIDEBAR_WIDTH` for
-        // symmetry with the editor pane.
+        // The collapse gate hides the conversation sidebar; the Settings nav
+        // is exempt — its back control is the only way out of the Settings
+        // page, so hiding it would strand the user there.
+        let sidebar_shown = self.sidebar_visible || matches!(self.view_mode, ViewMode::Settings);
+        // The divider is the (invisible) drag handle for resizing the sidebar.
+        // Double-click resets to the default `SIDEBAR_WIDTH` for symmetry with
+        // the editor pane.
         let sync_width = |this: &mut Self, cx: &mut App, width: Pixels| {
             this.sidebar_width = width;
             this.sidebar.update(cx, |s, cx| s.set_width(width, cx));
@@ -950,21 +1018,17 @@ impl Workspace {
                 settings.update(cx, |s, cx| s.set_width(width, cx));
             }
         };
+        // Centered on the sidebar/card boundary, which lives at
+        // `SHELL_PAD_LEFT + sidebar_width` from the window's left edge.
+        let handle_left = px(SHELL_PAD_LEFT) + self.sidebar_width - px(SIDEBAR_DIVIDER_WIDTH / 2.);
         let sidebar_divider = gpui::div()
             .id("sidebar-divider")
+            .absolute()
+            .left(handle_left)
+            .top(px(SHELL_PAD_EDGE))
+            .bottom(px(SHELL_PAD_EDGE))
             .w(px(SIDEBAR_DIVIDER_WIDTH))
-            .h_full()
-            .flex_shrink_0()
-            .relative()
             .cursor(CursorStyle::ResizeLeftRight)
-            .child(
-                gpui::div()
-                    .absolute()
-                    .left(px(2.5))
-                    .w(px(1.))
-                    .h_full()
-                    .bg(theme.border),
-            )
             .on_drag(DraggedSidebarDivider, |_, _, _, cx| {
                 cx.stop_propagation();
                 cx.new(|_| DraggedSidebarDivider)
@@ -979,10 +1043,63 @@ impl Workspace {
                     }
                 }),
             );
+        // Window-drag hot zones for everything above/outside the card's own
+        // title bar: the slim full-width strip over the top gutter, plus the
+        // sidebar slot's empty top band (its traffic-light/content inset) —
+        // dragging there feels identical to dragging the title bar (the
+        // seamless sidebar shows no bar of its own). The band stops exactly
+        // where the sidebar's first interactive row begins, so the Settings
+        // back control and the "+" new-session button stay clickable on
+        // every platform; macOS traffic lights float over the band and keep
+        // their native click handling. While the sidebar is collapsed the
+        // zone shrinks to the left gutter strip.
+        let top_drag_gutter = gpui::div()
+            .id("window-drag-gutter")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(SHELL_PAD_EDGE))
+            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                window.start_window_move();
+            });
+        let sidebar_drag_zone = gpui::div()
+            .id("sidebar-drag-zone")
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(px(SHELL_PAD_LEFT)
+                + if sidebar_shown {
+                    self.sidebar_width
+                } else {
+                    px(0.)
+                })
+            .h(px(SHELL_PAD_EDGE) + sidebar_top_inset())
+            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                window.start_window_move();
+            });
+        // The main card: bordered + rounded, clipping its children so the
+        // in-card title bar's square background never spills over the
+        // rounded corners.
+        let main_card = gpui::div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .relative()
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius_lg)
+            .bg(theme.background)
+            .child(main);
 
         h_flex()
             .size_full()
             .relative()
+            .pl(px(SHELL_PAD_LEFT))
+            .pt(px(SHELL_PAD_EDGE))
+            .pr(px(SHELL_PAD_EDGE))
+            .pb(px(SHELL_PAD_EDGE))
             .bg(theme.background)
             .text_color(theme.foreground)
             // Mode-switching shortcuts apply in every view mode.
@@ -998,23 +1115,31 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &CloseTerminalTab, _window, cx| {
                 this.close_terminal_tab(cx);
             }))
-            .child(sidebar)
-            .child(sidebar_divider)
-            .child(main)
+            .children(sidebar_shown.then_some(sidebar))
+            .child(main_card)
+            .child(top_drag_gutter)
+            .child(sidebar_drag_zone)
+            // Last so the resize handle paints (and hit-tests) above the drag
+            // zones — the boundary strip stays draggable for its full height
+            // instead of losing its top patch to the window-move zone.
+            .children(sidebar_shown.then_some(sidebar_divider))
             .on_drag_move(cx.listener(
                 move |this, e: &DragMoveEvent<DraggedSidebarDivider>, _window, cx| {
-                    // The root fills the window, so the sidebar's right edge is
-                    // the cursor's x position relative to the root's left.
-                    // Clamp so the message column (and the editor pane when
-                    // open) always retain at least `MAIN_MIN_WIDTH`.
-                    let new_w = e.event.position.x - e.bounds.left();
+                    // The root fills the window; the sidebar slot starts one
+                    // left gutter inset from its left edge, so the sidebar's
+                    // right edge is the cursor's x minus `SHELL_PAD_LEFT`.
+                    // Clamp so the card interior (message column, and the
+                    // editor pane when open) always retains at least
+                    // `MAIN_MIN_WIDTH`.
+                    let new_w = e.event.position.x - e.bounds.left() - px(SHELL_PAD_LEFT);
                     let editor_reserve = if this.right_pane_open() {
                         this.editor_width + px(EDITOR_DIVIDER_WIDTH)
                     } else {
                         px(0.)
                     };
                     let dynamic_max = e.bounds.size.width
-                        - px(SIDEBAR_DIVIDER_WIDTH)
+                        - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
+                        - px(CARD_BORDER)
                         - editor_reserve
                         - px(MAIN_MIN_WIDTH);
                     let max_w = dynamic_max
@@ -1028,14 +1153,17 @@ impl Workspace {
     }
 
     /// The terminal-style main column shared by the built-in Terminal tab and
-    /// external agent CLI sessions: a TitleBar (leading icon + title) over a
-    /// full-bleed terminal view. One shape for both, so the two terminal
-    /// surfaces read as peers inside the shared shell.
+    /// external agent CLI sessions: a TitleBar (sidebar toggle, leading icon,
+    /// title) over a full-bleed terminal view. One shape for both, so the
+    /// two terminal surfaces read as peers inside the shared shell — and the
+    /// sidebar toggle stays reachable while a collapsed sidebar persists
+    /// across mode switches.
     fn render_terminal_column(
         &self,
         icon: AnyElement,
         title: SharedString,
         content: impl IntoElement,
+        cx: &mut Context<Self>,
     ) -> gpui::Div {
         v_flex()
             .flex_1()
@@ -1043,23 +1171,40 @@ impl Workspace {
             .min_w_0()
             .relative()
             .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .flex_1()
-                        .min_w_0()
-                        .child(icon)
-                        .child(
-                            gpui::div()
-                                .text_sm()
-                                .text_left()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(title),
+                card_title_bar()
+                    .child(
+                        h_flex().items_center().pl_2().child(
+                            Button::new("sidebar-toggle")
+                                .ghost()
+                                .xsmall()
+                                .icon(if self.sidebar_visible {
+                                    IconName::PanelLeftClose
+                                } else {
+                                    IconName::PanelLeftOpen
+                                })
+                                .tooltip(i18n::t("sidebar-toggle"))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.toggle_sidebar(cx);
+                                })),
                         ),
-                ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_1()
+                            .min_w_0()
+                            .child(icon)
+                            .child(
+                                gpui::div()
+                                    .text_sm()
+                                    .text_left()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(title),
+                            ),
+                    ),
             )
             .child(v_flex().flex_1().h_full().w_full().child(content))
     }
