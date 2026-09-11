@@ -239,7 +239,12 @@ mod tests {
             // raise in that commit and is corrected here).
             // U9b cluster 6: the ask/auth resolve legs' five wire replies moved
             // with the chip families (16→11 here, frozen at 5 there).
-            ("workspace.rs", "protocol sends (U9)", SENDS, 6),
+            // Sidebar order: the two insertBefore notes (thread move + folder
+            // move) are new wire surfaces for a capability that did not exist
+            // before, not a new bypass face — the store is reached only through
+            // the gateway, which is why they land here rather than on the
+            // STORE_WRITE ledger.
+            ("workspace.rs", "protocol sends (U9)", SENDS, 8),
             (
                 "workspace/composer_render.rs",
                 "protocol sends (U9)",

@@ -22,10 +22,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::i18n;
+use crate::sidebar_view::{self, OrderBy};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent, Entity,
-    EventEmitter, Pixels, Render, ScrollHandle, SharedString, Subscription, Transformation,
-    WeakEntity, Window, deferred, ease_in_out, linear, percentage, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent,
+    DragMoveEvent, Entity, EventEmitter, Pixels, Render, ScrollHandle, SharedString, Subscription,
+    Transformation, WeakEntity, Window, deferred, ease_in_out, linear, percentage, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, Theme,
@@ -106,28 +107,72 @@ enum AnimRole {
 }
 
 /// A row in the Conversations list — either a manox thread (the gateway's
-/// wire `ThreadListItem`, U2) or an external agent CLI session, unified so
-/// the two can be merged and ordered by recency instead of living in
-/// separate sections. Both row kinds share the selection-slide: their ids
-/// join one `flat_ids` ordering and `render_thread_item` applies the same
-/// `SlideCtx` wash to either.
+/// wire `ThreadListItem`, U2) or an external agent CLI session, unified so the
+/// two render through one row factory in one band sequence. Both row kinds share
+/// the selection-slide: their ids join one `flat_ids` ordering and
+/// `render_thread_item` applies the same `SlideCtx` wash to either.
+#[derive(Clone)]
 enum SidebarRow {
     Thread(ThreadListItem),
     External(crate::external_session::ExternalSessionSummary),
 }
 
-impl SidebarRow {
-    /// Recency sort key (newest first). Threads use the wire row's
-    /// `updated_at` (unix seconds; the list snapshot's recency column);
-    /// external sessions use their spawn `created_at` — manox cannot observe
-    /// in-TUI interaction, so the spawn time is the only signal it has.
-    fn sort_key(&self) -> i64 {
-        match self {
-            Self::Thread(s) => s.updated_at as i64,
-            Self::External(s) => s.created_at,
-        }
-    }
+/// The render environment every partition row shares: selection, badges, the
+/// slide animation and the theme.
+struct PartitionEnv<'a> {
+    selected: Option<&'a str>,
+    unread_map: &'a HashMap<String, bool>,
+    slide: &'a SlideCtx,
+    theme: &'a Theme,
+    /// Left inset of a top-level row: a project folder indents its rows, the
+    /// loose partition does not.
+    indent_base: Pixels,
+}
 
+/// Which edge of a row the insertion line hugs: the boundary is between this
+/// row and its neighbour, so the anchor resolves at commit time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragEdge {
+    Top,
+    Bottom,
+}
+
+/// In-flight row drag: the row being dragged, the row whose edge carries the
+/// insertion line, and which edge that is.
+#[derive(Debug, Clone, PartialEq)]
+struct RowDrag {
+    dragged: String,
+    line_on: String,
+    edge: DragEdge,
+}
+
+/// Drag payload for a thread row. The id is all the gesture needs: the
+/// partition resolves from the wire row at commit time.
+#[derive(Clone, PartialEq)]
+struct DraggedThreadRow {
+    id: String,
+}
+
+impl Render for DraggedThreadRow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // No visible ghost: the row itself is the thing being moved.
+        gpui::div()
+    }
+}
+
+/// Drag payload for a project folder header.
+#[derive(Clone, PartialEq)]
+struct DraggedFolderRow {
+    path: String,
+}
+
+impl Render for DraggedFolderRow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::div()
+    }
+}
+
+impl SidebarRow {
     fn id(&self) -> &str {
         match self {
             Self::Thread(s) => s.id.as_str(),
@@ -151,6 +196,7 @@ struct RowNesting {
 /// One ordered sidebar row plus its team nesting metadata: `indent` offsets
 /// members under their leader, `team_leader` marks a row that can collapse
 /// its member group, `team_collapsed` the fold state.
+#[derive(Clone)]
 struct ThreadRender {
     row: SidebarRow,
     indent: f32,
@@ -201,6 +247,19 @@ pub enum SidebarEvent {
     /// unified "Inbox" button threads also use): kill the agent and drop it
     /// from the sidebar — the same path as closing the tab.
     ArchiveExternalSession(String),
+    /// User dragged one thread row to a new position in its partition. The
+    /// anchor is the row the dragged one lands in front of; `None` appends to
+    /// the end of the partition.
+    MoveThread {
+        id: String,
+        before_id: Option<String>,
+    },
+    /// User dragged one project folder to a new position in the Projects
+    /// section, with the same anchor semantics as [`SidebarEvent::MoveThread`].
+    MoveFolder {
+        path: PathBuf,
+        before_path: Option<PathBuf>,
+    },
     /// User removed a project folder from the sidebar (project action menu).
     /// The store unregisters the path: the folder disappears and its threads
     /// fall back to the loose Conversations list. Conversation history is
@@ -208,9 +267,18 @@ pub enum SidebarEvent {
     RemoveProject(PathBuf),
 }
 
-/// Order threads as a team forest: top-level rows (threads + externals)
-/// merged by recency, each leader followed by its indented member subtree.
-/// Orphans and cycles stay top-level (`depth` is zeroed for them at the
+/// Project one partition's rows into render order. **The caller hands rows in
+/// display order already** (the client's view account, seeded from the server's
+/// durable manual account) — this function never sorts, because a sort on any
+/// timestamp key is what made rows drift.
+///
+/// Each partition renders three bands: pinned threads, then the live external
+/// CLI/terminal sessions, then the remaining threads. Externals own no account
+/// (the server never sees them) and their spawn time never changes, so their
+/// band is stable without ever being compared against a thread timestamp.
+///
+/// Every leader is followed by its indented member subtree in the same incoming
+/// order; orphans and cycles stay top-level (`depth` is zeroed for them at the
 /// store); a collapsed leader hides its subtree.
 fn team_forest(
     team_collapsed: &HashSet<String>,
@@ -226,7 +294,7 @@ fn team_forest(
             members.entry(parent).or_default().push(s);
         }
     }
-    let mut top: Vec<SidebarRow> = threads
+    let top: Vec<&ThreadListItem> = threads
         .iter()
         .filter(|s| {
             // A member whose leader lives in another partition (e.g. an
@@ -234,14 +302,22 @@ fn team_forest(
             // webview forest, so archiving a leader never hides its members.
             s.depth == 0 || !s.parent_id.as_deref().is_some_and(|p| ids.contains(p))
         })
-        .cloned()
-        .map(SidebarRow::Thread)
-        .chain(externals.iter().cloned().map(SidebarRow::External))
         .collect();
-    top.sort_by_key(|r| std::cmp::Reverse(r.sort_key()));
+    // A stable re-band: the server's snapshot already leads with pinned rows,
+    // but the client's promotion can lift an unpinned row above one, so the
+    // band boundary is re-applied here (in one place, never per call site).
+    let (pinned, rest): (Vec<&ThreadListItem>, Vec<&ThreadListItem>) =
+        top.into_iter().partition(|s| s.pinned);
+    let mut externals: Vec<crate::external_session::ExternalSessionSummary> = externals.to_vec();
+    externals.sort_by_key(|s| std::cmp::Reverse(s.created_at));
 
     let mut out = Vec::new();
-    for row in top {
+    for row in pinned
+        .into_iter()
+        .map(|s| SidebarRow::Thread((*s).clone()))
+        .chain(externals.into_iter().map(SidebarRow::External))
+        .chain(rest.into_iter().map(|s| SidebarRow::Thread((*s).clone())))
+    {
         let id = row.id().to_string();
         // Only threads can lead a team; external CLI sessions never do.
         let team_leader = match &row {
@@ -255,8 +331,7 @@ fn team_forest(
             team_collapsed: team_collapsed.contains(&id),
         });
         if team_leader && !team_collapsed.contains(&id) {
-            let mut kids = members.get(id.as_str()).cloned().unwrap_or_default();
-            kids.sort_by_key(|k| std::cmp::Reverse(k.updated_at));
+            let kids = members.get(id.as_str()).cloned().unwrap_or_default();
             for kid in kids {
                 push_member(team_collapsed, &mut out, kid, 1.0, &members);
             }
@@ -287,8 +362,8 @@ fn push_member(
         team_collapsed: team_collapsed.contains(&s.id),
     });
     if has_kids && !team_collapsed.contains(&s.id) && depth < MAX_TEAM_RENDER_DEPTH {
-        let mut kids = members.get(s.id.as_str()).cloned().unwrap_or_default();
-        kids.sort_by_key(|k| std::cmp::Reverse(k.updated_at));
+        // Members follow their leader in the incoming display order; no sort.
+        let kids = members.get(s.id.as_str()).cloned().unwrap_or_default();
         for kid in kids {
             push_member(team_collapsed, out, kid, depth + 1.0, members);
         }
@@ -324,10 +399,18 @@ pub struct Sidebar {
     /// state is keyed by id).
     select_gen: u64,
     /// Project paths whose folder group is collapsed; absent means expanded.
+    /// Mirrored into [`Sidebar::view`] so the sidebar reopens as it was left.
     collapsed: HashSet<String>,
     /// Team leader ids whose member group is collapsed; absent means
-    /// expanded. Mirrors `collapsed` but per leader row instead of folder.
+    /// expanded. Mirrors `collapsed` but per leader row instead of folder, and
+    /// persisted alongside it.
     team_collapsed: HashSet<String>,
+    /// The client's view state: ordering mode, per-partition display order,
+    /// observed interaction stamps, and the two collapse sets.
+    view: crate::sidebar_view::SidebarView,
+    /// The mode as of the previous paint — the edge that triggers the one
+    /// complete recency sort when the user switches into `Last updated`.
+    prev_order_by: crate::sidebar_view::OrderBy,
     /// list. Merged into the Conversations list by recency (an `external:` id
     /// in `selected` highlights the active one).
     external_sessions: Vec<crate::external_session::ExternalSessionSummary>,
@@ -351,6 +434,25 @@ pub struct Sidebar {
     row_menu_open: Option<String>,
     row_menu: Option<Entity<PopupMenu>>,
     row_menu_sub: Option<Subscription>,
+    /// The view-options popup (session ordering mode) and its dismissal
+    /// subscription; one at a time, mirroring the row menu.
+    view_menu_open: bool,
+    view_menu: Option<Entity<PopupMenu>>,
+    view_menu_sub: Option<Subscription>,
+    /// The thread row currently under a drag, with the insertion line's host.
+    drag_row: Option<RowDrag>,
+    /// The project folder currently under a drag, same shape.
+    drag_folder: Option<RowDrag>,
+    /// The ids each partition last rendered, in display order: a drop resolves
+    /// its anchor against what the user actually sees.
+    displayed: HashMap<String, Vec<String>>,
+    /// The folder paths as last rendered, in order — a folder drop resolves its
+    /// anchor against what the user sees.
+    folder_order: Vec<String>,
+    /// Partitions whose overflow the user revealed for this mount. Transient by
+    /// design: closing a folder clears it, so a reopened folder returns to the
+    /// bounded projection.
+    revealed: HashSet<String>,
     /// Live width driven by dragging the divider on the right edge. Updated
     /// from the owning `Workspace` on every drag-move tick.
     width: Pixels,
@@ -371,13 +473,20 @@ impl Sidebar {
     }
 
     pub fn new(width: Pixels, _cx: &mut Context<Self>) -> Self {
+        // The view file carries the ordering mode, the display accounts and the
+        // two collapse sets; a missing or corrupt file is the empty default.
+        let view = sidebar_view::load();
         Self {
             mux: None,
             selected: None,
-            collapsed: HashSet::new(),
-            team_collapsed: HashSet::new(),
+            collapsed: view.collapsed_folders.iter().cloned().collect(),
+            team_collapsed: view.collapsed_teams.iter().cloned().collect(),
             prev_selected: None,
             select_gen: 0,
+            view: view.clone(),
+            // Seeded equal to the loaded mode: the first paint is not a switch
+            // into `Last updated`, so it must not force a complete re-sort.
+            prev_order_by: view.order_by,
             external_sessions: Vec::new(),
             new_session_open: false,
             new_session_menu: None,
@@ -387,9 +496,90 @@ impl Sidebar {
             row_menu_open: None,
             row_menu: None,
             row_menu_sub: None,
+            view_menu_open: false,
+            view_menu: None,
+            view_menu_sub: None,
+            drag_row: None,
+            drag_folder: None,
+            displayed: HashMap::new(),
+            folder_order: Vec::new(),
+            revealed: HashSet::new(),
             width,
             scroll_handle: ScrollHandle::new(),
         }
+    }
+
+    /// Whether the view-options popup is mounted open.
+    pub fn view_menu_is_open(&self) -> bool {
+        self.view_menu_open
+    }
+
+    /// Open the view-options popup: the session ordering mode. The mode is
+    /// client view state (never a kernel write) — it decides whether activity may
+    /// promote a row, nothing else.
+    fn open_view_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_view_menu();
+        self.close_new_session_menu();
+        let sidebar = cx.entity().downgrade();
+        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
+            // The active mode carries the check mark; the popup is the mode's
+            // only editor, and choosing a mode never touches the server.
+            let build = |menu: PopupMenu, order_by: OrderBy, label: &'static str| {
+                let target = sidebar.clone();
+                let active = sidebar
+                    .upgrade()
+                    .is_some_and(|entity| entity.read(_cx).view.order_by == order_by);
+                menu.item(PopupMenuItem::new(i18n::t(label)).checked(active).on_click(
+                    move |_, _, cx| {
+                        let _ = target.update(cx, |this, cx| {
+                            this.close_view_menu();
+                            this.set_order_by(order_by, cx);
+                        });
+                    },
+                ))
+            };
+            let menu = build(
+                menu.max_w(gpui::px(240.)),
+                OrderBy::Manual,
+                "sidebar-order-manual",
+            );
+            build(menu, OrderBy::Updated, "sidebar-order-updated")
+        });
+        self.view_menu_sub = Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.view_menu_open = false;
+            this.view_menu = None;
+            this.view_menu_sub = None;
+            cx.notify();
+        }));
+        self.view_menu_open = true;
+        self.view_menu = Some(menu);
+        cx.notify();
+    }
+
+    fn close_view_menu(&mut self) {
+        self.view_menu_open = false;
+        self.view_menu = None;
+        self.view_menu_sub = None;
+    }
+
+    /// Switch the ordering mode. Entering `Last updated` is the edge that runs
+    /// the one complete recency sort; leaving it keeps every current position
+    /// and only stops further promotion.
+    fn set_order_by(&mut self, order_by: OrderBy, cx: &mut Context<Self>) {
+        if self.view.order_by == order_by {
+            return;
+        }
+        self.view.order_by = order_by;
+        self.save_view(cx);
+        cx.notify();
+    }
+
+    /// Persist the two collapse sets into the view file. Called after a folder
+    /// or leader toggle, so a folded sidebar survives a restart.
+    fn persist_collapse(&mut self, cx: &mut Context<Self>) {
+        self.view.collapsed_folders = self.collapsed.iter().cloned().collect();
+        self.view.collapsed_teams = self.team_collapsed.iter().cloned().collect();
+        self.save_view(cx);
     }
 
     /// Replace the external-session projection. Called by the Workspace
@@ -425,10 +615,15 @@ impl Sidebar {
         dropdown: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        section_header(
-            i18n::t("sidebar-section-conversations"),
-            theme,
-            Some(
+        // Both header actions sit in one element: the new-session `+` and the
+        // ordering-mode trigger. Each mounts its own popup only on the in-flow
+        // copy (`dropdown`), so the sticky overlay never duplicates a menu.
+        let actions = gpui::div()
+            .relative()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .child(
                 gpui::div()
                     .relative()
                     .child(
@@ -458,9 +653,36 @@ impl Sidebar {
                                 )
                             })
                             .flatten(),
+                    ),
+            )
+            .child(
+                gpui::div()
+                    .relative()
+                    .child(
+                        Button::new(format!("{id_prefix}-view-options"))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Menu)
+                            .tooltip(i18n::t("sidebar-view-options"))
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                if this.view_menu_open {
+                                    this.close_view_menu();
+                                } else {
+                                    this.open_view_menu(window, cx);
+                                }
+                                cx.notify();
+                            })),
                     )
-                    .into_any_element(),
-            ),
+                    .children(
+                        (dropdown && self.view_menu_open)
+                            .then(|| self.render_view_menu_dropdown())
+                            .flatten(),
+                    ),
+            );
+        section_header(
+            i18n::t("sidebar-section-conversations"),
+            theme,
+            Some(actions.into_any_element()),
         )
     }
 
@@ -692,6 +914,28 @@ impl Sidebar {
     /// Anchor the open row menu below its trigger button. Deferred so it
     /// paints above sibling rows and escapes the row's `overflow_hidden`;
     /// `top_full()` + `right_0()` hang it just under the button's wrapper.
+    /// The view-options popup, hung under its header trigger the same deferred
+    /// way the row menu is, so it escapes the scroll clip.
+    fn render_view_menu_dropdown(&self) -> Option<AnyElement> {
+        if !self.view_menu_open {
+            return None;
+        }
+        let menu = self.view_menu.clone()?;
+        Some(
+            deferred(
+                gpui::div()
+                    .id("sidebar-view-options-dropdown")
+                    .absolute()
+                    .top_full()
+                    .right_0()
+                    .occlude()
+                    .child(menu),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
     fn render_row_menu_dropdown(&self, id: &str) -> Option<AnyElement> {
         if self.row_menu_open.as_deref() != Some(id) {
             return None;
@@ -834,16 +1078,284 @@ impl Sidebar {
         self.selected.as_deref()
     }
 
-    /// Order threads as a team forest: top-level rows (threads + externals)
-    /// merged by recency, each leader followed by its indented member
-    /// subtree. Orphans and cycles stay top-level (`depth` is zeroed for
-    /// them at the store); a collapsed leader hides its subtree.
+    /// Project one partition's rows into render order (no sorting here: the
+    /// incoming order is the display order, and the three bands are assembled by
+    /// [`team_forest`]).
     fn order_rows(
         &self,
         threads: &[ThreadListItem],
         externals: &[crate::external_session::ExternalSessionSummary],
     ) -> Vec<ThreadRender> {
         team_forest(&self.team_collapsed, threads, externals)
+    }
+
+    /// Re-order each partition's thread rows by the client's view account before
+    /// anything is projected.
+    ///
+    /// This is where the reference's browser-local order lives: `Manual` renders
+    /// the server's durable manual account verbatim, `Last updated` keeps a
+    /// display order of its own that a real user interaction moves exactly one
+    /// row through. A partition whose account changed marks the view file for
+    /// writing; a partition that merely re-reads the same order writes nothing.
+    fn apply_view_order(
+        &mut self,
+        projects: &mut [(String, Vec<ThreadListItem>)],
+        loose: &mut Vec<ThreadListItem>,
+        cx: &mut Context<Self>,
+    ) {
+        let switched =
+            self.view.order_by == OrderBy::Updated && self.prev_order_by != OrderBy::Updated;
+        self.prev_order_by = self.view.order_by;
+        let mut changed = false;
+        for (partition, rows) in projects
+            .iter_mut()
+            .map(|(path, items)| (path.as_str(), items))
+            .chain(std::iter::once((crate::sidebar_view::LOOSE, loose)))
+        {
+            // Owned (id, stamp) pairs first: `rows` must stay free to reorder
+            // while the account is being computed from this snapshot.
+            let stamps: Vec<(String, i64)> = rows
+                .iter()
+                .map(|s| (s.id.clone(), s.updated_at as i64))
+                .collect();
+            let input: Vec<sidebar_view::Row<'_>> = stamps
+                .iter()
+                .map(|(id, stamp)| sidebar_view::Row {
+                    id: id.as_str(),
+                    stamp: *stamp,
+                })
+                .collect();
+            let stored = self.view.account.get(partition).cloned();
+            let observed = self
+                .view
+                .observed
+                .get(partition)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(order) = sidebar_view::next_account(
+                &input,
+                stored.as_deref(),
+                &observed,
+                self.view.order_by,
+                switched || stored.is_none(),
+            ) {
+                let rank: HashMap<&str, usize> = order
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| (id.as_str(), i))
+                    .collect();
+                rows.sort_by_key(|s| rank.get(s.id.as_str()).copied().unwrap_or(usize::MAX));
+                self.view.account.insert(partition.to_string(), order);
+                changed = true;
+            }
+            sidebar_view::observe(&mut self.view, partition, &input);
+            // A drop resolves its anchor against the partition's live order,
+            // recorded here rather than at paint time: the fold hides rows, the
+            // account they belong to does not.
+            let order = self
+                .view
+                .account
+                .get(partition)
+                .cloned()
+                .unwrap_or_default();
+            let live: Vec<String> = input.iter().map(|r| r.id.to_string()).collect();
+            let merged = sidebar_view::reconciled(
+                &live
+                    .iter()
+                    .map(|id| sidebar_view::Row {
+                        id: id.as_str(),
+                        stamp: 0,
+                    })
+                    .collect::<Vec<_>>(),
+                Some(&order),
+            );
+            self.displayed.insert(partition.to_string(), merged);
+        }
+        if changed {
+            self.save_view(cx);
+        }
+    }
+
+    /// Persist the view state. A failed write is logged and dropped: this file is
+    /// presentation state, and the in-memory order stays correct for the run.
+    fn save_view(&mut self, _cx: &mut Context<Self>) {
+        if let Err(error) = sidebar_view::save(&self.view) {
+            tracing::warn!(error = %error, "failed to persist the sidebar view state");
+        }
+    }
+
+    /// Resolve the pointer's boundary on one row: the insertion line hugs the
+    /// half of the row the pointer is in, so a top-half hit lands the drag in
+    /// front of this row and a bottom-half hit lands it behind. Outside the
+    /// row's own bounds there is no boundary — `on_drag_move` fires for every
+    /// move of a live drag, not only the hovered element.
+    fn drag_boundary(bounds_top: Pixels, height: Pixels, pointer_y: Pixels) -> Option<DragEdge> {
+        let bottom = bounds_top + height;
+        if pointer_y < bounds_top || pointer_y > bottom {
+            return None;
+        }
+        Some(if pointer_y < bounds_top + height / 2.0 {
+            DragEdge::Top
+        } else {
+            DragEdge::Bottom
+        })
+    }
+
+    /// The id the dragged row lands in front of, resolved against the order the
+    /// user is looking at: the row after the line's host, or `None` when the
+    /// line sits at the end of the partition.
+    fn anchor_after(drag: &RowDrag, shown: &[String]) -> Option<String> {
+        let at = shown.iter().position(|id| *id == drag.line_on)?;
+        match drag.edge {
+            DragEdge::Top => shown.get(at).cloned(),
+            DragEdge::Bottom => shown.get(at + 1).cloned(),
+        }
+    }
+
+    /// Commit a thread drop: reorder the partition's display order locally, so
+    /// the row lands immediately, and hand the same move to the server's manual
+    /// account. A redundant move (self-anchored, already in place) emits
+    /// nothing and writes nothing.
+    fn commit_row_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag_row.take() else {
+            return;
+        };
+        if drag.dragged == drag.line_on {
+            cx.notify();
+            return;
+        }
+        let Some(partition) = self.partition_of_row(&drag.dragged, cx) else {
+            cx.notify();
+            return;
+        };
+        let mut shown = self.displayed.get(&partition).cloned().unwrap_or_default();
+        // A line under the last row means "append"; anywhere else it means
+        // "in front of whatever follows the line's host".
+        let at_end = matches!(drag.edge, DragEdge::Bottom)
+            && shown.last().is_some_and(|id| *id == drag.line_on);
+        let anchor = if at_end {
+            None
+        } else {
+            Self::anchor_after(&drag, &shown)
+        };
+        let Some(next) = sidebar_view::move_in_account(&shown, &drag.dragged, anchor.as_deref())
+        else {
+            cx.notify();
+            return;
+        };
+        shown = next;
+        self.displayed.insert(partition.clone(), shown.clone());
+        self.view.account.insert(partition, shown);
+        self.save_view(cx);
+        cx.emit(SidebarEvent::MoveThread {
+            id: drag.dragged,
+            before_id: anchor,
+        });
+        cx.notify();
+    }
+
+    /// Commit a folder drop. Folder order is server-owned state with no client
+    /// account, so this only forwards the move.
+    fn commit_folder_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag_folder.take() else {
+            return;
+        };
+        if drag.dragged == drag.line_on {
+            cx.notify();
+            return;
+        }
+        let at = match Self::anchor_after(&drag, &self.folder_order) {
+            Some(anchor) if anchor != drag.dragged => Some(PathBuf::from(anchor)),
+            _ => None,
+        };
+        cx.emit(SidebarEvent::MoveFolder {
+            path: PathBuf::from(&drag.dragged),
+            before_path: at,
+        });
+        cx.notify();
+    }
+
+    /// The partition a row belongs to: its registered project, else the loose
+    /// Conversations account. Same rule the server partitions by.
+    fn partition_of_row(&self, id: &str, cx: &mut App) -> Option<String> {
+        let mux = self.mux.as_ref()?;
+        let list = mux.read(cx).thread_list().to_vec();
+        let known = mux.read(cx).known_projects().to_vec();
+        let row = list.iter().find(|r| r.id == id)?;
+        let project = row.project.as_deref().unwrap_or_default();
+        Some(
+            if !project.is_empty() && known.iter().any(|k| k == project) {
+                project.to_string()
+            } else {
+                crate::sidebar_view::LOOSE.to_string()
+            },
+        )
+    }
+
+    /// Render one partition's projected rows, folded to the quota with an
+    /// explicit reveal affordance for the remainder.
+    fn render_partition_rows(
+        &self,
+        account: &str,
+        rows: Vec<ThreadRender>,
+        env: &PartitionEnv<'_>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let indent_base = env.indent_base;
+        let theme = env.theme;
+        let slide = env.slide;
+        let unread_map = env.unread_map;
+        let selected = env.selected;
+        let revealed = self.revealed.contains(account);
+        let (shown, hidden) = folded_rows(&rows, revealed);
+        let mut render = |tr: ThreadRender| {
+            let is_selected = selected == Some(tr.row.id());
+            match tr.row {
+                SidebarRow::Thread(s) => render_thread_item(
+                    &SidebarThreadItem::from_wire(
+                        &s,
+                        is_selected,
+                        unread_map.get(&s.id).copied(),
+                        RowNesting {
+                            indent: indent_base + px(tr.indent),
+                            team_leader: tr.team_leader,
+                            team_collapsed: tr.team_collapsed,
+                            nested: tr.indent > 0.0,
+                        },
+                        theme,
+                    ),
+                    slide,
+                    self,
+                    theme,
+                    cx,
+                ),
+                SidebarRow::External(s) => render_thread_item(
+                    &SidebarThreadItem::from_external(&s, is_selected, indent_base, theme),
+                    slide,
+                    self,
+                    theme,
+                    cx,
+                ),
+            }
+        };
+        let account = account.to_string();
+        v_flex()
+            .w_full()
+            .gap_0p5()
+            .children(shown.into_iter().map(&mut render))
+            .children((hidden > 0).then(|| {
+                Button::new(format!("show-more-{account}"))
+                    .ghost()
+                    .xsmall()
+                    .label(i18n::t_count("sidebar-show-more", hidden as i64))
+                    .text_color(theme.muted_foreground)
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.revealed.insert(account.clone());
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }))
+            .into_any_element()
     }
 
     /// A collapsible project folder: a clickable header (chevron + folder icon +
@@ -883,6 +1395,12 @@ impl Sidebar {
             .cloned()
             .collect();
 
+        let drag_path = path.to_string();
+        let folder_drag_line = self
+            .drag_folder
+            .as_ref()
+            .filter(|d| d.line_on == path && d.dragged != d.line_on)
+            .map(|d| d.edge);
         let header = h_flex()
             .id(key.clone())
             .w_full()
@@ -963,49 +1481,82 @@ impl Sidebar {
                     if !this.collapsed.remove(&path) {
                         this.collapsed.insert(path.clone());
                     }
+                    // A fold survives a restart.
+                    this.persist_collapse(cx);
                     cx.notify();
                 }
-            }));
+            }))
+            .relative()
+            .children(folder_drag_line.map(|edge| {
+                gpui::div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.))
+                    .rounded_full()
+                    .bg(theme.accent)
+                    .when(edge == DragEdge::Top, |this| this.top(px(-1.)))
+                    .when(edge == DragEdge::Bottom, |this| this.bottom(px(-1.)))
+                    .into_any_element()
+            }))
+            .on_drag(
+                DraggedFolderRow {
+                    path: drag_path.clone(),
+                },
+                {
+                    let payload = DraggedFolderRow {
+                        path: drag_path.clone(),
+                    };
+                    move |_, _, _, cx| cx.new(|_| payload.clone())
+                },
+            )
+            .on_drag_move::<DraggedFolderRow>(cx.listener(
+                move |this, e: &DragMoveEvent<DraggedFolderRow>, _window, cx| {
+                    let top = e.bounds.origin.y;
+                    let Some(edge) =
+                        Sidebar::drag_boundary(top, e.bounds.size.height, e.event.position.y)
+                    else {
+                        return;
+                    };
+                    let marker = RowDrag {
+                        dragged: e.drag(cx).path.clone(),
+                        line_on: drag_path.clone(),
+                        edge,
+                    };
+                    if this.drag_folder.as_ref() != Some(&marker) {
+                        this.drag_folder = Some(marker);
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drop::<DraggedFolderRow>(cx.listener(
+                move |this, folder: &DraggedFolderRow, _window, cx| {
+                    if this
+                        .drag_folder
+                        .as_ref()
+                        .is_some_and(|d| d.dragged == folder.path)
+                    {
+                        this.commit_folder_drag(cx);
+                    }
+                },
+            ));
 
         let rows = expanded.then(|| {
-            // Threads + this project's external sessions, merged by recency so
-            // an external CLI session launched from the folder's menu sits
-            // among the folder's manox threads instead of in the loose list;
-            // team members nest indented under their leader.
-            let team_rows = self.order_rows(group, &externals);
-            v_flex()
-                .w_full()
-                .gap_0p5()
-                .children(team_rows.into_iter().map(|tr| {
-                    let is_selected = selected == Some(tr.row.id());
-                    match tr.row {
-                        SidebarRow::Thread(s) => render_thread_item(
-                            &SidebarThreadItem::from_wire(
-                                &s,
-                                is_selected,
-                                unread_map.get(&s.id).copied(),
-                                RowNesting {
-                                    indent: px(16. + tr.indent),
-                                    team_leader: tr.team_leader,
-                                    team_collapsed: tr.team_collapsed,
-                                    nested: tr.indent > 0.0,
-                                },
-                                &theme,
-                            ),
-                            slide,
-                            self,
-                            &theme,
-                            cx,
-                        ),
-                        SidebarRow::External(s) => render_thread_item(
-                            &SidebarThreadItem::from_external(&s, is_selected, px(16.), &theme),
-                            slide,
-                            self,
-                            &theme,
-                            cx,
-                        ),
-                    }
-                }))
+            // The folder's threads (in view-account order) with this project's
+            // external sessions as a fixed band between the pinned and unpinned
+            // thread bands; team members nest indented under their leader.
+            self.render_partition_rows(
+                path,
+                self.order_rows(group, &externals),
+                &PartitionEnv {
+                    selected,
+                    unread_map: &unread_map,
+                    slide,
+                    theme: &theme,
+                    indent_base: px(16.),
+                },
+                cx,
+            )
         });
 
         v_flex()
@@ -1061,12 +1612,18 @@ impl Render for Sidebar {
         }
         // Merge registered projects that have no active threads — they still
         // appear as empty folders so the user can start a new conversation
-        // in the project without losing the folder reference.
+        // in the project without losing the folder reference. The folder
+        // sequence itself is the server's committed order (`known_projects`
+        // arrives in it), so no sorting happens here.
         for kp in &known_projects {
             if !projects.iter().any(|(p, _)| p == kp) {
                 projects.push((kp.clone(), Vec::new()));
             }
         }
+        // The client's view account is the last word on row order: `Manual` keeps
+        // the server's account order, `Last updated` promotes the single row whose
+        // human-interaction stamp advanced. Runs before any banding or folding.
+        self.apply_view_order(&mut projects, &mut loose, cx);
         // External sessions not bound to a *registered* project stay in the
         // loose Conversations list — that covers unbound sessions, sessions
         // whose folder was removed, and sessions bound to a cwd never
@@ -1159,6 +1716,7 @@ impl Render for Sidebar {
                 .child(header)
                 .into_any_element()
         });
+        self.folder_order = projects.iter().map(|(path, _)| path.clone()).collect();
         let projects_el: Vec<AnyElement> = projects
             .into_iter()
             .map(|(path, group)| {
@@ -1214,51 +1772,56 @@ impl Render for Sidebar {
                                 !overlay_shows_conversations,
                                 cx,
                             ))
-                            .child({
-                                let team_rows = self.order_rows(&loose, &loose_externals);
-                                v_flex()
-                                    .w_full()
-                                    .gap_0p5()
-                                    .children(team_rows.into_iter().map(|tr| {
-                                        let is_selected = selected.as_deref() == Some(tr.row.id());
-                                        match tr.row {
-                                            SidebarRow::Thread(s) => render_thread_item(
-                                                &SidebarThreadItem::from_wire(
-                                                    &s,
-                                                    is_selected,
-                                                    unread_map.get(&s.id).copied(),
-                                                    RowNesting {
-                                                        indent: px(tr.indent),
-                                                        team_leader: tr.team_leader,
-                                                        team_collapsed: tr.team_collapsed,
-                                                        nested: tr.indent > 0.0,
-                                                    },
-                                                    &theme,
-                                                ),
-                                                &slide,
-                                                self,
-                                                &theme,
-                                                cx,
-                                            ),
-                                            SidebarRow::External(s) => render_thread_item(
-                                                &SidebarThreadItem::from_external(
-                                                    &s,
-                                                    is_selected,
-                                                    px(0.),
-                                                    &theme,
-                                                ),
-                                                &slide,
-                                                self,
-                                                &theme,
-                                                cx,
-                                            ),
-                                        }
-                                    }))
-                            }),
+                            .child(self.render_partition_rows(
+                                crate::sidebar_view::LOOSE,
+                                self.order_rows(&loose, &loose_externals),
+                                &PartitionEnv {
+                                    selected: selected.as_deref(),
+                                    unread_map: &unread_map,
+                                    slide: &slide,
+                                    theme: &theme,
+                                    indent_base: px(0.),
+                                },
+                                cx,
+                            )),
                     ),
             )
             .children(overlay)
     }
+}
+
+/// The fold quota: an open folder shows this many rows, then offers the
+/// remainder through an explicit reveal.
+const COLLAPSED_ROWS: usize = 5;
+
+/// Fold a projected row list to the quota and report how many rows it hides.
+///
+/// A leader and its member subtree are one unit: the cut lands between units,
+/// so a member can never be shown without the leader that owns its indent guide
+/// and never stranded above a hidden leader. Revealing is a per-mount
+/// inspection, never persisted — a folder reopened much later returns to the
+/// bounded projection.
+fn folded_rows(rows: &[ThreadRender], revealed: bool) -> (Vec<ThreadRender>, usize) {
+    if revealed || rows.len() <= COLLAPSED_ROWS {
+        return (rows.to_vec(), 0);
+    }
+    // Walk whole units (a top-level row plus its contiguous subtree) until the
+    // next unit would cross the quota.
+    let mut keep = 0;
+    while keep < rows.len() {
+        let mut end = keep + 1;
+        while end < rows.len() && rows[end].indent > 0.0 {
+            end += 1;
+        }
+        if end > COLLAPSED_ROWS {
+            break;
+        }
+        keep = end;
+    }
+    // A first unit longer than the quota still shows: hiding everything while
+    // rows remain hidden would leave the reveal affordance pointing at nothing.
+    let keep = keep.max(1).min(rows.len());
+    (rows[..keep].to_vec(), rows.len() - keep)
 }
 
 fn section_header(label: SharedString, theme: &Theme, action: Option<AnyElement>) -> AnyElement {
@@ -1732,6 +2295,16 @@ fn render_thread_item(
     let icon = item.icon.clone();
     let open_kind = item.kind.clone();
     let group = gpui::SharedString::from(format!("thread-row-{id}"));
+    // Only thread rows carry order: an external session has no server-side
+    // account, so it is never a drag source, a drop target or a line host.
+    let is_thread_row = matches!(item.kind, RowKind::Thread { .. });
+    let drag_id = id.clone();
+    let drag_line = sidebar
+        .drag_row
+        .as_ref()
+        .filter(|d| d.line_on == id.as_str() && d.dragged != d.line_on)
+        .map(|d| d.edge);
+    let drag_source = sidebar.drag_row.as_ref().is_some_and(|d| d.dragged == id);
     // The loop can still self-advance (turn in flight, monitors / background
     // bash alive): the row spins and the id tag stays highlighted.
     let autonomous = item.running || item.background_work;
@@ -1918,6 +2491,53 @@ fn render_thread_item(
             RowKind::External => cx.emit(SidebarEvent::OpenExternalSession(id_open.clone())),
         }))
         .when_some(wash_overlay, |this, overlay| this.child(overlay))
+        .children(drag_line.map(|edge| {
+            gpui::div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(2.))
+                .rounded_full()
+                .bg(theme.accent)
+                .when(edge == DragEdge::Top, |this| this.top(px(-1.)))
+                .when(edge == DragEdge::Bottom, |this| this.bottom(px(-1.)))
+                .into_any_element()
+        }))
+        .when(drag_source, |this| this.opacity(0.4))
+        .when(is_thread_row, |this| {
+            let payload = DraggedThreadRow {
+                id: drag_id.clone(),
+            };
+            let ghost = payload.clone();
+            this.on_drag(payload, move |_, _, _, cx| cx.new(|_| ghost.clone()))
+                .on_drag_move::<DraggedThreadRow>(cx.listener(
+                    move |this, e: &DragMoveEvent<DraggedThreadRow>, _window, cx| {
+                        let top = e.bounds.origin.y;
+                        let Some(edge) =
+                            Sidebar::drag_boundary(top, e.bounds.size.height, e.event.position.y)
+                        else {
+                            return;
+                        };
+                        let marker = RowDrag {
+                            dragged: e.drag(cx).id.clone(),
+                            line_on: drag_id.clone(),
+                            edge,
+                        };
+                        if this.drag_row.as_ref() != Some(&marker) {
+                            this.drag_row = Some(marker);
+                            cx.notify();
+                        }
+                    },
+                ))
+                .on_drop::<DraggedThreadRow>(cx.listener(
+                    move |this, row: &DraggedThreadRow, _window, cx| {
+                        // The drop is authoritative only for the row being dragged.
+                        if this.drag_row.as_ref().is_some_and(|d| d.dragged == row.id) {
+                            this.commit_row_drag(cx);
+                        }
+                    },
+                ))
+        })
         .when(item.team_leader, |this| {
             // Team collapse toggle: folds/unfolds the member rows nested
             // under this leader without opening the conversation.
@@ -1940,6 +2560,7 @@ fn render_thread_item(
                         if !this.team_collapsed.remove(&id_team) {
                             this.team_collapsed.insert(id_team.clone());
                         }
+                        this.persist_collapse(cx);
                         cx.notify();
                     })),
             )
@@ -2318,9 +2939,147 @@ mod tests {
         assert!(!rows[0].team_leader);
     }
 
-    /// The team forest orders top-level rows by recency with members nested
-    /// indented right after their leader; a collapsed leader hides its
-    /// subtree and an orphan stays top-level.
+    /// The insertion boundary is the row's own half the pointer sits in, and a
+    /// pointer outside the row's bounds claims no boundary at all (every row
+    /// sees every move event of a live drag).
+    #[test]
+    fn drag_boundary_reports_the_half_the_pointer_is_in() {
+        use gpui::px;
+        assert_eq!(
+            Sidebar::drag_boundary(px(10.), px(20.), px(12.)),
+            Some(DragEdge::Top)
+        );
+        assert_eq!(
+            Sidebar::drag_boundary(px(10.), px(20.), px(25.)),
+            Some(DragEdge::Bottom)
+        );
+        assert_eq!(
+            Sidebar::drag_boundary(px(10.), px(20.), px(9.)),
+            None,
+            "above the row"
+        );
+        assert_eq!(
+            Sidebar::drag_boundary(px(10.), px(20.), px(31.)),
+            None,
+            "below the row"
+        );
+    }
+
+    /// A drop in front of a row anchors that row; behind it anchors the next;
+    /// behind the last row anchors nothing (append).
+    #[test]
+    fn the_drag_anchor_resolves_against_the_displayed_order() {
+        let shown: Vec<String> = ["t1", "t2", "t3"].iter().map(|s| s.to_string()).collect();
+        let at = |line_on: &str, edge| {
+            Sidebar::anchor_after(
+                &RowDrag {
+                    dragged: "t3".into(),
+                    line_on: line_on.into(),
+                    edge,
+                },
+                &shown,
+            )
+        };
+        assert_eq!(at("t2", DragEdge::Top).as_deref(), Some("t2"));
+        assert_eq!(at("t1", DragEdge::Bottom).as_deref(), Some("t2"));
+        assert_eq!(at("t3", DragEdge::Bottom), None);
+    }
+
+    /// A projected row for the fold tests: identity, and the parent/depth pair
+    /// that decides whether the row hangs under a leader.
+    fn rendered(id: &str, parent: Option<&str>, depth: i32) -> ThreadRender {
+        let mut item = sample_item();
+        item.id = id.into();
+        item.parent_id = parent.map(str::to_string);
+        item.depth = depth;
+        ThreadRender {
+            row: SidebarRow::Thread(item),
+            indent: if depth > 0 { 14.0 } else { 0.0 },
+            team_leader: false,
+            team_collapsed: false,
+        }
+    }
+
+    /// An open partition shows the quota; the remainder waits behind an explicit
+    /// reveal, and revealing reports nothing left to hide.
+    #[test]
+    fn folding_bounds_an_open_partition_at_the_quota() {
+        let rows: Vec<ThreadRender> = (0..8)
+            .map(|i| rendered(&format!("t{i}"), None, 0))
+            .collect();
+        let (shown, hidden) = folded_rows(&rows, false);
+        assert_eq!(hidden, 3);
+        let names: Vec<&str> = shown.iter().map(|r| r.row.id()).collect();
+        assert_eq!(names, vec!["t0", "t1", "t2", "t3", "t4"]);
+        let (all, hidden) = folded_rows(&rows, true);
+        assert_eq!(all.len(), 8);
+        assert_eq!(hidden, 0);
+    }
+
+    /// A subtree longer than the quota does not stretch the quota: the boundary
+    /// falls back to the leader alone, so no member is ever shown without the
+    /// leader it hangs off and the projection never exceeds the bound.
+    #[test]
+    fn a_quota_landing_mid_subtree_cuts_back_to_the_leader() {
+        let rows = vec![
+            rendered("l1", None, 0),
+            rendered("m1", Some("l1"), 1),
+            rendered("m2", Some("l1"), 1),
+            rendered("m3", Some("l1"), 1),
+            rendered("m4", Some("l1"), 1),
+            rendered("m5", Some("l1"), 1),
+            rendered("l2", None, 0),
+        ];
+        let (shown, hidden) = folded_rows(&rows, false);
+        let names: Vec<&str> = shown.iter().map(|r| r.row.id()).collect();
+        assert_eq!(names, vec!["l1"]);
+        assert_eq!(hidden, 6);
+    }
+
+    /// A partition within the quota never folds, so no reveal appears.
+    #[test]
+    fn a_partition_within_the_quota_never_folds() {
+        let rows = vec![rendered("a", None, 0), rendered("b", None, 0)];
+        let (shown, hidden) = folded_rows(&rows, false);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(hidden, 0);
+    }
+
+    /// The cut never lands inside a leader's subtree: no member can be shown
+    /// without the leader that owns its indent guide.
+    #[test]
+    fn folding_never_splits_a_leader_from_its_members() {
+        let rows = vec![
+            rendered("l1", None, 0),
+            rendered("m1", Some("l1"), 1),
+            rendered("m2", Some("l1"), 1),
+            rendered("l2", None, 0),
+            rendered("m3", Some("l2"), 1),
+            rendered("l3", None, 0),
+        ];
+        let (shown, hidden) = folded_rows(&rows, false);
+        let names: Vec<&str> = shown.iter().map(|r| r.row.id()).collect();
+        // The quota of 5 covers l1's subtree and l2's whole subtree exactly; the
+        // next unit (l3) is what folds away.
+        assert_eq!(names, vec!["l1", "m1", "m2", "l2", "m3"]);
+        assert_eq!(hidden, 1);
+        for r in &shown {
+            if let SidebarRow::Thread(s) = &r.row
+                && let Some(parent) = s.parent_id.as_deref().filter(|_| r.indent > 0.0)
+            {
+                assert!(
+                    names.contains(&parent),
+                    "{} shown without its leader {parent}",
+                    s.id
+                );
+            }
+        }
+    }
+
+    /// The team forest is a pure projection: top-level rows keep the order they
+    /// arrive in (the caller's view account, ultimately the server's manual
+    /// account), members nest indented right after their leader, a collapsed
+    /// leader hides its subtree, and an orphan stays top-level.
     #[test]
     fn team_forest_nests_members_and_honors_collapse() {
         let thread = |id: &str, parent: Option<&str>, depth: i32, at: i64| {
@@ -2331,6 +3090,7 @@ mod tests {
             s.updated_at = at as i32;
             s
         };
+        // Deliberately NOT stamp-ordered: the stamps must not move anything.
         let threads = vec![
             thread("leader", None, 0, 100),
             thread("member-old", Some("leader"), 1, 50),
@@ -2341,19 +3101,44 @@ mod tests {
         let collapsed = HashSet::new();
         let rows = team_forest(&collapsed, &threads, &[]);
         let ids: Vec<&str> = rows.iter().map(|r| r.row.id()).collect();
-        // Orphan sorts newest first; the leader carries its members right
-        // after it, members in activity order.
-        assert_eq!(ids, vec!["orphan", "leader", "member-new", "member-old"]);
-        assert!(rows[1].team_leader);
+        // Incoming order, with each member pulled under its leader.
+        assert_eq!(ids, vec!["leader", "member-old", "member-new", "orphan"]);
+        assert!(rows[0].team_leader);
+        assert_eq!(rows[1].indent, 14.0);
         assert_eq!(rows[2].indent, 14.0);
-        assert_eq!(rows[3].indent, 14.0);
-        assert!(!rows[0].team_leader);
+        assert!(!rows[3].team_leader);
 
         let collapsed = HashSet::from(["leader".to_string()]);
         let rows = team_forest(&collapsed, &threads, &[]);
         let ids: Vec<&str> = rows.iter().map(|r| r.row.id()).collect();
-        assert_eq!(ids, vec!["orphan", "leader"]);
-        assert!(rows[1].team_collapsed);
+        assert_eq!(ids, vec!["leader", "orphan"]);
+        assert!(rows[0].team_collapsed);
+    }
+
+    /// The forest never re-sorts: shuffling the incoming order shuffles the
+    /// output identically, even though every stamp stayed where it was. This is
+    /// the regression lock for rows that used to drift on background activity.
+    #[test]
+    fn team_forest_preserves_incoming_order_regardless_of_stamps() {
+        let thread = |id: &str, at: i64| {
+            let mut s = sample_item();
+            s.id = id.into();
+            s.updated_at = at as i32;
+            s
+        };
+        let one = vec![thread("a", 300), thread("b", 100), thread("c", 200)];
+        let ids: Vec<String> = team_forest(&HashSet::new(), &one, &[])
+            .iter()
+            .map(|r| r.row.id().to_string())
+            .collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+
+        let other = vec![thread("c", 200), thread("a", 300), thread("b", 100)];
+        let ids: Vec<String> = team_forest(&HashSet::new(), &other, &[])
+            .iter()
+            .map(|r| r.row.id().to_string())
+            .collect();
+        assert_eq!(ids, ["c", "a", "b"]);
     }
 
     /// The unified row projection: a selected external session carries the
