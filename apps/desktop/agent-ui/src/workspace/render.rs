@@ -202,8 +202,9 @@ impl Workspace {
         let loading = false;
         let composer_placement = composer_placement(editor_open && right_pane_open, first_screen);
         let main_body_w = window.bounds().size.width
+            - px(2. * SHELL_PADDING)
+            - px(CARD_BORDER)
             - self.sidebar_width
-            - px(SIDEBAR_DIVIDER_WIDTH)
             - if right_pane_open {
                 editor_width + px(EDITOR_DIVIDER_WIDTH)
             } else {
@@ -898,20 +899,23 @@ impl Workspace {
             .children(turn_navigator_overlay)
             .on_drag_move(cx.listener(
                 |this, e: &DragMoveEvent<DraggedEditorDivider>, _window, cx| {
-                    // The root fills the window, so its right edge is the
-                    // window's right edge and the editor pane's width is the
-                    // distance from the cursor to that edge. Clamp both to a
-                    // minimum and to leave the message column at least
-                    // `MAIN_MIN_WIDTH` (sidebar + divider + main view sit
-                    // left of the editor), so dragging wide never overflows
-                    // the window or collapses the conversation column. The
+                    // The root fills the window, but the card interior ends
+                    // one gutter inset (+1px border) before the window's right
+                    // edge, so the editor pane's width is the distance from
+                    // the cursor to that inset edge. Clamp both to a minimum
+                    // and to leave the message column at least
+                    // `MAIN_MIN_WIDTH` (sidebar + main view sit left of the
+                    // editor), so dragging wide never overflows the card or
+                    // collapses the conversation column. The
                     // context card is hidden while the editor is open, so it
                     // does not claim a width here — the conversation alone
                     // holds the message column. `sidebar_width` is read live
                     // so a wide sidebar correctly shrinks the available
                     // editor envelope.
-                    let new_w = e.bounds.right() - e.event.position.x;
+                    let new_w = e.bounds.right() - e.event.position.x - px(SHELL_PADDING + 1.);
                     let dynamic_max = e.bounds.size.width
+                        - px(2. * SHELL_PADDING)
+                        - px(CARD_BORDER)
                         - this.sidebar_width
                         - px(EDITOR_DIVIDER_WIDTH)
                         - px(MAIN_MIN_WIDTH);
@@ -925,14 +929,16 @@ impl Workspace {
         root.into_any_element()
     }
     /// The shared window shell every full-window `ViewMode` renders through:
-    /// `sidebar | sidebar-divider | main`, plus the mode-switching actions and
-    /// the sidebar drag/reset handling. The divider (drag handle, double-click
-    /// reset, width clamp + sync) lives here once, so the conversation,
-    /// built-in terminal, external-session, and Settings pages all resize
-    /// their sidebar identically — only the sidebar slot and main column
-    /// differ per mode. The Settings page passes its own nav as the sidebar
-    /// slot; dragging the divider there updates the same width state so the
-    /// layout container behaves identically across pages.
+    /// a `SHELL_PADDING` gutter around an `sidebar slot | main card` pair.
+    /// The sidebar slot is visually seamless (no border or own background —
+    /// the shell's background shows through); the main slot is wrapped in a
+    /// bordered, rounded card. The two sit flush (no layout gap): the resize
+    /// handle is an invisible absolute strip overlaying their boundary, so
+    /// the conversation, built-in terminal, external-session, and Settings
+    /// pages all resize the sidebar identically — only the sidebar slot and
+    /// the card's content differ per mode. The Settings page passes its own
+    /// nav as the sidebar slot; dragging the handle there updates the same
+    /// width state so the layout behaves identically across pages.
     fn shell_root(
         &mut self,
         sidebar: impl IntoElement,
@@ -940,9 +946,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let theme = cx.theme().clone();
-        // The divider is the visual separator and the drag handle for resizing
-        // the sidebar. Double-click resets to the default `SIDEBAR_WIDTH` for
-        // symmetry with the editor pane.
+        // The divider is the (invisible) drag handle for resizing the sidebar.
+        // Double-click resets to the default `SIDEBAR_WIDTH` for symmetry with
+        // the editor pane.
         let sync_width = |this: &mut Self, cx: &mut App, width: Pixels| {
             this.sidebar_width = width;
             this.sidebar.update(cx, |s, cx| s.set_width(width, cx));
@@ -950,21 +956,18 @@ impl Workspace {
                 settings.update(cx, |s, cx| s.set_width(width, cx));
             }
         };
+        // Centered on the sidebar/card boundary, which lives at
+        // `SHELL_PADDING + sidebar_width` from the window's left edge.
+        let handle_left =
+            px(SHELL_PADDING) + self.sidebar_width - px(SIDEBAR_DIVIDER_WIDTH / 2.);
         let sidebar_divider = gpui::div()
             .id("sidebar-divider")
+            .absolute()
+            .left(handle_left)
+            .top(px(SHELL_PADDING))
+            .bottom(px(SHELL_PADDING))
             .w(px(SIDEBAR_DIVIDER_WIDTH))
-            .h_full()
-            .flex_shrink_0()
-            .relative()
             .cursor(CursorStyle::ResizeLeftRight)
-            .child(
-                gpui::div()
-                    .absolute()
-                    .left(px(2.5))
-                    .w(px(1.))
-                    .h_full()
-                    .bg(theme.border),
-            )
             .on_drag(DraggedSidebarDivider, |_, _, _, cx| {
                 cx.stop_propagation();
                 cx.new(|_| DraggedSidebarDivider)
@@ -979,10 +982,38 @@ impl Workspace {
                     }
                 }),
             );
+        // The gutter strip above the card is not part of any in-card title
+        // bar, so it gets its own window-drag hot zone to keep the top edge
+        // of the window draggable.
+        let top_drag_gutter = gpui::div()
+            .id("window-drag-gutter")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(SHELL_PADDING))
+            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                window.start_window_move();
+            });
+        // The main card: bordered + rounded, clipping its children so the
+        // in-card title bar's square background never spills over the
+        // rounded corners.
+        let main_card = gpui::div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .relative()
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius_lg)
+            .bg(theme.background)
+            .child(main);
 
         h_flex()
             .size_full()
             .relative()
+            .p(px(SHELL_PADDING))
             .bg(theme.background)
             .text_color(theme.foreground)
             // Mode-switching shortcuts apply in every view mode.
@@ -999,22 +1030,25 @@ impl Workspace {
                 this.close_terminal_tab(cx);
             }))
             .child(sidebar)
+            .child(main_card)
             .child(sidebar_divider)
-            .child(main)
+            .child(top_drag_gutter)
             .on_drag_move(cx.listener(
                 move |this, e: &DragMoveEvent<DraggedSidebarDivider>, _window, cx| {
-                    // The root fills the window, so the sidebar's right edge is
-                    // the cursor's x position relative to the root's left.
-                    // Clamp so the message column (and the editor pane when
-                    // open) always retain at least `MAIN_MIN_WIDTH`.
-                    let new_w = e.event.position.x - e.bounds.left();
+                    // The root fills the window; the sidebar slot starts one
+                    // gutter inset from its left edge, so the sidebar's right
+                    // edge is the cursor's x minus `SHELL_PADDING`. Clamp so
+                    // the card interior (message column, and the editor pane
+                    // when open) always retains at least `MAIN_MIN_WIDTH`.
+                    let new_w = e.event.position.x - e.bounds.left() - px(SHELL_PADDING);
                     let editor_reserve = if this.right_pane_open() {
                         this.editor_width + px(EDITOR_DIVIDER_WIDTH)
                     } else {
                         px(0.)
                     };
                     let dynamic_max = e.bounds.size.width
-                        - px(SIDEBAR_DIVIDER_WIDTH)
+                        - px(2. * SHELL_PADDING)
+                        - px(CARD_BORDER)
                         - editor_reserve
                         - px(MAIN_MIN_WIDTH);
                     let max_w = dynamic_max

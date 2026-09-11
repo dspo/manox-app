@@ -167,25 +167,27 @@ Full-window external agent CLI session (claude / codex / copilot) or a plain ter
 
 ## 3. ViewMode::Workspace Layout
 
-Every non-Settings `ViewMode` renders through one shared shell ([WorkspaceShell](#workspaceshell)): `sidebar | SidebarDivider | main view`. The sidebar divider (drag-resize, double-click reset, width clamp + sync to the sidebar entity) is defined in exactly one place, so the conversation, built-in terminal, and external-session views all resize the sidebar identically — only the main view's content differs per mode. In the default mode the main view is a two-column container ([MainView](#mainview)): the [MessageColumn](#messagecolumn) (conversation) on the left and, when any right-pane tab is open, the right side view ([RightPane](#rightpane)) on the right. The old third top-level shell column now nests inside the main view, so the shell stays uniformly two columns. The [ContextRail](#contextrail) is NOT a flex sibling column — it is an absolute overlay floating over the message column's top-right (`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`), content height (never full-height), with the conversation body reserving `ENV_CONTENT_INSET` right padding so the message list never hides behind the card. While the right pane is open the card stays hidden so the conversation reclaims its width. The card also folds away below `RAIL_NARROW_BREAK` (900px message-column width), in which case the message column fills the main view.
+Every non-Settings `ViewMode` renders through one shared shell ([WorkspaceShell](#workspaceshell)): a `SHELL_PADDING` (10px) gutter around the window edge containing `sidebar slot | main card`, the two flush against each other (no layout gap). The sidebar slot is visually seamless — no own background or border, the shell background shows through — while the main slot is wrapped in a bordered + rounded card (`border_1` / `rounded(theme.radius_lg)` / `bg:background` / `overflow_hidden`) so each mode's content reads as one floating panel. The sidebar resize handle ([SidebarDivider](#sidebardivider)) is an invisible absolute strip overlaying the sidebar/card boundary (drag-resize, double-click reset, width clamp + sync to the sidebar entity), defined in exactly one place, so the conversation, built-in terminal, and external-session views all resize the sidebar identically — only the card's content differs per mode. The gutter strip above the card carries its own window-drag hot zone so the top window edge stays draggable. In the default mode the card's content is a two-column container ([MainView](#mainview)): the [MessageColumn](#messagecolumn) (conversation) on the left and, when any right-pane tab is open, the right side view ([RightPane](#rightpane)) on the right. The old third top-level shell column now nests inside the main view, so the shell stays uniformly two columns. The [ContextRail](#contextrail) is NOT a flex sibling column — it is an absolute overlay floating over the message column's top-right (`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`), content height (never full-height), with the conversation body reserving `ENV_CONTENT_INSET` right padding so the message list never hides behind the card. While the right pane is open the card stays hidden so the conversation reclaims its width. The card also folds away below `RAIL_NARROW_BREAK` (900px message-column width), in which case the message column fills the main view.
 
 ```
-┌──────────┬──┬──────────────────────────────────┐
-│          │  │MainView (h_flex)                 │
-│Sidebar   │▌ │ ┌──────────────┬──┬──────────┐   │
-│          │  │ │ MessageColumn│▌ │RightPane  │  │
-│          │  │ │ TitleBar     │  │(editor/  │   │
-│          │  │ │ conversation │  │browser)  │   │
-│          │  │ │ ContextRail  │  │          │   │
-│          │  │ │ float overlay│  │          │   │
-│          │  │ └──────────────┴──┴──────────┘   │
-│          │  │└────────────────────────────────┘│
-└──────────┴──┴──────────────────────────────────┘
+┌──────────────────────────────────────────────┐ ← window (native decorations)
+│ ╭──────────┬───────────────────────────────╮ │
+│ │ Sidebar  ┊Main card (bordered, rounded)  │ │
+│ │ (seamless┊ ┌──────────────┬──┬─────────┐ │ │
+│ │  slot)   ┊ │ MessageColumn│▌ │RightPane│ │ │
+│ │          ┊ │ TitleBar     │  │(editor/ │ │ │
+│ │ invisible┊ │ conversation │  │browser) │ │ │
+│ │ drag     ┊ │              │  │         │ │ │
+│ │ handle on┊ │ ContextRail  │  │         │ │ │
+│ │ boundary ┊ │ float overlay│  │         │ │ │
+│ │          ┊ └──────────────┴──┴─────────┘ │ │
+│ ╰──────────┴───────────────────────────────╯ │
+└──────────────────────────────────────────────┘
 ```
 
 #### WorkspaceShell
 
-The shared window shell built by `Workspace::shell_root(sidebar, main)`: an `h_flex` root with `sidebar-slot | 6px SidebarDivider | main view`, the mode-switching actions (`FocusConversation` / `FocusTerminal` / `NewTerminalTab` / `CloseTerminalTab`), and the sidebar drag/reset handling. Every full-window `ViewMode` routes through it — the sidebar slot is the conversation `Sidebar` for Workspace / Terminal / ExternalSession modes and the [SettingsLeftNav](#settingsleftnav) for Settings; the Workspace mode chains the conversation-only actions (settings / editor / browser / completion / archive…) and the turn-navigator overlay onto it, and passes a [MainView](#mainview) (message column + right side view) as the main slot; the Terminal and ExternalSession modes pass a single-column [TerminalColumn](#terminalcolumn) instead. The divider drag/double-click-reset writes one shared width (`Workspace::sidebar_width`) and syncs it to both the `Sidebar` entity and the `SettingsView`, so the Settings page resizes its sidebar exactly like the app page. Terminal-style main views are built by `Workspace::render_terminal_column` ([TerminalColumn](#terminalcolumn)).
+The shared window shell built by `Workspace::shell_root(sidebar, main)`: an `h_flex` root with a `SHELL_PADDING` (10px) gutter on all four sides, holding `sidebar-slot | main card` flush against each other plus the mode-switching actions (`FocusConversation` / `FocusTerminal` / `NewTerminalTab` / `CloseTerminalTab`) and the sidebar drag/reset handling. The main slot is wrapped in the shell's card chrome (`border_1` + `rounded(theme.radius_lg)` + `bg:background` + `overflow_hidden`), and an invisible absolute [SidebarDivider](#sidebardivider) strip overlays the sidebar/card boundary; a window-drag hot zone on the top gutter strip keeps the window's top edge draggable. Every full-window `ViewMode` routes through it — the sidebar slot is the conversation `Sidebar` for Workspace / Terminal / ExternalSession modes and the [SettingsLeftNav](#settingsleftnav) for Settings; the Workspace mode chains the conversation-only actions (settings / editor / browser / completion / archive…) and the turn-navigator overlay onto it, and passes a [MainView](#mainview) (message column + right side view) as the main slot; the Terminal and ExternalSession modes pass a single-column [TerminalColumn](#terminalcolumn) instead. The divider drag/double-click-reset writes one shared width (`Workspace::sidebar_width`) and syncs it to both the `Sidebar` entity and the `SettingsView`, so the Settings page resizes its sidebar exactly like the app page. Terminal-style main views are built by `Workspace::render_terminal_column` ([TerminalColumn](#terminalcolumn)).
 
 > Source: `apps/desktop/agent-ui/src/workspace/render.rs`
 
@@ -207,7 +209,7 @@ Left panel, fixed width (260px default, 200–480 draggable).
 
 #### Sidebar
 
-Full-height left panel, vertical flex, `bg:background`, right border.
+Full-height left panel, vertical flex, seamless slot — no own background or border (the shell's gutter background shows through; the main card's left border is the only visible boundary).
 
 > Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
 
@@ -284,7 +286,7 @@ to its thread, so a restart must not resurface it as a top-level resumable row
 
 #### SidebarDivider
 
-6px drag handle between Sidebar and the mode main view, `cursor:col-resize`. Constructed once inside [WorkspaceShell](#workspaceshell), so it appears — and behaves identically (drag-resize, double-click reset to the 260px default) — in the conversation, terminal, and external-session views.
+Invisible 6px drag handle overlaying the Sidebar/main-card boundary (absolute strip centered on it, `cursor:col-resize`, no layout space — the two panels sit flush), spanning the gutter-to-gutter content height. Constructed once inside [WorkspaceShell](#workspaceshell), so it appears — and behaves identically (drag-resize, double-click reset to the 260px default) — in the conversation, terminal, and external-session views.
 
 > Source: `apps/desktop/agent-ui/src/workspace/render.rs`
 

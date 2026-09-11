@@ -1170,12 +1170,13 @@ impl Render for Sidebar {
             })
             .collect();
 
+        // Seamless slot: no own background or border — the shell's gutter
+        // background shows through and the main card's left border is the
+        // only visible boundary.
         v_flex()
             .h_full()
             .w(self.width)
-            .bg(theme.background)
-            .border_r_1()
-            .border_color(theme.border)
+            .flex_shrink_0()
             .relative()
             .child(
                 v_flex()

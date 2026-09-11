@@ -463,12 +463,13 @@ impl SettingsView {
             px(8.)
         };
 
+        // Seamless slot (mirrors the conversation Sidebar): no own background
+        // or border — the shell background shows through and the main card's
+        // left border is the only visible boundary.
         v_flex()
             .h_full()
             .w(self.width)
-            .bg(theme.background)
-            .border_r_1()
-            .border_color(theme.border)
+            .flex_shrink_0()
             // Pinned top slot: back control + search input stay put while the
             // group list scrolls underneath.
             .child(

@@ -895,7 +895,16 @@ const EDITOR_DIVIDER_WIDTH: f32 = 6.;
 const SIDEBAR_WIDTH: f32 = 260.;
 const SIDEBAR_MIN_WIDTH: f32 = 200.;
 const SIDEBAR_MAX_WIDTH: f32 = 480.;
+/// Width of the invisible sidebar resize hot zone. It overlays the
+/// sidebar/card boundary as an absolute strip and claims no layout space —
+/// the two panels sit flush against each other.
 const SIDEBAR_DIVIDER_WIDTH: f32 = 6.;
+/// Gutter between the window edge and the shell content (the sidebar slot
+/// and the main card) on all four sides.
+const SHELL_PADDING: f32 = 10.;
+/// The main card's `border_1` on both edges; width budgets that measure
+/// card-interior space subtract this.
+const CARD_BORDER: f32 = 2.;
 /// Floor for the message column width when the right side view (editor
 /// pane) is dragged wide.
 const MAIN_MIN_WIDTH: f32 = 160.;
@@ -918,7 +927,10 @@ fn turn_navigator_layout(
     right_pane_width: Option<Pixels>,
     show_context_rail: bool,
 ) -> TurnNavigatorLayout {
-    let left_inset = sidebar_width + px(SIDEBAR_DIVIDER_WIDTH);
+    // The overlay anchors to the shell root's padding box (gpui absolute
+    // positioning is CSS-style), so both insets carry the shell gutter plus
+    // the card's 1px border on their side.
+    let left_inset = px(SHELL_PADDING) + sidebar_width + px(CARD_BORDER / 2.);
     let right_pane_inset = right_pane_width
         .map(|width| width + px(EDITOR_DIVIDER_WIDTH))
         .unwrap_or(px(0.));
@@ -927,7 +939,7 @@ fn turn_navigator_layout(
     } else {
         px(0.)
     };
-    let right_inset = right_pane_inset + context_inset;
+    let right_inset = px(SHELL_PADDING) + px(CARD_BORDER / 2.) + right_pane_inset + context_inset;
     let available = window_width - left_inset - right_inset - px(24.);
     let panel_width = if available <= px(0.) {
         px(0.)
@@ -2482,7 +2494,9 @@ impl Workspace {
                         .bottom_0()
                         .left(layout.left_inset)
                         .items_center()
-                        .pt(TITLE_BAR_HEIGHT + px(8.0))
+                        // The card (and its title bar) starts below the shell
+                        // gutter, so the panel clears them from the window top.
+                        .pt(px(SHELL_PADDING) + TITLE_BAR_HEIGHT + px(8.0))
                         .child(
                             popup_menu::popup_container(theme, navigator)
                                 .id("turn-navigator-panel")
