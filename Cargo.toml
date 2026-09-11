@@ -158,6 +158,15 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 [patch.crates-io]
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
 
+# Full DWARF makes the largest test targets (`cx` integration tests and `cx-cli`
+# bin tests) large enough to crash `ld.lld` on GitHub-hosted Linux runners.
+# Keep file/line backtraces while shrinking debug sections across dev/test links.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
 # gpui 在 debug 下也需要 opt-level 3，否则渲染极慢（对齐 gpui-component）
 [profile.dev.package]
 gpui = { opt-level = 3 }
