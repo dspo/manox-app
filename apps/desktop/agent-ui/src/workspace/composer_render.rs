@@ -342,14 +342,13 @@ impl Workspace {
     ///
     /// The chip is a mode-aware pill rendered next to the composer send button.
     /// Each `PermissionMode` gets its own icon + accent color (amber eye for
-    /// Read Only, green folder for Workspace Write, red triangle for Full
+    /// Read Only, green folder for Workspace Access, red triangle for Full
     /// Access) so the current permission posture is legible at a glance — a
     /// 1-line summary of what the model is allowed to do.
     ///
-    /// Clicking the chip opens the popover: a question row with a "Learn
-    /// more" link and three selectable rows (icon + title + subtitle, check
-    /// on the right). The popover is `w(360)` to fit the longest bilingual
-    /// subtitle without wrapping.
+    /// Clicking the chip opens the popover: three title-only selectable rows
+    /// (icon + title, check on the right) — no header, no per-mode
+    /// descriptions.
     pub(super) fn render_access_placeholder(
         &mut self,
         theme: &Theme,

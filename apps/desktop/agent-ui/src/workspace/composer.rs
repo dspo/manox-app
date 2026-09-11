@@ -173,17 +173,22 @@ impl Workspace {
         // input (Handled), asks to inject text as a user turn (InjectUserTurn),
         // or declines (NoOp → fall through to the normal path). Slash parsing
         // only applies to text-only input; attachments force the normal path.
-        // Slash commands only dispatch while idle — a `/name [args]` typed
-        // while a turn is running is parked in the follow-up queue as raw text
-        // rather than interrupting the run (e.g. `/clear` mid-turn would race
-        // the streaming conversation). The queued text flushes at turn end.
-        if !self
+        // While idle every recognized command dispatches; while a turn runs,
+        // only `/mode` dispatches immediately — mode switches are hot (the
+        // gate governs the very next tool call) and the prompt half of
+        // `/mode <name> <prompt>` parks as a follow-up like any message.
+        // Everything else typed mid-turn stays in the follow-up queue as raw
+        // text rather than interrupting the run (e.g. `/clear` mid-turn would
+        // race the streaming conversation); the queued text flushes at turn
+        // end.
+        let running = self
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
-            .expect("foreground store present")
-            && attachments.is_empty()
+            .expect("foreground store present");
+        if attachments.is_empty()
             && let Some(parsed) = crate::slash_command::parse(&text)
+            && (!running || parsed.name == "mode")
         {
             let result = crate::slash_command::dispatch(&parsed, self, window, cx);
             match result {

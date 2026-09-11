@@ -330,6 +330,14 @@ impl ClientStore {
         }
     }
 
+    /// UI-optimistic mirror write for a permission-mode switch: the chip
+    /// moves the instant the user clicks, without waiting for the journal
+    /// echo. The echo (and any later snapshot) stays authoritative — a
+    /// higher-seq frame overwrites whatever this set.
+    pub fn set_permission_mode_optimistic(&mut self, mode: manox_agent::thread::PermissionMode) {
+        self.permission_mode = mode;
+    }
+
     /// Merge a projection frame (§E.1): per key, higher-`seq`-wins; each
     /// accepted value materializes into its mirrored field.
     pub fn merge_projections(&mut self, frame: &manox_protocol::ProjectionsFrame) {

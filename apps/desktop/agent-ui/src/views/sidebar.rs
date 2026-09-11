@@ -1691,7 +1691,7 @@ impl SidebarThreadItem {
             team_collapsed: false,
             nested: false,
             icon: RowIcon::External(summary.kind.icon_asset()),
-            // Same wash as Workspace Write threads: `theme.accent` resolves to
+            // Same wash as Workspace Access threads: `theme.accent` resolves to
             // `neutral-100` (near-white) in the forced Light theme, which made
             // the external row's hover/active/selected wash invisible on the
             // white sidebar. `theme.info` (cyan) is the visible default tint.
@@ -2395,7 +2395,7 @@ mod tests {
         // this row's `is_selected` check.
         assert_eq!(external.id, "external:claude:deadbeef");
         // Fully unified: the external row's wash is the same visible tint a
-        // default (Workspace Write) manox thread carries — never the near-white
+        // default (Workspace Access) manox thread carries — never the near-white
         // `theme.accent`, which disappears against the light sidebar.
         assert_eq!(external.wash, thread.wash);
         assert_eq!(external.wash, theme.info);
