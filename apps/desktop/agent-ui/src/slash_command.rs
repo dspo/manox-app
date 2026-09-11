@@ -326,7 +326,7 @@ fn builtin_meta(name: &str) -> &'static manox_agent::slash_builtins::BuiltinSlas
 /// `ProposePlan` tool, never as prose.
 /// `/mode` — cycle or set the permission mode on the current thread.
 ///
-/// `/mode` (no args) cycles ReadOnly → WorkspaceWrite → DangerFullAccess and
+/// `/mode` (no args) cycles ReadOnly → WorkspaceAccess → FullAccess and
 /// pushes a notice. `/mode <name>` sets the named mode (`read-only`,
 /// `workspace-write`, `danger-full-access`); an optional prompt after the mode
 /// name immediately starts a turn under the new mode.

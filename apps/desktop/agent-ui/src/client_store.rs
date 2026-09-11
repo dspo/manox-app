@@ -330,6 +330,14 @@ impl ClientStore {
         }
     }
 
+    /// UI-optimistic mirror write for a permission-mode switch: the chip
+    /// moves the instant the user clicks, without waiting for the journal
+    /// echo. The echo (and any later snapshot) stays authoritative — a
+    /// higher-seq frame overwrites whatever this set.
+    pub fn set_permission_mode_optimistic(&mut self, mode: manox_agent::thread::PermissionMode) {
+        self.permission_mode = mode;
+    }
+
     /// Merge a projection frame (§E.1): per key, higher-`seq`-wins; each
     /// accepted value materializes into its mirrored field.
     pub fn merge_projections(&mut self, frame: &manox_protocol::ProjectionsFrame) {
@@ -607,6 +615,41 @@ mod tests {
         // Retained non-session notes are no-ops for the mirror.
         store.apply_server_note(&ServerNote::Ready);
         assert_eq!(store.id.0, "s1");
+    }
+
+    /// The optimistic mirror contract: the workspace writes the mode field
+    /// directly on a click (chip flips without the journal echo), and any
+    /// later projection merge — the authoritative echo — overwrites it. A
+    /// stale in-flight frame may bounce the field once; the echo corrects.
+    #[test]
+    fn optimistic_permission_mode_is_overwritten_by_the_echo() {
+        let mut store = ClientStore::default();
+        assert_eq!(
+            store.permission_mode,
+            manox_agent::thread::PermissionMode::WorkspaceWrite
+        );
+        store.set_permission_mode_optimistic(manox_agent::thread::PermissionMode::ReadOnly);
+        assert_eq!(
+            store.permission_mode,
+            manox_agent::thread::PermissionMode::ReadOnly
+        );
+        // A stale in-flight frame carrying the pre-switch value bounces the
+        // mirror (the optimistic write owns no projections slot).
+        store.merge_projection(
+            "permission_mode",
+            Value::String("workspace-write".into()),
+            1,
+        );
+        assert_eq!(
+            store.permission_mode,
+            manox_agent::thread::PermissionMode::WorkspaceWrite
+        );
+        // The authoritative echo at a higher seq settles the field for good.
+        store.merge_projection("permission_mode", Value::String("read-only".into()), 2);
+        assert_eq!(
+            store.permission_mode,
+            manox_agent::thread::PermissionMode::ReadOnly
+        );
     }
 
     #[test]

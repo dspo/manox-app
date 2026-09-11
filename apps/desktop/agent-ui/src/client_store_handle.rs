@@ -53,7 +53,9 @@ pub enum LeafRequest {
 /// A gpui entity that owns a single session's [`ClientStore`], the v2
 /// [`JournalFold`] engine, and re-emits the live fold as `ThreadEvent`s. The
 /// multiplexer is the sole writer (retained `ServerNote`s) and the sole
-/// stream router (v2).
+/// stream router (v2) — with one sanctioned exception: the workspace's
+/// optimistic permission-mode mirror write (the chip moves on click; the
+/// journal echo remains authoritative and overwrites it later).
 pub struct ClientStoreHandle {
     pub store: ClientStore,
     fold: JournalFold,
@@ -118,6 +120,13 @@ impl ClientStoreHandle {
     /// ride the shared connection).
     pub fn set_outbound(&mut self, outbound: async_channel::Sender<LeafRequest>) {
         self.outbound = Some(outbound);
+    }
+
+    /// The sanctioned sole-writer exception: the workspace mirrors a mode
+    /// switch onto the store immediately so the chip reflects the click
+    /// without waiting for the journal echo.
+    pub fn set_permission_mode_optimistic(&mut self, mode: manox_agent::thread::PermissionMode) {
+        self.store.set_permission_mode_optimistic(mode);
     }
 
     pub fn session_id(&self) -> &str {

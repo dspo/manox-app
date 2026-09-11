@@ -243,10 +243,10 @@ fn mode_chip_visual(mode: PermissionMode, theme: &Theme) -> (SharedString, gpui:
     }
 }
 
-/// Build the popover content for the access chip: a header row (question +
-/// "Learn more" link) and three selectable mode rows (icon + title +
-/// subtitle, check on the right for the active one). The whole thing is a
-/// plain `v_flex` so it sizes to its content with no `flex_1` distribution
+/// Build the popover content for the access chip: three selectable mode rows
+/// (icon + title, check on the right for the active one) — titles only, no
+/// header and no per-mode descriptions. The whole thing is a plain `v_flex`
+/// so it sizes to its content with no `flex_1` distribution
 /// across items. The chip's dropdown wraps this in a `popover_style` div
 /// for the opaque card chrome — that path doesn't go through `PopupMenu`
 /// at all, sidestepping the per-`ElementItem` `flex_1`/`min_h(26)` wrapper
@@ -262,15 +262,12 @@ fn build_permission_content(
     current: PermissionMode,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    let fg: gpui::Hsla = cx.theme().foreground;
-    let muted: gpui::Hsla = cx.theme().muted_foreground;
     let info: gpui::Hsla = cx.theme().info;
     let warning: gpui::Hsla = cx.theme().warning;
     let danger: gpui::Hsla = cx.theme().danger;
 
     let make_row = |mode: PermissionMode,
                     title: SharedString,
-                    subtitle: SharedString,
                     icon: IconName,
                     accent: gpui::Hsla,
                     selected: bool| {
@@ -283,24 +280,12 @@ fn build_permission_content(
             .cursor_pointer()
             .child(Icon::new(icon).small().text_color(accent))
             .child(
-                v_flex()
+                gpui::div()
                     .flex_1()
                     .min_w_0()
-                    .gap_0p5()
-                    .child(
-                        gpui::div()
-                            .min_w_0()
-                            .text_sm()
-                            .text_color(accent)
-                            .child(title),
-                    )
-                    .child(
-                        gpui::div()
-                            .min_w_0()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(subtitle),
-                    ),
+                    .text_sm()
+                    .text_color(accent)
+                    .child(title),
             )
             .when(selected, |el| {
                 el.child(Icon::new(IconName::Check).small().text_color(accent))
@@ -314,38 +299,9 @@ fn build_permission_content(
         .w_full()
         .gap_2()
         .p_2()
-        .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(fg)
-                        .child(i18n::t("workspace-mode-title").to_string()),
-                )
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            gpui::div()
-                                .text_xs()
-                                .text_color(info)
-                                .child(i18n::t("workspace-mode-learn-more").to_string()),
-                        )
-                        .child(Icon::new(IconName::ArrowRight).xsmall().text_color(info)),
-                ),
-        )
         .child(make_row(
             PermissionMode::ReadOnly,
             i18n::t("workspace-mode-readonly-title"),
-            i18n::t("workspace-mode-readonly-desc"),
             IconName::Eye,
             warning,
             current == PermissionMode::ReadOnly,
@@ -353,7 +309,6 @@ fn build_permission_content(
         .child(make_row(
             PermissionMode::WorkspaceWrite,
             i18n::t("workspace-mode-workspacewrite-title"),
-            i18n::t("workspace-mode-workspacewrite-desc"),
             IconName::FolderOpen,
             info,
             current == PermissionMode::WorkspaceWrite,
@@ -361,7 +316,6 @@ fn build_permission_content(
         .child(make_row(
             PermissionMode::DangerFullAccess,
             i18n::t("workspace-mode-dangerfullaccess-title"),
-            i18n::t("workspace-mode-dangerfullaccess-desc"),
             IconName::TriangleAlert,
             danger,
             current == PermissionMode::DangerFullAccess,
@@ -2795,7 +2749,7 @@ impl Workspace {
 
 impl Workspace {
     /// Cycle the permission mode on the current thread (`/mode` no-args
-    /// form): ReadOnly → WorkspaceWrite → DangerFullAccess → ReadOnly. The mode
+    /// form): ReadOnly → WorkspaceAccess → FullAccess → ReadOnly. The mode
     /// change notice rides `apply_permission_mode` so the conversation shows
     /// the switch.
     pub(crate) fn cycle_mode(&mut self, cx: &mut Context<Self>) {
@@ -2813,9 +2767,10 @@ impl Workspace {
     }
 
     /// Apply `mode` and immediately send `prompt` as a user turn — the
-    /// `/mode <name> [prompt]` form. Slash dispatch only fires while idle
-    /// (the submit gate); `/mode` typed mid-turn parks in the follow-up
-    /// queue as raw text like any other message.
+    /// `/mode <name> [prompt]` form. `/mode` dispatches even mid-turn (mode
+    /// switches are hot), so the mode applies right away while the prompt
+    /// half parks in the follow-up queue like any message sent while
+    /// running.
     pub(crate) fn start_mode_turn(
         &mut self,
         mode: PermissionMode,
@@ -2846,6 +2801,11 @@ impl Workspace {
             session_id: sid.into(),
             mode: mode_wire,
         });
+        // Optimistic mirror: the chip reflects the click now; the journal
+        // echo lands later (turn end at the latest) and confirms it.
+        if let Some(store) = &self.store {
+            store.update(cx, |leaf, _| leaf.set_permission_mode_optimistic(mode));
+        }
         self.add_info_message(
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),
             NoticeAnchor::TurnEnd,
