@@ -21,6 +21,7 @@ pub mod menu;
 pub mod multiplexer;
 pub(crate) mod overlap_diag;
 pub mod server_note_translate;
+pub mod sidebar_view;
 pub mod slash_command;
 pub(crate) mod source_gates;
 pub mod views;
