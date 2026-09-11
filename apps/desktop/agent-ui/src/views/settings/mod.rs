@@ -9,7 +9,7 @@
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, Entity, EventEmitter, Pixels, SharedString,
-    Window, ease_out_quint, prelude::*, px,
+    Window, ease_out_quint, prelude::*,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, TITLE_BAR_HEIGHT, TitleBar, h_flex,
@@ -457,11 +457,7 @@ impl SettingsView {
         }
 
         // macOS traffic-light buttons float over the sidebar's transparent top.
-        let top_inset = if cfg!(target_os = "macos") {
-            px(28.)
-        } else {
-            px(8.)
-        };
+        let top_inset = crate::workspace::sidebar_top_inset();
 
         // Seamless slot (mirrors the conversation Sidebar): no own background
         // or border — the shell background shows through and the main card's

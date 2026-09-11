@@ -909,6 +909,19 @@ const SIDEBAR_DIVIDER_WIDTH: f32 = 6.;
 /// edge), tighter on the top/bottom/right card sides.
 const SHELL_PAD_LEFT: f32 = 10.;
 const SHELL_PAD_EDGE: f32 = 4.;
+
+/// The empty band the sidebar slot reserves at its top before any content:
+/// macOS floats the traffic lights over it (28px), other platforms need only
+/// a small breathing inset (8px). Shared by the sidebar/settings-nav scroll
+/// bodies (`pt(top_inset)`) and the shell's sidebar window-drag zone, which
+/// must cover exactly this band and never the interactive rows below it.
+pub(crate) fn sidebar_top_inset() -> Pixels {
+    if cfg!(target_os = "macos") {
+        px(28.)
+    } else {
+        px(8.)
+    }
+}
 /// The main card's `border_1` on both edges; width budgets that measure
 /// card-interior space subtract this.
 const CARD_BORDER: f32 = 2.;

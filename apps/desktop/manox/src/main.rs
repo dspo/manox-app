@@ -17,10 +17,10 @@ actions!(manox, [Quit, ToggleFullscreen, OpenAbout]);
 
 /// Minimum window width budget, left to right:
 /// shell gutter (10 left + 4 right) + card borders (2) + sidebar (260) + a
-/// readable conversation column (~584). The context rail is a flex sibling
-/// of the conversation column (not an overlay), and folds into a drawer
-/// below `RAIL_NARROW_BREAK` in agent-ui, so it never constrains the minimum
-/// window width.
+/// readable conversation column (~584). The context rail is an absolute
+/// overlay over the conversation column (not a flex sibling), and folds
+/// into a drawer below `RAIL_NARROW_BREAK` in agent-ui, so it never
+/// constrains the minimum window width.
 const MIN_WINDOW_W: f32 = 860.0;
 
 /// Minimum window height: title bar + several message lines + composer +

@@ -1118,11 +1118,7 @@ impl Render for Sidebar {
             gen_id: self.select_gen,
         };
 
-        let top_inset = if cfg!(target_os = "macos") {
-            px(28.)
-        } else {
-            px(8.)
-        };
+        let top_inset = crate::workspace::sidebar_top_inset();
 
         // Sticky overlay pinned above the scroll body: while the current
         // section's header would scroll out of view, an overlay copy takes its

@@ -9,6 +9,20 @@
 
 use super::*;
 
+/// The in-card title bar: gpui-component's `TitleBar` chrome minus the
+/// macOS traffic-light left padding (hardcoded `pl(80)` there) — a card
+/// title bar never sits at the window's left edge (the sidebar slot does),
+/// so the reservation would just push the leading controls away from the
+/// edge. Leading children bring their own `pl_2`.
+fn card_title_bar() -> TitleBar {
+    let bar = TitleBar::new();
+    if cfg!(target_os = "macos") {
+        bar.pl(px(0.))
+    } else {
+        bar
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_manox(window, cx)
@@ -26,7 +40,7 @@ impl Workspace {
         // of a visible right pane) — an inactive tab would otherwise paint
         // over the pane's content.
         self.sync_browser_visibility(cx);
-        // Settings reuses the shared shell (`sidebar | divider | main`) — the
+        // Settings reuses the shared shell (`sidebar slot | main card`) — the
         // same layout container as the app page, only with the settings nav in
         // the sidebar slot and the settings panel as the main column. The
         // underlying Workspace state (conversation sidebar, composer) is
@@ -616,7 +630,7 @@ impl Workspace {
             .right(px(0.))
             .h(TITLE_BAR_HEIGHT)
             .child(
-                TitleBar::new()
+                card_title_bar()
                     .child(
                         h_flex().items_center().pl_2().child(
                             Button::new("sidebar-toggle")
@@ -820,7 +834,7 @@ impl Workspace {
         // right side view (editor / launcher / browser / session tabs) as its
         // sub-columns. Nesting the right pane inside the main view keeps the
         // shell uniformly
-        // `sidebar | divider | main view` across every view mode (Terminal /
+        // `sidebar slot | main card` across every view mode (Terminal /
         // ExternalSession / Settings pass a single-column main).
         let main_view = h_flex()
             .flex_1()
@@ -932,7 +946,9 @@ impl Workspace {
                     // holds the message column. `sidebar_width` is read live
                     // so a wide sidebar correctly shrinks the available
                     // editor envelope.
-                    let new_w = e.bounds.right() - e.event.position.x - px(SHELL_PAD_EDGE + 1.);
+                    let new_w = e.bounds.right()
+                        - e.event.position.x
+                        - px(SHELL_PAD_EDGE + CARD_BORDER / 2.);
                     let dynamic_max = e.bounds.size.width
                         - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
                         - px(CARD_BORDER)
@@ -991,8 +1007,7 @@ impl Workspace {
         // The collapse gate hides the conversation sidebar; the Settings nav
         // is exempt — its back control is the only way out of the Settings
         // page, so hiding it would strand the user there.
-        let sidebar_shown =
-            self.sidebar_visible || matches!(self.view_mode, ViewMode::Settings);
+        let sidebar_shown = self.sidebar_visible || matches!(self.view_mode, ViewMode::Settings);
         // The divider is the (invisible) drag handle for resizing the sidebar.
         // Double-click resets to the default `SIDEBAR_WIDTH` for symmetry with
         // the editor pane.
@@ -1005,8 +1020,7 @@ impl Workspace {
         };
         // Centered on the sidebar/card boundary, which lives at
         // `SHELL_PAD_LEFT + sidebar_width` from the window's left edge.
-        let handle_left =
-            px(SHELL_PAD_LEFT) + self.sidebar_width - px(SIDEBAR_DIVIDER_WIDTH / 2.);
+        let handle_left = px(SHELL_PAD_LEFT) + self.sidebar_width - px(SIDEBAR_DIVIDER_WIDTH / 2.);
         let sidebar_divider = gpui::div()
             .id("sidebar-divider")
             .absolute()
@@ -1031,12 +1045,14 @@ impl Workspace {
             );
         // Window-drag hot zones for everything above/outside the card's own
         // title bar: the slim full-width strip over the top gutter, plus the
-        // sidebar slot's whole top region up to the same height as the
-        // in-card title bar — dragging there feels identical to dragging the
-        // title bar (the seamless sidebar shows no bar of its own). macOS
-        // traffic lights float over this zone and keep their native click
-        // handling. While the sidebar is collapsed the zone shrinks to the
-        // left gutter strip.
+        // sidebar slot's empty top band (its traffic-light/content inset) —
+        // dragging there feels identical to dragging the title bar (the
+        // seamless sidebar shows no bar of its own). The band stops exactly
+        // where the sidebar's first interactive row begins, so the Settings
+        // back control and the "+" new-session button stay clickable on
+        // every platform; macOS traffic lights float over the band and keep
+        // their native click handling. While the sidebar is collapsed the
+        // zone shrinks to the left gutter strip.
         let top_drag_gutter = gpui::div()
             .id("window-drag-gutter")
             .absolute()
@@ -1052,15 +1068,13 @@ impl Workspace {
             .absolute()
             .top_0()
             .left_0()
-            .w(
-                px(SHELL_PAD_LEFT)
-                    + if sidebar_shown {
-                        self.sidebar_width
-                    } else {
-                        px(0.)
-                    },
-            )
-            .h(px(SHELL_PAD_EDGE) + TITLE_BAR_HEIGHT)
+            .w(px(SHELL_PAD_LEFT)
+                + if sidebar_shown {
+                    self.sidebar_width
+                } else {
+                    px(0.)
+                })
+            .h(px(SHELL_PAD_EDGE) + sidebar_top_inset())
             .on_mouse_down(MouseButton::Left, |_, window, _| {
                 window.start_window_move();
             });
@@ -1103,9 +1117,12 @@ impl Workspace {
             }))
             .children(sidebar_shown.then_some(sidebar))
             .child(main_card)
-            .children(sidebar_shown.then_some(sidebar_divider))
             .child(top_drag_gutter)
             .child(sidebar_drag_zone)
+            // Last so the resize handle paints (and hit-tests) above the drag
+            // zones — the boundary strip stays draggable for its full height
+            // instead of losing its top patch to the window-move zone.
+            .children(sidebar_shown.then_some(sidebar_divider))
             .on_drag_move(cx.listener(
                 move |this, e: &DragMoveEvent<DraggedSidebarDivider>, _window, cx| {
                     // The root fills the window; the sidebar slot starts one
@@ -1154,7 +1171,7 @@ impl Workspace {
             .min_w_0()
             .relative()
             .child(
-                TitleBar::new()
+                card_title_bar()
                     .child(
                         h_flex().items_center().pl_2().child(
                             Button::new("sidebar-toggle")
