@@ -1478,10 +1478,17 @@ impl Sidebar {
             .on_click(cx.listener({
                 let path = path.to_string();
                 move |this, _ev, _window, cx| {
-                    if !this.collapsed.remove(&path) {
+                    let folding = this.collapsed.remove(&path);
+                    if !folding {
                         this.collapsed.insert(path.clone());
                     }
-                    // A fold survives a restart.
+                    // Closing a folder resets its transient reveal, so reopening
+                    // it returns to the bounded projection.
+                    if folding {
+                        this.revealed.remove(&path);
+                    }
+                    // Which folders are folded survives a restart; which are
+                    // revealed does not.
                     this.persist_collapse(cx);
                     cx.notify();
                 }
