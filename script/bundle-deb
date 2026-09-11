@@ -2,29 +2,46 @@
 
 set -euo pipefail
 
-# Build and install manox on Linux (deb-based distros).
+# Bundle manox as a Debian package (.deb) — the Linux analog of bundle-mac.
 #
 # Usage: script/bundle-deb [options]
 # Options:
 #   -d    Compile in debug mode
-#   -o    Open (launch) after installing
-#   -i    Install the binary to /usr/local/bin and register a desktop entry
+#   -i    Install the .deb system-wide (sudo apt-get install ./<deb>)
+#   -o    Run the app after bundling (from the build tree, not the install)
 #   -h    Display this help and exit
+#
+# Installed layout:
+#   /usr/bin/<exe>                                   the manox binary
+#   /usr/share/applications/<bundle-id>.desktop      desktop entry
+#   /usr/share/icons/hicolor/{128x128,256x256}/apps/<bundle-id>.png
+#
+# Identity comes from [package.metadata.bundle] in apps/desktop/manox/Cargo.toml
+# (the same single source of truth bundle-mac reads); the executable name is
+# the bundle display name lowercased with spaces mapped to dashes, so future
+# flavor bundles can coexist as distinct /usr/bin entries.
+#
+# Runtime Depends are computed from the linked binary by mapping every NEEDED
+# shared object to its owning package (ldd + dpkg -S); the static fallback
+# covers the gpui/wry stack (GTK3, WebKit2GTK, JavaScriptCore, libsoup,
+# xkbcommon). Note: the pi-harness flavor metadata still exists but its cargo
+# feature was removed — bundle-mac's --harness option is stale; this script
+# deliberately has no flavor switch.
 
 build_flag="--release"
 target_dir="release"
-open_result=false
 install_result=false
+run_result=false
 
 help_info() {
     echo "
 Usage: ${0##*/} [options]
-Build and install manox for Linux.
+Bundle manox as a Debian package (.deb).
 
 Options:
   -d    Compile in debug mode
-  -o    Open (launch) manox after installing
-  -i    Install binary to /usr/local/bin and register a .desktop entry
+  -i    Install the .deb system-wide (sudo apt-get install)
+  -o    Run the app after bundling (from the build tree)
   -h    Display this help and exit
 "
 }
@@ -32,15 +49,18 @@ Options:
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d) build_flag=""; target_dir="debug";;
-        -o) open_result=true;;
         -i) install_result=true;;
+        -o) run_result=true;;
         -h|--help) help_info; exit 0;;
         *) echo "Error: unknown option '$1'"; help_info; exit 1;;
     esac
     shift
 done
 
-# --- Detect target triple ---
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+# --- Platform guard ---
 version_info=$(rustc --version --verbose)
 host_line=$(echo "$version_info" | grep host)
 target_triple=${host_line#*: }
@@ -49,60 +69,154 @@ if [[ "$target_triple" != *-linux-* ]]; then
     echo "Error: this script only runs on Linux (detected $target_triple)"
     exit 1
 fi
+if ! command -v dpkg-deb >/dev/null 2>&1; then
+    echo "Error: dpkg-deb not found — install the dpkg package (or run on a Debian derivative)"
+    exit 1
+fi
+deb_arch=$(dpkg --print-architecture)
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+# --- Build ---
+echo "Building manox binary"
+cargo build ${build_flag} --package manox
+bin_path="target/${target_dir}/manox"
+[[ -f "${bin_path}" ]] || { echo "Error: ${bin_path} missing after build"; exit 1; }
 
+# --- Read bundle configuration from Cargo.toml ---
+# Same extraction as bundle-mac: [package.metadata.bundle] in
+# apps/desktop/manox/Cargo.toml is the single source of truth.
+bundle_toml="apps/desktop/manox/Cargo.toml"
+read_bundle_value() {
+    local section="$1" key="$2"
+    awk -v section="$section" -v key="$key" '
+        $0 == "[" section "]" { in_section = 1; next }
+        /^\[/ { in_section = 0 }
+        in_section && $1 == key && $2 == "=" {
+            line = $0
+            sub(/^[^"]*"/, "", line)
+            sub(/".*$/, "", line)
+            print line
+            exit
+        }
+    ' "${bundle_toml}"
+}
+bundle_id=$(read_bundle_value "package.metadata.bundle" "identifier")
+app_name=$(read_bundle_value "package.metadata.bundle" "name")
+[[ -n "${bundle_id}" ]] || { echo "Error: no [package.metadata.bundle] identifier in ${bundle_toml}"; exit 1; }
+[[ -n "${app_name}" ]] || app_name="Manox"
+# version is workspace-inherited; resolve via cargo metadata
 app_version=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
     | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
                    p=[x for x in pkgs if x['name']=='manox']; \
                    print(p[0]['version'] if p else '0.1.0')")
 
-# --- Build ---
-echo "Building manox (${build_flag:-debug})..."
-cargo build ${build_flag} --package manox --target "$target_triple"
+pkg_name=$(echo "${app_name}" | tr '[:upper:] ' '[:lower:]-')
+exe_name="${pkg_name}"
 
-binary_path="target/${target_triple}/${target_dir}/manox"
-echo "Binary: ${binary_path}"
-
-if [[ "$install_result" = true ]]; then
-    echo "Installing to /usr/local/bin/manox"
-    sudo install -m 755 "${binary_path}" /usr/local/bin/manox
-    echo "Installed: /usr/local/bin/manox"
-
-    # --- .desktop entry ---
-    desktop_dir="${HOME}/.local/share/applications"
-    mkdir -p "${desktop_dir}"
-
-    icon_dest="${HOME}/.local/share/icons/hicolor/256x256/apps"
-    mkdir -p "${icon_dest}"
-
-    # Use the PNG icon; fall back to a bundled asset if available
-    icon_src="${ROOT}/apps/desktop/manox/resources/app-icon.png"
-    if [[ -f "$icon_src" ]]; then
-        cp "$icon_src" "${icon_dest}/manox.png"
-        echo "Icon installed: ${icon_dest}/manox.png"
-    fi
-
-    desktop_file="${desktop_dir}/manox.desktop"
-    cat > "${desktop_file}" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=Manox
-Comment=Manox AI Agent Desktop
-Exec=/usr/local/bin/manox
-Icon=manox
-Terminal=false
-Categories=Utility;
-StartupNotify=true
-DESKTOP
-    echo "Desktop entry: ${desktop_file}"
+# --- Compute runtime Depends from the linked binary ---
+# dpkg-shlibdeps is unusable here (it demands a debian/control build context),
+# so map each NEEDED shared object to its owning package via ldd + dpkg -S.
+# This covers the direct link set (GTK3, WebKit2GTK, JSC, X11/Wayland, …);
+# dlopen-only modules are resolved by their parent library's own dependencies.
+# dpkg -S only matches the canonical path (dpkg's db records /usr/lib/...,
+# while ldd reports the /lib -> /usr/lib symlink), so readlink -f first.
+depends=$(ldd "${bin_path}" 2>/dev/null \
+    | awk '/=> \// {print $3}' | sort -u \
+    | while read -r so; do
+          dpkg -S "$(readlink -f "$so")" 2>/dev/null | head -1 | cut -d: -f1 || true
+      done | sort -u | sed 's/:amd64$//' | paste -sd, -)
+if [[ -z "${depends}" ]]; then
+    echo "Warning: ldd+dpkg -S mapping produced nothing — using static Depends fallback"
+    depends="libgtk-3-0, libwebkit2gtk-4.1-0, libjavascriptcoregtk-4.1-0, libsoup-3.0-0, libxkbcommon0"
 fi
 
-echo ""
-echo "Build complete: ${binary_path}"
+# --- Assemble the package root ---
+stage_dir="target/deb/${pkg_name}"
+pkg_root="${stage_dir}/root"
+echo "Assembling package tree at ${pkg_root}"
+rm -rf "${stage_dir}"
+# dpkg-deb expects DEBIAN/control INSIDE the package root it is handed.
+mkdir -p "${pkg_root}/DEBIAN" \
+         "${pkg_root}/usr/bin" \
+         "${pkg_root}/usr/share/applications" \
+         "${pkg_root}/usr/share/icons/hicolor/128x128/apps" \
+         "${pkg_root}/usr/share/icons/hicolor/256x256/apps"
 
-if [[ "$open_result" = true ]]; then
-    echo "Launching manox..."
-    "${binary_path}" &
+cp "${bin_path}" "${pkg_root}/usr/bin/${exe_name}"
+chmod 755 "${pkg_root}/usr/bin/${exe_name}"
+
+icon_resources_dir="apps/desktop/manox/resources"
+if [[ -f "${icon_resources_dir}/app-icon.png" ]]; then
+    cp "${icon_resources_dir}/app-icon.png" "${pkg_root}/usr/share/icons/hicolor/128x128/apps/${bundle_id}.png"
+fi
+if [[ -f "${icon_resources_dir}/app-icon@2x.png" ]]; then
+    cp "${icon_resources_dir}/app-icon@2x.png" "${pkg_root}/usr/share/icons/hicolor/256x256/apps/${bundle_id}.png"
+fi
+
+cat > "${pkg_root}/usr/share/applications/${bundle_id}.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=${app_name}
+Exec=${exe_name}
+Icon=${bundle_id}
+Comment=In-process native agent workbench
+Categories=Development;Utility;
+Terminal=false
+DESKTOP
+
+cat > "${pkg_root}/DEBIAN/control" <<CONTROL
+Package: ${pkg_name}
+Version: ${app_version}
+Section: utils
+Priority: optional
+Architecture: ${deb_arch}
+Depends: ${depends}
+Maintainer: dspo <dspo@users.noreply.github.com>
+Description: GPUI desktop workbench for the manox agent runtime
+ Single-binary, single-process native agent workbench: conversation UI,
+ embedded terminal, webview, and the cx external-agent launcher. The
+ agent runtime itself ships inside the binary; per-user state lives
+ under ~/.manox/.
+CONTROL
+
+# Best-effort desktop-database / icon-cache refresh; never fatal.
+cat > "${pkg_root}/DEBIAN/postinst" <<'HOOK'
+#!/bin/sh
+set -e
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+HOOK
+cat > "${pkg_root}/DEBIAN/postrm" <<'HOOK'
+#!/bin/sh
+set -e
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+HOOK
+chmod 755 "${pkg_root}/DEBIAN/postinst" "${pkg_root}/DEBIAN/postrm"
+
+# --- Build the .deb ---
+deb_path="target/deb/${pkg_name}_${app_version}_${deb_arch}.deb"
+echo "Packing ${deb_path}"
+dpkg-deb --build --root-owner-group "${pkg_root}" "${deb_path}"
+
+echo ""
+echo "Bundle complete: ${deb_path}"
+echo "Binary:   /usr/bin/${exe_name}"
+echo "Desktop:  /usr/share/applications/${bundle_id}.desktop"
+echo "Install:  sudo apt-get install ./${deb_path}"
+echo ""
+
+if [[ "$install_result" = true ]]; then
+    echo "Installing ${deb_path} system-wide"
+    sudo apt-get install -y "./${deb_path}"
+    echo "Installed: ${pkg_name} ${app_version} (${exe_name})"
+fi
+
+if [[ "$run_result" = true ]]; then
+    echo "Running ${bin_path}"
+    "${bin_path}"
 fi
