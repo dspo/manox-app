@@ -5419,7 +5419,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "lsp"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#43fc3ff40c54cde6050480669238fe155591de9a"
+source = "git+https://github.com/dspo/manox.git?branch=main#ba21f3f23f6ec84e75ad93fb82613a8d1ee34568"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -5547,7 +5547,7 @@ dependencies = [
 [[package]]
 name = "manox-agent"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#43fc3ff40c54cde6050480669238fe155591de9a"
+source = "git+https://github.com/dspo/manox.git?branch=main#ba21f3f23f6ec84e75ad93fb82613a8d1ee34568"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -5634,7 +5634,7 @@ dependencies = [
 [[package]]
 name = "manox-harness"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#43fc3ff40c54cde6050480669238fe155591de9a"
+source = "git+https://github.com/dspo/manox.git?branch=main#ba21f3f23f6ec84e75ad93fb82613a8d1ee34568"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -5673,7 +5673,7 @@ dependencies = [
 [[package]]
 name = "manox-protocol"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#43fc3ff40c54cde6050480669238fe155591de9a"
+source = "git+https://github.com/dspo/manox.git?branch=main#ba21f3f23f6ec84e75ad93fb82613a8d1ee34568"
 dependencies = [
  "async-channel 2.5.0",
  "base64 0.22.1",
@@ -5685,7 +5685,7 @@ dependencies = [
 [[package]]
 name = "manox-providers"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#43fc3ff40c54cde6050480669238fe155591de9a"
+source = "git+https://github.com/dspo/manox.git?branch=main#ba21f3f23f6ec84e75ad93fb82613a8d1ee34568"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5698,7 +5698,7 @@ dependencies = [
 [[package]]
 name = "manox-session-core"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#43fc3ff40c54cde6050480669238fe155591de9a"
+source = "git+https://github.com/dspo/manox.git?branch=main#ba21f3f23f6ec84e75ad93fb82613a8d1ee34568"
 dependencies = [
  "async-channel 2.5.0",
  "async-trait",
@@ -9672,7 +9672,7 @@ dependencies = [
 [[package]]
 name = "supervisor"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#43fc3ff40c54cde6050480669238fe155591de9a"
+source = "git+https://github.com/dspo/manox.git?branch=main#ba21f3f23f6ec84e75ad93fb82613a8d1ee34568"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
