@@ -618,6 +618,7 @@ impl Workspace {
         // builder borrows `self` (title-menu trigger, context rail), which
         // would collide with `shell_root`'s `&mut self` receiver inside a
         // single call expression.
+        self.reconcile_pending_with_projections(cx);
         self.sync_ask_card_snapshots(cx);
         // Title-bar overlay for the whole main card: mounted on `main_view`
         // (not the conversation column) so it spans the message column and

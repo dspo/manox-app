@@ -458,7 +458,10 @@ Bottom area of MessageColumn, below [MessageArea](#messagearea) (or below [Hero]
 
 #### Footer
 
-Vertical flex, `flex_shrink_0`, `py_2`, contains [Composer](#composer) or [AskDrawer](#askdrawer).
+Vertical flex, `flex_shrink_0`, `py_2`, contains [Composer](#composer). The
+ask/auth interaction cards render inline in the transcript
+([AskDrawer](#askdrawer)), never by swapping the footer — cancel priority
+keeps the composer live underneath them.
 
 > Source: `apps/desktop/agent-ui/src/workspace/render.rs`
 
@@ -527,7 +530,11 @@ Multi-line auto-grow text input, placeholder text.
 
 #### SendBtn
 
-Circular button, `primary` color (idle) / `danger` color (running, acts as stop).
+Circular button driven by the raw running edge alone: `danger` Pause glyph
+(acts as stop) while a turn runs — under any pending ask/approve/plan card
+(absolute cancel priority: interrupting is never blocked by an unanswered
+interaction) — and `accent` ArrowUp (send) when idle, inert on empty input.
+Ask supplement input keeps its own path: Enter.
 
 > Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
 
@@ -551,14 +558,20 @@ Dropdown chip showing current project → [ProjectMenu](#projectmenu) popup.
 
 ##### AskDrawer
 
-Replaces [Composer](#composer) when `pending_ask` is set. Every
+Inline transcript card, not a footer swap. Every
 `ThreadEvent::ToolCallAuthorization` — `AskUserQuestion` calls and bubbled
-team-member questions — surfaces here as the question card; the payload's
-options carry the decision.
+team-member questions — sets the pending state AND synthesizes the matching
+`ToolCall` row (same-frame guarantee); the payload's options carry the
+decision. Switching back to a parked thread re-surfaces the card over the
+wire: the gateway replays unsettled adjudications to joining owners
+(manox §D.6). A card whose id leaves the leaf's `pending_auth` projection
+after having been confirmed in it settled remotely and is reconciled away.
 
 #### AskDrawer
 
-Multi-step question navigator replacing the footer.
+Multi-step question navigator rendered inside the conversation
+(`render_ask_user_card`, `apps/desktop/agent-ui/src/views/message.rs`); its
+state (`Workspace::pending_ask` + snapshot sync) lives in `chips.rs`.
 
 > Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
 

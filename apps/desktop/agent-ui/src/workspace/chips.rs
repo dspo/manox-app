@@ -1,5 +1,5 @@
 //! The chip + interaction-card families (U9b cluster 6): the ask/auth
-//! card surface (resurface, snapshots, option toggle/prev/next,
+//! card surface (projection reconcile, snapshots, option toggle/prev/next,
 //! resolve-with-response, the auth resolve leg), the model-selector pi
 //! face (wire tag/color, the canonical identity/display resolvers, the
 //! selector render + popup builder), and the goal chip (popover open,
@@ -11,43 +11,57 @@
 use super::*;
 
 impl Workspace {
-    /// Re-surface any pending interaction on the current thread that was
-    /// emitted while the thread was in the background (no subscription). Called
-    /// after switching threads so the question card appears without requiring
-    /// the user to wait for the next event.
-    pub(super) fn resurface_pending_auths(&mut self, cx: &mut Context<Self>) {
-        // Query the thread for any pending interaction metadata that was
-        // stored when the auth event was originally emitted. If the thread was
-        // parked waiting for a user answer while in the background, re-surface
-        // the events so the question card appears immediately upon switching
-        // back. Every interaction surfaces as the AskUserQuestion card.
-        let entries: Vec<(String, String, String, serde_json::Value)> = self
-            .thread
-            .read(|t| t.pending_auth_entries())
-            .into_iter()
-            .map(|(id, meta)| (id, meta.tool_name, meta.summary, meta.input))
-            .collect();
-        for (id, tool_name, summary, input) in entries {
-            self.pending_ask = parse_pending_ask(id.clone(), input.clone());
-            self.pending_auth = self.pending_ask.is_none().then(|| PendingAuth {
-                id: id.clone(),
-                tool_name,
-                summary: summary.clone(),
+    /// Remote-settle reconcile for a surfaced interaction card. The leaf's
+    /// `pending_auth` projection is the gateway's authoritative pending
+    /// view: an id that was confirmed in it and then vanished settled
+    /// elsewhere (timeout expiry, another owner's answer, a cancel discard)
+    /// and the local card must not latch onto the dead interaction.
+    ///
+    /// Arming on the FIRST confirmed membership keeps the startup race safe:
+    /// the `Request` frame can land before the projection fold reflects the
+    /// park, and an id never yet confirmed must never be cleared for being
+    /// absent. Re-surfacing after a thread switch needs no local memory
+    /// either — the gateway replays unsettled adjudications to every joining
+    /// owner (manox §D.6), so the wire itself is the restore path.
+    pub(crate) fn reconcile_pending_with_projections(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .pending_ask
+            .as_ref()
+            .map(|a| a.id.clone())
+            .or_else(|| self.pending_auth.as_ref().map(|a| a.id.clone()))
+        else {
+            self.pending_projection_confirmed = false;
+            return;
+        };
+        // No leaf yet (attach in flight): nothing to reconcile against.
+        if self.store.is_none() {
+            return;
+        }
+        let live = self
+            .store
+            .as_ref()
+            .is_some_and(|s| s.read(cx).store.pending_auth_set.contains(&id));
+        if live {
+            self.pending_projection_confirmed = true;
+            return;
+        }
+        if !self.pending_projection_confirmed {
+            return;
+        }
+        self.pending_ask = None;
+        self.pending_auth = None;
+        self.pending_projection_confirmed = false;
+        self.ask_step = 0;
+        self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        // The settled call's MsgId has no live waiter left; dropping the
+        // mapping keeps a stale card click from replying to a dead call.
+        if let Some(store) = &self.store {
+            store.update(cx, |h, cx| {
+                h.store.pending_auth.remove(&id);
+                cx.notify();
             });
-            self.ask_step = 0;
-            self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
-            // The card renders on a top-level `ToolCall` item. The rebuilt
-            // conversation may lack it (a parked thread never saw the live
-            // `ToolCall` event, or a stale mirror missed the ask). Synthesize
-            // the card the gate would have created live so the interactive
-            // drawer renders.
-            if self.pending_ask.is_some() {
-                self.ensure_ask_tool_item(&id, &summary, input, cx);
-            }
         }
-        if self.pending_ask.is_some() || self.pending_auth.is_some() {
-            cx.notify();
-        }
+        cx.notify();
     }
 
     /// Synthesize the top-level AskUserQuestion card when the rebuilt

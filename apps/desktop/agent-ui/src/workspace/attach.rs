@@ -599,15 +599,14 @@ impl Workspace {
         // thread after the rail reset above (a restoring thread has no
         // messages yet — its rows land with the `HistoryRestored` rebuild).
         self.apply_subagent_rows(subagent_rows, cx);
-        // If the new thread has pending interactions (e.g. it was parked
-        // waiting for a user answer), re-surface them so the question card
-        // appears immediately upon switching back.
-        self.resurface_pending_auths(cx);
         self.sidebar
             .update(cx, |s, cx| s.set_selected(Some(id.clone()), cx));
         // The user is now viewing this thread: clear any unread red dot it
         // carried from a prior background completion, and any pending-auth
-        // badge (the verdict card re-surfaced below if one is outstanding).
+        // badge. Re-surfacing a parked interaction needs no local lookup —
+        // the gateway replays unsettled adjudications to this joining owner
+        // over the wire (manox §D.6), which re-arms the card through the
+        // live `ToolCallAuthorization` handler.
         let store = manox_agent::thread_store_global();
         store.with_mut(|s| {
             s.set_unread(&id, false);

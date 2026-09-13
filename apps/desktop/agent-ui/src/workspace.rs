@@ -687,6 +687,11 @@ pub struct Workspace {
     /// A pending `AskUserQuestion` card rendered inline in the message list.
     pending_ask: Option<PendingAsk>,
     pending_auth: Option<PendingAuth>,
+    /// Whether the CURRENT pending interaction's id has been observed in the
+    /// leaf store's `pending_auth` projection set. Arms the remote-settle
+    /// reconcile (chips.rs) so the startup race — Request landing before the
+    /// projection frame — can never clear a freshly surfaced card.
+    pending_projection_confirmed: bool,
     /// Tool row currently carrying the Workspace-derived ask snapshot. This is
     /// synchronized before list construction; the row factory itself remains
     /// a read-only projection during measurement and prepaint.
@@ -1175,6 +1180,7 @@ impl Workspace {
             sidebar_visible: true,
             pending_ask: None,
             pending_auth: None,
+            pending_projection_confirmed: false,
             ask_snapshot_item: None,
             pending_plan_review: None,
             pending_plans: HashMap::new(),
@@ -1442,6 +1448,74 @@ impl Workspace {
             .count()
     }
 
+    /// The pending question card's id, if one is surfaced. Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_pending_ask_id(&self) -> Option<String> {
+        self.pending_ask.as_ref().map(|a| a.id.clone())
+    }
+
+    /// The ask walk's churn counter. Diagnostic-only: a re-delivery of the
+    /// same pending id must not advance it — the walk state belongs to the
+    /// user, not to the wire.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ask_transition_gen(&self) -> u64 {
+        self.ask_transition_gen
+    }
+
+    /// The leaf store's pending-auth MsgId keys. Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_store_pending_auth_ids(&self, cx: &App) -> Vec<String> {
+        self.store
+            .as_ref()
+            .map(|s| s.read(cx).store.pending_auth.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Register an auth id → MsgId mapping in the bound leaf store, mirroring
+    /// what the live `Request` frame does. Diagnostic-only: lets tests drive
+    /// the reply-leg bookkeeping without a wire round-trip.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_seed_store_pending_auth(
+        &mut self,
+        auth_id: &str,
+        msg_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(store) = &self.store {
+            store.update(cx, |h, cx| {
+                h.store
+                    .pending_auth
+                    .insert(auth_id.to_string(), manox_protocol::MsgId::new(msg_id));
+                cx.notify();
+            });
+        }
+    }
+
+    /// Merge a projection into the bound leaf store. Diagnostic-only: stands
+    /// in for the gateway's `Projections` stream without a wire round-trip.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_merge_projection(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+        seq: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(store) = &self.store {
+            store.update(cx, |h, cx| {
+                h.store.merge_projection(key, value, seq);
+                cx.notify();
+            });
+        }
+    }
+
+    /// Run the render-time projection reconcile. Diagnostic-only wrapper
+    /// around the private `reconcile_pending_with_projections`.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_reconcile_pending_with_projections(&mut self, cx: &mut Context<Self>) {
+        self.reconcile_pending_with_projections(cx);
+    }
+
     /// Remeasure every list row whenever the conversation mutates. A height
     /// change on an off-screen row would otherwise leave the list's cached
     /// height stale until the next width change; this applies that cure
@@ -1555,14 +1629,43 @@ impl Workspace {
                     // from Edit/Write, a malformed ask) surfaces as the
                     // generic approval card — a parked thread must never wait
                     // invisibly.
+                    //
+                    // Idempotent per (kind, id): the gateway re-delivers a
+                    // parked question on re-own (§D.6 replay), and re-churning
+                    // the card state here would wipe the walk a user is
+                    // mid-way through. Only the card row is re-adoption-safe
+                    // to (re-)ensure.
+                    if this.pending_ask.as_ref().is_some_and(|a| &a.id == id)
+                        || this.pending_auth.as_ref().is_some_and(|a| &a.id == id)
+                    {
+                        if this.pending_ask.is_some() {
+                            this.ensure_ask_tool_item(id, summary, input.clone(), cx);
+                        }
+                        return;
+                    }
                     this.pending_ask = parse_pending_ask(id.clone(), input.clone());
                     this.pending_auth = this.pending_ask.is_none().then(|| PendingAuth {
                         id: id.clone(),
                         tool_name: tool_name.clone(),
                         summary: summary.clone(),
                     });
+                    // Arming is per-card: a fresh adjudication has never been
+                    // confirmed in the leaf's `pending_auth` projection, so it
+                    // must not inherit the previous card's armed flag — mere
+                    // absence right after a Request frame is exactly the race
+                    // the arming guard exists for.
+                    this.pending_projection_confirmed = false;
                     this.ask_step = 0;
                     this.ask_transition_gen = this.ask_transition_gen.wrapping_add(1);
+                    // Live synthesis: the question card appears in the
+                    // transcript on the same edge as the pending state —
+                    // never waiting on the journal's `tool_use` fold to
+                    // arrive through the stream (when it lagged or lost the
+                    // race against a thread switch, the ask was unrenderable
+                    // and the turn deadlocked).
+                    if this.pending_ask.is_some() {
+                        this.ensure_ask_tool_item(id, summary, input.clone(), cx);
+                    }
                     this.context_rail.update(cx, |r, cx| {
                         r.cockpit_phase = CockpitPhase::AwaitingApproval;
                         cx.notify();
@@ -2725,9 +2828,14 @@ impl Workspace {
 
     /// Abort the current turn.
     pub(crate) fn cancel_turn(&mut self, cx: &mut Context<Self>) {
-        let _ = self.send_note(|sid| manox_protocol::ClientNote::CancelTurn {
+        // A dropped cancel is the silent-death shape this file's regressions
+        // keep producing: leaving no trace made the composer-locked repro
+        // undebuggable.
+        if !self.send_note(|sid| manox_protocol::ClientNote::CancelTurn {
             session_id: sid.into(),
-        });
+        }) {
+            tracing::warn!("CancelTurn dropped: the active leaf has no bound session");
+        }
         cx.notify();
     }
 
