@@ -146,6 +146,13 @@ struct RowDrag {
     edge: DragEdge,
 }
 
+/// A committed folder drop: a no-op (emit nothing) or the move to forward to
+/// the server, `None` meaning append.
+enum FolderDrop {
+    Noop,
+    Move(Option<PathBuf>),
+}
+
 /// Drag payload for a thread row. The id is all the gesture needs: the
 /// partition resolves from the wire row at commit time.
 #[derive(Clone, PartialEq)]
@@ -1215,7 +1222,8 @@ impl Sidebar {
     /// Commit a thread drop: reorder the partition's display order locally, so
     /// the row lands immediately, and hand the same move to the server's manual
     /// account. A redundant move (self-anchored, already in place) emits
-    /// nothing and writes nothing.
+    /// nothing and writes nothing. The server leg runs only in `Manual` — see
+    /// the emit gate below.
     fn commit_row_drag(&mut self, cx: &mut Context<Self>) {
         let Some(drag) = self.drag_row.take() else {
             return;
@@ -1229,15 +1237,7 @@ impl Sidebar {
             return;
         };
         let mut shown = self.displayed.get(&partition).cloned().unwrap_or_default();
-        // A line under the last row means "append"; anywhere else it means
-        // "in front of whatever follows the line's host".
-        let at_end = matches!(drag.edge, DragEdge::Bottom)
-            && shown.last().is_some_and(|id| *id == drag.line_on);
-        let anchor = if at_end {
-            None
-        } else {
-            Self::anchor_after(&drag, &shown)
-        };
+        let anchor = Self::resolve_row_anchor(&drag, &shown);
         let Some(next) = sidebar_view::move_in_account(&shown, &drag.dragged, anchor.as_deref())
         else {
             cx.notify();
@@ -1247,11 +1247,33 @@ impl Sidebar {
         self.displayed.insert(partition.clone(), shown.clone());
         self.view.account.insert(partition, shown);
         self.save_view(cx);
-        cx.emit(SidebarEvent::MoveThread {
-            id: drag.dragged,
-            before_id: anchor,
-        });
+        // `Manual` is the server account's single writer. In `Last updated`
+        // the head promotions have already split the view order from the
+        // server's account, so the visible anchor can resolve to a move that
+        // is a server-side no-op — the drag stays pure view state (this
+        // client account persists, so the reorder survives a restart) and the
+        // durable account only ever records moves the user laid out in
+        // `Manual`.
+        if self.view.order_by == OrderBy::Manual {
+            cx.emit(SidebarEvent::MoveThread {
+                id: drag.dragged,
+                before_id: anchor,
+            });
+        }
         cx.notify();
+    }
+
+    /// The row drop's anchor: a line under the last row means "append"
+    /// (`None`); anywhere else it means "in front of whatever follows the
+    /// line's host".
+    fn resolve_row_anchor(drag: &RowDrag, shown: &[String]) -> Option<String> {
+        let at_end = matches!(drag.edge, DragEdge::Bottom)
+            && shown.last().is_some_and(|id| *id == drag.line_on);
+        if at_end {
+            None
+        } else {
+            Self::anchor_after(drag, shown)
+        }
     }
 
     /// Commit a folder drop. Folder order is server-owned state with no client
@@ -1264,15 +1286,35 @@ impl Sidebar {
             cx.notify();
             return;
         }
-        let at = match Self::anchor_after(&drag, &self.folder_order) {
-            Some(anchor) if anchor != drag.dragged => Some(PathBuf::from(anchor)),
-            _ => None,
-        };
-        cx.emit(SidebarEvent::MoveFolder {
-            path: PathBuf::from(&drag.dragged),
-            before_path: at,
-        });
-        cx.notify();
+        match Self::resolve_folder_drop(&drag, &self.folder_order) {
+            FolderDrop::Noop => cx.notify(),
+            FolderDrop::Move(at) => {
+                cx.emit(SidebarEvent::MoveFolder {
+                    path: PathBuf::from(&drag.dragged),
+                    before_path: at,
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    /// Resolve a folder drop against the rendered folder order, mirroring the
+    /// row path's no-op contract: only the line on the bottom edge of the
+    /// last folder is a true append, and everything the row commit rejects
+    /// through `move_in_account` is a no-op here too — a drop back onto the
+    /// dragged folder's own boundary, a drop that would re-insert the folder
+    /// where it already sits, and a dragged folder that left the rendered
+    /// order mid-drag. None of these may decay into an append: upstream
+    /// treats `before = None` as a real move to the tail.
+    fn resolve_folder_drop(drag: &RowDrag, order: &[String]) -> FolderDrop {
+        if !order.iter().any(|p| p == &drag.line_on) {
+            return FolderDrop::Noop;
+        }
+        let anchor = Self::anchor_after(drag, order);
+        match sidebar_view::move_in_account(order, &drag.dragged, anchor.as_deref()) {
+            Some(_) => FolderDrop::Move(anchor.map(PathBuf::from)),
+            None => FolderDrop::Noop,
+        }
     }
 
     /// The partition a row belongs to: its registered project, else the loose
@@ -1577,6 +1619,19 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // gpui cancels a drag on any mouse-up that doesn't land inside a drop
+        // target carrying the payload's type — release below the list, over a
+        // folder header while dragging a thread, or outside the sidebar. No
+        // `on_drop` runs in those cases, so the commit paths never fire and
+        // the markers would survive the gesture, pinning the insertion line
+        // and the ghosted source row until some later drag overwrote them.
+        // The cancel always paints (gpui refreshes the window right after
+        // clearing its `active_drag`), so pruning here cleans up in the same
+        // frame the gesture dies — no repaint request needed.
+        if !cx.has_active_drag() && (self.drag_row.is_some() || self.drag_folder.is_some()) {
+            self.drag_row = None;
+            self.drag_folder = None;
+        }
         let theme = cx.theme().clone();
         // U2: the rows are the gateway's wire list (the multiplexer's
         // `ThreadListItem`s — §D.5 mirrors / `ListThreads` responses with
@@ -2990,6 +3045,103 @@ mod tests {
         assert_eq!(at("t2", DragEdge::Top).as_deref(), Some("t2"));
         assert_eq!(at("t1", DragEdge::Bottom).as_deref(), Some("t2"));
         assert_eq!(at("t3", DragEdge::Bottom), None);
+    }
+
+    /// The row commit's anchor: a line under the last row is the append
+    /// gesture (`None`), the same line on any other row anchors its follower.
+    #[test]
+    fn a_line_under_the_last_row_is_the_row_append_gesture() {
+        let shown: Vec<String> = ["t1", "t2", "t3"].iter().map(|s| s.to_string()).collect();
+        let anchor = |line_on: &str, edge| {
+            Sidebar::resolve_row_anchor(
+                &RowDrag {
+                    dragged: "t1".into(),
+                    line_on: line_on.into(),
+                    edge,
+                },
+                &shown,
+            )
+        };
+        assert_eq!(anchor("t3", DragEdge::Bottom), None);
+        assert_eq!(anchor("t3", DragEdge::Top).as_deref(), Some("t3"));
+        assert_eq!(anchor("t2", DragEdge::Bottom).as_deref(), Some("t3"));
+    }
+
+    /// A folder drop resolved against the rendered order. The case that
+    /// motivated the guard: releasing on the boundary immediately above the
+    /// dragged folder's own position (`anchor_after` returns the dragged
+    /// folder) is a no-op — it must never decay into an append, which is what
+    /// upstream `before = None` means. The mirrored in-place drop (the top
+    /// edge of the folder that already follows the dragged one) is a no-op
+    /// for the same reason `move_in_account` rejects it on the row path.
+    #[test]
+    fn a_folder_drop_back_onto_its_own_boundary_is_a_noop() {
+        let order: Vec<String> = ["f1", "f2", "f3"].iter().map(|s| s.to_string()).collect();
+        let drop = |dragged: &str, line_on: &str, edge| {
+            Sidebar::resolve_folder_drop(
+                &RowDrag {
+                    dragged: dragged.into(),
+                    line_on: line_on.into(),
+                    edge,
+                },
+                &order,
+            )
+        };
+        assert!(matches!(
+            drop("f2", "f1", DragEdge::Bottom),
+            FolderDrop::Noop
+        ));
+        // In-place mirror: f3 already follows f2, so "f2 in front of f3"
+        // re-inserts the folder where it sits — the same already-in-place
+        // rejection the row commit gets from `move_in_account`.
+        assert!(matches!(drop("f2", "f3", DragEdge::Top), FolderDrop::Noop));
+    }
+
+    /// The true append still works: the line on the bottom edge of the last
+    /// folder lands the dragged folder at the tail, and an ordinary drop in
+    /// front of an unrelated folder keeps that folder as the anchor.
+    #[test]
+    fn a_folder_drop_below_the_last_folder_is_a_true_append() {
+        let order: Vec<String> = ["f1", "f2", "f3"].iter().map(|s| s.to_string()).collect();
+        let drop = |dragged: &str, line_on: &str, edge| {
+            Sidebar::resolve_folder_drop(
+                &RowDrag {
+                    dragged: dragged.into(),
+                    line_on: line_on.into(),
+                    edge,
+                },
+                &order,
+            )
+        };
+        match drop("f1", "f3", DragEdge::Bottom) {
+            FolderDrop::Move(at) => assert_eq!(at, None),
+            FolderDrop::Noop => panic!("the bottom edge of the last folder appends"),
+        }
+        match drop("f1", "f3", DragEdge::Top) {
+            FolderDrop::Move(at) => {
+                assert_eq!(at.as_deref(), Some(std::path::Path::new("f3")))
+            }
+            FolderDrop::Noop => panic!("a front-of-anchor drop keeps the anchor"),
+        }
+    }
+
+    /// A line whose host left the rendered order mid-drag (folder removed, or
+    /// the order otherwise rewritten under the gesture) claims no move — it
+    /// must not decay into an append either.
+    #[test]
+    fn a_folder_line_whose_host_vanished_is_a_noop() {
+        let order: Vec<String> = ["f1", "f3"].iter().map(|s| s.to_string()).collect();
+        assert!(matches!(
+            Sidebar::resolve_folder_drop(
+                &RowDrag {
+                    dragged: "f1".into(),
+                    line_on: "f2".into(),
+                    edge: DragEdge::Bottom,
+                },
+                &order,
+            ),
+            FolderDrop::Noop
+        ));
     }
 
     /// A projected row for the fold tests: identity, and the parent/depth pair
