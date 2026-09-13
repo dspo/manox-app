@@ -571,14 +571,52 @@ impl Sidebar {
 
     /// Switch the ordering mode. Entering `Last updated` is the edge that runs
     /// the one complete recency sort; leaving it keeps every current position
-    /// and only stops further promotion.
+    /// and only stops further promotion. Landing back in `Manual` additionally
+    /// reconciles the server account to those kept positions, so the order the
+    /// user is now looking at is the order a `Manual` drag edits against.
     fn set_order_by(&mut self, order_by: OrderBy, cx: &mut Context<Self>) {
         if self.view.order_by == order_by {
             return;
         }
         self.view.order_by = order_by;
         self.save_view(cx);
+        if order_by == OrderBy::Manual {
+            self.reconcile_manual_account(cx);
+        }
         cx.notify();
+    }
+
+    /// Replay the drift between the client's view account and the server's
+    /// committed order as one minimal batch of `MoveThread` moves.
+    ///
+    /// The `Last updated` account drifts by design — promotions at the head,
+    /// view-local drags — and landing in `Manual` keeps those positions. The
+    /// server has to catch up before the user's first `Manual` drag: its
+    /// anchors are resolved against the visible order, so a move committed
+    /// over the drift would land the row somewhere the user is not looking
+    /// at. `Manual` drags themselves emit and apply the same move locally, so
+    /// the accounts stay in step — this switch edge is the only place drift
+    /// can exist. Rows the wire list no longer knows are skipped by
+    /// [`sidebar_view::reconcile_moves`]; a replay whose emits are lost
+    /// (gateway down at switch time) leaves the drift until the next switch,
+    /// while the client keeps showing the user's order either way.
+    fn reconcile_manual_account(&mut self, cx: &mut Context<Self>) {
+        let Some(mux) = self.mux.as_ref() else {
+            return;
+        };
+        let items = mux.read(cx).thread_list().to_vec();
+        let known = mux.read(cx).known_projects().to_vec();
+        for (partition, server) in wire_partition_orders(&items, &known) {
+            let Some(target) = self.view.account.get(&partition) else {
+                continue;
+            };
+            for (id, before) in sidebar_view::reconcile_moves(&server, target) {
+                cx.emit(SidebarEvent::MoveThread {
+                    id,
+                    before_id: before,
+                });
+            }
+        }
     }
 
     /// Persist the two collapse sets into the view file. Called after a folder
@@ -1855,6 +1893,33 @@ impl Render for Sidebar {
 /// The fold quota: an open folder shows this many rows, then offers the
 /// remainder through an explicit reveal.
 const COLLAPSED_ROWS: usize = 5;
+
+/// The wire list partitioned exactly as the render partitions it — a row
+/// bound to a *registered* project joins that folder's partition, everything
+/// else joins the loose Conversations account — preserving the server's
+/// committed order within each partition. This is the server-side surface
+/// `reconcile_manual_account` replays against: the wire list arrives in the
+/// durable account's order, so it is what a `Manual` landing diffs the view
+/// account into. Partitions with no wire rows never appear.
+fn wire_partition_orders(
+    items: &[ThreadListItem],
+    known_projects: &[String],
+) -> Vec<(String, Vec<String>)> {
+    let mut orders: Vec<(String, Vec<String>)> = Vec::new();
+    for s in items {
+        let project = s.project.as_deref().unwrap_or_default();
+        let key = if !project.is_empty() && known_projects.iter().any(|k| k == project) {
+            project.to_string()
+        } else {
+            crate::sidebar_view::LOOSE.to_string()
+        };
+        match orders.iter_mut().find(|(p, _)| p == &key) {
+            Some((_, ids)) => ids.push(s.id.clone()),
+            None => orders.push((key, vec![s.id.clone()])),
+        }
+    }
+    orders
+}
 
 /// Fold a projected row list to the quota and report how many rows it hides.
 ///
@@ -3142,6 +3207,38 @@ mod tests {
             ),
             FolderDrop::Noop
         ));
+    }
+
+    /// The reconcile's server-side surface partitions the wire list by the
+    /// same rule render does — registered project folder, else the loose
+    /// account — and keeps the wire's committed order inside each partition.
+    #[test]
+    fn the_wire_list_partitions_in_committed_order() {
+        let item = |id: &str, project: Option<&str>| ThreadListItem {
+            id: id.into(),
+            project: project.map(str::to_string),
+            ..sample_item()
+        };
+        let items = vec![
+            item("a", Some("/p1")),
+            item("b", None),
+            item("c", Some("/p1")),
+            item("d", Some("/ghost")),
+            item("e", Some("/p2")),
+        ];
+        let known = vec!["/p1".to_string(), "/p2".to_string()];
+        let orders = wire_partition_orders(&items, &known);
+        assert_eq!(
+            orders,
+            vec![
+                ("/p1".to_string(), vec!["a".to_string(), "c".to_string()]),
+                (
+                    crate::sidebar_view::LOOSE.to_string(),
+                    vec!["b".to_string(), "d".to_string()]
+                ),
+                ("/p2".to_string(), vec!["e".to_string()]),
+            ]
+        );
     }
 
     /// A projected row for the fold tests: identity, and the parent/depth pair

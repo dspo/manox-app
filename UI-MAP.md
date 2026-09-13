@@ -250,7 +250,7 @@ Loose (non-project) threads + external sessions (scroll-body child 1). Its secti
 
 #### SidebarViewOptionsMenu
 
-`PopupMenu` anchored below the Conversations header's second action — a ghost `Menu`-icon trigger beside the `+` (tooltip "View options", `sidebar-view-options`). The sidebar's ordering-mode editor and its only surface: two checked rows, Manual (`sidebar-order-manual`) and Last updated (`sidebar-order-updated`), check on the active mode. Built per open like the other sidebar popups and hung under its trigger through the same deferred `top_full().right_0()` wrapper as the row menu (escapes the scroll clip; opening it closes the new-session menu, so one sidebar popup is open at a time), dismissed via its `DismissEvent` subscription. Picking a mode never touches the server: it flips the client view's `order_by` (persisted in the sidebar-view file) — entering Last updated runs the one complete recency sort, leaving it keeps every current position and only stops further promotion.
+`PopupMenu` anchored below the Conversations header's second action — a ghost `Menu`-icon trigger beside the `+` (tooltip "View options", `sidebar-view-options`). The sidebar's ordering-mode editor and its only surface: two checked rows, Manual (`sidebar-order-manual`) and Last updated (`sidebar-order-updated`), check on the active mode. Built per open like the other sidebar popups and hung under its trigger through the same deferred `top_full().right_0()` wrapper as the row menu (escapes the scroll clip; opening it closes the new-session menu, so one sidebar popup is open at a time), dismissed via its `DismissEvent` subscription. Picking Last updated is pure client state: it flips the view's `order_by` (persisted in the sidebar-view file), runs the one complete recency sort on entry, and leaving it keeps every current position while only stopping further promotion. Picking Manual additionally reconciles — the drift the Updated account accumulated is replayed to the server's durable account as one minimal `MoveThread` batch, so the order the user lands on is the order a Manual drag edits against (see [SidebarThreadItem](#sidebarthreaditem)'s drag roles).
 
 > Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
 
@@ -280,6 +280,15 @@ insertBefore semantics; a line under the last row is the append gesture) and —
 in Manual mode only — forwards the same move to the server as `MoveThread`
 (`InsertThreadBefore`); Last updated drags stay pure view state because the
 head promotions have already split the view order from the server account.
+Because that split is exactly what would make a Manual drag resolve its anchor
+against an order the server disagrees with, landing back in Manual first
+reconciles: `reconcile_manual_account` diffs the view account against the wire
+list's committed per-partition order (`wire_partition_orders` — the same
+project/loose rule render groups by) and replays the diff through
+`sidebar_view::reconcile_moves` as one minimal batch of `MoveThread` moves
+(an LCS keep-set, so each drifted row moves at most once and no shorter batch
+exists). Manual drags keep both accounts in step afterwards, so the switch
+edge is the only place drift can exist.
 Drag markers (`drag_row` / `drag_folder`) are pruned at the top of render
 whenever gpui no longer carries an active drag, so an interrupted gesture
 (release below the list, over a mismatched payload type, or outside the

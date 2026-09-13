@@ -176,6 +176,63 @@ pub fn move_in_account(account: &[String], id: &str, before: Option<&str>) -> Op
     (without != *account).then_some(without)
 }
 
+/// The minimal batch of `insertBefore` moves that reshapes the server's
+/// committed order into the view account — the replay a switch back into
+/// `Manual` sends so the durable account matches what the user is looking at
+/// (the `Last updated` account drifts: promotions at the head, view-local
+/// drags). Rows already in their correct relative order (a longest common
+/// subsequence) stay put; every other target row moves exactly once, in front
+/// of its target successor (`None` = append). Target ids the server no longer
+/// knows (archived mid-session) are skipped, and ids only the server has are
+/// left in place. Applying the moves to `server` always yields exactly the
+/// target projection, and the count is the lower bound `n − LCS`, so no
+/// shorter batch exists.
+pub fn reconcile_moves(server: &[String], target: &[String]) -> Vec<(String, Option<String>)> {
+    let known: std::collections::HashSet<&str> = server.iter().map(String::as_str).collect();
+    let want: Vec<&str> = target
+        .iter()
+        .map(String::as_str)
+        .filter(|id| known.contains(id))
+        .collect();
+    let have: Vec<&str> = server.iter().map(String::as_str).collect();
+    // LCS length table, walked forward to mark the rows that never need to move.
+    let (n, m) = (have.len(), want.len());
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if have[i] == want[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut keep: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if have[i] == want[j] {
+            keep.insert(have[i]);
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    // Tail-to-head so each moved row lands in front of a successor that is
+    // already where the target wants it.
+    let mut moves = Vec::new();
+    for idx in (0..want.len()).rev() {
+        if keep.contains(want[idx]) {
+            continue;
+        }
+        let before = want.get(idx + 1).map(|anchor| (*anchor).to_string());
+        moves.push((want[idx].to_string(), before));
+    }
+    moves
+}
+
 /// The view-state file under the shared state root.
 pub fn view_path() -> PathBuf {
     manox_agent::paths::manox_config_dir()
@@ -363,6 +420,123 @@ mod tests {
         assert_eq!(move_in_account(&account, "a", Some("a")), None);
         assert_eq!(move_in_account(&account, "ghost", None), None);
         assert_eq!(move_in_account(&account, "a", Some("ghost")), None);
+    }
+
+    /// Apply a replay the way the server would: one insertBefore per move.
+    fn apply_moves(server: &[String], moves: &[(String, Option<String>)]) -> Vec<String> {
+        let mut cur = server.to_vec();
+        for (id, before) in moves {
+            let at = cur.iter().position(|x| x == id).expect("moved id is known");
+            cur.remove(at);
+            let to = match before {
+                None => cur.len(),
+                Some(anchor) => cur
+                    .iter()
+                    .position(|x| x == anchor)
+                    .expect("anchor is a known target row"),
+            };
+            cur.insert(to, id.clone());
+        }
+        cur
+    }
+
+    /// The drift shapes the replay actually sees: a `Last updated` promotion
+    /// is one move to the head, a rotated-by-one account is one move to the
+    /// tail (the LCS keeps the rest), and a full reversal moves everything
+    /// but the one row the two orders already agree on.
+    #[test]
+    fn reconcile_moves_minimizes_the_common_drift_shapes() {
+        // Promotion: `x` leads the view while the server still has it last.
+        let server = ids(&["a", "b", "c", "x"]);
+        assert_eq!(
+            reconcile_moves(&server, &ids(&["x", "a", "b", "c"])),
+            vec![("x".to_string(), Some("a".to_string()))]
+        );
+        // Rotation: appending `a` is enough; a per-position greedy would
+        // spend two moves here.
+        let server = ids(&["a", "b", "c"]);
+        assert_eq!(
+            reconcile_moves(&server, &ids(&["b", "c", "a"])),
+            vec![("a".to_string(), None)]
+        );
+        // Full reversal: only the middle row is already in place.
+        let server = ids(&["a", "b", "c", "d", "e"]);
+        let replay = reconcile_moves(&server, &ids(&["e", "d", "c", "b", "a"]));
+        assert_eq!(replay.len(), 4);
+        assert_eq!(
+            apply_moves(&server, &replay),
+            ids(&["e", "d", "c", "b", "a"])
+        );
+        // No drift, no moves — the switch edge stays silent.
+        assert!(reconcile_moves(&server, &server).is_empty());
+    }
+
+    /// Ids the server no longer knows are dropped from the replay, and ids
+    /// only the server has are left in place: applying the moves yields
+    /// exactly the target projection.
+    #[test]
+    fn reconcile_moves_skips_rows_either_side_forgets() {
+        let server = ids(&["a", "gone", "b"]);
+        let replay = reconcile_moves(&server, &ids(&["archived", "b", "a"]));
+        assert_eq!(apply_moves(&server, &replay), ids(&["gone", "b", "a"]));
+        // And an empty server column has nothing to move.
+        assert!(reconcile_moves(&[], &ids(&["a", "b"])).is_empty());
+    }
+
+    /// Exhaustive over every 5-row permutation: the replay always lands the
+    /// target exactly, and its length is the `n − LCS` lower bound (each
+    /// insertBefore can install at most one row into the kept subsequence),
+    /// so no shorter batch exists.
+    #[test]
+    fn reconcile_moves_lands_every_permutation_minimally() {
+        fn lcs(a: &[&str], b: &[&str]) -> usize {
+            let mut dp = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+            for i in (0..a.len()).rev() {
+                for j in (0..b.len()).rev() {
+                    dp[i][j] = if a[i] == b[j] {
+                        dp[i + 1][j + 1] + 1
+                    } else {
+                        dp[i + 1][j].max(dp[i][j + 1])
+                    };
+                }
+            }
+            dp[0][0]
+        }
+        let base: Vec<String> = ["t0", "t1", "t2", "t3", "t4"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // Heap's algorithm over the 120 permutations.
+        let mut perm = base.clone();
+        let mut c = [0usize; 5];
+        let mut i = 0;
+        loop {
+            let replay = reconcile_moves(&base, &perm);
+            assert_eq!(
+                apply_moves(&base, &replay),
+                perm,
+                "replay of {perm:?} must land the target"
+            );
+            let want: Vec<&str> = perm.iter().map(String::as_str).collect();
+            let have: Vec<&str> = base.iter().map(String::as_str).collect();
+            assert_eq!(
+                replay.len(),
+                5 - lcs(&have, &want),
+                "replay of {perm:?} must be minimal"
+            );
+            if i >= 5 {
+                break;
+            }
+            if c[i] < i {
+                let swap = if i % 2 == 0 { 0 } else { c[i] };
+                perm.swap(swap, i);
+                c[i] += 1;
+                i = 0;
+            } else {
+                c[i] = 0;
+                i += 1;
+            }
+        }
     }
 
     #[test]
