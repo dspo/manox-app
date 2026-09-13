@@ -2188,6 +2188,29 @@ impl Workspace {
                     let store = manox_agent::thread_store_global();
                     store.with_mut(|s| s.set_thread_tag(id, tag.clone()));
                 }
+                // Sidebar order is the server's durable manual account, so a
+                // move rides the gateway rather than an in-process store write
+                // (the same-face rule the archive/tag migrations converged on).
+                // These notes carry no session: they address a thread and a
+                // folder, not the landing conversation.
+                SidebarEvent::MoveThread { id, before_id } => {
+                    // These notes address no session, so they go straight to the
+                    // shared client rather than the session-scoped helper.
+                    this.client
+                        .send_note(manox_protocol::ClientNote::InsertThreadBefore {
+                            thread_id: id.clone(),
+                            before_thread_id: before_id.clone(),
+                        });
+                }
+                SidebarEvent::MoveFolder { path, before_path } => {
+                    this.client
+                        .send_note(manox_protocol::ClientNote::InsertGroupBefore {
+                            path: path.to_string_lossy().into_owned(),
+                            before_path: before_path
+                                .as_ref()
+                                .map(|p| p.to_string_lossy().into_owned()),
+                        });
+                }
                 SidebarEvent::RemoveProject(path) => {
                     // Unregister the folder; the sidebar drops the group and
                     // its threads fall back to the loose Conversations list.

@@ -51,7 +51,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Sidebar
 
-- [Sidebar](#sidebar) · [SidebarScrollBody](#sidebarscrollbody) · [SidebarPinnedSectionHeader](#sidebarpinnedsectionheader) · [SidebarProjectsSection](#sidebarprojectssection) · [SidebarProjectGroup](#sidebarprojectgroup) · [SidebarConversationsSection](#sidebarconversationssection) · [SidebarNewSessionMenu](#sidebarnewsessionmenu) · [SidebarProjectMenu](#sidebarprojectmenu) · [SidebarThreadItem](#sidebarthreaditem) · [SidebarThreadRowMenu](#sidebarthreadrowmenu) · [SidebarTagChip](#sidebartagchip) · [ResumeSidecar](#resumesidecar) · [SidebarDivider](#sidebardivider)
+- [Sidebar](#sidebar) · [SidebarScrollBody](#sidebarscrollbody) · [SidebarPinnedSectionHeader](#sidebarpinnedsectionheader) · [SidebarProjectsSection](#sidebarprojectssection) · [SidebarProjectGroup](#sidebarprojectgroup) · [SidebarConversationsSection](#sidebarconversationssection) · [SidebarNewSessionMenu](#sidebarnewsessionmenu) · [SidebarViewOptionsMenu](#sidebarviewoptionsmenu) · [SidebarProjectMenu](#sidebarprojectmenu) · [SidebarThreadItem](#sidebarthreaditem) · [SidebarThreadRowMenu](#sidebarthreadrowmenu) · [SidebarTagChip](#sidebartagchip) · [SidebarShowMoreRow](#sidebarshowmorerow) · [ResumeSidecar](#resumesidecar) · [SidebarDivider](#sidebardivider)
 
 ### MainView
 
@@ -232,19 +232,25 @@ Middle section: project-grouped threads (if any projects exist). Its section hea
 
 #### SidebarProjectGroup
 
-Collapsible folder: chevron + folder icon + project name, indented thread list, and a trailing ellipsis button opening the [SidebarProjectMenu](#sidebarprojectmenu). Threads inside a folder order as a team forest (`team_forest`): top-level rows merged by recency, each team leader followed by its member rows indented one level (`14px` per `depth`); a leader with members renders a collapse chevron and hides its subtree when folded.
+Collapsible folder: chevron + folder icon + project name, indented thread list, and a trailing ellipsis button opening the [SidebarProjectMenu](#sidebarprojectmenu). Threads inside a folder order as a team forest (`team_forest`): top-level rows merged by recency, each team leader followed by its member rows indented one level (`14px` per `depth`); a leader with members renders a collapse chevron and hides its subtree when folded. The header is also a drag source (`DraggedFolderRow` payload) and a drop target for reordering folders: while a folder drag is live, a 2px accent insertion line hugs the hovered header's top/bottom half (`drag_boundary`), and the drop forwards `MoveFolder` (`InsertGroupBefore`) with the anchor resolved against the rendered folder sequence (`folder_order`) — a drop back onto the dragged folder's own boundary, any already-in-place move, or a line whose host vanished mid-drag is a no-op (mirroring `move_in_account`), never an accidental append.
 
 > Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
 
 #### SidebarConversationsSection
 
-Loose (non-project) threads + external sessions (scroll-body child 1). Its section header sits in-flow directly above these rows and carries the `+` button opening the `SidebarNewSessionMenu` popup; the sticky overlay (`SidebarPinnedSectionHeader`) pins a copy when scrolled. Like the project folders, loose rows order as a team forest with member rows nested under their leader.
+Loose (non-project) threads + external sessions (scroll-body child 1). Its section header sits in-flow directly above these rows and carries two header actions: the `+` button opening the `SidebarNewSessionMenu` popup and the view-options button opening the [SidebarViewOptionsMenu](#sidebarviewoptionsmenu); the sticky overlay (`SidebarPinnedSectionHeader`) pins a copy when scrolled. Like the project folders, loose rows order as a team forest with member rows nested under their leader, fold at the quota behind a [SidebarShowMoreRow](#sidebarshowmorerow), and their thread rows carry the drag roles described under [SidebarThreadItem](#sidebarthreaditem).
 
 > Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
 
 #### SidebarNewSessionMenu
 
 `PopupMenu` anchored below the "Conversations" header `+` button — the flat new-session menu (project folders use the structured [SidebarProjectMenu](#sidebarprojectmenu) instead). One flat row (Manox → `NewThread`), one flat Terminal row (`sidebar-new-terminal` label shared with the project menu; plain PTY session in the workspace cwd → `SpawnPlainSession(Terminal, None)`, no cascade), one `submenu_with_icon` per external agent kind (Claude Code / Codex / GitHub Copilot), and a single flat VS Code entry (injection resolves from the persisted `vscode_app:` settings — no provider/model cascade; disabled when VS Code is not installed, parity with 工具 → VS Code). All top-level rows use the menu component's native icon slot with a monochrome brand SVG, keeping their icon and label columns aligned. Each agent submenu is a provider→model cascade built by the shared `build_model_cascade`: models from `manox_agent::provider_glue::global()` filtered by registration metadata `agents` containing the agent id (`claude` / `codex` / `copilot`), grouped by provider display name into provider submenus; a config model registered through several wire apis appears once per wire endpoint (dedup keyed on registration name + config id, parity with the composer model menu), each row carrying the same wire-api Tag (Anthropic/Responses/Completions) as the composer popup. The emitted payload is (provider display name, raw cx config key, optional cx wire key); the workspace forwards the wire key to `cx::AgentBuilder::wire_api` so the picked endpoint variant is the one launched (claude/codex cascades show a single wire after the visibility filter; copilot exposes all three). The Terminal entry skips the cascade entirely — the workspace spawns the user's shell through `spawn_plain_session` with no provider/model injection. Picking a model in a CLI-agent cascade emits `SpawnExternalSession(kind, provider, model, wire, None)` and the VS Code entry emits `LaunchVSCode(None)` — the workspace then launches VS Code through `cx::launch_vscode_app` with Claude Code BYOK env injected, opening the workspace cwd. An agent with no supporting model renders a muted "no model configured" label row instead of provider submenus.
+
+> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+
+#### SidebarViewOptionsMenu
+
+`PopupMenu` anchored below the Conversations header's second action — a ghost `Menu`-icon trigger beside the `+` (tooltip "View options", `sidebar-view-options`). The sidebar's ordering-mode editor and its only surface: two checked rows, Manual (`sidebar-order-manual`) and Last updated (`sidebar-order-updated`), check on the active mode. Built per open like the other sidebar popups and hung under its trigger through the same deferred `top_full().right_0()` wrapper as the row menu (escapes the scroll clip; opening it closes the new-session menu, so one sidebar popup is open at a time), dismissed via its `DismissEvent` subscription. Picking a mode never touches the server: it flips the client view's `order_by` (persisted in the sidebar-view file) — entering Last updated runs the one complete recency sort, leaving it keeps every current position and only stops further promotion.
 
 > Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
 
@@ -263,6 +269,21 @@ Row titles render single-line with ellipsis (`.truncate()` replaces the old
 wrap-and-clip `overflow_hidden`), so no title — sanitized OSC titles and
 pre-sanitize sidecar titles folded at projection alike — can stretch a row at
 any sidebar width.
+Drag roles (thread rows only — an external session has no server-side account,
+so it is never a drag source, a drop target or a line host): a row drags via a
+`DraggedThreadRow` payload and renders at 0.4 opacity while it is the dragged
+source; every other thread row is a drop target and insertion-line host, showing
+the same 2px accent line as the folder headers hugging the hovered half
+(`drag_boundary`, so the line reads as "insert before / after this row"). A drop
+reorders the partition's client view account immediately (`move_in_account`
+insertBefore semantics; a line under the last row is the append gesture) and —
+in Manual mode only — forwards the same move to the server as `MoveThread`
+(`InsertThreadBefore`); Last updated drags stay pure view state because the
+head promotions have already split the view order from the server account.
+Drag markers (`drag_row` / `drag_folder`) are pruned at the top of render
+whenever gpui no longer carries an active drag, so an interrupted gesture
+(release below the list, over a mismatched payload type, or outside the
+sidebar) never leaves the insertion line or the ghosted source row stuck.
 
 #### SidebarThreadRowMenu
 
@@ -273,6 +294,12 @@ Three-dot (`IconName::Ellipsis`) hover overflow trigger on a thread row's right 
 #### SidebarTagChip
 
 The persisted user tag rendered as an outlined secondary `Tag` beside the short-id tag chip (thread rows only; one tag per thread, persisted in the pi session sidecar's `tag` field via `ThreadStore::set_thread_tag`). A ghost xsmall ✕ button inside the chip clears it (`SetThreadTag(id, None)`); double-clicking the chip enters rename mode (the inline input prefilled with the current tag). Chip clicks stop propagation so they never trip the row's open-thread click.
+> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+
+#### SidebarShowMoreRow
+
+The reveal affordance of the per-partition fold (`folded_rows`): when a partition projects more than `COLLAPSED_ROWS` (5) rows, only whole leader units that fit the quota render and a ghost xsmall "Show {N} more" button (`sidebar-show-more`, `t_count`) closes the section — a quota landing mid-subtree cuts back to the unit's leader, so a member is never shown without its leader. One click sets that partition's `revealed` flag (transient per mount: closing the folder clears it, so reopening returns to the bounded projection) and renders the rest of the account; rows are hidden, never unloaded. Rendered by `render_partition_rows`, so both the project partitions and the loose Conversations partition fold identically.
+
 > Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
 
 
