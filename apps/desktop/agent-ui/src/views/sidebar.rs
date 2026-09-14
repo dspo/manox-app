@@ -17,19 +17,22 @@
 //! in the "Projects" section, keyed by project path; the rest fall under "Conversations". The top
 //! menu and bottom account footer are static decoration.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::i18n;
 use crate::sidebar_view::{self, OrderBy};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent,
     DragMoveEvent, Entity, EventEmitter, Pixels, Render, ScrollHandle, SharedString, Subscription,
-    Transformation, WeakEntity, Window, deferred, ease_in_out, linear, percentage, prelude::*, px,
+    Transformation, WeakEntity, Window, anchored, deferred, ease_in_out, linear, percentage, point,
+    prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, Theme,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -446,6 +449,15 @@ pub struct Sidebar {
     view_menu_open: bool,
     view_menu: Option<Entity<PopupMenu>>,
     view_menu_sub: Option<Subscription>,
+    /// Window-space bottom-right corner of each open dropdown's trigger,
+    /// captured from that trigger's `on_prepaint` bounds and seeded at open
+    /// time from the window bounds. `anchored()` positions the deferred menu
+    /// here (fit mode `SwitchAnchor` flips it above the trigger when it would
+    /// overflow the window's bottom edge), replacing the old downward-only
+    /// `top_full()` hang that got clipped near the bottom of the list.
+    row_menu_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
+    view_menu_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
+    new_session_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
     /// The thread row currently under a drag, with the insertion line's host.
     drag_row: Option<RowDrag>,
     /// The project folder currently under a drag, same shape.
@@ -506,6 +518,9 @@ impl Sidebar {
             view_menu_open: false,
             view_menu: None,
             view_menu_sub: None,
+            row_menu_anchor: Rc::new(Cell::new(None)),
+            view_menu_anchor: Rc::new(Cell::new(None)),
+            new_session_anchor: Rc::new(Cell::new(None)),
             drag_row: None,
             drag_folder: None,
             displayed: HashMap::new(),
@@ -527,6 +542,11 @@ impl Sidebar {
     fn open_view_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_view_menu();
         self.close_new_session_menu();
+        // Seed the trigger anchor up front so the first paint after opening
+        // already positions the menu; `on_prepaint` on the trigger refines it
+        // to the exact bottom-right corner every frame the menu stays open.
+        self.view_menu_anchor
+            .set(Some(window.bounds().bottom_right()));
         let sidebar = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
             // The active mode carries the check mark; the popup is the mode's
@@ -676,6 +696,19 @@ impl Sidebar {
             .child(
                 gpui::div()
                     .relative()
+                    // Feed the anchored dropdown this wrapper's exact
+                    // bottom-right window position every frame it is the open
+                    // trigger (in-flow copy only, so the sticky overlay never
+                    // clobbers the anchor).
+                    .when(
+                        dropdown && self.new_session_open && self.new_session_project.is_none(),
+                        |el| {
+                            let cell = self.new_session_anchor.clone();
+                            el.on_prepaint(move |bounds, _window, _cx| {
+                                cell.set(Some(bounds.bottom_right()));
+                            })
+                        },
+                    )
                     .child(
                         Button::new(format!("{id_prefix}-conv-plus"))
                             .ghost()
@@ -691,10 +724,9 @@ impl Sidebar {
                                 cx.notify();
                             })),
                     )
-                    // Deferred inside this relative wrapper so it paints after
-                    // sibling rows (z-order) while staying positioned just
-                    // below the button (`top_full()` is 100% of this wrapper's
-                    // height).
+                    // Deferred here so it paints above sibling rows (z-order);
+                    // `anchored()` positions it in window coordinates from the
+                    // captured anchor rather than off this wrapper.
                     .children(
                         (dropdown && self.new_session_open && self.new_session_project.is_none())
                             .then(|| {
@@ -708,6 +740,12 @@ impl Sidebar {
             .child(
                 gpui::div()
                     .relative()
+                    .when(dropdown && self.view_menu_open, |el| {
+                        let cell = self.view_menu_anchor.clone();
+                        el.on_prepaint(move |bounds, _window, _cx| {
+                            cell.set(Some(bounds.bottom_right()));
+                        })
+                    })
                     .child(
                         Button::new(format!("{id_prefix}-view-options"))
                             .ghost()
@@ -749,6 +787,8 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         self.new_session_project = project.clone();
+        self.new_session_anchor
+            .set(Some(window.bounds().bottom_right()));
         let theme = cx.theme().clone();
         let sidebar = cx.entity().downgrade();
         // The menu-build closures run EAGERLY inside this Sidebar update,
@@ -892,6 +932,8 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         self.close_row_menu();
+        self.row_menu_anchor
+            .set(Some(window.bounds().bottom_right()));
         let theme = cx.theme().clone();
         let sidebar = cx.entity().downgrade();
         let open_id = id.clone();
@@ -961,28 +1003,45 @@ impl Sidebar {
         self.row_menu_sub = None;
     }
 
-    /// Anchor the open row menu below its trigger button. Deferred so it
-    /// paints above sibling rows and escapes the row's `overflow_hidden`;
-    /// `top_full()` + `right_0()` hang it just under the button's wrapper.
-    /// The view-options popup, hung under its header trigger the same deferred
-    /// way the row menu is, so it escapes the scroll clip.
+    /// Mount a deferred `PopupMenu` at its trigger's captured window-space
+    /// bottom-right corner using gpui's `anchored()` element. The default fit
+    /// mode (`SwitchAnchor`) keeps the menu below-right of the trigger when
+    /// there is room and flips the anchor to the window's bottom edge (opening
+    /// upward) when the trigger sits too close to the bottom for the menu to
+    /// fit — the behavior the old downward-only `top_full()` hang lacked. No
+    /// menu-height estimation is needed; `anchored()` measures and flips.
+    fn anchored_dropdown(
+        id: impl Into<SharedString>,
+        anchor: Option<gpui::Point<Pixels>>,
+        menu: Entity<PopupMenu>,
+    ) -> Option<AnyElement> {
+        let position = anchor?;
+        let id: SharedString = id.into();
+        Some(
+            deferred(
+                anchored()
+                    .anchor(Anchor::TopRight)
+                    .position(position)
+                    .offset(point(px(0.), px(2.)))
+                    .child(gpui::div().id(id).occlude().child(menu)),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
+    /// The view-options popup, anchored below its header trigger via the
+    /// shared [`Self::anchored_dropdown`] so it escapes the scroll clip and
+    /// flips upward near the window's bottom edge.
     fn render_view_menu_dropdown(&self) -> Option<AnyElement> {
         if !self.view_menu_open {
             return None;
         }
         let menu = self.view_menu.clone()?;
-        Some(
-            deferred(
-                gpui::div()
-                    .id("sidebar-view-options-dropdown")
-                    .absolute()
-                    .top_full()
-                    .right_0()
-                    .occlude()
-                    .child(menu),
-            )
-            .with_priority(1)
-            .into_any_element(),
+        Self::anchored_dropdown(
+            "sidebar-view-options-dropdown",
+            self.view_menu_anchor.get(),
+            menu,
         )
     }
 
@@ -991,18 +1050,10 @@ impl Sidebar {
             return None;
         }
         let menu = self.row_menu.clone()?;
-        Some(
-            deferred(
-                gpui::div()
-                    .id(SharedString::from(format!("thread-menu-dropdown-{id}")))
-                    .absolute()
-                    .top_full()
-                    .right_0()
-                    .occlude()
-                    .child(menu),
-            )
-            .with_priority(1)
-            .into_any_element(),
+        Self::anchored_dropdown(
+            SharedString::from(format!("thread-menu-dropdown-{id}")),
+            self.row_menu_anchor.get(),
+            menu,
         )
     }
 
@@ -1092,24 +1143,13 @@ impl Sidebar {
         })
     }
 
-    /// Build the session-menu dropdown anchored below the trigger button
-    /// that opened it. Deferred so it paints above sibling rows; `top_full()` is
-    /// 100% of the wrapping `.relative()` div, so the menu sits just under the
-    /// button rather than at the sidebar's bottom edge.
+    /// Build the session-menu dropdown anchored at the trigger that opened it
+    /// (Conversations header `+` or a project folder's ellipsis) via the
+    /// shared [`Self::anchored_dropdown`], so it flips upward near the window's
+    /// bottom edge instead of being clipped by the old downward-only hang.
     fn render_new_session_dropdown(&self, id: SharedString) -> Option<AnyElement> {
-        self.new_session_menu.clone().map(|menu| {
-            deferred(
-                gpui::div()
-                    .id(id)
-                    .absolute()
-                    .top_full()
-                    .right_0()
-                    .occlude()
-                    .child(menu),
-            )
-            .with_priority(1)
-            .into_any_element()
-        })
+        let menu = self.new_session_menu.clone()?;
+        Self::anchored_dropdown(id, self.new_session_anchor.get(), menu)
     }
 
     /// Mark the currently selected thread id (back-filled by Workspace on switch/new, for highlight).
@@ -1523,6 +1563,17 @@ impl Sidebar {
             .child(
                 gpui::div()
                     .relative()
+                    .when(
+                        self.new_session_open
+                            && self.new_session_project.as_deref()
+                                == Some(std::path::Path::new(path)),
+                        |el| {
+                            let cell = self.new_session_anchor.clone();
+                            el.on_prepaint(move |bounds, _window, _cx| {
+                                cell.set(Some(bounds.bottom_right()));
+                            })
+                        },
+                    )
                     .child(
                         Button::new(format!("project-menu-{key}"))
                             .ghost()
@@ -2892,8 +2943,9 @@ fn render_tag_chip(
 
 /// The thread row's overflow trigger: a three-dot button opening the
 /// Archive + Tag popup. Clicking it again toggles the menu closed; the
-/// dropdown anchors below the button (deferred, so it escapes the row's
-/// `overflow_hidden` and paints above sibling rows).
+/// dropdown is deferred and anchored at this trigger's captured window-space
+/// corner (so it escapes the row's `overflow_hidden`, paints above sibling
+/// rows, and flips upward when it would overflow the window's bottom edge).
 fn render_thread_menu_trigger(
     item: &SidebarThreadItem,
     sidebar: &Sidebar,
@@ -2918,8 +2970,15 @@ fn render_thread_menu_trigger(
             cx.notify();
         }));
     let dropdown = sidebar.render_row_menu_dropdown(&id);
+    let menu_open = sidebar.row_menu_open.as_deref() == Some(id.as_str());
     gpui::div()
         .relative()
+        .when(menu_open, |el| {
+            let cell = sidebar.row_menu_anchor.clone();
+            el.on_prepaint(move |bounds, _window, _cx| {
+                cell.set(Some(bounds.bottom_right()));
+            })
+        })
         .child(button)
         .children(dropdown)
         .into_any_element()
@@ -3673,5 +3732,84 @@ mod tests {
                 s.open_new_session_menu(None, window, cx);
             });
         });
+    }
+
+    /// A host view rendering the exact `anchored()` configuration
+    /// `Sidebar::anchored_dropdown` emits — anchor `TopRight`, an explicit
+    /// window-space `position`, and the `(0, 2)` offset — around two fixed-size
+    /// stand-ins for the menu: one with room below its trigger, one with the
+    /// trigger near the window's bottom edge. (A real `PopupMenu` would need a
+    /// `Root` and self-sizes, adding layout noise to a geometry assertion.)
+    struct AnchorFlipHost;
+
+    fn anchored_case(position: gpui::Point<Pixels>, selector: &'static str) -> AnyElement {
+        deferred(
+            anchored()
+                .anchor(Anchor::TopRight)
+                .position(position)
+                .offset(point(px(0.), px(2.)))
+                .child(
+                    gpui::div()
+                        .id(selector)
+                        .debug_selector(move || selector.into())
+                        .w(px(160.))
+                        .h(px(120.)),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+
+    impl Render for AnchorFlipHost {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> impl gpui::IntoElement {
+            // 400x300 window, 120px menu, offset 2. A trigger at y=260 cannot
+            // fit the menu below (260 + 2 + 120 = 382 > 300) so `SwitchAnchor`
+            // flips it up; a trigger at y=100 fits (100 + 2 + 120 = 222 ≤ 300).
+            gpui::div().size_full().children(vec![
+                anchored_case(point(px(200.), px(260.)), "SIDEBAR-DROPDOWN-BOTTOM"),
+                anchored_case(point(px(200.), px(100.)), "SIDEBAR-DROPDOWN-TOP"),
+            ])
+        }
+    }
+
+    /// #4: the sidebar dropdowns hang off `anchored()` (fit mode
+    /// `SwitchAnchor`) instead of the old downward-only `top_full()`, so a
+    /// trigger near the window's bottom edge flips the menu upward rather than
+    /// having it clipped away out of reach.
+    #[gpui::test]
+    fn anchored_dropdown_flips_above_trigger_near_window_bottom(cx: &mut gpui::TestAppContext) {
+        let window = cx.open_window(gpui::size(px(400.), px(300.)), |_, _| AnchorFlipHost);
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        let flipped = visual
+            .debug_bounds("SIDEBAR-DROPDOWN-BOTTOM")
+            .expect("near-bottom dropdown must render");
+        // Flipped: the menu's bottom lands at the anchor point (+2 offset),
+        // entirely above the trigger — not extending off the window below it.
+        assert!(
+            flipped.bottom() <= px(262.) + px(1.),
+            "menu must flip above the trigger, bottom={:?}",
+            f32::from(flipped.bottom())
+        );
+        assert!(
+            flipped.origin.y < px(260.),
+            "flipped menu top must be above the trigger, origin_y={:?}",
+            f32::from(flipped.origin.y)
+        );
+
+        let below = visual
+            .debug_bounds("SIDEBAR-DROPDOWN-TOP")
+            .expect("room-below dropdown must render");
+        // Room below: the menu hangs just under the trigger, exactly as before.
+        assert!(
+            (f32::from(below.origin.y) - 102.0).abs() < 1.0,
+            "menu top sits just under the trigger (+2 offset), origin_y={:?}",
+            f32::from(below.origin.y)
+        );
     }
 }
