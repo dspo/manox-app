@@ -10,12 +10,12 @@
 #   - crates/cx:                      cx headless 库（SessionHandle 驱动、chatgpt/
 #                                     vscode 设置与 launch、probe db、配置核心）
 #   - crates/cx-cli:                  cx CLI bin（clap + ratatui TUI + `cx web`）
-#   - crates/manox-ext-agents:        ext-agent 启动 API、会话管理、IPC relay
-#   - crates/manox-terminal:          终端仿真核心（PTY + alacritty 数据层）
-#   - crates/hyperlinks:              URL/路径链接识别（终端网格 + markdown）
+#   - crates/manox-ext-agents:        ext-agent 启动 API、会话管理、IPC relay、
+#                                     cx_session 桥（SessionHandle → PtySource）
 #
-# agent runtime（harness/agent/session-core/protocol/providers/supervisor/lsp）
-# 来自 dspo/manox，经 git 依赖 + Cargo.lock 锁 rev 消费；本地联动开发用
+# agent runtime（harness/agent/session-core/protocol/providers/supervisor/lsp，
+# 以及已回流的 manox-terminal 与 hyperlinks）来自 dspo/manox，经 git 依赖 +
+# Cargo.lock 锁 rev 消费；上游侧注明 CxSessionSource 桥留在本仓。本地联动开发用
 # .cargo/config.toml 的 [patch] 覆盖（见 script/local-manox.sh，勿提交）。
 #
 # gpui 相关依赖严格对齐 gpui-component 锁定的 rev，保证 gpui 单一版本。
