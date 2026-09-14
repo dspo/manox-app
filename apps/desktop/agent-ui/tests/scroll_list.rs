@@ -89,7 +89,7 @@ fn draw_list(
 fn redraw(cx: &mut TestAppContext, any: AnyWindowHandle) {
     cx.run_until_parked();
     cx.update_window(any, |_, window, cx| {
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
     })
     .unwrap();
 }
@@ -279,7 +279,7 @@ async fn real_table_message_height_converges_across_width_changes(cx: &mut TestA
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     for _ in 0..2 {
-        visual.update(|window, cx| window.draw(cx).clear());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     let narrow = visual
         .debug_bounds("markdown-list-row-0")
@@ -288,7 +288,7 @@ async fn real_table_message_height_converges_across_width_changes(cx: &mut TestA
     visual.simulate_resize(size(px(1_200.), px(4_000.)));
     visual.run_until_parked();
     for _ in 0..2 {
-        visual.update(|window, cx| window.draw(cx).clear());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     let wide = visual
         .debug_bounds("markdown-list-row-0")
@@ -309,7 +309,7 @@ async fn real_table_message_height_converges_across_width_changes(cx: &mut TestA
     visual.simulate_resize(size(px(520.), px(4_000.)));
     visual.run_until_parked();
     for _ in 0..2 {
-        visual.update(|window, cx| window.draw(cx).clear());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     let narrow_again = visual
         .debug_bounds("markdown-list-row-0")
@@ -318,7 +318,7 @@ async fn real_table_message_height_converges_across_width_changes(cx: &mut TestA
     visual.simulate_resize(size(px(1_200.), px(4_000.)));
     visual.run_until_parked();
     for _ in 0..2 {
-        visual.update(|window, cx| window.draw(cx).clear());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     let wide_again = visual
         .debug_bounds("markdown-list-row-0")
@@ -361,7 +361,7 @@ async fn list_measures_persistent_wrapped_markdown_rows(cx: &mut TestAppContext)
     });
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let first = visual
         .debug_bounds("markdown-list-row-0")
@@ -400,7 +400,7 @@ async fn list_remeasures_streaming_markdown_child_growth(cx: &mut TestAppContext
     });
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let suffix = (0..100)
         .map(|ix| format!("\n## Section {ix}\n\n- streamed wrapped content {ix}\n"))
@@ -409,7 +409,7 @@ async fn list_remeasures_streaming_markdown_child_growth(cx: &mut TestAppContext
         markdown.replace(format!("{prefix}{suffix}"), cx)
     });
     visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let first = visual
         .debug_bounds("markdown-list-row-0")
@@ -521,7 +521,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
     });
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let suffix = (0..100)
         .map(|ix| format!("\n## Section {ix}\n\n- streamed wrapped content for item {ix}\n"))
@@ -535,7 +535,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
         item.update_text(&full, cx);
     });
     visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let plan = visual
         .debug_bounds("message-item-list-row-0")
@@ -663,7 +663,7 @@ async fn production_rows_do_not_overlap_on_consecutive_frames(cx: &mut TestAppCo
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     for _ in 0..2 {
-        visual.update(|window, cx| window.draw(cx).clear());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
         let rows = (0..4)
             .map(|ix| {
                 visual
@@ -704,11 +704,11 @@ async fn production_list_recovers_after_narrow_width_without_blank_range(cx: &mu
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     for _ in 0..2 {
-        visual.update(|window, cx| window.draw(cx).clear());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     visual.simulate_resize(size(px(320.), px(600.)));
     visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
     let narrow_scroll_range = state.max_offset_for_scrollbar().y;
     assert!(
         narrow_scroll_range > px(1_000.),
@@ -718,7 +718,7 @@ async fn production_list_recovers_after_narrow_width_without_blank_range(cx: &mu
     visual.simulate_resize(size(px(1_200.), px(600.)));
     visual.run_until_parked();
     for _ in 0..2 {
-        visual.update(|window, cx| window.draw(cx).clear());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     let wide_scroll_range = state.max_offset_for_scrollbar().y;
     assert!(
@@ -784,7 +784,7 @@ async fn list_measures_persistent_terminal_panel_rows(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let panel = visual
         .debug_bounds("terminal-list-row-0")
@@ -823,7 +823,7 @@ async fn terminal_load_more_remeasures_row_without_overlap(cx: &mut TestAppConte
     });
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
     let before = visual
         .debug_bounds("terminal-list-row-0")
         .expect("terminal row before load more");
@@ -832,7 +832,7 @@ async fn terminal_load_more_remeasures_row_without_overlap(cx: &mut TestAppConte
     visual.simulate_mouse_down(load_more, MouseButton::Left, Modifiers::none());
     visual.simulate_mouse_up(load_more, MouseButton::Left, Modifiers::none());
     visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let after = visual
         .debug_bounds("terminal-list-row-0")

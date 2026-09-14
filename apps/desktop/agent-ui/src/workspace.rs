@@ -32,11 +32,14 @@ use gpui_component::{
     Size, TITLE_BAR_HEIGHT, Theme, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState, Paste, RopeExt},
+    input::{
+        Editor, EditorState, Input, InputEvent, InputState, Paste, RopeExt, Textarea,
+        TextareaState,
+    },
     v_flex,
 };
 use gpui_component::{
-    StyledExt as _,
+    ThemeStyled as _,
     menu::PopupMenuItem,
     tab::{Tab, TabBar},
     tag::{Tag, TagVariant},
@@ -593,7 +596,7 @@ pub struct Workspace {
     /// notify drives the sidebar rows and the workspace's model surfaces.
     _mux_lists: gpui::Subscription,
     pub(crate) conversation: Entity<ConversationState>,
-    pub(crate) input_state: Entity<InputState>,
+    pub(crate) input_state: Entity<TextareaState>,
     /// Per-thread unsent composer text, keyed by thread id. Saved when
     /// switching away and restored on return, so each thread keeps its own
     /// in-progress draft instead of a single shared input bleeding across.
@@ -615,7 +618,7 @@ pub struct Workspace {
     /// Right-side markdown composer; opened via the `ToggleEditor` shortcut.
     /// Plain-text edit mode by default; `ToggleEditorPreview` switches to a
     /// rendered markdown preview (`Markdown`).
-    editor_state: Entity<InputState>,
+    editor_state: Entity<EditorState>,
     /// Whether the Editor tab is the active right-pane tab. Drives the inline
     /// composer hide (writing happens in the side panel) and the env/hero
     /// gates.
@@ -1084,16 +1087,15 @@ impl Workspace {
         };
 
         let input_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(4, 12)
                 .submit_on_enter(true)
                 .placeholder(i18n::t("workspace-input-placeholder"))
         });
 
         let editor_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor("markdown")
+            EditorState::new(window, cx)
+                .language("markdown")
                 .line_number(true)
                 .folding(false)
                 .soft_wrap(true)
