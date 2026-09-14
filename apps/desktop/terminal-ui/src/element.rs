@@ -334,6 +334,7 @@ impl Element for TerminalElement {
             // PTY pump's `with_mut`) is queued — parking_lot's `RwLock` is
             // task-fair and does not exempt reentrant readers.
             let term_rows = t.rows();
+            let block_char_render = t.block_char_render();
             t.with_term(|term| {
                 let content = term.renderable_content();
                 let selection = content.selection;
@@ -365,7 +366,7 @@ impl Element for TerminalElement {
                 } = layout_grid(
                     cells.iter().map(|(d, _g, c, cell)| (*d, *c, *cell)),
                     &self.theme,
-                    t.block_char_render(),
+                    block_char_render,
                 );
                 TermSnapshot {
                     background,
