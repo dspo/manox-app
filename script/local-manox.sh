@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Toggle the local manox [patch] override for this repo's git dependencies.
 #
-# ON  (default): rewrite .cargo/config.toml so the six manox-agent/-harness/
-#     -protocol/-session-core/-providers/-supervisor (+ lsp, manox-terminal,
-#     hyperlinks) git deps resolve from a local manox checkout instead of GitHub — daily two-repo workflow:
-#     edits in ../manox are picked up by the next cargo build, no push needed.
+# ON  (default): rewrite .cargo/config.toml so the nine dspo/manox git deps
+#     (agent/harness/protocol/session-core/providers/supervisor/lsp +
+#     manox-terminal + hyperlinks) resolve from a local manox checkout
+#     instead of GitHub — daily two-repo workflow: edits in ../manox are
+#     picked up by the next cargo build, no push needed.
 # OFF: remove the override (falls back to pure git deps pinned by Cargo.lock —
 #     what CI uses). .cargo/config.toml is gitignored on purpose.
 #

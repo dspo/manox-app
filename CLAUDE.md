@@ -20,12 +20,11 @@ crates/                    # 应用自有的非 UI-框架 crate
   cx/                      # cx headless 库（配置核心、launch-home、
                            #   chatgpt/vscode launch、probe db）
   cx-cli/                  # cx CLI bin（clap + ratatui TUI + relay + stats + `cx web`）
-  manox-ext-agents/        # ext-agent 启动 API、会话管理、IPC relay
-  manox-terminal/          # 终端仿真核心（PTY + alacritty 数据层）
-  hyperlinks/              # URL/路径链接识别（终端网格 + markdown）
+  manox-ext-agents/        # ext-agent 启动 API、会话管理、IPC relay、
+                           #   cx_session 桥（SessionHandle → PtySource）
 ```
 
-上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。
+上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真核心（manox-terminal）与 hyperlinks 已回流 dspo/manox（同经 git 依赖消费），`CxSessionSource` 桥留在本仓 manox-ext-agents。
 
 ### 与 manox 仓的联动开发
 
