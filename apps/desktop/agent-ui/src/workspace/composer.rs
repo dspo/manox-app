@@ -453,7 +453,12 @@ impl Workspace {
 
     /// Foreground settle of a turn that finished normally: move every
     /// `SteerPending` card out of the queue and into the message list as a
-    /// `steered` user bubble (the server injected it mid-turn). The remaining
+    /// `steered` user bubble. The card may promote on THIS settle even when the
+    /// server injected it during a continuation run it auto-starts afterwards:
+    /// delivery is guaranteed by the server's steer-continuation contract
+    /// (dspo/manox — idle steers wake their own run, residue at a normal settle
+    /// chains a `continue_`, and an aborted run withdraws every stranded steer
+    /// from the kernel queue so a retry can never double-deliver). The remaining
     /// `Queued` cards flush as the next turn afterwards, so the list order ends
     /// up matching the real delivery order (injected steers first, then the
     /// batched queue). `Failed` cards stay parked for a retry.
