@@ -21,8 +21,6 @@
 # gpui 相关依赖严格对齐 gpui-component 锁定的 rev，保证 gpui 单一版本。
 [workspace]
 members = [
-	"crates/manox-terminal",
-	"crates/hyperlinks",
 	"crates/cx",
 	"crates/cx-cli",
 	"crates/manox-ext-agents",
@@ -48,16 +46,18 @@ manox-protocol = { git = "https://github.com/dspo/manox.git", branch = "main" }
 manox-session-core = { git = "https://github.com/dspo/manox.git", branch = "main" }
 manox-providers = { git = "https://github.com/dspo/manox.git", branch = "main" }
 supervisor = { git = "https://github.com/dspo/manox.git", branch = "main" }
+# 终端仿真核心与 hyperlinks 已回流 runtime 仓（dspo/manox#773），本仓经
+# git 依赖消费；CxSessionSource 桥留在本仓的 manox-ext-agents。
+manox-terminal = { git = "https://github.com/dspo/manox.git", branch = "main" }
+hyperlinks = { git = "https://github.com/dspo/manox.git", branch = "main" }
 
 # —— 本仓成员（path 依赖；经 `foo.workspace = true` 引用）——
 agent-ui = { path = "apps/desktop/agent-ui" }
 manox = { path = "apps/desktop/manox" }
-manox-terminal = { path = "crates/manox-terminal" }
 terminal-ui = { path = "apps/desktop/terminal-ui" }
 manox-components = { path = "apps/desktop/manox-components" }
 manox-webview = { path = "apps/desktop/manox-webview" }
 manox-webview-macros = { path = "apps/desktop/manox-webview-macros" }
-hyperlinks = { path = "crates/hyperlinks" }
 manox-ext-agents = { path = "crates/manox-ext-agents" }
 # cx —— headless 库（原 dspo/cx 仓库并入 manox，拆分时随应用侧迁入本仓）。
 cx = { path = "crates/cx" }

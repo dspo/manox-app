@@ -2,8 +2,8 @@
 # Toggle the local manox [patch] override for this repo's git dependencies.
 #
 # ON  (default): rewrite .cargo/config.toml so the six manox-agent/-harness/
-#     -protocol/-session-core/-providers/-supervisor (+ lsp) git deps resolve
-#     from a local manox checkout instead of GitHub — daily two-repo workflow:
+#     -protocol/-session-core/-providers/-supervisor (+ lsp, manox-terminal,
+#     hyperlinks) git deps resolve from a local manox checkout instead of GitHub — daily two-repo workflow:
 #     edits in ../manox are picked up by the next cargo build, no push needed.
 # OFF: remove the override (falls back to pure git deps pinned by Cargo.lock —
 #     what CI uses). .cargo/config.toml is gitignored on purpose.
@@ -36,6 +36,8 @@ manox-session-core = { path = "$MANOX_DIR/crates/manox-session-core" }
 manox-providers = { path = "$MANOX_DIR/crates/manox-providers" }
 supervisor = { path = "$MANOX_DIR/crates/supervisor" }
 lsp = { path = "$MANOX_DIR/crates/lsp" }
+manox-terminal = { path = "$MANOX_DIR/crates/manox-terminal" }
+hyperlinks = { path = "$MANOX_DIR/crates/hyperlinks" }
 EOF
         echo "local override ON -> $MANOX_DIR"
         ;;

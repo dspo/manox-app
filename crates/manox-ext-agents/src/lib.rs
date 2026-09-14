@@ -32,6 +32,7 @@ use manox_providers::{
 
 pub mod api;
 pub mod chatgpt_app;
+pub mod cx_session;
 pub mod relay;
 pub mod send;
 pub mod session;
