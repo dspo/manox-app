@@ -1553,12 +1553,37 @@ pub fn build_launch_spec(
                 env_remove.push("ANTHROPIC_MODEL".into());
                 env.insert("ANTHROPIC_BASE_URL".into(), model.endpoint_url.clone());
                 env.insert("ANTHROPIC_API_KEY".into(), apikey);
-                env.insert("ANTHROPIC_MODEL".into(), api_model_id.to_string());
+                // Claude Code's context-window picker (extracted from the
+                // 2.1.170 binary) tests only `/\[1m\]/i` on the model name;
+                // `[2m]` appears solely in a strip/display helper and does
+                // not widen the window. CLAUDE_CODE_MAX_CONTEXT_TOKENS is read
+                // only under DISABLE_COMPACT. So `[1m]` is the sole pass-through
+                // that declares a 1M window (Claude Code strips it before the
+                // wire request); every other ctx_hint falls back to the base id
+                // plus the env, warned below as DISABLE_COMPACT-only. Mirrors the
+                // cx-cli `claude` arm (see convergence issue for dedup).
+                let claude_model = match ctx_hint {
+                    Some(1_000_000) => format!("{api_model_id}[1m]"),
+                    Some(tokens) => {
+                        eprintln!(
+                            "cx: 警告: Claude Code 无法用模型名后缀表示 {tokens} 上下文窗口\
+                             （只有 [1m] 参与窗口判定），且 CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+                             仅在 DISABLE_COMPACT 开启时生效；默认配置下 Claude Code 会回退 \
+                             200k 并提前自动压缩。"
+                        );
+                        api_model_id.to_string()
+                    }
+                    None => api_model_id.to_string(),
+                };
+                env.insert("ANTHROPIC_MODEL".into(), claude_model.clone());
+                // Context declaration travels with the injection: LaunchSpec
+                // env overrides the inherited env at spawn, and suffix-less
+                // models leave any shell-exported value untouched.
                 if let Some(tokens) = ctx_hint {
                     env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), tokens.to_string());
                 }
                 args.push("--model".into());
-                args.push(api_model_id.to_string());
+                args.push(claude_model);
                 args.extend(passthrough_args.iter().cloned());
             }
             "codex" => {
@@ -1735,5 +1760,142 @@ mod probe {
         ) -> Result<Option<super::super::WireApi>, rusqlite::Error> {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn fake_claude_binary(dir: &TempDir) -> PathBuf {
+        let path = dir.path().join("claude");
+        fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn claude_resolved_model(model_id: &str) -> ResolvedModel {
+        ResolvedModel {
+            id: model_id.into(),
+            desc: String::new(),
+            wire_api: WireApi::Anthropic,
+            model_wire_apis: vec![WireApi::Anthropic],
+            provider_name: "DashScope".into(),
+            endpoint_url: "https://dashscope.aliyuncs.com/apps/anthropic".into(),
+            visible_agents: vec!["claude".into()],
+            copilot_auth: CopilotAuth::ApiKey,
+            env: BTreeMap::new(),
+            apikey_source: None,
+            max_tokens: None,
+            context: None,
+            supports_tools: true,
+            supports_images: false,
+        }
+    }
+
+    // Desktop external sessions reach build_launch_spec through
+    // `AgentBuilder::spawn` → `SessionHandle::spawn`; the claude arm must
+    // declare the context window the same way the cx-cli arm does.
+    fn claude_launch_spec_for_model(model_id: &str) -> LaunchSpec {
+        let dir = TempDir::new().unwrap();
+        let binary = fake_claude_binary(&dir);
+        let selection = Selection {
+            agent_id: "claude".into(),
+            agent_binary: binary.display().to_string(),
+            agent_args: Vec::new(),
+            agent_env: BTreeMap::new(),
+            selected_wire_api: WireApi::Anthropic,
+            provider: ResolvedProvider {
+                name: "DashScope".into(),
+                has_endpoints: true,
+                apikey_source: Some("literal:test-key".into()),
+                env: BTreeMap::new(),
+            },
+            model: Some(claude_resolved_model(model_id)),
+            injected_models: Vec::new(),
+        };
+        build_launch_spec(&selection, &[], false, None, None).unwrap()
+    }
+
+    fn model_arg(spec: &LaunchSpec) -> Option<String> {
+        spec.args
+            .iter()
+            .position(|a| a == "--model")
+            .map(|i| spec.args[i + 1].clone())
+    }
+
+    #[test]
+    fn launch_forwards_context_suffix_to_claude() {
+        // `glm-5.2[1m]` → claude receives `--model glm-5.2[1m]` and
+        // ANTHROPIC_MODEL=glm-5.2[1m] (Claude Code parses the name suffix and
+        // strips it before the wire request); CX_MODEL stays the base id;
+        // CLAUDE_CODE_MAX_CONTEXT_TOKENS is still injected as the
+        // DISABLE_COMPACT-only fallback.
+        let spec = claude_launch_spec_for_model("glm-5.2[1m]");
+        assert_eq!(spec.env.get("CX_MODEL"), Some(&"glm-5.2".to_string()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_MODEL"),
+            Some(&"glm-5.2[1m]".to_string())
+        );
+        assert_eq!(model_arg(&spec), Some("glm-5.2[1m]".to_string()));
+        assert_eq!(
+            spec.env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some(&"1000000".to_string())
+        );
+    }
+
+    #[test]
+    fn launch_does_not_forward_2m_suffix_to_claude() {
+        // [2m] does not participate in window selection (Claude Code's picker
+        // tests only `/\[1m\]/i`; [2m] lives in a strip/display helper), so it
+        // merges into the fallback arm: base id on the wire, with
+        // CLAUDE_CODE_MAX_CONTEXT_TOKENS=2000000 (DISABLE_COMPACT-only).
+        let spec = claude_launch_spec_for_model("glm-5.2[2m]");
+        assert_eq!(spec.env.get("CX_MODEL"), Some(&"glm-5.2".to_string()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_MODEL"),
+            Some(&"glm-5.2".to_string())
+        );
+        assert_eq!(model_arg(&spec), Some("glm-5.2".to_string()));
+        assert!(!spec.args.iter().any(|a| a.contains("[2m]")));
+        assert_eq!(
+            spec.env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some(&"2000000".to_string())
+        );
+    }
+
+    #[test]
+    fn launch_falls_back_to_env_for_unrepresentable_claude_suffix() {
+        // [200k] has no window-widening suffix (only [1m] is tested), so the
+        // base id goes on the wire and the window is declared via the
+        // DISABLE_COMPACT-only env fallback.
+        let spec = claude_launch_spec_for_model("glm-5.2[200k]");
+        assert_eq!(spec.env.get("CX_MODEL"), Some(&"glm-5.2".to_string()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_MODEL"),
+            Some(&"glm-5.2".to_string())
+        );
+        assert!(!spec.args.iter().any(|a| a.contains('[')));
+        assert_eq!(
+            spec.env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some(&"200000".to_string())
+        );
+    }
+
+    #[test]
+    fn launch_no_suffix_leaves_claude_model_unchanged() {
+        // Suffix-less model: base id on the wire, no context declaration
+        // injected (leaves any shell-exported CLAUDE_CODE_MAX_CONTEXT_TOKENS
+        // untouched).
+        let spec = claude_launch_spec_for_model("qwen3.6-plus");
+        assert_eq!(spec.env.get("CX_MODEL"), Some(&"qwen3.6-plus".to_string()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_MODEL"),
+            Some(&"qwen3.6-plus".to_string())
+        );
+        assert_eq!(model_arg(&spec), Some("qwen3.6-plus".to_string()));
+        assert!(!spec.env.contains_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
     }
 }
