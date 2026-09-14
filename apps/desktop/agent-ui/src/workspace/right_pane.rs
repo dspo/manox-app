@@ -8,19 +8,24 @@
 use super::*;
 
 impl Workspace {
-    /// Switch to the terminal pane, creating the terminal tab on first focus.
-    /// The terminal runs in the workspace's cwd with the user's shell.
+    /// Switch to the terminal pane, creating the terminal tab on first
+    /// focus. The shell runs in the active session's working directory (the
+    /// launcher's source), falling back to the workspace default when the
+    /// session has not seeded one.
     pub fn focus_terminal(&mut self, cx: &mut Context<Self>) {
         if self.terminal_view.is_none() {
             let id = uuid::Uuid::new_v4().to_string();
-            let pty = match manox_terminal::pty::default_source(&self.cwd, 80, 24) {
+            let spawn_cwd = self
+                .launcher_thread_cwd(cx)
+                .unwrap_or_else(|| self.cwd.clone());
+            let pty = match manox_terminal::pty::default_source(&spawn_cwd, 80, 24) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::error!(error = ?e, "failed to open terminal pty");
                     return;
                 }
             };
-            let terminal = match Terminal::spawn(id, self.cwd.clone(), 80, 24, pty) {
+            let terminal = match Terminal::spawn(id, spawn_cwd, 80, 24, pty) {
                 Ok(t) => cx.new(|cx| TerminalProxy::new(t, cx)),
                 Err(e) => {
                     tracing::error!(error = ?e, "failed to spawn terminal");
@@ -381,15 +386,16 @@ impl Workspace {
         }
     }
 
-    /// The active thread's cwd for launcher spawns (`None` when unset — the
-    /// spawn paths fall back to the workspace cwd, parity with the
-    /// Conversations-header spawns).
+    /// The active session's working directory — the single source for every
+    /// right-pane spawn (launcher rows and the terminal pane). `None` when
+    /// no foreground store exists or its `cwd` projection has not seeded
+    /// yet; the spawn paths then fall back to the workspace default (parity
+    /// with the Conversations-header spawns).
     pub(super) fn launcher_thread_cwd(&self, cx: &App) -> Option<PathBuf> {
         let cwd = self
             .store
             .as_ref()
-            .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))
-            .expect("foreground store present");
+            .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))?;
         if cwd.as_os_str().is_empty() {
             None
         } else {
