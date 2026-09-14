@@ -505,6 +505,10 @@ impl SessionMultiplexer {
                 self.set_threads(threads.clone());
                 cx.notify();
             }
+            // The live-terminal table has no desktop consumer: the
+            // desktop's terminal sessions are in-process spawns, not the
+            // server's persisted terminal sessions this snapshot describes.
+            HostEvent::TerminalsUpdated { .. } => {}
             HostEvent::SessionStatus {
                 session_id,
                 running,
@@ -771,6 +775,9 @@ impl SessionMultiplexer {
             // Hidden-context seeding is an embedder (VS Code host) feature;
             // the desktop app never seeds.
             seed: None,
+            // Multi-root working directories have no desktop surface;
+            // empty keeps the session single-cwd.
+            working_directories: Vec::new(),
         });
         self.create_callbacks.insert(id, on_done);
     }
