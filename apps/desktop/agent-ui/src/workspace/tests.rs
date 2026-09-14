@@ -2334,6 +2334,82 @@ fn launcher_cascade_builds_inside_workspace_update(cx: &mut gpui::TestAppContext
     let _ = std::fs::remove_file(&db_path);
 }
 
+/// The right-pane spawn cwd source: `launcher_thread_cwd` tracks the
+/// foreground store's `cwd` projection exactly — seeded value wins, an
+/// unseeded (empty) projection and a missing store both yield `None` so
+/// the spawn paths fall back to the workspace default. All three branches
+/// are load-bearing: the terminal pane and every launcher row key off
+/// this one helper.
+#[gpui::test]
+fn launcher_thread_cwd_tracks_the_foreground_projection(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path =
+        std::env::temp_dir().join(format!("manox-launcher-cwd-test-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    // Seeded projection wins.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            let handle = ws.store.clone().expect("the ctor workspace has a leaf");
+            handle.update(cx, |h, _| {
+                h.store
+                    .merge_projection("cwd", serde_json::json!("/seeded/project"), 5);
+            });
+            assert_eq!(
+                ws.launcher_thread_cwd(cx),
+                Some(std::path::PathBuf::from("/seeded/project")),
+                "a seeded cwd projection is the spawn source"
+            );
+
+            // Unseeded (empty) projection: fall back to the workspace default.
+            handle.update(cx, |h, _| {
+                h.store.merge_projection("cwd", serde_json::json!(""), 6);
+            });
+            assert_eq!(
+                ws.launcher_thread_cwd(cx),
+                None,
+                "an empty cwd projection yields None"
+            );
+
+            // Missing foreground store: None (warned), never a panic.
+            let saved = ws.store.take();
+            assert_eq!(
+                ws.launcher_thread_cwd(cx),
+                None,
+                "a missing foreground store yields None instead of panicking"
+            );
+            ws.store = saved;
+        });
+    });
+    let _ = std::fs::remove_file(&db_path);
+}
+
 /// `turn_navigator_layout` matrix: the gutter/border compensation must keep
 /// the overlay centered over the message column's card interior at every
 /// combination of sidebar collapse, right pane, and context rail.

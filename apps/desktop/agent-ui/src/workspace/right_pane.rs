@@ -388,14 +388,18 @@ impl Workspace {
 
     /// The active session's working directory — the single source for every
     /// right-pane spawn (launcher rows and the terminal pane). `None` when
-    /// no foreground store exists or its `cwd` projection has not seeded
-    /// yet; the spawn paths then fall back to the workspace default (parity
-    /// with the Conversations-header spawns).
+    /// no foreground store exists (loud: the attach invariant is under
+    /// pressure) or its `cwd` projection has not seeded yet; the spawn
+    /// paths then fall back to the workspace default (parity with the
+    /// Conversations-header spawns).
     pub(super) fn launcher_thread_cwd(&self, cx: &App) -> Option<PathBuf> {
-        let cwd = self
-            .store
-            .as_ref()
-            .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))?;
+        let Some(store) = self.store.as_ref() else {
+            tracing::warn!(
+                "right-pane spawn without a foreground store — falling back to the workspace cwd"
+            );
+            return None;
+        };
+        let cwd = std::path::PathBuf::from(store.read(cx).store.cwd.clone());
         if cwd.as_os_str().is_empty() {
             None
         } else {
