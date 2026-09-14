@@ -1336,8 +1336,12 @@ fn build_launch_spec(
         // Inject a unified model identifier so agents and their tooling can
         // detect which model cx configured, regardless of the agent type.
         // The wire-facing id is the base id (context suffix stripped; providers
-        // do not recognize cx's suffix). ctx_hint ([1m] → 1_000_000) is consumed
-        // per agent branch: claude writes CLAUDE_CODE_MAX_CONTEXT_TOKENS, copilot
+        // do not recognize cx's suffix), except claude, which re-appends a
+        // `[1m]` suffix for the 1M tier — its own window parser tests only
+        // `/\[1m\]/i` and strips the suffix before the wire request. ctx_hint
+        // ([1m] → 1_000_000) is consumed per agent branch: claude writes the
+        // `[1m]`-suffixed name (or the base id plus CLAUDE_CODE_MAX_CONTEXT_TOKENS
+        // as a DISABLE_COMPACT-only fallback for other tiers), copilot
         // COPILOT_PROVIDER_MAX_PROMPT_TOKENS, codex model_context_window.
         let (api_model_id, ctx_hint) = parse_model_context_suffix(&model.id);
         env.insert("CX_MODEL".into(), api_model_id.to_string());
@@ -1393,15 +1397,37 @@ fn build_launch_spec(
                 env_remove.push("ANTHROPIC_MODEL".into());
                 env.insert("ANTHROPIC_BASE_URL".into(), model.endpoint_url.clone());
                 env.insert("ANTHROPIC_API_KEY".into(), apikey);
-                env.insert("ANTHROPIC_MODEL".into(), api_model_id.to_string());
-                // [1m] context declaration travels with the injection: LaunchSpec
-                // env overrides the inherited env at spawn, and suffix-less models
-                // leave any shell-exported value untouched (apply_byok_env parity).
+                // Claude Code's context-window picker (extracted from the
+                // 2.1.170 binary) tests only `/\[1m\]/i` on the model name;
+                // `[2m]` appears solely in a strip/display helper and does
+                // not widen the window. CLAUDE_CODE_MAX_CONTEXT_TOKENS is read
+                // only under DISABLE_COMPACT. So `[1m]` is the sole pass-through
+                // that declares a 1M window (Claude Code strips it before the
+                // wire request); every other ctx_hint falls back to the base id
+                // plus the env, warned below as DISABLE_COMPACT-only.
+                let claude_model = match ctx_hint {
+                    Some(1_000_000) => format!("{api_model_id}[1m]"),
+                    Some(tokens) => {
+                        eprintln!(
+                            "cx: 警告: Claude Code 无法用模型名后缀表示 {tokens} 上下文窗口\
+                             （只有 [1m] 参与窗口判定），且 CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+                             仅在 DISABLE_COMPACT 开启时生效；默认配置下 Claude Code 会回退 \
+                             200k 并提前自动压缩。"
+                        );
+                        api_model_id.to_string()
+                    }
+                    None => api_model_id.to_string(),
+                };
+                env.insert("ANTHROPIC_MODEL".into(), claude_model.clone());
+                // Context declaration travels with the injection: LaunchSpec
+                // env overrides the inherited env at spawn, and suffix-less
+                // models leave any shell-exported value untouched
+                // (apply_byok_env parity).
                 if let Some(tokens) = ctx_hint {
                     env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), tokens.to_string());
                 }
                 args.push("--model".into());
-                args.push(api_model_id.to_string());
+                args.push(claude_model);
                 args.extend(passthrough_args.iter().cloned());
             }
             "codex" => {
@@ -3762,11 +3788,7 @@ agents:
         let _ = fs::remove_dir_all(fake_binary.parent().unwrap());
     }
 
-    #[test]
-    fn launch_strips_1m_suffix_for_claude() {
-        // `glm-5.2[1m]` → claude 收到 ANTHROPIC_MODEL=glm-5.2、--model glm-5.2、
-        // CX_MODEL=glm-5.2（[1m] 是 cx 内部上下文后缀，provider 不识别）。
-        let fake_binary = create_fake_binary("claude");
+    fn claude_launch_spec_for_model(fake_binary: &Path, model_id: &str) -> LaunchSpec {
         let selection = Selection {
             agent_id: "claude".into(),
             agent_binary: fake_binary.display().to_string(),
@@ -3779,35 +3801,85 @@ agents:
                 apikey_source: Some("literal:test-key".into()),
                 env: BTreeMap::new(),
             },
-            model: Some(ResolvedModel {
-                id: "glm-5.2[1m]".into(),
-                desc: String::new(),
-                wire_api: WireApi::Anthropic,
-                model_wire_apis: vec![WireApi::Anthropic],
-                provider_name: "DashScope".into(),
-                endpoint_url: "https://dashscope.aliyuncs.com/apps/anthropic".into(),
-                visible_agents: vec!["claude".into()],
-                copilot_auth: CopilotAuth::ApiKey,
-                env: BTreeMap::new(),
-                apikey_source: None,
-                max_tokens: None,
-                context: None,
-                supports_tools: true,
-                supports_images: false,
-            }),
+            model: Some(test_resolved_model(
+                model_id,
+                "https://dashscope.aliyuncs.com/apps/anthropic",
+                WireApi::Anthropic,
+            )),
             injected_models: Vec::new(),
         };
-        let spec = build_launch_spec(&selection, &[], false, None, None).unwrap();
+        build_launch_spec(&selection, &[], false, None, None).unwrap()
+    }
+
+    #[test]
+    fn launch_forwards_context_suffix_to_claude() {
+        // `glm-5.2[1m]` → claude 收到 --model glm-5.2[1m] 与 ANTHROPIC_MODEL=glm-5.2[1m]
+        // （Claude Code 识别模型名后缀并自行在请求前剥离）；CX_MODEL 保持 base id；
+        // CLAUDE_CODE_MAX_CONTEXT_TOKENS 仍注入，作为 DISABLE_COMPACT 场景的兜底。
+        let fake_binary = create_fake_binary("claude");
+        let spec = claude_launch_spec_for_model(&fake_binary, "glm-5.2[1m]");
+        assert_eq!(spec.env.get("CX_MODEL"), Some(&"glm-5.2".to_string()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_MODEL"),
+            Some(&"glm-5.2[1m]".to_string())
+        );
+        let model_arg = spec
+            .args
+            .iter()
+            .position(|a| a == "--model")
+            .map(|i| spec.args[i + 1].clone());
+        assert_eq!(model_arg, Some("glm-5.2[1m]".to_string()));
+        assert_eq!(
+            spec.env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some(&"1000000".to_string())
+        );
+        let _ = fs::remove_dir_all(fake_binary.parent().unwrap());
+    }
+
+    #[test]
+    fn launch_does_not_forward_2m_suffix_to_claude() {
+        // [2m] 不参与窗口判定：Claude Code 的窗口选择器只测 /\[1m\]/i，`[2m]`
+        // 仅出现在剥离/展示 helper 里（真二进制实测 [2m] → 200k no-op）。故并入
+        // 兜底臂：--model 与 ANTHROPIC_MODEL 传 base id，依赖
+        // CLAUDE_CODE_MAX_CONTEXT_TOKENS=2000000（仅 DISABLE_COMPACT 时生效）
+        // 兜底，args 不含 [2m]。
+        let fake_binary = create_fake_binary("claude");
+        let spec = claude_launch_spec_for_model(&fake_binary, "glm-5.2[2m]");
         assert_eq!(spec.env.get("CX_MODEL"), Some(&"glm-5.2".to_string()));
         assert_eq!(
             spec.env.get("ANTHROPIC_MODEL"),
             Some(&"glm-5.2".to_string())
         );
-        assert!(spec.args.iter().any(|a| a == "glm-5.2"));
-        assert!(!spec.args.iter().any(|a| a.contains("[1m]")));
+        let model_arg = spec
+            .args
+            .iter()
+            .position(|a| a == "--model")
+            .map(|i| spec.args[i + 1].clone());
+        assert_eq!(model_arg, Some("glm-5.2".to_string()));
+        assert!(!spec.args.iter().any(|a| a.contains("[2m]")));
         assert_eq!(
             spec.env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
-            Some(&"1000000".to_string())
+            Some(&"2000000".to_string())
+        );
+        let _ = fs::remove_dir_all(fake_binary.parent().unwrap());
+    }
+
+    #[test]
+    fn launch_falls_back_to_env_for_unrepresentable_claude_suffix() {
+        // [200k] 无对应的可扩窗后缀（只有 [1m] 参与窗口判定）→ 传 base id，
+        // 依赖 CLAUDE_CODE_MAX_CONTEXT_TOKENS 兜底（仅 DISABLE_COMPACT 时生效），
+        // 并输出 warning 提示默认配置下会回退 200k。
+        let fake_binary = create_fake_binary("claude");
+        let spec = claude_launch_spec_for_model(&fake_binary, "glm-5.2[200k]");
+        assert_eq!(spec.env.get("CX_MODEL"), Some(&"glm-5.2".to_string()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_MODEL"),
+            Some(&"glm-5.2".to_string())
+        );
+        assert!(!spec.args.iter().any(|a| a.contains('[')));
+        assert_eq!(
+            spec.env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some(&"200000".to_string())
         );
         let _ = fs::remove_dir_all(fake_binary.parent().unwrap());
     }

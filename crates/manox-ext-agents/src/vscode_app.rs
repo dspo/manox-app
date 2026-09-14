@@ -291,18 +291,34 @@ fn apply_byok_env(selection: &Selection, apikey: &str, env: &mut BTreeMap<String
     for key in BYOK_OVERRIDE_KEYS {
         env.remove(*key);
     }
-    // 剥除上下文后缀：provider 接收 base id（如 glm-5.2），上下文窗口改经
-    // CLAUDE_CODE_MAX_CONTEXT_TOKENS 传达。
+    // 剥除上下文后缀得 base id；但 Claude Code 的上下文窗口选择器（2.1.170 二进制
+    // 提取）只测模型名上的 `/\[1m\]/i`——`[2m]` 仅出现在剥离/展示 helper、不扩窗，
+    // 且 CLAUDE_CODE_MAX_CONTEXT_TOKENS 仅在 DISABLE_COMPACT 时读取。故 1M 档
+    // （[1m]）把带后缀的模型名传给 ANTHROPIC_MODEL（Claude Code 上线前自行剥离），
+    // 其余 Some(_) 回退 base id + env（DISABLE_COMPACT-only，下方告警）。与
+    // cx-cli `claude` 分支同语义。CX_MODEL 与别名 env 一律为 base id。
     let (api_model_id, ctx_hint) = parse_model_context_suffix(&model.id);
+    let claude_model = match ctx_hint {
+        Some(1_000_000) => format!("{api_model_id}[1m]"),
+        Some(tokens) => {
+            eprintln!(
+                "cx: 警告: Claude Code 无法用模型名后缀表示 {tokens} 上下文窗口\
+                 （只有 [1m] 参与窗口判定），且 CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+                 仅在 DISABLE_COMPACT 开启时生效；默认配置下 Claude Code 会回退 \
+                 200k 并提前自动压缩。"
+            );
+            api_model_id.to_string()
+        }
+        None => api_model_id.to_string(),
+    };
     env.insert("ANTHROPIC_BASE_URL".into(), model.endpoint_url.clone());
     env.insert("ANTHROPIC_API_KEY".into(), apikey.to_string());
-    env.insert("ANTHROPIC_MODEL".into(), api_model_id.to_string());
+    env.insert("ANTHROPIC_MODEL".into(), claude_model);
     env.insert("CX_MODEL".into(), api_model_id.to_string());
-    // Claude Code 对未识别模型名按内置窗口假设上下文；经 ANTHROPIC_BASE_URL
-    // 路由第三方模型时需显式声明，否则 [1m] 模型会被按默认窗口截断。
     if let Some(tokens) = ctx_hint {
         // 选中模型带上下文后缀时窗口声明以本次注入为准，剥除 shell 残留旧值
-        //（无后缀模型不设置该变量，保留 shell 原值）。
+        //（无后缀模型不设置该变量，保留 shell 原值）。1M 档下 env 仅作
+        // DISABLE_COMPACT 场景的兜底。
         env.remove("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
         env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), tokens.to_string());
     }
@@ -592,10 +608,12 @@ mod tests {
         );
         assert_eq!(
             env.get("ANTHROPIC_MODEL").map(String::as_str),
-            Some("glm-5.2")
+            Some("glm-5.2[1m]")
         );
+        // ANTHROPIC_MODEL 透传 [1m]（Claude Code 唯一参与窗口判定的后缀），
+        // CX_MODEL/别名仍为 base id。
         assert_eq!(env.get("CX_MODEL").map(String::as_str), Some("glm-5.2"));
-        // [1m] 后缀 → 上下文窗口声明
+        // [1m] 后缀 → 上下文窗口声明（DISABLE_COMPACT-only 兜底，与透传并存）
         assert_eq!(
             env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
                 .map(String::as_str),
@@ -640,6 +658,33 @@ mod tests {
                 .map(String::as_str),
             Some("qwen3.7-max")
         );
+    }
+
+    /// [2m]/[200k] 不参与 Claude Code 窗口判定 → 回退 base id + env
+    /// （DISABLE_COMPACT-only 兜底），ANTHROPIC_MODEL 不带任何后缀。与 cx-cli
+    /// `claude` 分支同语义。
+    #[test]
+    fn apply_byok_env_falls_back_for_non_1m_suffix() {
+        for (model_id, tokens) in [("glm-5.2[2m]", "2000000"), ("glm-5.2[200k]", "200000")] {
+            let selection = vscode_test_selection(model_id, BTreeMap::new());
+            let mut env = BTreeMap::new();
+            apply_byok_env(&selection, "k", &mut env);
+            assert_eq!(
+                env.get("ANTHROPIC_MODEL").map(String::as_str),
+                Some("glm-5.2")
+            );
+            assert_eq!(env.get("CX_MODEL").map(String::as_str), Some("glm-5.2"));
+            assert_eq!(
+                env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                    .map(String::as_str),
+                Some("glm-5.2")
+            );
+            assert_eq!(
+                env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+                    .map(String::as_str),
+                Some(tokens)
+            );
+        }
     }
 
     #[test]
