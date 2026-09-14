@@ -67,7 +67,7 @@ pub fn server_call_to_thread_event(call: &ServerCall) -> Option<ThreadEvent> {
         // — dropping them silently is fail-open (the server parks on the
         // 300s timeout with zero client-side trace). The debug log is the
         // minimum trace; implementing them is C4 wire work.
-        BrowserOp { .. } | ClipboardRead { .. } | OpenExternal { .. } => {
+        BrowserOp { .. } | ClipboardRead { .. } | OpenExternal { .. } | InvokeClientTool { .. } => {
             tracing::debug!(
                 "capability call not supported by the desktop client (will time out server-side)"
             );

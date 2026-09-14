@@ -721,6 +721,7 @@ mod tests {
                     reasoning: 0,
                 }),
                 origin_rpc: None,
+                display: None,
             },
         }));
         let snap = &store.per_request_usage["m-9"];
@@ -745,6 +746,7 @@ mod tests {
                 content: vec![serde_json::json!({"type": "text", "text": "hello"})],
                 usage: None,
                 origin_rpc: None,
+                display: None,
             },
         }));
         store.apply_window_change(WindowChange::Append(JournalWireEntry {
@@ -757,6 +759,7 @@ mod tests {
                 content: vec![serde_json::json!({"type": "text", "text": "world"})],
                 usage: None,
                 origin_rpc: None,
+                display: None,
             },
         }));
         assert_eq!(store.derived_messages().len(), 2);
@@ -816,6 +819,7 @@ mod tests {
                 content: vec![serde_json::json!({"type": "text", "text": "hi"})],
                 usage: None,
                 origin_rpc: None,
+                display: None,
             },
         )];
         let rebuilt = store.apply_window_change(WindowChange::Replace {
@@ -863,6 +867,7 @@ mod tests {
                 content: vec![],
                 usage: None,
                 origin_rpc: Some("rpc-77".into()),
+                display: None,
             },
         );
         store.apply_window_change(WindowChange::Append(entry));

@@ -99,7 +99,7 @@ impl Workspace {
             }
         };
         let id = format!("external:{}:{}", agent_id, uuid::Uuid::new_v4());
-        let source = manox_terminal::cx_session::CxSessionSource::new(Arc::clone(&handle));
+        let source = manox_ext_agents::cx_session::CxSessionSource::new(Arc::clone(&handle));
         let terminal = match Terminal::spawn(id.clone(), cwd.clone(), 80, 24, Box::new(source)) {
             Ok(t) => cx.new(|cx| TerminalProxy::new(t, cx)),
             Err(e) => {
@@ -471,7 +471,7 @@ impl Workspace {
                 }
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                let source = manox_terminal::cx_session::CxSessionSource::new(Arc::clone(&handle));
+                let source = manox_ext_agents::cx_session::CxSessionSource::new(Arc::clone(&handle));
                 let terminal =
                     match manox_terminal::Terminal::spawn(id.clone(), PathBuf::from(&sidecar.cwd), 80, 24, Box::new(source))
                     {

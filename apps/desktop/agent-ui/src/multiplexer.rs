@@ -768,6 +768,9 @@ impl SessionMultiplexer {
             initial_model: initial_model.map(ModelRef::new),
             approval_mode,
             reasoning_effort,
+            // Hidden-context seeding is an embedder (VS Code host) feature;
+            // the desktop app never seeds.
+            seed: None,
         });
         self.create_callbacks.insert(id, on_done);
     }

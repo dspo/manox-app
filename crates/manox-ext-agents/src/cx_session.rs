@@ -1,4 +1,6 @@
-//! `PtySource` backed by a `cx::SessionHandle`.
+//! `PtySource` backed by a `cx::SessionHandle`. This bridge lives in
+//! ext-agents (next to the `SessionHandle` it wraps); the terminal core
+//! itself is consumed from the runtime repo via git dependency.
 //!
 //! An external agent CLI (claude/codex/copilot) runs under a PTY that cx owns;
 //! this module bridges cx's blocking `SessionHandle::read` / `wait` into the
@@ -12,10 +14,10 @@ use std::thread;
 
 use async_channel::Sender;
 
-use manox_ext_agents::SessionHandle;
+use manox_terminal::event::TerminalEvent;
+use manox_terminal::pty_source::PtySource;
 
-use crate::event::TerminalEvent;
-use crate::pty_source::PtySource;
+use crate::SessionHandle;
 
 /// A `PtySource` over a shared `cx::SessionHandle`. The handle is held behind
 /// `Arc` so the external-session owner (the workspace's `ExternalSession`)

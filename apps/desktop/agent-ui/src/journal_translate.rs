@@ -108,6 +108,7 @@ pub fn history_entries_of(entry: &JournalWireEntry) -> Vec<HistoryEntry> {
                         content: vec![tail.clone()],
                         usage: None,
                         origin_rpc: None,
+                        display: None,
                     },
                 };
                 match role.as_str() {
@@ -553,6 +554,7 @@ mod tests {
                 content: vec![serde_json::json!({"type": "text", "text": "hello"})],
                 usage: None,
                 origin_rpc: Some("rpc-1".into()),
+                display: None,
             },
         );
         let items = history_entries_of(&entry);
@@ -585,6 +587,7 @@ mod tests {
                     reasoning: 0,
                 }),
                 origin_rpc: None,
+                display: None,
             },
         );
         let items = history_entries_of(&entry);
@@ -613,6 +616,7 @@ mod tests {
                 content: vec![row],
                 usage: None,
                 origin_rpc: None,
+                display: None,
             },
         );
         let items = history_entries_of(&entry);
@@ -725,6 +729,7 @@ mod tests {
                 content: vec![],
                 usage: None,
                 origin_rpc: None,
+                display: None,
             },
         );
         assert!(thread_event_of(&message).is_none());

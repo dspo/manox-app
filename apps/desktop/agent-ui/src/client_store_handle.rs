@@ -880,6 +880,7 @@ mod tests {
             content: vec![serde_json::json!({"type": "text", "text": "x"})],
             usage: None,
             origin_rpc: None,
+            display: None,
         };
 
         // Snapshot: two message rows plus one delta → Replace → committed
@@ -1245,6 +1246,7 @@ mod tests {
                     content: vec![serde_json::json!({"type": "text", "text": "one"})],
                     usage: None,
                     origin_rpc: None,
+                    display: None,
                 },
             ),
             wire(
@@ -1254,6 +1256,7 @@ mod tests {
                     content: vec![serde_json::json!({"type": "text", "text": "two"})],
                     usage: None,
                     origin_rpc: None,
+                    display: None,
                 },
             ),
             wire(
@@ -1263,6 +1266,7 @@ mod tests {
                     content: vec![serde_json::json!({"type": "text", "text": "three"})],
                     usage: None,
                     origin_rpc: Some("rpc-9".into()),
+                    display: None,
                 },
             ),
         ];
@@ -1346,6 +1350,7 @@ mod tests {
                 content: vec![serde_json::json!({"type": "text", "text": "hi"})],
                 usage: None,
                 origin_rpc: None,
+                display: None,
             },
         );
         handle.update(cx, |h, cx| {
@@ -1484,6 +1489,7 @@ mod tests {
                                 content: vec![serde_json::json!({"type": "text", "text": "hello"})],
                                 usage: None,
                                 origin_rpc: Some("rpc-42".into()),
+                                display: None,
                             },
                         )],
                     ),
@@ -1508,6 +1514,7 @@ mod tests {
                             content: vec![serde_json::json!({"type": "text", "text": "hello"})],
                             usage: None,
                             origin_rpc: Some("rpc-42".into()),
+                            display: None,
                         },
                     },
                 ),
