@@ -226,7 +226,8 @@ impl ClientStoreHandle {
     }
 
     /// A v2 follow-stream frame: Snapshot opens/replaces the window; Entry
-    /// feeds the live journal; Projections merge the P-face.
+    /// feeds the live journal; Projections merge the P-face. Terminal PTY
+    /// bytes are a different stream kind and never route here.
     fn apply_stream_frame(&mut self, frame: StreamFrame, cx: &mut Context<Self>) {
         let outs = match frame {
             StreamFrame::Snapshot(snap) => {
@@ -264,6 +265,7 @@ impl ClientStoreHandle {
                 cx.notify();
                 return;
             }
+            StreamFrame::TerminalOutput { .. } => return,
         };
         self.handle_fold_outs(outs, cx);
     }
