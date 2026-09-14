@@ -833,7 +833,11 @@ mod tests {
                 "cumulativeUsage": {"input": 100, "output": 40, "cacheWrite": 5, "cacheRead": 10},
                 "cumulativeCost": 0.42,
                 "models": [
-                    {"provider": "P", "model": "m", "input": 100, "output": 40,
+                    // Real §E.3 payload shape: the server already sends the
+                    // canonical `{provider}/{model}` identity in `model`; the
+                    // `provider` field is redundant and must NOT be re-prefixed
+                    // onto the group key (a regression would yield `P/P/m`).
+                    {"provider": "P", "model": "P/m", "input": 100, "output": 40,
                      "cacheRead": 10, "cacheWrite": 5}
                 ],
                 "perModelCost": {"P/m": 0.42},
@@ -845,9 +849,77 @@ mod tests {
             let cumulative = st.cumulative_usage.as_ref().expect("cumulative filled");
             assert_eq!((cumulative.input, cumulative.output), (100, 40));
             assert_eq!(st.per_model_usage.len(), 1);
+            // The per-model key is the canonical identity taken verbatim from
+            // `model`, so it lines up with both `perModelCost` and the rail's
+            // `split_once('/')` resolution.
+            let row = st
+                .per_model_usage
+                .get("P/m")
+                .expect("per-model usage keyed by canonical `model`");
+            assert_eq!((row.input, row.output), (100, 40));
             assert!((st.cumulative_cost - 0.42).abs() < 1e-9);
             assert_eq!(st.per_model_cost.get("P/m"), Some(&0.42));
         });
+    }
+
+    /// #1 regression guard at the display boundary: the canonical per-model
+    /// key `{provider}/{model}` (what the store now keys by) splits into the
+    /// exact registration name + model id, resolves against the registry, and
+    /// renders as `百炼/qwen3.8-max` — not the double-prefixed
+    /// `百炼-anthropic/百炼-anthropic/qwen3.8-max` the old store key produced,
+    /// which failed `split_once`/`resolve_model` and fell through to the raw
+    /// verbatim branch (also silently killing the cost + context-budget rows).
+    #[test]
+    fn canonical_model_key_resolves_to_provider_and_display_pair() {
+        use manox_harness::core::{
+            Api, Cost, InputModality, ProviderConfig, ProviderModelConfig, ProviderRegistry,
+        };
+        let registry = ProviderRegistry::new();
+        registry
+            .register_provider(
+                // Registration name is `{display}-{wire}` (provider.rs
+                // `provider_registration_name`): `百炼` over the anthropic
+                // endpoint registers as `百炼-anthropic`.
+                "百炼-anthropic",
+                ProviderConfig {
+                    name: Some("百炼".into()),
+                    base_url: Some("https://bailian.example".into()),
+                    api_key: Some("sk-literal".into()),
+                    api: Some(Api::AnthropicMessages),
+                    headers: None,
+                    auth_header: true,
+                    models: vec![ProviderModelConfig {
+                        id: "qwen3.8-max".into(),
+                        name: "qwen3.8-max".into(),
+                        reasoning: false,
+                        input: vec![InputModality::Text],
+                        context_window: 131_072,
+                        max_tokens: 8_192,
+                        cost: Cost::default(),
+                        api: None,
+                        base_url: None,
+                        metadata: std::collections::HashMap::new(),
+                    }],
+                },
+            )
+            .unwrap();
+
+        // The store key is the verbatim `model` field — the canonical identity.
+        let key = "百炼-anthropic/qwen3.8-max";
+        let (provider, id) = key.split_once('/').expect("composite key splits");
+        assert_eq!(provider, "百炼-anthropic");
+        assert_eq!(id, "qwen3.8-max");
+        let model = registry
+            .resolve_model(provider, id)
+            .expect("canonical key must resolve");
+        assert_eq!(
+            manox_agent::provider_glue::display_provider_name(&model),
+            "百炼"
+        );
+        assert_eq!(
+            manox_agent::provider_glue::display_name(&model),
+            "qwen3.8-max"
+        );
     }
 
     /// U7 (§E.3): the committed-message counter is maintained

@@ -236,12 +236,14 @@ impl ClientStore {
         self.per_model_cost.clear();
         if let Some(models) = payload.get("models").and_then(|v| v.as_array()) {
             for row in models {
-                let key = format!(
-                    "{}/{}",
-                    row.get("provider").and_then(|v| v.as_str()).unwrap_or(""),
-                    row.get("model").and_then(|v| v.as_str()).unwrap_or("")
-                );
-                self.per_model_usage.insert(key.clone(), snap(row));
+                // The server fold already emits `model` as the canonical
+                // identity `{provider}/{model}` (journal_query L8); re-prefixing
+                // the `provider` field here would double it and break every
+                // downstream split_once('/') resolution.
+                let Some(key) = row.get("model").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                self.per_model_usage.insert(key.to_string(), snap(row));
             }
         }
         if let Some(costs) = payload.get("perModelCost").and_then(|v| v.as_object()) {
