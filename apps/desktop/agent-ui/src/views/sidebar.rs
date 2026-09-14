@@ -604,8 +604,13 @@ impl Sidebar {
         let Some(mux) = self.mux.as_ref() else {
             return;
         };
-        let items = mux.read(cx).thread_list().to_vec();
-        let known = mux.read(cx).known_projects().to_vec();
+        // One snapshot of both surfaces: the partition rule needs the list and
+        // the registry from the same instant, or a row could be judged by a
+        // registry that no longer matches its list.
+        let (items, known) = {
+            let mux = mux.read(cx);
+            (mux.thread_list().to_vec(), mux.known_projects().to_vec())
+        };
         for (partition, server) in wire_partition_orders(&items, &known) {
             let Some(target) = self.view.account.get(&partition) else {
                 continue;
@@ -1356,7 +1361,9 @@ impl Sidebar {
     }
 
     /// The partition a row belongs to: its registered project, else the loose
-    /// Conversations account. Same rule the server partitions by.
+    /// Conversations account. Same rule the server partitions by — the third
+    /// face of the rule shared with the render grouping and
+    /// [`Self::wire_partition_orders`]; keep the three in sync.
     fn partition_of_row(&self, id: &str, cx: &mut App) -> Option<String> {
         let mux = self.mux.as_ref()?;
         let list = mux.read(cx).thread_list().to_vec();
@@ -1701,6 +1708,12 @@ impl Render for Sidebar {
             // that was never bound as a project (e.g. the default home dir)
             // stays in the loose Conversations list. U2 cross-domain #1:
             // the binding rides the wire row's project column.
+            //
+            // This is the rule's display face. The same rule exists in
+            // `wire_partition_orders` (the reconcile's server-order surface)
+            // and `partition_of_row` (the row commit's lookup) — there is no
+            // compile-time tie between the three, so a change here must land
+            // in both.
             let project = s.project.as_deref().unwrap_or_default();
             if project.is_empty() || !known_projects.iter().any(|kp| kp == project) {
                 loose.push(s.clone());
@@ -1901,6 +1914,11 @@ const COLLAPSED_ROWS: usize = 5;
 /// `reconcile_manual_account` replays against: the wire list arrives in the
 /// durable account's order, so it is what a `Manual` landing diffs the view
 /// account into. Partitions with no wire rows never appear.
+///
+/// The partition rule intentionally lives in three places — this id-order
+/// face, the render grouping's display face, and `partition_of_row`'s
+/// one-row commit lookup — with no compile-time tie between them. Changing
+/// the rule means changing all three in the same PR.
 fn wire_partition_orders(
     items: &[ThreadListItem],
     known_projects: &[String],
