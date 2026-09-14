@@ -17,8 +17,11 @@ cd "$ROOT"
 
 fail=0
 
-if grep -rn "zed-industries" --include="Cargo.toml" . | grep -v "^./target"; then
-  echo "error: Cargo.toml files must not reference zed-industries (use gpui-pre* via crates.io)" >&2
+# Non-comment `git = "...zed-industries..."` declarations are the violation;
+# comments may mention the name to document the policy.
+if grep -rEn '^[[:space:]]*[^#]*git[[:space:]]*=[[:space:]]*"[^"]*zed-industries' \
+    --include="Cargo.toml" . | grep -v "^./target"; then
+  echo "error: Cargo.toml files must not declare zed-industries git deps (use gpui-pre* via crates.io)" >&2
   fail=1
 fi
 

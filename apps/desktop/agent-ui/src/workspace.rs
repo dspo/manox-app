@@ -33,8 +33,7 @@ use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
     input::{
-        Editor, EditorState, Input, InputEvent, InputState, Paste, RopeExt, Textarea,
-        TextareaState,
+        Editor, EditorState, Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState,
     },
     v_flex,
 };
