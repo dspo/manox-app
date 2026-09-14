@@ -23,7 +23,7 @@
 use crate::Selection;
 use crate::VsCodeClaudePart;
 use crate::VsCodeCodexPart;
-use crate::parse_model_context_suffix;
+use crate::claude_model_injection;
 use crate::probe::runtime;
 use anyhow::{Context, Result, bail};
 use base64::{
@@ -291,31 +291,15 @@ fn apply_byok_env(selection: &Selection, apikey: &str, env: &mut BTreeMap<String
     for key in BYOK_OVERRIDE_KEYS {
         env.remove(*key);
     }
-    // 剥除上下文后缀得 base id；但 Claude Code 的上下文窗口选择器（2.1.170 二进制
-    // 提取）只测模型名上的 `/\[1m\]/i`——`[2m]` 仅出现在剥离/展示 helper、不扩窗，
-    // 且 CLAUDE_CODE_MAX_CONTEXT_TOKENS 仅在 DISABLE_COMPACT 时读取。故 1M 档
-    // （[1m]）把带后缀的模型名传给 ANTHROPIC_MODEL（Claude Code 上线前自行剥离），
-    // 其余 Some(_) 回退 base id + env（DISABLE_COMPACT-only，下方告警）。与
-    // cx-cli `claude` 分支同语义。CX_MODEL 与别名 env 一律为 base id。
-    let (api_model_id, ctx_hint) = parse_model_context_suffix(&model.id);
-    let claude_model = match ctx_hint {
-        Some(1_000_000) => format!("{api_model_id}[1m]"),
-        Some(tokens) => {
-            eprintln!(
-                "cx: 警告: Claude Code 无法用模型名后缀表示 {tokens} 上下文窗口\
-                 （只有 [1m] 参与窗口判定），且 CLAUDE_CODE_MAX_CONTEXT_TOKENS \
-                 仅在 DISABLE_COMPACT 开启时生效；默认配置下 Claude Code 会回退 \
-                 200k 并提前自动压缩。"
-            );
-            api_model_id.to_string()
-        }
-        None => api_model_id.to_string(),
-    };
+    let injection = claude_model_injection(&model.id);
+    if let Some(warning) = injection.warn {
+        eprintln!("{warning}");
+    }
     env.insert("ANTHROPIC_BASE_URL".into(), model.endpoint_url.clone());
     env.insert("ANTHROPIC_API_KEY".into(), apikey.to_string());
-    env.insert("ANTHROPIC_MODEL".into(), claude_model);
-    env.insert("CX_MODEL".into(), api_model_id.to_string());
-    if let Some(tokens) = ctx_hint {
+    env.insert("ANTHROPIC_MODEL".into(), injection.model_env);
+    env.insert("CX_MODEL".into(), injection.cx_model.clone());
+    if let Some(tokens) = injection.max_context_tokens {
         // 选中模型带上下文后缀时窗口声明以本次注入为准，剥除 shell 残留旧值
         //（无后缀模型不设置该变量，保留 shell 原值）。1M 档下 env 仅作
         // DISABLE_COMPACT 场景的兜底。
@@ -328,12 +312,9 @@ fn apply_byok_env(selection: &Selection, apikey: &str, env: &mut BTreeMap<String
     // 取代），仅剥除残留值、不再写回。
     env.insert(
         "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
-        api_model_id.to_string(),
+        injection.cx_model.clone(),
     );
-    env.insert(
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
-        api_model_id.to_string(),
-    );
+    env.insert("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), injection.cx_model);
     // Provider + Model 级自定义环境变量（ResolvedModel.env 已合并 provider +
     // model env，model 优先），覆盖以上默认注入。
     for (key, value) in &model.env {
@@ -661,8 +642,8 @@ mod tests {
     }
 
     /// [2m]/[200k] 不参与 Claude Code 窗口判定 → 回退 base id + env
-    /// （DISABLE_COMPACT-only 兜底），ANTHROPIC_MODEL 不带任何后缀。与 cx-cli
-    /// `claude` 分支同语义。
+    /// （DISABLE_COMPACT-only 兜底），ANTHROPIC_MODEL 不带任何后缀。决策语义
+    /// 由 `claude_model_injection` 统一定义。
     #[test]
     fn apply_byok_env_falls_back_for_non_1m_suffix() {
         for (model_id, tokens) in [("glm-5.2[2m]", "2000000"), ("glm-5.2[200k]", "200000")] {
@@ -685,6 +666,16 @@ mod tests {
                 Some(tokens)
             );
         }
+    }
+
+    // Self-test target for crate::tests::apply_byok_env_prints_warning: its
+    // only purpose is to run apply_byok_env where the eprintln happens.
+    #[test]
+    fn vscode_apply_byok_emits_warning_for_2m() {
+        let selection = vscode_test_selection("glm-5.2[2m]", BTreeMap::new());
+        let mut env = BTreeMap::new();
+        apply_byok_env(&selection, "k", &mut env);
+        assert_eq!(env.get("CX_MODEL").map(String::as_str), Some("glm-5.2"));
     }
 
     #[test]
