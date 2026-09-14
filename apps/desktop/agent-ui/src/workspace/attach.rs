@@ -30,9 +30,6 @@ impl Workspace {
             // tool-traffic heuristics this replaces only ran in-proc and
             // raced the actual verdict. Tool traffic falls to the
             // catch-all.
-            ThreadEvent::SteerInjected { message_id } => {
-                this.consume_background_steer(&id, message_id);
-            }
             ThreadEvent::PlanReady { plan_file, title } => {
                 // A plan proposed while the thread was parked never reaches
                 // the foreground handler: stash the review so the
@@ -53,10 +50,7 @@ impl Workspace {
                 // store write + delta (single writer).
             }
             ThreadEvent::TurnFinished {
-                cancelled,
-                failed,
-                stranded_steer_ids,
-                ..
+                cancelled, failed, ..
             } => {
                 // A cancelled/failed turn voids a stashed plan review
                 // (mirroring the foreground demote); a normal settle keeps
@@ -74,12 +68,19 @@ impl Workspace {
                 // mirror (the client-owned badge source), not the
                 // server-side store mirror.
                 this.multiplexer.update(cx, |m, cx| m.note_unread(&id, cx));
-                // Mirror the foreground terminal bookkeeping: steers the
-                // aborted turn never drained flip to `Failed` in the
-                // parked stash (a late `SteerInjected` can still heal
-                // them), and queued follow-ups only become the next turn
-                // on a natural settle — never after a cancel.
-                this.mark_parked_stranded_steers_failed(&id, stranded_steer_ids);
+                // Mirror the foreground settle routing against the parked
+                // stash: the server strands a cancelled/failed turn's whole
+                // steer queue all-or-nothing (`Failed`), while a normal
+                // settle injected them — a parked thread has no live list to
+                // append into, so those cards just drop and surface through
+                // the transcript on switch-back / reload. Queued follow-ups
+                // only become the next turn on a natural settle — never
+                // after a cancel.
+                if *cancelled || *failed {
+                    this.mark_parked_stranded_steers_failed(&id);
+                } else {
+                    this.drop_parked_settled_steers(&id);
+                }
                 if !*cancelled {
                     this.flush_parked_follow_ups(&id, cx);
                 }

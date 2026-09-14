@@ -8,9 +8,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use agent_ui::{
     Workspace,
-    conversation::{
-        ActivityEntry, ConvItem, ThinkingContainer, ToolCallItem, UserMessageDisplayState,
-    },
+    conversation::{ActivityEntry, ConvItem, ThinkingContainer, ToolCallItem},
     views::{MessageListWidthInvalidator, message::MessageItem},
 };
 use gpui::{
@@ -596,7 +594,6 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
             text: "需要修本项目吗？".into(),
             images: Vec::new(),
             meta: None,
-            display_state: UserMessageDisplayState::Normal,
         },
         ConvItem::Thinking(activity),
         ConvItem::Assistant {

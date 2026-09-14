@@ -827,13 +827,11 @@ fn parked_follow_up_flush_rides_the_gateway_wire(cx: &mut gpui::TestAppContext) 
     ws.update(cx, |ws, cx| {
         let turn = |text: &str, cx: &mut Context<Workspace>| -> super::DeferredUserTurn {
             let meta = ws.user_turn_meta(cx);
-            let ui = Workspace::message_ui_metadata(&meta);
             super::DeferredUserTurn {
                 text: text.to_string(),
                 images: vec![],
                 user_images: vec![],
                 meta,
-                ui,
             }
         };
         let mut q = std::collections::VecDeque::new();
@@ -847,9 +845,7 @@ fn parked_follow_up_flush_rides_the_gateway_wire(cx: &mut gpui::TestAppContext) 
         });
         q.push_back(super::QueuedFollowUp {
             turn: turn("failed-card", cx),
-            state: super::FollowUpState::Failed {
-                message_id: "m-9".into(),
-            },
+            state: super::FollowUpState::Failed,
         });
         ws.queued_follow_ups_by_thread.insert("s-parked".into(), q);
     });
@@ -916,9 +912,289 @@ fn parked_follow_up_flush_rides_the_gateway_wire(cx: &mut gpui::TestAppContext) 
             .get("s-parked")
             .expect("the Failed card keeps the stash alive");
         assert_eq!(q.len(), 1, "{:?}", q.len());
-        assert!(matches!(q[0].state, super::FollowUpState::Failed { .. }));
+        assert!(matches!(q[0].state, super::FollowUpState::Failed));
     });
     std::fs::remove_file(&db_path).ok();
+}
+
+/// #5: the pure insert rule that keeps the composer queue's invariant
+/// `[SteerPending|Failed …] ++ [Queued …]`. A promoted steer lands at the head
+/// of the queued group (== the end of the steer group), i.e. right before the
+/// first plain `Queued` item, or at the tail when there is none.
+#[test]
+fn steer_group_insert_index_keeps_steers_before_the_queue() {
+    use crate::conversation::{UserImage, UserTurnMeta};
+    let turn = |text: &str| super::DeferredUserTurn {
+        text: text.to_string(),
+        images: vec![],
+        meta: UserTurnMeta::new(1, "m".into(), None),
+        user_images: Vec::<UserImage>::new(),
+    };
+    let q = |state| super::QueuedFollowUp {
+        turn: turn("x"),
+        state,
+    };
+    use super::FollowUpState as S;
+
+    let empty = std::collections::VecDeque::new();
+    assert_eq!(super::Workspace::steer_group_insert_index(&empty), 0);
+
+    let all_queued: std::collections::VecDeque<_> =
+        [q(S::Queued), q(S::Queued)].into_iter().collect();
+    assert_eq!(super::Workspace::steer_group_insert_index(&all_queued), 0);
+
+    let all_steers: std::collections::VecDeque<_> =
+        [q(S::SteerPending), q(S::Failed)].into_iter().collect();
+    assert_eq!(super::Workspace::steer_group_insert_index(&all_steers), 2);
+
+    let mixed: std::collections::VecDeque<_> =
+        [q(S::SteerPending), q(S::Failed), q(S::Queued), q(S::Queued)]
+            .into_iter()
+            .collect();
+    assert_eq!(super::Workspace::steer_group_insert_index(&mixed), 2);
+}
+
+/// A foreground workspace bound to a spy client with a running store, ready to
+/// exercise the composer steer state machine without a real agent turn. Returns
+/// the workspace handle and the server half of the spy connection.
+fn running_foreground_with_spy(
+    cx: &mut gpui::TestAppContext,
+    tag: &'static str,
+    session_id: &str,
+) -> (gpui::Entity<Workspace>, manox_protocol::InProcessConnection) {
+    use gpui::AppContext as _;
+    let db_path = std::env::temp_dir().join(format!("manox-{tag}-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let _ = window;
+    let ws = captured.borrow().clone().expect("workspace captured");
+    let (client_conn, server_conn) = manox_protocol::in_process_pair();
+    ws.update(cx, |ws, cx| {
+        ws.client = std::sync::Arc::new(manox_session_core::agent_client::AgentClient::from_conn(
+            client_conn,
+        ));
+        ws.session_id = Some(session_id.to_string());
+        let store = ws.store.as_ref().expect("landing store bound");
+        store.update(cx, |h, _| h.store.running = true);
+    });
+    (ws, server_conn)
+}
+
+/// #5: clicking 「引导」 on a parked follow-up while a turn runs sends the REAL
+/// online `ClientCall::Steer` and keeps the card parked (promoted to
+/// `SteerPending`) — it must NOT push a message-list bubble. That bubble only
+/// appears once the turn settles (see the settle tests).
+#[gpui::test]
+fn steer_click_wires_online_steer_and_parks_the_card(cx: &mut gpui::TestAppContext) {
+    use manox_protocol::RpcConnection as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let (ws, server_conn) = running_foreground_with_spy(cx, "steer-wire", "s-steer");
+    cx.run_until_parked();
+
+    let bubbles_before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    ws.update(cx, |ws, cx| {
+        let meta = ws.user_turn_meta(cx);
+        ws.queued_follow_ups.push_back(super::QueuedFollowUp {
+            turn: super::DeferredUserTurn {
+                text: "steer me".into(),
+                images: vec![],
+                meta,
+                user_images: vec![],
+            },
+            state: super::FollowUpState::Queued,
+        });
+        ws.steer_follow_up(0, cx);
+    });
+
+    // ① card stays parked, promoted to SteerPending.
+    ws.read_with(cx, |ws, _| {
+        assert_eq!(ws.queued_follow_ups.len(), 1);
+        assert!(
+            matches!(
+                ws.queued_follow_ups[0].state,
+                super::FollowUpState::SteerPending
+            ),
+            "a running steer parks the card as SteerPending"
+        );
+    });
+    // ② no message-list bubble was pushed.
+    let bubbles_after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    assert_eq!(
+        bubbles_before, bubbles_after,
+        "steering must not surface a bubble before the turn settles"
+    );
+    // ③ the online steer reached the wire.
+    let rx = server_conn.client_rx();
+    let mut saw_steer = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while saw_steer.is_none() && std::time::Instant::now() < deadline {
+        cx.run_until_parked();
+        while let Ok(m) = rx.try_recv() {
+            if let manox_protocol::FromClient::Request {
+                call:
+                    manox_protocol::ClientCall::Steer {
+                        session_id, text, ..
+                    },
+                ..
+            } = m
+            {
+                saw_steer = Some((session_id, text));
+            }
+        }
+    }
+    let (sid, text) = saw_steer.expect("a running steer must send ClientCall::Steer");
+    assert_eq!(sid, "s-steer");
+    assert_eq!(text, "steer me");
+}
+
+/// #5 (settle, success path): a normally-settled turn moves every
+/// `SteerPending` card out of the queue and into the message list as a
+/// `steered` user bubble, leaving the plain `Queued` cards parked for the flush
+/// that follows — so the final list order equals the real delivery order.
+#[gpui::test]
+fn settle_promotes_pending_steers_into_the_list(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let ws = captured.borrow().clone().expect("workspace captured");
+    let mk = |text: &str, state, ws: &mut Workspace, cx: &mut Context<Workspace>| {
+        super::QueuedFollowUp {
+            turn: super::DeferredUserTurn {
+                text: text.into(),
+                images: vec![],
+                meta: ws.user_turn_meta(cx),
+                user_images: vec![],
+            },
+            state,
+        }
+    };
+    ws.update(cx, |ws, cx| {
+        let steer = mk("the steer", super::FollowUpState::SteerPending, ws, cx);
+        ws.queued_follow_ups.push_back(steer);
+        let plain = mk("plain queue", super::FollowUpState::Queued, ws, cx);
+        ws.queued_follow_ups.push_back(plain);
+    });
+    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+
+    ws.update(cx, |ws, cx| ws.promote_settled_steers(cx));
+
+    // Steer card left the queue; the plain Queued card stays for the flush.
+    ws.read_with(cx, |ws, _| {
+        assert_eq!(ws.queued_follow_ups.len(), 1, "only the plain queue stays");
+        assert!(matches!(
+            ws.queued_follow_ups[0].state,
+            super::FollowUpState::Queued
+        ));
+    });
+    // The steered bubble entered the list.
+    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    assert_eq!(after, before + 1, "settled steer pushes exactly one bubble");
+    ws.read_with(cx, |ws, cx| {
+        let items = ws.conversation.read(cx).items();
+        let last = items.last().expect("steered bubble appended");
+        match last.read(cx).kind() {
+            crate::conversation::ConvItem::User { text, meta, .. } => {
+                assert_eq!(text, "the steer");
+                assert!(
+                    meta.as_ref().is_some_and(|m| m.steered),
+                    "the promoted bubble carries the steered flag"
+                );
+            }
+            other => panic!("expected a user bubble, got {other:?}"),
+        }
+    });
+}
+
+/// #5 (settle, cancel/abort path): an abnormally-ended turn strands every
+/// `SteerPending` card to `Failed` (retryable) and surfaces NO bubble — the
+/// steer was never injected.
+#[gpui::test]
+fn cancelled_settle_strands_steers_without_a_bubble(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let ws = captured.borrow().clone().expect("workspace captured");
+    ws.update(cx, |ws, cx| {
+        let meta = ws.user_turn_meta(cx);
+        ws.queued_follow_ups.push_back(super::QueuedFollowUp {
+            turn: super::DeferredUserTurn {
+                text: "the steer".into(),
+                images: vec![],
+                meta,
+                user_images: vec![],
+            },
+            state: super::FollowUpState::SteerPending,
+        });
+    });
+    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+
+    ws.update(cx, |ws, cx| ws.mark_stranded_steers_failed(cx));
+
+    ws.read_with(cx, |ws, _| {
+        assert!(matches!(
+            ws.queued_follow_ups[0].state,
+            super::FollowUpState::Failed
+        ));
+    });
+    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    assert_eq!(before, after, "a stranded steer must not add a bubble");
 }
 
 /// server's wire projection instead of a kernel read.

@@ -170,9 +170,11 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// Render the compact queue above the composer. Pending steers live in the
-    /// message list, so this area contains only ordinary queued rows and failed
-    /// steers that need an explicit retry or deletion.
+    /// Render the compact queue above the composer. Every follow-up parked
+    /// during the running turn stays visible here until it settles: ordinary
+    /// `Queued` rows, in-flight `SteerPending` rows (icon + summary + a
+    /// 「待引导」badge, no buttons — the steer is committed to the server and can't
+    /// be withdrawn), and `Failed` rows that need an explicit retry or deletion.
     pub(super) fn render_queued_follow_ups(
         &self,
         theme: &Theme,
@@ -180,10 +182,55 @@ impl Workspace {
     ) -> Vec<AnyElement> {
         let mut rows = Vec::with_capacity(self.queued_follow_ups.len());
         for (idx, item) in self.queued_follow_ups.iter().enumerate() {
-            if matches!(item.state, FollowUpState::SteerPending { .. }) {
+            let summary = truncate_follow_up(&item.turn.text);
+            // A pending steer renders as a read-only status row: no inline
+            // buttons (delete/retry would imply a withdrawal the protocol
+            // doesn't offer), just the corner-right-up glyph + summary + the
+            // 「待引导」badge until the turn settles and it moves to the list.
+            if matches!(item.state, FollowUpState::SteerPending) {
+                let badge = gpui::div()
+                    .px_1()
+                    .py_0p5()
+                    .rounded(theme.radius)
+                    .bg(theme.accent.opacity(0.15))
+                    .text_sm()
+                    .text_color(theme.accent_foreground)
+                    .child(i18n::t("message-steer-pending-badge"));
+                let pending_left = h_flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        Icon::default()
+                            .path("icons/corner-right-up.svg")
+                            .xsmall()
+                            .text_color(theme.accent),
+                    )
+                    .child(
+                        gpui::div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_hidden()
+                            .text_xs()
+                            .text_color(theme.foreground)
+                            .child(summary),
+                    );
+                rows.push(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(theme.border.opacity(0.6))
+                        .child(pending_left)
+                        .child(badge)
+                        .into_any_element(),
+                );
                 continue;
             }
-            let summary = truncate_follow_up(&item.turn.text);
             let delete_btn = Button::new(format!("queue-delete-{idx}"))
                 .ghost()
                 .xsmall()
@@ -211,7 +258,7 @@ impl Workspace {
                         }));
                     (steer_btn.into_any_element(), false)
                 }
-                FollowUpState::Failed { .. } => {
+                FollowUpState::Failed => {
                     let retry_btn = Button::new(format!("queue-steer-{idx}"))
                         .ghost()
                         .xsmall()
@@ -223,7 +270,7 @@ impl Workspace {
                         }));
                     (retry_btn.into_any_element(), true)
                 }
-                FollowUpState::SteerPending { .. } => unreachable!(),
+                FollowUpState::SteerPending => unreachable!("handled above"),
             };
 
             let summary_color = if danger {

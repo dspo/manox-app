@@ -480,7 +480,6 @@ struct DeferredUserTurn {
     text: String,
     images: Vec<manox_agent::language_model::MessageContent>,
     meta: UserTurnMeta,
-    ui: manox_agent::MessageUiMetadata,
     user_images: Vec<UserImage>,
 }
 
@@ -510,22 +509,25 @@ struct BackgroundThread {
 }
 
 /// Lifecycle of a follow-up submitted while a turn is running. A queued item
-/// renders above the composer; clicking Steer moves an optimistic bubble into
-/// the conversation immediately while the canonical message waits for a safe
-/// join point in `Thread::pending_steer`.
+/// renders above the composer; clicking Steer promotes it to `SteerPending`,
+/// which is handed to the server's steer queue for the running turn but STAYS
+/// parked in the composer queue (at the head of the steer group) until the turn
+/// settles. Only then does it move into the message list as a `steered` bubble.
 enum FollowUpState {
-    /// Parked, waiting to flush as the next user turn at terminal Stop (or to
-    /// be promoted to a steer via the Steer action).
+    /// Parked, waiting to flush as the next user turn at the turn boundary (or
+    /// to be promoted to a steer via the Steer action).
     Queued,
-    /// Handed to the thread's steer queue and represented by a pending bubble
-    /// in the message list. Hidden from the composer queue while in flight.
-    SteerPending { message_id: String },
-    /// The running turn exited (Abort/Error) before draining it — stranded.
-    /// Carries the steer message id so a later `SteerInjected` (if the drain
-    /// actually did fire after the premature `Stop`) can still heal the card
-    /// into a real steered bubble instead of leaving a false "failed" marker.
-    /// Stays parked, marked red, retryable via the Steer action.
-    Failed { message_id: String },
+    /// Promoted to the server steer queue for the running turn (a client-minted
+    /// id was sent with [`manox_protocol::ClientCall::Steer`]; the all-or-nothing
+    /// settle needs no client-side copy of it). Not removable (no
+    /// steer-withdrawal channel in the protocol). Resolves at the turn boundary:
+    /// a normal settle moves the card into the message list; a cancelled/failed
+    /// turn strands it into [`FollowUpState::Failed`].
+    SteerPending,
+    /// The running turn exited abnormally (Abort/Error) before settling, so the
+    /// steer was not injected this turn. Stays parked, marked red, retryable via
+    /// the Steer action (which re-sends a fresh online steer). Removable.
+    Failed,
 }
 
 /// A follow-up submitted while a turn is running. Every new item starts queued;
@@ -1787,9 +1789,7 @@ impl Workspace {
                     this.spawn_thinking_ticker(cx);
                 }
                 ThreadEvent::TurnFinished {
-                    cancelled,
-                    failed,
-                    stranded_steer_ids,
+                    cancelled, failed, ..
                 } => {
                     // Seal the conversation's streaming state at the
                     // authoritative turn boundary: a turn that ended without
@@ -1811,10 +1811,18 @@ impl Workspace {
                         )
                     });
                     this.apply_list_outcome(outcome, cx);
-                    // This is the authoritative end-of-turn boundary: unlike a
-                    // provider Stop event, `Thread::is_running()` is already
-                    // false, so a queued follow-up can safely start a new turn.
-                    this.mark_stranded_steers_failed(stranded_steer_ids, cx);
+                    // This is the authoritative end-of-turn boundary and the
+                    // earliest point the client can confirm what happened to
+                    // every `SteerPending` card. The server settles a turn's
+                    // steer queue all-or-nothing (`engine.rs`: an aborted/failed
+                    // run strands every steer; a normal finish injects them), so
+                    // no per-id matching is needed — `cancelled || failed` is the
+                    // exact verdict for the whole steer group.
+                    if *cancelled || *failed {
+                        this.mark_stranded_steers_failed(cx);
+                    } else {
+                        this.promote_settled_steers(cx);
+                    }
                     let thread_id = this
                         .store
                         .as_ref()
@@ -1934,12 +1942,13 @@ impl Workspace {
                     }
                     cx.notify();
                 }
-                ThreadEvent::SteerInjected { message_id } => {
-                    // The running turn drained the steer. Confirm the bubble
-                    // that was inserted optimistically when the user clicked;
-                    // do not push a duplicate.
-                    this.consume_steered_follow_up(message_id, cx);
-                }
+                // The v2 link never delivers `ThreadEvent::SteerInjected`: the
+                // facade emits it (manox thread.rs `BackendNotice::Settled` →
+                // push per steered id) but the journal→wire translation drops
+                // it, so the engine-less render mirror never sees it. Steer
+                // outcomes are driven entirely by the `TurnFinished` settle
+                // boundary above; any stray `SteerInjected` falls through to the
+                // generic `apply` (a no-op).
                 _ => {
                     // U3b: the background-work flag is the server pump's
                     // store write + delta (its BackgroundTaskUpdated arm
@@ -2917,6 +2926,37 @@ impl Workspace {
             origin_rpc: Some(origin_rpc),
         });
         true
+    }
+
+    /// v2 §D.2 steer path: hand a message to the running turn's server-side
+    /// steer queue. The desktop's `Workspace.thread` is an engine-less render
+    /// mirror, so the old `thread.enqueue_steer` only inserted a local id and
+    /// never reached the server — a dead end where the card sat forever and the
+    /// message was neither injected nor confirmed. This sends the real
+    /// [`manox_protocol::ClientCall::Steer`] (server: enqueue while running,
+    /// insert + start a turn while idle). Receipt-only like
+    /// [`Self::send_submit_v2`]; no echo is registered because the message does
+    /// not enter the conversation here — it moves in only when the turn settles
+    /// (see the `TurnFinished` handler). `message_id` is the client-minted id the
+    /// composer card correlates by.
+    pub(crate) fn send_steer_v2(
+        &mut self,
+        message_id: String,
+        text: String,
+        images: Vec<manox_protocol::ImageAttachment>,
+    ) {
+        let Some(sid) = self.session_id.clone() else {
+            tracing::warn!("steer dropped: no session bound to the workspace");
+            return;
+        };
+        tracing::info!(session_id = %sid, "steer v2 sent");
+        self.client.send_call(manox_protocol::ClientCall::Steer {
+            session_id: sid,
+            message_id,
+            text,
+            images,
+            origin_rpc: None,
+        });
     }
 }
 

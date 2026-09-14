@@ -32,35 +32,34 @@ fn wire_image_attachment(
 }
 
 impl Workspace {
-    /// Flip the parked thread's `SteerPending` cards whose steers an aborted
-    /// turn never drained to `Failed`, mirroring the foreground
-    /// `mark_stranded_steers_failed` against the per-thread stash. A parked
-    /// thread has no live conversation bubble to roll back (the optimistic
-    /// bubble died with the conversation entity on switch-away), so only the
-    /// queue state changes; the retry affordance renders once the stash is
-    /// restored on switch-back.
-    pub(super) fn mark_parked_stranded_steers_failed(
-        &mut self,
-        thread_id: &str,
-        stranded_steer_ids: &[String],
-    ) {
-        let stranded: std::collections::HashSet<&str> =
-            stranded_steer_ids.iter().map(String::as_str).collect();
-        if stranded.is_empty() {
-            return;
-        }
+    /// Flip EVERY parked thread's `SteerPending` card to `Failed` when its turn
+    /// settled abnormally, mirroring the foreground rule against the per-thread
+    /// stash. The server strands a cancelled/failed turn's whole steer queue
+    /// all-or-nothing, so no per-id matching is needed. A parked thread has no
+    /// live conversation list, so the cards just change state; the retry
+    /// affordance renders once the stash is restored on switch-back.
+    pub(super) fn mark_parked_stranded_steers_failed(&mut self, thread_id: &str) {
         let Some(queue) = self.queued_follow_ups_by_thread.get_mut(thread_id) else {
             return;
         };
         for item in queue.iter_mut() {
-            if let FollowUpState::SteerPending { message_id } = &item.state
-                && stranded.contains(message_id.as_str())
-            {
-                // Keep the id so a later `SteerInjected` can still heal this
-                // provisional rollback (via `consume_background_steer`).
-                let message_id = message_id.clone();
-                item.state = FollowUpState::Failed { message_id };
+            if matches!(item.state, FollowUpState::SteerPending) {
+                item.state = FollowUpState::Failed;
             }
+        }
+    }
+
+    /// Drop every parked thread's `SteerPending` card on a normal settle: the
+    /// server injected them mid-turn and they surface through the transcript on
+    /// switch-back / reload (a parked thread has no live conversation to append
+    /// into). `Failed` cards stay parked for a retry.
+    pub(super) fn drop_parked_settled_steers(&mut self, thread_id: &str) {
+        let Some(queue) = self.queued_follow_ups_by_thread.get_mut(thread_id) else {
+            return;
+        };
+        queue.retain(|item| !matches!(item.state, FollowUpState::SteerPending));
+        if queue.is_empty() {
+            self.queued_follow_ups_by_thread.remove(thread_id);
         }
     }
 
@@ -360,14 +359,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let meta = self.user_turn_meta(cx);
-        let ui = Self::message_ui_metadata(&meta);
         let weak = cx.weak_entity();
         let user_images = Self::decode_user_images(&images);
         let turn = DeferredUserTurn {
             text,
             images,
             meta,
-            ui,
             user_images,
         };
         // A turn is running — every new message first parks as a visible
@@ -423,71 +420,86 @@ impl Workspace {
         self.multiplexer.update(cx, |m, _| m.fetch_thread_list());
     }
 
-    /// Hand a parked follow-up to the thread's steer queue — the running turn
-    /// absorbs it at the next safe join point. No conversation bubble is pushed
-    /// here. The caller immediately pushes an optimistic pending bubble; the
-    /// later `SteerInjected` event confirms it. Returns the message id used to
-    /// correlate the pending bubble and the canonical history message.
-    pub(super) fn enqueue_steer_pending(
-        &mut self,
-        turn: &mut DeferredUserTurn,
-        _cx: &mut Context<Self>,
-    ) -> String {
-        use manox_agent::language_model::MessageContent;
-        let mut content = Vec::with_capacity(turn.images.len() + 1);
-        if !turn.text.trim().is_empty() {
-            content.push(MessageContent::Text(turn.text.clone()));
-        }
-        content.append(&mut turn.images);
-        let ui = std::mem::take(&mut turn.ui);
-        // The steered tag is applied only when the drain succeeds (in
-        // `consume_steered_follow_up`), so a stranded steer that the user
-        // later retries as an idle fresh turn carries no badge — it was never
-        // actually injected.
-        self.thread
-            .with_mut(|thread| thread.enqueue_steer(content, Some(ui)))
+    /// Promote a parked follow-up to an ONLINE steer: mint a local message id,
+    /// hand the message to the server's steer queue for the running turn. The
+    /// card stays parked in the queue (the caller re-inserts it at the
+    /// steer-group boundary) and only enters the conversation when the turn
+    /// settles. The old path called `thread.enqueue_steer` on the engine-less
+    /// render mirror, which only inserted a local id and never reached the
+    /// server — a dead end. The message id is the server's correlation handle
+    /// (the all-or-nothing settle needs no client-side copy).
+    pub(super) fn enqueue_steer_pending(&mut self, turn: &DeferredUserTurn) {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let attachments: Vec<manox_protocol::ImageAttachment> = turn
+            .images
+            .iter()
+            .filter_map(wire_image_attachment)
+            .collect();
+        self.send_steer_v2(message_id, turn.text.clone(), attachments);
     }
 
-    pub(super) fn consume_background_steer(&mut self, thread_id: &str, message_id: &str) {
-        let Some(queue) = self.queued_follow_ups_by_thread.get_mut(thread_id) else {
+    /// Index at which a promoted steer card belongs so the queue keeps its
+    /// invariant `[SteerPending|Failed …] ++ [Queued …]`: the head of the queued
+    /// group — i.e. the end of the steer group — which is also `queue.len()`
+    /// when there are no plain `Queued` items.
+    pub(super) fn steer_group_insert_index(
+        queue: &std::collections::VecDeque<QueuedFollowUp>,
+    ) -> usize {
+        queue
+            .iter()
+            .position(|item| matches!(item.state, FollowUpState::Queued))
+            .unwrap_or(queue.len())
+    }
+
+    /// Foreground settle of a turn that finished normally: move every
+    /// `SteerPending` card out of the queue and into the message list as a
+    /// `steered` user bubble (the server injected it mid-turn). The remaining
+    /// `Queued` cards flush as the next turn afterwards, so the list order ends
+    /// up matching the real delivery order (injected steers first, then the
+    /// batched queue). `Failed` cards stay parked for a retry.
+    pub(super) fn promote_settled_steers(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .queued_follow_ups
+            .iter()
+            .any(|item| matches!(item.state, FollowUpState::SteerPending))
+        {
             return;
-        };
-        if let Some(index) = queue.iter().position(|item| {
-            matches!(
-                &item.state,
-                FollowUpState::SteerPending { message_id: id }
-                    | FollowUpState::Failed { message_id: id }
-                    if id == message_id
-            )
-        }) {
-            queue.remove(index);
         }
-        if queue.is_empty() {
-            self.queued_follow_ups_by_thread.remove(thread_id);
-        }
-    }
-
-    /// Render the optimistic message-list bubble for a steer that is still
-    /// waiting in `Thread::pending_steer`.
-    pub(super) fn push_pending_steer_bubble(
-        &mut self,
-        turn: &DeferredUserTurn,
-        message_id: &str,
-        cx: &mut Context<Self>,
-    ) {
         let weak = cx.weak_entity();
-        self.conversation.update(cx, |conversation, cx| {
-            conversation.push_pending_steer(
-                turn.text.clone(),
-                turn.user_images.clone(),
-                turn.meta.clone(),
-                message_id.to_string(),
-                weak,
-                cx,
-            )
-        });
+        let follow_tail = self.list_state.is_following_tail();
+        let mut promoted = false;
+        let mut retain: Vec<QueuedFollowUp> = Vec::new();
+        while let Some(item) = self.queued_follow_ups.pop_front() {
+            match item.state {
+                FollowUpState::SteerPending => {
+                    let mut meta = item.turn.meta.clone();
+                    // The 「已引导」 badge rides `meta.steered` (rendered in
+                    // `render_user`), now that the pending bubble is gone.
+                    meta.steered = true;
+                    self.conversation.update(cx, |c, cx| {
+                        c.push_user(
+                            item.turn.text.clone(),
+                            item.turn.user_images.clone(),
+                            meta,
+                            weak.clone(),
+                            cx,
+                        )
+                    });
+                    promoted = true;
+                }
+                _ => retain.push(item),
+            }
+        }
+        self.queued_follow_ups.extend(retain);
+        if !promoted {
+            return;
+        }
         self.sync_list_count(cx);
-        self.list_state.set_follow_mode(FollowMode::Tail);
+        if follow_tail {
+            self.follow_message_tail();
+        }
+        self.list_state.remeasure();
+        cx.notify();
     }
 
     pub(super) fn append_and_run_user_turn(
@@ -520,8 +532,11 @@ impl Workspace {
     /// Drain every parked `Queued` follow-up into a single new turn. Multiple
     /// messages coalesce into one user block, keeping the request prefix stable
     /// (mirrors the team inbox flush). `Failed` cards stay parked for the user
-    /// to retry; `SteerPending` cards are marked `Failed` by
-    /// `mark_stranded_steers_failed` before this runs, so none reach here.
+    /// to retry; every `SteerPending` card has already been routed by the
+    /// `TurnFinished` settle boundary — promoted into the message list
+    /// ([`Self::promote_settled_steers`]) or stranded to `Failed`
+    /// ([`Self::mark_stranded_steers_failed`]) — before this runs, so none
+    /// reach here.
     pub(super) fn flush_queued_follow_ups(&mut self, cx: &mut Context<Self>) {
         if self.queued_follow_ups.is_empty() {
             return;
@@ -582,33 +597,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Mark every `SteerPending` card whose message id is still in the thread's
-    /// steer queue as `Failed` — the running turn exited (terminal Stop/Error)
-    /// before draining them, so they are stranded. Called at terminal states so
-    /// the cards stop spinning and surface a retry instead of hanging forever.
-    pub(super) fn mark_stranded_steers_failed(
-        &mut self,
-        stranded_steer_ids: &[String],
-        cx: &mut Context<Self>,
-    ) {
-        let stranded: std::collections::HashSet<&str> =
-            stranded_steer_ids.iter().map(String::as_str).collect();
-        if stranded.is_empty() {
-            return;
-        }
+    /// Flip EVERY `SteerPending` card to `Failed` when the running turn
+    /// terminated abnormally. The server strands a cancelled/failed turn's whole
+    /// steer queue all-or-nothing, so the `TurnFinished{cancelled, failed}`
+    /// signal is the exact verdict for the group — no per-id matching, and no
+    /// optimistic bubble to roll back (cards now live in the queue, not the
+    /// message list, until settle).
+    pub(super) fn mark_stranded_steers_failed(&mut self, cx: &mut Context<Self>) {
         let mut any = false;
         for item in self.queued_follow_ups.iter_mut() {
-            if let FollowUpState::SteerPending { message_id } = &item.state
-                && stranded.contains(message_id.as_str())
-            {
-                self.conversation.update(cx, |conversation, cx| {
-                    conversation.rollback_pending_steer(message_id, cx);
-                });
-                self.list_state.remeasure();
-                // Keep the id so a later `SteerInjected` can still heal this
-                // provisional rollback.
-                let message_id = message_id.clone();
-                item.state = FollowUpState::Failed { message_id };
+            if matches!(item.state, FollowUpState::SteerPending) {
+                item.state = FollowUpState::Failed;
                 any = true;
             }
         }
@@ -617,38 +616,12 @@ impl Workspace {
         }
     }
 
-    /// Confirm the optimistic bubble whose canonical message was just drained.
-    /// `Failed` also matches so a late drain can heal a provisional rollback.
-    pub(super) fn consume_steered_follow_up(&mut self, message_id: &str, cx: &mut Context<Self>) {
-        // Match either SteerPending or the prematurely-marked Failed card
-        // (see the doc comment above) by the steer message id.
-        let id_matches = |f: &QueuedFollowUp| match &f.state {
-            FollowUpState::SteerPending { message_id: mid }
-            | FollowUpState::Failed { message_id: mid } => mid == message_id,
-            FollowUpState::Queued => false,
-        };
-        let Some(idx) = self.queued_follow_ups.iter().position(id_matches) else {
-            return;
-        };
-        let Some(_) = self.queued_follow_ups.remove(idx) else {
-            return;
-        };
-        self.conversation.update(cx, |c, cx| {
-            c.confirm_pending_steer(message_id, cx);
-        });
-        self.list_state.remeasure();
-        // Only re-engage tail-follow if the user hasn't scrolled away —
-        // a steer injection is event-driven, not user-initiated, so it
-        // should not yank the viewport back to the bottom.
-        if self.list_state.is_following_tail() {
-            self.list_state.scroll_to_end();
-        }
-        cx.notify();
-    }
-
-    /// Promote a parked follow-up to a steer. While running, enqueue it and
-    /// immediately move an optimistic bubble into the message list. While idle,
-    /// send it as a fresh ordinary turn.
+    /// Promote a parked follow-up to a steer. While running, hand it to the
+    /// server's steer queue and park the card at the head of the queued group
+    /// (the end of the steer group) — no message-list bubble is pushed; the card
+    /// moves into the list only when the turn settles (see
+    /// [`Self::promote_settled_steers`]). While idle, send it as a fresh ordinary
+    /// turn instead.
     pub(super) fn steer_follow_up(&mut self, idx: usize, cx: &mut Context<Self>) {
         let running = self
             .store
@@ -659,82 +632,62 @@ impl Workspace {
             return;
         };
         match item.state {
-            FollowUpState::Queued => {
+            FollowUpState::Queued | FollowUpState::Failed => {
                 if running {
-                    let id = self.enqueue_steer_pending(&mut item.turn, cx);
-                    self.push_pending_steer_bubble(&item.turn, &id, cx);
-                    item.state = FollowUpState::SteerPending { message_id: id };
-                    self.queued_follow_ups.insert(idx, item);
+                    // (Re-)send the online steer and re-insert at the steer-group
+                    // boundary, so the promoted card joins the trailing group of
+                    // in-flight / failed steers ahead of the plain queue.
+                    self.enqueue_steer_pending(&item.turn);
+                    item.state = FollowUpState::SteerPending;
+                    let insert_at = Self::steer_group_insert_index(&self.queued_follow_ups);
+                    self.queued_follow_ups.insert(insert_at, item);
                     cx.notify();
                 } else {
                     let weak = cx.weak_entity();
                     self.append_and_run_user_turn(item.turn, weak, cx);
                 }
             }
-            FollowUpState::Failed { message_id } => {
-                // Drop the stranded message so its id can never drain into a
-                // later turn (no-op if the loop already cleared the queue).
-                self.thread
-                    .with_mut(|thread| thread.cancel_pending_steer(&message_id));
-                if running {
-                    let id = self.enqueue_steer_pending(&mut item.turn, cx);
-                    self.push_pending_steer_bubble(&item.turn, &id, cx);
-                    item.state = FollowUpState::SteerPending { message_id: id };
-                    self.queued_follow_ups.insert(idx, item);
-                    cx.notify();
-                } else {
-                    let weak = cx.weak_entity();
-                    self.append_and_run_user_turn(item.turn, weak, cx);
-                }
-            }
-            FollowUpState::SteerPending { .. } => {
-                // Already in flight; restore untouched.
-                self.queued_follow_ups.insert(idx, item);
+            FollowUpState::SteerPending => {
+                // Already handed to the server steer queue; restore untouched
+                // (wherever the last settle left it).
+                let insert_at = Self::steer_group_insert_index(&self.queued_follow_ups);
+                self.queued_follow_ups.insert(insert_at, item);
             }
         }
     }
 
     pub(super) fn delete_follow_up(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if let Some(item) = self.queued_follow_ups.remove(idx) {
-            // A SteerPending or Failed card has a message that may still sit in
-            // the thread's steer queue (SteerPending: enqueued and pending
-            // drain; Failed: stranded, pending the loop's end-of-turn clear).
-            // Removing the UI card alone would let that message drain later with
-            // no matching card, so the steer would fire invisibly. Cancel it in
-            // the thread too (no-op if already drained/cleared).
-            let steer_id = match &item.state {
-                FollowUpState::SteerPending { message_id }
-                | FollowUpState::Failed { message_id } => Some(message_id.clone()),
-                FollowUpState::Queued => None,
-            };
-            if let Some(id) = steer_id {
-                self.thread
-                    .with_mut(|thread| thread.cancel_pending_steer(&id));
-                self.conversation.update(cx, |conversation, cx| {
-                    conversation.rollback_pending_steer(&id, cx);
-                });
-                self.list_state.remeasure();
-            }
-            cx.notify();
+        // `SteerPending` cards are not removable: the steer is already handed to
+        // the server and the protocol has no steer-withdrawal channel, so
+        // deleting the card would let it inject invisibly (see the composer
+        // render's disabled delete). `Queued` and `Failed` cards drop freely.
+        let Some(item) = self.queued_follow_ups.get(idx) else {
+            return;
+        };
+        if matches!(item.state, FollowUpState::SteerPending) {
+            return;
         }
+        self.queued_follow_ups.remove(idx);
+        cx.notify();
     }
 
     pub(super) fn undo_last_queued(&mut self, cx: &mut Context<Self>) {
-        if let Some(item) = self.queued_follow_ups.pop_back() {
-            let steer_id = match &item.state {
-                FollowUpState::SteerPending { message_id }
-                | FollowUpState::Failed { message_id } => Some(message_id.clone()),
-                FollowUpState::Queued => None,
-            };
-            if let Some(id) = steer_id {
-                self.thread
-                    .with_mut(|thread| thread.cancel_pending_steer(&id));
-                self.conversation.update(cx, |conversation, cx| {
-                    conversation.rollback_pending_steer(&id, cx);
-                });
-                self.list_state.remeasure();
+        // Drop the last plain `Queued` card (the ⌘⌥/ undo affordance). Skip any
+        // `SteerPending` cards sitting at the tail — an online steer can't be
+        // withdrawn, so it isn't undoable — and leave `Failed` cards for the
+        // explicit retry/remove path.
+        while let Some(item) = self.queued_follow_ups.back() {
+            match item.state {
+                FollowUpState::Queued => {
+                    self.queued_follow_ups.pop_back();
+                    cx.notify();
+                    return;
+                }
+                FollowUpState::SteerPending => return,
+                FollowUpState::Failed => {
+                    self.queued_follow_ups.pop_back();
+                }
             }
-            cx.notify();
         }
     }
 

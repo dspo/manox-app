@@ -773,32 +773,18 @@ pub fn render_item(
     cx: &mut App,
 ) -> gpui::AnyElement {
     match item {
-        ConvItem::User {
-            text,
-            images,
-            meta,
-            display_state,
-        } => match display_state {
-            crate::conversation::UserMessageDisplayState::RolledBackSteer { .. } => {
-                gpui::div().hidden().into_any_element()
-            }
-            display_state => render_user(
-                UserRenderContent {
-                    text,
-                    images,
-                    meta: meta.as_ref(),
-                    pending_steer: matches!(
-                        display_state,
-                        crate::conversation::UserMessageDisplayState::PendingSteer { .. }
-                    ),
-                },
-                ix,
-                role,
-                theme,
-                body,
-                cx,
-            ),
-        },
+        ConvItem::User { text, images, meta } => render_user(
+            UserRenderContent {
+                text,
+                images,
+                meta: meta.as_ref(),
+            },
+            ix,
+            role,
+            theme,
+            body,
+            cx,
+        ),
         ConvItem::Assistant {
             text,
             streaming: _,
@@ -921,7 +907,6 @@ struct UserRenderContent<'a> {
     text: &'a str,
     images: &'a [UserImage],
     meta: Option<&'a UserTurnMeta>,
-    pending_steer: bool,
 }
 
 fn render_user(
@@ -932,12 +917,7 @@ fn render_user(
     body: Option<Entity<Markdown>>,
     cx: &mut App,
 ) -> gpui::AnyElement {
-    let UserRenderContent {
-        text,
-        images,
-        meta,
-        pending_steer,
-    } = content;
+    let UserRenderContent { text, images, meta } = content;
     let model_id = meta
         .map(|m| m.model_id.as_str())
         .filter(|m| !m.is_empty())
@@ -968,30 +948,19 @@ fn render_user(
     // A persistent "steered" marker for user messages that entered the list
     // via the steer-queue drain (mid-turn injection) rather than starting a
     // fresh turn. Survives reload because it is read back from
-    // `MessageUiMetadata::steered` in `from_message`.
-    let steer_badge = if pending_steer {
-        Some(
-            gpui::div()
-                .px_1()
-                .py_0p5()
-                .rounded(theme.radius)
-                .bg(accent.opacity(0.15))
-                .text_sm()
-                .text_color(theme.accent_foreground)
-                .child(i18n::t("message-steer-pending-badge")),
-        )
-    } else {
-        meta.filter(|m| m.steered).map(|_| {
-            gpui::div()
-                .px_1()
-                .py_0p5()
-                .rounded(theme.radius)
-                .bg(accent.opacity(0.15))
-                .text_sm()
-                .text_color(theme.accent_foreground)
-                .child(i18n::t("message-steered-badge"))
-        })
-    };
+    // `MessageUiMetadata::steered` in `from_message`. A steer still in flight
+    // never reaches the list (it parks in the composer queue until settle), so
+    // there is no live "pending" variant here.
+    let steer_badge = meta.filter(|m| m.steered).map(|_| {
+        gpui::div()
+            .px_1()
+            .py_0p5()
+            .rounded(theme.radius)
+            .bg(accent.opacity(0.15))
+            .text_sm()
+            .text_color(theme.accent_foreground)
+            .child(i18n::t("message-steered-badge"))
+    });
 
     let body_el = body_or_static(body, ("user-text", ix), text.to_string(), theme, cx);
     let mut header_el = h_flex()
@@ -3318,7 +3287,6 @@ impl ItemBuilder {
                             text,
                             images,
                             meta: Some(meta),
-                            display_state: crate::conversation::UserMessageDisplayState::Normal,
                         });
                     }
                     for c in &m.content {
@@ -4641,7 +4609,6 @@ mod tests {
             text: "hello".into(),
             images: Vec::new(),
             meta: None,
-            display_state: crate::conversation::UserMessageDisplayState::Normal,
         };
         assert_eq!(text_body_of(&user), Some((false, "hello".into())));
 
