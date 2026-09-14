@@ -1336,12 +1336,13 @@ fn build_launch_spec(
         // Inject a unified model identifier so agents and their tooling can
         // detect which model cx configured, regardless of the agent type.
         // The wire-facing id is the base id (context suffix stripped; providers
-        // do not recognize cx's suffix), except claude, which re-appends the
-        // [1m]/[2m] suffix — its own window parser reads it and strips it before
-        // the wire request. ctx_hint ([1m] → 1_000_000) is consumed per agent
-        // branch: claude writes the suffixed model name plus
-        // CLAUDE_CODE_MAX_CONTEXT_TOKENS as a DISABLE_COMPACT-only fallback,
-        // copilot COPILOT_PROVIDER_MAX_PROMPT_TOKENS, codex model_context_window.
+        // do not recognize cx's suffix), except claude, which re-appends a
+        // `[1m]` suffix for the 1M tier — its own window parser tests only
+        // `/\[1m\]/i` and strips the suffix before the wire request. ctx_hint
+        // ([1m] → 1_000_000) is consumed per agent branch: claude writes the
+        // `[1m]`-suffixed name (or the base id plus CLAUDE_CODE_MAX_CONTEXT_TOKENS
+        // as a DISABLE_COMPACT-only fallback for other tiers), copilot
+        // COPILOT_PROVIDER_MAX_PROMPT_TOKENS, codex model_context_window.
         let (api_model_id, ctx_hint) = parse_model_context_suffix(&model.id);
         env.insert("CX_MODEL".into(), api_model_id.to_string());
 
@@ -1396,21 +1397,22 @@ fn build_launch_spec(
                 env_remove.push("ANTHROPIC_MODEL".into());
                 env.insert("ANTHROPIC_BASE_URL".into(), model.endpoint_url.clone());
                 env.insert("ANTHROPIC_API_KEY".into(), apikey);
-                // Claude Code's context-window decision (extracted from the
-                // 2.1.170 binary) reads CLAUDE_CODE_MAX_CONTEXT_TOKENS only
-                // under DISABLE_COMPACT; otherwise a `[1m]`/`[2m]` model-name
-                // suffix is the sole way to declare a >200k window, and
-                // Claude Code strips it before the wire request. So pass the
-                // suffix through for the representable tiers; the env below is
-                // kept for every Some(ctx_hint) as a harmless fallback.
+                // Claude Code's context-window picker (extracted from the
+                // 2.1.170 binary) tests only `/\[1m\]/i` on the model name;
+                // `[2m]` appears solely in a strip/display helper and does
+                // not widen the window. CLAUDE_CODE_MAX_CONTEXT_TOKENS is read
+                // only under DISABLE_COMPACT. So `[1m]` is the sole pass-through
+                // that declares a 1M window (Claude Code strips it before the
+                // wire request); every other ctx_hint falls back to the base id
+                // plus the env, warned below as DISABLE_COMPACT-only.
                 let claude_model = match ctx_hint {
                     Some(1_000_000) => format!("{api_model_id}[1m]"),
-                    Some(2_000_000) => format!("{api_model_id}[2m]"),
                     Some(tokens) => {
                         eprintln!(
-                            "cx: 警告: Claude Code 无法用模型名后缀表示 {tokens} 上下文窗口，\
-                             且 CLAUDE_CODE_MAX_CONTEXT_TOKENS 仅在 DISABLE_COMPACT 开启时生效；\
-                             默认配置下 Claude Code 会回退 200k 并提前自动压缩。"
+                            "cx: 警告: Claude Code 无法用模型名后缀表示 {tokens} 上下文窗口\
+                             （只有 [1m] 参与窗口判定），且 CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+                             仅在 DISABLE_COMPACT 开启时生效；默认配置下 Claude Code 会回退 \
+                             200k 并提前自动压缩。"
                         );
                         api_model_id.to_string()
                     }
@@ -3835,21 +3837,26 @@ agents:
     }
 
     #[test]
-    fn launch_forwards_2m_suffix_to_claude() {
-        // [2m] 同样透传：Claude Code 后缀语法认 \[(1|2)m\]。
+    fn launch_does_not_forward_2m_suffix_to_claude() {
+        // [2m] 不参与窗口判定：Claude Code 的窗口选择器只测 /\[1m\]/i，`[2m]`
+        // 仅出现在剥离/展示 helper 里（真二进制实测 [2m] → 200k no-op）。故并入
+        // 兜底臂：--model 与 ANTHROPIC_MODEL 传 base id，依赖
+        // CLAUDE_CODE_MAX_CONTEXT_TOKENS=2000000（仅 DISABLE_COMPACT 时生效）
+        // 兜底，args 不含 [2m]。
         let fake_binary = create_fake_binary("claude");
         let spec = claude_launch_spec_for_model(&fake_binary, "glm-5.2[2m]");
         assert_eq!(spec.env.get("CX_MODEL"), Some(&"glm-5.2".to_string()));
         assert_eq!(
             spec.env.get("ANTHROPIC_MODEL"),
-            Some(&"glm-5.2[2m]".to_string())
+            Some(&"glm-5.2".to_string())
         );
         let model_arg = spec
             .args
             .iter()
             .position(|a| a == "--model")
             .map(|i| spec.args[i + 1].clone());
-        assert_eq!(model_arg, Some("glm-5.2[2m]".to_string()));
+        assert_eq!(model_arg, Some("glm-5.2".to_string()));
+        assert!(!spec.args.iter().any(|a| a.contains("[2m]")));
         assert_eq!(
             spec.env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
             Some(&"2000000".to_string())
@@ -3859,7 +3866,7 @@ agents:
 
     #[test]
     fn launch_falls_back_to_env_for_unrepresentable_claude_suffix() {
-        // [200k] 没有对应的 Claude Code 后缀（语法只认 [1m]/[2m]）→ 传 base id，
+        // [200k] 无对应的可扩窗后缀（只有 [1m] 参与窗口判定）→ 传 base id，
         // 依赖 CLAUDE_CODE_MAX_CONTEXT_TOKENS 兜底（仅 DISABLE_COMPACT 时生效），
         // 并输出 warning 提示默认配置下会回退 200k。
         let fake_binary = create_fake_binary("claude");
