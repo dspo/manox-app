@@ -307,6 +307,9 @@ impl Workspace {
         // Queue state is session-local but belongs to a thread, not to the
         // currently visible workspace. Move it aside before rebinding.
         let outgoing_follow_ups = std::mem::take(&mut self.queued_follow_ups);
+        // A live queue drag belongs to the outgoing view: its indices mean
+        // nothing against the incoming thread's queue — drop the marker.
+        self.queue_drag = None;
         if outgoing_follow_ups.is_empty() {
             self.queued_follow_ups_by_thread.remove(&old_id);
         } else {

@@ -661,6 +661,92 @@ impl Workspace {
         }
     }
 
+    /// Resolve a live queue-row drag to the index the dragged item lands at,
+    /// or `None` when the gesture must no-op: no marker, the row dropped on
+    /// itself, a committed (non-`Queued`) drag source, or a landing spot
+    /// outside the contiguous `Queued` tail — the
+    /// `[SteerPending|Failed …] ++ [Queued …]` group invariant survives even
+    /// if the pointer hovers the status rows mid-drag.
+    pub(super) fn queue_move_index(
+        queue: &std::collections::VecDeque<QueuedFollowUp>,
+        drag: composer_render::QueueRowDrag,
+    ) -> Option<usize> {
+        let from = drag.dragged;
+        if from == drag.line_on {
+            return None;
+        }
+        if !matches!(queue.get(from)?.state, FollowUpState::Queued) {
+            return None;
+        }
+        let target = match drag.edge {
+            composer_render::QueueDragEdge::Top => drag.line_on,
+            composer_render::QueueDragEdge::Bottom => drag.line_on + 1,
+        }
+        .min(queue.len());
+        let insert = if target > from { target - 1 } else { target };
+        // The `Queued` group is the queue's contiguous tail (invariant):
+        // anything below the first `Queued` row belongs to the committed
+        // group and is not a legal destination.
+        let head = queue
+            .iter()
+            .position(|item| matches!(item.state, FollowUpState::Queued))
+            .unwrap_or(queue.len());
+        if insert < head || insert > queue.len() - 1 {
+            return None;
+        }
+        (insert != from).then_some(insert)
+    }
+
+    /// Commit a queue-row drag: reorder the parked `Queued` tail locally. This
+    /// is session UI state only — the flush order the model eventually sees is
+    /// the queue's own order, so no server round-trip is involved.
+    pub(super) fn commit_queue_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.queue_drag.take() else {
+            cx.notify();
+            return;
+        };
+        if let Some(insert) = Self::queue_move_index(&self.queued_follow_ups, drag)
+            && let Some(item) = self.queued_follow_ups.remove(drag.dragged)
+        {
+            self.queued_follow_ups.insert(insert, item);
+        }
+        cx.notify();
+    }
+
+    /// Return a parked row to the composer for another edit: its text merges
+    /// into the input (below anything already typed) and its images re-attach
+    /// as pending attachments. Only `Queued` / `Failed` rows render this
+    /// affordance; the guard re-checks so a stale gesture can no-op.
+    pub(super) fn edit_follow_up(
+        &mut self,
+        idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.queued_follow_ups.remove(idx) else {
+            return;
+        };
+        if matches!(item.state, FollowUpState::SteerPending) {
+            self.queued_follow_ups.insert(idx, item);
+            return;
+        }
+        let current = self.input_state.read(cx).value();
+        let merged = if current.trim().is_empty() {
+            item.turn.text.clone()
+        } else {
+            format!("{current}\n{}", item.turn.text)
+        };
+        self.input_state.update(cx, |state, cx| {
+            state.set_value(merged, window, cx);
+            state.focus(window, cx);
+        });
+        for image in item.turn.user_images {
+            self.pending_attachments
+                .push(PendingAttachment::ClipboardImage((*image.0).clone()));
+        }
+        cx.notify();
+    }
+
     pub(super) fn delete_follow_up(&mut self, idx: usize, cx: &mut Context<Self>) {
         // `SteerPending` cards are not removable: the steer is already handed to
         // the server and the protocol has no steer-withdrawal channel, so

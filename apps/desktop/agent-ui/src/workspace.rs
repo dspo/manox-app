@@ -742,6 +742,10 @@ pub struct Workspace {
     /// Session-only per-thread queue stash. Switching tasks moves the active
     /// deque here and restores it on return; no database persistence is used.
     queued_follow_ups_by_thread: HashMap<String, std::collections::VecDeque<QueuedFollowUp>>,
+    /// In-flight queue-row drag (the composer queue's grip handle): the
+    /// insertion marker cleared on commit / cancel / thread switch. Mirrors
+    /// the sidebar's `drag_row` cue for the same gesture.
+    queue_drag: Option<composer_render::QueueRowDrag>,
     /// Tracks which composer placeholder is installed, so render only mutates
     /// the input state on mode transitions.
     composer_placeholder_mode: ComposerPlaceholderMode,
@@ -1206,6 +1210,7 @@ impl Workspace {
             turn_navigator_previous_focus: None,
             queued_follow_ups: std::collections::VecDeque::new(),
             queued_follow_ups_by_thread: HashMap::new(),
+            queue_drag: None,
             composer_placeholder_mode: ComposerPlaceholderMode::Normal,
             pending_attachments: Vec::new(),
             active_browser_suites: Vec::new(),
@@ -3028,20 +3033,6 @@ impl Workspace {
         self.close_access_menu();
         cx.notify();
     }
-}
-
-/// Cap a queued follow-up's text for the compact queue row so long pastes
-/// don't blow out the composer chrome. Trailing whitespace is trimmed and an
-/// ellipsis marks a truncation.
-fn truncate_follow_up(s: &str) -> String {
-    const MAX: usize = 80;
-    let s = s.trim();
-    if s.chars().count() <= MAX {
-        return s.to_string();
-    }
-    let mut t: String = s.chars().take(MAX).collect();
-    t.push('…');
-    t
 }
 
 /// Whether the gateway's command snapshot (§D.5 `Commands` / `ListCommands`)

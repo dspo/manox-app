@@ -9,6 +9,77 @@
 
 use super::*;
 
+/// Drag payload for a queued follow-up row. The index is all the gesture
+/// needs: rows are transient session state, so the live queue position is
+/// the identity (mirrors the sidebar's id-carrying `DraggedThreadRow`, of
+/// which this is the index-addressed twin).
+#[derive(Clone, PartialEq)]
+pub(super) struct DraggedQueueRow {
+    idx: usize,
+}
+
+impl Render for DraggedQueueRow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // No visible ghost: the row itself is the thing being moved.
+        gpui::div()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum QueueDragEdge {
+    Top,
+    Bottom,
+}
+
+/// In-flight queue-row drag: the row being dragged, the row whose edge
+/// carries the insertion line, and which edge that is (the sidebar's
+/// `RowDrag` shape, index-keyed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct QueueRowDrag {
+    pub(super) dragged: usize,
+    pub(super) line_on: usize,
+    pub(super) edge: QueueDragEdge,
+}
+
+/// Resolve the pointer's boundary on one row: the insertion line hugs the
+/// half of the row the pointer is in (the sidebar's `drag_boundary`, so the
+/// two drag affordances behave identically). Outside the row's own bounds
+/// there is no boundary — `on_drag_move` fires for every move of a live
+/// drag, not only the hovered element.
+fn queue_drag_boundary(
+    bounds_top: gpui::Pixels,
+    height: gpui::Pixels,
+    pointer_y: gpui::Pixels,
+) -> Option<QueueDragEdge> {
+    let bottom = bounds_top + height;
+    if pointer_y < bounds_top || pointer_y > bottom {
+        return None;
+    }
+    Some(if pointer_y < bounds_top + height / 2.0 {
+        QueueDragEdge::Top
+    } else {
+        QueueDragEdge::Bottom
+    })
+}
+
+/// The queue row's single-line summary: newlines collapse to spaces; the
+/// width-based `text_ellipsis` renders do the truncation (no char cap —
+/// width ellipsis replaces the old 80-char cap).
+/// Accent 2px hairline: the insertion position for a live queue drag.
+fn insertion_line(theme: &Theme) -> AnyElement {
+    gpui::div()
+        .h(px(2.))
+        .w_full()
+        .bg(theme.accent)
+        .into_any_element()
+}
+
+/// One-line summary for a queue row (newlines collapsed; width ellipsis
+/// renders do the truncation).
+fn queue_row_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl Workspace {
     /// Rendered bare — no card border, fill, or rounding — so it shares the
     /// page background with the message list and reads as the same layer.
@@ -171,10 +242,15 @@ impl Workspace {
     }
 
     /// Render the compact queue above the composer. Every follow-up parked
-    /// during the running turn stays visible here until it settles: ordinary
-    /// `Queued` rows, in-flight `SteerPending` rows (icon + summary + a
-    /// 「待引导」badge, no buttons — the steer is committed to the server and can't
-    /// be withdrawn), and `Failed` rows that need an explicit retry or deletion.
+    /// during the running turn stays visible here until it settles. Row
+    /// layout (left to right): a grip handle, an optional image badge, the
+    /// single-line ellipsized summary, then steer-now / edit / delete.
+    /// `SteerPending` rows are status-only (spacer + badge, no buttons —
+    /// committed, not removable); they also sit at the head of the queue, so
+    /// dragging is offered only on non-pending rows and commits only inside
+    /// the contiguous `Queued` tail — the
+    /// `[SteerPending|Failed …] ++ [Queued …]` invariant is never negotiable
+    /// ([`Workspace::commit_queue_drag`]).
     pub(super) fn render_queued_follow_ups(
         &self,
         theme: &Theme,
@@ -182,12 +258,11 @@ impl Workspace {
     ) -> Vec<AnyElement> {
         let mut rows = Vec::with_capacity(self.queued_follow_ups.len());
         for (idx, item) in self.queued_follow_ups.iter().enumerate() {
-            let summary = truncate_follow_up(&item.turn.text);
-            // A pending steer renders as a read-only status row: no inline
-            // buttons (delete/retry would imply a withdrawal the protocol
-            // doesn't offer), just the corner-right-up glyph + summary + the
-            // 「待引导」badge until the turn settles and it moves to the list.
-            if matches!(item.state, FollowUpState::SteerPending) {
+            let line = queue_row_line(&item.turn.text);
+            let is_pending = matches!(item.state, FollowUpState::SteerPending);
+            let danger = matches!(item.state, FollowUpState::Failed);
+            // SteerPending: read-only status row (no buttons, no handle)
+            if is_pending {
                 let badge = gpui::div()
                     .px_1()
                     .py_0p5()
@@ -196,28 +271,34 @@ impl Workspace {
                     .text_sm()
                     .text_color(theme.accent_foreground)
                     .child(i18n::t("message-steer-pending-badge"));
-                let pending_left = h_flex()
+                let left = h_flex()
                     .items_center()
                     .gap_2()
                     .min_w_0()
                     .flex_1()
-                    .child(
-                        Icon::default()
-                            .path("icons/corner-right-up.svg")
-                            .xsmall()
-                            .text_color(theme.accent),
-                    )
+                    .child(gpui::div().w_4().flex_shrink_0()) // spacer for grip
+                    .when(!item.turn.user_images.is_empty(), |l| {
+                        l.child(
+                            Icon::default()
+                                .path("icons/image.svg")
+                                .xsmall()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
                     .child(
                         gpui::div()
                             .flex_1()
                             .min_w_0()
                             .overflow_x_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_xs()
                             .text_color(theme.foreground)
-                            .child(summary),
+                            .child(line),
                     );
                 rows.push(
                     h_flex()
+                        .id(format!("queue-pending-row-{idx}"))
                         .w_full()
                         .items_center()
                         .gap_2()
@@ -225,12 +306,50 @@ impl Workspace {
                         .py_1()
                         .border_b_1()
                         .border_color(theme.border.opacity(0.6))
-                        .child(pending_left)
+                        .child(left)
                         .child(badge)
                         .into_any_element(),
                 );
                 continue;
             }
+            // Queued / Failed: draggable grip + right-button cluster
+            let payload = DraggedQueueRow { idx };
+            let ghost = payload.clone();
+            let handle = gpui::div()
+                .id(format!("queue-grip-{idx}"))
+                .flex_shrink_0()
+                .cursor_grab()
+                .text_color(theme.muted_foreground)
+                .on_drag(payload, move |_, _, _, cx| cx.new(|_| ghost.clone()))
+                .child(Icon::default().path("icons/grip-vertical.svg").xsmall());
+            let image_badge = (!item.turn.user_images.is_empty()).then(|| {
+                Icon::default()
+                    .path("icons/image.svg")
+                    .xsmall()
+                    .text_color(theme.muted_foreground)
+            });
+            let steer_label = if danger {
+                "queued-steer-now-retry-action"
+            } else {
+                "queued-steer-now-action"
+            };
+            let steer_btn = Button::new(format!("queue-steer-{idx}"))
+                .secondary()
+                .xsmall()
+                .icon(Icon::default().path("icons/corner-right-up.svg"))
+                .label(i18n::t(steer_label))
+                .tooltip(i18n::t(steer_label))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.steer_follow_up(idx, cx);
+                }));
+            let edit_btn = Button::new(format!("queue-edit-{idx}"))
+                .ghost()
+                .xsmall()
+                .icon(Icon::default().path("icons/pencil.svg"))
+                .tooltip(i18n::t("queued-edit-action"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.edit_follow_up(idx, window, cx);
+                }));
             let delete_btn = Button::new(format!("queue-delete-{idx}"))
                 .ghost()
                 .xsmall()
@@ -239,95 +358,97 @@ impl Workspace {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.delete_follow_up(idx, cx);
                 }));
-            let more_btn = Button::new(format!("queue-more-{idx}"))
-                .ghost()
-                .xsmall()
-                .icon(IconName::Ellipsis)
-                .tooltip(i18n::t("queued-more-action"));
-
-            let (action_btn, danger): (AnyElement, bool) = match &item.state {
-                FollowUpState::Queued => {
-                    let steer_btn = Button::new(format!("queue-steer-{idx}"))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Redo2)
-                        .label(i18n::t("queued-steer-action"))
-                        .tooltip(i18n::t("queued-steer-action"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.steer_follow_up(idx, cx);
-                        }));
-                    (steer_btn.into_any_element(), false)
-                }
-                FollowUpState::Failed => {
-                    let retry_btn = Button::new(format!("queue-steer-{idx}"))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Redo2)
-                        .label(i18n::t("queued-steer-retry-action"))
-                        .tooltip(i18n::t("queued-steer-retry-action"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.steer_follow_up(idx, cx);
-                        }));
-                    (retry_btn.into_any_element(), true)
-                }
-                FollowUpState::SteerPending => unreachable!("handled above"),
-            };
-
-            let summary_color = if danger {
-                theme.danger
-            } else {
-                theme.foreground
-            };
-
             let left = h_flex()
                 .items_center()
                 .gap_2()
                 .min_w_0()
                 .flex_1()
-                .child(
-                    Icon::default()
-                        .path("icons/corner-right-up.svg")
-                        .xsmall()
-                        .text_color(if danger {
-                            theme.danger
-                        } else {
-                            theme.muted_foreground
-                        }),
-                )
+                .child(handle)
+                .when_some(image_badge, |l, badge| l.child(badge))
                 .child(
                     gpui::div()
                         .flex_1()
                         .min_w_0()
                         .overflow_x_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_xs()
-                        .text_color(summary_color)
-                        .child(summary),
+                        .text_color(if danger {
+                            theme.danger
+                        } else {
+                            theme.foreground
+                        })
+                        .child(line),
                 );
-
             let right = h_flex()
                 .items_center()
                 .gap_0p5()
                 .flex_shrink_0()
-                .child(action_btn)
-                .child(delete_btn)
-                .child(more_btn);
-
-            rows.push(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(theme.border.opacity(0.6))
-                    .when(danger, |row| row.bg(theme.danger.opacity(0.08)))
-                    .child(left)
-                    .child(right)
-                    .into_any_element(),
-            );
+                .child(steer_btn)
+                .child(edit_btn)
+                .child(delete_btn);
+            let row = h_flex()
+                .id(format!("queue-row-{idx}"))
+                .w_full()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(theme.border.opacity(0.6))
+                .when(danger, |row| row.bg(theme.danger.opacity(0.08)))
+                .when(self.queue_drag.is_some_and(|d| d.dragged == idx), |row| {
+                    row.opacity(0.4)
+                })
+                .on_drag_move::<DraggedQueueRow>(cx.listener(
+                    move |this, e: &gpui::DragMoveEvent<DraggedQueueRow>, _, cx| {
+                        let Some(edge) = queue_drag_boundary(
+                            e.bounds.origin.y,
+                            e.bounds.size.height,
+                            e.event.position.y,
+                        ) else {
+                            return;
+                        };
+                        let marker = QueueRowDrag {
+                            dragged: e.drag(cx).idx,
+                            line_on: idx,
+                            edge,
+                        };
+                        if this.queue_drag != Some(marker) {
+                            this.queue_drag = Some(marker);
+                            cx.notify();
+                        }
+                    },
+                ))
+                .on_drop::<DraggedQueueRow>(cx.listener(
+                    move |this, row: &DraggedQueueRow, _, cx| {
+                        if this.queue_drag.is_some_and(|d| d.dragged == row.idx) {
+                            this.commit_queue_drag(cx);
+                        }
+                    },
+                ));
+            rows.push(row.child(left).child(right).into_any_element());
         }
-        rows
+        // Insertion marker: accent hairline between rows while dragging.
+        let mut with_marker = Vec::with_capacity(rows.len());
+        if let Some(drag) = self.queue_drag {
+            for (i, row) in rows.into_iter().enumerate() {
+                if drag.line_on == i {
+                    if matches!(drag.edge, QueueDragEdge::Top) {
+                        with_marker.push(insertion_line(theme));
+                    }
+                    with_marker.push(row);
+                    if matches!(drag.edge, QueueDragEdge::Bottom) {
+                        with_marker.push(insertion_line(theme));
+                    }
+                } else {
+                    with_marker.push(row);
+                }
+            }
+            with_marker
+        } else {
+            rows
+        }
     }
 
     /// Plan-mode indicator chip: visible while the session plans (read-only

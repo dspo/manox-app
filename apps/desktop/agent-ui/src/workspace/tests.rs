@@ -954,6 +954,131 @@ fn steer_group_insert_index_keeps_steers_before_the_queue() {
     assert_eq!(super::Workspace::steer_group_insert_index(&mixed), 2);
 }
 
+/// The queue drag's commit rule: reorder inside the `Queued` tail only. A
+/// committed row (steer/failed) never moves and is never a crossing
+/// destination — the group invariant holds even when the pointer hovers the
+/// status rows mid-drag.
+#[test]
+fn queue_move_index_reorders_only_the_queued_tail() {
+    use super::composer_render::{QueueDragEdge as E, QueueRowDrag as D};
+    let turn = |text: &str| super::DeferredUserTurn {
+        text: text.to_string(),
+        images: vec![],
+        meta: crate::conversation::UserTurnMeta::new(1, "m".into(), None),
+        user_images: Vec::new(),
+    };
+    let q = |state| super::QueuedFollowUp {
+        turn: turn("x"),
+        state,
+    };
+    use super::FollowUpState as S;
+
+    let queue: std::collections::VecDeque<_> =
+        [q(S::SteerPending), q(S::Queued), q(S::Queued), q(S::Queued)]
+            .into_iter()
+            .collect();
+
+    // Forward move: row 1 dropped below row 3 → lands at the tail.
+    assert_eq!(
+        super::Workspace::queue_move_index(
+            &queue,
+            D {
+                dragged: 1,
+                line_on: 3,
+                edge: E::Bottom
+            }
+        ),
+        Some(3)
+    );
+    // Backward move: row 3 dropped above row 1 → lands at 1.
+    assert_eq!(
+        super::Workspace::queue_move_index(
+            &queue,
+            D {
+                dragged: 3,
+                line_on: 1,
+                edge: E::Top
+            }
+        ),
+        Some(1)
+    );
+    // Self drops no-op (own row, and the adjacent slot that re-inserts in place).
+    assert_eq!(
+        super::Workspace::queue_move_index(
+            &queue,
+            D {
+                dragged: 2,
+                line_on: 2,
+                edge: E::Top
+            }
+        ),
+        None
+    );
+    assert_eq!(
+        super::Workspace::queue_move_index(
+            &queue,
+            D {
+                dragged: 2,
+                line_on: 1,
+                edge: E::Bottom
+            }
+        ),
+        None
+    );
+    // Landing inside the committed head is rejected.
+    assert_eq!(
+        super::Workspace::queue_move_index(
+            &queue,
+            D {
+                dragged: 3,
+                line_on: 0,
+                edge: E::Top
+            }
+        ),
+        None
+    );
+    // A committed source never moves: SteerPending and Failed alike.
+    assert_eq!(
+        super::Workspace::queue_move_index(
+            &queue,
+            D {
+                dragged: 0,
+                line_on: 3,
+                edge: E::Bottom
+            }
+        ),
+        None
+    );
+    let with_failed: std::collections::VecDeque<_> = [q(S::Failed), q(S::Queued), q(S::Queued)]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        super::Workspace::queue_move_index(
+            &with_failed,
+            D {
+                dragged: 0,
+                line_on: 2,
+                edge: E::Bottom
+            }
+        ),
+        None
+    );
+    // All-Queued still reorders freely to the end.
+    let all_queued: std::collections::VecDeque<_> =
+        [q(S::Queued), q(S::Queued)].into_iter().collect();
+    assert_eq!(
+        super::Workspace::queue_move_index(
+            &all_queued,
+            D {
+                dragged: 0,
+                line_on: 1,
+                edge: E::Bottom
+            }
+        ),
+        Some(1)
+    );
+}
+
 /// A foreground workspace bound to a spy client with a running store, ready to
 /// exercise the composer steer state machine without a real agent turn. Returns
 /// the workspace handle and the server half of the spy connection.
