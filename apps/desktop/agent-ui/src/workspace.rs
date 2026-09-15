@@ -32,11 +32,13 @@ use gpui_component::{
     Size, TITLE_BAR_HEIGHT, Theme, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState, Paste, RopeExt},
+    input::{
+        Editor, EditorState, Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState,
+    },
     v_flex,
 };
 use gpui_component::{
-    StyledExt as _,
+    ThemeStyled as _,
     menu::PopupMenuItem,
     tab::{Tab, TabBar},
     tag::{Tag, TagVariant},
@@ -150,8 +152,22 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
     }
     let mut parsed: Vec<AskQuestion> = Vec::with_capacity(questions.len());
     let mut selections: Vec<Vec<bool>> = Vec::with_capacity(questions.len());
-    for q in questions {
+    for (i, q) in questions.iter().enumerate() {
         let question = q.get("question")?.as_str()?.to_string();
+        // The server mints a stable id onto each parked question; answers are
+        // id-routed and unknown ids are dropped at the settle boundary.
+        // Inputs predating the mint (fixtures, older servers) fall back to a
+        // positional id, mirroring how the card keys its per-step state.
+        let id = q
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(match i {
+                0 => "q0",
+                1 => "q1",
+                _ => "q2",
+            })
+            .to_string();
         let header = q
             .get("header")
             .and_then(|v| v.as_str())
@@ -191,6 +207,7 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
         }
         selections.push(vec![false; opts.len()]);
         parsed.push(AskQuestion {
+            id,
             question,
             header,
             multi_select,
@@ -418,6 +435,9 @@ pub(crate) struct AskCardOption {
 }
 
 struct AskQuestion {
+    /// Stable question id (server-minted) used to route the canonical
+    /// `AskAnswer` back through the settle boundary.
+    id: String,
     question: String,
     header: String,
     multi_select: bool,
@@ -593,7 +613,7 @@ pub struct Workspace {
     /// notify drives the sidebar rows and the workspace's model surfaces.
     _mux_lists: gpui::Subscription,
     pub(crate) conversation: Entity<ConversationState>,
-    pub(crate) input_state: Entity<InputState>,
+    pub(crate) input_state: Entity<TextareaState>,
     /// Per-thread unsent composer text, keyed by thread id. Saved when
     /// switching away and restored on return, so each thread keeps its own
     /// in-progress draft instead of a single shared input bleeding across.
@@ -615,7 +635,7 @@ pub struct Workspace {
     /// Right-side markdown composer; opened via the `ToggleEditor` shortcut.
     /// Plain-text edit mode by default; `ToggleEditorPreview` switches to a
     /// rendered markdown preview (`Markdown`).
-    editor_state: Entity<InputState>,
+    editor_state: Entity<EditorState>,
     /// Whether the Editor tab is the active right-pane tab. Drives the inline
     /// composer hide (writing happens in the side panel) and the env/hero
     /// gates.
@@ -1062,9 +1082,9 @@ impl Workspace {
             &agent_server,
             "desktop",
             vec![
-                manox_protocol::handshake::HookKind::Approve,
-                manox_protocol::handshake::HookKind::PlanVerdict,
-                manox_protocol::handshake::HookKind::AskUserQuestion,
+                manox_protocol::AnswerKind::Approve,
+                manox_protocol::AnswerKind::PlanVerdict,
+                manox_protocol::AnswerKind::AskUserQuestion,
             ],
             vec![],
         ));
@@ -1084,16 +1104,15 @@ impl Workspace {
         };
 
         let input_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(4, 12)
                 .submit_on_enter(true)
                 .placeholder(i18n::t("workspace-input-placeholder"))
         });
 
         let editor_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor("markdown")
+            EditorState::new(window, cx)
+                .language("markdown")
                 .line_number(true)
                 .folding(false)
                 .soft_wrap(true)
