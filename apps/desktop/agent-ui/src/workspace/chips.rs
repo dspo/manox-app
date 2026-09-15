@@ -355,6 +355,8 @@ impl Workspace {
             );
             return;
         }
+        // In-process fallback (no wire MsgId): the canonical rows built above
+        // ride the direct kernel path.
         self.thread.with_mut(|thread| {
             thread.respond_authorization(
                 &id,
@@ -375,15 +377,14 @@ impl Workspace {
     }
 
     /// Wire api string → text color for the pi composer model label and the
-    /// context rail's per-model usage rows. Blue/cyan/amber at 600 in light,
-    /// 300 in dark, mirroring the VS Code webview's `--wire-*` tokens so both
-    /// sides render identical hues.
+    /// context rail's per-model usage rows. Tinted directly from theme tokens
+    /// (matching `mode_chip_visual` and the settings panel) so both surfaces
+    /// follow the active light/dark theme automatically.
     pub(crate) fn pi_wire_text_color(api: &str, theme: &Theme) -> gpui::Hsla {
-        let step = if theme.is_dark() { 300 } else { 600 };
         match api {
-            "anthropic" => ColorName::Blue.scale(step),
-            "openai_responses" => ColorName::Cyan.scale(step),
-            "openai_completions" => ColorName::Amber.scale(step),
+            "anthropic" => theme.info,
+            "openai_responses" => theme.success,
+            "openai_completions" => theme.warning,
             _ => theme.muted_foreground,
         }
     }

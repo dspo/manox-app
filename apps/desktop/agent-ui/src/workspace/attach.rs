@@ -30,9 +30,6 @@ impl Workspace {
             // tool-traffic heuristics this replaces only ran in-proc and
             // raced the actual verdict. Tool traffic falls to the
             // catch-all.
-            ThreadEvent::SteerInjected { message_id } => {
-                this.consume_background_steer(&id, message_id);
-            }
             ThreadEvent::PlanReady { plan_file, title } => {
                 // A plan proposed while the thread was parked never reaches
                 // the foreground handler: stash the review so the
@@ -74,12 +71,19 @@ impl Workspace {
                 // mirror (the client-owned badge source), not the
                 // server-side store mirror.
                 this.multiplexer.update(cx, |m, cx| m.note_unread(&id, cx));
-                // Mirror the foreground terminal bookkeeping: steers the
-                // aborted turn never drained flip to `Failed` in the
-                // parked stash (a late `SteerInjected` can still heal
-                // them), and queued follow-ups only become the next turn
-                // on a natural settle — never after a cancel.
-                this.mark_parked_stranded_steers_failed(&id, stranded_steer_ids);
+                // Mirror the foreground settle routing against the parked
+                // stash with the same per-id verdict: only the retracted tail
+                // (`stranded_steer_ids`) turns `Failed`; the injected rest
+                // drops and surfaces through the transcript on switch-back /
+                // reload. A normal settle carries zero stranded — everything
+                // drops, unchanged from before. Queued follow-ups only become
+                // the next turn on a natural settle — never after a cancel.
+                let stranded = if *cancelled || *failed {
+                    stranded_steer_ids.len()
+                } else {
+                    0
+                };
+                this.settle_parked_steer_group(&id, stranded);
                 if !*cancelled {
                     this.flush_parked_follow_ups(&id, cx);
                 }
@@ -306,6 +310,9 @@ impl Workspace {
         // Queue state is session-local but belongs to a thread, not to the
         // currently visible workspace. Move it aside before rebinding.
         let outgoing_follow_ups = std::mem::take(&mut self.queued_follow_ups);
+        // A live queue drag belongs to the outgoing view: its indices mean
+        // nothing against the incoming thread's queue — drop the marker.
+        self.queue_drag = None;
         if outgoing_follow_ups.is_empty() {
             self.queued_follow_ups_by_thread.remove(&old_id);
         } else {

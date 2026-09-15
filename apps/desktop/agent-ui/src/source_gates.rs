@@ -173,8 +173,11 @@ mod tests {
                 "workspace/composer.rs",
                 "facade writes (U1/U6)",
                 FACADE_WRITE,
-                // §二.7①: four receiver-form sites, pre-ratchet; frozen.
-                4,
+                // UI-polish #5: ratcheted 4→0. The steer no longer writes the
+                // engine-less `thread` mirror (the `enqueue_steer` + three
+                // `cancel_pending_steer` bypass sites); it rides the wire via
+                // `Workspace::send_steer_v2` instead.
+                0,
             ),
             (
                 "workspace/plan_review.rs",
@@ -248,7 +251,13 @@ mod tests {
             // before, not a new bypass face — the store is reached only through
             // the gateway, which is why they land here rather than on the
             // STORE_WRITE ledger.
-            ("workspace.rs", "protocol sends (U9)", SENDS, 8),
+            // UI-polish #5: the composer's dead-end steer (four bypass facade
+            // writes on the engine-less `thread` mirror — `enqueue_steer` +
+            // three `cancel_pending_steer`) migrates to ONE real wire send
+            // (`send_steer_v2`'s `ClientCall::Steer`), the ledger-mandated
+            // direction (a bypass write → a protocol send); composer.rs's
+            // FACADE_WRITE budget ratchets 4→0 in the same commit.
+            ("workspace.rs", "protocol sends (U9)", SENDS, 9),
             (
                 "workspace/composer_render.rs",
                 "protocol sends (U9)",

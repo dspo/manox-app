@@ -837,7 +837,6 @@ impl ContextRail {
                 .w_full()
                 .min_w_0()
                 .py_0p5()
-                .pl(px(12.))
                 .gap_1p5()
                 .items_center()
                 .rounded(px(4.))

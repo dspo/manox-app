@@ -118,6 +118,9 @@ mod tests {
             "icons/zodiac-scorpio.svg",
             "icons/blocks.svg",
             "icons/panel-right-dashed.svg",
+            "icons/grip-vertical.svg",
+            "icons/image.svg",
+            "icons/pencil.svg",
         ] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
         }

@@ -51,17 +51,6 @@ pub struct UserTurnMeta {
     pub peer: bool,
 }
 
-/// Live-only presentation state for a user bubble submitted as a steer.
-/// Canonical history only contains confirmed steers, so rebuilt messages are
-/// always `Normal`. A rolled-back item stays as an invisible tombstone to keep
-/// the stable ids of later `MessageItem` entities intact.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UserMessageDisplayState {
-    Normal,
-    PendingSteer { message_id: String },
-    RolledBackSteer { message_id: String },
-}
-
 impl UserTurnMeta {
     pub fn new(timestamp: i64, model_id: String, approval_mode: Option<PermissionMode>) -> Self {
         Self {
@@ -101,7 +90,6 @@ pub enum ConvItem {
         text: String,
         images: Vec<UserImage>,
         meta: Option<UserTurnMeta>,
-        display_state: UserMessageDisplayState,
     },
     Assistant {
         text: String,
@@ -626,13 +614,7 @@ impl ConversationState {
         self.items.iter().all(|e| {
             matches!(
                 e.read(cx).kind(),
-                ConvItem::Error(_)
-                    | ConvItem::Notice(_)
-                    | ConvItem::CacheMiss { .. }
-                    | ConvItem::User {
-                        display_state: UserMessageDisplayState::RolledBackSteer { .. },
-                        ..
-                    }
+                ConvItem::Error(_) | ConvItem::Notice(_) | ConvItem::CacheMiss { .. }
             )
         })
     }
@@ -658,112 +640,12 @@ impl ConversationState {
                     text,
                     images,
                     meta: Some(meta),
-                    display_state: UserMessageDisplayState::Normal,
                 },
                 role,
                 id,
                 weak,
             )
         }));
-    }
-
-    /// Append a steer bubble immediately after the user clicks Steer. The
-    /// canonical `Thread::messages` entry is still parked in `pending_steer`;
-    /// `confirm_pending_steer` turns this optimistic bubble into normal history
-    /// only after `ThreadEvent::SteerInjected` acknowledges the drain.
-    pub fn push_pending_steer(
-        &mut self,
-        text: String,
-        images: Vec<UserImage>,
-        meta: UserTurnMeta,
-        message_id: String,
-        weak: WeakEntity<Workspace>,
-        cx: &mut App,
-    ) {
-        let mut meta = meta;
-        meta.recipient = Some(self.recipient.clone());
-        let id = self.alloc_id();
-        let role = meta.model_id.clone();
-        self.items.push(cx.new(|_| {
-            MessageItem::new(
-                ConvItem::User {
-                    text,
-                    images,
-                    meta: Some(meta),
-                    display_state: UserMessageDisplayState::PendingSteer { message_id },
-                },
-                role,
-                id,
-                weak,
-            )
-        }));
-    }
-
-    /// Confirm an optimistic steer. This also heals a provisional rollback: a
-    /// terminal Stop can arrive before the run loop performs its final drain.
-    pub fn confirm_pending_steer(&mut self, message_id: &str, cx: &mut App) -> bool {
-        for entity in &self.items {
-            let matches = matches!(
-                entity.read(cx).kind(),
-                ConvItem::User {
-                    display_state: UserMessageDisplayState::PendingSteer { message_id: id }
-                        | UserMessageDisplayState::RolledBackSteer { message_id: id },
-                    ..
-                } if id == message_id
-            );
-            if matches {
-                entity.update(cx, |item, cx| {
-                    if let ConvItem::User {
-                        meta,
-                        display_state,
-                        ..
-                    } = item.kind_mut()
-                    {
-                        if let Some(meta) = meta {
-                            meta.steered = true;
-                        }
-                        *display_state = UserMessageDisplayState::Normal;
-                    }
-                    cx.notify();
-                });
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Hide an optimistic steer that the running turn never absorbed. The
-    /// owning queue item is restored separately by `Workspace`.
-    pub fn rollback_pending_steer(&mut self, message_id: &str, cx: &mut App) -> bool {
-        for entity in &self.items {
-            let matches = matches!(
-                entity.read(cx).kind(),
-                ConvItem::User {
-                    display_state: UserMessageDisplayState::PendingSteer { message_id: id },
-                    ..
-                } if id == message_id
-            );
-            if matches {
-                entity.update(cx, |item, cx| {
-                    if let ConvItem::User {
-                        meta,
-                        display_state,
-                        ..
-                    } = item.kind_mut()
-                    {
-                        if let Some(meta) = meta {
-                            meta.steered = false;
-                        }
-                        *display_state = UserMessageDisplayState::RolledBackSteer {
-                            message_id: message_id.to_string(),
-                        };
-                    }
-                    cx.notify();
-                });
-                return true;
-            }
-        }
-        false
     }
 
     /// The `NoticeAnchor` for a notice tied to a tool call: directly after the
@@ -1639,7 +1521,6 @@ impl ConversationState {
                             text: content.clone(),
                             images: Vec::new(),
                             meta: Some(meta),
-                            display_state: UserMessageDisplayState::Normal,
                         },
                         role.to_string(),
                         id,
@@ -2149,47 +2030,6 @@ mod tests {
         assert_eq!(output.len(), 20);
         assert_eq!(output.first().map(String::as_str), Some("event-5"));
         assert_eq!(output.last().map(String::as_str), Some("event-24"));
-    }
-
-    #[test]
-    fn optimistic_steer_rolls_back_and_late_confirmation_heals_tombstone() {
-        let cx = gpui::TestAppContext::single();
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let meta = UserTurnMeta::new(1, "test-model".into(), None);
-
-        cx.update(|cx| {
-            conversation.update(cx, |conversation, cx| {
-                conversation.push_pending_steer(
-                    "please adjust".into(),
-                    Vec::new(),
-                    meta,
-                    "steer-1".into(),
-                    gpui::WeakEntity::<Workspace>::new_invalid(),
-                    cx,
-                );
-                assert!(conversation.rollback_pending_steer("steer-1", cx));
-                assert!(conversation.is_empty(cx));
-                assert!(conversation.confirm_pending_steer("steer-1", cx));
-                assert!(!conversation.is_empty(cx));
-            });
-        });
-
-        cx.update(|cx| {
-            conversation.read_with(cx, |conversation, cx| {
-                let item = conversation.items[0].read(cx);
-                let ConvItem::User {
-                    meta,
-                    display_state,
-                    ..
-                } = item.kind()
-                else {
-                    panic!("expected user item");
-                };
-                assert_eq!(display_state, &UserMessageDisplayState::Normal);
-                assert!(meta.as_ref().is_some_and(|meta| meta.steered));
-            });
-        });
     }
 
     /// When assistant text arrives while a live activity segment exists, the
@@ -3129,25 +2969,20 @@ mod tests {
         });
     }
 
-    /// A mid-turn steer is also a user-message boundary: the optimistic steer
-    /// bubble must not have the turn's subsequent thinking fold into the segment
-    /// above it. Mirrors the rebuild path's `close_segment` on a prompt.
+    /// A settled steer is also a user-message boundary: the steered user bubble
+    /// must not have the turn's subsequent thinking fold into the segment above
+    /// it. Mirrors the rebuild path's `close_segment` on a prompt.
     #[gpui::test]
-    fn agent_thinking_after_pending_steer_does_not_fold_into_segment_above(
+    fn agent_thinking_after_steered_user_message_does_not_fold_into_segment_above(
         cx: &mut gpui::TestAppContext,
     ) {
         let (conversation, ctx) = stale_segment_conv(cx);
         let weak = ctx.weak.clone();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
-                c.push_pending_steer(
-                    "adjust".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(2, "model".into(), None),
-                    "s1".into(),
-                    weak.clone(),
-                    cx,
-                );
+                let mut meta = UserTurnMeta::new(2, "model".into(), None);
+                meta.steered = true;
+                c.push_user("adjust".into(), Vec::new(), meta, weak.clone(), cx);
                 let _ = c.apply(
                     &ThreadEvent::AgentThinking("b".into()),
                     "model",
