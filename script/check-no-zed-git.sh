@@ -25,10 +25,13 @@ if grep -rEn '^[[:space:]]*[^#]*git[[:space:]]*=[[:space:]]*"[^"]*zed-industries
   fail=1
 fi
 
-# `[patch]`/`[replace]` git sources (root, members, or a committed config) are
-# caught by the Cargo.lock check below; this precise check also covers a
-# committed .cargo/config.toml override (dspo/manox local-dev patches are
-# legitimate — only zed sources are banned).
+# `[patch]`/`[replace]` entries whose source is a zed git URL are caught here
+# (Cargo.toml) or by the Cargo.lock source check below. Known limit: a
+# `path`-form patch (e.g. vendoring zed sources into the tree) has no zed
+# string to match and no git source in the lock — it is out of scope for this
+# guard and is covered by code review instead.
+# This precise check also covers a committed .cargo/config.toml override
+# (dspo/manox local-dev patches are legitimate — only zed sources are banned).
 if [ -f .cargo/config.toml ] \
     && grep -qE 'git[[:space:]]*=[[:space:]]*"[^"]*zed-industries' .cargo/config.toml; then
   echo "error: .cargo/config.toml must not patch/replace with a zed-industries git source" >&2

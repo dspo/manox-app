@@ -1,5 +1,5 @@
 //! Asset source overlaying manox-specific SVG icons on top of
-//! `gpui-kit-assets`（原 `gpui-kit-assets`，gpui-kit 0.6 更名）。
+//! `gpui-kit-assets`（原 `gpui-component-assets`，0.6 更名）。
 //!
 //! `gpui-kit-assets` ships the icon set `IconName` resolves to, but it
 //! cannot carry manox's own brand icons (the Manox / Claude / Codex / GitHub Copilot
