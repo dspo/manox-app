@@ -36,6 +36,7 @@ use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Input, InputState},
     tooltip::Tooltip,
     v_flex,
 };
@@ -2323,6 +2324,19 @@ fn render_ask_user_card(
         .text_color(theme.foreground)
         .child(snapshot.question.question.clone());
 
+    // B2-PR-1 L1: `detail` is optional markdown support text beneath the
+    // question (the plan-review body rides here). Static, so a per-frame
+    // `markdown_tv` mount is fine — no persistent selection across frames.
+    let detail_block = (!snapshot.question.detail.trim().is_empty()).then(|| {
+        markdown_tv(
+            format!("ask-card-detail-{ix}-{step}"),
+            snapshot.question.detail.clone(),
+            theme,
+            false,
+            cx,
+        )
+    });
+
     let mut options_block = v_flex().w_full().min_w_0().gap_1p5();
     for (oi, opt) in snapshot.question.options.iter().enumerate() {
         let selected = snapshot.selections.get(oi).copied().unwrap_or(false);
@@ -2433,6 +2447,45 @@ fn render_ask_user_card(
         options_block = options_block.child(option_row);
     }
 
+    // B2-PR-1 L1 tri-state: a per-question free-text `custom` input (single
+    // select — it overrides the selection at the settle fold; multi select —
+    // it supplements it) plus an explicit per-question skip button (clears the
+    // selection and the custom, settling `{selected: [], no custom}` — a skip,
+    // distinct from closing the whole card). The `custom` entity is allocated on
+    // the render path (see `ensure_ask_custom_inputs`) because an `InputState`
+    // needs a `Window`; if it isn't present yet the row simply carries the skip.
+    let custom_state: Option<Entity<InputState>> = weak
+        .upgrade()
+        .and_then(|ws| ws.read(cx).ask_custom_state(step));
+    let weak_skip = weak.clone();
+    let skip_row = h_flex()
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap_2()
+        .child(
+            gpui::div()
+                .flex_1()
+                .min_w_0()
+                .children(custom_state.map(|state| {
+                    Input::new(&state).appearance(false).prefix(
+                        gpui::div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(i18n::t("workspace-ask-supplement-label")),
+                    )
+                })),
+        )
+        .child(
+            Button::new(format!("ask-card-skip-{ix}-{step}"))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Minus)
+                .on_click(move |_, window, cx: &mut App| {
+                    let _ = weak_skip.update(cx, |w, cx| w.skip_ask_question(step, window, cx));
+                }),
+        );
+
     v_flex()
         .id(format!(
             "ask-card-{}-{}",
@@ -2460,7 +2513,9 @@ fn render_ask_user_card(
         .shadow_lg()
         .child(header)
         .child(question_row)
+        .children(detail_block)
         .child(options_block)
+        .child(skip_row)
         .with_animation(
             format!("ask-card-slide-{}", snapshot.transition_gen),
             Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),

@@ -574,7 +574,9 @@ Circular button driven by the raw running edge alone: `danger` Pause glyph
 (acts as stop) while a turn runs — under any pending ask/approve/plan card
 (absolute cancel priority: interrupting is never blocked by an unanswered
 interaction) — and `accent` ArrowUp (send) when idle, inert on empty input.
-Ask supplement input keeps its own path: Enter.
+While an ask card is up, Enter/send submits the card (per-question selections +
+custom inputs), not a composer-fed free-text answer — the card-level supplement
+was retired by B2-PR-1 in favour of the per-question custom input.
 
 > Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
 
@@ -623,33 +625,55 @@ Title + stepper "N/M".
 
 #### AskDrawerQuestion
 
-Header tag + question text.
+Header tag + question text, then an optional `detail` block — markdown support
+text rendered with the repo `Markdown` component (`markdown_tv`) beneath the
+question. `detail` is where the plan-review body will ride once plan-review
+folds onto the ask channel (the card's intent derivation is a later commit).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`)
 
 #### AskDrawerOptions
 
-Checkbox/radio list with labels + descriptions.
+Checkbox/radio list with labels + descriptions. Single-select resets siblings on
+toggle; multi-select toggles in place. Options are optional and unbounded — a
+detail/intent-only question is legal (B2-PR-1 lifted the 1..=3 / 2..=3 caps).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/workspace/chips.rs` (`toggle_ask_option`)
 
-#### AskDrawerOtherInput
+#### AskDrawerCustomInput
 
-Free-text input for "Other" option (conditional).
+Per-question free-text `custom` input, rendered under the options with an
+`Input` bound to a lazily-allocated `Entity<InputState>`
+(`Workspace::ensure_ask_custom_inputs`, run on the render path because an
+`InputState` needs a `Window`). Its live text mirrors into
+`Workspace::ask_custom_text[qi]`. At the settle fold a `custom` REPLACES a
+single-select's selection and SUPPLEMENTS a multi-select's — free text can only
+ever attach to its own question (the removed card-level "response" override is
+gone).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `apps/desktop/agent-ui/src/workspace/chips.rs`
 
-#### AskDrawerResponseInput
+#### AskDrawerSkipButton
 
-Free-form response input overriding all answers (conditional).
+Explicit per-question skip (`IconName::Minus`, ghost) beside the custom input:
+clears that question's selection and custom, settling the canonical row
+`{id, selected: []}` with no `custom` (the server's `AskAnswer::is_skip`). A
+skip is distinct from closing the whole card (that is `dismiss_ask`, the Nav's
+Cancel leg).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `apps/desktop/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
 
 #### AskDrawerNav
 
-Prev / Next / Cancel / Submit buttons.
+Prev / Next (last step submits) / Cancel (close ⇒ `{"dismissed": true}`)
+buttons. Submitting gathers every question's tri-state (`selected` +
+`custom`, skipped ones carry `selected: []`) into the canonical reply frame
+`{"answers":[{"id","selected","custom"?}]}` — the legacy positional
+`[[question, answer]]` pair and the card-level `response` are removed.
+Dismiss keeps `{"dismissed": true}`; the generic approval card's allow/deny leg
+(`resolve_auth`, `{"allow": …}`) is unchanged.
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`)
 
 #### 3.2.4 Popups & Dropdowns
 

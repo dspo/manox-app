@@ -157,17 +157,40 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
         // The server mints a stable id onto each parked question; answers are
         // id-routed and unknown ids are dropped at the settle boundary.
         // Inputs predating the mint (fixtures, older servers) fall back to a
-        // positional id, mirroring how the card keys its per-step state.
-        let id = q
+        // positional id, mirroring how the card keys its per-step state. The
+        // positional fallback is index-derived (`q{i}`) — a fixed small set of
+        // names collided past 3 questions once the count cap was lifted, which
+        // made two answers share an id and mis-route at the settle boundary.
+        let id = match q
             .get("id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(match i {
-                0 => "q0",
-                1 => "q1",
-                _ => "q2",
-            })
+        {
+            Some(explicit) => explicit.to_string(),
+            None => format!("q{i}"),
+        };
+        // B2-PR-1 L1 vocabulary: `detail` is optional markdown support text
+        // rendered beneath the question; `intent` names a specialised surface
+        // (`kind`, e.g. "plan-review") with the option label that carries the
+        // affirmative verdict (`approve`). Both ride the snapshot so the card
+        // renders them; later PRs branch on `intent`.
+        let detail = q
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
             .to_string();
+        let intent = q.get("intent").and_then(|v| v.as_object()).map(|obj| {
+            let read = |k: &str| {
+                obj.get(k)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            AskIntent {
+                kind: read("kind"),
+                approve: read("approve"),
+            }
+        });
         let header = q
             .get("header")
             .and_then(|v| v.as_str())
@@ -210,6 +233,8 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
             id,
             question,
             header,
+            detail,
+            intent,
             multi_select,
             options: opts,
         });
@@ -417,14 +442,28 @@ pub(crate) struct AskCardSnapshot {
     pub transition_gen: u64,
     pub question: AskCardQuestion,
     pub selections: Vec<bool>,
+    /// Current step's free-text custom answer (the per-question input's live
+    /// value), so the card can reflect it and gate the skip affordance.
+    pub custom: String,
 }
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct AskCardQuestion {
     pub question: String,
     pub header: String,
+    /// Optional markdown support text beneath the question.
+    pub detail: String,
+    /// Optional specialised-surface intent (`kind` + the `approve` option
+    /// label). Empty `kind` means a plain ask.
+    pub intent: Option<AskCardIntent>,
     pub multi_select: bool,
     pub options: Vec<AskCardOption>,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct AskCardIntent {
+    pub kind: String,
+    pub approve: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -440,8 +479,17 @@ struct AskQuestion {
     id: String,
     question: String,
     header: String,
+    detail: String,
+    intent: Option<AskIntent>,
     multi_select: bool,
     options: Vec<AskOption>,
+}
+
+/// Parsed form of a question's `intent` object: the specialised-surface kind
+/// (e.g. "plan-review") and the option label carrying the affirmative verdict.
+struct AskIntent {
+    kind: String,
+    approve: String,
 }
 
 struct AskOption {
@@ -740,6 +788,21 @@ pub struct Workspace {
     /// Animation generation counter for the ask drawer slide, bumped on every
     /// open/close so a fresh tween fires rather than replaying a cached delta.
     ask_transition_gen: u64,
+    /// Per-question free-text `custom` inputs for the pending ask card, one
+    /// slot per question (index-aligned with `pending_ask.questions`). Created
+    /// lazily at render time because an `InputState` needs a `Window`, which
+    /// the park event handler lacks; reset whenever the ask is (re)seeded or
+    /// retired. A tri-state answer is `{selected, custom}` — `custom` overrides
+    /// a single-select and supplements a multi-select at the settle fold, and
+    /// an empty selection with no `custom` is an explicit skip.
+    ask_custom_inputs: Vec<Option<Entity<InputState>>>,
+    /// Subscriptions keeping the card repainted as the custom inputs change.
+    ask_custom_subs: Vec<Subscription>,
+    /// Authoritative per-question custom text (index-aligned with
+    /// `pending_ask.questions`), the value `resolve_ask` folds
+    /// into each canonical `AskAnswer`. The `InputState` entities above mirror
+    /// this for live editing; tests drive this directly. Reset with the ask.
+    ask_custom_text: Vec<String>,
     pub(crate) model_open: bool,
     /// PopupMenu entity for the open model selector; created on open, destroyed on close.
     model_menu: Option<Entity<PopupMenu>>,
@@ -1218,6 +1281,9 @@ impl Workspace {
             pending_plans: HashMap::new(),
             ask_step: 0,
             ask_transition_gen: 0,
+            ask_custom_inputs: Vec::new(),
+            ask_custom_subs: Vec::new(),
+            ask_custom_text: Vec::new(),
             model_open: false,
             model_menu: None,
             model_menu_sub: None,
@@ -1365,13 +1431,33 @@ impl Workspace {
         });
         self.ask_step = 0;
         self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        self.reset_ask_custom();
         cx.notify();
+    }
+
+    /// Seed a per-question free-text `custom` answer on the pending ask
+    /// without a `Window` (the render path mirrors the `InputState` entities
+    /// onto this, but the tri-state fold reads `ask_custom_text` directly).
+    /// Diagnostic-only: drives the answer-leg wire tests.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_set_ask_custom(&mut self, qi: usize, text: &str) {
+        if qi >= self.ask_custom_text.len() {
+            self.ask_custom_text.resize(qi + 1, String::new());
+        }
+        if let Some(slot) = self.ask_custom_text.get_mut(qi) {
+            *slot = text.to_string();
+        }
+    }
+
+    /// The pending ask's per-question `custom` texts (diagnostic-only; used to
+    /// confirm a skip/re-seed cleared the scratch).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ask_custom_texts(&self) -> Vec<String> {
+        self.ask_custom_text.clone()
     }
 
     /// Seed a non-question authorization (a sandbox escalation, or an ask
     /// whose payload failed to parse) as the pending generic card.
-    /// Diagnostic-only: mirrors what the `ToolCallAuthorization` handler
-    /// stores for a non-ask payload.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_seed_auth(
         &mut self,
@@ -1387,6 +1473,7 @@ impl Workspace {
             summary: summary.to_string(),
         });
         self.ask_step = 0;
+        self.reset_ask_custom();
         cx.notify();
     }
 
@@ -1690,6 +1777,7 @@ impl Workspace {
                     this.pending_projection_confirmed = false;
                     this.ask_step = 0;
                     this.ask_transition_gen = this.ask_transition_gen.wrapping_add(1);
+                    this.reset_ask_custom();
                     // Live synthesis: the question card appears in the
                     // transcript on the same edge as the pending state —
                     // never waiting on the journal's `tool_use` fold to

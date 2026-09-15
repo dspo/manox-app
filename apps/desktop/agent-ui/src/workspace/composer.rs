@@ -107,13 +107,19 @@ impl Workspace {
         let attachments = std::mem::take(&mut self.pending_attachments);
         if self.pending_ask.is_some() {
             self.pending_attachments = attachments;
+            // A send/Enter while an ask card is up submits the card, not a
+            // message: the tri-state answers are collected from the card's own
+            // per-question selections + custom inputs (there is no card-level
+            // composer override any more — B2-PR-1 retired the whole-card
+            // `response` free text). The composer text is a supplement the user
+            // may type but it no longer rides the answer.
             if !text.trim().is_empty() || self.pending_ask_has_selection() {
                 self.input_state
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 // Submitting ends the walk: nothing is left to return to.
                 self.end_recall_walk();
                 self.close_completion(cx);
-                self.resolve_ask_with_response(Some(text), cx);
+                self.resolve_ask(cx);
             }
             return;
         }
