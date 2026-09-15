@@ -8,10 +8,11 @@
 
 ```toml
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" } # optional icons
+# gpui-pre* = Longbridge's weekly snapshot republish of zed's gpui (crates.io)
+gpui = { package = "gpui-pre", version = "=0.3.4" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit"] }
+gpui-component = { version = "=0.6.1" }
+gpui-kit-assets = { version = "=0.6.1" } # optional icons (renamed from gpui-component-assets)
 ```
 
 ### 2. Initialization
@@ -19,7 +20,7 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 ```rust
 fn main() {
     gpui_platform::application()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(gpui_kit_assets::Assets)
         .run(move |cx| {
             gpui_component::init(cx); // MUST be first
 

@@ -1,5 +1,5 @@
 //! Asset source overlaying manox-specific SVG icons on top of
-//! `gpui-kit-assets`（原 `gpui-component-assets`，gpui-kit 0.6 更名）。
+//! `gpui-kit-assets`（原 `gpui-kit-assets`，gpui-kit 0.6 更名）。
 //!
 //! `gpui-kit-assets` ships the icon set `IconName` resolves to, but it
 //! cannot carry manox's own brand icons (the Manox / Claude / Codex / GitHub Copilot
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn embeds_context_rail_branch_and_worktree_glyphs() {
         // Rail glyphs resolved via `ExtrasAssetSource`; a missing file would
-        // silently fall through to `gpui-component-assets`, which does not
+        // silently fall through to `gpui-kit-assets`, which does not
         // ship these names, rendering blank.
         for path in ["icons/git-branch.svg", "icons/workflow.svg"] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn embeds_custom_icon_overrides() {
-        // Icons not shipped by gpui-component-assets; layered in via
+        // Icons not shipped by gpui-kit-assets; layered in via
         // ExtrasAssetSource so call sites can use Icon::default().path(…).
         for path in [
             "icons/circle-check-big.svg",
