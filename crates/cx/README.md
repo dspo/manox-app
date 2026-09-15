@@ -43,6 +43,10 @@ Alternatively, run `script/install-cx` from the repository root — it wraps
 the same `cargo install` command (`CX_INSTALL_DIR` overrides the install
 root).
 
+An app package built by `script/bundle-mac` or `script/bundle-deb` carries the
+same CLI (`.app/Contents/MacOS/cx`, `/usr/bin/cx`); the macOS bundler also links
+`~/.local/bin/cx` to it, so a terminal runs the build that ships with the app.
+
 If you previously used the old `ccc` launcher, remove its leftovers
 manually: `rm -f ~/.local/bin/ccc` and delete any `ccc` shim functions
 from your shell rc file.
