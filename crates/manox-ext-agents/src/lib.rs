@@ -2043,34 +2043,57 @@ mod tests {
         );
     }
 
-    /// Run `test_name` in a fresh child of the test binary with stderr
-    /// captured through a pipe, returning the child's stderr bytes. Proves
-    /// the warning actually reaches the eprintln channel at each call site
-    /// (the #25 contract) without process-global fd redirection.
+    /// Run `test_name` in a fresh child of the test binary, returning the
+    /// child's stderr bytes captured through a temp file. Proves the warning
+    /// actually reaches the eprintln channel at each call site (the #25
+    /// contract) without process-global fd redirection. Child stdout/stdin
+    /// are nulled so its libtest summary cannot leak into the parent's test
+    /// log, and stderr goes straight to a file rather than a pipe, so there
+    /// is no drain-order deadlock. A `try_wait` deadline turns a hung child
+    /// into a test failure instead of blocking the suite until CI times out.
     fn capture_stderr_of(test_name: &str) -> Vec<u8> {
-        use std::io::Read;
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
 
+        const TIMEOUT: Duration = Duration::from_secs(60);
+        const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+        let stderr_file = tempfile::NamedTempFile::new().expect("temp stderr file");
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg(test_name)
             .arg("--nocapture")
             .arg("--quiet")
-            .stderr(std::process::Stdio::piped())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(
+                stderr_file
+                    .as_file()
+                    .try_clone()
+                    .expect("clone stderr file"),
+            )
             .spawn()
             .expect("spawn test-binary child");
-        let mut stderr = Vec::new();
-        child
-            .stderr
-            .as_mut()
-            .expect("stderr piped")
-            .read_to_end(&mut stderr)
-            .expect("read child stderr");
-        let status = child.wait().expect("wait child");
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll child status") {
+                break status;
+            }
+            if start.elapsed() >= TIMEOUT {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "child test `{test_name}` timed out after {}s",
+                    TIMEOUT.as_secs()
+                );
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        };
         assert!(
             status.success(),
             "child test `{test_name}` failed: {status}"
         );
-        stderr
+        std::fs::read(stderr_file.path()).expect("read child stderr file")
     }
 
     #[test]
