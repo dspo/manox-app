@@ -185,7 +185,7 @@ fn composer_key_context_is_the_popover_or_the_composer() {
 /// workspace does; an action listener that fires consumes its keystroke
 /// even when it does nothing.
 struct RecallTestComposer {
-    input: gpui::Entity<gpui_component::input::InputState>,
+    input: gpui::Entity<gpui_component::input::TextareaState>,
     context: &'static str,
     consume_recall: bool,
 }
@@ -202,7 +202,7 @@ impl gpui::Render for RecallTestComposer {
                 .on_action(|_: &crate::ComposerRecallUp, _window, _cx| {})
                 .on_action(|_: &crate::ComposerRecallDown, _window, _cx| {});
         }
-        wrap.child(gpui_component::input::Input::new(&self.input))
+        wrap.child(gpui_component::input::Textarea::new(&self.input))
     }
 }
 
@@ -219,7 +219,7 @@ fn bare_arrows_move_caret_and_alt_arrows_recall(cx: &mut gpui::TestAppContext) {
     let slot_for_window = slot.clone();
     let (_root, cx) = cx.add_window_view(move |window, cx| {
         let view = cx.new(|cx| RecallTestComposer {
-            input: cx.new(|cx| gpui_component::input::InputState::new(window, cx).multi_line(true)),
+            input: cx.new(|cx| gpui_component::input::TextareaState::new(window, cx)),
             context: "composer",
             consume_recall: true,
         });

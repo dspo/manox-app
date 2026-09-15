@@ -198,7 +198,7 @@ pub(super) fn blur_on_click_out(
     move |_event, window, cx| {
         let handle = Focusable::focus_handle(&state, cx);
         if handle.is_focused(window) {
-            window.blur();
+            window.blur(cx);
         }
     }
 }

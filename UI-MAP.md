@@ -755,7 +755,7 @@ Resolved git identity block in the panel body (`render_branch_block`). When the 
   - "git unavailable" when the `git` binary is missing.
   - "--" before the first refresh lands; "No project" when no project is bound.
 
-Both glyphs live in manox's local asset bundle (`ExtrasAssetSource` in `apps/desktop/agent-ui/src/assets.rs`), not `gpui-component-assets` — `IconName` is generated at compile time from the latter's directory and cannot reference them, so the rows construct `Icon::default().path("icons/…")` instead of `Icon::new(IconName::…)`. Branch resolution shells out to `git branch --show-current`, falling back to `git rev-parse --short HEAD` for detached HEAD. All via [`crate::git_status`](#git_status).
+Both glyphs live in manox's local asset bundle (`ExtrasAssetSource` in `apps/desktop/agent-ui/src/assets.rs`), not `gpui-kit-assets` — `IconName` is generated at compile time from the latter's directory and cannot reference them, so the rows construct `Icon::default().path("icons/…")` instead of `Icon::new(IconName::…)`. Branch resolution shells out to `git branch --show-current`, falling back to `git rev-parse --short HEAD` for detached HEAD. All via [`crate::git_status`](#git_status).
 
 > Source: `apps/desktop/agent-ui/src/views/context_rail.rs` (`render_branch_block`)
 

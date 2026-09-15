@@ -18,7 +18,9 @@
 # Cargo.lock 锁 rev 消费；上游侧注明 CxSessionSource 桥留在本仓。本地联动开发用
 # .cargo/config.toml 的 [patch] 覆盖（见 script/local-manox.sh，勿提交）。
 #
-# gpui 相关依赖严格对齐 gpui-component 锁定的 rev，保证 gpui 单一版本。
+# GPUI 栈整体走 longbridge/gpui-kit 轨：gpui 本体是 crates.io 上的 gpui-pre 快照，
+# 组件是 gpui-component 0.6；本仓不直接依赖 zed-industries/zed（防回潮见
+# script/check-no-zed-git.sh）。
 [workspace]
 members = [
 	"crates/cx",
@@ -103,7 +105,7 @@ tray-icon = "0.24"
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 # rust-embed — embed SVG icons into the binary at compile time so manox stays a
 # single-binary deliverable; the ExtrasAssetSource overlays custom agent icons
-# (claude/codex/copilot) on top of gpui-component-assets.
+# (claude/codex/copilot) on top of gpui-kit-assets.
 rust-embed = "8"
 
 # wry stack — native webview embedded as a child of a gpui window. raw-window-handle
@@ -125,9 +127,9 @@ rfd = "0.15"
 arboard = "3"
 open = "5"
 
-# markdown-rs (mdast) — markdown 解析。经 gpui-component 已在 Cargo.lock,workspace 声明复用同一版本。
+# markdown-rs (mdast) — markdown 解析。经 gpui-component 已在 Cargo.lock,workspace 声明复用同一版本（0.6.1 锁 markdown 1.0.0）。
 markdown = "1"
-# ropey — SyntaxHighlighter::update 接收 &Rope;版本对齐 gpui-component 在 Cargo.lock 锁定的 2.0.0-beta.1。
+# ropey — SyntaxHighlighter::update 接收 &Rope;版本对齐 gpui-component 在 Cargo.lock 锁定的 2.0.0-beta.1（0.6.1 不变）。
 ropey = "2.0.0-beta.1"
 # vte — ANSI escape parser (alacritty/wezterm 的同款,仅解析器)。TerminalPanel 用其 Handler trait 解析工具输出着色。
 vte = { version = "0.13", default-features = false, features = ["ansi"] }
@@ -146,17 +148,27 @@ portable-pty = "0.9"
 # and the foreground-process indicator.
 sysinfo = "0.39"
 
-# GPUI 栈 —— git 仓库地址（规则允许）。gpui-component 锁定 zed rev 1d217ee，三者必须一致。
-gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+# GPUI 栈 —— 全面退出对 zed-industries/zed 的直接构建耦合（本段取代旧的
+# 「gpui-component 锁定 zed rev 1d217ee 三者必须一致」纪律）。gpui 本体 =
+# Longbridge 每周从 zed main 重打包的 `gpui-pre*` 快照（bump-gpui.ts 机械改名，
+# [lib] 名保留，`use gpui::*` 照旧；每个版本自带 [package.metadata] zed-rev
+# 映射可审计）。升级 = `cargo update -p gpui-pre --precise`，用 `=` 精确 pin
+# 防周更快照漂移。gpui-pre 0.3.4 = zed@691640083，含上游 gpui#60295 的
+# element-arena 崩溃修复（ec3d887507，即旧栈上「开 About 窗口后 mouseUp
+# deref 已清空 Arena」SIGABRT 的修复）。
+gpui = { package = "gpui-pre", version = "=0.3.4" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 
-# gpui-component（longbridge）
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "1505b1487131adbb443f6c69e87847db35bfa2d1", features = ["tree-sitter-languages"] }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "1505b1487131adbb443f6c69e87847db35bfa2d1" }
+# gpui-kit（longbridge/gpui-kit，原 gpui-component 仓改名重组）组件层，
+# crates.io 发布。资产 crate 已更名 gpui-component-assets → gpui-kit-assets
+# （Rust 路径 `gpui_kit_assets`）。组件与 gpui-pre 同线版本管理，不再需要
+# 跨仓对齐 zed rev；tree-sitter-languages feature 仍在（0.6 起为 35 个
+# per-language feature 的聚合别名，底层个别语法换源如 sql→sequel）。
+gpui-component = { version = "=0.6.1", features = ["tree-sitter-languages"] }
+gpui-kit-assets = { version = "=0.6.1" }
 
-# psm 用 stacker 的版本（对齐 gpui-component）
-[patch.crates-io]
-psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
+# （旧栈的 `[patch.crates-io] psm = stacker` 已随 zed gpui 退出删除：gpui-pre
+# 0.3.4 依赖闭包不含 psm/stacker，kit lock 同样零命中。）
 
 # Full DWARF makes the largest test targets (`cx` integration tests and `cx-cli`
 # bin tests) large enough to crash `ld.lld` on GitHub-hosted Linux runners.
@@ -167,7 +179,8 @@ debug = "line-tables-only"
 [profile.test]
 debug = "line-tables-only"
 
-# gpui 在 debug 下也需要 opt-level 3，否则渲染极慢（对齐 gpui-component）
+# gpui 在 debug 下也需要 opt-level 3，否则渲染极慢（对齐 gpui-kit；
+# package 名 = 实际 crate 名 gpui-pre*，workspace 别名 `gpui` 不作用于 profile）
 [profile.dev.package]
-gpui = { opt-level = 3 }
-gpui_platform = { opt-level = 3 }
+gpui-pre = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }

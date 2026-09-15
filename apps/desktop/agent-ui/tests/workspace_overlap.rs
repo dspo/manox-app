@@ -142,7 +142,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     for _ in 0..3 {
-        visual.update(|window, cx| window.draw(cx).clear());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     assert_workspace_bodies_contained(&mut visual, item_count, "full workspace tail");
 
@@ -154,7 +154,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
         workspace.read_with(&visual.cx, |workspace, _| workspace.diagnostic_list_state());
     let draw = |visual: &mut VisualTestContext| {
         for _ in 0..2 {
-            visual.update(|window, cx| window.draw(cx).clear());
+            visual.update(|window, cx| window.draw(cx).clear(cx));
         }
     };
     for width in [1_120., 1_700., 900., 1_500., 760., 1_400., 1_120.] {

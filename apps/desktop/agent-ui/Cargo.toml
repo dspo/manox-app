@@ -31,7 +31,7 @@ uuid.workspace = true
 
 gpui.workspace = true
 gpui-component.workspace = true
-gpui-component-assets.workspace = true
+gpui-kit-assets.workspace = true
 rust-embed.workspace = true
 
 manox-agent.workspace = true

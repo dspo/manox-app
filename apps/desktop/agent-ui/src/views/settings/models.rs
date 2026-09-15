@@ -1247,7 +1247,7 @@ fn render_provider_node(
                     // drop focus so the blur handler surfaces pending edits.
                     let handle = Focusable::focus_handle(&name, cx);
                     if handle.is_focused(window) {
-                        window.blur();
+                        window.blur(cx);
                     }
                 })
                 .child(Input::new(&p.name)),
@@ -2375,7 +2375,7 @@ mod blur_flush_tests {
         });
         cx.run_until_parked();
 
-        cx.update(|window, _cx| window.blur());
+        cx.update(|window, cx| window.blur(cx));
         cx.run_until_parked();
 
         assert!(
