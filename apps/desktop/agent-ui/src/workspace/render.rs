@@ -25,6 +25,14 @@ fn card_title_bar() -> TitleBar {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // gpui cancels a drag on any mouse-up that doesn't land inside a
+        // payload-matching drop target (`on_drop` never runs) — prune the
+        // queue-drag marker here, the same policy as the sidebar's rows. gpui
+        // refreshes on that cancel, so this clears the same frame; without it
+        // the source row would stay dimmed and the insertion line pinned.
+        if !cx.has_active_drag() && self.queue_drag.is_some() {
+            self.queue_drag = None;
+        }
         self.render_manox(window, cx)
     }
 }
