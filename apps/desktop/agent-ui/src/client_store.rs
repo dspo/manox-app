@@ -241,6 +241,10 @@ impl ClientStore {
                 // the `provider` field here would double it and break every
                 // downstream split_once('/') resolution.
                 let Some(key) = row.get("model").and_then(|v| v.as_str()) else {
+                    tracing::warn!(
+                        row = %row,
+                        "conversation-info model row without a `model` key; its usage is dropped from the rail"
+                    );
                     continue;
                 };
                 self.per_model_usage.insert(key.to_string(), snap(row));

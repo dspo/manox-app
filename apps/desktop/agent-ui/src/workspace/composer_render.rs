@@ -314,6 +314,7 @@ impl Workspace {
             let ghost = payload.clone();
             let handle = gpui::div()
                 .id(format!("queue-grip-{idx}"))
+                .debug_selector(move || format!("queue-grip-{idx}"))
                 .flex_shrink_0()
                 .cursor_grab()
                 .text_color(theme.muted_foreground)
@@ -386,6 +387,7 @@ impl Workspace {
                 .child(delete_btn);
             let row = h_flex()
                 .id(format!("queue-row-{idx}"))
+                .debug_selector(move || format!("queue-row-{idx}"))
                 .w_full()
                 .items_center()
                 .gap_2()
@@ -418,10 +420,13 @@ impl Workspace {
                     },
                 ))
                 .on_drop::<DraggedQueueRow>(cx.listener(
-                    move |this, row: &DraggedQueueRow, _, cx| {
-                        if this.queue_drag.is_some_and(|d| d.dragged == row.idx) {
-                            this.commit_queue_drag(cx);
-                        }
+                    // The payload IS the dragged row (`e.drag(cx).idx`), so
+                    // comparing it to the marker proved nothing; the marker's
+                    // own liveness is the gate — every queue mutation and the
+                    // render prune clear it, and `commit_queue_drag` no-ops
+                    // without one.
+                    move |this, _row: &DraggedQueueRow, _, cx| {
+                        this.commit_queue_drag(cx);
                     },
                 ));
             rows.push(row.child(left).child(right).into_any_element());

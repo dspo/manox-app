@@ -1776,6 +1776,13 @@ impl Render for Sidebar {
             .as_ref()
             .map(|m| m.read(cx).thread_list().to_vec())
             .unwrap_or_default();
+        // Per-frame prune: anchors are write-only while rows live, so
+        // archived/deleted rows (and any stale id reuse) would otherwise leak
+        // keys for the session's lifetime. Rows scroll as laid-out elements,
+        // so a merely-off-screen row keeps refreshing its own key.
+        self.row_menu_anchors
+            .borrow_mut()
+            .retain(|key, _| items.iter().any(|item| item.id == *key));
         // U2 cross-domain #1: the grouping registry rides the wire (the
         // `HostEvent::Projects` mirror), not a workspace push.
         let known_projects = self
@@ -1783,6 +1790,11 @@ impl Render for Sidebar {
             .as_ref()
             .map(|m| m.read(cx).known_projects().to_vec())
             .unwrap_or_default();
+        // Same per-frame prune for the per-project new-session keys (the
+        // conversations-header sentinel always stays).
+        self.new_session_anchors.borrow_mut().retain(|key, _| {
+            key == &new_session_anchor_key(None) || known_projects.iter().any(|p| p == key)
+        });
         let selected = self.selected.clone();
         // GW5 badge source: the leaves' client-owned unread mirrors.
         let unread_map = self
@@ -4014,5 +4026,60 @@ mod tests {
             f32::from(menu.right()),
             f32::from(trigger.right())
         );
+    }
+
+    /// The per-project new-session anchors: only the key a painted project
+    /// trigger wrote can open its menu. An unseeded path refuses (the shared
+    /// single slot this replaced would have opened every project against
+    /// whichever trigger painted last).
+    #[gpui::test]
+    fn project_menu_opens_only_for_its_own_painted_key(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.open_window(gpui::size(gpui::px(960.), gpui::px(640.)), |window, cx| {
+            let host = cx.new(|_| MenuHost);
+            gpui_component::Root::new(host, window, cx)
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let sidebar = cx.new(|cx| Sidebar::new(gpui::px(240.), cx));
+
+        // Nothing painted yet: the open refuses.
+        visual.update(|window, cx| {
+            sidebar.update(cx, |s, cx| {
+                s.open_new_session_menu(Some(PathBuf::from("/tmp/a")), window, cx);
+            });
+        });
+        sidebar.read_with(cx, |s, _| {
+            assert!(!s.new_session_open, "an unpainted project trigger refuses");
+        });
+
+        // Project A's trigger painted last frame (key seeded); project B never
+        // did — A opens, B still refuses.
+        sidebar.update(cx, |s, _| {
+            s.new_session_anchors.borrow_mut().insert(
+                new_session_anchor_key(Some(std::path::Path::new("/tmp/a"))),
+                gpui::point(px(10.), px(20.)),
+            );
+        });
+        visual.update(|window, cx| {
+            sidebar.update(cx, |s, cx| {
+                s.open_new_session_menu(Some(PathBuf::from("/tmp/a")), window, cx);
+            });
+        });
+        sidebar.read_with(cx, |s, _| {
+            assert!(s.new_session_open, "the painted project's menu opens");
+        });
+        visual.update(|window, cx| {
+            sidebar.update(cx, |s, cx| {
+                s.close_new_session_menu();
+                s.open_new_session_menu(Some(PathBuf::from("/tmp/b")), window, cx);
+            });
+        });
+        sidebar.read_with(cx, |s, _| {
+            assert!(
+                !s.new_session_open,
+                "an unpainted project must not borrow another trigger's corner"
+            );
+        });
     }
 }

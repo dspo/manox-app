@@ -705,6 +705,9 @@ impl Workspace {
                     if let Some(message_id) = self.enqueue_steer_pending(&item.turn) {
                         item.state = FollowUpState::SteerPending { message_id };
                     }
+                    // The group just changed: any in-flight drag's indices are
+                    // stale (undo is a keyboard action and can land mid-drag).
+                    self.queue_drag = None;
                     let insert_at = Self::steer_group_insert_index(&self.queued_follow_ups);
                     self.queued_follow_ups.insert(insert_at, item);
                     cx.notify();
@@ -791,6 +794,7 @@ impl Workspace {
             self.queued_follow_ups.insert(idx, item);
             return;
         }
+        self.queue_drag = None;
         let current = self.input_state.read(cx).value();
         let merged = if current.trim().is_empty() {
             item.turn.text.clone()
@@ -820,6 +824,7 @@ impl Workspace {
             return;
         }
         self.queued_follow_ups.remove(idx);
+        self.queue_drag = None;
         cx.notify();
     }
 
@@ -833,6 +838,9 @@ impl Workspace {
         };
         if matches!(item.state, FollowUpState::Queued) {
             self.queued_follow_ups.pop_back();
+            // A keyboard action can land mid-drag: void the stale marker so a
+            // release can never move the wrong row.
+            self.queue_drag = None;
             cx.notify();
         }
     }

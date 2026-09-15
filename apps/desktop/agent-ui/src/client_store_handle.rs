@@ -874,6 +874,32 @@ mod tests {
         use manox_harness::core::{
             Api, Cost, InputModality, ProviderConfig, ProviderModelConfig, ProviderRegistry,
         };
+        // The writer itself (the review's falsification): the store must key
+        // per-model usage by the row's verbatim `model` — re-introducing the
+        // `{provider}/{model}` re-prefix turns this red.
+        let mut store = crate::client_store::ClientStore::default();
+        store.apply_conversation_info(&serde_json::json!({
+            "models": [{
+                "provider": "百炼-anthropic",
+                "model": "百炼-anthropic/qwen3.8-max",
+                "input": 10,
+                "output": 2,
+                "cacheWrite": 0,
+                "cacheRead": 0,
+            }],
+        }));
+        assert!(
+            store
+                .per_model_usage
+                .contains_key("百炼-anthropic/qwen3.8-max"),
+            "the store key is the verbatim canonical identity"
+        );
+        assert!(
+            !store
+                .per_model_usage
+                .contains_key("百炼-anthropic/百炼-anthropic/qwen3.8-max"),
+            "the provider field must not be prefixed a second time"
+        );
         let registry = ProviderRegistry::new();
         registry
             .register_provider(

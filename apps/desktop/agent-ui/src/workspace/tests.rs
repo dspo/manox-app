@@ -1387,6 +1387,239 @@ fn cancelled_settle_strands_steers_without_a_bubble(cx: &mut gpui::TestAppContex
     });
 }
 
+/// A cancelled drag must not leave the insertion marker behind: gpui cancels
+/// on a mouse-up outside a payload-matching drop target without running
+/// `on_drop`, so the render entry owns the prune. The test harness cannot
+/// drive the platform's internal drag start (`on_drag` → `active_drag`), so
+/// this seeds the exact post-move state such a cancel leaves — marker set,
+/// no active drag — and runs one render pass; deleting the prune line turns
+/// it red (the falsification the review ran).
+#[gpui::test]
+fn cancelled_drag_prunes_the_queue_marker(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+    ws.update(cx, |ws, cx| {
+        for text in ["first", "second"] {
+            let item = super::QueuedFollowUp {
+                turn: super::DeferredUserTurn {
+                    text: text.into(),
+                    images: vec![],
+                    meta: ws.user_turn_meta(cx),
+                    user_images: vec![],
+                },
+                state: super::FollowUpState::Queued,
+            };
+            ws.queued_follow_ups.push_back(item);
+        }
+        // The exact state a gpui-cancelled drag leaves behind.
+        ws.queue_drag = Some(super::composer_render::QueueRowDrag {
+            dragged: 0,
+            line_on: 1,
+            edge: super::composer_render::QueueDragEdge::Top,
+        });
+        cx.notify();
+    });
+    visual.run_until_parked();
+    ws.read_with(cx, |ws, _| {
+        assert!(
+            ws.queue_drag.is_none(),
+            "a cancelled drag must not survive the next render (the entry prune)"
+        );
+        assert_eq!(ws.queued_follow_ups.len(), 2, "a cancel moves nothing");
+    });
+}
+
+/// `commit_queue_drag` consumes the marker and moves the marked row: the
+/// remove+insert pairing the pure `queue_move_index` rule feeds.
+#[gpui::test]
+fn commit_queue_drag_moves_the_marked_row_and_clears_it(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let ws = captured.borrow().clone().expect("workspace captured");
+    ws.update(cx, |ws, cx| {
+        for text in ["a", "b", "c"] {
+            let item = super::QueuedFollowUp {
+                turn: super::DeferredUserTurn {
+                    text: text.into(),
+                    images: vec![],
+                    meta: ws.user_turn_meta(cx),
+                    user_images: vec![],
+                },
+                state: super::FollowUpState::Queued,
+            };
+            ws.queued_follow_ups.push_back(item);
+        }
+        ws.queue_drag = Some(super::composer_render::QueueRowDrag {
+            dragged: 0,
+            line_on: 2,
+            edge: super::composer_render::QueueDragEdge::Bottom,
+        });
+    });
+    ws.update(cx, |ws, cx| ws.commit_queue_drag(cx));
+    ws.read_with(cx, |ws, _| {
+        let order: Vec<&str> = ws
+            .queued_follow_ups
+            .iter()
+            .map(|item| item.turn.text.as_str())
+            .collect();
+        assert_eq!(order, vec!["b", "c", "a"], "row `a` lands at the tail");
+        assert!(ws.queue_drag.is_none(), "the commit consumes the marker");
+    });
+}
+
+/// The SteerPending guards promise "not removable, not editable" — assert
+/// both doors stay shut (the render layer simply omits the affordances).
+#[gpui::test]
+fn pending_steer_cards_refuse_delete_and_edit(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+    ws.update(cx, |ws, cx| {
+        let item = super::QueuedFollowUp {
+            turn: super::DeferredUserTurn {
+                text: "in flight".into(),
+                images: vec![],
+                meta: ws.user_turn_meta(cx),
+                user_images: vec![],
+            },
+            state: super::FollowUpState::SteerPending {
+                message_id: "guard-1".into(),
+            },
+        };
+        ws.queued_follow_ups.push_back(item);
+    });
+
+    ws.update(cx, |ws, cx| ws.delete_follow_up(0, cx));
+    ws.read_with(cx, |ws, _| {
+        assert_eq!(ws.queued_follow_ups.len(), 1, "delete must refuse");
+        assert!(matches!(
+            ws.queued_follow_ups[0].state,
+            super::FollowUpState::SteerPending { .. }
+        ));
+    });
+    let before_input = ws.read_with(cx, |ws, cx| ws.input_state.read(cx).value().to_string());
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.edit_follow_up(0, window, cx));
+    });
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(ws.queued_follow_ups.len(), 1, "edit must refuse");
+        assert_eq!(
+            ws.input_state.read(cx).value().to_string(),
+            before_input,
+            "edit must not touch the composer"
+        );
+    });
+}
+
+/// retire → settle on the SAME card is idempotent: the settle's promote finds
+/// no card left (the claimed row already retired it) and pushes no second
+/// bubble.
+#[gpui::test]
+fn retire_then_settle_pushes_exactly_one_bubble(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let ws = captured.borrow().clone().expect("workspace captured");
+    ws.update(cx, |ws, cx| {
+        let item = super::QueuedFollowUp {
+            turn: super::DeferredUserTurn {
+                text: "raced steer".into(),
+                images: vec![],
+                meta: ws.user_turn_meta(cx),
+                user_images: vec![],
+            },
+            state: super::FollowUpState::SteerPending {
+                message_id: "race-1".into(),
+            },
+        };
+        ws.queued_follow_ups.push_back(item);
+    });
+    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    ws.update(cx, |ws, cx| ws.retire_injected_steer("race-1", cx));
+    ws.update(cx, |ws, cx| ws.settle_steer_group(0, cx));
+    ws.read_with(cx, |ws, _| assert!(ws.queued_follow_ups.is_empty()));
+    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    assert_eq!(after, before + 1, "exactly one bubble across both paths");
+}
+
 /// The settle ROUTING arm itself: a `TurnFinished` fed through the
 /// workspace's live subscription must derive `stranded` from
 /// `stranded_steer_ids` (the forwarding arm, not just `settle_steer_group`)
