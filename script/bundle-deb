@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-# Bundle manox as a Debian package (.deb) — the Linux analog of bundle-mac.
+# Bundle manox and the cx CLI as a Debian package (.deb) — the Linux analog of
+# bundle-mac.
 #
 # Usage: script/bundle-deb [options]
 # Options:
@@ -13,6 +14,7 @@ set -euo pipefail
 #
 # Installed layout:
 #   /usr/bin/<exe>                                   the manox binary
+#   /usr/bin/cx                                      the cx CLI, same build
 #   /usr/share/applications/<bundle-id>.desktop      desktop entry
 #   /usr/share/icons/hicolor/{128x128,256x256}/apps/<bundle-id>.png
 #
@@ -76,10 +78,12 @@ fi
 deb_arch=$(dpkg --print-architecture)
 
 # --- Build ---
-echo "Building manox binary"
-cargo build ${build_flag} --package manox
+echo "Building manox and cx binaries"
+cargo build ${build_flag} --package manox --package cx-cli
 bin_path="target/${target_dir}/manox"
+cx_bin_path="target/${target_dir}/cx"
 [[ -f "${bin_path}" ]] || { echo "Error: ${bin_path} missing after build"; exit 1; }
+[[ -f "${cx_bin_path}" ]] || { echo "Error: ${cx_bin_path} missing after build"; exit 1; }
 
 # --- Read bundle configuration from Cargo.toml ---
 # Same extraction as bundle-mac: [package.metadata.bundle] in
@@ -115,11 +119,13 @@ exe_name="${pkg_name}"
 # --- Compute runtime Depends from the linked binary ---
 # dpkg-shlibdeps is unusable here (it demands a debian/control build context),
 # so map each NEEDED shared object to its owning package via ldd + dpkg -S.
-# This covers the direct link set (GTK3, WebKit2GTK, JSC, X11/Wayland, …);
+# This covers the direct link set of both binaries (GTK3, WebKit2GTK, JSC,
+# X11/Wayland, …); the cx CLI links only the C runtime today, but reading it too
+# keeps the mapping honest if that changes.
 # dlopen-only modules are resolved by their parent library's own dependencies.
 # dpkg -S only matches the canonical path (dpkg's db records /usr/lib/...,
 # while ldd reports the /lib -> /usr/lib symlink), so readlink -f first.
-depends=$(ldd "${bin_path}" 2>/dev/null \
+depends=$(ldd "${bin_path}" "${cx_bin_path}" 2>/dev/null \
     | awk '/=> \// {print $3}' | sort -u \
     | while read -r so; do
           dpkg -S "$(readlink -f "$so")" 2>/dev/null | head -1 | cut -d: -f1 || true
@@ -143,6 +149,10 @@ mkdir -p "${pkg_root}/DEBIAN" \
 
 cp "${bin_path}" "${pkg_root}/usr/bin/${exe_name}"
 chmod 755 "${pkg_root}/usr/bin/${exe_name}"
+
+# The cx CLI ships beside the app binary: a terminal cx and the app are one build.
+cp "${cx_bin_path}" "${pkg_root}/usr/bin/cx"
+chmod 755 "${pkg_root}/usr/bin/cx"
 
 icon_resources_dir="apps/desktop/manox/resources"
 if [[ -f "${icon_resources_dir}/app-icon.png" ]]; then
@@ -206,6 +216,7 @@ dpkg-deb --build --root-owner-group "${pkg_root}" "${deb_path}"
 echo ""
 echo "Bundle complete: ${deb_path}"
 echo "Binary:   /usr/bin/${exe_name}"
+echo "cx CLI:   /usr/bin/cx"
 echo "Desktop:  /usr/share/applications/${bundle_id}.desktop"
 echo "Install:  sudo apt-get install ./${deb_path}"
 echo ""

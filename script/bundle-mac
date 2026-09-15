@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-# Bundle manox as a macOS .app.
+# Bundle manox — and the cx CLI inside it — as a macOS .app.
 #
 # Usage: script/bundle-mac [options]
 # Options:
@@ -14,24 +14,37 @@ set -euo pipefail
 #   -d    Compile in debug mode
 #   -o    Open the resulting .app after bundling
 #   -i    Install the .app to /Applications
+#   --cx-link-dir <dir>  Directory whose cx symlink points into the bundle
+#                        (default: ~/.local/bin)
+#   --no-cx-link         Do not create the cx symlink
 #   -h    Display this help and exit
+#
+# The cx CLI ships as Contents/MacOS/cx — a nested executable beside the app
+# binary, so the signature covers it as code — and is linked into
+# <cx-link-dir>/cx, making a terminal `cx` run this app's build. An existing
+# non-symlink at the link path is moved aside to cx.bak-<timestamp>.
 
 build_flag="--release"
 target_dir="release"
 open_result=false
 install_result=false
 harness="manox"
+cx_link_dir="$HOME/.local/bin"
+cx_link=true
 
 help_info() {
     echo "
 Usage: ${0##*/} [options]
-Bundle manox as a macOS .app.
+Bundle manox (with the cx CLI inside) as a macOS .app.
 
 Options:
   --harness <pi|manox>  Harness core to build (default: manox)
   -d    Compile in debug mode
   -o    Open the resulting .app after bundling
   -i    Install the .app to /Applications
+  --cx-link-dir <dir>   Directory whose cx symlink points into the bundle
+                        (default: ~/.local/bin)
+  --no-cx-link          Do not create the cx symlink
   -h    Display this help and exit
 "
 }
@@ -50,6 +63,13 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { echo "Error: --harness requires a value"; exit 1; }
             set_harness "$2"; shift;;
         --harness=*) set_harness "${1#--harness=}";;
+        --cx-link-dir)
+            [[ $# -ge 2 && -n "$2" ]] || { echo "Error: --cx-link-dir requires a value"; exit 1; }
+            cx_link_dir="$2"; shift;;
+        --cx-link-dir=*)
+            cx_link_dir="${1#--cx-link-dir=}"
+            [[ -n "${cx_link_dir}" ]] || { echo "Error: --cx-link-dir requires a value"; exit 1; };;
+        --no-cx-link) cx_link=false;;
         -d) build_flag=""; target_dir="debug";;
         -o) open_result=true;;
         -i) install_result=true;;
@@ -76,6 +96,11 @@ if [[ "$harness" == "pi" ]]; then
     feature_args=(--no-default-features --features harness-pi)
 fi
 cargo build ${build_flag} ${feature_args[@]+"${feature_args[@]}"} --package manox --target "$target_triple"
+
+# The cx CLI comes from the same workspace/lock, but builds in its own cargo
+# invocation: the harness feature flags above are manox-only.
+echo "Building cx CLI"
+cargo build ${build_flag} --package cx-cli --target "$target_triple"
 
 # --- Read bundle configuration from Cargo.toml ---
 # Single source of truth: [package.metadata.bundle] in apps/desktop/manox/Cargo.toml.
@@ -119,8 +144,12 @@ echo "Creating .app bundle at ${app_path}"
 rm -rf "${app_path}"
 mkdir -p "${macos_dir}" "${resources_dir}"
 
-# Copy binary
+# Copy binaries: the app binary plus the cx CLI as a nested executable. Nested
+# code belongs in Contents/MacOS — a Mach-O under Resources is sealed as a plain
+# resource, stays unsigned, and cannot execute on Apple Silicon.
 cp "target/${target_triple}/${target_dir}/manox" "${macos_dir}/manox"
+cp "target/${target_triple}/${target_dir}/cx" "${macos_dir}/cx"
+chmod 755 "${macos_dir}/cx"
 
 # Copy icons (if present)
 if [[ -f "${icon_resources_dir}/app-icon.icns" ]]; then
@@ -186,7 +215,15 @@ echo "Info.plist written to ${app_path}/Contents/Info.plist"
 # Ad-hoc sign with entitlements (required for JIT / unsigned-executable-memory
 # that GPUI uses for runtime shaders). A proper Apple Developer certificate
 # signing can override this if env vars are present.
+#
+# Nested executables are signed before the bundle that contains them, and
+# without the bundle's entitlements: the outer signature seals the nested
+# signature as it stands, while a single --deep pass would copy the app's JIT
+# entitlements onto it. The outer pass runs without --deep, so a nested binary
+# nobody signed fails the bundle loudly instead of shipping one that cannot
+# execute on Apple Silicon.
 entitlements_path="${icon_resources_dir}/manox.entitlements"
+nested_cx="${macos_dir}/cx"
 
 if [[ -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; then
     echo "Setting up keychain for code signing..."
@@ -206,8 +243,12 @@ if [[ -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; th
     }
     trap cleanup_keychain EXIT
 
+    echo "Signing the cx CLI"
+    /usr/bin/codesign --force --timestamp --options runtime \
+        --sign "${MACOS_SIGNING_IDENTITY:-}" "${nested_cx}" -v
+
     echo "Code signing with Apple Developer certificate"
-    /usr/bin/codesign --force --deep --timestamp --options runtime \
+    /usr/bin/codesign --force --timestamp --options runtime \
         --entitlements "${entitlements_path}" \
         --sign "${MACOS_SIGNING_IDENTITY:-}" "${app_path}" -v
 
@@ -215,8 +256,11 @@ if [[ -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; th
     trap - EXIT
     cleanup_keychain
 else
+    echo "Signing the cx CLI (ad-hoc)"
+    codesign --force --sign - "${nested_cx}" -v
+
     echo "Ad-hoc signing with entitlements (no Apple Developer certificate)"
-    codesign --force --deep \
+    codesign --force \
         --entitlements "${entitlements_path}" \
         --sign - "${app_path}" -v
 fi
@@ -224,6 +268,7 @@ fi
 echo ""
 echo "Bundle complete: ${app_path}"
 echo "Binary:  ${macos_dir}/manox"
+echo "cx CLI:  ${macos_dir}/cx"
 echo ""
 
 if [[ "$install_result" = true ]]; then
@@ -233,6 +278,31 @@ if [[ "$install_result" = true ]]; then
     cp -R "${app_path}" "${install_dest}"
     echo "Installed: ${install_dest}"
     app_path="${install_dest}"
+fi
+
+if [[ "$cx_link" = true ]]; then
+    # Linked after the optional install so the link follows the copy the user
+    # actually runs (/Applications) rather than the build-tree bundle.
+    link_dir="${cx_link_dir/#\~/$HOME}"
+    # A relative link directory resolves against the repo root otherwise.
+    [[ "${link_dir}" = /* ]] || link_dir="$(pwd)/${link_dir}"
+    link_path="${link_dir}/cx"
+    link_target="$(cd "$(dirname "${app_path}")" && pwd)/$(basename "${app_path}")/Contents/MacOS/cx"
+    mkdir -p "${link_dir}"
+    if [[ -e "${link_path}" && ! -L "${link_path}" ]]; then
+        backup="${link_path}.bak-$(date +%Y%m%d%H%M%S)"
+        mv "${link_path}" "${backup}"
+        echo "Moved existing ${link_path} to ${backup}"
+    fi
+    ln -sfn "${link_target}" "${link_path}"
+    echo "Linked: ${link_path} -> ${link_target}"
+    if [[ "$install_result" != true ]]; then
+        echo "Note: the link points into the build tree; re-run with -i to point it at /Applications."
+    fi
+    case ":${PATH}:" in
+        *":${link_dir}:"*) ;;
+        *) echo "Warning: ${link_dir} is not in PATH — add it to run cx from a shell" ;;
+    esac
 fi
 
 if [[ "$open_result" = true ]]; then
