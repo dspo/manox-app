@@ -2533,24 +2533,41 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
         });
     });
 
-    // Click: cancel, not answer. The pending cards stay (their retirement is
-    // the projection reconcile's job, not a side effect of the click) and the
-    // composer text is untouched — `submit_input` would have consumed both.
+    // Click: cancel, not answer — and since B2-PR-3 the cancel dismisses the
+    // parked ask on the way through (the `{"dismissed": true}` /
+    // `AskUserQuestionDismissed` leg that converges the server waterfall on
+    // the interrupt). The proof it cancelled rather than answered: the
+    // composer text survives untouched (`submit_input`/
+    // `resolve_ask_with_response` would have consumed it), and the generic
+    // approval card — no party to the dismissal — stays parked for the next
+    // verdict.
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| ws.send_button_clicked(window, cx));
     });
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
             assert!(
-                ws.pending_ask.is_some(),
-                "a running-turn click cancels; it must never answer the ask card"
+                ws.pending_ask.is_none(),
+                "the interrupt retires the parked ask via dismissal"
             );
-            assert!(ws.pending_auth.is_some());
+            assert!(
+                ws.pending_auth.is_some(),
+                "cancel dismisses the ask only; the approval card stays"
+            );
             assert_eq!(
                 ws.input_state.read(cx).value(),
                 "hello",
                 "cancel consumes no composer input"
             );
+            // Re-surface the ask so the idle edge below keeps the
+            // supplement-path contract against a live card.
+            let ask_payload = serde_json::json!({
+                "questions": [
+                    { "question": "Which one?", "header": "Pick",
+                      "options": [{ "label": "A" }, { "label": "B" }] }
+                ]
+            });
+            ws.pending_ask = super::parse_pending_ask("ask1".into(), ask_payload);
             let store = ws.store.as_ref().expect("landing store bound");
             store.update(cx, |h, _| h.store.running = false);
         });
@@ -2856,4 +2873,250 @@ fn armed_then_gone_projection_retires_the_local_card(cx: &mut gpui::TestAppConte
         "retiring churns the card state once"
     );
     let _ = std::fs::remove_file(&db_path);
+}
+
+/// B2-PR-3: shared scaffold for the dismissal-path regressions. A landing
+/// Workspace whose `client` is a raw `in_process_pair` spy (every frame the
+/// workspace sends on the wire lands on the returned receiver), with a
+/// parsed ask card seeded AND the MsgId a live `Request` frame would have
+/// registered for its reply leg. The lock guards ride in the fixture: the
+/// process-global store is swapped for exactly one test body.
+#[cfg(feature = "test-support")]
+struct AskWireSpyFixture {
+    _globals: std::sync::MutexGuard<'static, ()>,
+    _store: std::sync::MutexGuard<'static, ()>,
+    visual: gpui::VisualTestContext,
+    ws: gpui::Entity<Workspace>,
+    rx: async_channel::Receiver<manox_protocol::FromClient>,
+    db_path: std::path::PathBuf,
+}
+
+#[cfg(feature = "test-support")]
+fn seeded_ask_wire_spy(cx: &mut gpui::TestAppContext) -> AskWireSpyFixture {
+    use gpui::AppContext as _;
+    let _globals = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path = std::env::temp_dir().join(format!("manox-ask-dismiss-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    // Cross-thread AgentServer replies need the scheduler's parking
+    // allowance (see the gateway flow tests' note).
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(1_120.), gpui::px(780.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+    // Spy client: the dismissal/cancel frames land on a raw pair this test
+    // reads directly (the multiplexer keeps its own server connection).
+    let (client_conn, server_conn) = manox_protocol::in_process_pair();
+    use manox_protocol::RpcConnection as _;
+    let rx = server_conn.client_rx();
+    ws.update(&mut visual, |ws, _| {
+        ws.client = std::sync::Arc::new(manox_session_core::agent_client::AgentClient::from_conn(
+            client_conn,
+        ));
+    });
+    let ask_payload = serde_json::json!({
+        "questions": [{ "question": "Which one?", "header": "Pick",
+                         "options": [{ "label": "A" }, { "label": "B" }] }]
+    });
+    ws.update(&mut visual, |ws, cx| {
+        ws.diagnostic_seed_ask("ask1", ask_payload, cx);
+        assert!(ws.pending_ask.is_some(), "ask payload must parse");
+        // The MsgId the live `Request` frame registered for the reply leg.
+        ws.diagnostic_seed_store_pending_auth("ask1", "q1", cx);
+    });
+    AskWireSpyFixture {
+        _globals,
+        _store,
+        visual,
+        ws,
+        rx,
+        db_path,
+    }
+}
+
+/// Collect `count` frames off the spy with a real-clock deadline (the
+/// tokio-backed cross-thread wake needs scheduler pumps the deterministic
+/// test loop alone may not provide).
+#[cfg(feature = "test-support")]
+fn spy_frames(
+    cx: &mut gpui::TestAppContext,
+    rx: &async_channel::Receiver<manox_protocol::FromClient>,
+    count: usize,
+    what: &str,
+) -> Vec<manox_protocol::FromClient> {
+    let mut frames = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while frames.len() < count {
+        cx.run_until_parked();
+        while let Ok(m) = rx.try_recv() {
+            frames.push(m);
+        }
+        if frames.len() >= count {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}: only {} frames reached the wire",
+            frames.len()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    frames
+}
+
+/// B2-PR-3 ① (close ⇒ dismissal): closing the question card without
+/// answering — the card's X leg, `dismiss_ask` — replies on the wire with
+/// the Batch-1 `{"dismissed": true}` marker against the live call's MsgId
+/// and retires the card. It must NOT send the allow/deny shape: a close is
+/// "the user left to speak", not a rejection (server `apply_ask_reply`
+/// maps the marker to `AskUserQuestionDismissed`).
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn closing_the_ask_card_sends_the_dismissal_marker(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy(cx);
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    ws.update(&mut visual, |ws, cx| ws.dismiss_ask(cx));
+    let frames = spy_frames(cx, &f.rx, 1, "the close leg must reach the wire");
+    match &frames[0] {
+        manox_protocol::FromClient::Reply { id, outcome } => {
+            assert_eq!(
+                id,
+                &manox_protocol::MsgId::new("q1"),
+                "reply to the live ask"
+            );
+            assert_eq!(
+                outcome.as_ref().ok(),
+                Some(&serde_json::json!({ "dismissed": true })),
+                "the close carries the dismissal marker, never an allow/deny shape"
+            );
+        }
+        other => panic!("expected the dismissal Reply, got {other:?}"),
+    }
+    // The card is retired locally: a stale second click replies to nothing.
+    // (The dead call's MsgId leaves the leaf store with the settle
+    // reconcile — same as the answer leg, which never deletes it either.)
+    let pending = ws.read_with(&mut visual, |ws, _| ws.diagnostic_pending_ask_id());
+    assert_eq!(pending, None, "the close retires the card");
+    // A repeat close with nothing pending: no second frame, no panic.
+    ws.update(&mut visual, |ws, cx| ws.dismiss_ask(cx));
+    cx.run_until_parked();
+    assert!(
+        f.rx.try_recv().is_err(),
+        "a dismissal with no parked card sends nothing"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// B2-PR-3 ③ (turn interrupt ⇒ convergence): hitting stop while the ask
+/// card is parked must converge the server's waterfall immediately — the
+/// dismissal marker goes out on the ask's MsgId first, then the
+/// `CancelTurn` note. The Batch-1 pump awaits the parked adjudication
+/// inline: without the marker the cancel leaves the pump stalled until
+/// disconnect, exactly the practical risk this PR removes.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn turn_interrupt_dismisses_the_parked_ask_before_cancel(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy(cx);
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    let session_id = ws
+        .read_with(&mut visual, |ws, _| ws.session_id.clone())
+        .expect("landing session bound");
+    ws.update(&mut visual, |ws, cx| ws.cancel_turn(cx));
+    let frames = spy_frames(cx, &f.rx, 2, "interrupt: dismissal + cancel");
+    match &frames[0] {
+        manox_protocol::FromClient::Reply { id, outcome } => {
+            assert_eq!(id, &manox_protocol::MsgId::new("q1"));
+            assert_eq!(
+                outcome.as_ref().ok(),
+                Some(&serde_json::json!({ "dismissed": true })),
+                "the interrupt converges the parked waterfall with the marker"
+            );
+        }
+        other => panic!("expected the dismissal Reply first, got {other:?}"),
+    }
+    match &frames[1] {
+        manox_protocol::FromClient::Notification {
+            note: manox_protocol::ClientNote::CancelTurn { session_id: sid },
+        } => {
+            assert_eq!(sid, &session_id, "the turn cancel still rides the note");
+        }
+        other => panic!("expected the CancelTurn note, got {other:?}"),
+    }
+    ws.read_with(&mut visual, |ws, _| {
+        assert!(
+            ws.diagnostic_pending_ask_id().is_none(),
+            "the interrupt retires the parked card locally"
+        );
+    });
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// B2-PR-3 ② (deny stays the Decision leg): the generic approval card's
+/// verdict must still settle as allow/deny — `{"allow": …}` on the wire —
+/// and must never gain the dismissal marker. Close and reject now run
+/// through disjoint exits; this test pins the reject side of the split
+/// (it also guards that `resolve_auth` no longer absorbs an ask id).
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn approval_denial_stays_on_the_decision_leg(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy(cx);
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    // Close the ask first (dismissal leg), then raise the generic approval
+    // card exactly as a gate escalation would.
+    ws.update(&mut visual, |ws, cx| ws.dismiss_ask(cx));
+    let frames = spy_frames(cx, &f.rx, 1, "close leg reply");
+    assert!(
+        matches!(&frames[0], manox_protocol::FromClient::Reply { .. }),
+        "the ask close replies first: {frames:?}"
+    );
+    ws.update(&mut visual, |ws, cx| {
+        ws.diagnostic_seed_auth("call_9", "Edit", "escalate sandbox", cx);
+        ws.diagnostic_seed_store_pending_auth("call_9", "q9", cx);
+    });
+    ws.update(&mut visual, |ws, cx| {
+        ws.resolve_auth_for_test(manox_agent::PermissionDecision::Deny, cx)
+    });
+    let frames = spy_frames(cx, &f.rx, 1, "deny reply");
+    match &frames[0] {
+        manox_protocol::FromClient::Reply { id, outcome } => {
+            assert_eq!(
+                id,
+                &manox_protocol::MsgId::new("q9"),
+                "the verdict answers the approval call"
+            );
+            let v = outcome.as_ref().expect("the deny replies Ok");
+            assert_eq!(v, &serde_json::json!({ "allow": false }));
+            assert!(
+                !serde_json::to_string(v).unwrap().contains("dismissed"),
+                "the denial leg never smuggles the dismissal marker"
+            );
+        }
+        other => panic!("expected the deny Reply, got {other:?}"),
+    }
+    ws.read_with(&mut visual, |ws, _| {
+        assert!(ws.diagnostic_pending_auth().is_none(), "the card retires");
+    });
+    let _ = std::fs::remove_file(&f.db_path);
 }

@@ -2279,7 +2279,8 @@ fn render_ask_user_card(
     let weak_prev = weak.clone();
     let weak_next = weak.clone();
     let weak_submit = weak.clone();
-    let weak_cancel = weak.clone();
+    let weak_close = weak.clone();
+    let weak_dismiss = weak.clone();
     let header = h_flex()
         .w_full()
         .min_w_0()
@@ -2339,9 +2340,9 @@ fn render_ask_user_card(
                         .xsmall()
                         .icon(IconName::Close)
                         .on_click(move |_, _, cx: &mut App| {
-                            let _ = weak_cancel.update(cx, |w, cx| {
-                                w.resolve_auth(manox_agent::PermissionDecision::Deny, cx);
-                            });
+                            // Close (not deny): the dismissal marker, never
+                            // the allow/deny exit the approval card owns.
+                            let _ = weak_close.update(cx, |w, cx| w.dismiss_ask(cx));
                         }),
                 ),
         );
@@ -2469,6 +2470,11 @@ fn render_ask_user_card(
             snapshot.id, snapshot.transition_gen
         ))
         .key_context("AskDrawer")
+        // Esc inside the drawer closes it unanswered — the same dismissal
+        // leg as the X button, never the approval card's deny.
+        .on_action(move |_: &crate::AskCancel, _window, cx: &mut App| {
+            let _ = weak_dismiss.update(cx, |w, cx| w.dismiss_ask(cx));
+        })
         .w_full()
         .min_w_0()
         .gap_2p5()
