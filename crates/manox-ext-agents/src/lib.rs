@@ -399,7 +399,7 @@ pub fn merge_codex_config(
 /// 返回 (发给 provider/agent 的 base id, Option<上下文 token 数>)。
 /// `[1m]` → 1_000_000；`[200k]` → 200_000；无后缀则 base = 原 id、hint = None。
 /// 不匹配的尾缀（如 `model[1mm]`）原样保留。
-pub(crate) fn parse_model_context_suffix(model_id: &str) -> (&str, Option<i64>) {
+pub fn parse_model_context_suffix(model_id: &str) -> (&str, Option<i64>) {
     match context_window_from_suffix(model_id) {
         Some(tokens) => {
             let open = model_id.rfind('[').unwrap();
@@ -1450,6 +1450,52 @@ pub fn resolve_launch_model(
     Ok((model, selected))
 }
 
+/// Single source of truth for the Claude model-name injection decision
+/// (shared by `build_launch_spec`'s claude arm and the VS Code BYOK path).
+pub struct ClaudeModelInjection {
+    /// Value for `ANTHROPIC_MODEL` / `--model`; may carry the `[1m]` suffix.
+    pub model_env: String,
+    /// Base id (context suffix stripped) for `CX_MODEL` and alias envs.
+    pub cx_model: String,
+    /// `Some` ⇒ inject `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
+    pub max_context_tokens: Option<i64>,
+    /// Warning to surface when a suffix could not widen the model name.
+    pub warn: Option<String>,
+}
+
+/// Map a selected model id onto the Claude Code injection values.
+///
+/// Claude Code 2.1.170 (binary evidence, PR #25) picks its context window
+/// only by testing `/\[1m\]/i` on the model name and strips the suffix
+/// before the wire request, so `[1m]` is safe to pass through; `[2m]` and
+/// any other suffix do not widen the window. CLAUDE_CODE_MAX_CONTEXT_TOKENS
+/// is read only under DISABLE_COMPACT — under default (auto-compact on) a
+/// non-`[1m]` tier falls back to 200k, hence the warning. So:
+/// `Some(1_000_000)` → `{base}[1m]`; other `Some(_)` → base id plus the env
+/// fallback and a warning; `None` → base id, no env.
+pub fn claude_model_injection(model_id: &str) -> ClaudeModelInjection {
+    let (base, ctx_hint) = parse_model_context_suffix(model_id);
+    let (model_env, warn) = match ctx_hint {
+        Some(1_000_000) => (format!("{base}[1m]"), None),
+        Some(tokens) => (
+            base.to_string(),
+            Some(format!(
+                "cx: 警告: Claude Code 无法用模型名后缀表示 {tokens} 上下文窗口\
+                 （只有 [1m] 参与窗口判定），且 CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+                 仅在 DISABLE_COMPACT 开启时生效；默认配置下 Claude Code 会回退 \
+                 200k 并提前自动压缩。"
+            )),
+        ),
+        None => (base.to_string(), None),
+    };
+    ClaudeModelInjection {
+        model_env,
+        cx_model: base.to_string(),
+        max_context_tokens: ctx_hint,
+        warn,
+    }
+}
+
 pub fn build_launch_spec(
     selection: &Selection,
     passthrough_args: &[String],
@@ -1553,37 +1599,19 @@ pub fn build_launch_spec(
                 env_remove.push("ANTHROPIC_MODEL".into());
                 env.insert("ANTHROPIC_BASE_URL".into(), model.endpoint_url.clone());
                 env.insert("ANTHROPIC_API_KEY".into(), apikey);
-                // Claude Code's context-window picker (extracted from the
-                // 2.1.170 binary) tests only `/\[1m\]/i` on the model name;
-                // `[2m]` appears solely in a strip/display helper and does
-                // not widen the window. CLAUDE_CODE_MAX_CONTEXT_TOKENS is read
-                // only under DISABLE_COMPACT. So `[1m]` is the sole pass-through
-                // that declares a 1M window (Claude Code strips it before the
-                // wire request); every other ctx_hint falls back to the base id
-                // plus the env, warned below as DISABLE_COMPACT-only. Mirrors the
-                // cx-cli `claude` arm (see convergence issue for dedup).
-                let claude_model = match ctx_hint {
-                    Some(1_000_000) => format!("{api_model_id}[1m]"),
-                    Some(tokens) => {
-                        eprintln!(
-                            "cx: 警告: Claude Code 无法用模型名后缀表示 {tokens} 上下文窗口\
-                             （只有 [1m] 参与窗口判定），且 CLAUDE_CODE_MAX_CONTEXT_TOKENS \
-                             仅在 DISABLE_COMPACT 开启时生效；默认配置下 Claude Code 会回退 \
-                             200k 并提前自动压缩。"
-                        );
-                        api_model_id.to_string()
-                    }
-                    None => api_model_id.to_string(),
-                };
-                env.insert("ANTHROPIC_MODEL".into(), claude_model.clone());
+                let injection = claude_model_injection(&model.id);
+                if let Some(warning) = injection.warn {
+                    eprintln!("{warning}");
+                }
+                env.insert("ANTHROPIC_MODEL".into(), injection.model_env.clone());
                 // Context declaration travels with the injection: LaunchSpec
                 // env overrides the inherited env at spawn, and suffix-less
                 // models leave any shell-exported value untouched.
-                if let Some(tokens) = ctx_hint {
+                if let Some(tokens) = injection.max_context_tokens {
                     env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), tokens.to_string());
                 }
                 args.push("--model".into());
-                args.push(claude_model);
+                args.push(injection.model_env);
                 args.extend(passthrough_args.iter().cloned());
             }
             "codex" => {
@@ -1796,8 +1824,8 @@ mod tests {
     }
 
     // Desktop external sessions reach build_launch_spec through
-    // `AgentBuilder::spawn` → `SessionHandle::spawn`; the claude arm must
-    // declare the context window the same way the cx-cli arm does.
+    // `AgentBuilder::spawn` → `SessionHandle::spawn`; the claude arm declares
+    // the context window via `claude_model_injection`.
     fn claude_launch_spec_for_model(model_id: &str) -> LaunchSpec {
         let dir = TempDir::new().unwrap();
         let binary = fake_claude_binary(&dir);
@@ -1897,5 +1925,179 @@ mod tests {
         );
         assert_eq!(model_arg(&spec), Some("qwen3.6-plus".to_string()));
         assert!(!spec.env.contains_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
+    }
+
+    fn claude_selection(binary: &Path, provider_name: &str, has_endpoints: bool) -> Selection {
+        Selection {
+            agent_id: "claude".into(),
+            agent_binary: binary.display().to_string(),
+            agent_args: Vec::new(),
+            agent_env: BTreeMap::new(),
+            selected_wire_api: WireApi::Responses,
+            provider: ResolvedProvider {
+                name: provider_name.into(),
+                has_endpoints,
+                apikey_source: Some("literal:test-key".into()),
+                env: BTreeMap::new(),
+            },
+            model: None,
+            injected_models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn claude_launch_removes_anthropic_env_vars() {
+        let dir = TempDir::new().unwrap();
+        let binary = fake_claude_binary(&dir);
+        let selection = claude_selection(&binary, "Test", false);
+        let spec = build_launch_spec(&selection, &[], false, None, None).unwrap();
+        assert!(spec.env_remove.contains(&"ANTHROPIC_API_KEY".to_string()));
+        assert!(
+            spec.env_remove
+                .contains(&"ANTHROPIC_AUTH_TOKEN".to_string())
+        );
+        assert!(spec.env_remove.contains(&"ANTHROPIC_BASE_URL".to_string()));
+        assert!(spec.env_remove.contains(&"ANTHROPIC_MODEL".to_string()));
+        assert_eq!(spec.env.get("ANTHROPIC_API_KEY"), Some(&"test-key".into()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_AUTH_TOKEN"),
+            Some(&"test-key".into())
+        );
+        assert!(!spec.env.contains_key("HOME"));
+    }
+
+    #[test]
+    fn claude_with_endpoint_removes_anthropic_env_vars() {
+        let dir = TempDir::new().unwrap();
+        let binary = fake_claude_binary(&dir);
+        let mut selection = claude_selection(&binary, "DashScope", true);
+        selection.model = Some(claude_resolved_model("qwen3.6-plus"));
+        let spec = build_launch_spec(
+            &selection,
+            &["mcp".into(), "list".into()],
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(spec.env_remove.contains(&"ANTHROPIC_API_KEY".to_string()));
+        assert!(
+            spec.env_remove
+                .contains(&"ANTHROPIC_AUTH_TOKEN".to_string())
+        );
+        assert!(spec.env_remove.contains(&"ANTHROPIC_BASE_URL".to_string()));
+        assert!(spec.env_remove.contains(&"ANTHROPIC_MODEL".to_string()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_BASE_URL"),
+            Some(&"https://dashscope.aliyuncs.com/apps/anthropic".into())
+        );
+        assert_eq!(spec.env.get("ANTHROPIC_API_KEY"), Some(&"test-key".into()));
+        assert_eq!(
+            spec.env.get("ANTHROPIC_MODEL"),
+            Some(&"qwen3.6-plus".into())
+        );
+        // Suffix-less model: no context declaration injected.
+        assert!(!spec.env.contains_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
+        assert_eq!(
+            spec.args,
+            vec![
+                "--model".to_string(),
+                "qwen3.6-plus".to_string(),
+                "mcp".to_string(),
+                "list".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_injection_decisions_per_context_hint() {
+        let one_m = claude_model_injection("glm-5.2[1m]");
+        assert_eq!(one_m.model_env, "glm-5.2[1m]");
+        assert_eq!(one_m.cx_model, "glm-5.2");
+        assert_eq!(one_m.max_context_tokens, Some(1_000_000));
+        assert!(one_m.warn.is_none());
+
+        let two_m = claude_model_injection("glm-5.2[2m]");
+        assert_eq!(two_m.model_env, "glm-5.2");
+        assert_eq!(two_m.cx_model, "glm-5.2");
+        assert_eq!(two_m.max_context_tokens, Some(2_000_000));
+        assert!(two_m.warn.is_some());
+
+        let none = claude_model_injection("qwen3.6-plus");
+        assert_eq!(none.model_env, "qwen3.6-plus");
+        assert_eq!(none.cx_model, "qwen3.6-plus");
+        assert_eq!(none.max_context_tokens, None);
+        assert!(none.warn.is_none());
+    }
+
+    /// The exact contract wording from PR #25, asserted byte-for-byte.
+    #[test]
+    fn claude_injection_warn_text_is_locked() {
+        let warn = claude_model_injection("glm-5.2[2m]").warn.unwrap();
+        assert_eq!(
+            warn,
+            "cx: 警告: Claude Code 无法用模型名后缀表示 2000000 上下文窗口\
+             （只有 [1m] 参与窗口判定），且 CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+             仅在 DISABLE_COMPACT 开启时生效；默认配置下 Claude Code 会回退 \
+             200k 并提前自动压缩。"
+        );
+    }
+
+    /// Run `test_name` in a fresh child of the test binary with stderr
+    /// captured through a pipe, returning the child's stderr bytes. Proves
+    /// the warning actually reaches the eprintln channel at each call site
+    /// (the #25 contract) without process-global fd redirection.
+    fn capture_stderr_of(test_name: &str) -> Vec<u8> {
+        use std::io::Read;
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .arg("--quiet")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn test-binary child");
+        let mut stderr = Vec::new();
+        child
+            .stderr
+            .as_mut()
+            .expect("stderr piped")
+            .read_to_end(&mut stderr)
+            .expect("read child stderr");
+        let status = child.wait().expect("wait child");
+        assert!(
+            status.success(),
+            "child test `{test_name}` failed: {status}"
+        );
+        stderr
+    }
+
+    #[test]
+    fn launch_claude_fallback_arm_prints_warning() {
+        let warn = claude_model_injection("glm-5.2[200k]").warn.unwrap();
+        let stderr = String::from_utf8(capture_stderr_of(
+            "tests::claude_launch_spec_for_model_emits_warning_for_200k",
+        ))
+        .unwrap();
+        assert!(stderr.contains(&warn), "warning missing: {stderr:?}");
+    }
+
+    // Self-test target for launch_claude_fallback_arm_prints_warning: its only
+    // purpose is to run the claude fallback arm where the eprintln happens.
+    #[test]
+    fn claude_launch_spec_for_model_emits_warning_for_200k() {
+        let spec = claude_launch_spec_for_model("glm-5.2[200k]");
+        assert_eq!(spec.env.get("CX_MODEL"), Some(&"glm-5.2".to_string()));
+    }
+
+    #[test]
+    fn apply_byok_env_prints_warning() {
+        let warn = claude_model_injection("glm-5.2[2m]").warn.unwrap();
+        let stderr = String::from_utf8(capture_stderr_of(
+            "vscode_app::tests::vscode_apply_byok_emits_warning_for_2m",
+        ))
+        .unwrap();
+        assert!(stderr.contains(&warn), "warning missing: {stderr:?}");
     }
 }

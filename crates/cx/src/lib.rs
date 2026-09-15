@@ -493,19 +493,9 @@ pub fn merge_codex_config(
     Ok(rendered)
 }
 
-/// 解析 model id 末尾的上下文窗口后缀（cx 约定，如 `glm-5.2[1m]`、`model[200k]`、`model[1m123k]`）。
-/// 返回 (发给 provider/agent 的 base id, Option<上下文 token 数>)。
-/// `[1m]` → 1_000_000；`[200k]` → 200_000；无后缀则 base = 原 id、hint = None。
-/// 不匹配的尾缀（如 `model[1mm]`）原样保留。
-pub fn parse_model_context_suffix(model_id: &str) -> (&str, Option<i64>) {
-    match context_window_from_suffix(model_id) {
-        Some(tokens) => {
-            let open = model_id.rfind('[').unwrap();
-            (&model_id[..open], Some(tokens as i64))
-        }
-        None => (model_id, None),
-    }
-}
+// Single implementation lives in manox-ext-agents; re-exported so `cx::` stays
+// the one-stop vocabulary for consumers of this crate.
+pub use manox_ext_agents::parse_model_context_suffix;
 
 /// 在 merge_codex_config 渲染结果中注入 `supports_websockets = <bool>`。
 /// 插入点是首个 `wire_api = ...` 行之后——merge_codex_config 会整体丢弃用户
