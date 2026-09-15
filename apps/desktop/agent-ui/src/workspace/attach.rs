@@ -50,7 +50,10 @@ impl Workspace {
                 // store write + delta (single writer).
             }
             ThreadEvent::TurnFinished {
-                cancelled, failed, ..
+                cancelled,
+                failed,
+                stranded_steer_ids,
+                ..
             } => {
                 // A cancelled/failed turn voids a stashed plan review
                 // (mirroring the foreground demote); a normal settle keeps
@@ -69,18 +72,18 @@ impl Workspace {
                 // server-side store mirror.
                 this.multiplexer.update(cx, |m, cx| m.note_unread(&id, cx));
                 // Mirror the foreground settle routing against the parked
-                // stash: the server strands a cancelled/failed turn's whole
-                // steer queue all-or-nothing (`Failed`), while a normal
-                // settle injected them — a parked thread has no live list to
-                // append into, so those cards just drop and surface through
-                // the transcript on switch-back / reload. Queued follow-ups
-                // only become the next turn on a natural settle — never
-                // after a cancel.
-                if *cancelled || *failed {
-                    this.mark_parked_stranded_steers_failed(&id);
+                // stash with the same per-id verdict: only the retracted tail
+                // (`stranded_steer_ids`) turns `Failed`; the injected rest
+                // drops and surfaces through the transcript on switch-back /
+                // reload. A normal settle carries zero stranded — everything
+                // drops, unchanged from before. Queued follow-ups only become
+                // the next turn on a natural settle — never after a cancel.
+                let stranded = if *cancelled || *failed {
+                    stranded_steer_ids.len()
                 } else {
-                    this.drop_parked_settled_steers(&id);
-                }
+                    0
+                };
+                this.settle_parked_steer_group(&id, stranded);
                 if !*cancelled {
                     this.flush_parked_follow_ups(&id, cx);
                 }

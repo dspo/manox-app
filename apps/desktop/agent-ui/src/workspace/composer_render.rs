@@ -62,9 +62,6 @@ fn queue_drag_boundary(
     })
 }
 
-/// The queue row's single-line summary: newlines collapse to spaces; the
-/// width-based `text_ellipsis` renders do the truncation (no char cap —
-/// width ellipsis replaces the old 80-char cap).
 /// Accent 2px hairline: the insertion position for a live queue drag.
 fn insertion_line(theme: &Theme) -> AnyElement {
     gpui::div()
@@ -74,8 +71,8 @@ fn insertion_line(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// One-line summary for a queue row (newlines collapsed; width ellipsis
-/// renders do the truncation).
+/// The queue row's one-line summary: newlines collapse to spaces, and the
+/// width-based `text_ellipsis` render does the truncation.
 fn queue_row_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

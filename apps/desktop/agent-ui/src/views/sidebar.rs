@@ -449,12 +449,15 @@ pub struct Sidebar {
     view_menu_open: bool,
     view_menu: Option<Entity<PopupMenu>>,
     view_menu_sub: Option<Subscription>,
-    /// Window-space bottom-right corner of each open dropdown's trigger,
-    /// captured from that trigger's `on_prepaint` bounds and seeded at open
-    /// time from the window bounds. `anchored()` positions the deferred menu
-    /// here (fit mode `SwitchAnchor` flips it above the trigger when it would
-    /// overflow the window's bottom edge), replacing the old downward-only
-    /// `top_full()` hang that got clipped near the bottom of the list.
+    /// Window-space bottom-right corner of each dropdown's trigger, written
+    /// by that trigger's `on_prepaint` (unguarded, every frame — a render-time
+    /// read must never race a same-frame prepaint write, which is what put the
+    /// first menu frame at the window's bottom-right corner). The click reads
+    /// the previous frame's corner, so the menu opens already positioned.
+    /// `anchored()` hangs the deferred menu here (fit mode `SwitchAnchor`
+    /// flips it above the trigger when it would overflow the window's bottom
+    /// edge), replacing the old downward-only `top_full()` hang that got
+    /// clipped near the bottom of the list.
     row_menu_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
     view_menu_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
     new_session_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
@@ -542,11 +545,13 @@ impl Sidebar {
     fn open_view_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_view_menu();
         self.close_new_session_menu();
-        // Seed the trigger anchor up front so the first paint after opening
-        // already positions the menu; `on_prepaint` on the trigger refines it
-        // to the exact bottom-right corner every frame the menu stays open.
-        self.view_menu_anchor
-            .set(Some(window.bounds().bottom_right()));
+        // The anchor was captured by the trigger's `on_prepaint` on the frame
+        // that painted the click; a `None` means the trigger has never been
+        // painted (unreachable for a click on it) — refuse rather than park
+        // the menu at a fabricated corner.
+        if self.view_menu_anchor.get().is_none() {
+            return;
+        }
         let sidebar = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
             // The active mode carries the check mark; the popup is the mode's
@@ -700,15 +705,16 @@ impl Sidebar {
                     // bottom-right window position every frame it is the open
                     // trigger (in-flow copy only, so the sticky overlay never
                     // clobbers the anchor).
-                    .when(
-                        dropdown && self.new_session_open && self.new_session_project.is_none(),
-                        |el| {
-                            let cell = self.new_session_anchor.clone();
-                            el.on_prepaint(move |bounds, _window, _cx| {
+                    .when(dropdown, |el| {
+                        // Unguarded, every frame: the click closure reads this
+                        // cell for the menu's first frame (render must never
+                        // read a value this frame's prepaint will write).
+                        let cell = self.new_session_anchor.clone();
+                        el.debug_selector(|| "sidebar-conv-plus-host".into())
+                            .on_prepaint(move |bounds, _window, _cx| {
                                 cell.set(Some(bounds.bottom_right()));
                             })
-                        },
-                    )
+                    })
                     .child(
                         Button::new(format!("{id_prefix}-conv-plus"))
                             .ghost()
@@ -740,7 +746,7 @@ impl Sidebar {
             .child(
                 gpui::div()
                     .relative()
-                    .when(dropdown && self.view_menu_open, |el| {
+                    .when(dropdown, |el| {
                         let cell = self.view_menu_anchor.clone();
                         el.on_prepaint(move |bounds, _window, _cx| {
                             cell.set(Some(bounds.bottom_right()));
@@ -787,8 +793,9 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         self.new_session_project = project.clone();
-        self.new_session_anchor
-            .set(Some(window.bounds().bottom_right()));
+        if self.new_session_anchor.get().is_none() {
+            return;
+        }
         let theme = cx.theme().clone();
         let sidebar = cx.entity().downgrade();
         // The menu-build closures run EAGERLY inside this Sidebar update,
@@ -932,8 +939,9 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         self.close_row_menu();
-        self.row_menu_anchor
-            .set(Some(window.bounds().bottom_right()));
+        if self.row_menu_anchor.get().is_none() {
+            return;
+        }
         let theme = cx.theme().clone();
         let sidebar = cx.entity().downgrade();
         let open_id = id.clone();
@@ -1023,7 +1031,13 @@ impl Sidebar {
                     .anchor(Anchor::TopRight)
                     .position(position)
                     .offset(point(px(0.), px(2.)))
-                    .child(gpui::div().id(id).occlude().child(menu)),
+                    .child(
+                        gpui::div()
+                            .id(id)
+                            .debug_selector(|| "sidebar-dropdown-probe".into())
+                            .occlude()
+                            .child(menu),
+                    ),
             )
             .with_priority(1)
             .into_any_element(),
@@ -2970,10 +2984,9 @@ fn render_thread_menu_trigger(
             cx.notify();
         }));
     let dropdown = sidebar.render_row_menu_dropdown(&id);
-    let menu_open = sidebar.row_menu_open.as_deref() == Some(id.as_str());
     gpui::div()
         .relative()
-        .when(menu_open, |el| {
+        .when(dropdown.is_some(), |el| {
             let cell = sidebar.row_menu_anchor.clone();
             el.on_prepaint(move |bounds, _window, _cx| {
                 cell.set(Some(bounds.bottom_right()));
@@ -3719,6 +3732,13 @@ mod tests {
         cx.run_until_parked();
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         let sidebar = cx.new(|cx| Sidebar::new(gpui::px(240.), cx));
+        // Seed the trigger anchor a painted frame would have written: the
+        // open path requires it (and refuses to park a menu at a fabricated
+        // corner).
+        sidebar.update(cx, |s, _| {
+            s.new_session_anchor
+                .set(Some(gpui::point(gpui::px(180.), gpui::px(60.))));
+        });
         // The project-group shape: the crash path (build_project_menu →
         // the nested per-agent cascade submenus).
         visual.update(|window, cx| {
@@ -3810,6 +3830,59 @@ mod tests {
             (f32::from(below.origin.y) - 102.0).abs() < 1.0,
             "menu top sits just under the trigger (+2 offset), origin_y={:?}",
             f32::from(below.origin.y)
+        );
+    }
+
+    /// #4 (real chain): clicking a real trigger must paint the menu at the
+    /// trigger's corner on the very frame the click causes. The first
+    /// implementation seeded the anchor with the window bounds in render while
+    /// the trigger's prepaint wrote the real corner later in the same frame —
+    /// so the menu sat at the window's bottom-right until an unrelated
+    /// re-render (the review's measured repro).
+    #[gpui::test]
+    fn dropdown_opens_at_the_real_trigger_on_the_first_frame(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.open_window(gpui::size(gpui::px(960.), gpui::px(640.)), |window, cx| {
+            let sidebar = cx.new(|cx| Sidebar::new(gpui::px(240.), cx));
+            gpui_component::Root::new(sidebar, window, cx)
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        let trigger = visual
+            .debug_bounds("sidebar-conv-plus-host")
+            .expect("the conversations header renders its `+` trigger");
+        assert!(
+            visual.debug_bounds("sidebar-dropdown-probe").is_none(),
+            "the menu only exists after the click"
+        );
+
+        visual.simulate_click(trigger.center(), gpui::Modifiers::default());
+        visual.run_until_parked();
+
+        let menu = visual
+            .debug_bounds("sidebar-dropdown-probe")
+            .expect("the menu paints on the click frame");
+        // `anchored(anchor = TopRight) + offset (0, 2)` puts the menu's
+        // top-right corner on the trigger's bottom-right corner (+2 down).
+        assert!(
+            (f32::from(menu.origin.y) - (f32::from(trigger.bottom()) + 2.0)).abs() < 1.5,
+            "menu top must hug the trigger's bottom (+2), origin_y={:?} trigger_bottom={:?}",
+            f32::from(menu.origin.y),
+            f32::from(trigger.bottom())
+        );
+        assert!(
+            (f32::from(menu.right()) - f32::from(trigger.right())).abs() < 1.5,
+            "menu right edge must align with the trigger's right, right={:?} trigger_right={:?}",
+            f32::from(menu.right()),
+            f32::from(trigger.right())
+        );
+        // The old defect painted it at the window's bottom-right corner.
+        assert!(
+            f32::from(menu.right()) < 500.0 && f32::from(menu.origin.y) < 500.0,
+            "menu must not sit at the window corner (right={:?}, y={:?})",
+            f32::from(menu.right()),
+            f32::from(menu.origin.y)
         );
     }
 }

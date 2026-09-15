@@ -1820,7 +1820,10 @@ impl Workspace {
                     this.retire_injected_steer(message_id, cx);
                 }
                 ThreadEvent::TurnFinished {
-                    cancelled, failed, ..
+                    cancelled,
+                    failed,
+                    stranded_steer_ids,
+                    ..
                 } => {
                     // Seal the conversation's streaming state at the
                     // authoritative turn boundary: a turn that ended without
@@ -1842,18 +1845,19 @@ impl Workspace {
                         )
                     });
                     this.apply_list_outcome(outcome, cx);
-                    // This is the authoritative end-of-turn boundary and the
-                    // earliest point the client can confirm what happened to
-                    // every `SteerPending` card. The server settles a turn's
-                    // steer queue all-or-nothing (`engine.rs`: an aborted/failed
-                    // run strands every steer; a normal finish injects them), so
-                    // no per-id matching is needed — `cancelled || failed` is the
-                    // exact verdict for the whole steer group.
-                    if *cancelled || *failed {
-                        this.mark_stranded_steers_failed(cx);
+                    // The server's per-id verdict: only the not-yet-injected
+                    // tail of the steer group is retracted (`stranded_steer_ids`,
+                    // FIFO), the rest was injected and its rows are on disk. The
+                    // claim path (`UserRowLanded`) usually retired those already;
+                    // this settle is the fallback for a row that raced it — and
+                    // it must NOT fail the injected subset (a retry of one would
+                    // double-deliver). A normal settle carries zero stranded.
+                    let stranded = if *cancelled || *failed {
+                        stranded_steer_ids.len()
                     } else {
-                        this.promote_settled_steers(cx);
-                    }
+                        0
+                    };
+                    this.settle_steer_group(stranded, cx);
                     let thread_id = this
                         .store
                         .as_ref()
@@ -2975,10 +2979,10 @@ impl Workspace {
         message_id: String,
         text: String,
         images: Vec<manox_protocol::ImageAttachment>,
-    ) {
+    ) -> bool {
         let Some(sid) = self.session_id.clone() else {
             tracing::warn!("steer dropped: no session bound to the workspace");
-            return;
+            return false;
         };
         tracing::info!(session_id = %sid, "steer v2 sent");
         self.client.send_call(manox_protocol::ClientCall::Steer {
@@ -2988,6 +2992,7 @@ impl Workspace {
             images,
             origin_rpc: None,
         });
+        true
     }
 }
 

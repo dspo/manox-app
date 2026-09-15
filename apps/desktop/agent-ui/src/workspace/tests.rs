@@ -1294,9 +1294,11 @@ fn settle_promotes_pending_steers_into_the_list(cx: &mut gpui::TestAppContext) {
     });
 }
 
-/// #5 (settle, cancel/abort path): an abnormally-ended turn strands every
-/// `SteerPending` card to `Failed` (retryable) and surfaces NO bubble — the
-/// steer was never injected.
+/// #5 (settle routing, per-id verdict): the server retracts only the
+/// not-yet-injected FIFO tail of the steer group — exactly those cards turn
+/// `Failed` (retryable, no bubble); the injected head promotes with its
+/// `steered` bubble. The old "whole group strands" reading would fake-fail
+/// an already-delivered message and double-deliver on retry.
 #[gpui::test]
 fn cancelled_settle_strands_steers_without_a_bubble(cx: &mut gpui::TestAppContext) {
     use gpui::AppContext as _;
@@ -1321,32 +1323,68 @@ fn cancelled_settle_strands_steers_without_a_bubble(cx: &mut gpui::TestAppContex
     );
     cx.run_until_parked();
     let ws = captured.borrow().clone().expect("workspace captured");
-    ws.update(cx, |ws, cx| {
-        let meta = ws.user_turn_meta(cx);
-        ws.queued_follow_ups.push_back(super::QueuedFollowUp {
+    let mk = |text: &str, message_id: &str, ws: &mut Workspace, cx: &mut Context<Workspace>| {
+        super::QueuedFollowUp {
             turn: super::DeferredUserTurn {
-                text: "the steer".into(),
+                text: text.into(),
                 images: vec![],
-                meta,
+                meta: ws.user_turn_meta(cx),
                 user_images: vec![],
             },
             state: super::FollowUpState::SteerPending {
-                message_id: "steer-strand".into(),
+                message_id: message_id.into(),
             },
-        });
+        }
+    };
+    ws.update(cx, |ws, cx| {
+        let injected = mk("injected steer", "steer-injected", ws, cx);
+        ws.queued_follow_ups.push_back(injected);
+        let retracted = mk("retracted steer", "steer-retracted", ws, cx);
+        ws.queued_follow_ups.push_back(retracted);
+        let plain = super::QueuedFollowUp {
+            turn: super::DeferredUserTurn {
+                text: "plain queue".into(),
+                images: vec![],
+                meta: ws.user_turn_meta(cx),
+                user_images: vec![],
+            },
+            state: super::FollowUpState::Queued,
+        };
+        ws.queued_follow_ups.push_back(plain);
     });
     let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
 
-    ws.update(cx, |ws, cx| ws.mark_stranded_steers_failed(cx));
+    // The server's per-id verdict: one retracted id (the FIFO tail card).
+    ws.update(cx, |ws, cx| ws.settle_steer_group(1, cx));
 
     ws.read_with(cx, |ws, _| {
-        assert!(matches!(
-            ws.queued_follow_ups[0].state,
-            super::FollowUpState::Failed
-        ));
+        assert_eq!(ws.queued_follow_ups.len(), 2, "injected card promoted out");
+        assert!(
+            matches!(ws.queued_follow_ups[0].state, super::FollowUpState::Failed),
+            "the retracted tail lands Failed (retryable)"
+        );
+        assert!(
+            matches!(ws.queued_follow_ups[1].state, super::FollowUpState::Queued),
+            "the plain queue stays for the flush"
+        );
     });
     let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
-    assert_eq!(before, after, "a stranded steer must not add a bubble");
+    assert_eq!(
+        after,
+        before + 1,
+        "the injected steer promotes exactly one bubble; the retracted one adds none"
+    );
+    ws.read_with(cx, |ws, cx| {
+        let items = ws.conversation.read(cx).items();
+        let last = items.last().expect("promoted bubble appended");
+        match last.read(cx).kind() {
+            crate::conversation::ConvItem::User { text, meta, .. } => {
+                assert_eq!(text, "injected steer");
+                assert!(meta.as_ref().is_some_and(|m| m.steered));
+            }
+            other => panic!("expected a user bubble, got {other:?}"),
+        }
+    });
 }
 
 /// Retire-on-injection (dsh `claimed`): the card leaves the queue the moment
