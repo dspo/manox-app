@@ -1,8 +1,7 @@
-<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-  <!-- 帆：保持主 logo 的等腰比例 -->
-  <path d="M8 1.8 L11.6 10.8 L4.4 10.8 Z" fill="#fff"/>
-
-  <!-- 船体：一条弧线 -->
-  <path d="M1.8 11.8 Q8 15.2 14.2 11.8"
-        fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <g fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 5.7 4.5 L 1 11 L 5.7 17.5" />
+    <path d="M 16.3 4.5 L 21 11 L 16.3 17.5" />
+    <path d="M 8.7 11 L 13.3 11" />
+  </g>
 </svg>
