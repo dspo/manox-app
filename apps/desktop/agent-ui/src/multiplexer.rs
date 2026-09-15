@@ -78,11 +78,7 @@ const MODELS_EMPTY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_
 
 /// Capabilities the desktop can adjudicate (mirrors the pre-multiplex
 /// per-session handshake).
-const CAPABILITIES: &[AnswerKind] = &[
-    AnswerKind::Approve,
-    AnswerKind::PlanVerdict,
-    AnswerKind::AskUserQuestion,
-];
+const CAPABILITIES: &[AnswerKind] = &[AnswerKind::Approve, AnswerKind::AskUserQuestion];
 
 /// One connection, many sessions. The pump reads `server_rx()` and routes
 /// each `FromServer` to the [`ClientStoreHandle`] registered for its
@@ -267,6 +263,23 @@ impl SessionMultiplexer {
                 handle.update(cx, |h, cx| h.apply_from_server(m, cx));
             }
             self.apply_host(host, cx);
+            return;
+        }
+        // PR-4: `DeliveryCancelled` is keyed by delivery id, not session —
+        // broadcast to every leaf; each retires the card behind its own
+        // matching auth (only the owning leaf's reverse-lookup hits).
+        if let FromServer::Notification {
+            note: manox_protocol::ServerNote::DeliveryCancelled { delivery_id },
+        } = &msg
+        {
+            let note = manox_protocol::ServerNote::DeliveryCancelled {
+                delivery_id: delivery_id.clone(),
+            };
+            for handle in self.sessions.values() {
+                handle.update(cx, |h, cx| {
+                    h.apply_from_server(FromServer::Notification { note: note.clone() }, cx)
+                });
+            }
             return;
         }
         let sid = match &msg {
@@ -857,7 +870,7 @@ impl SessionMultiplexer {
         self.client.send_note(note);
     }
 
-    /// Answer a `ServerCall` (Approve / PlanVerdict / AskUserQuestion / …).
+    /// Answer a `ServerCall` (Approve / AskUserQuestion / …).
     pub fn send_reply(&self, id: MsgId, outcome: Result<serde_json::Value, RpcError>) {
         self.client.send_reply(id, outcome);
     }

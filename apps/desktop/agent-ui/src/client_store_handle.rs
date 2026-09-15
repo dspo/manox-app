@@ -138,6 +138,13 @@ impl ClientStoreHandle {
         match msg {
             FromServer::Notification { note } => {
                 self.store.apply_server_note(&note);
+                // PR-4: a delivery settled on another owner retires THIS leaf's
+                // card against the matching auth id (the multiplexer fans this
+                // session-less note out to every leaf; only the owning leaf's
+                // reverse-lookup hits).
+                if let manox_protocol::ServerNote::DeliveryCancelled { delivery_id } = &note {
+                    self.store.handle_delivery_cancelled(delivery_id);
+                }
                 if let Some(ev) = server_note_to_thread_event(&note) {
                     cx.emit(ev);
                 }
@@ -577,31 +584,17 @@ impl ClientStoreHandle {
         cx: &mut Context<Self>,
     ) {
         if let Some(delivery_id) = delivery_id_of(call) {
-            // GW3 capture: the withdrawal identity, keyed like the Reply
-            // correlations below.
-            match call {
-                manox_protocol::ServerCall::PlanVerdict { plan_file, .. } => {
-                    self.store
-                        .pending_plan_delivery
-                        .insert(plan_file.clone(), delivery_id);
-                }
-                _ => {
-                    if let Some(auth_id) = auth_id_of(call) {
-                        self.store
-                            .pending_auth_delivery
-                            .insert(auth_id, delivery_id);
-                    }
-                }
+            // GW3 capture: the withdrawal identity, keyed by auth id like the
+            // Reply correlation below (a `CancelDelivery` withdraws it, and a
+            // PR-4 `DeliveryCancelled` note retires the card against it).
+            if let Some(auth_id) = auth_id_of(call) {
+                self.store
+                    .pending_auth_delivery
+                    .insert(auth_id, delivery_id);
             }
         }
         if let Some(auth_id) = auth_id_of(call) {
             self.store.pending_auth.insert(auth_id, id.clone());
-            cx.notify();
-        }
-        if let Some(plan_file) = plan_file_of(call) {
-            self.store
-                .pending_plan_verdict
-                .insert(plan_file, id.clone());
             cx.notify();
         }
         if let Some(ev) = server_call_to_thread_event(call) {
@@ -685,11 +678,12 @@ mod tests {
         (mux, server_conn)
     }
 
-    /// GW3 capture: an adjudication Request deposits BOTH correlations on
-    /// the leaf — the MsgId (a `Reply` answers by it) and the delivery_id
-    /// (a `CancelDelivery` withdraws by it). The withdrawal identity is
-    /// what lets `ExecuteFresh` retire the server waterfall at once
-    /// instead of hanging it to the 300s expire.
+    /// GW3 capture: an adjudication Request deposits BOTH correlations on the
+    /// leaf — the MsgId (a `Reply` answers by it) and the delivery_id (a
+    /// `CancelDelivery` withdraws by it, and a PR-4 `DeliveryCancelled` note
+    /// retires the card against it). AskUserQuestion answers the model; the
+    /// delivery identity is what lets a settled-on-another-client card retire
+    /// at once instead of hanging to the 300s expire.
     #[gpui::test]
     fn adjudication_requests_capture_reply_and_delivery_correlations(cx: &mut TestAppContext) {
         let (mux, server_conn) = test_mux(cx);
@@ -737,6 +731,71 @@ mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the adjudication correlations never landed on the leaf"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// PR-4 end-to-end at the leaf: an `AskUserQuestion` delivery captured on
+    /// the leaf is retired by the matching `DeliveryCancelled` note routed
+    /// through `apply_from_server` — the reply + withdrawal correlations drop,
+    /// the projection-set membership clears (so the card reconciles away), and
+    /// the auth id is armed for the "handled elsewhere" notice.
+    #[gpui::test]
+    async fn delivery_cancelled_note_retires_a_parked_ask(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        let handle = mux.update(cx, |m, cx| m.open_or_create("s1", "/w", false, cx));
+        cx.run_until_parked();
+        server_conn.send_to_client(manox_protocol::FromServer::Request {
+            id: manox_protocol::MsgId::new("req-ask"),
+            call: manox_protocol::ServerCall::AskUserQuestion {
+                delivery_id: "dlv-ask".into(),
+                session_id: "s1".into(),
+                auth_id: "auth-q".into(),
+                input: serde_json::json!({"questions": []}),
+            },
+        });
+        // Wait for the capture, then arm the projection-set membership the
+        // reconcile guard keys on (a real settle delta also clears it; here we
+        // seed it to prove the note's own removal path).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let captured = handle.read_with(cx, |h, _| {
+                h.store.pending_auth.contains_key("auth-q")
+                    && h.store.pending_auth_delivery.contains_key("auth-q")
+            });
+            if captured {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the ask delivery never captured"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        handle.update(cx, |h, _| h.store.pending_auth_set.insert("auth-q".into()));
+
+        server_conn.send_to_client(manox_protocol::FromServer::Notification {
+            note: manox_protocol::ServerNote::DeliveryCancelled {
+                delivery_id: "dlv-ask".into(),
+            },
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let retired = handle.read_with(cx, |h, _| {
+                !h.store.pending_auth.contains_key("auth-q")
+                    && !h.store.pending_auth_delivery.contains_key("auth-q")
+                    && !h.store.pending_auth_set.contains("auth-q")
+                    && h.store.settled_elsewhere.contains("auth-q")
+            });
+            if retired {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the DeliveryCancelled note never retired the parked ask"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

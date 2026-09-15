@@ -66,6 +66,32 @@ impl Workspace {
         cx.notify();
     }
 
+    /// PR-4: surface a transient "answered on another client" notice for any
+    /// card the leaf retired via a `DeliveryCancelled` since the last frame,
+    /// then drain the marker set (so the notice fires exactly once per remote
+    /// settle). Runs on the render path where a `Window` is available for the
+    /// notification surface; the card itself is cleared by
+    /// [`Self::reconcile_pending_with_projections`] (the leaf dropped the id
+    /// from the projection set).
+    pub(crate) fn notice_settled_elsewhere(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let drained = self
+            .store
+            .as_ref()
+            .map(|store| {
+                store.update(cx, |h, _| {
+                    let ids: Vec<String> = h.store.settled_elsewhere.drain().collect();
+                    ids
+                })
+            })
+            .unwrap_or_default();
+        if !drained.is_empty() {
+            window.push_notification(
+                Notification::info(i18n::t("workspace-ask-settled-elsewhere")),
+                cx,
+            );
+        }
+    }
+
     /// Synthesize the top-level AskUserQuestion card when the rebuilt
     /// conversation lacks the matching `ToolCall` item. The live card is
     /// created by the gate's `ToolCall` event, which a parked thread never
@@ -129,6 +155,7 @@ impl Workspace {
         {
             self.client
                 .send_reply(msg_id, Ok(serde_json::json!({ "allow": allow })));
+            self.retire_wire_auth(&id, cx);
             return;
         }
         self.thread.with_mut(|thread| {
@@ -138,6 +165,15 @@ impl Workspace {
             );
         });
         cx.notify();
+    }
+
+    /// Drop a locally-settled card's leaf correlations so a later PR-4
+    /// `DeliveryCancelled` for the same delivery cannot mis-fire the "handled
+    /// elsewhere" notice.
+    fn retire_wire_auth(&mut self, auth_id: &str, cx: &mut Context<Self>) {
+        if let Some(store) = &self.store {
+            store.update(cx, |h, _| h.store.retire_auth(auth_id));
+        }
     }
 
     /// Close the pending question card without answering: reply with the
@@ -161,6 +197,7 @@ impl Workspace {
         {
             self.client
                 .send_reply(msg_id, Ok(serde_json::json!({ "dismissed": true })));
+            self.retire_wire_auth(&ask.id, cx);
             cx.notify();
             return;
         }
@@ -366,6 +403,7 @@ impl Workspace {
         {
             self.client
                 .send_reply(msg_id, Ok(serde_json::json!({ "answers": wire })));
+            self.retire_wire_auth(&id, cx);
             return;
         }
         // In-process fallback (no wire MsgId): the canonical rows built above

@@ -73,15 +73,18 @@ pub struct ClientStore {
     /// Pending adjudication ServerCall (Approve/AskUser) from the AgentServer,
     /// keyed by `auth_id`. The workspace uses the MsgId to send the reply.
     pub pending_auth: HashMap<String, manox_protocol::MsgId>,
-    /// Pending plan-verdict ServerCall from the AgentServer, keyed by
-    /// `plan_file`. The workspace uses the MsgId to send the verdict reply.
-    pub pending_plan_verdict: HashMap<String, manox_protocol::MsgId>,
-    /// GW3: the delivery identities of the pending adjudications, keyed
-    /// like `pending_auth` / `pending_plan_verdict`. A `Reply` answers by
-    /// MsgId; a `CancelDelivery` withdraws by delivery_id (an abandoned
-    /// plan verdict — ExecuteFresh — or an explicit card withdrawal).
+    /// GW3: the delivery identities of the pending adjudications, keyed like
+    /// `pending_auth`. A `Reply` answers by MsgId; a `CancelDelivery` withdraws
+    /// by delivery_id, and a PR-4 `DeliveryCancelled` note retires the card
+    /// against it (an abandoned card, or one settled on another client).
     pub pending_auth_delivery: HashMap<String, String>,
-    pub pending_plan_delivery: HashMap<String, String>,
+    /// PR-4 (§D.4): auth ids whose delivery this client was told was settled
+    /// on ANOTHER client (`ServerNote::DeliveryCancelled`). The leaf records
+    /// the id when it retires the card; the workspace surfaces a "handled
+    /// elsewhere" notice against it, then drains the set. Distinct from a local
+    /// answer/dismissal (which never lands here) so the notice fires only for a
+    /// genuine remote settle.
+    pub settled_elsewhere: HashSet<String>,
     // ── v2 (§F.2 SessionStore) ──────────────────────────────────────────
     /// The gap-free journal window: wire entries with dense seq, oldest
     /// first. The single source of the v2 `display` fold (§F.1 rule 1-4).
@@ -185,8 +188,7 @@ impl Default for ClientStore {
             per_request_usage: HashMap::new(),
             pending_auth: HashMap::new(),
             pending_auth_delivery: HashMap::new(),
-            pending_plan_delivery: HashMap::new(),
-            pending_plan_verdict: HashMap::new(),
+            settled_elsewhere: HashSet::new(),
             window: Vec::new(),
             window_has_more: false,
             display: Vec::new(),
@@ -596,6 +598,40 @@ impl ClientStore {
             self.id = ThreadId(session_id.clone());
         }
     }
+
+    /// PR-4: retire this client's pending card behind a delivery that was
+    /// settled on another owner. Reverse-lookups the auth id by `delivery_id`,
+    /// drops its reply (`pending_auth`) + withdrawal (`pending_auth_delivery`)
+    /// correlations and its projection-set membership (so the workspace's
+    /// reconcile retires the card), and records the id in `settled_elsewhere`
+    /// so the workspace can surface a notice. Returns `true` when a pending
+    /// card was found and retired (this leaf owned that delivery).
+    pub fn handle_delivery_cancelled(&mut self, delivery_id: &str) -> bool {
+        let Some(auth_id) = self
+            .pending_auth_delivery
+            .iter()
+            .find(|(_, d)| d == &delivery_id)
+            .map(|(auth, _)| auth.clone())
+        else {
+            return false;
+        };
+        self.pending_auth_delivery.remove(&auth_id);
+        self.pending_auth.remove(&auth_id);
+        self.pending_auth_set.remove(&auth_id);
+        self.settled_elsewhere.insert(auth_id);
+        true
+    }
+
+    /// Drop every correlation for an auth id once this client settles the card
+    /// itself (answer / dismiss / allow-deny), so a later
+    /// [`Self::handle_delivery_cancelled`] for the same delivery cannot mis-fire
+    /// the "handled elsewhere" notice against an already-resolved card. The
+    /// projection-set membership is left to the server's settle delta.
+    pub fn retire_auth(&mut self, auth_id: &str) {
+        self.pending_auth.remove(auth_id);
+        self.pending_auth_delivery.remove(auth_id);
+        self.settled_elsewhere.remove(auth_id);
+    }
 }
 
 #[cfg(test)]
@@ -610,6 +646,80 @@ mod tests {
     //   usage_snapshot_sets_cumulative   → assistant_usage_rows_fold_per_request
     //   compaction_note_replaces_store_transcript
     //                                     → compaction_row_restarts_display_fold
+
+    /// PR-4: a `DeliveryCancelled` for a delivery this leaf owns retires the
+    /// card's reply + withdrawal correlations and its projection-set
+    /// membership (so the workspace reconcile clears the card) and records the
+    /// auth id for the "handled elsewhere" notice. A foreign delivery id
+    /// matches nothing and is inert.
+    #[test]
+    fn delivery_cancelled_retires_owned_auth_and_flags_the_notice() {
+        let mut store = ClientStore::default();
+        store
+            .pending_auth
+            .insert("auth-1".into(), manox_protocol::MsgId::new("m1"));
+        store
+            .pending_auth_delivery
+            .insert("auth-1".into(), "dlv-1".into());
+        store.pending_auth_set.insert("auth-1".into());
+
+        assert!(
+            store.handle_delivery_cancelled("dlv-1"),
+            "the leaf owns delivery dlv-1"
+        );
+        assert!(
+            !store.pending_auth.contains_key("auth-1"),
+            "reply correlation gone"
+        );
+        assert!(
+            !store.pending_auth_delivery.contains_key("auth-1"),
+            "withdrawal correlation gone"
+        );
+        assert!(
+            !store.pending_auth_set.contains("auth-1"),
+            "projection membership gone"
+        );
+        assert!(
+            store.settled_elsewhere.contains("auth-1"),
+            "notice armed for auth-1"
+        );
+
+        // A delivery this leaf never saw: inert, and it must not clobber the
+        // still-pending card.
+        store
+            .pending_auth_delivery
+            .insert("auth-2".into(), "dlv-2".into());
+        assert!(
+            !store.handle_delivery_cancelled("dlv-unknown"),
+            "an unknown delivery id matches nothing"
+        );
+        assert!(
+            store.pending_auth_delivery.contains_key("auth-2"),
+            "the other card stands"
+        );
+    }
+
+    /// Locally settling a card (`retire_auth`) drops the reply + withdrawal
+    /// correlations and clears any armed notice for it, so a later
+    /// `DeliveryCancelled` for the same delivery cannot mis-fire the notice.
+    #[test]
+    fn local_retire_clears_correlations_and_the_notice_marker() {
+        let mut store = ClientStore::default();
+        store
+            .pending_auth
+            .insert("auth-9".into(), manox_protocol::MsgId::new("m9"));
+        store
+            .pending_auth_delivery
+            .insert("auth-9".into(), "dlv-9".into());
+        store.settled_elsewhere.insert("auth-9".into());
+
+        store.retire_auth("auth-9");
+        assert!(!store.pending_auth.contains_key("auth-9"));
+        assert!(!store.pending_auth_delivery.contains_key("auth-9"));
+        assert!(!store.settled_elsewhere.contains("auth-9"));
+        // A delivery cancel after a local settle is now inert (nothing to match).
+        assert!(!store.handle_delivery_cancelled("dlv-9"));
+    }
 
     #[test]
     fn session_created_note_binds_store_id() {
