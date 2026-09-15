@@ -4050,7 +4050,7 @@ fn closing_the_ask_card_sends_the_dismissal_marker(cx: &mut gpui::TestAppContext
     // The card is retired locally: a stale second click replies to nothing.
     // (The dead call's MsgId leaves the leaf store with the settle
     // reconcile — same as the answer leg, which never deletes it either.)
-    let pending = ws.read_with(&mut visual, |ws, _| ws.diagnostic_pending_ask_id());
+    let pending = ws.read_with(&visual, |ws, _| ws.diagnostic_pending_ask_id());
     assert_eq!(pending, None, "the close retires the card");
     // A repeat close with nothing pending: no second frame, no panic.
     ws.update(&mut visual, |ws, cx| ws.dismiss_ask(cx));
@@ -4075,7 +4075,7 @@ fn turn_interrupt_dismisses_the_parked_ask_before_cancel(cx: &mut gpui::TestAppC
     let mut visual = f.visual;
     let ws = f.ws.clone();
     let session_id = ws
-        .read_with(&mut visual, |ws, _| ws.session_id.clone())
+        .read_with(&visual, |ws, _| ws.session_id.clone())
         .expect("landing session bound");
     ws.update(&mut visual, |ws, cx| ws.cancel_turn(cx));
     let frames = spy_frames(cx, &f.rx, 2, "interrupt: dismissal + cancel");
@@ -4098,7 +4098,7 @@ fn turn_interrupt_dismisses_the_parked_ask_before_cancel(cx: &mut gpui::TestAppC
         }
         other => panic!("expected the CancelTurn note, got {other:?}"),
     }
-    ws.read_with(&mut visual, |ws, _| {
+    ws.read_with(&visual, |ws, _| {
         assert!(
             ws.diagnostic_pending_ask_id().is_none(),
             "the interrupt retires the parked card locally"
@@ -4150,7 +4150,7 @@ fn approval_denial_stays_on_the_decision_leg(cx: &mut gpui::TestAppContext) {
         }
         other => panic!("expected the deny Reply, got {other:?}"),
     }
-    ws.read_with(&mut visual, |ws, _| {
+    ws.read_with(&visual, |ws, _| {
         assert!(ws.diagnostic_pending_auth().is_none(), "the card retires");
     });
     let _ = std::fs::remove_file(&f.db_path);

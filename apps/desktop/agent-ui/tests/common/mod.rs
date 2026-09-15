@@ -49,7 +49,12 @@ impl ThreadEngine for FakeEngine {
         None
     }
     fn run(&self, _prompt: String, _images: Vec<ContentBlock>) {}
-    fn steer(&self, _text: String, _images: Vec<ContentBlock>) -> String {
+    fn steer(
+        &self,
+        _text: String,
+        _images: Vec<ContentBlock>,
+        _message_id: Option<String>,
+    ) -> String {
         String::new()
     }
     fn cancel_steer(&self, _id: &str) -> bool {
