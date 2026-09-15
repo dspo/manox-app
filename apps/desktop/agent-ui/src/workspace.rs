@@ -2851,6 +2851,13 @@ impl Workspace {
 
     /// Abort the current turn.
     pub(crate) fn cancel_turn(&mut self, cx: &mut Context<Self>) {
+        // B2-PR-3: a parked question card is dismissed on the interrupt —
+        // the same `{"dismissed": true}` marker the close leg sends — so the
+        // server's waterfall converges on it immediately instead of stalling
+        // the session pump until the turn-cancel or a disconnect settles it.
+        if self.pending_ask.is_some() {
+            self.dismiss_ask(cx);
+        }
         // A dropped cancel is the silent-death shape this file's regressions
         // keep producing: leaving no trace made the composer-locked repro
         // undebuggable.

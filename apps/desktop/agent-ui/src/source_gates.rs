@@ -151,7 +151,11 @@ mod tests {
                 FACADE_WRITE,
                 // §二.7①: the receiver-form needle found these two — they
                 // predate the ratchet; frozen at the audited count.
-                2,
+                // B2-PR-3: +1 — the dismissal leg's in-process fallback
+                // (`dismiss_ask`), the exact same `respond_authorization`
+                // shape the answer/deny legs keep; the wire leg rides a
+                // `Reply`, this is the no-session direct-kernel twin.
+                3,
             ),
             (
                 "workspace/right_pane.rs",

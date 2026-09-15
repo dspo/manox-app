@@ -111,18 +111,14 @@ impl Workspace {
     }
 
     pub(crate) fn resolve_auth(&mut self, decision: PermissionDecision, cx: &mut Context<Self>) {
-        // An AskUserQuestion card's "Cancel" button calls this; the generic
-        // approval card's verdicts land here too. Whichever pending surface
-        // is up owns the round-trip id.
-        let id = match (self.pending_ask.as_ref(), self.pending_auth.as_ref()) {
-            (Some(ask), _) => ask.id.clone(),
-            (None, Some(auth)) => auth.id.clone(),
-            (None, None) => return,
+        // The generic approval card's allow/deny leg. The question card's
+        // close is NOT this path — it is `dismiss_ask` (B2-PR-3): a close is
+        // "the user left to speak", never a rejection, and the two must not
+        // share an exit (they used to both render `WrapperToolDenied`).
+        let Some(auth) = self.pending_auth.take() else {
+            return;
         };
-        self.pending_ask = None;
-        self.pending_auth = None;
-        self.ask_step = 0;
-        self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        let id = auth.id;
         let allow = matches!(decision, PermissionDecision::AllowOnce);
         if let Some(msg_id) = self
             .store
@@ -137,6 +133,38 @@ impl Workspace {
             thread.respond_authorization(
                 &id,
                 manox_agent::ToolAuthorizationResponse::Decision(decision),
+            );
+        });
+        cx.notify();
+    }
+
+    /// Close the pending question card without answering: reply with the
+    /// Batch-1 dismissal marker (`{"dismissed": true}` on the wire,
+    /// `AskUserQuestionDismissed` in-process) so the parked waterfall
+    /// converges immediately and the model reads "the user left to speak"
+    /// — neither a denial nor an empty answer. The generic approval card's
+    /// allow/deny leg stays in `resolve_auth`; the two exits must not merge.
+    pub(crate) fn dismiss_ask(&mut self, cx: &mut Context<Self>) {
+        let ask = match self.pending_ask.take() {
+            Some(a) => a,
+            None => return,
+        };
+        self.ask_step = 0;
+        self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        if let Some(msg_id) = self
+            .store
+            .as_ref()
+            .and_then(|s| s.read(cx).store.pending_auth.get(&ask.id).cloned())
+        {
+            self.client
+                .send_reply(msg_id, Ok(serde_json::json!({ "dismissed": true })));
+            cx.notify();
+            return;
+        }
+        self.thread.with_mut(|thread| {
+            thread.respond_authorization(
+                &ask.id,
+                manox_agent::ToolAuthorizationResponse::AskUserQuestionDismissed,
             );
         });
         cx.notify();
