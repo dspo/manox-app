@@ -66,6 +66,9 @@ jobs:
 
       # The agent runtime comes from dspo/manox via git dependencies (public
       # repo — no token needed); revs are pinned by the committed Cargo.lock.
+      - name: GPUI track guard
+        run: ./script/check-no-zed-git.sh
+
       - name: Fmt check
         run: cargo fmt --all -- --check
 

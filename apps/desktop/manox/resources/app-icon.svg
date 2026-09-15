@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="512" height="512">
+  <!--
+    Brand master artwork. Derived bitmaps (app-icon.png, app-icon@2x.png,
+    app-icon.icns) are generated from this file:
+      rsvg-convert -w 128 -h 128 app-icon.svg -o app-icon.png
+      rsvg-convert -w 256 -h 256 app-icon.svg -o app-icon@2x.png
+      iconutil -c icns <iconset built from this svg at 16..512 (+@2x)>
+  -->
+
+  <!-- dark rounded backdrop -->
+  <rect width="256" height="256" rx="56" fill="#0F172A" />
+  <rect width="256" height="256" rx="56" fill="none" stroke="#334155" stroke-width="2" />
+
+  <!-- left chevron '<' -->
+  <path d="M 76 64 L 30 128 L 76 192"
+        fill="none" stroke="#00F2FE" stroke-width="22"
+        stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- right chevron '>' -->
+  <path d="M 180 64 L 226 128 L 180 192"
+        fill="none" stroke="#00F2FE" stroke-width="22"
+        stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- center dash, with a visual gap on both ends -->
+  <path d="M 106 128 L 150 128"
+        fill="none" stroke="#00F2FE" stroke-width="22"
+        stroke-linecap="round" />
+</svg>

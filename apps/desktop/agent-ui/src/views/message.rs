@@ -3792,7 +3792,7 @@ mod tests {
         let any: AnyWindowHandle = window.into();
         let mut cx = VisualTestContext::from_window(any, cx);
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
 
         for selector in [

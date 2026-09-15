@@ -857,6 +857,13 @@ impl ConversationState {
         ) && self.pop_trailing_retry(cx);
 
         let outcome = match event {
+            // Shared steer-lifecycle vocabulary: synthesized by a client fold
+            // when an injected steer's durable row arrives, never emitted by
+            // the server (translate skips it). The desktop's pending-steer
+            // retirement rides its existing history-reload path, so there is
+            // nothing to settle here yet — recognized, not ignored by accident.
+            ThreadEvent::UserRowLanded { .. } => ApplyOutcome::Unchanged,
+
             // A compaction landed — render the handoff summary as a Recap card.
             // The card is appended (never updated in place): a compaction is a
             // one-time boundary marker, and the summary text is final.
@@ -924,8 +931,7 @@ impl ConversationState {
             // workspace owns the queue→list transition (it pairs the event with
             // the matching `SteerPending` queue card and pushes the bubble here
             // via `push_user`); the conversation list takes no direct action.
-            | ThreadEvent::SteerInjected { .. }
-            | ThreadEvent::UserRowLanded { .. } => ApplyOutcome::Unchanged,
+            | ThreadEvent::SteerInjected { .. } => ApplyOutcome::Unchanged,
             // The pi backend restored an existing session; the workspace
             // rebuilds the conversation from the authoritative history.
             | ThreadEvent::HistoryRestored => ApplyOutcome::Unchanged,

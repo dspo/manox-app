@@ -199,7 +199,7 @@ impl Workspace {
                         // MoveUp/MoveDown in every composer state.
                         .key_context(composer_key_context(self.completion.is_some()));
                     wrap.child(
-                        Input::new(&self.input_state)
+                        Textarea::new(&self.input_state)
                             .appearance(false)
                             .text_size(crate::views::message::MESSAGE_BODY_SIZE),
                     )

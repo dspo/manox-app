@@ -582,7 +582,7 @@ impl Workspace {
                                         // content, so it shares the inline
                                         // input's body typeface: Lilex Light
                                         // at MESSAGE_BODY_SIZE (13px).
-                                        Input::new(&self.editor_state)
+                                        Editor::new(&self.editor_state)
                                             .size_full()
                                             .appearance(false)
                                             .font_family(theme.mono_font_family.clone())

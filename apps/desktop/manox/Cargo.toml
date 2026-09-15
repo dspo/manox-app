@@ -15,7 +15,7 @@ default = []
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
-gpui-component-assets.workspace = true
+gpui-kit-assets.workspace = true
 
 agent-ui.workspace = true
 # `chrome-use` links the in-process Chrome engine (rustwright-core) into the

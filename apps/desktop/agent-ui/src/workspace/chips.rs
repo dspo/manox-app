@@ -317,17 +317,25 @@ impl Workspace {
         } else {
             Some(response_text.trim().to_string())
         };
-        let mut wire_answers: Vec<(String, String)> = Vec::with_capacity(ask.questions.len());
+        let mut answers: Vec<(String, String)> = Vec::with_capacity(ask.questions.len());
+        let mut canonical: Vec<manox_agent::AskAnswer> = Vec::with_capacity(ask.questions.len());
         for (i, q) in ask.questions.iter().enumerate() {
             let sel = ask.selections.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
-            let selected: Vec<&str> = q
+            let selected: Vec<String> = q
                 .options
                 .iter()
                 .zip(sel.iter())
-                .filter_map(|(o, &s)| s.then_some(o.label.as_str()))
+                .filter_map(|(o, &s)| s.then_some(o.label.clone()))
                 .collect();
             let answer = selected.join(", ");
-            wire_answers.push((q.question.clone(), answer));
+            answers.push((q.question.clone(), answer));
+            // Canonical id-routed tri-state. The removed card-level free-text
+            // override rides the FIRST question's custom — exactly the
+            // transitional mapping the server applies to legacy wire payloads
+            // (agent_server `parse_ask_answers`), so in-process and wire
+            // settlement agree on the note's landing spot.
+            let custom = if i == 0 { response.clone() } else { None };
+            canonical.push(manox_agent::AskAnswer::new(q.id.clone(), selected, custom));
         }
         let id = ask.id.clone();
         self.pending_ask = None;
@@ -341,33 +349,14 @@ impl Workspace {
             self.client.send_reply(
                 msg_id,
                 Ok(serde_json::json!({
-                    "answers": wire_answers,
+                    "answers": answers,
                     "response": response,
                 })),
             );
             return;
         }
-        // In-process fallback (no wire MsgId): the canonical answer rows the
-        // B2-PR-1 vocabulary expects, keyed by the server-minted question ids.
-        // The legacy card-level note folds into the first answer's `custom`,
-        // mirroring the gateway's transitional reader.
-        let canonical: Vec<manox_agent::permission::AskAnswer> = ask
-            .questions
-            .iter()
-            .enumerate()
-            .map(|(i, q)| {
-                let sel = ask.selections.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
-                let selected: Vec<String> = q
-                    .options
-                    .iter()
-                    .zip(sel.iter())
-                    .filter(|(_, s)| **s)
-                    .map(|(o, _)| o.label.clone())
-                    .collect();
-                let custom = if i == 0 { response.clone() } else { None };
-                manox_agent::permission::AskAnswer::new(q.id.clone(), selected, custom)
-            })
-            .collect();
+        // In-process fallback (no wire MsgId): the canonical rows built above
+        // ride the direct kernel path.
         self.thread.with_mut(|thread| {
             thread.respond_authorization(
                 &id,

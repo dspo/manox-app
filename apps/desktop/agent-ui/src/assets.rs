@@ -1,18 +1,18 @@
 //! Asset source overlaying manox-specific SVG icons on top of
-//! `gpui-component-assets`.
+//! `gpui-kit-assets`（原 `gpui-component-assets`，0.6 更名）。
 //!
-//! `gpui-component-assets` ships the icon set `IconName` resolves to, but it
+//! `gpui-kit-assets` ships the icon set `IconName` resolves to, but it
 //! cannot carry manox's own brand icons (the Manox / Claude / Codex / GitHub Copilot
 //! marks used in the sidebar and the new-session menu). `ExtrasAssetSource`
 //! layers those on top: a `rust-embed` lookup of `assets/icons/**` wins, then
-//! it falls through to `gpui-component-assets` for everything else. The manox
+//! it falls through to `gpui-kit-assets` for everything else. The manox
 //! bin registers it via `with_assets`, so any `gpui::svg().path("icons/…")`
 //! call site resolves through here.
 
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
-use gpui_component_assets::Assets as ComponentAssets;
+use gpui_kit_assets::Assets as ComponentAssets;
 use rust_embed::RustEmbed;
 
 /// Embedded manox-local SVG assets (brand icons not in gpui-component).
@@ -21,7 +21,7 @@ use rust_embed::RustEmbed;
 #[include = "icons/**/*.svg"]
 struct LocalAssets;
 
-/// Hybrid asset source: manox-local SVGs first, then `gpui-component-assets`
+/// Hybrid asset source: manox-local SVGs first, then `gpui-kit-assets`
 /// for the shared icon set. Mirrors the gpui-manos-assets pattern.
 pub struct ExtrasAssetSource;
 
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn embeds_context_rail_branch_and_worktree_glyphs() {
         // Rail glyphs resolved via `ExtrasAssetSource`; a missing file would
-        // silently fall through to `gpui-component-assets`, which does not
+        // silently fall through to `gpui-kit-assets`, which does not
         // ship these names, rendering blank.
         for path in ["icons/git-branch.svg", "icons/workflow.svg"] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn embeds_custom_icon_overrides() {
-        // Icons not shipped by gpui-component-assets; layered in via
+        // Icons not shipped by gpui-kit-assets; layered in via
         // ExtrasAssetSource so call sites can use Icon::default().path(…).
         for path in [
             "icons/circle-check-big.svg",
