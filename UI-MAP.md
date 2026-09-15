@@ -35,7 +35,7 @@ Component names use PascalCase. The hierarchy mirrors the visual containment tre
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
 | Sub-agent 观察 | ✅ 部分 | rail 观察行（生命周期/活动）+ Agent 工具卡片实时流式子转录（text/thinking delta、工具 ▸/✓/✗ 行）；独立钻取面板随 manox 移除，卡片体即钻取面 |
-| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控 + 4 裁决选项；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
+| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewAsAskCard](#planreviewasaskcard)，三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
 分层纪律：crates/manox-harness/src/core 只做 TS Pi 对齐与扩展点；harness 能力扩展一律走
@@ -83,7 +83,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### AskDrawer
 
-- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerOtherInput](#askdrawerotherinput) · [AskDrawerResponseInput](#askdrawerresponseinput) · [AskDrawerNav](#askdrawernav)
+- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerCustomInput](#askdrawercustominput) · [AskDrawerSkipButton](#askdrawerskipbutton) · [AskDrawerNav](#askdrawernav) · [PlanReviewAsAskCard](#planreviewasaskcard) · [AskSettledElsewhereNotice](#asksettledelsewherenotice)
 
 ### Popups & Dropdowns
 
@@ -574,7 +574,9 @@ Circular button driven by the raw running edge alone: `danger` Pause glyph
 (acts as stop) while a turn runs — under any pending ask/approve/plan card
 (absolute cancel priority: interrupting is never blocked by an unanswered
 interaction) — and `accent` ArrowUp (send) when idle, inert on empty input.
-Ask supplement input keeps its own path: Enter.
+While an ask card is up, Enter/send submits the card (per-question selections +
+custom inputs), not a composer-fed free-text answer — the card-level supplement
+was retired by B2-PR-1 in favour of the per-question custom input.
 
 > Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
 
@@ -623,33 +625,93 @@ Title + stepper "N/M".
 
 #### AskDrawerQuestion
 
-Header tag + question text.
+Header tag + question text, then an optional `detail` block — markdown support
+text rendered with the repo `Markdown` component (`markdown_tv`) beneath the
+question. The plan-review body rides here (see [PlanReviewAsAskCard](#planreviewasaskcard)).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`)
 
 #### AskDrawerOptions
 
-Checkbox/radio list with labels + descriptions.
+Checkbox/radio list with labels + descriptions. Single-select resets siblings on
+toggle; multi-select toggles in place. Options are optional and unbounded — a
+detail/intent-only question is legal (B2-PR-1 lifted the 1..=3 / 2..=3 caps).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/workspace/chips.rs` (`toggle_ask_option`)
 
-#### AskDrawerOtherInput
+#### AskDrawerCustomInput
 
-Free-text input for "Other" option (conditional).
+Per-question free-text `custom` input, rendered under the options with an
+`Input` bound to a lazily-allocated `Entity<InputState>`
+(`Workspace::ensure_ask_custom_inputs`, run on the render path because an
+`InputState` needs a `Window`). Its live text mirrors into
+`Workspace::ask_custom_text[qi]`. At the settle fold a `custom` REPLACES a
+single-select's selection and SUPPLEMENTS a multi-select's — free text can only
+ever attach to its own question (the removed card-level "response" override is
+gone).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `apps/desktop/agent-ui/src/workspace/chips.rs`
 
-#### AskDrawerResponseInput
+#### AskDrawerSkipButton
 
-Free-form response input overriding all answers (conditional).
+Explicit per-question skip (`IconName::Minus`, ghost) beside the custom input:
+clears that question's selection and custom, settling the canonical row
+`{id, selected: []}` with no `custom` (the server's `AskAnswer::is_skip`). A
+skip is distinct from closing the whole card (that is `dismiss_ask`, the Nav's
+Cancel leg).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `apps/desktop/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
 
 #### AskDrawerNav
 
-Prev / Next / Cancel / Submit buttons.
+Prev / Next (last step submits) / Cancel (close ⇒ `{"dismissed": true}`)
+buttons. Submitting gathers every question's tri-state (`selected` +
+`custom`, skipped ones carry `selected: []`) into the canonical reply frame
+`{"answers":[{"id","selected","custom"?}]}` — the legacy positional
+`[[question, answer]]` pair and the card-level `response` are removed.
+Dismiss keeps `{"dismissed": true}`; the generic approval card's allow/deny leg
+(`resolve_auth`, `{"allow": …}`) is unchanged.
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `apps/desktop/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`)
+
+#### PlanReviewAsAskCard
+
+B2-PR-5: a proposed plan is no longer a dedicated `PlanVerdict` drawer with a
+four-choice verdict (that surface, its `PendingPlanReview` state / stash /
+overlay, and the `ExecuteFresh` create-and-reseed path are deleted). It reaches
+the client as a single-question [AskDrawer](#askdrawer) whose `input` carries
+`detail` = the plan body (markdown) and `intent = {kind: "plan-review",
+approve: "Approve"}` over three options — **Approve**, **Approve & compact**,
+**Request changes**. The card derives from those fields (no `PlanReady` event,
+no `ServerCall::PlanVerdict`): `intent.kind == "plan-review"` marks it a
+plan-review, and the affirmative option (`intent.approve`, matched against the
+question's own labels) renders highlighted (a `theme.primary` tint + border).
+
+The user's answer rides the normal canonical reply; the SERVER owns the verdict
+mapping (Approve → keep, Approve & compact → compact, anything else — Request
+changes / custom / skip → refine, and a card close → stop and stay in plan mode
+awaiting a message). The client sends no verdict enum. A free-form message while
+the card is up submits the card (per `AskDrawerNav`), not a separate dismissal.
+
+> Source: `apps/desktop/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card` Approve highlight)
+
+#### AskSettledElsewhereNotice
+
+PR-4 first-claim-wins: when an ask/approve delivery is settled on ANOTHER
+client (or the approve quorum fails remotely), the server sends a session-less
+`ServerNote::DeliveryCancelled { delivery_id }`. The multiplexer broadcasts it to
+every leaf (keyed by delivery id, not session); the owning leaf's
+`ClientStore::handle_delivery_cancelled` reverse-looks the delivery to its auth
+id, drops the reply (`pending_auth`) + withdrawal (`pending_auth_delivery`)
+correlations and the projection-set membership (so
+`reconcile_pending_with_projections` retires the card — under the
+`pending_projection_confirmed` guard), and arms the auth id in
+`settled_elsewhere`. The workspace's `notice_settled_elsewhere` then drains the
+set and surfaces one transient `Notification::info` ("handled on another
+client"). A local settle (`resolve_ask` / `dismiss_ask` / `resolve_auth`) calls
+`retire_auth` so a later note for the same delivery cannot mis-fire the notice.
+
+> Source: `apps/desktop/agent-ui/src/client_store.rs` (`handle_delivery_cancelled`, `retire_auth`) + `apps/desktop/agent-ui/src/client_store_handle.rs` + `apps/desktop/agent-ui/src/multiplexer.rs` (broadcast) + `apps/desktop/agent-ui/src/workspace/chips.rs` (`notice_settled_elsewhere`)
 
 #### 3.2.4 Popups & Dropdowns
 
@@ -1011,7 +1073,7 @@ Small colored chip/badge with variant colors.
 
 #### TerminalPanel
 
-First-party selectable text panel (`manox-components::markdown::TerminalPanel`, an `Entity` + `Render` in the `markdown` module) that renders tool output as a terminal-styled shell — **not** a real terminal (no PTY, no grid; `crates/manox-terminal`/`TerminalView` are not involved). One persistent `Entity<TerminalPanel>` is owned per `ToolCallItem` (live + reloaded history) so the document-level `DocSelection` and its `FocusHandle` survive across re-renders: a drag started on frame N keeps its anchor on frame N+1, and Cmd/Ctrl+C reaches a stable focus handle — the same persistence fix that makes assistant/thinking text selectable. The panel renders **only the body**: a transparent, untinted vertical flex (no background fill on the content — it blends into the message list; mono font at `text_sm`（代码档，与代码块同号；thinking body 走 markdown 正文档 `text_base`）; `px_3 py_2`; `cursor_text`) that mounts a zero-size sentinel first, then a single `RichText` document composed of a prompt block + the body. The prompt block appears **only for `bash`** — the one tool that runs a real shell command a human would type in a terminal; internal tools (`grep`/`read_file`/`edit_file`/`glob`/`list_directory`/`monitor`/…) and MCP tools are manox abstractions, not terminal commands, so they render the body only (no cwd / `❯` preamble that would imply "run this in a shell"). The `bash` prompt block: line 1 cwd (home `~`-collapsed) + `git:{branch}` + status markers (`*mod ✘del !conflict ?untracked`, zero counts and the whole git segment omitted when not a repo); line 2 `❯` (green) + the echoed command. **Three-way text styling** separates prompt chrome / input / output by color × slant: guidance (cwd / `git:` / branch / markers / `❯`) — foreground + **upright**; the echoed command — foreground + **italic**; the body (output) — muted + **italic**. The doc div's `.italic()` sets the base the `RichText` unstyled ranges inherit (so command output / file content / diff context all read muted + italic); the prompt-block guidance and command runs pin their own slant via `styled(color, italic)` so the body's inherited italic does not leak into the prompt. The body is rendered per a `PanelKind` chosen by the agent-ui layer from the tool name (`tool_panel_body`): `File` (`read_file`/`write_file`) — a sequential line-number gutter (the agent-ui layer pre-strips the hashline `[path#TAG]` header + `N:` prefixes for `read_file` and feeds the written `content` for `write_file`, so the panel just numbers the content lines 1..N); `Diff` (`edit_file`) — `+`/`-` lines green/red, `@@` hunk headers cyan, `[path#TAG]`/`---` separators muted; `Plain` (default, `bash` + everything else) — `vte::ansi::Processor` parses SGR foreground/bold/italic into `HighlightStyle` ranges (control bytes stripped from the plain text, truecolor/256/16-color resolved; background SGR tracked but not painted). The whole document wraps at panel width (long lines wrap, no horizontal blow-out) and is one continuous selection across prompt + output. The terminal chrome — a **titlebar** showing the command summary (`gh issue create` for `bash`, `read_file path` otherwise) + status + disclosure chevron, click-to-toggle the body — lives in the agent-ui header (`render_tool_entry` / `render_tool_call`): the titlebar and this body share one bordered rounded frame so the pair reads as a single terminal window (titlebar gets a `border_b_1` separator only while the body is shown). Selection supports double-click word (a click inside a registered inline-code span selects the whole span), triple-click line, drag-extend, and Cmd/Ctrl+C copy — shared with `Markdown` via `DocSelection`. Git state is snapshotted per `bash` panel by the agent-ui layer via a background `git status --porcelain` + `git rev-parse --abbrev-ref HEAD` probe keyed off the thread cwd (internal tools skip the probe — they render no prompt block). `render_tool_output` returns `item.panel.into_any_element()` when mounted, falling back to a fenced code block otherwise.
+First-party selectable text panel (`manox-components::markdown::TerminalPanel`, an `Entity` + `Render` in the `markdown` module) that renders tool output as a terminal-styled shell — **not** a real terminal (no PTY, no grid; `crates/manox-terminal`/`TerminalView` are not involved). One persistent `Entity<TerminalPanel>` is owned per `ToolCallItem` (live + reloaded history) so the document-level `DocSelection` and its `FocusHandle` survive across re-renders: a drag started on frame N keeps its anchor on frame N+1, and Cmd/Ctrl+C reaches a stable focus handle — the same persistence fix that makes assistant/thinking text selectable. The panel renders **only the body**: a transparent, untinted vertical flex (no background fill on the content — it blends into the message list; mono font at `text_sm`（代码档，与代码块同号；thinking body 走 markdown 正文档 `text_base`）; `px_3 py_2`; `cursor_text`) that mounts a zero-size sentinel first, then a single `RichText` document composed of a prompt block + the body. The prompt block appears **only for `bash`** — the one tool that runs a real shell command a human would type in a terminal; internal tools (`grep`/`read_file`/`edit_file`/`glob`/`list_directory`/`monitor`/…) and MCP tools are manox abstractions, not terminal commands, so they render the body only (no cwd / `❯` preamble that would imply "run this in a shell"). The `bash` prompt block: line 1 cwd (home `~`-collapsed) + `git:{branch}` + status markers (`*mod ✘del !conflict ?untracked`, zero counts and the whole git segment omitted when not a repo); line 2 `❯` (green) + the echoed command. **Three-way text styling** separates prompt chrome / input / output by color × slant: guidance (cwd / `git:` / branch / markers / `❯`) — foreground + **upright**; the echoed command — foreground + **italic**; the body (output) — muted + **italic**. The doc div's `.italic()` sets the base the `RichText` unstyled ranges inherit (so command output / file content / diff context all read muted + italic); the prompt-block guidance and command runs pin their own slant via `styled(color, italic)` so the body's inherited italic does not leak into the prompt. The body is rendered per a `PanelKind` chosen by the agent-ui layer from the tool name (`tool_panel_body`): `File` (`read_file`/`write_file`) — a sequential line-number gutter (the agent-ui layer pre-strips the hashline `[path#TAG]` header + `N:` prefixes for `read_file` and feeds the written `content` for `write_file`, so the panel just numbers the content lines 1..N); `Diff` (`edit_file`) — `+`/`-` lines green/red, `@@` hunk headers cyan, `[path#TAG]`/`---` separators muted; `Plain` (default, `bash` + everything else) — `vte::ansi::Processor` parses SGR foreground/bold/italic into `HighlightStyle` ranges (control bytes stripped from the plain text, truecolor/256/16-color resolved; background SGR tracked but not painted). The whole document wraps at panel width (long lines wrap, no horizontal blow-out) and is one continuous selection across prompt + output. The terminal chrome — a **titlebar** showing the command summary (`gh issue create` for `bash`, `read_file path` otherwise) + status + disclosure chevron, click-to-toggle the body — lives in the agent-ui header (`render_tool_entry` / `render_tool_call`): the titlebar and this body share one bordered rounded frame so the pair reads as a single terminal window (titlebar gets a `border_b_1` separator only while the body is shown). Selection supports double-click word (a click inside a registered inline-code span selects the whole span), triple-click line, drag-extend, and Cmd/Ctrl+C copy — shared with `Markdown` via `DocSelection`. Git state is snapshotted per `bash` panel by the agent-ui layer via a background `git status --porcelain` + `git rev-parse --abbrev-ref HEAD` probe keyed off the thread cwd (internal tools skip the probe — they render no prompt block). `render_tool_output` returns `item.panel.into_any_element()` when mounted, falling back to a fenced code block otherwise. **AskUserQuestion answered-state exception** (B2-PR-2): when the call is an `AskUserQuestion` and its `output` parses as the canonical result JSON (`{"answers":[{"id","selected","custom"?}]}` — what both the live `ToolResult` deposit and the rebuild journal translate carry once the server makes the model-facing result canonical), `render_tool_output` short-circuits the panel/fenced paths and renders compact human Q/A rows via `ask_result_qa_rows` + `render_ask_result_body` — the question text recovered from the call's own `input` by `id` (unknown id → the id itself), a skip (`selected: []`, no `custom`) shown as an em dash. Any non-canonical payload (the transitional prose render, an error, malformed JSON) falls through to the raw output verbatim, so the fold is forward-compatible and never regresses on a parse miss.
 
 **Pagination.** A finalized body renders `PAGE_SIZE` (20) lines at a time; a "load more" affordance below the body (a centered `ChevronDown` + `+N` count, top-bordered, hover-tinted) grows the window by another page via `show_more`, clamped to the total. Streaming bodies render the whole live output (no pagination); on the streaming→finalized transition the cursor resets to the first page so the result opens at the top. The panel has **no internal vertical scroll** — the message-list `message-list` div scrolls the whole panel — so `show_more` never touches a scroll handle: growing the window appends lines below the current viewport without jumping to the tail. The pixel-anchored, tail-following message-list arbitration (recomputed each frame in `on_prepaint`) keeps the viewport at the user's reading position across the growth, so successive "load more" clicks stay anchored to the current line rather than snapping to the end.
 

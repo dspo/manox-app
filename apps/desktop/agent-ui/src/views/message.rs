@@ -36,6 +36,7 @@ use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Input, InputState},
     tooltip::Tooltip,
     v_flex,
 };
@@ -806,11 +807,6 @@ pub fn render_item(
         ConvItem::AgentTask(t) => render_agent_task(t, ix, theme, agent_ctx, tool_ctx, cx),
         ConvItem::Error(msg) => render_error(msg, ix, theme, body, cx),
         ConvItem::Notice(msg) => render_notice(msg, ix, theme, notice_panel, cx),
-        ConvItem::PlanReview {
-            title,
-            plan_text,
-            active,
-        } => render_plan_review_card(title, plan_text, *active, ix, theme, tool_ctx, body, cx),
         ConvItem::Recap {
             summary,
             collapsed,
@@ -1997,224 +1993,6 @@ fn open_file_in_vscode(raw: &str, cwd: Option<&Path>) {
             .spawn();
     }
 }
-/// Render a plan-review item as a drawer card that emerges from beneath the
-/// composer, mirroring `render_ask_user_card`'s shell (negative bottom margin +
-/// shadow + slide-in animation + `PlanDrawer` key context). The header carries
-/// the plan title and the download / copy affordances; the footer carries the
-/// verdicts that delegate to `Workspace::respond_plan_review`. The composer
-/// below stays live so the user can discuss or refine the plan instead of
-/// picking a verdict. (The retired manox harness additionally opened the plan
-/// in a right-pane preview tab; that surface was retired with the harness.)
-#[allow(clippy::too_many_arguments)] // render inputs stay explicit
-fn render_plan_review_card(
-    title: &str,
-    plan_text: &str,
-    active: bool,
-    ix: usize,
-    theme: &Theme,
-    tool_ctx: Option<&ToolCallCtx>,
-    body: Option<Entity<Markdown>>,
-    cx: &mut App,
-) -> gpui::AnyElement {
-    let Some(weak) = tool_ctx.map(|c| c.weak.clone()) else {
-        return v_flex()
-            .w_full()
-            .min_w_0()
-            .p_3()
-            .rounded(px(18.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .child(body_or_static(
-                body,
-                ("plan-review", ix),
-                plan_text.to_string(),
-                theme,
-                cx,
-            ))
-            .into_any_element();
-    };
-    let accent = theme.accent_foreground;
-
-    let download_btn = Button::new(("plan-download", ix))
-        .ghost()
-        .xsmall()
-        .icon(Icon::default().path("icons/download.svg"))
-        .tooltip(i18n::t("plan-card-download"))
-        .on_click({
-            let text = plan_text.to_string();
-            move |_, _, cx: &mut App| {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            }
-        });
-
-    let copy_btn = Button::new(("plan-copy", ix))
-        .ghost()
-        .xsmall()
-        .icon(IconName::Copy)
-        .tooltip(i18n::t("plan-card-copy"))
-        .on_click({
-            let text = plan_text.to_string();
-            move |_, _, cx: &mut App| {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            }
-        });
-
-    let header = h_flex()
-        .w_full()
-        .min_w_0()
-        .items_center()
-        .gap_2()
-        .child(
-            Icon::new(IconName::LayoutDashboard)
-                .xsmall()
-                .text_color(accent),
-        )
-        .child(
-            gpui::div()
-                .flex_1()
-                .min_w_0()
-                .text_base()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(accent)
-                .child(if title.is_empty() {
-                    i18n::t("plan-card-title")
-                } else {
-                    gpui::SharedString::from(title.to_string())
-                }),
-        )
-        .child(download_btn)
-        .child(copy_btn);
-
-    let plan_body = gpui::div().w_full().min_w_0().p_1().child(body_or_static(
-        body,
-        ("plan-review", ix),
-        plan_text.to_string(),
-        theme,
-        cx,
-    ));
-    if !active {
-        // Consumed: a verdict was clicked or a free-form message superseded
-        // this plan. Render a plain read-only record — no drawer shadow, no
-        // slide-in, no verdict footer — so the plan stays readable as history
-        // but cannot be re-judged.
-        return v_flex()
-            .w_full()
-            .min_w_0()
-            .gap_2p5()
-            .px_3()
-            .py_3()
-            .rounded(px(18.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .child(header)
-            .child(plan_body)
-            .into_any_element();
-    }
-
-    let weak_fresh = weak.clone();
-    let fresh_btn = Button::new(("plan-verdict-fresh", ix))
-        .ghost()
-        .small()
-        .label(i18n::t("plan-verdict-execute-fresh"))
-        .on_click(move |_, window, cx: &mut App| {
-            let _ = weak_fresh.update(cx, |w, cx| {
-                w.respond_plan_review(
-                    manox_agent::collaboration_mode::PlanReviewChoice::ExecuteFresh,
-                    window,
-                    cx,
-                );
-            });
-        });
-
-    let weak_compact = weak.clone();
-    let compact_btn = Button::new(("plan-verdict-compact", ix))
-        .ghost()
-        .small()
-        .label(i18n::t("plan-verdict-execute-compact"))
-        .on_click(move |_, window, cx: &mut App| {
-            let _ = weak_compact.update(cx, |w, cx| {
-                w.respond_plan_review(
-                    manox_agent::collaboration_mode::PlanReviewChoice::ExecuteCompact,
-                    window,
-                    cx,
-                );
-            });
-        });
-
-    let weak_keep = weak.clone();
-    let keep_btn = Button::new(("plan-verdict-keep", ix))
-        .ghost()
-        .small()
-        .label(i18n::t("plan-verdict-execute-keep"))
-        .on_click(move |_, window, cx: &mut App| {
-            let _ = weak_keep.update(cx, |w, cx| {
-                w.respond_plan_review(
-                    manox_agent::collaboration_mode::PlanReviewChoice::ExecuteKeep,
-                    window,
-                    cx,
-                );
-            });
-        });
-
-    let weak_refine = weak;
-    let refine_btn = Button::new(("plan-verdict-refine", ix))
-        .ghost()
-        .small()
-        .label(i18n::t("plan-verdict-refine"))
-        .on_click(move |_, window, cx: &mut App| {
-            let _ = weak_refine.update(cx, |w, cx| {
-                w.respond_plan_review(
-                    manox_agent::collaboration_mode::PlanReviewChoice::Refine,
-                    window,
-                    cx,
-                );
-            });
-        });
-
-    let footer = h_flex()
-        .w_full()
-        .min_w_0()
-        .items_center()
-        .justify_end()
-        .gap_2()
-        .border_t_1()
-        .border_color(theme.border)
-        .pt_2p5()
-        .child(refine_btn)
-        .child(keep_btn)
-        .child(compact_btn)
-        .child(fresh_btn);
-
-    v_flex()
-        .id(format!("plan-card-{ix}"))
-        .key_context("PlanDrawer")
-        .w_full()
-        .min_w_0()
-        .gap_2p5()
-        .px_3()
-        .pt_3()
-        // Extra bottom padding + negative margin let the composer cover the
-        // drawer tail, so the card reads as emerging from beneath it — the same
-        // trick render_ask_user_card uses.
-        .pb_5()
-        .mb(px(-10.))
-        .rounded(px(18.))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.background)
-        .shadow_lg()
-        .child(header)
-        .child(plan_body)
-        .child(footer)
-        .with_animation(
-            format!("plan-card-slide-{ix}"),
-            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-            |el, delta| el.mt(px(8. * (1. - delta))).opacity(delta),
-        )
-        .into_any_element()
-}
 
 fn render_ask_user_card(
     item: &ToolCallItem,
@@ -2323,6 +2101,19 @@ fn render_ask_user_card(
         .text_color(theme.foreground)
         .child(snapshot.question.question.clone());
 
+    // B2-PR-1 L1: `detail` is optional markdown support text beneath the
+    // question (the plan-review body rides here). Static, so a per-frame
+    // `markdown_tv` mount is fine — no persistent selection across frames.
+    let detail_block = (!snapshot.question.detail.trim().is_empty()).then(|| {
+        markdown_tv(
+            format!("ask-card-detail-{ix}-{step}"),
+            snapshot.question.detail.clone(),
+            theme,
+            false,
+            cx,
+        )
+    });
+
     let mut options_block = v_flex().w_full().min_w_0().gap_1p5();
     for (oi, opt) in snapshot.question.options.iter().enumerate() {
         let selected = snapshot.selections.get(oi).copied().unwrap_or(false);
@@ -2366,6 +2157,14 @@ fn render_ask_user_card(
                 .border_color(theme.border)
         };
         let weak_for_option = weak.clone();
+        // B2-PR-5: a plan-review ask (single question, `intent.kind ==
+        // "plan-review"`) highlights the affirmative option (`intent.approve`,
+        // "Approve") so the verdict card reads at a glance. `intent.approve`
+        // always names one of this question's own option labels (server
+        // validated), so the match is exact.
+        let is_approve_option = snapshot.question.intent.as_ref().is_some_and(|i| {
+            i.kind == "plan-review" && !i.approve.is_empty() && i.approve == opt.label
+        });
         let option_row = h_flex()
             .w_full()
             .min_w_0()
@@ -2375,6 +2174,11 @@ fn render_ask_user_card(
             .py_1p5()
             .rounded(px(10.))
             .when(selected, |row| row.bg(theme.accent.opacity(0.08)))
+            .when(is_approve_option && !selected, |row| {
+                row.bg(theme.primary.opacity(0.08))
+                    .border_1()
+                    .border_color(theme.primary.opacity(0.45))
+            })
             .hover(|row| row.bg(theme.accent.opacity(0.06)))
             .id(gpui::SharedString::from(format!(
                 "ask-card-opt-{ix}-{step}-{oi}"
@@ -2433,6 +2237,45 @@ fn render_ask_user_card(
         options_block = options_block.child(option_row);
     }
 
+    // B2-PR-1 L1 tri-state: a per-question free-text `custom` input (single
+    // select — it overrides the selection at the settle fold; multi select —
+    // it supplements it) plus an explicit per-question skip button (clears the
+    // selection and the custom, settling `{selected: [], no custom}` — a skip,
+    // distinct from closing the whole card). The `custom` entity is allocated on
+    // the render path (see `ensure_ask_custom_inputs`) because an `InputState`
+    // needs a `Window`; if it isn't present yet the row simply carries the skip.
+    let custom_state: Option<Entity<InputState>> = weak
+        .upgrade()
+        .and_then(|ws| ws.read(cx).ask_custom_state(step));
+    let weak_skip = weak.clone();
+    let skip_row = h_flex()
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap_2()
+        .child(
+            gpui::div()
+                .flex_1()
+                .min_w_0()
+                .children(custom_state.map(|state| {
+                    Input::new(&state).appearance(false).prefix(
+                        gpui::div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(i18n::t("workspace-ask-supplement-label")),
+                    )
+                })),
+        )
+        .child(
+            Button::new(format!("ask-card-skip-{ix}-{step}"))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Minus)
+                .on_click(move |_, window, cx: &mut App| {
+                    let _ = weak_skip.update(cx, |w, cx| w.skip_ask_question(step, window, cx));
+                }),
+        );
+
     v_flex()
         .id(format!(
             "ask-card-{}-{}",
@@ -2460,7 +2303,9 @@ fn render_ask_user_card(
         .shadow_lg()
         .child(header)
         .child(question_row)
+        .children(detail_block)
         .child(options_block)
+        .child(skip_row)
         .with_animation(
             format!("ask-card-slide-{}", snapshot.transition_gen),
             Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
@@ -2655,6 +2500,19 @@ fn render_tool_output(
     theme: &Theme,
     cx: &mut App,
 ) -> gpui::AnyElement {
+    // B2-PR-2: once the server's model-facing ask result is canonical JSON
+    // (`{"answers":[{"id","selected","custom"?}]}`), the answered-state card
+    // body reads as raw JSON. Fold it back into compact human Q/A rows — the
+    // question text is recovered from the call's own `input` by id. A parse
+    // miss (a legacy prose result, an error, or a non-canonical payload) falls
+    // through to the raw output path, so the display degrades gracefully. This
+    // sits above the terminal-panel branch because the ask result is a small
+    // structured payload, not shell text.
+    if item.name == manox_agent::tools::ASK_USER_QUESTION
+        && let Some(rows) = ask_result_qa_rows(&item.input, &item.output)
+    {
+        return render_ask_result_body(rows, ix, theme);
+    }
     // Persistent terminal panel: the conversation handler mounts it at every
     // live output chunk, finalized result, and reloaded-history entry, so the
     // common path renders the `Entity<TerminalPanel>` directly — giving tool
@@ -2711,6 +2569,111 @@ fn render_tool_output(
             cx,
         ))
         .into_any_element()
+}
+
+/// Parse an ask tool's canonical result JSON (`{"answers":[{"id","selected",
+/// "custom"?}]}`) into `(question, answer)` display rows. The question text is
+/// recovered from the call's own `input` by matching `id`; an id the input
+/// doesn't name falls back to the id itself (never a wrong question). Tri-state
+/// fold mirrors the server: an explicit skip (empty `selected`, no `custom`)
+/// shows a marked non-answer, `custom` alone is the whole answer, `selected` +
+/// `custom` shows the picks with the note appended. Returns `None` for any
+/// non-canonical payload (prose result, error text, malformed JSON) so the
+/// caller falls back to the raw output.
+fn ask_result_qa_rows(input: &serde_json::Value, output: &str) -> Option<Vec<(String, String)>> {
+    use serde_json::Value;
+    let trimmed = output.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let answers = value.get("answers")?.as_array()?;
+    if answers.is_empty() {
+        return None;
+    }
+    let questions = input.get("questions").and_then(|q| q.as_array());
+    let question_text = |id: &str| -> String {
+        questions
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|q| q.get("id").and_then(Value::as_str) == Some(id))
+                    .and_then(|q| {
+                        q.get("question")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+            })
+            .unwrap_or_else(|| id.to_string())
+    };
+    let mut rows = Vec::with_capacity(answers.len());
+    for answer in answers {
+        let id = answer.get("id").and_then(Value::as_str)?;
+        let selected: Vec<&str> = answer
+            .get("selected")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let custom = answer
+            .get("custom")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+        let rendered = match (selected.is_empty(), custom) {
+            // An explicit skip is a language-neutral em dash — no locale key,
+            // and visually distinct from a real (possibly empty-ish) answer.
+            (true, None) => "—".to_string(),
+            (true, Some(c)) => c.to_string(),
+            (false, None) => selected.join(", "),
+            (false, Some(c)) => format!("{} · {c}", selected.join(", ")),
+        };
+        rows.push((question_text(id), rendered));
+    }
+    Some(rows)
+}
+
+/// Render the folded ask Q/A rows as a bordered card body (a compact two-
+/// column question / answer table), replacing the raw JSON the model now sees.
+fn render_ask_result_body(
+    rows: Vec<(String, String)>,
+    ix: usize,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    let container = v_flex()
+        .id(format!("ask-result-{ix}"))
+        .w_full()
+        .min_w_0()
+        .gap_1p5()
+        .px_3()
+        .py_2()
+        .border_t_1()
+        .border_color(theme.border);
+    let body = rows.into_iter().fold(container, |col, (question, answer)| {
+        col.child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .items_start()
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(question),
+                )
+                .child(
+                    gpui::div()
+                        .max_w(px(300.))
+                        .text_right()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(answer),
+                ),
+        )
+    });
+    body.into_any_element()
 }
 
 fn agent_terminal_icon(status: ToolCallStatus) -> Icon {
@@ -3612,6 +3575,83 @@ mod tests {
     fn live_tail_short_output_unchanged() {
         let s = "line\nline2\n";
         assert_eq!(live_tail(s), s);
+    }
+
+    /// B2-PR-2: the ask tool result row folds a canonical answers payload into
+    /// `(question, answer)` rows (question text recovered by id from the call's
+    /// own input). This is the shared render contract BOTH arrival paths satisfy
+    /// — the live `ToolResult` event and the rebuild journal translate each
+    /// deposit the identical JSON string into `ToolCallItem.output`, so a
+    /// fixture per path feeds this one function.
+    #[test]
+    fn ask_result_qa_rows_fold_the_canonical_single_select_live_payload() {
+        let input = serde_json::json!({
+            "questions": [{"id": "a1", "question": "Which color?", "options": [
+                {"label": "Red"}, {"label": "Blue"}]}]
+        });
+        // The live path's `ToolResult.output` once the server emits canonical JSON.
+        let output = r#"{"answers":[{"id":"a1","selected":["Blue"]}]}"#;
+        let rows = ask_result_qa_rows(&input, output).expect("canonical payload folds");
+        assert_eq!(rows, vec![("Which color?".to_string(), "Blue".to_string())]);
+    }
+
+    /// Rebuild-path fixture: a multi-select supplement plus an explicit skip
+    /// across two questions, arriving verbatim from the journal tool row.
+    #[test]
+    fn ask_result_qa_rows_fold_the_canonical_multi_and_skip_rebuild_payload() {
+        let input = serde_json::json!({
+            "questions": [
+                {"id": "m", "question": "Pick flavors", "multiSelect": true},
+                {"id": "s", "question": "Skip me"}
+            ]
+        });
+        let output = r#"{"answers":[
+            {"id":"m","selected":["vanilla","salt"],"custom":"and pistachio"},
+            {"id":"s","selected":[]}
+        ]}"#;
+        let rows = ask_result_qa_rows(&input, output).expect("canonical payload folds");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "Pick flavors".to_string(),
+                    "vanilla, salt · and pistachio".to_string()
+                ),
+                ("Skip me".to_string(), "—".to_string()),
+            ],
+            "multi-select lists picks with the supplement; the skip renders an em dash"
+        );
+    }
+
+    /// An unknown id (not in the call's input) falls back to the id itself —
+    /// never a mislabelled question.
+    #[test]
+    fn ask_result_qa_rows_fall_back_to_the_id_for_an_unknown_question() {
+        let input = serde_json::json!({ "questions": [] });
+        let output = r#"{"answers":[{"id":"ghost","selected":["x"]}]}"#;
+        let rows = ask_result_qa_rows(&input, output).expect("still folds");
+        assert_eq!(rows, vec![("ghost".to_string(), "x".to_string())]);
+    }
+
+    /// A non-canonical result (the transitional prose render, an error string,
+    /// or malformed JSON) yields `None` so the display falls back to the raw
+    /// output verbatim.
+    #[test]
+    fn ask_result_qa_rows_reject_non_canonical_payloads() {
+        let input = serde_json::json!({ "questions": [{"id":"a","question":"Q"}] });
+        assert!(
+            ask_result_qa_rows(&input, "Question: Q\nAnswer: Blue").is_none(),
+            "the legacy prose result is not canonical JSON"
+        );
+        assert!(ask_result_qa_rows(&input, "boom: not json").is_none());
+        assert!(
+            ask_result_qa_rows(&input, r#"{"answers":[]}"#).is_none(),
+            "empty is not a fold"
+        );
+        assert!(
+            ask_result_qa_rows(&input, r#"{"answers":[{"id":"a","custom":"x"}]}"#).is_none(),
+            "a row without `selected` is not canonical"
+        );
     }
 
     #[test]

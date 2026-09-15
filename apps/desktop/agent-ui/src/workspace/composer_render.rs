@@ -91,10 +91,7 @@ impl Workspace {
     ) -> AnyElement {
         // Flip the composer placeholder only on mode transitions, so render
         // doesn't churn the InputState every frame.
-        let followup_mode = running
-            && self.pending_plan_review.is_none()
-            && self.pending_ask.is_none()
-            && self.pending_auth.is_none();
+        let followup_mode = running && self.pending_ask.is_none() && self.pending_auth.is_none();
         let placeholder_mode = if self.pending_ask.is_some() {
             ComposerPlaceholderMode::Ask
         } else if followup_mode {
@@ -1425,10 +1422,7 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.pending_ask.is_some()
-            || self.pending_plan_review.is_some()
-            || self.pending_auth.is_some()
-        {
+        if self.pending_ask.is_some() || self.pending_auth.is_some() {
             return None;
         }
         self.blank_project_parent.as_ref()?;

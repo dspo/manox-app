@@ -30,50 +30,21 @@ impl Workspace {
             // tool-traffic heuristics this replaces only ran in-proc and
             // raced the actual verdict. Tool traffic falls to the
             // catch-all.
-            ThreadEvent::PlanReady { plan_file, title } => {
-                // A plan proposed while the thread was parked never reaches
-                // the foreground handler: stash the review so the
-                // switch-back restore (`attach_thread` drains `pending_plans`)
-                // re-surfaces the verdict card, and persist the sidecar flag
-                // so a restart re-emits PlanReady on Ready. The sidebar
-                // keeps the blue-static wait until the verdict lands.
-                let content = std::fs::read_to_string(plan_file).unwrap_or_default();
-                this.pending_plans.insert(
-                    id.clone(),
-                    PendingPlanReview {
-                        plan_file: plan_file.clone(),
-                        title: title.clone(),
-                        content,
-                    },
-                );
-                // U3a: the pending-plan badge rides the pump's PlanReady
-                // store write + delta (single writer).
-            }
             ThreadEvent::TurnFinished {
                 cancelled,
                 failed,
                 stranded_steer_ids,
                 ..
             } => {
-                // A cancelled/failed turn voids a stashed plan review
-                // (mirroring the foreground demote); a normal settle keeps
-                // it so the switch-back restore re-surfaces the card. The
-                // pending-plan badge stays up while a review is stashed —
-                // the card is not visible until the user switches back.
-                if *cancelled || *failed {
-                    this.pending_plans.remove(&id);
-                }
                 // U3a: the settle flags are the pump's store writes (single
-                // writer); the stashed-plan nuance was already overridden by
-                // the pump's unconditional clear in-proc — the stash itself
-                // (UI state) is untouched.
+                // writer).
                 // GW5: the parked settle's unread rise rides the leaf
                 // mirror (the client-owned badge source), not the
                 // server-side store mirror.
                 this.multiplexer.update(cx, |m, cx| m.note_unread(&id, cx));
                 // Mirror the foreground settle routing against the parked
-                // stash with the same per-id verdict: only the retracted tail
-                // (`stranded_steer_ids`) turns `Failed`; the injected rest
+                // transcript with the same per-id verdict: only the retracted
+                // tail (`stranded_steer_ids`) turns `Failed`; the injected rest
                 // drops and surfaces through the transcript on switch-back /
                 // reload. A normal settle carries zero stranded — everything
                 // drops, unchanged from before. Queued follow-ups only become
@@ -89,9 +60,6 @@ impl Workspace {
                 }
             }
             ThreadEvent::Error(_) => {
-                // An errored run voids a stashed plan review (the verdict
-                // is moot once the loop bailed out).
-                this.pending_plans.remove(&id);
                 // U3b: the idle + full badge clear is the server Error
                 // arm's store write + the single delta carrying the whole
                 // set (the same five flags this mirror block wrote).
@@ -298,14 +266,6 @@ impl Workspace {
             old_id.clone(),
             self.editor_state.read(cx).value().to_string(),
         );
-
-        // Stash the outgoing thread's pending plan verdict so it survives a
-        // round-trip through another thread. The plan text lives only in
-        // `pending_plan_review` (never in persisted messages), so switching
-        // away would otherwise drop it — and the verdict card with it.
-        if let Some(review) = self.pending_plan_review.take() {
-            self.pending_plans.insert(old_id.clone(), review);
-        }
 
         // Queue state is session-local but belongs to a thread, not to the
         // currently visible workspace. Move it aside before rebinding.
@@ -544,21 +504,6 @@ impl Workspace {
         self.list_state.set_follow_mode(FollowMode::Tail);
         self.pending_ask = None;
         self.pending_auth = None;
-        // Restore the incoming thread's stashed pending plan, if any.
-        self.pending_plan_review = self.pending_plans.remove(&new_id);
-        if let Some(review) = self.pending_plan_review.as_ref() {
-            let title = review.title.clone();
-            let content = review.content.clone();
-            let role = self.model_label(cx);
-            let weak = cx.weak_entity();
-            self.conversation.update(cx, |c, cx| {
-                c.push_plan_review(title, content, role, weak, cx);
-            });
-            // The card is appended after the earlier `reset`, so splice the
-            // list count and re-pin so the restored drawer is in view.
-            self.sync_list_count(cx);
-            self.list_state.set_follow_mode(FollowMode::Tail);
-        }
         let (thread_events, store_changes) = self.subscribe_thread(cx);
         self.thread_sub = Some(thread_events);
         self.store_observe = Some(store_changes);

@@ -47,7 +47,6 @@ use gpui_component::{
 /// ChatGPT.app launch path (#410) reports outcomes under either harness.
 use gpui_component::{WindowExt as _, notification::Notification, tooltip::Tooltip};
 use manox_agent::PermissionDecision;
-use manox_agent::collaboration_mode::PlanReviewChoice;
 use manox_agent::language_model::StopReason;
 use manox_agent::thread::PermissionMode;
 use manox_agent::thread_engine::BrowserTabId;
@@ -157,17 +156,40 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
         // The server mints a stable id onto each parked question; answers are
         // id-routed and unknown ids are dropped at the settle boundary.
         // Inputs predating the mint (fixtures, older servers) fall back to a
-        // positional id, mirroring how the card keys its per-step state.
-        let id = q
+        // positional id, mirroring how the card keys its per-step state. The
+        // positional fallback is index-derived (`q{i}`) — a fixed small set of
+        // names collided past 3 questions once the count cap was lifted, which
+        // made two answers share an id and mis-route at the settle boundary.
+        let id = match q
             .get("id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(match i {
-                0 => "q0",
-                1 => "q1",
-                _ => "q2",
-            })
+        {
+            Some(explicit) => explicit.to_string(),
+            None => format!("q{i}"),
+        };
+        // B2-PR-1 L1 vocabulary: `detail` is optional markdown support text
+        // rendered beneath the question; `intent` names a specialised surface
+        // (`kind`, e.g. "plan-review") with the option label that carries the
+        // affirmative verdict (`approve`). Both ride the snapshot so the card
+        // renders them; later PRs branch on `intent`.
+        let detail = q
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
             .to_string();
+        let intent = q.get("intent").and_then(|v| v.as_object()).map(|obj| {
+            let read = |k: &str| {
+                obj.get(k)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            AskIntent {
+                kind: read("kind"),
+                approve: read("approve"),
+            }
+        });
         let header = q
             .get("header")
             .and_then(|v| v.as_str())
@@ -210,6 +232,8 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
             id,
             question,
             header,
+            detail,
+            intent,
             multi_select,
             options: opts,
         });
@@ -417,14 +441,28 @@ pub(crate) struct AskCardSnapshot {
     pub transition_gen: u64,
     pub question: AskCardQuestion,
     pub selections: Vec<bool>,
+    /// Current step's free-text custom answer (the per-question input's live
+    /// value), so the card can reflect it and gate the skip affordance.
+    pub custom: String,
 }
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct AskCardQuestion {
     pub question: String,
     pub header: String,
+    /// Optional markdown support text beneath the question.
+    pub detail: String,
+    /// Optional specialised-surface intent (`kind` + the `approve` option
+    /// label). Empty `kind` means a plain ask.
+    pub intent: Option<AskCardIntent>,
     pub multi_select: bool,
     pub options: Vec<AskCardOption>,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct AskCardIntent {
+    pub kind: String,
+    pub approve: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -440,8 +478,17 @@ struct AskQuestion {
     id: String,
     question: String,
     header: String,
+    detail: String,
+    intent: Option<AskIntent>,
     multi_select: bool,
     options: Vec<AskOption>,
+}
+
+/// Parsed form of a question's `intent` object: the specialised-surface kind
+/// (e.g. "plan-review") and the option label carrying the affirmative verdict.
+struct AskIntent {
+    kind: String,
+    approve: String,
 }
 
 struct AskOption {
@@ -570,15 +617,6 @@ struct QueuedFollowUp {
 enum RegistryTurnKind {
     Command,
     Skill,
-}
-
-/// A submitted plan file awaiting the user's review verdict. Carries the
-/// plan file path, its resolved title, and the file content rendered into
-/// the review card.
-struct PendingPlanReview {
-    plan_file: String,
-    title: String,
-    content: String,
 }
 
 pub struct Workspace {
@@ -725,21 +763,26 @@ pub struct Workspace {
     /// synchronized before list construction; the row factory itself remains
     /// a read-only projection during measurement and prepaint.
     ask_snapshot_item: Option<Entity<MessageItem>>,
-    /// A completed plan awaiting the user's implement / clear-context verdict,
-    /// rendered as the inline plan-review drawer card.
-    pending_plan_review: Option<PendingPlanReview>,
-    /// Per-thread stash of `pending_plan_review`, keyed by thread id. A
-    /// pending plan never enters persisted messages (the `<proposed_plan>`
-    /// block is stripped before the assistant text is saved), so without this
-    /// stash the verdict card + buttons vanish on a switch-away/switch-back
-    /// round-trip. Mirrors `drafts`: populated on switch-away, drained on
-    /// switch-back.
-    pending_plans: HashMap<String, PendingPlanReview>,
     /// Current question index in the ask drawer (0-based).
     ask_step: usize,
     /// Animation generation counter for the ask drawer slide, bumped on every
     /// open/close so a fresh tween fires rather than replaying a cached delta.
     ask_transition_gen: u64,
+    /// Per-question free-text `custom` inputs for the pending ask card, one
+    /// slot per question (index-aligned with `pending_ask.questions`). Created
+    /// lazily at render time because an `InputState` needs a `Window`, which
+    /// the park event handler lacks; reset whenever the ask is (re)seeded or
+    /// retired. A tri-state answer is `{selected, custom}` — `custom` overrides
+    /// a single-select and supplements a multi-select at the settle fold, and
+    /// an empty selection with no `custom` is an explicit skip.
+    ask_custom_inputs: Vec<Option<Entity<InputState>>>,
+    /// Subscriptions keeping the card repainted as the custom inputs change.
+    ask_custom_subs: Vec<Subscription>,
+    /// Authoritative per-question custom text (index-aligned with
+    /// `pending_ask.questions`), the value `resolve_ask` folds
+    /// into each canonical `AskAnswer`. The `InputState` entities above mirror
+    /// this for live editing; tests drive this directly. Reset with the ask.
+    ask_custom_text: Vec<String>,
     pub(crate) model_open: bool,
     /// PopupMenu entity for the open model selector; created on open, destroyed on close.
     model_menu: Option<Entity<PopupMenu>>,
@@ -1096,7 +1139,6 @@ impl Workspace {
             "desktop",
             vec![
                 manox_protocol::AnswerKind::Approve,
-                manox_protocol::AnswerKind::PlanVerdict,
                 manox_protocol::AnswerKind::AskUserQuestion,
             ],
             vec![],
@@ -1214,10 +1256,11 @@ impl Workspace {
             pending_auth: None,
             pending_projection_confirmed: false,
             ask_snapshot_item: None,
-            pending_plan_review: None,
-            pending_plans: HashMap::new(),
             ask_step: 0,
             ask_transition_gen: 0,
+            ask_custom_inputs: Vec::new(),
+            ask_custom_subs: Vec::new(),
+            ask_custom_text: Vec::new(),
             model_open: false,
             model_menu: None,
             model_menu_sub: None,
@@ -1365,13 +1408,33 @@ impl Workspace {
         });
         self.ask_step = 0;
         self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        self.reset_ask_custom();
         cx.notify();
+    }
+
+    /// Seed a per-question free-text `custom` answer on the pending ask
+    /// without a `Window` (the render path mirrors the `InputState` entities
+    /// onto this, but the tri-state fold reads `ask_custom_text` directly).
+    /// Diagnostic-only: drives the answer-leg wire tests.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_set_ask_custom(&mut self, qi: usize, text: &str) {
+        if qi >= self.ask_custom_text.len() {
+            self.ask_custom_text.resize(qi + 1, String::new());
+        }
+        if let Some(slot) = self.ask_custom_text.get_mut(qi) {
+            *slot = text.to_string();
+        }
+    }
+
+    /// The pending ask's per-question `custom` texts (diagnostic-only; used to
+    /// confirm a skip/re-seed cleared the scratch).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ask_custom_texts(&self) -> Vec<String> {
+        self.ask_custom_text.clone()
     }
 
     /// Seed a non-question authorization (a sandbox escalation, or an ask
     /// whose payload failed to parse) as the pending generic card.
-    /// Diagnostic-only: mirrors what the `ToolCallAuthorization` handler
-    /// stores for a non-ask payload.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_seed_auth(
         &mut self,
@@ -1387,6 +1450,7 @@ impl Workspace {
             summary: summary.to_string(),
         });
         self.ask_step = 0;
+        self.reset_ask_custom();
         cx.notify();
     }
 
@@ -1442,32 +1506,6 @@ impl Workspace {
             .read(cx)
             .ask_snapshot
             .is_some()
-    }
-
-    /// Whether a plan review is currently awaiting a verdict. Diagnostic-only.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_pending_plan_review(&self) -> bool {
-        self.pending_plan_review.is_some()
-    }
-
-    /// Whether a stashed plan review exists for the given thread.
-    /// Diagnostic-only.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_has_stashed_plan(&self, id: &str) -> bool {
-        self.pending_plans.contains_key(id)
-    }
-
-    /// Whether the conversation's tail item is an *active* plan review card
-    /// (verdict buttons rendered). Diagnostic-only.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_tail_plan_active(&self, cx: &App) -> bool {
-        let Some(last) = self.conversation.read(cx).items().last() else {
-            return false;
-        };
-        matches!(
-            last.read(cx).kind(),
-            ConvItem::PlanReview { active: true, .. }
-        )
     }
 
     /// Count of top-level `ToolCall` items with the given id. Diagnostic-only.
@@ -1690,6 +1728,7 @@ impl Workspace {
                     this.pending_projection_confirmed = false;
                     this.ask_step = 0;
                     this.ask_transition_gen = this.ask_transition_gen.wrapping_add(1);
+                    this.reset_ask_custom();
                     // Live synthesis: the question card appears in the
                     // transcript on the same edge as the pending state —
                     // never waiting on the journal's `tool_use` fold to
@@ -1708,33 +1747,6 @@ impl Workspace {
                     // §F.2) — a parked thread blocked on this authorization
                     // keeps its badge through the pump, not through a
                     // desktop mirror write that only raced it.
-                    cx.notify();
-                }
-                ThreadEvent::PlanReady { plan_file, title } => {
-                    // The model submitted the plan through `ProposePlan`; read
-                    // the file once for the review card body.
-                    let content = std::fs::read_to_string(plan_file.as_str()).unwrap_or_default();
-                    let weak = cx.weak_entity();
-                    let role = this.model_label(cx);
-                    this.conversation.update(cx, |c, cx| {
-                        c.push_plan_review(title.clone(), content.clone(), role, weak, cx);
-                    });
-                    this.pending_plan_review = Some(PendingPlanReview {
-                        plan_file: plan_file.clone(),
-                        title: title.clone(),
-                        content,
-                    });
-                    // The AgentServer pump already persisted the pending
-                    // verdict flag on PlanReady (agent_server.rs), so a
-                    // restart re-emits the card without a UI-side write —
-                    // and U3a: the pump's store write + SessionStatus delta
-                    // are the badge's single writer. The sidebar row pauses
-                    // its spinner (blue static) while the verdict is due;
-                    // `respond_plan_review` releases it.
-                    this.sync_list_count(cx);
-                    // The finalized plan surfaces at the tail; reveal it like any
-                    // user-initiated jump to the live end.
-                    this.list_state.set_follow_mode(FollowMode::Tail);
                     cx.notify();
                 }
                 ThreadEvent::PlanModeChanged { .. } => {
@@ -1884,17 +1896,6 @@ impl Workspace {
                     // card's own demote below is UI state, not a store flag.
                     this.turn_active = false;
                     this.background_threads.retain(|b| b.id != thread_id);
-                    // Only a cancelled/failed turn demotes an outstanding plan
-                    // review — the verdict is moot once the loop released the
-                    // turn abnormally. A normal settle right after
-                    // `ProposePlan` keeps the card active so the user can
-                    // still choose a verdict; demoting it here made the card
-                    // flash its buttons and collapse to a plain record.
-                    if (*cancelled || *failed) && this.pending_plan_review.take().is_some() {
-                        this.conversation
-                            .update(cx, |c, cx| c.consume_plan_review(cx));
-                        this.list_state.remeasure();
-                    }
                     this.spawn_git_status_refresh(cx);
                     // Dispatch last: `run_turn` emits `TurnStarted`
                     // synchronously, so no terminal bookkeeping above may run
@@ -2036,17 +2037,6 @@ impl Workspace {
                             None,
                             cx,
                         );
-                        // An error is a terminal state symmetric to a terminal
-                        // `Stop`: the turn aborted, so any pending plan review
-                        // is now stale and must not linger over an idle thread.
-                        if this.pending_plan_review.take().is_some() {
-                            this.conversation
-                                .update(cx, |c, cx| c.consume_plan_review(cx));
-                            // The demoted plan card stays in place but flips
-                            // inactive — remeasure so the list's cached height
-                            // for it stays honest.
-                            this.list_state.remeasure();
-                        }
                         // The run task emits `TurnFinished` after it has cleared
                         // `running_turn`; queue recovery and follow-up dispatch
                         // happen there.
@@ -2497,8 +2487,7 @@ impl Workspace {
     }
 
     fn blocking_overlay_active(&self) -> bool {
-        self.pending_plan_review.is_some()
-            || self.pending_ask.is_some()
+        self.pending_ask.is_some()
             || self.pending_auth.is_some()
             || self.blank_project_parent.is_some()
     }
@@ -2805,18 +2794,6 @@ impl Workspace {
             self.model_label(cx),
             Some(permission_mode),
         )
-    }
-
-    fn message_ui_metadata(meta: &UserTurnMeta) -> manox_agent::MessageUiMetadata {
-        manox_agent::MessageUiMetadata {
-            model_id: (!meta.model_id.is_empty()).then(|| meta.model_id.clone()),
-            approval_mode: meta.approval_mode.map(|mode| mode.as_i64()),
-            steered: meta.steered.then_some(true),
-            external_event: None,
-            author: meta.author.clone(),
-            peer: meta.peer,
-            display_text: None,
-        }
     }
 
     pub(crate) fn model_label(&self, cx: &mut Context<Self>) -> String {

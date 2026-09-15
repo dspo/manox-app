@@ -662,6 +662,43 @@ mod tests {
         assert_eq!(r.content, "output!");
     }
 
+    /// B2-PR-2 rebuild-path fixture: an `AskUserQuestion` result whose content is
+    /// the canonical answers JSON survives translation verbatim, so the
+    /// answered-state card body (`ToolCallItem.output`) is exactly the payload
+    /// `ask_result_qa_rows` folds (the render layer owns the compact Q/A view).
+    #[test]
+    fn ask_tool_result_rebuild_preserves_the_canonical_payload() {
+        let canonical = r#"{"answers":[{"id":"a1","selected":["Blue"]}]}"#;
+        let row = serde_json::json!({
+            "role": "toolResult",
+            "toolCallId": "tc1",
+            "toolName": manox_agent::tools::ASK_USER_QUESTION,
+            "content": [{"type": "text", "text": canonical}],
+            "isError": false,
+        });
+        let entry = wire(
+            2,
+            JournalWireEvent::Message {
+                role: "tool".into(),
+                content: vec![row],
+                usage: None,
+                origin_rpc: None,
+                display: None,
+            },
+        );
+        let items = history_entries_of(&entry);
+        let HistoryEntry::Message(m) = &items[0] else {
+            panic!("expected a message item");
+        };
+        let MessageContent::ToolResult(r) = &m.content[0] else {
+            panic!("expected a tool result block");
+        };
+        assert_eq!(
+            r.content, canonical,
+            "the canonical JSON rides the rebuild path intact"
+        );
+    }
+
     #[test]
     fn ui_note_row_becomes_note_item() {
         let entry = wire(

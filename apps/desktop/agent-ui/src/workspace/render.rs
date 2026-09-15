@@ -627,7 +627,13 @@ impl Workspace {
         // would collide with `shell_root`'s `&mut self` receiver inside a
         // single call expression.
         self.reconcile_pending_with_projections(cx);
+        // Allocate the ask card's per-question `custom` inputs while a `Window`
+        // is in hand (the render path is the only place one is available), then
+        // sync the Workspace-derived snapshot onto the owning tool row.
+        self.ensure_ask_custom_inputs(window, cx);
         self.sync_ask_card_snapshots(cx);
+        // PR-4: announce cards retired on another client (drains the marker).
+        self.notice_settled_elsewhere(window, cx);
         // Title-bar overlay for the whole main card: mounted on `main_view`
         // (not the conversation column) so it spans the message column and
         // the right pane alike; painted last so the "..." menu isn't covered

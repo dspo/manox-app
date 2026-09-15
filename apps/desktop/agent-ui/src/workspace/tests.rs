@@ -3560,7 +3560,7 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
     // `AskUserQuestionDismissed` leg that converges the server waterfall on
     // the interrupt). The proof it cancelled rather than answered: the
     // composer text survives untouched (`submit_input`/
-    // `resolve_ask_with_response` would have consumed it), and the generic
+    // `resolve_ask` would have consumed it), and the generic
     // approval card — no party to the dismissal — stays parked for the next
     // verdict.
     visual.update(|window, cx| {
@@ -3595,8 +3595,9 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
         });
     });
 
-    // Idle: the same control keeps the supplement path — it resolves the ask
-    // with the composer text (Enter-semantics, cleared input, card gone).
+    // Idle: the same control submits the ask card (B2-PR-1: the per-question
+    // custom inputs are the free-text leg now — the composer no longer rides
+    // the answer, it just clears and settles the card, Enter-semantics).
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| ws.send_button_clicked(window, cx));
     });
@@ -3604,11 +3605,11 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
         ws.update(cx, |ws, cx| {
             assert!(
                 ws.pending_ask.is_none(),
-                "idle dispatch keeps the ask-supplement path"
+                "idle dispatch submits the parked ask card"
             );
             assert!(
                 ws.input_state.read(cx).value().is_empty(),
-                "the supplement was submitted, so the input cleared"
+                "submitting the card clears the composer"
             );
         });
     });
@@ -3915,6 +3916,22 @@ struct AskWireSpyFixture {
 
 #[cfg(feature = "test-support")]
 fn seeded_ask_wire_spy(cx: &mut gpui::TestAppContext) -> AskWireSpyFixture {
+    seeded_ask_wire_spy_with(
+        cx,
+        serde_json::json!({
+            "questions": [{ "question": "Which one?", "header": "Pick",
+                             "options": [{ "label": "A" }, { "label": "B" }] }]
+        }),
+    )
+}
+
+/// Variant taking an arbitrary ask payload so the answer-leg tri-state tests
+/// can drive single/multi/custom/skip shapes against the same wire spy.
+#[cfg(feature = "test-support")]
+fn seeded_ask_wire_spy_with(
+    cx: &mut gpui::TestAppContext,
+    ask_payload: serde_json::Value,
+) -> AskWireSpyFixture {
     use gpui::AppContext as _;
     let _globals = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _store = store_test_guard();
@@ -3954,10 +3971,6 @@ fn seeded_ask_wire_spy(cx: &mut gpui::TestAppContext) -> AskWireSpyFixture {
         ws.client = std::sync::Arc::new(manox_session_core::agent_client::AgentClient::from_conn(
             client_conn,
         ));
-    });
-    let ask_payload = serde_json::json!({
-        "questions": [{ "question": "Which one?", "header": "Pick",
-                         "options": [{ "label": "A" }, { "label": "B" }] }]
     });
     ws.update(&mut visual, |ws, cx| {
         ws.diagnostic_seed_ask("ask1", ask_payload, cx);
@@ -4037,7 +4050,7 @@ fn closing_the_ask_card_sends_the_dismissal_marker(cx: &mut gpui::TestAppContext
     // The card is retired locally: a stale second click replies to nothing.
     // (The dead call's MsgId leaves the leaf store with the settle
     // reconcile — same as the answer leg, which never deletes it either.)
-    let pending = ws.read_with(&mut visual, |ws, _| ws.diagnostic_pending_ask_id());
+    let pending = ws.read_with(&visual, |ws, _| ws.diagnostic_pending_ask_id());
     assert_eq!(pending, None, "the close retires the card");
     // A repeat close with nothing pending: no second frame, no panic.
     ws.update(&mut visual, |ws, cx| ws.dismiss_ask(cx));
@@ -4062,7 +4075,7 @@ fn turn_interrupt_dismisses_the_parked_ask_before_cancel(cx: &mut gpui::TestAppC
     let mut visual = f.visual;
     let ws = f.ws.clone();
     let session_id = ws
-        .read_with(&mut visual, |ws, _| ws.session_id.clone())
+        .read_with(&visual, |ws, _| ws.session_id.clone())
         .expect("landing session bound");
     ws.update(&mut visual, |ws, cx| ws.cancel_turn(cx));
     let frames = spy_frames(cx, &f.rx, 2, "interrupt: dismissal + cancel");
@@ -4085,7 +4098,7 @@ fn turn_interrupt_dismisses_the_parked_ask_before_cancel(cx: &mut gpui::TestAppC
         }
         other => panic!("expected the CancelTurn note, got {other:?}"),
     }
-    ws.read_with(&mut visual, |ws, _| {
+    ws.read_with(&visual, |ws, _| {
         assert!(
             ws.diagnostic_pending_ask_id().is_none(),
             "the interrupt retires the parked card locally"
@@ -4137,8 +4150,247 @@ fn approval_denial_stays_on_the_decision_leg(cx: &mut gpui::TestAppContext) {
         }
         other => panic!("expected the deny Reply, got {other:?}"),
     }
-    ws.read_with(&mut visual, |ws, _| {
+    ws.read_with(&visual, |ws, _| {
         assert!(ws.diagnostic_pending_auth().is_none(), "the card retires");
     });
     let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// Pull the single `answers` array out of an ask reply frame and assert its
+/// `id`-routing shape (canonical `{"answers":[{"id","selected","custom"?}]}`).
+#[cfg(feature = "test-support")]
+fn ask_answer_frames(
+    cx: &mut gpui::TestAppContext,
+    rx: &async_channel::Receiver<manox_protocol::FromClient>,
+    what: &str,
+) -> Vec<serde_json::Value> {
+    let frames = spy_frames(cx, rx, 1, what);
+    match &frames[0] {
+        manox_protocol::FromClient::Reply { id, outcome } => {
+            assert_eq!(
+                id,
+                &manox_protocol::MsgId::new("q1"),
+                "replies the ask call"
+            );
+            let v = outcome.as_ref().expect("the ask replies Ok");
+            assert!(
+                v.get("response").is_none(),
+                "the removed card-level `response` must never ride the wire: {v}"
+            );
+            v.get("answers")
+                .and_then(|a| a.as_array())
+                .cloned()
+                .unwrap_or_else(|| panic!("expected a canonical `answers` array: {v}"))
+        }
+        other => panic!("expected the ask Reply, got {other:?}"),
+    }
+}
+
+/// B2-PR-1 ① (canonical single-select): selecting one option replies with the
+/// id-routed canonical row `{id, selected:[label]}` — the old positional
+/// `[[question, answer]]` pair and the card-level `response` are gone, so the
+/// reply is stable across a server-side re-ask of a differently-worded question.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn asking_a_single_select_answers_with_the_canonical_row(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy(cx);
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    // The unlabelled question falls back to the positional id `q0`.
+    ws.update(&mut visual, |ws, cx| ws.toggle_ask_option(0, 1, cx));
+    ws.update(&mut visual, |ws, cx| ws.resolve_ask(cx));
+    let answers = ask_answer_frames(cx, &f.rx, "single-select answer");
+    assert_eq!(
+        answers,
+        vec![serde_json::json!({ "id": "q0", "selected": ["B"] })],
+        "the pick routes by id; no `custom` key when nothing was typed"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// B2-PR-1 ② (explicit skip): resolving with nothing selected and no custom
+/// text is a skip — the canonical row is `{id, selected:[]}` with no `custom`
+/// key (the server folds it to `AskAnswer::is_skip`, distinct from a card
+/// dismissal). Every question in the walk is emitted, skipped or not.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn an_unanswered_ask_settles_as_an_explicit_skip(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy(cx);
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    ws.update(&mut visual, |ws, cx| ws.resolve_ask(cx));
+    let answers = ask_answer_frames(cx, &f.rx, "skip answer");
+    assert_eq!(
+        answers,
+        vec![serde_json::json!({ "id": "q0", "selected": [] })],
+        "a skip is empty `selected` with no `custom`"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// B2-PR-1 ③ (per-question custom): free text rides its OWN question's
+/// `custom` — a single-select with a pick + a typed note carries both
+/// (`selected:[label]`, `custom`), which the server fold treats as a
+/// supplement/override, never as the removed whole-card `response`.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn a_typed_custom_rides_its_question_and_not_the_card(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy(cx);
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    ws.update(&mut visual, |ws, cx| {
+        ws.toggle_ask_option(0, 0, cx);
+        ws.diagnostic_set_ask_custom(0, "  a quick note  ");
+    });
+    ws.update(&mut visual, |ws, cx| ws.resolve_ask(cx));
+    let answers = ask_answer_frames(cx, &f.rx, "custom answer");
+    assert_eq!(
+        answers,
+        vec![serde_json::json!({
+            "id": "q0", "selected": ["A"], "custom": "a quick note"
+        })],
+        "`custom` is trimmed and attached to its own question id"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// B2-PR-1 ④ (multi-select supplement + skip on a second question): one
+/// multi-select carries several labels + a supplementing `custom`, and a second
+/// question left untouched settles as its own skip — the two questions are
+/// independent canonical rows keyed by distinct positional ids (`q0`, `q1`).
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn multi_select_supplements_and_a_second_question_skips_independently(
+    cx: &mut gpui::TestAppContext,
+) {
+    let f = seeded_ask_wire_spy_with(
+        cx,
+        serde_json::json!({
+            "questions": [
+                { "question": "Pick several", "header": "Multi", "multiSelect": true,
+                  "options": [{"label":"X"},{"label":"Y"}] },
+                { "question": "Skip this", "header": "Skip",
+                  "options": [{"label":"P"},{"label":"Q"}] },
+            ]
+        }),
+    );
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    ws.update(&mut visual, |ws, cx| {
+        ws.toggle_ask_option(0, 0, cx); // X
+        ws.toggle_ask_option(0, 1, cx); // Y (multi → both stay)
+        ws.diagnostic_set_ask_custom(0, "plus one more");
+        // question 1 deliberately untouched → skip
+    });
+    ws.update(&mut visual, |ws, cx| ws.resolve_ask(cx));
+    let answers = ask_answer_frames(cx, &f.rx, "multi + skip");
+    assert_eq!(
+        answers,
+        vec![
+            serde_json::json!({ "id": "q0", "selected": ["X", "Y"], "custom": "plus one more" }),
+            serde_json::json!({ "id": "q1", "selected": [] }),
+        ],
+        "multi-select keeps both picks + supplement; the untouched question is its own skip"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// B2-PR-1 (positional-id collision fix): a walk with more than three
+/// questions must give every unlabelled question a distinct fallback id. The
+/// old fixed `q0/q1/q2` set reused `q2` past index 2, so two answers shared an
+/// id and mis-routed at the settle boundary.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn positional_fallback_ids_stay_distinct_past_three_questions(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy_with(
+        cx,
+        serde_json::json!({
+            "questions": [
+                {"question":"a","options":[{"label":"1"}]},
+                {"question":"b","options":[{"label":"2"}]},
+                {"question":"c","options":[{"label":"3"}]},
+                {"question":"d","options":[{"label":"4"}]},
+                {"question":"e","options":[{"label":"5"}]},
+            ]
+        }),
+    );
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    ws.update(&mut visual, |ws, cx| ws.resolve_ask(cx));
+    let answers = ask_answer_frames(cx, &f.rx, "five-question id uniqueness");
+    let ids: Vec<&str> = answers
+        .iter()
+        .map(|a| a.get("id").and_then(|i| i.as_str()).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["q0", "q1", "q2", "q3", "q4"],
+        "each positional id is index-derived and unique"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// B2-PR-5 (plan-review folds onto the ask channel): a plan-review now reaches
+/// the client as a single-question `AskUserQuestion` whose `intent.kind` is
+/// `plan-review`, `detail` carries the plan body, and `intent.approve` names the
+/// affirmative option. The client derives its plan-review card purely from
+/// these fields — no dedicated `PlanVerdict` call any more — so `parse_pending_ask`
+/// must surface them verbatim and the approve label must be one of the
+/// question's own options (the invariant the card's Approve highlight keys on).
+#[test]
+fn plan_review_ask_parses_intent_detail_and_approve() {
+    let payload = serde_json::json!({
+        "questions": [{
+            "id": "plan-review",
+            "question": "Review the proposed plan?",
+            "header": "Plan",
+            "detail": "# the plan\n\n- do the thing",
+            "intent": {"kind": "plan-review", "approve": "Approve"},
+            "options": [
+                {"label": "Approve"},
+                {"label": "Approve & compact"},
+                {"label": "Request changes"}
+            ]
+        }]
+    });
+    let ask = super::parse_pending_ask("ask1".into(), payload).expect("plan-review ask parses");
+    assert_eq!(ask.questions.len(), 1, "a plan-review is one question");
+    let q = &ask.questions[0];
+    assert_eq!(q.id, "plan-review", "the server-minted id is preserved");
+    assert_eq!(
+        q.detail, "# the plan\n\n- do the thing",
+        "the plan body rides detail"
+    );
+    let intent = q.intent.as_ref().expect("intent present");
+    assert_eq!(
+        intent.kind, "plan-review",
+        "the derivation keys on this kind"
+    );
+    assert_eq!(
+        intent.approve, "Approve",
+        "the affirmative label is captured"
+    );
+    assert!(
+        q.options.iter().any(|o| o.label == intent.approve),
+        "approve must name one of this question's own options (the highlight invariant)"
+    );
+}
+
+/// A plain ask (no `intent`) parses with `intent == None`, so the card renders
+/// the generic tri-state (no Approve highlight) — the plan-review branch is
+/// opt-in purely off `intent.kind`, never a guess.
+#[test]
+fn a_plain_ask_carries_no_intent() {
+    let payload = serde_json::json!({
+        "questions": [{"question": "Which color?", "options": [{"label": "Red"}]}]
+    });
+    let ask = super::parse_pending_ask("ask1".into(), payload).expect("plain ask parses");
+    assert!(
+        ask.questions[0].intent.is_none(),
+        "no intent → generic ask card"
+    );
+    assert!(
+        ask.questions[0].detail.is_empty(),
+        "no detail → no markdown block"
+    );
 }

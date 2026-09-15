@@ -137,8 +137,10 @@ impl ContextRail {
     }
 
     /// Diagnostic: the entity id of the bound store leaf (the rail-freeze
-    /// regression asserts the attach-time re-bind).
-    #[cfg(any(test, feature = "test-support"))]
+    /// regression asserts the attach-time re-bind). Unit-test-only callers,
+    /// so the gate is `cfg(test)` — a feature-gated build would compile it
+    /// without its callers and trip dead-code.
+    #[cfg(test)]
     pub fn diagnostic_store_id(&self) -> Option<gpui::EntityId> {
         self.store.as_ref().map(|s| s.entity_id())
     }

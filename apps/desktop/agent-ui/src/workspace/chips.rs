@@ -9,6 +9,7 @@
 //! handlers and the `tests` child.
 
 use super::*;
+use gpui::Window;
 
 impl Workspace {
     /// Remote-settle reconcile for a surfaced interaction card. The leaf's
@@ -53,6 +54,7 @@ impl Workspace {
         self.pending_projection_confirmed = false;
         self.ask_step = 0;
         self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        self.reset_ask_custom();
         // The settled call's MsgId has no live waiter left; dropping the
         // mapping keeps a stale card click from replying to a dead call.
         if let Some(store) = &self.store {
@@ -62,6 +64,32 @@ impl Workspace {
             });
         }
         cx.notify();
+    }
+
+    /// PR-4: surface a transient "answered on another client" notice for any
+    /// card the leaf retired via a `DeliveryCancelled` since the last frame,
+    /// then drain the marker set (so the notice fires exactly once per remote
+    /// settle). Runs on the render path where a `Window` is available for the
+    /// notification surface; the card itself is cleared by
+    /// [`Self::reconcile_pending_with_projections`] (the leaf dropped the id
+    /// from the projection set).
+    pub(crate) fn notice_settled_elsewhere(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let drained = self
+            .store
+            .as_ref()
+            .map(|store| {
+                store.update(cx, |h, _| {
+                    let ids: Vec<String> = h.store.settled_elsewhere.drain().collect();
+                    ids
+                })
+            })
+            .unwrap_or_default();
+        if !drained.is_empty() {
+            window.push_notification(
+                Notification::info(i18n::t("workspace-ask-settled-elsewhere")),
+                cx,
+            );
+        }
     }
 
     /// Synthesize the top-level AskUserQuestion card when the rebuilt
@@ -127,6 +155,7 @@ impl Workspace {
         {
             self.client
                 .send_reply(msg_id, Ok(serde_json::json!({ "allow": allow })));
+            self.retire_wire_auth(&id, cx);
             return;
         }
         self.thread.with_mut(|thread| {
@@ -136,6 +165,15 @@ impl Workspace {
             );
         });
         cx.notify();
+    }
+
+    /// Drop a locally-settled card's leaf correlations so a later PR-4
+    /// `DeliveryCancelled` for the same delivery cannot mis-fire the "handled
+    /// elsewhere" notice.
+    fn retire_wire_auth(&mut self, auth_id: &str, cx: &mut Context<Self>) {
+        if let Some(store) = &self.store {
+            store.update(cx, |h, _| h.store.retire_auth(auth_id));
+        }
     }
 
     /// Close the pending question card without answering: reply with the
@@ -151,6 +189,7 @@ impl Workspace {
         };
         self.ask_step = 0;
         self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        self.reset_ask_custom();
         if let Some(msg_id) = self
             .store
             .as_ref()
@@ -158,6 +197,7 @@ impl Workspace {
         {
             self.client
                 .send_reply(msg_id, Ok(serde_json::json!({ "dismissed": true })));
+            self.retire_wire_auth(&ask.id, cx);
             cx.notify();
             return;
         }
@@ -179,6 +219,7 @@ impl Workspace {
         }
         let step = self.ask_step.min(ask.questions.len() - 1);
         let q = ask.questions.get(step)?;
+        let custom = self.ask_custom_text.get(step).cloned().unwrap_or_default();
         Some(AskCardSnapshot {
             id: ask.id.clone(),
             step,
@@ -187,6 +228,11 @@ impl Workspace {
             question: AskCardQuestion {
                 question: q.question.clone(),
                 header: q.header.clone(),
+                detail: q.detail.clone(),
+                intent: q.intent.as_ref().map(|i| AskCardIntent {
+                    kind: i.kind.clone(),
+                    approve: i.approve.clone(),
+                }),
                 multi_select: q.multi_select,
                 options: q
                     .options
@@ -199,6 +245,7 @@ impl Workspace {
                     .collect(),
             },
             selections: ask.selections.get(step).cloned().unwrap_or_default(),
+            custom,
         })
     }
 
@@ -238,9 +285,13 @@ impl Workspace {
     }
 
     pub(super) fn pending_ask_has_selection(&self) -> bool {
-        self.pending_ask
-            .as_ref()
-            .is_some_and(|ask| ask.selections.iter().flatten().any(|selected| *selected))
+        self.pending_ask.as_ref().is_some_and(|ask| {
+            ask.selections.iter().flatten().any(|selected| *selected)
+                || self
+                    .ask_custom_text
+                    .iter()
+                    .any(|custom| !custom.trim().is_empty())
+        })
     }
 
     pub(super) fn composer_can_submit(&self, running: bool, cx: &App) -> bool {
@@ -300,25 +351,20 @@ impl Workspace {
         }
     }
 
-    /// Submit the ask drawer: gather selected options plus an optional global
-    /// supplemental note from the composer.
-    pub(crate) fn resolve_ask_with_response(
-        &mut self,
-        response_override: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Submit the ask drawer: fold each question's tri-state (its selected
+    /// labels plus its own free-text `custom`) into canonical `AskAnswer` rows.
+    /// A blank custom is `None`; a question with nothing selected and no custom
+    /// settles as an explicit skip (`selected: []`, no `custom`) — the same
+    /// tri-state the server's `fold_ask_answers` reads. There is no card-level
+    /// free-text override: a card close is `dismiss_ask`, and per-question free
+    /// text rides the answer's `custom`.
+    pub(crate) fn resolve_ask(&mut self, cx: &mut Context<Self>) {
         let ask = match self.pending_ask.take() {
             Some(a) => a,
             None => return,
         };
-        let response_text = response_override.unwrap_or_default();
-        let response = if response_text.trim().is_empty() {
-            None
-        } else {
-            Some(response_text.trim().to_string())
-        };
-        let mut answers: Vec<(String, String)> = Vec::with_capacity(ask.questions.len());
         let mut canonical: Vec<manox_agent::AskAnswer> = Vec::with_capacity(ask.questions.len());
+        let mut wire: Vec<serde_json::Value> = Vec::with_capacity(ask.questions.len());
         for (i, q) in ask.questions.iter().enumerate() {
             let sel = ask.selections.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
             let selected: Vec<String> = q
@@ -327,32 +373,37 @@ impl Workspace {
                 .zip(sel.iter())
                 .filter_map(|(o, &s)| s.then_some(o.label.clone()))
                 .collect();
-            let answer = selected.join(", ");
-            answers.push((q.question.clone(), answer));
-            // Canonical id-routed tri-state. The removed card-level free-text
-            // override rides the FIRST question's custom — exactly the
-            // transitional mapping the server applies to legacy wire payloads
-            // (agent_server `parse_ask_answers`), so in-process and wire
-            // settlement agree on the note's landing spot.
-            let custom = if i == 0 { response.clone() } else { None };
-            canonical.push(manox_agent::AskAnswer::new(q.id.clone(), selected, custom));
+            let custom = self
+                .ask_custom_text
+                .get(i)
+                .filter(|s| !s.trim().is_empty())
+                .cloned();
+            let answer = manox_agent::AskAnswer::new(q.id.clone(), selected, custom);
+            // Canonical reply row: `{id, selected, custom?}`. `custom` is
+            // omitted (not an empty string) on a skip so it matches the
+            // server's canonical parser field-for-field.
+            let mut row = serde_json::Map::new();
+            row.insert("id".into(), serde_json::Value::String(answer.id.clone()));
+            row.insert("selected".into(), serde_json::json!(answer.selected));
+            if let Some(custom) = &answer.custom {
+                row.insert("custom".into(), serde_json::Value::String(custom.clone()));
+            }
+            wire.push(serde_json::Value::Object(row));
+            canonical.push(answer);
         }
         let id = ask.id.clone();
         self.pending_ask = None;
         self.ask_step = 0;
         self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        self.reset_ask_custom();
         if let Some(msg_id) = self
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.pending_auth.get(&id).cloned())
         {
-            self.client.send_reply(
-                msg_id,
-                Ok(serde_json::json!({
-                    "answers": answers,
-                    "response": response,
-                })),
-            );
+            self.client
+                .send_reply(msg_id, Ok(serde_json::json!({ "answers": wire })));
+            self.retire_wire_auth(&id, cx);
             return;
         }
         // In-process fallback (no wire MsgId): the canonical rows built above
@@ -363,6 +414,96 @@ impl Workspace {
                 manox_agent::ToolAuthorizationResponse::AskUserQuestion { answers: canonical },
             );
         });
+        cx.notify();
+    }
+
+    /// Drop the ask custom-answer state — call whenever the pending ask is
+    /// seeded, resolved, dismissed, or reconciled away so a stale custom never
+    /// leaks into the next card or a re-surfaced walk.
+    pub(super) fn reset_ask_custom(&mut self) {
+        self.ask_custom_inputs.clear();
+        self.ask_custom_subs.clear();
+        self.ask_custom_text.clear();
+    }
+
+    /// Align the per-question custom-answer scratch with the current ask:
+    /// reset lengths to `questions.len()` (on re-seed / count change) and
+    /// create each `custom` `InputState` lazily — allocation needs a `Window`,
+    /// which the park event handler lacks, so this runs on the render path.
+    /// Each input's `Change` repaints the card (driving the skip affordance and
+    /// the submit gate) and mirrors its live text into `ask_custom_text`.
+    pub(crate) fn ensure_ask_custom_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self
+            .pending_ask
+            .as_ref()
+            .map_or(0, |ask| ask.questions.len());
+        if self.pending_ask.is_none() {
+            if !self.ask_custom_inputs.is_empty() {
+                self.reset_ask_custom();
+            }
+            return;
+        }
+        if self.ask_custom_text.len() != count || self.ask_custom_inputs.len() != count {
+            self.reset_ask_custom();
+            self.ask_custom_text = vec![String::new(); count];
+            self.ask_custom_inputs = vec![None; count];
+        }
+        for qi in 0..count {
+            if self.ask_custom_inputs[qi].is_none() {
+                let initial = self
+                    .ask_custom_text
+                    .get(qi)
+                    .cloned()
+                    .filter(|s| !s.is_empty());
+                let state: Entity<InputState> = cx.new(|cx| {
+                    let mut st = InputState::new(window, cx)
+                        .placeholder(i18n::t("workspace-ask-supplement-placeholder"));
+                    if let Some(initial) = initial {
+                        st.set_value(initial, window, cx);
+                    }
+                    st
+                });
+                let sub = cx.subscribe(&state, move |this, state, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        if let Some(slot) = this.ask_custom_text.get_mut(qi) {
+                            *slot = state.read(cx).value().to_string();
+                        }
+                        cx.notify();
+                    }
+                });
+                self.ask_custom_inputs[qi] = Some(state);
+                self.ask_custom_subs.push(sub);
+            }
+        }
+    }
+
+    /// The `custom` input entity for question `qi`, if the card is live.
+    pub(crate) fn ask_custom_state(&self, qi: usize) -> Option<Entity<InputState>> {
+        self.ask_custom_inputs.get(qi).and_then(|slot| slot.clone())
+    }
+
+    /// Skip question `qi`: clear its selection and its `custom` text, so the
+    /// settled answer is the canonical explicit skip (`selected: []`, no
+    /// `custom`) rather than a card dismissal.
+    pub(crate) fn skip_ask_question(
+        &mut self,
+        qi: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            for s in sel.iter_mut() {
+                *s = false;
+            }
+        }
+        if let Some(slot) = self.ask_custom_text.get_mut(qi) {
+            slot.clear();
+        }
+        if let Some(state) = self.ask_custom_inputs.get(qi).and_then(|slot| slot.clone()) {
+            state.update(cx, |st, cx| st.set_value("", window, cx));
+        }
         cx.notify();
     }
 
@@ -406,12 +547,13 @@ impl Workspace {
     }
 
     /// Exact registration match of a canonical model identity against the
-    /// kernel provider registry, returning the kernel `Model`. U2 retired
-    /// this from the DISPLAY surfaces (the chip and the menu resolve against
-    /// the gateway's wire snapshot — [`Self::resolve_model_display`]); what
-    /// remains is the `ExecuteFresh` facade seeding, which constructs a
-    /// kernel `Thread` and needs a kernel `Model` (U6/attach surface). A
+    /// kernel provider registry, returning the kernel `Model`. The display
+    /// surfaces resolve against the gateway's wire snapshot
+    /// ([`Self::resolve_model_display`]); this kernel-model resolver outlived the
+    /// `ExecuteFresh` facade that was its last production caller (retired by
+    /// B2-PR-5), so it now exists for the model-resolution unit tests only. A
     /// stale id resolves to `None`, never a fuzzy look-alike.
+    #[cfg(test)]
     pub(crate) fn resolve_model_identity(
         provider: &str,
         id: &str,
@@ -422,6 +564,7 @@ impl Workspace {
     /// The pure core of [`Self::resolve_model_identity`] against an explicit
     /// registry (tests construct one synchronously — the global builds on a
     /// background thread).
+    #[cfg(test)]
     pub(crate) fn resolve_model_identity_in(
         registry: &manox_harness::core::ProviderRegistry,
         provider: &str,
