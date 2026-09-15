@@ -359,37 +359,11 @@ impl Workspace {
             cx.notify();
             return;
         }
-        // The thread is idle (not running). If a plan review was awaiting a
-        // verdict, a free-form message means the user is discussing or revising
-        // rather than accepting — drop the stale verdict so the card hides
-        // until the agent re-proposes via a fresh `PlanReady`. Without this the
-        // lingering Implement button would act on the now-outdated plan text.
-        let dismissed_plan = self.pending_plan_review.take();
-        if let Some(review) = dismissed_plan.as_ref() {
-            // U6b②/④: the DURABLE dismissal lives server-side — the
-            // gateway's Submit arm runs the implicit dismissal (it clears
-            // the session facade, whose engine journals the `resolved`
-            // plan_review edge, and the store badge). The desktop's attach
-            // mirror has no engine and the state is session-owned; the
-            // UI-side half (card consume, collapsed record) stays here.
-            self.conversation
-                .update(cx, |c, cx| c.consume_plan_review(cx));
-            // The demoted plan card stays in place but flips inactive —
-            // remeasure so the list's cached height for it stays honest.
-            self.list_state.remeasure();
-            // Persist the dismissed plan as a UI note so the collapsed record
-            // survives a thread switch / reload — the live card is UI-only and
-            // never enters `Thread::messages`. The append lands before the
-            // dismissing message's prompt dispatch below (single actor
-            // queue), so the rebuilt conversation shows the card ahead of
-            // this dismissing message — matching the live order.
-            self.append_ui_note(
-                manox_agent::db::UiNoteKind::PlanReview,
-                review.content.clone(),
-                None,
-                cx,
-            );
-        }
+        // The thread is idle (not running). A free-form message dispatches as
+        // a normal turn. (A plan-review verdict now reaches the user as an
+        // `AskUserQuestion` card, and a send while that card is up submits it —
+        // see `submit_input` — so there is no stale verdict card to dismiss on
+        // this path any more.)
         self.append_and_run_user_turn(turn, weak, cx);
         // The conversation exists the moment the message is sent: refetch
         // the sidebar list now (the transcript-side refetch on the user

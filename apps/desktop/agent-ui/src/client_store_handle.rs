@@ -622,15 +622,7 @@ fn delivery_id_of(call: &manox_protocol::ServerCall) -> Option<String> {
     match call {
         ServerCall::Approve { delivery_id, .. }
         | ServerCall::AskUserQuestion { delivery_id, .. }
-        | ServerCall::PlanVerdict { delivery_id, .. } => Some(delivery_id.clone()),
-        _ => None,
-    }
-}
-
-/// Extract the `plan_file` from a `ServerCall::PlanVerdict`.
-fn plan_file_of(call: &manox_protocol::ServerCall) -> Option<String> {
-    match call {
-        manox_protocol::ServerCall::PlanVerdict { plan_file, .. } => Some(plan_file.clone()),
+        | ServerCall::InvokeClientTool { delivery_id, .. } => Some(delivery_id.clone()),
         _ => None,
     }
 }
@@ -702,12 +694,11 @@ mod tests {
         });
         server_conn.send_to_client(manox_protocol::FromServer::Request {
             id: manox_protocol::MsgId::new("req-2"),
-            call: manox_protocol::ServerCall::PlanVerdict {
+            call: manox_protocol::ServerCall::AskUserQuestion {
                 delivery_id: "dlv-s1-2".into(),
                 session_id: "s1".into(),
-                plan_file: "/plans/p.md".into(),
-                title: "Plan".into(),
-                content: None,
+                auth_id: "auth-2".into(),
+                input: serde_json::json!({"questions": []}),
             },
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -717,8 +708,8 @@ mod tests {
                 (
                     h.store.pending_auth.get("auth-1").cloned(),
                     h.store.pending_auth_delivery.get("auth-1").cloned(),
-                    h.store.pending_plan_verdict.get("/plans/p.md").cloned(),
-                    h.store.pending_plan_delivery.get("/plans/p.md").cloned(),
+                    h.store.pending_auth.get("auth-2").cloned(),
+                    h.store.pending_auth_delivery.get("auth-2").cloned(),
                 )
             });
             let landed = matches!(&got.0, Some(id) if *id == manox_protocol::MsgId::new("req-1"))

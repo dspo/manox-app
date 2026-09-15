@@ -35,7 +35,7 @@ Component names use PascalCase. The hierarchy mirrors the visual containment tre
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
 | Sub-agent 观察 | ✅ 部分 | rail 观察行（生命周期/活动）+ Agent 工具卡片实时流式子转录（text/thinking delta、工具 ▸/✓/✗ 行）；独立钻取面板随 manox 移除，卡片体即钻取面 |
-| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控 + 4 裁决选项；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
+| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewAsAskCard](#planreviewasaskcard)，三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
 分层纪律：crates/manox-harness/src/core 只做 TS Pi 对齐与扩展点；harness 能力扩展一律走
@@ -83,7 +83,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### AskDrawer
 
-- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerOtherInput](#askdrawerotherinput) · [AskDrawerResponseInput](#askdrawerresponseinput) · [AskDrawerNav](#askdrawernav)
+- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerCustomInput](#askdrawercustominput) · [AskDrawerSkipButton](#askdrawerskipbutton) · [AskDrawerNav](#askdrawernav) · [PlanReviewAsAskCard](#planreviewasaskcard) · [AskSettledElsewhereNotice](#asksettledelsewherenotice)
 
 ### Popups & Dropdowns
 
@@ -627,8 +627,7 @@ Title + stepper "N/M".
 
 Header tag + question text, then an optional `detail` block — markdown support
 text rendered with the repo `Markdown` component (`markdown_tv`) beneath the
-question. `detail` is where the plan-review body will ride once plan-review
-folds onto the ask channel (the card's intent derivation is a later commit).
+question. The plan-review body rides here (see [PlanReviewAsAskCard](#planreviewasaskcard)).
 
 > Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`)
 
@@ -674,6 +673,45 @@ Dismiss keeps `{"dismissed": true}`; the generic approval card's allow/deny leg
 (`resolve_auth`, `{"allow": …}`) is unchanged.
 
 > Source: `apps/desktop/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`)
+
+#### PlanReviewAsAskCard
+
+B2-PR-5: a proposed plan is no longer a dedicated `PlanVerdict` drawer with a
+four-choice verdict (that surface, its `PendingPlanReview` state / stash /
+overlay, and the `ExecuteFresh` create-and-reseed path are deleted). It reaches
+the client as a single-question [AskDrawer](#askdrawer) whose `input` carries
+`detail` = the plan body (markdown) and `intent = {kind: "plan-review",
+approve: "Approve"}` over three options — **Approve**, **Approve & compact**,
+**Request changes**. The card derives from those fields (no `PlanReady` event,
+no `ServerCall::PlanVerdict`): `intent.kind == "plan-review"` marks it a
+plan-review, and the affirmative option (`intent.approve`, matched against the
+question's own labels) renders highlighted (a `theme.primary` tint + border).
+
+The user's answer rides the normal canonical reply; the SERVER owns the verdict
+mapping (Approve → keep, Approve & compact → compact, anything else — Request
+changes / custom / skip → refine, and a card close → stop and stay in plan mode
+awaiting a message). The client sends no verdict enum. A free-form message while
+the card is up submits the card (per `AskDrawerNav`), not a separate dismissal.
+
+> Source: `apps/desktop/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card` Approve highlight)
+
+#### AskSettledElsewhereNotice
+
+PR-4 first-claim-wins: when an ask/approve delivery is settled on ANOTHER
+client (or the approve quorum fails remotely), the server sends a session-less
+`ServerNote::DeliveryCancelled { delivery_id }`. The multiplexer broadcasts it to
+every leaf (keyed by delivery id, not session); the owning leaf's
+`ClientStore::handle_delivery_cancelled` reverse-looks the delivery to its auth
+id, drops the reply (`pending_auth`) + withdrawal (`pending_auth_delivery`)
+correlations and the projection-set membership (so
+`reconcile_pending_with_projections` retires the card — under the
+`pending_projection_confirmed` guard), and arms the auth id in
+`settled_elsewhere`. The workspace's `notice_settled_elsewhere` then drains the
+set and surfaces one transient `Notification::info` ("handled on another
+client"). A local settle (`resolve_ask` / `dismiss_ask` / `resolve_auth`) calls
+`retire_auth` so a later note for the same delivery cannot mis-fire the notice.
+
+> Source: `apps/desktop/agent-ui/src/client_store.rs` (`handle_delivery_cancelled`, `retire_auth`) + `apps/desktop/agent-ui/src/client_store_handle.rs` + `apps/desktop/agent-ui/src/multiplexer.rs` (broadcast) + `apps/desktop/agent-ui/src/workspace/chips.rs` (`notice_settled_elsewhere`)
 
 #### 3.2.4 Popups & Dropdowns
 

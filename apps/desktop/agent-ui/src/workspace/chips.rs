@@ -547,12 +547,13 @@ impl Workspace {
     }
 
     /// Exact registration match of a canonical model identity against the
-    /// kernel provider registry, returning the kernel `Model`. U2 retired
-    /// this from the DISPLAY surfaces (the chip and the menu resolve against
-    /// the gateway's wire snapshot — [`Self::resolve_model_display`]); what
-    /// remains is the `ExecuteFresh` facade seeding, which constructs a
-    /// kernel `Thread` and needs a kernel `Model` (U6/attach surface). A
+    /// kernel provider registry, returning the kernel `Model`. The display
+    /// surfaces resolve against the gateway's wire snapshot
+    /// ([`Self::resolve_model_display`]); this kernel-model resolver outlived the
+    /// `ExecuteFresh` facade that was its last production caller (retired by
+    /// B2-PR-5), so it now exists for the model-resolution unit tests only. A
     /// stale id resolves to `None`, never a fuzzy look-alike.
+    #[cfg(test)]
     pub(crate) fn resolve_model_identity(
         provider: &str,
         id: &str,
@@ -563,6 +564,7 @@ impl Workspace {
     /// The pure core of [`Self::resolve_model_identity`] against an explicit
     /// registry (tests construct one synchronously — the global builds on a
     /// background thread).
+    #[cfg(test)]
     pub(crate) fn resolve_model_identity_in(
         registry: &manox_harness::core::ProviderRegistry,
         provider: &str,

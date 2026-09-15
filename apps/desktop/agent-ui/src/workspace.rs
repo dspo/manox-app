@@ -47,7 +47,6 @@ use gpui_component::{
 /// ChatGPT.app launch path (#410) reports outcomes under either harness.
 use gpui_component::{WindowExt as _, notification::Notification, tooltip::Tooltip};
 use manox_agent::PermissionDecision;
-use manox_agent::collaboration_mode::PlanReviewChoice;
 use manox_agent::language_model::StopReason;
 use manox_agent::thread::PermissionMode;
 use manox_agent::thread_engine::BrowserTabId;
@@ -620,15 +619,6 @@ enum RegistryTurnKind {
     Skill,
 }
 
-/// A submitted plan file awaiting the user's review verdict. Carries the
-/// plan file path, its resolved title, and the file content rendered into
-/// the review card.
-struct PendingPlanReview {
-    plan_file: String,
-    title: String,
-    content: String,
-}
-
 pub struct Workspace {
     pub(crate) cwd: PathBuf,
     pub(crate) thread: manox_agent::thread::ThreadHandle,
@@ -773,16 +763,6 @@ pub struct Workspace {
     /// synchronized before list construction; the row factory itself remains
     /// a read-only projection during measurement and prepaint.
     ask_snapshot_item: Option<Entity<MessageItem>>,
-    /// A completed plan awaiting the user's implement / clear-context verdict,
-    /// rendered as the inline plan-review drawer card.
-    pending_plan_review: Option<PendingPlanReview>,
-    /// Per-thread stash of `pending_plan_review`, keyed by thread id. A
-    /// pending plan never enters persisted messages (the `<proposed_plan>`
-    /// block is stripped before the assistant text is saved), so without this
-    /// stash the verdict card + buttons vanish on a switch-away/switch-back
-    /// round-trip. Mirrors `drafts`: populated on switch-away, drained on
-    /// switch-back.
-    pending_plans: HashMap<String, PendingPlanReview>,
     /// Current question index in the ask drawer (0-based).
     ask_step: usize,
     /// Animation generation counter for the ask drawer slide, bumped on every
@@ -1159,7 +1139,6 @@ impl Workspace {
             "desktop",
             vec![
                 manox_protocol::AnswerKind::Approve,
-                manox_protocol::AnswerKind::PlanVerdict,
                 manox_protocol::AnswerKind::AskUserQuestion,
             ],
             vec![],
@@ -1277,8 +1256,6 @@ impl Workspace {
             pending_auth: None,
             pending_projection_confirmed: false,
             ask_snapshot_item: None,
-            pending_plan_review: None,
-            pending_plans: HashMap::new(),
             ask_step: 0,
             ask_transition_gen: 0,
             ask_custom_inputs: Vec::new(),
@@ -1531,32 +1508,6 @@ impl Workspace {
             .is_some()
     }
 
-    /// Whether a plan review is currently awaiting a verdict. Diagnostic-only.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_pending_plan_review(&self) -> bool {
-        self.pending_plan_review.is_some()
-    }
-
-    /// Whether a stashed plan review exists for the given thread.
-    /// Diagnostic-only.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_has_stashed_plan(&self, id: &str) -> bool {
-        self.pending_plans.contains_key(id)
-    }
-
-    /// Whether the conversation's tail item is an *active* plan review card
-    /// (verdict buttons rendered). Diagnostic-only.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_tail_plan_active(&self, cx: &App) -> bool {
-        let Some(last) = self.conversation.read(cx).items().last() else {
-            return false;
-        };
-        matches!(
-            last.read(cx).kind(),
-            ConvItem::PlanReview { active: true, .. }
-        )
-    }
-
     /// Count of top-level `ToolCall` items with the given id. Diagnostic-only.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_tool_call_count(&self, id: &str, cx: &App) -> usize {
@@ -1798,33 +1749,6 @@ impl Workspace {
                     // desktop mirror write that only raced it.
                     cx.notify();
                 }
-                ThreadEvent::PlanReady { plan_file, title } => {
-                    // The model submitted the plan through `ProposePlan`; read
-                    // the file once for the review card body.
-                    let content = std::fs::read_to_string(plan_file.as_str()).unwrap_or_default();
-                    let weak = cx.weak_entity();
-                    let role = this.model_label(cx);
-                    this.conversation.update(cx, |c, cx| {
-                        c.push_plan_review(title.clone(), content.clone(), role, weak, cx);
-                    });
-                    this.pending_plan_review = Some(PendingPlanReview {
-                        plan_file: plan_file.clone(),
-                        title: title.clone(),
-                        content,
-                    });
-                    // The AgentServer pump already persisted the pending
-                    // verdict flag on PlanReady (agent_server.rs), so a
-                    // restart re-emits the card without a UI-side write —
-                    // and U3a: the pump's store write + SessionStatus delta
-                    // are the badge's single writer. The sidebar row pauses
-                    // its spinner (blue static) while the verdict is due;
-                    // `respond_plan_review` releases it.
-                    this.sync_list_count(cx);
-                    // The finalized plan surfaces at the tail; reveal it like any
-                    // user-initiated jump to the live end.
-                    this.list_state.set_follow_mode(FollowMode::Tail);
-                    cx.notify();
-                }
                 ThreadEvent::PlanModeChanged { .. } => {
                     // Refresh the plan chip.
                     cx.notify();
@@ -1972,17 +1896,6 @@ impl Workspace {
                     // card's own demote below is UI state, not a store flag.
                     this.turn_active = false;
                     this.background_threads.retain(|b| b.id != thread_id);
-                    // Only a cancelled/failed turn demotes an outstanding plan
-                    // review — the verdict is moot once the loop released the
-                    // turn abnormally. A normal settle right after
-                    // `ProposePlan` keeps the card active so the user can
-                    // still choose a verdict; demoting it here made the card
-                    // flash its buttons and collapse to a plain record.
-                    if (*cancelled || *failed) && this.pending_plan_review.take().is_some() {
-                        this.conversation
-                            .update(cx, |c, cx| c.consume_plan_review(cx));
-                        this.list_state.remeasure();
-                    }
                     this.spawn_git_status_refresh(cx);
                     // Dispatch last: `run_turn` emits `TurnStarted`
                     // synchronously, so no terminal bookkeeping above may run
@@ -2124,17 +2037,6 @@ impl Workspace {
                             None,
                             cx,
                         );
-                        // An error is a terminal state symmetric to a terminal
-                        // `Stop`: the turn aborted, so any pending plan review
-                        // is now stale and must not linger over an idle thread.
-                        if this.pending_plan_review.take().is_some() {
-                            this.conversation
-                                .update(cx, |c, cx| c.consume_plan_review(cx));
-                            // The demoted plan card stays in place but flips
-                            // inactive — remeasure so the list's cached height
-                            // for it stays honest.
-                            this.list_state.remeasure();
-                        }
                         // The run task emits `TurnFinished` after it has cleared
                         // `running_turn`; queue recovery and follow-up dispatch
                         // happen there.
@@ -2585,8 +2487,7 @@ impl Workspace {
     }
 
     fn blocking_overlay_active(&self) -> bool {
-        self.pending_plan_review.is_some()
-            || self.pending_ask.is_some()
+        self.pending_ask.is_some()
             || self.pending_auth.is_some()
             || self.blank_project_parent.is_some()
     }
@@ -2893,18 +2794,6 @@ impl Workspace {
             self.model_label(cx),
             Some(permission_mode),
         )
-    }
-
-    fn message_ui_metadata(meta: &UserTurnMeta) -> manox_agent::MessageUiMetadata {
-        manox_agent::MessageUiMetadata {
-            model_id: (!meta.model_id.is_empty()).then(|| meta.model_id.clone()),
-            approval_mode: meta.approval_mode.map(|mode| mode.as_i64()),
-            steered: meta.steered.then_some(true),
-            external_event: None,
-            author: meta.author.clone(),
-            peer: meta.peer,
-            display_text: None,
-        }
     }
 
     pub(crate) fn model_label(&self, cx: &mut Context<Self>) -> String {

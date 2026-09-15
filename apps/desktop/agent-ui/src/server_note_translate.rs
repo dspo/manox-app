@@ -4,8 +4,7 @@
 //! module: the session-domain note arms are gone, and the v2 successor for
 //! their events is [`crate::journal_translate`] (journal rows → the same
 //! `ThreadEvent` vocabulary). `server_call_to_thread_event` stays: the
-//! adjudication waterfall (Approve / AskUserQuestion / PlanVerdict) still
-//! rides `ServerCall`.
+//! adjudication waterfall (Approve / AskUserQuestion) still rides `ServerCall`.
 
 use manox_agent::ThreadEvent;
 use manox_protocol::{ServerCall, ServerNote};
@@ -19,10 +18,13 @@ pub fn server_note_to_thread_event(note: &ServerNote) -> Option<ThreadEvent> {
     Some(match note {
         Error { message, .. } => ThreadEvent::Error(anyhow::anyhow!("{}", message)),
         // No ThreadEvent counterpart: owner control, the list channel, the
-        // model-chat side stream.
+        // model-chat side stream, and the PR-4 "settled on another client"
+        // notice (the leaf folds it against `pending_auth`; no transcript
+        // event — the workspace surfaces a transient notice, see D3).
         Ready
         | SessionCreated { .. }
         | SessionDisposed { .. }
+        | DeliveryCancelled { .. }
         | ThreadsUpdated { .. }
         | Models { .. }
         | Commands { .. }
@@ -56,12 +58,6 @@ pub fn server_call_to_thread_event(call: &ServerCall) -> Option<ThreadEvent> {
             tool_name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
             summary: String::new(),
             input: input.clone(),
-        }),
-        PlanVerdict {
-            plan_file, title, ..
-        } => Some(ThreadEvent::PlanReady {
-            plan_file: plan_file.clone(),
-            title: title.clone(),
         }),
         // Round 4 §4.3: the desktop implements none of the capability calls
         // — dropping them silently is fail-open (the server parks on the
@@ -154,21 +150,6 @@ mod tests {
             server_call_to_thread_event(&call),
             Some(ThreadEvent::ToolCallAuthorization { tool_name, .. })
                 if tool_name == manox_agent::tools::ASK_USER_QUESTION
-        ));
-    }
-
-    #[test]
-    fn plan_verdict_maps_to_plan_ready() {
-        let call = ServerCall::PlanVerdict {
-            delivery_id: "dlv-3".into(),
-            session_id: "s1".into(),
-            plan_file: "/plan.md".into(),
-            title: "Plan".into(),
-            content: None,
-        };
-        assert!(matches!(
-            server_call_to_thread_event(&call),
-            Some(ThreadEvent::PlanReady { plan_file, .. }) if plan_file == "/plan.md"
         ));
     }
 

@@ -160,17 +160,6 @@ pub enum ConvItem {
         collapsed: bool,
         user_toggled: bool,
     },
-    /// A plan review item rendered as a bordered card in the message list.
-    /// Carries the finalized `<proposed_plan>` text so the user can read it
-    /// inline. `active` distinguishes the one plan currently awaiting a
-    /// verdict (drawer + footer buttons) from prior plans already consumed by
-    /// a verdict or a free-form message (plain read-only record, no buttons) —
-    /// a consumed plan must not be re-judgeable.
-    PlanReview {
-        title: String,
-        plan_text: String,
-        active: bool,
-    },
     /// A background task status card — shows a Monitor or background Bash
     /// task's kind, description, task ID, status, event count, and Stop
     /// button while running. Updated in-place by task ID.
@@ -685,35 +674,6 @@ impl ConversationState {
         ix
     }
 
-    /// Push a plan-review card at the tail of the conversation. The card
-    /// renders the finalized `<proposed_plan>` text inline as a read-only
-    /// bordered card with a height-limited markdown body.
-    /// Pushed `active` — a fresh `PlanReady` always awaits a verdict; the card
-    /// is demoted to an inactive record by `consume_plan_review` once the user
-    /// acts on it (verdict or free-form message).
-    pub fn push_plan_review(
-        &mut self,
-        title: String,
-        plan_text: String,
-        role: String,
-        weak: WeakEntity<Workspace>,
-        cx: &mut App,
-    ) {
-        let id = self.alloc_id();
-        self.items.push(cx.new(|_| {
-            MessageItem::new(
-                ConvItem::PlanReview {
-                    title,
-                    plan_text,
-                    active: true,
-                },
-                role,
-                id,
-                weak,
-            )
-        }));
-    }
-
     /// Push a synthetic top-level `ToolCall` card at the tail, mirroring the
     /// gate-created AskUserQuestion card. The workspace synthesizes it when
     /// re-surfacing a pending authorization whose live `ToolCall` event was
@@ -732,46 +692,6 @@ impl ConversationState {
         let item_id = self.alloc_id();
         self.items
             .push(cx.new(|_| MessageItem::new(ConvItem::ToolCall(item), role, item_id, weak)));
-    }
-
-    /// Mark the most recent plan-review card as no longer actionable: a verdict
-    /// was clicked or a free-form message superseded it. Only the tail plan can
-    /// be active (every prior one was already consumed when its turn ended), so
-    /// the first `PlanReview` found scanning from the tail is the one to demote.
-    pub fn consume_plan_review(&mut self, cx: &mut App) {
-        for item in self.items.iter().rev() {
-            let is_active_plan = matches!(
-                item.read(cx).kind(),
-                ConvItem::PlanReview { active: true, .. }
-            );
-            if is_active_plan {
-                item.update(cx, |it, cx| {
-                    if let ConvItem::PlanReview { active, .. } = it.kind_mut() {
-                        *active = false;
-                    }
-                    cx.notify();
-                });
-                break;
-            }
-        }
-    }
-
-    /// Drop the most recent plan-review card outright. Called only on an
-    /// implement verdict, where the pending plan card is by construction the
-    /// live tail (a fresh `PlanReady` always lands at the tail and nothing is
-    /// pushed between the card and the verdict) — so a tail pop is the safe
-    /// removal. The verdict's own user bubble is pushed in its place, carrying
-    /// the same plan text the thread injects, so live and rebuilt views match.
-    pub fn pop_plan_review_tail(&mut self, cx: &mut App) -> bool {
-        let is_plan = self
-            .items
-            .last()
-            .map(|last| matches!(last.read(cx).kind(), ConvItem::PlanReview { .. }))
-            .unwrap_or(false);
-        if is_plan {
-            self.items.pop();
-        }
-        is_plan
     }
 
     pub fn find_tool(&self, id: &str, cx: &App) -> Option<usize> {
@@ -1994,12 +1914,9 @@ fn note_to_item(n: &UiNoteRecord) -> ConvItem {
         UiNoteKind::Error => ConvItem::Error(text),
         UiNoteKind::Notice => ConvItem::Notice(text),
         // Legacy manox-era notes render as plain notices; pi sessions never
-        // persist plan-review notes.
-        UiNoteKind::PlanReview => ConvItem::PlanReview {
-            title: String::new(),
-            plan_text: text,
-            active: false,
-        },
+        // persist plan-review notes (a plan now reaches the user as an
+        // `AskUserQuestion` with a `plan-review` intent, not a verdict card).
+        UiNoteKind::PlanReview => ConvItem::Notice(text),
     }
 }
 
@@ -2255,7 +2172,6 @@ mod tests {
                 ConvItem::Assistant { text, .. } => format!("A:{text}"),
                 ConvItem::Notice(t) => format!("N:{t}"),
                 ConvItem::Error(t) => format!("E:{t}"),
-                ConvItem::PlanReview { plan_text, .. } => format!("P:{plan_text}"),
                 _ => "?".to_string(),
             })
             .collect()

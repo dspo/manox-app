@@ -4329,3 +4329,68 @@ fn positional_fallback_ids_stay_distinct_past_three_questions(cx: &mut gpui::Tes
     );
     let _ = std::fs::remove_file(&f.db_path);
 }
+
+/// B2-PR-5 (plan-review folds onto the ask channel): a plan-review now reaches
+/// the client as a single-question `AskUserQuestion` whose `intent.kind` is
+/// `plan-review`, `detail` carries the plan body, and `intent.approve` names the
+/// affirmative option. The client derives its plan-review card purely from
+/// these fields — no dedicated `PlanVerdict` call any more — so `parse_pending_ask`
+/// must surface them verbatim and the approve label must be one of the
+/// question's own options (the invariant the card's Approve highlight keys on).
+#[test]
+fn plan_review_ask_parses_intent_detail_and_approve() {
+    let payload = serde_json::json!({
+        "questions": [{
+            "id": "plan-review",
+            "question": "Review the proposed plan?",
+            "header": "Plan",
+            "detail": "# the plan\n\n- do the thing",
+            "intent": {"kind": "plan-review", "approve": "Approve"},
+            "options": [
+                {"label": "Approve"},
+                {"label": "Approve & compact"},
+                {"label": "Request changes"}
+            ]
+        }]
+    });
+    let ask = super::parse_pending_ask("ask1".into(), payload).expect("plan-review ask parses");
+    assert_eq!(ask.questions.len(), 1, "a plan-review is one question");
+    let q = &ask.questions[0];
+    assert_eq!(q.id, "plan-review", "the server-minted id is preserved");
+    assert_eq!(
+        q.detail, "# the plan\n\n- do the thing",
+        "the plan body rides detail"
+    );
+    let intent = q.intent.as_ref().expect("intent present");
+    assert_eq!(
+        intent.kind, "plan-review",
+        "the derivation keys on this kind"
+    );
+    assert_eq!(
+        intent.approve, "Approve",
+        "the affirmative label is captured"
+    );
+    assert!(
+        q.options.iter().any(|o| o.label == intent.approve),
+        "approve must name one of this question's own options (the highlight invariant)"
+    );
+}
+
+/// A plain ask (no `intent`) parses with `intent == None`, so the card renders
+/// the generic tri-state (no Approve highlight) — the plan-review branch is
+/// opt-in purely off `intent.kind`, never a guess.
+#[test]
+fn a_plain_ask_carries_no_intent() {
+    let payload = serde_json::json!({
+        "questions": [{"question": "Which color?", "options": [{"label": "Red"}]}]
+    });
+    let ask = super::parse_pending_ask("ask1".into(), payload).expect("plain ask parses");
+    assert!(
+        ask.questions[0].intent.is_none(),
+        "no intent → generic ask card"
+    );
+    assert!(
+        ask.questions[0].detail.is_empty(),
+        "no detail → no markdown block"
+    );
+}
