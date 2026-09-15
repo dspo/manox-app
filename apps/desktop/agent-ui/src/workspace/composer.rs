@@ -43,7 +43,7 @@ impl Workspace {
             return;
         };
         for item in queue.iter_mut() {
-            if matches!(item.state, FollowUpState::SteerPending) {
+            if let FollowUpState::SteerPending { .. } = &item.state {
                 item.state = FollowUpState::Failed;
             }
         }
@@ -57,7 +57,7 @@ impl Workspace {
         let Some(queue) = self.queued_follow_ups_by_thread.get_mut(thread_id) else {
             return;
         };
-        queue.retain(|item| !matches!(item.state, FollowUpState::SteerPending));
+        queue.retain(|item| !matches!(item.state, FollowUpState::SteerPending { .. }));
         if queue.is_empty() {
             self.queued_follow_ups_by_thread.remove(thread_id);
         }
@@ -423,19 +423,21 @@ impl Workspace {
     /// Promote a parked follow-up to an ONLINE steer: mint a local message id,
     /// hand the message to the server's steer queue for the running turn. The
     /// card stays parked in the queue (the caller re-inserts it at the
-    /// steer-group boundary) and only enters the conversation when the turn
-    /// settles. The old path called `thread.enqueue_steer` on the engine-less
-    /// render mirror, which only inserted a local id and never reached the
-    /// server — a dead end. The message id is the server's correlation handle
-    /// (the all-or-nothing settle needs no client-side copy).
-    pub(super) fn enqueue_steer_pending(&mut self, turn: &DeferredUserTurn) {
+    /// steer-group boundary) until the model consumes it — the injected row
+    /// retires it ([`Self::retire_injected_steer`]). The old path called
+    /// `thread.enqueue_steer` on the engine-less render mirror, which only
+    /// inserted a local id and never reached the server — a dead end.
+    /// Returns the minted `message_id`: the server threads it through as the
+    /// injected row's durable identity, so the card retires by id.
+    pub(super) fn enqueue_steer_pending(&mut self, turn: &DeferredUserTurn) -> String {
         let message_id = uuid::Uuid::new_v4().to_string();
         let attachments: Vec<manox_protocol::ImageAttachment> = turn
             .images
             .iter()
             .filter_map(wire_image_attachment)
             .collect();
-        self.send_steer_v2(message_id, turn.text.clone(), attachments);
+        self.send_steer_v2(message_id.clone(), turn.text.clone(), attachments);
+        message_id
     }
 
     /// Index at which a promoted steer card belongs so the queue keeps its
@@ -466,7 +468,7 @@ impl Workspace {
         if !self
             .queued_follow_ups
             .iter()
-            .any(|item| matches!(item.state, FollowUpState::SteerPending))
+            .any(|item| matches!(item.state, FollowUpState::SteerPending { .. }))
         {
             return;
         }
@@ -476,7 +478,7 @@ impl Workspace {
         let mut retain: Vec<QueuedFollowUp> = Vec::new();
         while let Some(item) = self.queued_follow_ups.pop_front() {
             match item.state {
-                FollowUpState::SteerPending => {
+                FollowUpState::SteerPending { .. } => {
                     let mut meta = item.turn.meta.clone();
                     // The 「已引导」 badge rides `meta.steered` (rendered in
                     // `render_user`), now that the pending bubble is gone.
@@ -499,6 +501,49 @@ impl Workspace {
         if !promoted {
             return;
         }
+        self.sync_list_count(cx);
+        if follow_tail {
+            self.follow_message_tail();
+        }
+        self.list_state.remeasure();
+        cx.notify();
+    }
+
+    /// Retire ONE `SteerPending` card whose injected row just landed
+    /// (`ThreadEvent::UserRowLanded`): the model has consumed the steer, so the
+    /// card leaves the queue immediately and its `steered` bubble enters the
+    /// list — the dsh `claimed` instant, not the turn boundary. A no-op when no
+    /// card matches the id (every ordinary prompt row reports the same event;
+    /// only steers carry a card id). The settle path stays as the fallback for
+    /// a row that raced it.
+    pub(super) fn retire_injected_steer(&mut self, message_id: &str, cx: &mut Context<Self>) {
+        let Some(pos) = self
+            .queued_follow_ups
+            .iter()
+            .position(|item| match &item.state {
+                FollowUpState::SteerPending { message_id: card } => card.as_str() == message_id,
+                _ => false,
+            })
+        else {
+            return;
+        };
+        let Some(item) = self.queued_follow_ups.remove(pos) else {
+            return;
+        };
+        let weak = cx.weak_entity();
+        let follow_tail = self.list_state.is_following_tail();
+        let mut meta = item.turn.meta.clone();
+        // The 「已引导」 badge rides `meta.steered` (rendered in `render_user`).
+        meta.steered = true;
+        self.conversation.update(cx, |c, cx| {
+            c.push_user(
+                item.turn.text.clone(),
+                item.turn.user_images.clone(),
+                meta,
+                weak,
+                cx,
+            )
+        });
         self.sync_list_count(cx);
         if follow_tail {
             self.follow_message_tail();
@@ -611,7 +656,7 @@ impl Workspace {
     pub(super) fn mark_stranded_steers_failed(&mut self, cx: &mut Context<Self>) {
         let mut any = false;
         for item in self.queued_follow_ups.iter_mut() {
-            if matches!(item.state, FollowUpState::SteerPending) {
+            if let FollowUpState::SteerPending { .. } = &item.state {
                 item.state = FollowUpState::Failed;
                 any = true;
             }
@@ -642,8 +687,8 @@ impl Workspace {
                     // (Re-)send the online steer and re-insert at the steer-group
                     // boundary, so the promoted card joins the trailing group of
                     // in-flight / failed steers ahead of the plain queue.
-                    self.enqueue_steer_pending(&item.turn);
-                    item.state = FollowUpState::SteerPending;
+                    let message_id = self.enqueue_steer_pending(&item.turn);
+                    item.state = FollowUpState::SteerPending { message_id };
                     let insert_at = Self::steer_group_insert_index(&self.queued_follow_ups);
                     self.queued_follow_ups.insert(insert_at, item);
                     cx.notify();
@@ -652,7 +697,7 @@ impl Workspace {
                     self.append_and_run_user_turn(item.turn, weak, cx);
                 }
             }
-            FollowUpState::SteerPending => {
+            FollowUpState::SteerPending { .. } => {
                 // Already handed to the server steer queue; restore untouched
                 // (wherever the last settle left it).
                 let insert_at = Self::steer_group_insert_index(&self.queued_follow_ups);
@@ -726,7 +771,7 @@ impl Workspace {
         let Some(item) = self.queued_follow_ups.remove(idx) else {
             return;
         };
-        if matches!(item.state, FollowUpState::SteerPending) {
+        if matches!(item.state, FollowUpState::SteerPending { .. }) {
             self.queued_follow_ups.insert(idx, item);
             return;
         }
@@ -755,7 +800,7 @@ impl Workspace {
         let Some(item) = self.queued_follow_ups.get(idx) else {
             return;
         };
-        if matches!(item.state, FollowUpState::SteerPending) {
+        if matches!(item.state, FollowUpState::SteerPending { .. }) {
             return;
         }
         self.queued_follow_ups.remove(idx);
@@ -774,7 +819,7 @@ impl Workspace {
                     cx.notify();
                     return;
                 }
-                FollowUpState::SteerPending => return,
+                FollowUpState::SteerPending { .. } => return,
                 FollowUpState::Failed => {
                     self.queued_follow_ups.pop_back();
                 }

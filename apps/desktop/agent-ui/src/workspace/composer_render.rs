@@ -259,7 +259,7 @@ impl Workspace {
         let mut rows = Vec::with_capacity(self.queued_follow_ups.len());
         for (idx, item) in self.queued_follow_ups.iter().enumerate() {
             let line = queue_row_line(&item.turn.text);
-            let is_pending = matches!(item.state, FollowUpState::SteerPending);
+            let is_pending = matches!(item.state, FollowUpState::SteerPending { .. });
             let danger = matches!(item.state, FollowUpState::Failed);
             // SteerPending: read-only status row (no buttons, no handle)
             if is_pending {

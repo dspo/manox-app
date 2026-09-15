@@ -177,6 +177,15 @@ pub fn history_entries_of(entry: &JournalWireEntry) -> Vec<HistoryEntry> {
 /// delta rows below.
 pub fn thread_event_of(entry: &JournalWireEntry) -> Option<ThreadEvent> {
     Some(match &entry.event {
+        // A `user` row landing IS the claim instant for a steer: the server
+        // threads the client-minted id through as the row's durable identity
+        // (stable id), so the workspace retires the matching card. Ordinary
+        // prompt rows report the same event and no-op (no card carries their
+        // id). The turn-boundary `TurnFinish` row below stays the fallback.
+        JournalWireEvent::Message { role, .. } if role == "user" => ThreadEvent::UserRowLanded {
+            message_id: entry.id.clone(),
+        },
+        JournalWireEvent::Message { .. } => return None,
         JournalWireEvent::AgentTextDelta { s } => ThreadEvent::AgentText(s.clone()),
         JournalWireEvent::AgentThinkingDelta { s } => ThreadEvent::AgentThinking(s.clone()),
         JournalWireEvent::ToolCall {
@@ -545,6 +554,29 @@ mod tests {
         }
     }
 
+    /// The claim instant (dsh `claimed`): a `user` row landing maps to
+    /// `ThreadEvent::UserRowLanded` carrying the row's durable id — the
+    /// client-minted steer id the server threads through. Assistant rows stay
+    /// event-less (they stream via deltas), so nothing else fires.
+    #[test]
+    fn user_message_rows_map_to_user_row_landed_by_id() {
+        let ev = |role: &str| JournalWireEvent::Message {
+            role: role.into(),
+            content: vec![serde_json::json!({"type": "text", "text": "x"})],
+            usage: None,
+            origin_rpc: None,
+            display: None,
+        };
+        match thread_event_of(&wire(7, ev("user"))) {
+            Some(ThreadEvent::UserRowLanded { message_id }) => assert_eq!(message_id, "entry-7"),
+            other => panic!("expected UserRowLanded, got {other:?}"),
+        }
+        assert!(
+            thread_event_of(&wire(8, ev("assistant"))).is_none(),
+            "assistant rows carry no claim event"
+        );
+    }
+
     #[test]
     fn user_message_row_becomes_display_message() {
         let entry = wire(
@@ -722,10 +754,14 @@ mod tests {
 
     #[test]
     fn transcript_rows_have_no_live_event() {
+        // `user` rows DO carry the claim edge now (UserRowLanded, asserted in
+        // `user_message_rows_map_to_user_row_landed_by_id`); every other
+        // transcript row stays event-less — they render through the display
+        // fold, not the live channel.
         let message = wire(
             5,
             JournalWireEvent::Message {
-                role: "user".into(),
+                role: "assistant".into(),
                 content: vec![],
                 usage: None,
                 origin_rpc: None,
@@ -733,7 +769,18 @@ mod tests {
             },
         );
         assert!(thread_event_of(&message).is_none());
-        let title = wire(6, JournalWireEvent::Title { title: "t".into() });
+        let tool = wire(
+            6,
+            JournalWireEvent::Message {
+                role: "tool".into(),
+                content: vec![],
+                usage: None,
+                origin_rpc: None,
+                display: None,
+            },
+        );
+        assert!(thread_event_of(&tool).is_none());
+        let title = wire(7, JournalWireEvent::Title { title: "t".into() });
         assert!(thread_event_of(&title).is_none());
     }
 

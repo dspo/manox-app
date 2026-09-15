@@ -924,7 +924,8 @@ impl ConversationState {
             // workspace owns the queue→list transition (it pairs the event with
             // the matching `SteerPending` queue card and pushes the bubble here
             // via `push_user`); the conversation list takes no direct action.
-            | ThreadEvent::SteerInjected { .. } => ApplyOutcome::Unchanged,
+            | ThreadEvent::SteerInjected { .. }
+            | ThreadEvent::UserRowLanded { .. } => ApplyOutcome::Unchanged,
             // The pi backend restored an existing session; the workspace
             // rebuilds the conversation from the authoritative history.
             | ThreadEvent::HistoryRestored => ApplyOutcome::Unchanged,

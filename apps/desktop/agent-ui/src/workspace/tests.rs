@@ -943,14 +943,26 @@ fn steer_group_insert_index_keeps_steers_before_the_queue() {
         [q(S::Queued), q(S::Queued)].into_iter().collect();
     assert_eq!(super::Workspace::steer_group_insert_index(&all_queued), 0);
 
-    let all_steers: std::collections::VecDeque<_> =
-        [q(S::SteerPending), q(S::Failed)].into_iter().collect();
+    let all_steers: std::collections::VecDeque<_> = [
+        q(S::SteerPending {
+            message_id: "k".into(),
+        }),
+        q(S::Failed),
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(super::Workspace::steer_group_insert_index(&all_steers), 2);
 
-    let mixed: std::collections::VecDeque<_> =
-        [q(S::SteerPending), q(S::Failed), q(S::Queued), q(S::Queued)]
-            .into_iter()
-            .collect();
+    let mixed: std::collections::VecDeque<_> = [
+        q(S::SteerPending {
+            message_id: "k".into(),
+        }),
+        q(S::Failed),
+        q(S::Queued),
+        q(S::Queued),
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(super::Workspace::steer_group_insert_index(&mixed), 2);
 }
 
@@ -973,10 +985,16 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     };
     use super::FollowUpState as S;
 
-    let queue: std::collections::VecDeque<_> =
-        [q(S::SteerPending), q(S::Queued), q(S::Queued), q(S::Queued)]
-            .into_iter()
-            .collect();
+    let queue: std::collections::VecDeque<_> = [
+        q(S::SteerPending {
+            message_id: "k".into(),
+        }),
+        q(S::Queued),
+        q(S::Queued),
+        q(S::Queued),
+    ]
+    .into_iter()
+    .collect();
 
     // Forward move: row 1 dropped below row 3 → lands at the tail.
     assert_eq!(
@@ -1158,7 +1176,7 @@ fn steer_click_wires_online_steer_and_parks_the_card(cx: &mut gpui::TestAppConte
         assert!(
             matches!(
                 ws.queued_follow_ups[0].state,
-                super::FollowUpState::SteerPending
+                super::FollowUpState::SteerPending { .. }
             ),
             "a running steer parks the card as SteerPending"
         );
@@ -1233,7 +1251,14 @@ fn settle_promotes_pending_steers_into_the_list(cx: &mut gpui::TestAppContext) {
         }
     };
     ws.update(cx, |ws, cx| {
-        let steer = mk("the steer", super::FollowUpState::SteerPending, ws, cx);
+        let steer = mk(
+            "the steer",
+            super::FollowUpState::SteerPending {
+                message_id: "steer-1".into(),
+            },
+            ws,
+            cx,
+        );
         ws.queued_follow_ups.push_back(steer);
         let plain = mk("plain queue", super::FollowUpState::Queued, ws, cx);
         ws.queued_follow_ups.push_back(plain);
@@ -1305,7 +1330,9 @@ fn cancelled_settle_strands_steers_without_a_bubble(cx: &mut gpui::TestAppContex
                 meta,
                 user_images: vec![],
             },
-            state: super::FollowUpState::SteerPending,
+            state: super::FollowUpState::SteerPending {
+                message_id: "steer-strand".into(),
+            },
         });
     });
     let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
@@ -1320,6 +1347,109 @@ fn cancelled_settle_strands_steers_without_a_bubble(cx: &mut gpui::TestAppContex
     });
     let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
     assert_eq!(before, after, "a stranded steer must not add a bubble");
+}
+
+/// Retire-on-injection (dsh `claimed`): the card leaves the queue the moment
+/// its injected row lands — long before the turn boundary — and an unmatched
+/// id (any ordinary prompt row reports the same event) is a no-op.
+#[gpui::test]
+fn injected_row_landing_retires_the_matching_steer_card(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let ws = captured.borrow().clone().expect("workspace captured");
+    let mk = |text: &str, state, ws: &mut Workspace, cx: &mut Context<Workspace>| {
+        super::QueuedFollowUp {
+            turn: super::DeferredUserTurn {
+                text: text.into(),
+                images: vec![],
+                meta: ws.user_turn_meta(cx),
+                user_images: vec![],
+            },
+            state,
+        }
+    };
+    ws.update(cx, |ws, cx| {
+        let first = mk(
+            "first steer",
+            super::FollowUpState::SteerPending {
+                message_id: "steer-a".into(),
+            },
+            ws,
+            cx,
+        );
+        ws.queued_follow_ups.push_back(first);
+        let second = mk(
+            "second steer",
+            super::FollowUpState::SteerPending {
+                message_id: "steer-b".into(),
+            },
+            ws,
+            cx,
+        );
+        ws.queued_follow_ups.push_back(second);
+        let plain = mk("plain queue", super::FollowUpState::Queued, ws, cx);
+        ws.queued_follow_ups.push_back(plain);
+    });
+    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+
+    // An ordinary prompt row (id carries no card) is inert.
+    ws.update(cx, |ws, cx| ws.retire_injected_steer("prompt-row", cx));
+    ws.read_with(cx, |ws, _| {
+        assert_eq!(
+            ws.queued_follow_ups.len(),
+            3,
+            "unmatched id changes nothing"
+        );
+    });
+
+    // The injected row for steer-b retires exactly that card, immediately.
+    ws.update(cx, |ws, cx| ws.retire_injected_steer("steer-b", cx));
+    ws.read_with(cx, |ws, _| {
+        assert_eq!(ws.queued_follow_ups.len(), 2, "the injected card left");
+        assert!(matches!(
+            ws.queued_follow_ups[0].state,
+            super::FollowUpState::SteerPending { .. }
+        ));
+        assert!(matches!(
+            ws.queued_follow_ups[1].state,
+            super::FollowUpState::Queued
+        ));
+    });
+    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    assert_eq!(after, before + 1, "exactly one steered bubble appears");
+    ws.read_with(cx, |ws, cx| {
+        let items = ws.conversation.read(cx).items();
+        let last = items.last().expect("steered bubble appended");
+        match last.read(cx).kind() {
+            crate::conversation::ConvItem::User { text, meta, .. } => {
+                assert_eq!(text, "second steer");
+                assert!(
+                    meta.as_ref().is_some_and(|m| m.steered),
+                    "the injected bubble carries the steered flag"
+                );
+            }
+            other => panic!("expected a user bubble, got {other:?}"),
+        }
+    });
 }
 
 /// server's wire projection instead of a kernel read.

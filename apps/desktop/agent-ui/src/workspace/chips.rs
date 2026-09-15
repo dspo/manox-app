@@ -317,7 +317,7 @@ impl Workspace {
         } else {
             Some(response_text.trim().to_string())
         };
-        let mut answers: Vec<(String, String)> = Vec::with_capacity(ask.questions.len());
+        let mut wire_answers: Vec<(String, String)> = Vec::with_capacity(ask.questions.len());
         for (i, q) in ask.questions.iter().enumerate() {
             let sel = ask.selections.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
             let selected: Vec<&str> = q
@@ -327,7 +327,7 @@ impl Workspace {
                 .filter_map(|(o, &s)| s.then_some(o.label.as_str()))
                 .collect();
             let answer = selected.join(", ");
-            answers.push((q.question.clone(), answer));
+            wire_answers.push((q.question.clone(), answer));
         }
         let id = ask.id.clone();
         self.pending_ask = None;
@@ -341,16 +341,37 @@ impl Workspace {
             self.client.send_reply(
                 msg_id,
                 Ok(serde_json::json!({
-                    "answers": answers,
+                    "answers": wire_answers,
                     "response": response,
                 })),
             );
             return;
         }
+        // In-process fallback (no wire MsgId): the canonical answer rows the
+        // B2-PR-1 vocabulary expects, keyed by the server-minted question ids.
+        // The legacy card-level note folds into the first answer's `custom`,
+        // mirroring the gateway's transitional reader.
+        let canonical: Vec<manox_agent::permission::AskAnswer> = ask
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let sel = ask.selections.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
+                let selected: Vec<String> = q
+                    .options
+                    .iter()
+                    .zip(sel.iter())
+                    .filter(|(_, s)| **s)
+                    .map(|(o, _)| o.label.clone())
+                    .collect();
+                let custom = if i == 0 { response.clone() } else { None };
+                manox_agent::permission::AskAnswer::new(q.id.clone(), selected, custom)
+            })
+            .collect();
         self.thread.with_mut(|thread| {
             thread.respond_authorization(
                 &id,
-                manox_agent::ToolAuthorizationResponse::AskUserQuestion { answers, response },
+                manox_agent::ToolAuthorizationResponse::AskUserQuestion { answers: canonical },
             );
         });
         cx.notify();

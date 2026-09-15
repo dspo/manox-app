@@ -142,15 +142,20 @@ fn thread_cwd(
 /// malformed (the generic question overlay then takes over as a fallback).
 fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk> {
     let questions = input.get("questions")?.as_array()?;
-    // Out-of-range counts violate the tool contract. No card is shown for
-    // such input; the pending question resolves only when the turn is
-    // cancelled.
-    if !(1..=3).contains(&questions.len()) {
+    // B2-PR-1 removed the 1..=3 question cap (and the 2..=3 option cap) from
+    // the tool contract; the card steps through any count. Empty stays
+    // malformed.
+    if questions.is_empty() {
         return None;
     }
     let mut parsed: Vec<AskQuestion> = Vec::with_capacity(questions.len());
     let mut selections: Vec<Vec<bool>> = Vec::with_capacity(questions.len());
     for q in questions {
+        let id = q
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let question = q.get("question")?.as_str()?.to_string();
         let header = q
             .get("header")
@@ -186,11 +191,12 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
                 });
             }
         }
-        if !(2..=3).contains(&opts.len()) {
-            return None;
-        }
+        // B2-PR-1: options are optional and unbounded (a detail/intent-only
+        // question is legal) — the old 2..=3 cap is gone server-side, so the
+        // card must not degrade on counts it now receives.
         selections.push(vec![false; opts.len()]);
         parsed.push(AskQuestion {
+            id,
             question,
             header,
             multi_select,
@@ -418,6 +424,9 @@ pub(crate) struct AskCardOption {
 }
 
 struct AskQuestion {
+    /// Server-minted stable id (B2-PR-1, `ensure_ask_ids`): the canonical
+    /// answer key the in-process fallback replies with.
+    id: String,
     question: String,
     header: String,
     multi_select: bool,
@@ -510,23 +519,30 @@ struct BackgroundThread {
 
 /// Lifecycle of a follow-up submitted while a turn is running. A queued item
 /// renders above the composer; clicking Steer promotes it to `SteerPending`,
-/// which is handed to the server's steer queue for the running turn but STAYS
-/// parked in the composer queue (at the head of the steer group) until the turn
-/// settles. Only then does it move into the message list as a `steered` bubble.
+/// which is handed to the server's steer queue for the running turn and STAYS
+/// parked in the composer queue (at the head of the steer group) until the
+/// model actually consumes it. Consumption is observed at the earliest point
+/// the wire offers: the injected `user` journal row landing
+/// (`ThreadEvent::UserRowLanded`, id == the client-minted `message_id` thanks
+/// to the server's stable-id threading) retires the card immediately; the
+/// turn-boundary `TurnFinished` (now journal-delivered) is the fallback for a
+/// row that raced the settle, and the strand path for a cancelled turn.
 enum FollowUpState {
     /// Parked, waiting to flush as the next user turn at the turn boundary (or
     /// to be promoted to a steer via the Steer action).
     Queued,
-    /// Promoted to the server steer queue for the running turn (a client-minted
-    /// id was sent with [`manox_protocol::ClientCall::Steer`]; the all-or-nothing
-    /// settle needs no client-side copy of it). Not removable (no
-    /// steer-withdrawal channel in the protocol). Resolves at the turn boundary:
-    /// a normal settle moves the card into the message list; a cancelled/failed
-    /// turn strands it into [`FollowUpState::Failed`].
-    SteerPending,
-    /// The running turn exited abnormally (Abort/Error) before settling, so the
-    /// steer was not injected this turn. Stays parked, marked red, retryable via
-    /// the Steer action (which re-sends a fresh online steer). Removable.
+    /// Promoted to the server steer queue for the running turn. Carries the
+    /// client-minted id sent with [`manox_protocol::ClientCall::Steer`]: the
+    /// injected row's durable identity (the retire-on-injection key) and the
+    /// stranded-verdict key at settle. Not removable (no steer-withdrawal
+    /// channel in the protocol). A normal settle the injection row missed
+    /// promotes it into the message list; a cancelled/failed turn strands it
+    /// into [`FollowUpState::Failed`].
+    SteerPending { message_id: String },
+    /// The running turn exited abnormally (Abort/Error) before injecting the
+    /// steer. Stays parked, marked red, retryable via the Steer action (which
+    /// re-sends a fresh online steer under a fresh id). Removable. Carries no
+    /// id: the retry never reuses the retracted one.
     Failed,
 }
 
@@ -1068,9 +1084,9 @@ impl Workspace {
             &agent_server,
             "desktop",
             vec![
-                manox_protocol::handshake::HookKind::Approve,
-                manox_protocol::handshake::HookKind::PlanVerdict,
-                manox_protocol::handshake::HookKind::AskUserQuestion,
+                manox_protocol::AnswerKind::Approve,
+                manox_protocol::AnswerKind::PlanVerdict,
+                manox_protocol::AnswerKind::AskUserQuestion,
             ],
             vec![],
         ));
@@ -1792,6 +1808,16 @@ impl Workspace {
                     // `turn_active` and self-terminates on the terminal stop.
                     this.turn_active = true;
                     this.spawn_thinking_ticker(cx);
+                }
+                ThreadEvent::UserRowLanded { message_id } => {
+                    // The steer's injected `user` row landed in the
+                    // transcript: the model has consumed it (dsh's `claimed`
+                    // instant). Retire the matching card NOW — a message the
+                    // model already saw must not linger in the queue until
+                    // the turn boundary. No-op for ordinary prompt rows
+                    // (nothing carries their id), and the settle path below
+                    // stays the fallback for a row that raced it.
+                    this.retire_injected_steer(message_id, cx);
                 }
                 ThreadEvent::TurnFinished {
                     cancelled, failed, ..
