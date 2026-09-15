@@ -152,8 +152,22 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
     }
     let mut parsed: Vec<AskQuestion> = Vec::with_capacity(questions.len());
     let mut selections: Vec<Vec<bool>> = Vec::with_capacity(questions.len());
-    for q in questions {
+    for (i, q) in questions.iter().enumerate() {
         let question = q.get("question")?.as_str()?.to_string();
+        // The server mints a stable id onto each parked question; answers are
+        // id-routed and unknown ids are dropped at the settle boundary.
+        // Inputs predating the mint (fixtures, older servers) fall back to a
+        // positional id, mirroring how the card keys its per-step state.
+        let id = q
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(match i {
+                0 => "q0",
+                1 => "q1",
+                _ => "q2",
+            })
+            .to_string();
         let header = q
             .get("header")
             .and_then(|v| v.as_str())
@@ -193,6 +207,7 @@ fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk>
         }
         selections.push(vec![false; opts.len()]);
         parsed.push(AskQuestion {
+            id,
             question,
             header,
             multi_select,
@@ -420,6 +435,9 @@ pub(crate) struct AskCardOption {
 }
 
 struct AskQuestion {
+    /// Stable question id (server-minted) used to route the canonical
+    /// `AskAnswer` back through the settle boundary.
+    id: String,
     question: String,
     header: String,
     multi_select: bool,
@@ -1064,9 +1082,9 @@ impl Workspace {
             &agent_server,
             "desktop",
             vec![
-                manox_protocol::handshake::HookKind::Approve,
-                manox_protocol::handshake::HookKind::PlanVerdict,
-                manox_protocol::handshake::HookKind::AskUserQuestion,
+                manox_protocol::AnswerKind::Approve,
+                manox_protocol::AnswerKind::PlanVerdict,
+                manox_protocol::AnswerKind::AskUserQuestion,
             ],
             vec![],
         ));

@@ -443,9 +443,10 @@ impl Workspace {
         // The steered tag is applied only when the drain succeeds (in
         // `consume_steered_follow_up`), so a stranded steer that the user
         // later retries as an idle fresh turn carries no badge — it was never
-        // actually injected.
+        // actually injected. The external id slot is for wire-injected steers
+        // (terminal attach path); a desktop submit has none.
         self.thread
-            .with_mut(|thread| thread.enqueue_steer(content, Some(ui)))
+            .with_mut(|thread| thread.enqueue_steer(content, Some(ui), None))
     }
 
     pub(super) fn consume_background_steer(&mut self, thread_id: &str, message_id: &str) {

@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext as _, Context, Entity, Task};
 
-use manox_protocol::handshake::HookKind;
+use manox_protocol::AnswerKind;
 use manox_protocol::journal::ModelRef;
 use manox_protocol::transport::RpcConnection as _;
 use manox_protocol::{
@@ -78,10 +78,10 @@ const MODELS_EMPTY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_
 
 /// Capabilities the desktop can adjudicate (mirrors the pre-multiplex
 /// per-session handshake).
-const CAPABILITIES: &[HookKind] = &[
-    HookKind::Approve,
-    HookKind::PlanVerdict,
-    HookKind::AskUserQuestion,
+const CAPABILITIES: &[AnswerKind] = &[
+    AnswerKind::Approve,
+    AnswerKind::PlanVerdict,
+    AnswerKind::AskUserQuestion,
 ];
 
 /// One connection, many sessions. The pump reads `server_rx()` and routes

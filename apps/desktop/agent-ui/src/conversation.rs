@@ -975,6 +975,13 @@ impl ConversationState {
         ) && self.pop_trailing_retry(cx);
 
         let outcome = match event {
+            // Shared steer-lifecycle vocabulary: synthesized by a client fold
+            // when an injected steer's durable row arrives, never emitted by
+            // the server (translate skips it). The desktop's pending-steer
+            // retirement rides its existing history-reload path, so there is
+            // nothing to settle here yet — recognized, not ignored by accident.
+            ThreadEvent::UserRowLanded { .. } => ApplyOutcome::Unchanged,
+
             // A compaction landed — render the handoff summary as a Recap card.
             // The card is appended (never updated in place): a compaction is a
             // one-time boundary marker, and the summary text is final.
