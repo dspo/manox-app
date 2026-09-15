@@ -2710,6 +2710,19 @@ fn render_tool_output(
     theme: &Theme,
     cx: &mut App,
 ) -> gpui::AnyElement {
+    // B2-PR-2: once the server's model-facing ask result is canonical JSON
+    // (`{"answers":[{"id","selected","custom"?}]}`), the answered-state card
+    // body reads as raw JSON. Fold it back into compact human Q/A rows — the
+    // question text is recovered from the call's own `input` by id. A parse
+    // miss (a legacy prose result, an error, or a non-canonical payload) falls
+    // through to the raw output path, so the display degrades gracefully. This
+    // sits above the terminal-panel branch because the ask result is a small
+    // structured payload, not shell text.
+    if item.name == manox_agent::tools::ASK_USER_QUESTION
+        && let Some(rows) = ask_result_qa_rows(&item.input, &item.output)
+    {
+        return render_ask_result_body(rows, ix, theme);
+    }
     // Persistent terminal panel: the conversation handler mounts it at every
     // live output chunk, finalized result, and reloaded-history entry, so the
     // common path renders the `Entity<TerminalPanel>` directly — giving tool
@@ -2766,6 +2779,111 @@ fn render_tool_output(
             cx,
         ))
         .into_any_element()
+}
+
+/// Parse an ask tool's canonical result JSON (`{"answers":[{"id","selected",
+/// "custom"?}]}`) into `(question, answer)` display rows. The question text is
+/// recovered from the call's own `input` by matching `id`; an id the input
+/// doesn't name falls back to the id itself (never a wrong question). Tri-state
+/// fold mirrors the server: an explicit skip (empty `selected`, no `custom`)
+/// shows a marked non-answer, `custom` alone is the whole answer, `selected` +
+/// `custom` shows the picks with the note appended. Returns `None` for any
+/// non-canonical payload (prose result, error text, malformed JSON) so the
+/// caller falls back to the raw output.
+fn ask_result_qa_rows(input: &serde_json::Value, output: &str) -> Option<Vec<(String, String)>> {
+    use serde_json::Value;
+    let trimmed = output.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let answers = value.get("answers")?.as_array()?;
+    if answers.is_empty() {
+        return None;
+    }
+    let questions = input.get("questions").and_then(|q| q.as_array());
+    let question_text = |id: &str| -> String {
+        questions
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|q| q.get("id").and_then(Value::as_str) == Some(id))
+                    .and_then(|q| {
+                        q.get("question")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+            })
+            .unwrap_or_else(|| id.to_string())
+    };
+    let mut rows = Vec::with_capacity(answers.len());
+    for answer in answers {
+        let id = answer.get("id").and_then(Value::as_str)?;
+        let selected: Vec<&str> = answer
+            .get("selected")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let custom = answer
+            .get("custom")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+        let rendered = match (selected.is_empty(), custom) {
+            // An explicit skip is a language-neutral em dash — no locale key,
+            // and visually distinct from a real (possibly empty-ish) answer.
+            (true, None) => "—".to_string(),
+            (true, Some(c)) => c.to_string(),
+            (false, None) => selected.join(", "),
+            (false, Some(c)) => format!("{} · {c}", selected.join(", ")),
+        };
+        rows.push((question_text(id), rendered));
+    }
+    Some(rows)
+}
+
+/// Render the folded ask Q/A rows as a bordered card body (a compact two-
+/// column question / answer table), replacing the raw JSON the model now sees.
+fn render_ask_result_body(
+    rows: Vec<(String, String)>,
+    ix: usize,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    let container = v_flex()
+        .id(format!("ask-result-{ix}"))
+        .w_full()
+        .min_w_0()
+        .gap_1p5()
+        .px_3()
+        .py_2()
+        .border_t_1()
+        .border_color(theme.border);
+    let body = rows.into_iter().fold(container, |col, (question, answer)| {
+        col.child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .items_start()
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(question),
+                )
+                .child(
+                    gpui::div()
+                        .max_w(px(300.))
+                        .text_right()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(answer),
+                ),
+        )
+    });
+    body.into_any_element()
 }
 
 fn agent_terminal_icon(status: ToolCallStatus) -> Icon {
@@ -3667,6 +3785,83 @@ mod tests {
     fn live_tail_short_output_unchanged() {
         let s = "line\nline2\n";
         assert_eq!(live_tail(s), s);
+    }
+
+    /// B2-PR-2: the ask tool result row folds a canonical answers payload into
+    /// `(question, answer)` rows (question text recovered by id from the call's
+    /// own input). This is the shared render contract BOTH arrival paths satisfy
+    /// — the live `ToolResult` event and the rebuild journal translate each
+    /// deposit the identical JSON string into `ToolCallItem.output`, so a
+    /// fixture per path feeds this one function.
+    #[test]
+    fn ask_result_qa_rows_fold_the_canonical_single_select_live_payload() {
+        let input = serde_json::json!({
+            "questions": [{"id": "a1", "question": "Which color?", "options": [
+                {"label": "Red"}, {"label": "Blue"}]}]
+        });
+        // The live path's `ToolResult.output` once the server emits canonical JSON.
+        let output = r#"{"answers":[{"id":"a1","selected":["Blue"]}]}"#;
+        let rows = ask_result_qa_rows(&input, output).expect("canonical payload folds");
+        assert_eq!(rows, vec![("Which color?".to_string(), "Blue".to_string())]);
+    }
+
+    /// Rebuild-path fixture: a multi-select supplement plus an explicit skip
+    /// across two questions, arriving verbatim from the journal tool row.
+    #[test]
+    fn ask_result_qa_rows_fold_the_canonical_multi_and_skip_rebuild_payload() {
+        let input = serde_json::json!({
+            "questions": [
+                {"id": "m", "question": "Pick flavors", "multiSelect": true},
+                {"id": "s", "question": "Skip me"}
+            ]
+        });
+        let output = r#"{"answers":[
+            {"id":"m","selected":["vanilla","salt"],"custom":"and pistachio"},
+            {"id":"s","selected":[]}
+        ]}"#;
+        let rows = ask_result_qa_rows(&input, output).expect("canonical payload folds");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "Pick flavors".to_string(),
+                    "vanilla, salt · and pistachio".to_string()
+                ),
+                ("Skip me".to_string(), "—".to_string()),
+            ],
+            "multi-select lists picks with the supplement; the skip renders an em dash"
+        );
+    }
+
+    /// An unknown id (not in the call's input) falls back to the id itself —
+    /// never a mislabelled question.
+    #[test]
+    fn ask_result_qa_rows_fall_back_to_the_id_for_an_unknown_question() {
+        let input = serde_json::json!({ "questions": [] });
+        let output = r#"{"answers":[{"id":"ghost","selected":["x"]}]}"#;
+        let rows = ask_result_qa_rows(&input, output).expect("still folds");
+        assert_eq!(rows, vec![("ghost".to_string(), "x".to_string())]);
+    }
+
+    /// A non-canonical result (the transitional prose render, an error string,
+    /// or malformed JSON) yields `None` so the display falls back to the raw
+    /// output verbatim.
+    #[test]
+    fn ask_result_qa_rows_reject_non_canonical_payloads() {
+        let input = serde_json::json!({ "questions": [{"id":"a","question":"Q"}] });
+        assert!(
+            ask_result_qa_rows(&input, "Question: Q\nAnswer: Blue").is_none(),
+            "the legacy prose result is not canonical JSON"
+        );
+        assert!(ask_result_qa_rows(&input, "boom: not json").is_none());
+        assert!(
+            ask_result_qa_rows(&input, r#"{"answers":[]}"#).is_none(),
+            "empty is not a fold"
+        );
+        assert!(
+            ask_result_qa_rows(&input, r#"{"answers":[{"id":"a","custom":"x"}]}"#).is_none(),
+            "a row without `selected` is not canonical"
+        );
     }
 
     #[test]

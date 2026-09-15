@@ -3291,6 +3291,69 @@ mod tests {
         });
     }
 
+    /// B2-PR-2 live-path fixture: an `AskUserQuestion` top-level card whose
+    /// `ToolResult` event carries the canonical answers JSON deposits that
+    /// string into `ToolCallItem.output` verbatim — the same payload the
+    /// answered-state card body folds through `ask_result_qa_rows` (mirror of
+    /// the rebuild path's journal-translate fixture).
+    #[gpui::test]
+    fn ask_tool_result_output_is_deposited_verbatim(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            cwd: None,
+        };
+        let canonical = r#"{"answers":[{"id":"a1","selected":["Blue"]}]}"#;
+        let weak = ctx.weak.clone();
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                c.push_tool_call(
+                    ToolCallItem {
+                        id: "ask1".into(),
+                        name: manox_agent::tools::ASK_USER_QUESTION.into(),
+                        title: "Clarifying question".into(),
+                        status: ToolCallStatus::PendingApproval,
+                        output: String::new(),
+                        is_error: false,
+                        input: serde_json::json!({"questions": []}),
+                        streaming: false,
+                        collapsed: false,
+                        user_toggled: false,
+                        panel: None,
+                    },
+                    "model".into(),
+                    weak,
+                    cx,
+                );
+                let _ = c.apply(
+                    &ThreadEvent::ToolResult {
+                        id: "ask1".into(),
+                        output: canonical.into(),
+                        is_error: false,
+                    },
+                    "model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.update(|cx| {
+            conversation.read_with(cx, |c, cx| {
+                let ix = c.find_tool("ask1", cx).expect("ask tool item present");
+                let ConvItem::ToolCall(entry) = c.items()[ix].read(cx).kind() else {
+                    panic!("expected a tool call item");
+                };
+                assert_eq!(
+                    entry.output, canonical,
+                    "live path deposits the canonical JSON"
+                );
+            });
+        });
+    }
+
     /// A user-toggle pins the entry: the delayed collapse is skipped and the
     /// entry stays in the user's chosen state.
     #[gpui::test]
