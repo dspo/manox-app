@@ -627,7 +627,7 @@ impl Workspace {
     /// per-id verdict: `stranded` is `stranded_steer_ids.len()` from the wire —
     /// the server retracts only the not-yet-injected tail (FIFO), so the first
     /// `N - stranded` cards were injected (promote into the list) and the LAST
-    /// `stranded` retracted (Failed, retryable). `saturating_sub` keeps a
+    /// `stranded` retracted (Failed, retryable). `stranded.min(n)` keeps a
     /// miscount harmless. A normal settle carries zero stranded and promotes
     /// the whole group. The drag marker is dropped: the group just moved.
     pub(super) fn settle_steer_group(&mut self, stranded: usize, cx: &mut Context<Self>) {

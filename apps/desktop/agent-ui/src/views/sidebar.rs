@@ -17,7 +17,7 @@
 //! in the "Projects" section, keyed by project path; the rest fall under "Conversations". The top
 //! menu and bottom account footer are static decoration.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -458,9 +458,9 @@ pub struct Sidebar {
     /// flips it above the trigger when it would overflow the window's bottom
     /// edge), replacing the old downward-only `top_full()` hang that got
     /// clipped near the bottom of the list.
-    row_menu_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
+    row_menu_anchors: Rc<RefCell<std::collections::HashMap<String, gpui::Point<Pixels>>>>,
     view_menu_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
-    new_session_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
+    new_session_anchors: Rc<RefCell<std::collections::HashMap<String, gpui::Point<Pixels>>>>,
     /// The thread row currently under a drag, with the insertion line's host.
     drag_row: Option<RowDrag>,
     /// The project folder currently under a drag, same shape.
@@ -521,9 +521,9 @@ impl Sidebar {
             view_menu_open: false,
             view_menu: None,
             view_menu_sub: None,
-            row_menu_anchor: Rc::new(Cell::new(None)),
+            row_menu_anchors: Rc::new(RefCell::new(std::collections::HashMap::new())),
             view_menu_anchor: Rc::new(Cell::new(None)),
-            new_session_anchor: Rc::new(Cell::new(None)),
+            new_session_anchors: Rc::new(RefCell::new(std::collections::HashMap::new())),
             drag_row: None,
             drag_folder: None,
             displayed: HashMap::new(),
@@ -705,14 +705,18 @@ impl Sidebar {
                     // bottom-right window position every frame it is the open
                     // trigger (in-flow copy only, so the sticky overlay never
                     // clobbers the anchor).
+                    // Unguarded, every frame: the click closure reads this
+                    // key's entry for the menu's first frame (render must
+                    // never read a value this frame's prepaint will write).
+                    // Keyed, because several triggers share this table.
                     .when(dropdown, |el| {
-                        // Unguarded, every frame: the click closure reads this
-                        // cell for the menu's first frame (render must never
-                        // read a value this frame's prepaint will write).
-                        let cell = self.new_session_anchor.clone();
+                        let anchors = self.new_session_anchors.clone();
                         el.debug_selector(|| "sidebar-conv-plus-host".into())
                             .on_prepaint(move |bounds, _window, _cx| {
-                                cell.set(Some(bounds.bottom_right()));
+                                anchors.borrow_mut().insert(
+                                    new_session_anchor_key(None).to_string(),
+                                    bounds.bottom_right(),
+                                );
                             })
                     })
                     .child(
@@ -793,7 +797,11 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         self.new_session_project = project.clone();
-        if self.new_session_anchor.get().is_none() {
+        if !self
+            .new_session_anchors
+            .borrow()
+            .contains_key(&new_session_anchor_key(project.as_deref()))
+        {
             return;
         }
         let theme = cx.theme().clone();
@@ -939,7 +947,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         self.close_row_menu();
-        if self.row_menu_anchor.get().is_none() {
+        if !self.row_menu_anchors.borrow().contains_key(&id) {
             return;
         }
         let theme = cx.theme().clone();
@@ -1066,7 +1074,7 @@ impl Sidebar {
         let menu = self.row_menu.clone()?;
         Self::anchored_dropdown(
             SharedString::from(format!("thread-menu-dropdown-{id}")),
-            self.row_menu_anchor.get(),
+            self.row_menu_anchors.borrow().get(id).copied(),
             menu,
         )
     }
@@ -1163,7 +1171,14 @@ impl Sidebar {
     /// bottom edge instead of being clipped by the old downward-only hang.
     fn render_new_session_dropdown(&self, id: SharedString) -> Option<AnyElement> {
         let menu = self.new_session_menu.clone()?;
-        Self::anchored_dropdown(id, self.new_session_anchor.get(), menu)
+        Self::anchored_dropdown(
+            id,
+            self.new_session_anchors
+                .borrow()
+                .get(&new_session_anchor_key(self.new_session_project.as_deref()))
+                .copied(),
+            menu,
+        )
     }
 
     /// Mark the currently selected thread id (back-filled by Workspace on switch/new, for highlight).
@@ -1577,17 +1592,19 @@ impl Sidebar {
             .child(
                 gpui::div()
                     .relative()
-                    .when(
-                        self.new_session_open
-                            && self.new_session_project.as_deref()
-                                == Some(std::path::Path::new(path)),
-                        |el| {
-                            let cell = self.new_session_anchor.clone();
-                            el.on_prepaint(move |bounds, _window, _cx| {
-                                cell.set(Some(bounds.bottom_right()));
-                            })
-                        },
-                    )
+                    // Unguarded, every frame, keyed by this row's project:
+                    // the click closure reads its key's last-painted corner
+                    // (a shared cell would hand every project row whichever
+                    // trigger painted last).
+                    .on_prepaint({
+                        let anchors = self.new_session_anchors.clone();
+                        let key = path.to_string();
+                        move |bounds, _window, _cx| {
+                            anchors
+                                .borrow_mut()
+                                .insert(key.clone(), bounds.bottom_right());
+                        }
+                    })
                     .child(
                         Button::new(format!("project-menu-{key}"))
                             .ghost()
@@ -1725,6 +1742,14 @@ impl Sidebar {
             .children(rows)
             .into_any_element()
     }
+}
+
+/// Anchor-store key for a new-session menu: the bound project's path, or the
+/// conversations header's sentinel (the flat menu's only trigger).
+fn new_session_anchor_key(project: Option<&std::path::Path>) -> String {
+    project
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "__conversations_header__".to_string())
 }
 
 impl Render for Sidebar {
@@ -2984,13 +3009,19 @@ fn render_thread_menu_trigger(
             cx.notify();
         }));
     let dropdown = sidebar.render_row_menu_dropdown(&id);
+    let anchors = sidebar.row_menu_anchors.clone();
+    let key = id.clone();
     gpui::div()
         .relative()
-        .when(dropdown.is_some(), |el| {
-            let cell = sidebar.row_menu_anchor.clone();
-            el.on_prepaint(move |bounds, _window, _cx| {
-                cell.set(Some(bounds.bottom_right()));
-            })
+        // Unguarded, every frame, keyed by this row's id: the click closure
+        // reads its own key's last-painted corner (the old `menu_open` guard
+        // — kept alive by `dropdown.is_some()` — meant the anchor was only
+        // ever written for an already-open menu, i.e. never on a first click).
+        .debug_selector(|| "sidebar-thread-menu-host".into())
+        .on_prepaint(move |bounds, _window, _cx| {
+            anchors
+                .borrow_mut()
+                .insert(key.clone(), bounds.bottom_right());
         })
         .child(button)
         .children(dropdown)
@@ -3736,8 +3767,10 @@ mod tests {
         // open path requires it (and refuses to park a menu at a fabricated
         // corner).
         sidebar.update(cx, |s, _| {
-            s.new_session_anchor
-                .set(Some(gpui::point(gpui::px(180.), gpui::px(60.))));
+            s.new_session_anchors.borrow_mut().insert(
+                new_session_anchor_key(None),
+                gpui::point(gpui::px(180.), gpui::px(60.)),
+            );
         });
         // The project-group shape: the crash path (build_project_menu →
         // the nested per-agent cascade submenus).
@@ -3883,6 +3916,103 @@ mod tests {
             "menu must not sit at the window corner (right={:?}, y={:?})",
             f32::from(menu.right()),
             f32::from(menu.origin.y)
+        );
+    }
+
+    /// A thread row's ⋯ trigger opens on the FIRST click. The anchor is
+    /// written unconditionally every frame, keyed by the row id — the
+    /// round-2 dead-trigger regression (the old guard wrote only while that
+    /// row's menu was already open, so the open path's `None`-refusal made
+    /// the menu unopenable forever) fails this test.
+    #[gpui::test]
+    fn thread_row_menu_opens_on_the_first_click(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let theme = real_theme();
+        let item = SidebarThreadItem::from_wire(
+            &sample_item(),
+            false,
+            None,
+            RowNesting {
+                indent: px(0.),
+                team_leader: false,
+                team_collapsed: false,
+                nested: false,
+            },
+            &theme,
+        );
+
+        struct RowMenuHost {
+            sidebar: gpui::Entity<Sidebar>,
+            item: SidebarThreadItem,
+        }
+        impl Render for RowMenuHost {
+            fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                // Rebuild every frame: the trigger's dropdown children come
+                // from the sidebar's open state.
+                self.sidebar
+                    .update(cx, |s, scx| render_thread_menu_trigger(&self.item, s, scx))
+            }
+        }
+
+        let sidebar_slot: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Sidebar>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = sidebar_slot.clone();
+        let window = cx.open_window(gpui::size(gpui::px(320.), gpui::px(240.)), |window, cx| {
+            let sidebar = cx.new(|cx| Sidebar::new(gpui::px(240.), cx));
+            *slot.borrow_mut() = Some(sidebar.clone());
+            let host = cx.new(|cx| {
+                cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
+                RowMenuHost {
+                    sidebar: sidebar.clone(),
+                    item,
+                }
+            });
+            gpui_component::Root::new(host, window, cx)
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let sidebar = sidebar_slot.borrow().clone().expect("sidebar captured");
+
+        let trigger = visual
+            .debug_bounds("sidebar-thread-menu-host")
+            .expect("the row  trigger paints");
+        assert!(
+            visual.debug_bounds("sidebar-dropdown-probe").is_none(),
+            "the menu only exists after the click"
+        );
+        // The painted frame must have written this row's keyed anchor.
+        assert!(
+            sidebar.read_with(cx, |s, _| s
+                .row_menu_anchors
+                .borrow()
+                .contains_key("thread-abcdef12")),
+            "the row's anchor key must exist after one painted frame"
+        );
+
+        // The wrapper stretches to the host width; the icon button sits at
+        // its start — click the button's own area, not the wrapper's center.
+        let click_at = gpui::point(trigger.origin.x + px(10.), trigger.center().y);
+        visual.simulate_click(click_at, gpui::Modifiers::default());
+        visual.run_until_parked();
+        assert!(
+            sidebar.read_with(cx, |s, _| s.row_menu_open.is_some()),
+            "the click must open the row menu"
+        );
+
+        let menu = visual
+            .debug_bounds("sidebar-dropdown-probe")
+            .expect("the  menu opens on the first click");
+        assert!(
+            (f32::from(menu.origin.y) - (f32::from(trigger.bottom()) + 2.0)).abs() < 1.5,
+            "menu top must hug the trigger's bottom (+2), origin_y={:?} trigger_bottom={:?}",
+            f32::from(menu.origin.y),
+            f32::from(trigger.bottom())
+        );
+        assert!(
+            (f32::from(menu.right()) - f32::from(trigger.right())).abs() < 1.5,
+            "menu right edge must align with the trigger's right, right={:?} trigger_right={:?}",
+            f32::from(menu.right()),
+            f32::from(trigger.right())
         );
     }
 }
