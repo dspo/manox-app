@@ -39,6 +39,26 @@ pub enum OrderBy {
     Updated,
 }
 
+impl OrderBy {
+    /// The other mode. Two states, so one step flips the pair either way —
+    /// the header toggle is a flip, never a menu of choices.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Manual => Self::Updated,
+            Self::Updated => Self::Manual,
+        }
+    }
+
+    /// The i18n key naming this mode. Also the toggle's tooltip text, so the
+    /// button states the mode it is in rather than only offering to change it.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Manual => "sidebar-order-manual",
+            Self::Updated => "sidebar-order-updated",
+        }
+    }
+}
+
 /// Everything the sidebar persists about how it displays the list.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SidebarView {
@@ -233,11 +253,36 @@ pub fn reconcile_moves(server: &[String], target: &[String]) -> Vec<(String, Opt
     moves
 }
 
-/// The view-state file under the shared state root.
+/// The view-state file under the shared state root — or, on a test thread that
+/// installed one through [`with_view_path`], that path instead.
 pub fn view_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_VIEW_PATH.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
     manox_agent::paths::manox_config_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("sidebar-view.json")
+}
+
+/// Redirect [`view_path`] to `path` for the current thread, restoring the
+/// previous value on the way out.
+///
+/// The header toggle persists the mode on every flip, so a test that drives the
+/// real header would otherwise rewrite the developer's own sidebar-view file.
+/// Thread-local rather than process-global: the unit-test binary runs its cases
+/// on parallel threads.
+#[cfg(test)]
+pub fn with_view_path<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let previous = TEST_VIEW_PATH.with(|slot| slot.replace(Some(path.to_path_buf())));
+    let out = f();
+    TEST_VIEW_PATH.with(|slot| *slot.borrow_mut() = previous);
+    out
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_VIEW_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Load the persisted view state. Missing or unreadable = the default (the
@@ -583,6 +628,21 @@ mod tests {
         );
         let view: SidebarView = serde_json::from_str("{}").unwrap();
         assert_eq!(view.order_by, OrderBy::Updated);
+    }
+
+    /// The header toggle flips the pair and nothing else: two states means
+    /// toggling twice is the identity. The mode names the toggle shows are the
+    /// locale keys whose suffix is the persisted spelling, pinned here so the
+    /// two can never drift apart silently.
+    #[test]
+    fn order_by_toggle_is_an_involution_over_two_named_modes() {
+        assert_eq!(OrderBy::Manual.toggled(), OrderBy::Updated);
+        assert_eq!(OrderBy::Updated.toggled(), OrderBy::Manual);
+        for mode in [OrderBy::Manual, OrderBy::Updated] {
+            assert_eq!(mode.toggled().toggled(), mode);
+        }
+        assert_eq!(OrderBy::Manual.label_key(), "sidebar-order-manual");
+        assert_eq!(OrderBy::Updated.label_key(), "sidebar-order-updated");
     }
 
     #[test]

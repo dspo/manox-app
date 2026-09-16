@@ -17,7 +17,7 @@
 //! in the "Projects" section, keyed by project path; the rest fall under "Conversations". The top
 //! menu and bottom account footer are static decoration.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -32,7 +32,7 @@ use gpui::{
     prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, Selectable as _, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -444,11 +444,6 @@ pub struct Sidebar {
     row_menu_open: Option<String>,
     row_menu: Option<Entity<PopupMenu>>,
     row_menu_sub: Option<Subscription>,
-    /// The view-options popup (session ordering mode) and its dismissal
-    /// subscription; one at a time, mirroring the row menu.
-    view_menu_open: bool,
-    view_menu: Option<Entity<PopupMenu>>,
-    view_menu_sub: Option<Subscription>,
     /// Window-space bottom-right corner of each dropdown's trigger, written
     /// by that trigger's `on_prepaint` (unguarded, every frame — a render-time
     /// read must never race a same-frame prepaint write, which is what put the
@@ -459,7 +454,6 @@ pub struct Sidebar {
     /// edge), replacing the old downward-only `top_full()` hang that got
     /// clipped near the bottom of the list.
     row_menu_anchors: Rc<RefCell<std::collections::HashMap<String, gpui::Point<Pixels>>>>,
-    view_menu_anchor: Rc<Cell<Option<gpui::Point<Pixels>>>>,
     new_session_anchors: Rc<RefCell<std::collections::HashMap<String, gpui::Point<Pixels>>>>,
     /// The thread row currently under a drag, with the insertion line's host.
     drag_row: Option<RowDrag>,
@@ -518,11 +512,7 @@ impl Sidebar {
             row_menu_open: None,
             row_menu: None,
             row_menu_sub: None,
-            view_menu_open: false,
-            view_menu: None,
-            view_menu_sub: None,
             row_menu_anchors: Rc::new(RefCell::new(std::collections::HashMap::new())),
-            view_menu_anchor: Rc::new(Cell::new(None)),
             new_session_anchors: Rc::new(RefCell::new(std::collections::HashMap::new())),
             drag_row: None,
             drag_folder: None,
@@ -534,64 +524,12 @@ impl Sidebar {
         }
     }
 
-    /// Whether the view-options popup is mounted open.
-    pub fn view_menu_is_open(&self) -> bool {
-        self.view_menu_open
-    }
-
-    /// Open the view-options popup: the session ordering mode. The mode is
-    /// client view state (never a kernel write) — it decides whether activity may
-    /// promote a row, nothing else.
-    fn open_view_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_view_menu();
-        self.close_new_session_menu();
-        // The anchor was captured by the trigger's `on_prepaint` on the frame
-        // that painted the click; a `None` means the trigger has never been
-        // painted (unreachable for a click on it) — refuse rather than park
-        // the menu at a fabricated corner.
-        if self.view_menu_anchor.get().is_none() {
-            return;
-        }
-        let sidebar = cx.entity().downgrade();
-        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
-            // The active mode carries the check mark; the popup is the mode's
-            // only editor, and choosing a mode never touches the server.
-            let build = |menu: PopupMenu, order_by: OrderBy, label: &'static str| {
-                let target = sidebar.clone();
-                let active = sidebar
-                    .upgrade()
-                    .is_some_and(|entity| entity.read(_cx).view.order_by == order_by);
-                menu.item(PopupMenuItem::new(i18n::t(label)).checked(active).on_click(
-                    move |_, _, cx| {
-                        let _ = target.update(cx, |this, cx| {
-                            this.close_view_menu();
-                            this.set_order_by(order_by, cx);
-                        });
-                    },
-                ))
-            };
-            let menu = build(
-                menu.max_w(gpui::px(240.)),
-                OrderBy::Manual,
-                "sidebar-order-manual",
-            );
-            build(menu, OrderBy::Updated, "sidebar-order-updated")
-        });
-        self.view_menu_sub = Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
-            this.view_menu_open = false;
-            this.view_menu = None;
-            this.view_menu_sub = None;
-            cx.notify();
-        }));
-        self.view_menu_open = true;
-        self.view_menu = Some(menu);
-        cx.notify();
-    }
-
-    fn close_view_menu(&mut self) {
-        self.view_menu_open = false;
-        self.view_menu = None;
-        self.view_menu_sub = None;
+    /// Flip the session ordering mode. The mode is client view state (never a
+    /// kernel write) — it decides whether activity may promote a row, nothing
+    /// else. The header toggle is its only editor; both switch edges live in
+    /// [`Self::set_order_by`].
+    fn toggle_order_by(&mut self, cx: &mut Context<Self>) {
+        self.set_order_by(self.view.order_by.toggled(), cx);
     }
 
     /// Switch the ordering mode. Entering `Last updated` is the edge that runs
@@ -679,10 +617,12 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// The Conversations section header with its `+` new-session button.
-    /// `id_prefix` disambiguates element ids when the header exists twice in
-    /// one tree (in-flow copy + sticky overlay), and `dropdown` gates the
-    /// deferred new-session menu so only the visible copy anchors it.
+    /// The Conversations section header with its two actions: the `+`
+    /// new-session button and the ordering-mode toggle. `id_prefix`
+    /// disambiguates element ids when the header exists twice in one tree
+    /// (in-flow copy + sticky overlay), and `dropdown` gates the deferred
+    /// new-session menu — and the toggle's painted-frame id — so only the
+    /// visible copy anchors the menu and carries the test selector.
     fn conversations_section_header(
         &self,
         theme: &Theme,
@@ -691,8 +631,10 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Both header actions sit in one element: the new-session `+` and the
-        // ordering-mode trigger. Each mounts its own popup only on the in-flow
-        // copy (`dropdown`), so the sticky overlay never duplicates a menu.
+        // ordering-mode toggle. Only the `+` mounts a popup, and only on the
+        // in-flow copy (`dropdown`), so the sticky overlay never duplicates a
+        // menu; the toggle is self-contained and behaves the same in both
+        // copies.
         let actions = gpui::div()
             .relative()
             .flex()
@@ -747,34 +689,37 @@ impl Sidebar {
                             .flatten(),
                     ),
             )
+            // The ordering mode is a two-state preference, so the header
+            // carries the toggle itself: a click flips it with no popup to
+            // build, anchor, or dismiss. `selected` marks the activity-driven
+            // mode, and the tooltip spells out the pair — the mode it is in and
+            // the one a click lands on — since a toggle has no other surface to
+            // say either.
             .child(
                 gpui::div()
                     .relative()
+                    // Painted-frame id for the click test (in-flow copy only,
+                    // so the sticky overlay's second button never double-
+                    // registers it).
                     .when(dropdown, |el| {
-                        let cell = self.view_menu_anchor.clone();
-                        el.on_prepaint(move |bounds, _window, _cx| {
-                            cell.set(Some(bounds.bottom_right()));
-                        })
+                        el.debug_selector(|| "sidebar-conv-order-toggle-host".into())
                     })
                     .child(
-                        Button::new(format!("{id_prefix}-view-options"))
+                        Button::new(format!("{id_prefix}-order-toggle"))
                             .ghost()
                             .xsmall()
-                            .icon(IconName::Menu)
-                            .tooltip(i18n::t("sidebar-view-options"))
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                if this.view_menu_open {
-                                    this.close_view_menu();
-                                } else {
-                                    this.open_view_menu(window, cx);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .children(
-                        (dropdown && self.view_menu_open)
-                            .then(|| self.render_view_menu_dropdown())
-                            .flatten(),
+                            .icon(IconName::SortDescending)
+                            .selected(self.view.order_by == OrderBy::Updated)
+                            .toggled(self.view.order_by == OrderBy::Updated)
+                            .tooltip(format!(
+                                "{}: {} → {}",
+                                i18n::t("sidebar-view-options"),
+                                i18n::t(self.view.order_by.label_key()),
+                                i18n::t(self.view.order_by.toggled().label_key())
+                            ))
+                            .on_click(
+                                cx.listener(|this, _ev, _window, cx| this.toggle_order_by(cx)),
+                            ),
                     ),
             );
         section_header(
@@ -1049,21 +994,6 @@ impl Sidebar {
             )
             .with_priority(1)
             .into_any_element(),
-        )
-    }
-
-    /// The view-options popup, anchored below its header trigger via the
-    /// shared [`Self::anchored_dropdown`] so it escapes the scroll clip and
-    /// flips upward near the window's bottom edge.
-    fn render_view_menu_dropdown(&self) -> Option<AnyElement> {
-        if !self.view_menu_open {
-            return None;
-        }
-        let menu = self.view_menu.clone()?;
-        Self::anchored_dropdown(
-            "sidebar-view-options-dropdown",
-            self.view_menu_anchor.get(),
-            menu,
         )
     }
 
@@ -3929,6 +3859,71 @@ mod tests {
             f32::from(menu.right()),
             f32::from(menu.origin.y)
         );
+    }
+
+    /// The header's ordering toggle flips the mode on a real click — the exact
+    /// gesture that used to abort the app (the retired popup's eager build read
+    /// the Sidebar entity inside the click listener's own update, and that panic
+    /// cannot unwind past `gpui_macos::window::handle_view_event`).
+    ///
+    /// The flip persists, so the view file is redirected to a temp path for this
+    /// thread; clicking a sidebar that still reads the developer's own
+    /// `sidebar-view.json` would rewrite it.
+    #[gpui::test]
+    fn header_order_toggle_flips_the_mode_on_click(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar-view.json");
+        sidebar_view::with_view_path(&path, || {
+            cx.update(gpui_component::init);
+            let captured: Rc<RefCell<Option<Entity<Sidebar>>>> = Rc::new(RefCell::new(None));
+            let slot = captured.clone();
+            let window = cx.open_window(
+                gpui::size(gpui::px(960.), gpui::px(640.)),
+                move |window, cx| {
+                    let sidebar = cx.new(|cx| Sidebar::new(gpui::px(240.), cx));
+                    *slot.borrow_mut() = Some(sidebar.clone());
+                    gpui_component::Root::new(sidebar, window, cx)
+                },
+            );
+            cx.run_until_parked();
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            let sidebar = captured.borrow().clone().expect("sidebar captured");
+
+            let toggle = visual
+                .debug_bounds("sidebar-conv-order-toggle-host")
+                .expect("the conversations header renders its ordering toggle");
+            let click_at = toggle.center();
+
+            // A missing view file seeds the default mode, so the first click is
+            // the one that has to move it.
+            assert_eq!(
+                sidebar.read_with(cx, |s, _| s.view.order_by),
+                OrderBy::Updated,
+                "the temp view file starts at the default mode"
+            );
+            visual.simulate_click(click_at, gpui::Modifiers::default());
+            visual.run_until_parked();
+            assert_eq!(
+                sidebar.read_with(cx, |s, _| s.view.order_by),
+                OrderBy::Manual,
+                "the click must flip the header's mode"
+            );
+            assert_eq!(
+                sidebar_view::load_from(&path).order_by,
+                OrderBy::Manual,
+                "the flip must land in the persisted view file"
+            );
+
+            // The same button is the pair's only editor, so it has to flip back
+            // too — a one-way control would strand the user in `Manual`.
+            visual.simulate_click(click_at, gpui::Modifiers::default());
+            visual.run_until_parked();
+            assert_eq!(
+                sidebar.read_with(cx, |s, _| s.view.order_by),
+                OrderBy::Updated,
+                "the second click must flip the mode back"
+            );
+        });
     }
 
     /// A thread row's ⋯ trigger opens on the FIRST click. The anchor is
