@@ -617,10 +617,12 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// The Conversations section header with its `+` new-session button.
-    /// `id_prefix` disambiguates element ids when the header exists twice in
-    /// one tree (in-flow copy + sticky overlay), and `dropdown` gates the
-    /// deferred new-session menu so only the visible copy anchors it.
+    /// The Conversations section header with its two actions: the `+`
+    /// new-session button and the ordering-mode toggle. `id_prefix`
+    /// disambiguates element ids when the header exists twice in one tree
+    /// (in-flow copy + sticky overlay), and `dropdown` gates the deferred
+    /// new-session menu — and the toggle's painted-frame id — so only the
+    /// visible copy anchors the menu and carries the test selector.
     fn conversations_section_header(
         &self,
         theme: &Theme,
@@ -629,8 +631,10 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Both header actions sit in one element: the new-session `+` and the
-        // ordering-mode trigger. Each mounts its own popup only on the in-flow
-        // copy (`dropdown`), so the sticky overlay never duplicates a menu.
+        // ordering-mode toggle. Only the `+` mounts a popup, and only on the
+        // in-flow copy (`dropdown`), so the sticky overlay never duplicates a
+        // menu; the toggle is self-contained and behaves the same in both
+        // copies.
         let actions = gpui::div()
             .relative()
             .flex()
@@ -688,21 +692,35 @@ impl Sidebar {
             // The ordering mode is a two-state preference, so the header
             // carries the toggle itself: a click flips it with no popup to
             // build, anchor, or dismiss. `selected` marks the activity-driven
-            // mode, and the tooltip names the mode the button is in — the
-            // toggle has no other surface to say what it does.
+            // mode, and the tooltip spells out the pair — the mode it is in and
+            // the one a click lands on — since a toggle has no other surface to
+            // say either.
             .child(
-                Button::new(format!("{id_prefix}-order-toggle"))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::SortDescending)
-                    .selected(self.view.order_by == OrderBy::Updated)
-                    .toggled(self.view.order_by == OrderBy::Updated)
-                    .tooltip(format!(
-                        "{}: {}",
-                        i18n::t("sidebar-view-options"),
-                        i18n::t(self.view.order_by.label_key())
-                    ))
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_order_by(cx))),
+                gpui::div()
+                    .relative()
+                    // Painted-frame id for the click test (in-flow copy only,
+                    // so the sticky overlay's second button never double-
+                    // registers it).
+                    .when(dropdown, |el| {
+                        el.debug_selector(|| "sidebar-conv-order-toggle-host".into())
+                    })
+                    .child(
+                        Button::new(format!("{id_prefix}-order-toggle"))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::SortDescending)
+                            .selected(self.view.order_by == OrderBy::Updated)
+                            .toggled(self.view.order_by == OrderBy::Updated)
+                            .tooltip(format!(
+                                "{}: {} → {}",
+                                i18n::t("sidebar-view-options"),
+                                i18n::t(self.view.order_by.label_key()),
+                                i18n::t(self.view.order_by.toggled().label_key())
+                            ))
+                            .on_click(
+                                cx.listener(|this, _ev, _window, cx| this.toggle_order_by(cx)),
+                            ),
+                    ),
             );
         section_header(
             i18n::t("sidebar-section-conversations"),
@@ -3841,6 +3859,71 @@ mod tests {
             f32::from(menu.right()),
             f32::from(menu.origin.y)
         );
+    }
+
+    /// The header's ordering toggle flips the mode on a real click — the exact
+    /// gesture that used to abort the app (the retired popup's eager build read
+    /// the Sidebar entity inside the click listener's own update, and that panic
+    /// cannot unwind past `gpui_macos::window::handle_view_event`).
+    ///
+    /// The flip persists, so the view file is redirected to a temp path for this
+    /// thread; clicking a sidebar that still reads the developer's own
+    /// `sidebar-view.json` would rewrite it.
+    #[gpui::test]
+    fn header_order_toggle_flips_the_mode_on_click(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar-view.json");
+        sidebar_view::with_view_path(&path, || {
+            cx.update(gpui_component::init);
+            let captured: Rc<RefCell<Option<Entity<Sidebar>>>> = Rc::new(RefCell::new(None));
+            let slot = captured.clone();
+            let window = cx.open_window(
+                gpui::size(gpui::px(960.), gpui::px(640.)),
+                move |window, cx| {
+                    let sidebar = cx.new(|cx| Sidebar::new(gpui::px(240.), cx));
+                    *slot.borrow_mut() = Some(sidebar.clone());
+                    gpui_component::Root::new(sidebar, window, cx)
+                },
+            );
+            cx.run_until_parked();
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            let sidebar = captured.borrow().clone().expect("sidebar captured");
+
+            let toggle = visual
+                .debug_bounds("sidebar-conv-order-toggle-host")
+                .expect("the conversations header renders its ordering toggle");
+            let click_at = toggle.center();
+
+            // A missing view file seeds the default mode, so the first click is
+            // the one that has to move it.
+            assert_eq!(
+                sidebar.read_with(cx, |s, _| s.view.order_by),
+                OrderBy::Updated,
+                "the temp view file starts at the default mode"
+            );
+            visual.simulate_click(click_at, gpui::Modifiers::default());
+            visual.run_until_parked();
+            assert_eq!(
+                sidebar.read_with(cx, |s, _| s.view.order_by),
+                OrderBy::Manual,
+                "the click must flip the header's mode"
+            );
+            assert_eq!(
+                sidebar_view::load_from(&path).order_by,
+                OrderBy::Manual,
+                "the flip must land in the persisted view file"
+            );
+
+            // The same button is the pair's only editor, so it has to flip back
+            // too — a one-way control would strand the user in `Manual`.
+            visual.simulate_click(click_at, gpui::Modifiers::default());
+            visual.run_until_parked();
+            assert_eq!(
+                sidebar.read_with(cx, |s, _| s.view.order_by),
+                OrderBy::Updated,
+                "the second click must flip the mode back"
+            );
+        });
     }
 
     /// A thread row's ⋯ trigger opens on the FIRST click. The anchor is

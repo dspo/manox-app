@@ -253,11 +253,36 @@ pub fn reconcile_moves(server: &[String], target: &[String]) -> Vec<(String, Opt
     moves
 }
 
-/// The view-state file under the shared state root.
+/// The view-state file under the shared state root — or, on a test thread that
+/// installed one through [`with_view_path`], that path instead.
 pub fn view_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_VIEW_PATH.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
     manox_agent::paths::manox_config_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("sidebar-view.json")
+}
+
+/// Redirect [`view_path`] to `path` for the current thread, restoring the
+/// previous value on the way out.
+///
+/// The header toggle persists the mode on every flip, so a test that drives the
+/// real header would otherwise rewrite the developer's own sidebar-view file.
+/// Thread-local rather than process-global: the unit-test binary runs its cases
+/// on parallel threads.
+#[cfg(test)]
+pub fn with_view_path<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let previous = TEST_VIEW_PATH.with(|slot| slot.replace(Some(path.to_path_buf())));
+    let out = f();
+    TEST_VIEW_PATH.with(|slot| *slot.borrow_mut() = previous);
+    out
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_VIEW_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Load the persisted view state. Missing or unreadable = the default (the
