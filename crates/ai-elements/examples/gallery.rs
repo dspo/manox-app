@@ -66,6 +66,79 @@ fn scripted_deltas() -> Vec<&'static str> {
     deltas
 }
 
+/// Gap between a scripted turn's steps — roughly one tool call apart.
+const STEP_CADENCE: Duration = Duration::from_millis(650);
+
+/// Delay between the last step landing and the segment folding, mirroring the
+/// conversation's post-turn fold.
+const CHAIN_FOLD_DELAY: Duration = Duration::from_millis(1200);
+
+/// What a scripted step is: a thinking round or a tool call. A real segment
+/// mixes both, which is the point of showing them apart here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepKind {
+    Reasoning,
+    Tool,
+}
+
+/// A scripted turn, in arrival order: the thinking rounds and tool calls one
+/// segment collects, with a tool call failing so the status slot shows both
+/// markers. The first round carries a body, the way a reasoning round does.
+const CHAIN_SCRIPT: &[(StepKind, &str, &str, bool, Option<&str>)] = &[
+    (
+        StepKind::Reasoning,
+        "思考",
+        "先确认组件边界",
+        false,
+        Some(
+            "A chain of thought is a list of labeled steps.\n\n\
+             The reasoning rounds and the tool calls of one turn are exactly that, so \
+             a segment renders as one — and the round's body is the step's content.",
+        ),
+    ),
+    (
+        StepKind::Tool,
+        "Read — crates/ai-elements/src/reasoning.rs",
+        "48 lines",
+        false,
+        None,
+    ),
+    (
+        StepKind::Tool,
+        "Bash — cargo test -p ai-elements",
+        "exit 1",
+        true,
+        None,
+    ),
+    (
+        StepKind::Reasoning,
+        "思考",
+        "失败来自断言而非编译",
+        false,
+        None,
+    ),
+    (
+        StepKind::Tool,
+        "Edit — crates/ai-elements/src/chain_of_thought.rs",
+        "+180 −0",
+        false,
+        None,
+    ),
+];
+
+/// One arriving step of the scripted turn.
+struct ChainStep {
+    kind: StepKind,
+    label: &'static str,
+    detail: &'static str,
+    failed: bool,
+    /// A reasoning round's thinking text; tool steps have none.
+    body: Option<&'static str>,
+    /// A step is in flight until the next one lands; the last one is closed out
+    /// when the script finishes.
+    done: bool,
+}
+
 /// A component this crate ships. Every variant appears in the rail; the selected
 /// one's demos fill the pane.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -126,6 +199,11 @@ struct Gallery {
     /// The chain of thought's open state — the host's, exactly as the
     /// conversation owns its segment's.
     chain_open: bool,
+    /// The scripted turn's steps so far, and the task feeding them. Both are the
+    /// host's, not the component's: a chain of thought is told what its steps
+    /// are, never the other way round.
+    chain_steps: Vec<ChainStep>,
+    chain_task: Option<gpui::Task<()>>,
     reasoning: Vec<Demo>,
     /// The scripted stream's delta sequence, cut once.
     deltas: Vec<&'static str>,
@@ -140,6 +218,8 @@ impl Gallery {
         Self {
             selected: Component::Reasoning,
             chain_open: false,
+            chain_steps: Vec::new(),
+            chain_task: None,
             reasoning,
             deltas: scripted_deltas(),
             _subscriptions: subscriptions,
@@ -310,6 +390,64 @@ impl Gallery {
         cx.notify();
     }
 
+    /// Run the scripted turn: steps land one at a time with the previous one
+    /// closed out, the way a segment collects tool calls, then the block folds —
+    /// the same host-side loop the conversation runs against `ThreadEvent`s.
+    fn start_chain(&mut self, cx: &mut Context<Self>) {
+        self.chain_steps.clear();
+        self.chain_open = true;
+        cx.notify();
+
+        // Assigning over the previous handle cancels a run this one replaces.
+        self.chain_task = Some(cx.spawn(async move |this, cx| {
+            for (kind, label, detail, failed, body) in CHAIN_SCRIPT {
+                cx.background_executor().timer(STEP_CADENCE).await;
+                let live = this
+                    .update(cx, |gallery, cx| {
+                        gallery.land_step(*kind, label, detail, *failed, *body, cx)
+                    })
+                    .is_ok();
+                if !live {
+                    return;
+                }
+            }
+            cx.background_executor().timer(CHAIN_FOLD_DELAY).await;
+            let _ = this.update(cx, |gallery, cx| gallery.fold_chain(cx));
+        }));
+    }
+
+    fn land_step(
+        &mut self,
+        kind: StepKind,
+        label: &'static str,
+        detail: &'static str,
+        failed: bool,
+        body: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous) = self.chain_steps.last_mut() {
+            previous.done = true;
+        }
+        self.chain_steps.push(ChainStep {
+            kind,
+            label,
+            detail,
+            failed,
+            body,
+            done: false,
+        });
+        cx.notify();
+    }
+
+    fn fold_chain(&mut self, cx: &mut Context<Self>) {
+        self.chain_task = None;
+        if let Some(last) = self.chain_steps.last_mut() {
+            last.done = true;
+        }
+        self.chain_open = false;
+        cx.notify();
+    }
+
     fn demo_block(&self, ix: usize) -> impl IntoElement {
         let demo = &self.reasoning[ix];
         let mut block =
@@ -404,87 +542,172 @@ impl Gallery {
         foreground: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let done = self.chain_steps.iter().filter(|step| step.done).count();
+        let failed = self
+            .chain_steps
+            .iter()
+            .filter(|step| step.failed && step.done)
+            .count();
+
+        // Header meta is whatever the host wants to say about the turn; here it
+        // reports progress and the failure count.
+        let mut header = ChainOfThoughtHeader::new("gallery-chain-scripted")
+            .label(SharedString::from("deepseek-v4-flash"))
+            .meta(meta_chip(
+                muted,
+                format!("{done}/{} steps", CHAIN_SCRIPT.len()),
+            ));
+        if failed > 0 {
+            header = header.meta(
+                div()
+                    .text_sm()
+                    .text_color(gpui::red())
+                    .child(SharedString::from(format!("{failed} failed"))),
+            );
+        }
+
+        let mut block = ChainOfThought::new("gallery-chain-scripted")
+            .open(self.chain_open)
+            .on_toggle(cx.listener(|this, _, _window, cx| {
+                this.chain_open = !this.chain_open;
+                cx.notify();
+            }))
+            .header(header);
+        for (ix, step) in self.chain_steps.iter().enumerate() {
+            // A thinking round keeps a book-open marker once it settles; a tool
+            // call reports its outcome. Both are the host's choice.
+            let marker_icon = match (step.kind, step.done, step.failed) {
+                (_, false, _) => IconName::LoaderCircle,
+                (StepKind::Reasoning, true, _) => IconName::BookOpen,
+                (StepKind::Tool, true, true) => IconName::CircleX,
+                (StepKind::Tool, true, false) => IconName::Check,
+            };
+            let color = if !step.done {
+                muted
+            } else if step.failed {
+                gpui::red()
+            } else if step.kind == StepKind::Reasoning {
+                muted
+            } else {
+                gpui::green()
+            };
+            let mut chain_step = ChainOfThoughtStep::new(format!("gallery-chain-step-{ix}"))
+                .icon(marker(marker_icon, color))
+                .label(step_label(foreground, step.label))
+                .description(step_description(muted, step.detail));
+            if let Some(body) = step.body {
+                chain_step = chain_step.content(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(body)),
+                );
+            }
+            block = block.step(chain_step);
+        }
+
         vec![
             demo_card(
                 muted,
                 border,
                 foreground,
-                "Controlled by the host",
-                "The header click reports a toggle; the gallery owns `open`. Meta slots carry \
-                 whatever the host shows — counts, elapsed, a warning badge.",
-                ChainOfThought::new("gallery-chain-controlled")
-                    .open(self.chain_open)
-                    .on_toggle(cx.listener(|this, _, _window, cx| {
-                        this.chain_open = !this.chain_open;
-                        cx.notify();
-                    }))
-                    .header(
-                        ChainOfThoughtHeader::new("gallery-chain-controlled")
-                            .label(SharedString::from("deepseek-v4-flash"))
-                            .meta(meta_chip(muted, "思考×8"))
-                            .meta(meta_chip(muted, "12s"))
-                            .meta(
-                                div()
-                                    .text_sm()
-                                    .text_color(gpui::red())
-                                    .child(SharedString::from("1 failed")),
+                "A turn arriving",
+                "Press Start: steps land one at a time, the previous one closing out, and the \
+                 block folds once the turn ends. Press Toggle by hand at any point — the block is \
+                 the host's, so nothing here resists you.",
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                Button::new("chain-start")
+                                    .xsmall()
+                                    .outline()
+                                    .label("Start")
+                                    .on_click(
+                                        cx.listener(|this, _, _window, cx| this.start_chain(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("chain-toggle")
+                                    .xsmall()
+                                    .outline()
+                                    .label("Toggle by hand")
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.chain_open = !this.chain_open;
+                                        cx.notify();
+                                    })),
                             ),
                     )
-                    .step(
-                        ChainOfThoughtStep::new("gallery-chain-step-0")
-                            .icon(marker(IconName::Check, gpui::green()))
-                            .label(step_label(foreground, "Read src/chain_of_thought.rs"))
-                            .description(step_description(muted, "48 lines")),
-                    )
-                    .step(
-                        ChainOfThoughtStep::new("gallery-chain-step-1")
-                            .icon(marker(IconName::LoaderCircle, muted))
-                            .label(step_label(foreground, "grep -rn upstream/reasoning.tsx"))
-                            .content(div().text_xs().text_color(muted).child(SharedString::from(
-                                "step body — whatever the host puts here",
-                            ))),
-                    ),
+                    .child(block),
             )
             .into_any_element(),
             demo_card(
                 muted,
                 border,
                 foreground,
-                "Steps and their rail",
-                "Always open, no header: only the steps. Every step but the last draws the \
-                 connector; the marker column is a slot, so a status vocabulary stays the host's.",
+                "Markers and rail",
+                "A finished turn, held open: every step but the last draws the connector, and the \
+                 marker column is a slot — a green check, a red cross, and a spinner are all the \
+                 host's choice, not the component's vocabulary.",
                 ChainOfThought::new("gallery-chain-static")
                     .open(true)
                     .header(
                         ChainOfThoughtHeader::new("gallery-chain-static")
                             .label(SharedString::from("Chain of Thought"))
-                            .meta(meta_chip(muted, "4 steps")),
+                            .meta(meta_chip(muted, "5 steps")),
                     )
                     .step(
                         ChainOfThoughtStep::new("gallery-static-step-0")
-                            .icon(marker(IconName::Check, gpui::green()))
-                            .label(step_label(foreground, "Explore — locate the component"))
-                            .description(step_description(muted, "done in 4s")),
+                            .icon(marker(IconName::BookOpen, muted))
+                            .label(step_label(foreground, "思考"))
+                            .description(step_description(muted, "先确认组件边界"))
+                            .content(div().text_xs().text_color(muted).child(SharedString::from(
+                                "A chain of thought is a list of labeled steps — a thinking round \
+                 is one of them, and its body is the step's content.",
+                            ))),
                     )
                     .step(
                         ChainOfThoughtStep::new("gallery-static-step-1")
                             .icon(marker(IconName::Check, gpui::green()))
-                            .label(step_label(foreground, "Read — packages/elements"))
-                            .description(step_description(muted, "12 files")),
+                            .label(step_label(
+                                foreground,
+                                "Read — crates/ai-elements/src/reasoning.rs",
+                            ))
+                            .description(step_description(muted, "48 lines")),
                     )
                     .step(
                         ChainOfThoughtStep::new("gallery-static-step-2")
-                            .icon(marker(IconName::CircleX, gpui::red()))
+                            .icon(marker(IconName::Check, gpui::green()))
                             .label(step_label(
                                 foreground,
-                                "Bash — npx ai-elements add reasoning",
+                                "Grep — \"ChainOfThought\" in the upstream tree",
                             ))
-                            .description(step_description(muted, "exit 1")),
+                            .description(step_description(muted, "6 hits")),
                     )
                     .step(
                         ChainOfThoughtStep::new("gallery-static-step-3")
+                            .icon(marker(IconName::CircleX, gpui::red()))
+                            .label(step_label(foreground, "Bash — cargo test -p ai-elements"))
+                            .description(step_description(muted, "exit 1")),
+                    )
+                    .step(
+                        ChainOfThoughtStep::new("gallery-static-step-4")
+                            .icon(marker(IconName::Check, gpui::green()))
+                            .label(step_label(
+                                foreground,
+                                "Edit — crates/ai-elements/src/chain_of_thought.rs",
+                            ))
+                            .description(step_description(muted, "+180 −0")),
+                    )
+                    .step(
+                        ChainOfThoughtStep::new("gallery-static-step-5")
                             .icon(marker(IconName::LoaderCircle, muted))
-                            .label(step_label(foreground, "Write — crates/ai-elements/src"))
+                            .label(step_label(foreground, "Bash — cargo run --example gallery"))
                             .description(step_description(muted, "running")),
                     ),
             )
@@ -693,11 +916,8 @@ fn demo_card(
         .child(body)
 }
 
-fn meta_chip(muted: gpui::Hsla, text: &'static str) -> impl IntoElement {
-    div()
-        .text_sm()
-        .text_color(muted)
-        .child(SharedString::from(text))
+fn meta_chip(muted: gpui::Hsla, text: impl Into<SharedString>) -> impl IntoElement {
+    div().text_sm().text_color(muted).child(text.into())
 }
 
 fn step_label(foreground: gpui::Hsla, text: &'static str) -> impl IntoElement {
