@@ -276,7 +276,12 @@ impl ChainOfThoughtHeader {
                 row.on_click(move |event, window, cx| on_toggle(event, window, cx))
             })
             .children(self.icon)
-            .child(div().flex_1().min_w_0().children(self.label))
+            // The label takes its own width rather than growing to fill the
+            // row: everything on this row reads left to right, in order, with
+            // no gap between the block's identity and what it is reporting.
+            // (Upstream lets the label grow and pins the chevron to the right
+            // edge; a row of counts floating away from its label is worse.)
+            .child(div().min_w_0().children(self.label))
             .child(chevron)
             .children(self.meta)
             .into_any_element()
