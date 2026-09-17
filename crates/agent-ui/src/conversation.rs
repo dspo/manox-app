@@ -3097,6 +3097,71 @@ mod tests {
 
     /// A live tool entry opens expanded while in flight (Running); the
     /// restored-history rebuild path still mounts collapsed.
+    /// A tool call arrives as two journal rows: the start row carries the
+    /// arguments and the title derived from them, the settle row carries neither
+    /// (`input: null`, and the bare tool name as its title). Applying both must
+    /// leave the row showing its arguments — otherwise every `Read` / `Grep` /
+    /// `Edit` row degrades to a bare tool name the moment it finishes.
+    #[gpui::test]
+    fn a_settled_tool_call_keeps_its_argument_title(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            cwd: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "tu_1".into(),
+                        name: "Read".into(),
+                        title: "Read src/lib.rs".into(),
+                        status: ToolCallStatus::Running,
+                        input: Some(serde_json::json!({ "path": "src/lib.rs" })),
+                    },
+                    "model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                // The settle row, as the wire sends it: no payload, bare name.
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "tu_1".into(),
+                        name: "Read".into(),
+                        title: "Read".into(),
+                        status: ToolCallStatus::Success,
+                        input: None,
+                    },
+                    "model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.update(|cx| {
+            conversation.read_with(cx, |c, cx| {
+                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
+                    panic!("expected a thinking segment");
+                };
+                let ActivityEntry::Tool(entry) = &t.entries[0] else {
+                    panic!("expected a tool entry");
+                };
+                assert_eq!(
+                    entry.title, "Read src/lib.rs",
+                    "the settle row must not erase the arguments"
+                );
+                assert_eq!(
+                    entry.input["path"], "src/lib.rs",
+                    "the start row's arguments must survive the settle row"
+                );
+            });
+        });
+    }
+
     #[gpui::test]
     fn live_tool_entry_opens_expanded(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
