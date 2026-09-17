@@ -46,11 +46,19 @@ const PAGE_SIZE: usize = 20;
 /// markers or are ANSI-colored command output.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum PanelKind {
-    /// `read_file` / `write_file`: file content with a sequential line-number
-    /// gutter. The agent-ui layer pre-strips the hashline `[path#TAG]` header
-    /// and `N:` prefixes, so the panel numbers the content lines 1..N.
+    /// `write_file`: file content with a sequential line-number gutter, the
+    /// content being what the tool wrote. The host feeds the body verbatim;
+    /// the panel numbers it 1..N.
     #[default]
     File,
+    /// `read_file`: the model-facing read shape — a `[path#TAG]` header, an
+    /// `N:` prefix per line carrying **the file's own** line numbers, and `...`
+    /// between disjoint windows. The panel strips the header, uses those
+    /// numbers for the gutter (a range read starts where the file does, not at
+    /// 1), and leaves a gap marker unnumbered. Owning the shape here is what
+    /// keeps the numbering honest: a host that pre-stripped the prefixes could
+    /// only renumber from 1.
+    Numbered,
     /// `edit_file`: unified diff. `+`/`-` lines are colored, `@@` hunk headers
     /// (which carry the line numbers) are accented, and `[path#TAG]` / `---`
     /// section separators are muted. No per-line gutter.
@@ -256,6 +264,51 @@ impl TerminalPanel {
                     s.push_str(&gutter);
                     runs.push((line_start..line_start + g_len, muted));
                     s.push_str(line);
+                    s.push('\n');
+                }
+                trim_trailing_newline(&mut s);
+                (s, runs, total, v)
+            }
+            PanelKind::Numbered => {
+                // The file's own numbers, so the gutter width comes from the
+                // largest number rather than from the line count.
+                let lines: Vec<HashlineLine<'_>> = self
+                    .output
+                    .lines()
+                    .filter(|line| !is_hashline_header(line))
+                    .map(parse_hashline_line)
+                    .collect();
+                let total = lines.len();
+                let v = self.visible_count(total);
+                let widest = lines
+                    .iter()
+                    .filter_map(|line| match line {
+                        HashlineLine::Numbered { number, .. } => Some(*number),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let width = digits(widest as usize);
+                let muted = style_color(self.styles.muted);
+                let mut s = String::new();
+                let mut runs = Vec::new();
+                for line in lines.iter().take(v) {
+                    let line_start = s.len();
+                    match line {
+                        HashlineLine::Numbered { number, content } => {
+                            let gutter = format!("{number:>width$}  ");
+                            let g_len = gutter.len();
+                            s.push_str(&gutter);
+                            runs.push((line_start..line_start + g_len, muted));
+                            s.push_str(content);
+                        }
+                        // A gap marker is not a file line: it carries no number.
+                        HashlineLine::Gap => {
+                            s.push_str(GAP_MARKER);
+                            runs.push((line_start..s.len(), muted));
+                        }
+                        HashlineLine::Plain(content) => s.push_str(content),
+                    }
                     s.push('\n');
                 }
                 trim_trailing_newline(&mut s);
@@ -483,6 +536,50 @@ fn styled(color: Hsla, italic: bool) -> HighlightStyle {
 fn body_parts(s: &str) -> Vec<&str> {
     let trimmed = s.strip_suffix('\n').unwrap_or(s);
     trimmed.split('\n').collect()
+}
+
+/// The marker the read tool emits between disjoint windows of one file.
+const GAP_MARKER: &str = "...";
+
+/// One line of a model-facing read body, classified by its prefix.
+enum HashlineLine<'a> {
+    /// `<digits>:<content>` — the number is the file's own line number.
+    Numbered { number: u64, content: &'a str },
+    /// `...` — the marker between disjoint read windows.
+    Gap,
+    /// A line carrying no number (a defensive fallback; the header is filtered
+    /// out before parsing).
+    Plain(&'a str),
+}
+
+/// Classify one read-body line. A line whose leading digits are not followed by
+/// `:` is content, not a number — a file line that itself starts with digits
+/// keeps its text rather than being misread as a gutter.
+fn parse_hashline_line(line: &str) -> HashlineLine<'_> {
+    if line == GAP_MARKER {
+        return HashlineLine::Gap;
+    }
+    let digits_end = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digits_end > 0
+        && line.as_bytes().get(digits_end) == Some(&b':')
+        && let Ok(number) = line[..digits_end].parse::<u64>()
+    {
+        return HashlineLine::Numbered {
+            number,
+            content: &line[digits_end + 1..],
+        };
+    }
+    HashlineLine::Plain(line)
+}
+
+/// Recognize the `[path#TAG]` header the read tool puts above the numbered body:
+/// bracketed, with a non-empty path and tag separated by the first `#`.
+fn is_hashline_header(line: &str) -> bool {
+    let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return false;
+    };
+    let mut parts = inner.splitn(2, '#');
+    matches!((parts.next(), parts.next()), (Some(p), Some(t)) if !p.is_empty() && !t.is_empty())
 }
 
 /// Decimal digit count of `n`, floored at 1. Sizes the line-number gutter so
@@ -966,6 +1063,33 @@ mod tests {
         assert!(matches!(classify_diff(" context"), DiffLine::Context));
         assert!(matches!(classify_diff(""), DiffLine::Context));
     }
+    #[test]
+    fn numbered_body_keeps_the_files_own_line_numbers() {
+        // A range read: the body starts at line 142 and skips to 200. The
+        // gutter must carry those numbers — renumbering from 1 would point at
+        // the wrong lines, which is what a host-side prefix strip caused.
+        let (text, total, v) = panel_body(
+            PanelKind::Numbered,
+            "[src/foo.rs#A1B2]\n142:fn main() {\n143:    let x = 1;\n...\n200:}",
+            10,
+            false,
+        );
+        assert_eq!(total, 4, "the header is not a body line");
+        assert_eq!(v, 4);
+        assert!(
+            !text.contains("[src/foo.rs#A1B2]"),
+            "header stripped: {text:?}"
+        );
+        assert!(text.contains("142  fn main() {"), "{text:?}");
+        assert!(text.contains("143      let x = 1;"), "{text:?}");
+        assert!(text.contains("200  }"), "{text:?}");
+        assert!(
+            text.contains("...") && !text.contains("  ..."),
+            "a gap marker carries no number: {text:?}"
+        );
+        assert!(!text.contains("1  "), "no renumbering from 1: {text:?}");
+    }
+
     /// A notice-style panel (no command / cwd, plain kind) renders only the
     /// paginated body: an empty prompt block and the first `visible` lines,
     /// so a long notice folds like a tool's output by default.
