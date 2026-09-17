@@ -38,6 +38,7 @@ manox-agent.workspace = true
 manox-terminal.workspace = true
 terminal-ui.workspace = true
 manox-components.workspace = true
+ai-elements.workspace = true
 open.workspace = true
 manox-webview.workspace = true
 
