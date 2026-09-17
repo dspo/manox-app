@@ -166,6 +166,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai-elements"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "manox-components",
+]
+
+[[package]]
 name = "alacritty_terminal"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

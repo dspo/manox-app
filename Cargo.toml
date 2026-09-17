@@ -5,6 +5,7 @@
 #   - crates/manox:                   主二进制（窗口 + 主题 + 托盘 + 接线）
 #   - crates/agent-ui:                GPUI UI 层（Workspace/ConversationState/views）
 #   - crates/terminal-ui:             终端渲染层（TerminalElement/TerminalView）
+#   - crates/ai-elements:             agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements
 #   - crates/manox-components:        app chrome 与基础渲染件（markdown/终端面板）
 #   - crates/manox-webview:           wry 原生 webview + Tauri 式 IPC
 #   - crates/manox-webview-macros:    webview IPC 过程宏
@@ -28,6 +29,7 @@ members = [
 	"crates/cx-cli",
 	"crates/manox-ext-agents",
 	"crates/agent-ui",
+	"crates/ai-elements",
 	"crates/manox",
 	"crates/terminal-ui",
 	"crates/manox-components",
@@ -57,6 +59,7 @@ hyperlinks = { git = "https://github.com/dspo/manox.git", branch = "main" }
 # —— 本仓成员（path 依赖；经 `foo.workspace = true` 引用）——
 agent-ui = { path = "crates/agent-ui" }
 manox = { path = "crates/manox" }
+ai-elements = { path = "crates/ai-elements" }
 terminal-ui = { path = "crates/terminal-ui" }
 manox-components = { path = "crates/manox-components" }
 manox-webview = { path = "crates/manox-webview" }
