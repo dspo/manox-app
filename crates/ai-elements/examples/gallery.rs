@@ -22,7 +22,10 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, Window, div, prelude::*, px, size,
 };
-use gpui_component::{Icon, IconName, Root, Sizable as _, Theme, button::Button, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Root, Sizable as _, Theme, button::Button, h_flex,
+    shimmer::ShimmerText, spinner::Spinner, v_flex,
+};
 use manox_components::markdown::{HeadingMode, Markdown};
 
 /// The scripted reasoning text. A scripted stream feeds it a few characters at a
@@ -66,12 +69,94 @@ fn scripted_deltas() -> Vec<&'static str> {
     deltas
 }
 
-/// Gap between a scripted turn's steps — roughly one tool call apart.
-const STEP_CADENCE: Duration = Duration::from_millis(650);
+/// How long a reasoning delta is held back — a provider's own cadence, and the
+/// thing that makes the round read as arriving rather than appearing.
+const THINK_DELTA: Duration = Duration::from_millis(180);
 
-/// Delay between the last step landing and the segment folding, mirroring the
-/// conversation's post-turn fold.
-const CHAIN_FOLD_DELAY: Duration = Duration::from_millis(1200);
+/// One beat of the scripted turn: what the host does to the block, and how long
+/// it waits before the next beat. Delays belong to the beats, not the steps,
+/// because a tool call's *running* stretch is as much a part of the turn as the
+/// call itself.
+enum ChainBeat {
+    /// A reasoning delta: the first opens the round, the rest grow its body.
+    Think(&'static str),
+    /// The round's stream ended.
+    ThinkSettled,
+    /// A tool call starts — the step lands with its marker in flight and no
+    /// result yet.
+    Tool(&'static str, &'static str),
+    /// The tool call returns, which is when its result appears.
+    ToolSettled {
+        detail: &'static str,
+        failed: bool,
+        output: &'static str,
+    },
+    /// The turn ends and the block folds.
+    Fold,
+}
+
+/// A scripted turn, beat by beat: a thinking round that streams, a tool call
+/// that runs before it answers, a failing call, a second round, and a fold.
+const CHAIN_SCRIPT: &[(Duration, ChainBeat)] = &[
+    (
+        Duration::from_millis(300),
+        ChainBeat::Think("先确认组件边界。"),
+    ),
+    (
+        THINK_DELTA,
+        ChainBeat::Think("这个段落本来就是一组带标签的步骤，"),
+    ),
+    (THINK_DELTA, ChainBeat::Think("而一轮思考就是其中之一，")),
+    (THINK_DELTA, ChainBeat::Think("工具调用也是。")),
+    (Duration::from_millis(250), ChainBeat::ThinkSettled),
+    (
+        Duration::from_millis(200),
+        ChainBeat::Tool("Read — crates/ai-elements/src/reasoning.rs", "reading"),
+    ),
+    (
+        Duration::from_millis(1300),
+        ChainBeat::ToolSettled {
+            detail: "48 lines",
+            failed: false,
+            output: "state · duration clock · auto-fold · user-toggle pin\n\
+                     animation keys · gallery wiring",
+        },
+    ),
+    (
+        Duration::from_millis(250),
+        ChainBeat::Tool("Bash — cargo test -p ai-elements", "running"),
+    ),
+    (
+        Duration::from_millis(1600),
+        ChainBeat::ToolSettled {
+            detail: "exit 1",
+            failed: true,
+            output: "test the_steps_follow_the_host_s_open_state ... FAILED\n\
+                     assertion `left == right` failed",
+        },
+    ),
+    (
+        Duration::from_millis(300),
+        ChainBeat::Think("失败来自断言，不是编译。"),
+    ),
+    (Duration::from_millis(220), ChainBeat::ThinkSettled),
+    (
+        Duration::from_millis(250),
+        ChainBeat::Tool(
+            "Edit — crates/ai-elements/src/chain_of_thought.rs",
+            "editing",
+        ),
+    ),
+    (
+        Duration::from_millis(1100),
+        ChainBeat::ToolSettled {
+            detail: "1 file changed",
+            failed: false,
+            output: "1 insertion(+), 1 deletion(-)",
+        },
+    ),
+    (Duration::from_millis(1200), ChainBeat::Fold),
+];
 
 /// What a scripted step is: a thinking round or a tool call. A real segment
 /// mixes both, which is the point of showing them apart here.
@@ -81,62 +166,19 @@ enum StepKind {
     Tool,
 }
 
-/// A scripted turn, in arrival order: the thinking rounds and tool calls one
-/// segment collects, with a tool call failing so the status slot shows both
-/// markers. The first round carries a body, the way a reasoning round does.
-const CHAIN_SCRIPT: &[(StepKind, &str, &str, bool, Option<&str>)] = &[
-    (
-        StepKind::Reasoning,
-        "思考",
-        "先确认组件边界",
-        false,
-        Some(
-            "A chain of thought is a list of labeled steps.\n\n\
-             The reasoning rounds and the tool calls of one turn are exactly that, so \
-             a segment renders as one — and the round's body is the step's content.",
-        ),
-    ),
-    (
-        StepKind::Tool,
-        "Read — crates/ai-elements/src/reasoning.rs",
-        "48 lines",
-        false,
-        None,
-    ),
-    (
-        StepKind::Tool,
-        "Bash — cargo test -p ai-elements",
-        "exit 1",
-        true,
-        None,
-    ),
-    (
-        StepKind::Reasoning,
-        "思考",
-        "失败来自断言而非编译",
-        false,
-        None,
-    ),
-    (
-        StepKind::Tool,
-        "Edit — crates/ai-elements/src/chain_of_thought.rs",
-        "+180 −0",
-        false,
-        None,
-    ),
-];
-
-/// One arriving step of the scripted turn.
+/// One step of the scripted turn, as the host has told it so far: a round's body
+/// grows while it streams, a tool's result lands only when it returns.
 struct ChainStep {
     kind: StepKind,
     label: &'static str,
-    detail: &'static str,
+    /// The line under the label: a tool's live phase, then its outcome.
+    detail: String,
+    /// A round's thinking text, or a tool's output once it returned.
+    body: String,
     failed: bool,
-    /// A reasoning round's thinking text; tool steps have none.
-    body: Option<&'static str>,
-    /// A step is in flight until the next one lands; the last one is closed out
-    /// when the script finishes.
-    done: bool,
+    /// True while the step is still in flight — the marker spins, and the label
+    /// of a round shimmers.
+    running: bool,
 }
 
 /// A component this crate ships. Every variant appears in the rail; the selected
@@ -390,8 +432,8 @@ impl Gallery {
         cx.notify();
     }
 
-    /// Run the scripted turn: steps land one at a time with the previous one
-    /// closed out, the way a segment collects tool calls, then the block folds —
+    /// Run the scripted turn, beat by beat: a round streams its body, a tool call
+    /// runs for a while before its result lands, and the block folds at the end —
     /// the same host-side loop the conversation runs against `ThreadEvent`s.
     fn start_chain(&mut self, cx: &mut Context<Self>) {
         self.chain_steps.clear();
@@ -400,51 +442,75 @@ impl Gallery {
 
         // Assigning over the previous handle cancels a run this one replaces.
         self.chain_task = Some(cx.spawn(async move |this, cx| {
-            for (kind, label, detail, failed, body) in CHAIN_SCRIPT {
-                cx.background_executor().timer(STEP_CADENCE).await;
+            for (delay, beat) in CHAIN_SCRIPT {
+                cx.background_executor().timer(*delay).await;
                 let live = this
-                    .update(cx, |gallery, cx| {
-                        gallery.land_step(*kind, label, detail, *failed, *body, cx)
-                    })
+                    .update(cx, |gallery, cx| gallery.apply_beat(beat, cx))
                     .is_ok();
                 if !live {
                     return;
                 }
             }
-            cx.background_executor().timer(CHAIN_FOLD_DELAY).await;
-            let _ = this.update(cx, |gallery, cx| gallery.fold_chain(cx));
         }));
     }
 
-    fn land_step(
-        &mut self,
-        kind: StepKind,
-        label: &'static str,
-        detail: &'static str,
-        failed: bool,
-        body: Option<&'static str>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(previous) = self.chain_steps.last_mut() {
-            previous.done = true;
+    fn apply_beat(&mut self, beat: &ChainBeat, cx: &mut Context<Self>) {
+        match beat {
+            // The first delta opens the round; the rest grow the same one, and
+            // the marker keeps spinning until the stream settles.
+            ChainBeat::Think(delta) => match self.chain_steps.last_mut() {
+                Some(step) if step.kind == StepKind::Reasoning && step.running => {
+                    step.body.push_str(delta);
+                }
+                _ => self.chain_steps.push(ChainStep {
+                    kind: StepKind::Reasoning,
+                    label: "思考",
+                    detail: String::from("streaming"),
+                    body: String::from(*delta),
+                    failed: false,
+                    running: true,
+                }),
+            },
+            ChainBeat::ThinkSettled => {
+                if let Some(step) = self.chain_steps.last_mut()
+                    && step.kind == StepKind::Reasoning
+                {
+                    step.running = false;
+                    step.detail = String::from("thinking");
+                }
+            }
+            ChainBeat::Tool(label, phase) => self.chain_steps.push(ChainStep {
+                kind: StepKind::Tool,
+                label,
+                detail: String::from(*phase),
+                body: String::new(),
+                failed: false,
+                running: true,
+            }),
+            // The result lands here and only here — which is the whole point of
+            // the tool part of the demo: running and answered are two moments.
+            ChainBeat::ToolSettled {
+                detail,
+                failed,
+                output,
+            } => {
+                if let Some(step) = self
+                    .chain_steps
+                    .iter_mut()
+                    .rev()
+                    .find(|step| step.kind == StepKind::Tool && step.running)
+                {
+                    step.running = false;
+                    step.failed = *failed;
+                    step.detail = String::from(*detail);
+                    step.body = String::from(*output);
+                }
+            }
+            ChainBeat::Fold => {
+                self.chain_task = None;
+                self.chain_open = false;
+            }
         }
-        self.chain_steps.push(ChainStep {
-            kind,
-            label,
-            detail,
-            failed,
-            body,
-            done: false,
-        });
-        cx.notify();
-    }
-
-    fn fold_chain(&mut self, cx: &mut Context<Self>) {
-        self.chain_task = None;
-        if let Some(last) = self.chain_steps.last_mut() {
-            last.done = true;
-        }
-        self.chain_open = false;
         cx.notify();
     }
 
@@ -542,11 +608,11 @@ impl Gallery {
         foreground: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let done = self.chain_steps.iter().filter(|step| step.done).count();
+        let settled = self.chain_steps.iter().filter(|step| !step.running).count();
         let failed = self
             .chain_steps
             .iter()
-            .filter(|step| step.failed && step.done)
+            .filter(|step| step.failed && !step.running)
             .count();
 
         // Header meta is whatever the host wants to say about the turn; here it
@@ -555,7 +621,7 @@ impl Gallery {
             .label(SharedString::from("deepseek-v4-flash"))
             .meta(meta_chip(
                 muted,
-                format!("{done}/{} steps", CHAIN_SCRIPT.len()),
+                format!("{settled}/{} steps", CHAIN_SCRIPT.len()),
             ));
         if failed > 0 {
             header = header.meta(
@@ -574,15 +640,9 @@ impl Gallery {
             }))
             .header(header);
         for (ix, step) in self.chain_steps.iter().enumerate() {
-            // A thinking round keeps a book-open marker once it settles; a tool
-            // call reports its outcome. Both are the host's choice.
-            let marker_icon = match (step.kind, step.done, step.failed) {
-                (_, false, _) => IconName::LoaderCircle,
-                (StepKind::Reasoning, true, _) => IconName::BookOpen,
-                (StepKind::Tool, true, true) => IconName::CircleX,
-                (StepKind::Tool, true, false) => IconName::Check,
-            };
-            let color = if !step.done {
+            // A round keeps a book-open marker once it settles; a tool call
+            // reports its outcome. Both are the host's choice.
+            let color = if step.running {
                 muted
             } else if step.failed {
                 gpui::red()
@@ -591,17 +651,42 @@ impl Gallery {
             } else {
                 gpui::green()
             };
+            let marker_el: AnyElement = if step.running {
+                running_marker(color)
+            } else {
+                let icon = match (step.kind, step.failed) {
+                    (StepKind::Reasoning, _) => IconName::BookOpen,
+                    (StepKind::Tool, true) => IconName::CircleX,
+                    (StepKind::Tool, false) => IconName::Check,
+                };
+                marker(icon, color)
+            };
+            // A round's label shimmers while its deltas arrive — the host's own
+            // text, in the host's own slot.
+            let label: AnyElement = if step.running && step.kind == StepKind::Reasoning {
+                ShimmerText::new("思考中…").into_any_element()
+            } else {
+                step_label(foreground, step.label).into_any_element()
+            };
             let mut chain_step = ChainOfThoughtStep::new(format!("gallery-chain-step-{ix}"))
-                .icon(marker(marker_icon, color))
-                .label(step_label(foreground, step.label))
-                .description(step_description(muted, step.detail));
-            if let Some(body) = step.body {
-                chain_step = chain_step.content(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(SharedString::from(body)),
-                );
+                .icon(marker_el)
+                .label(label)
+                .description(step_description(muted, step.detail.clone()));
+            if !step.body.is_empty() {
+                // A round's body is prose; a tool's is its output, so it reads
+                // as a terminal.
+                let body = div()
+                    .w_full()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from(step.body.as_str()));
+                chain_step = chain_step.content(match step.kind {
+                    StepKind::Reasoning => body.into_any_element(),
+                    StepKind::Tool => body
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .into_any_element(),
+                });
             }
             block = block.step(chain_step);
         }
@@ -612,9 +697,9 @@ impl Gallery {
                 border,
                 foreground,
                 "A turn arriving",
-                "Press Start: steps land one at a time, the previous one closing out, and the \
-                 block folds once the turn ends. Press Toggle by hand at any point — the block is \
-                 the host's, so nothing here resists you.",
+                "Press Start: a round streams its thinking, a tool call runs for a while before \
+                 its result lands, a call fails, a second round answers, and the block folds. Every \
+                 beat is the host telling the block what changed — the component holds no script.",
                 v_flex()
                     .w_full()
                     .min_w_0()
@@ -706,7 +791,7 @@ impl Gallery {
                     )
                     .step(
                         ChainOfThoughtStep::new("gallery-static-step-5")
-                            .icon(marker(IconName::LoaderCircle, muted))
+                            .icon(running_marker(muted))
                             .label(step_label(foreground, "Bash — cargo run --example gallery"))
                             .description(step_description(muted, "running")),
                     ),
@@ -920,18 +1005,12 @@ fn meta_chip(muted: gpui::Hsla, text: impl Into<SharedString>) -> impl IntoEleme
     div().text_sm().text_color(muted).child(text.into())
 }
 
-fn step_label(foreground: gpui::Hsla, text: &'static str) -> impl IntoElement {
-    div()
-        .text_sm()
-        .text_color(foreground)
-        .child(SharedString::from(text))
+fn step_label(foreground: gpui::Hsla, text: impl Into<SharedString>) -> impl IntoElement {
+    div().text_sm().text_color(foreground).child(text.into())
 }
 
-fn step_description(muted: gpui::Hsla, text: &'static str) -> impl IntoElement {
-    div()
-        .text_xs()
-        .text_color(muted)
-        .child(SharedString::from(text))
+fn step_description(muted: gpui::Hsla, text: impl Into<SharedString>) -> impl IntoElement {
+    div().text_xs().text_color(muted).child(text.into())
 }
 
 /// A step's marker: the status slot the host fills, so the component never
@@ -941,4 +1020,11 @@ fn marker(icon: IconName, color: gpui::Hsla) -> AnyElement {
         .xsmall()
         .text_color(color)
         .into_any_element()
+}
+
+/// A step still in flight: the same slot, filled with something that moves. A
+/// static glyph for "running" reads as a frozen frame — the spinner is what says
+/// the work is still happening.
+fn running_marker(color: gpui::Hsla) -> AnyElement {
+    Spinner::new().xsmall().color(color).into_any_element()
 }
