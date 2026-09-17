@@ -202,6 +202,37 @@ fn the_automatic_fold_fires_once(cx: &mut TestAppContext) {
     assert!(is_open(cx, &state));
 }
 
+/// A stream that resumes inside the fold's delay window still folds when it
+/// ends for real. The resume calls the pending fold off (upstream's effect
+/// cleanup), and a fold that never happened must not spend the block's single
+/// one — otherwise the first end would consume it, the stale timer would fire
+/// mid-stream, and the block would stay open for the rest of its life.
+#[gpui::test]
+fn a_stream_resuming_inside_the_delay_window_still_folds(cx: &mut TestAppContext) {
+    let state = closed_state(cx);
+    update(cx, &state, |state, cx| state.set_streaming(true, cx));
+    update(cx, &state, |state, cx| state.set_streaming(false, cx));
+
+    // Resume midway through the delay, then let the whole window pass.
+    cx.executor().advance_clock(AUTO_CLOSE_DELAY / 2);
+    update(cx, &state, |state, cx| state.set_streaming(true, cx));
+    cx.executor().advance_clock(AUTO_CLOSE_DELAY * 2);
+    cx.run_until_parked();
+    assert!(
+        is_open(cx, &state),
+        "a live stream keeps the block open past the first window"
+    );
+
+    // Ending for real folds it.
+    update(cx, &state, |state, cx| state.set_streaming(false, cx));
+    cx.executor().advance_clock(AUTO_CLOSE_DELAY);
+    cx.run_until_parked();
+    assert!(
+        !is_open(cx, &state),
+        "the second end must still fold the block"
+    );
+}
+
 // —— The two deliberate extensions ———————————————————————————————————————————
 
 /// A hand toggle claims the block: a fold already scheduled stands down, and

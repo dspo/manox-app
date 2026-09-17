@@ -139,6 +139,12 @@ impl ReasoningState {
             if self.started_at.is_none() {
                 self.started_at = Some(cx.background_executor().now());
             }
+            // A fold an earlier end scheduled is called off by the stream
+            // resuming — upstream's effect cleanup clears its timeout whenever
+            // `isStreaming` changes, and dropping the task is the cancellation.
+            // Without it the stale timer would fire mid-stream and spend the
+            // block's single fold on a fold it did not make.
+            self._auto_close_task = None;
             if !self.is_open && !self.explicitly_closed {
                 self.set_open_inner(true, cx);
             }
@@ -208,11 +214,13 @@ impl ReasoningState {
     }
 
     /// The delayed fold. Re-checks the guards, because the user may have taken
-    /// the block over during the delay; one-shot either way, so a block the
-    /// user re-opens is never folded out from under them.
+    /// the block over during the delay; and it counts as the block's one fold
+    /// **only when it folds**, so a fire that changed nothing does not spend the
+    /// one-shot on it — otherwise a stream that resumed inside the window would
+    /// leave the block open for good.
     fn fold_after_stream(&mut self, cx: &mut Context<Self>) {
-        self.has_auto_closed = true;
         if !self.is_streaming && self.is_open && !self.user_toggled {
+            self.has_auto_closed = true;
             self.set_open_inner(false, cx);
         }
         cx.notify();
