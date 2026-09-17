@@ -1046,10 +1046,12 @@ impl Workspace {
                     let mut menu = menu.max_w(gpui::px(320.)).scrollable(true);
                     menu = menu.label(i18n::t("sidebar-section-projects"));
 
-                    // Recent projects: the workspace registry rows, in host
-                    // order and capped like before.
+                    // Recent projects, newest first: the host's display
+                    // order is creation order (oldest first), so the menu
+                    // reverses it and caps at 20 — dropping the OLDEST rows,
+                    // like the pre-registry list did (review #39 [issue] 3).
                     let recent_projects: Vec<(String, String)> =
-                        rows.iter().take(20).cloned().collect();
+                        rows.iter().rev().take(20).cloned().collect();
 
                     let ws_recent = ws.clone();
                     let theme_recent = theme.clone();

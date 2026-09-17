@@ -3331,7 +3331,10 @@ impl ItemBuilder {
                                     close_segment(items, self.active_segment_ix);
                                     self.active_segment_ix = None;
                                     let (subagent_type, description) =
-                                        crate::conversation::agent_task_labels(&tu.input);
+                                        crate::conversation::agent_task_labels(
+                                            tu.name.as_ref(),
+                                            &tu.input,
+                                        );
                                     items.push(ConvItem::AgentTask(AgentTaskItem {
                                         id: tu.id.clone(),
                                         subagent_type,

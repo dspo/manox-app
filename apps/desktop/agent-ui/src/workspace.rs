@@ -653,9 +653,7 @@ pub struct Workspace {
     pub(crate) sidebar: Entity<Sidebar>,
     /// Distinct bound-project paths of the active summaries, in list order
     /// (the project chip's "recent, unregistered" section; U2 push cache).
-    thread_projects: Vec<String>,
     /// Registered project folders (chip menu + the sidebar grouping push).
-    known_projects: Vec<String>,
     /// Repaint observer on the multiplexer's list/registry state (U2): its
     /// notify drives the sidebar rows and the workspace's model surfaces.
     _mux_lists: gpui::Subscription,
@@ -1191,34 +1189,7 @@ impl Workspace {
         // feeds the chip-menu caches off the wire state (U2 cross-domain
         // #1: the store-read decoration snapshot retired — the registry
         // rides the Projects mirror, the per-thread projects ride the rows).
-        let _mux_lists = cx.observe(&multiplexer, |this, _, cx| {
-            let (projects, known) = {
-                let m = this.multiplexer.read(cx);
-                let mut projects: Vec<String> = Vec::new();
-                for row in m.thread_list() {
-                    if let Some(project) = row.project.as_deref()
-                        && !project.is_empty()
-                        && !projects.iter().any(|p| p == project)
-                    {
-                        projects.push(project.to_string());
-                    }
-                }
-                (
-                    m.workspaces()
-                        .iter()
-                        .flat_map(|row| row.session_ids.iter().cloned())
-                        .collect::<Vec<String>>(),
-                    m.workspaces()
-                        .iter()
-                        .map(|row| row.path.clone())
-                        .collect::<Vec<String>>(),
-                )
-            };
-            this.thread_projects = projects;
-            this.known_projects = known;
-            this.sidebar.update(cx, |_, cx| cx.notify());
-            cx.notify();
-        });
+        let _mux_lists = cx.observe(&multiplexer, |_, _, cx| cx.notify());
         let recipient = thread.read(|t| t.self_author());
         let conversation = cx.new(|_| ConversationState::new(recipient));
         let context_rail =
@@ -1236,8 +1207,6 @@ impl Workspace {
             background_threads: Vec::new(),
             git_status_gen: 0,
             sidebar,
-            thread_projects: Vec::new(),
-            known_projects: Vec::new(),
             _mux_lists,
             conversation: conversation.clone(),
             input_state,
@@ -1710,6 +1679,10 @@ impl Workspace {
                     .as_ref()
                     .is_none_or(|s| s.read(cx).session_id() != next)
             {
+                // One-shot: the signal is consumed here, so re-attaching the
+                // predecessor later cannot bounce the user back (review #39
+                // [sugg] 4).
+                store.update(cx, |handle, _| handle.store.replaced_by = None);
                 this.pending_successor = Some(next);
             }
             cx.notify();

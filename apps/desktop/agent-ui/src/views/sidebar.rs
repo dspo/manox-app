@@ -570,7 +570,7 @@ impl Sidebar {
         // One snapshot of both surfaces: the partition rule needs the list and
         // the registry from the same instant, or a row could be judged by a
         // registry that no longer matches its list.
-        let (items, known) = {
+        let (items, known, known_sessions) = {
             let mux = mux.read(cx);
             (
                 mux.thread_list().to_vec(),
@@ -578,9 +578,13 @@ impl Sidebar {
                     .iter()
                     .map(|row| row.path.clone())
                     .collect::<Vec<_>>(),
+                mux.workspaces()
+                    .iter()
+                    .flat_map(|row| row.session_ids.iter().cloned())
+                    .collect::<std::collections::HashSet<String>>(),
             )
         };
-        for (partition, server) in wire_partition_orders(&items, &known) {
+        for (partition, server) in wire_partition_orders(&items, &known, &known_sessions) {
             let Some(target) = self.view.account.get(&partition) else {
                 continue;
             };
@@ -1372,21 +1376,25 @@ impl Sidebar {
     fn partition_of_row(&self, id: &str, cx: &mut App) -> Option<String> {
         let mux = self.mux.as_ref()?;
         let list = mux.read(cx).thread_list().to_vec();
-        let known: Vec<String> = mux
-            .read(cx)
-            .workspaces()
-            .iter()
-            .map(|row| row.path.clone())
-            .collect();
+        let (known, known_sessions) = {
+            let mux = mux.read(cx);
+            (
+                mux.workspaces()
+                    .iter()
+                    .map(|row| row.path.clone())
+                    .collect::<Vec<_>>(),
+                mux.workspaces()
+                    .iter()
+                    .flat_map(|row| row.session_ids.iter().cloned())
+                    .collect::<std::collections::HashSet<String>>(),
+            )
+        };
         let row = list.iter().find(|r| r.id == id)?;
-        let project = row.project.as_deref().unwrap_or_default();
-        Some(
-            if !project.is_empty() && known.iter().any(|k| k == project) {
-                project.to_string()
-            } else {
-                crate::sidebar_view::LOOSE.to_string()
-            },
-        )
+        Some(if is_folder_member(row, &known, &known_sessions) {
+            row.project.clone().unwrap_or_default()
+        } else {
+            crate::sidebar_view::LOOSE.to_string()
+        })
     }
 
     /// Render one partition's projected rows, folded to the quota with an
@@ -1737,6 +1745,17 @@ impl Render for Sidebar {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let known_sessions: std::collections::HashSet<String> = self
+            .mux
+            .as_ref()
+            .map(|m| {
+                m.read(cx)
+                    .workspaces()
+                    .iter()
+                    .flat_map(|row| row.session_ids.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
         // Same per-frame prune for the per-project new-session keys (the
         // conversations-header sentinel always stays).
         self.new_session_anchors.borrow_mut().retain(|key, _| {
@@ -1764,7 +1783,7 @@ impl Render for Sidebar {
             // compile-time tie between the three, so a change here must land
             // in both.
             let project = s.project.as_deref().unwrap_or_default();
-            if project.is_empty() || !known_projects.iter().any(|kp| kp == project) {
+            if !is_folder_member(s, &known_projects, &known_sessions) {
                 loose.push(s.clone());
             } else if let Some(entry) = projects.iter_mut().find(|(p, _)| p == project) {
                 entry.1.push(s.clone());
@@ -1968,15 +1987,34 @@ const COLLAPSED_ROWS: usize = 5;
 /// face, the render grouping's display face, and `partition_of_row`'s
 /// one-row commit lookup — with no compile-time tie between them. Changing
 /// the rule means changing all three in the same PR.
+///
+/// Membership is host-authoritative: the workspace registry ACCOUNTS the
+/// session id (the server canonicalizes paths at attach), so a session whose
+/// project string is a symlinked or trailing-slash variant of the row path
+/// still lands in its folder. The raw-path comparison stays as the fallback
+/// for rows the registry never accounted (pre-registry bindings, external
+/// CLI sessions).
+fn is_folder_member(
+    row: &ThreadListItem,
+    known_paths: &[String],
+    known_sessions: &std::collections::HashSet<String>,
+) -> bool {
+    known_sessions.contains(&row.id)
+        || row
+            .project
+            .as_deref()
+            .is_some_and(|project| !project.is_empty() && known_paths.iter().any(|k| k == project))
+}
+
 fn wire_partition_orders(
     items: &[ThreadListItem],
     known_projects: &[String],
+    known_sessions: &std::collections::HashSet<String>,
 ) -> Vec<(String, Vec<String>)> {
     let mut orders: Vec<(String, Vec<String>)> = Vec::new();
     for s in items {
-        let project = s.project.as_deref().unwrap_or_default();
-        let key = if !project.is_empty() && known_projects.iter().any(|k| k == project) {
-            project.to_string()
+        let key = if is_folder_member(s, known_projects, known_sessions) {
+            s.project.clone().unwrap_or_default()
         } else {
             crate::sidebar_view::LOOSE.to_string()
         };
@@ -3289,6 +3327,33 @@ mod tests {
         ));
     }
 
+    /// Host authority over the raw path string: a session ACCOUNTED by a
+    /// workspace row lands in its folder even when its project string is a
+    /// symlink/trailing-slash variant of the canonical row path (review #39
+    /// [issue] 2).
+    #[test]
+    fn accounted_sessions_partition_regardless_of_the_project_string() {
+        let item = |id: &str, project: Option<&str>| ThreadListItem {
+            id: id.into(),
+            project: project.map(str::to_string),
+            ..sample_item()
+        };
+        let items = vec![item("a", Some("/var/tmp/proj")), item("b", Some("/ghost"))];
+        let known = vec!["/private/var/tmp/proj".to_string()];
+        let accounted: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
+        let orders = wire_partition_orders(&items, &known, &accounted);
+        assert_eq!(
+            orders,
+            vec![
+                ("/var/tmp/proj".to_string(), vec!["a".to_string()]),
+                (
+                    crate::sidebar_view::LOOSE.to_string(),
+                    vec!["b".to_string()]
+                ),
+            ]
+        );
+    }
+
     /// The reconcile's server-side surface partitions the wire list by the
     /// same rule render does — registered project folder, else the loose
     /// account — and keeps the wire's committed order inside each partition.
@@ -3307,7 +3372,7 @@ mod tests {
             item("e", Some("/p2")),
         ];
         let known = vec!["/p1".to_string(), "/p2".to_string()];
-        let orders = wire_partition_orders(&items, &known);
+        let orders = wire_partition_orders(&items, &known, &std::collections::HashSet::new());
         assert_eq!(
             orders,
             vec![
