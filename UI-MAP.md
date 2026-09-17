@@ -22,7 +22,7 @@ Component names use PascalCase. The hierarchy mirrors the visual containment tre
 | 权限门控（PermissionMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 三模式都运行（seatbelt 按模式渲染 read-only/workspace-write profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`sandbox_permissions`+`justification` 升级往返经 `ToolCallAuthorization`；AccessChip 切 ReadOnly/WorkspaceAccess/FullAccess，切换热生效（下一次工具调用即按新模式裁决），chip 乐观即时刷新 |
 | Slash commands | ✅ 部分 | `/compact`、`/exit`(`/quit`)、`/new`(`/clear` `/archive`)、`/plan`、`/goal`、`/mode`；markdown/skill 适配器经共享 registry |
 | 模型选择器 | ✅ | pi `ProviderRegistry`，按 provider 显示名分组 |
-| 项目（composer chip / 侧栏文件夹 / 绑定新会话） | ✅ | 共享 threads.db `projects` 表 |
+| 项目（composer chip / 侧栏文件夹 / 绑定新会话） | ✅ | 宿主 workspace registry（`ClientCall::Workspace` + `HostEvent::WorkspaceUpdate` 状态流），客户端不再写 threads.db `projects` 表 |
 | Sidebar / 会话列表 / 新建切换归档 / LLM 标题 | ✅ | pi `SessionRepository` + sidecar；标题双模式语义移植自 manox |
 | ContextRail（usage/cost/cockpit 相位/git 状态/plan/changes/branch） | ✅ | cost 来自内核 `session_stats`（rate card 计价）；cockpit 相位随事件流驱动 |
 | `/compact` + Recap 卡片 | ✅ | 内核 `HarnessEvent` compaction 事件（manual/threshold/overflow） |
@@ -225,6 +225,10 @@ Scrollable body inside Sidebar (`overflow_y_scroll`, `.track_scroll` on a `Scrol
 Sticky overlay copy of the current section header, absolutely positioned above the scroll body (`top_0`, `pt(top_inset)` for the traffic-light inset, `bg:background` + bottom border). It appears only once `scroll_top > 0` — the in-flow headers stay in the content (parent-child grouping intact) and the overlay takes their place at the resting position while rows scroll underneath. Shows the Projects header while the viewport is inside the projects section, then the Conversations header (with its `+` new-session button + dropdown) once the projects content has scrolled fully past the top. The switch threshold is the measured height of scroll-body child 0 (`bounds_for_item(0)`, fallback keeps Projects before the container is laid out). The overlay only appears once `scroll_top > 0`, which cannot happen before the first layout, so offset/bounds are always measured by then. Because the overlay and the in-flow copy coexist in one tree, the Conversations header's element ids and deferred dropdown are disambiguated by an id prefix and gated so only the visible copy anchors the new-session menu.
 
 #### SidebarProjectsSection
+
+The folder list is the workspace registry (paths in host display order);
+the host owns registration, so the old `known_projects` pull is only a
+fallback mirror.
 
 Middle section: project-grouped threads (if any projects exist). Its section header sits in-flow directly above the folder groups (scroll-body child 0), preserving the parent-child grouping.
 
@@ -594,7 +598,10 @@ Dropdown chip showing [PermissionMode](#permission-modes) → [AccessMenu](#acce
 
 #### ProjectChip
 
-Dropdown chip showing current project → [ProjectMenu](#projectmenu) popup.
+Dropdown chip showing current project → [ProjectMenu](#projectmenu) popup. The
+label is the workspace row accounting the foreground session (host registry
+order), falling back to the session's project mirror for sessions no row
+accounts; the menu's recency list is the same registry.
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
 

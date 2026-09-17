@@ -745,7 +745,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         for row in rows {
-            let first_line = manox_agent::steer_bus::first_line(&row.prompt);
+            let first_line = crate::conversation::first_line(&row.prompt);
             self.subagent_prompts.insert(
                 row.address.clone(),
                 SubagentPrompt {

@@ -50,6 +50,10 @@ pub struct ClientStore {
     pub has_interacted: bool,
     pub cwd: String,
     pub project: Option<String>,
+    /// The successor session this one handed its identity to (a bind's
+    /// `SessionDisposed{successor}`): the workspace switches its foreground
+    /// to it instead of treating the disposal as terminal.
+    pub replaced_by: Option<String>,
     pub background_tasks: Vec<Value>,
     /// Latest per-request usage, folded from the durable assistant `message`
     /// row's `usage` payload (v2; §C.2 transcript group). Successor of the
@@ -179,6 +183,7 @@ impl Default for ClientStore {
             has_interacted: false,
             cwd: String::new(),
             project: None,
+            replaced_by: None,
             background_tasks: Vec::new(),
             cumulative_usage: None,
             per_model_usage: HashMap::new(),
