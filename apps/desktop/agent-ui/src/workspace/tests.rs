@@ -3440,6 +3440,87 @@ fn launcher_thread_cwd_tracks_the_foreground_projection(cx: &mut gpui::TestAppCo
     let _ = std::fs::remove_file(&db_path);
 }
 
+/// The identity hand-off (review #39 round-2 [issue] 2): the predecessor's
+/// store records the successor, the observer stages it, the next render
+/// switches the foreground onto it — and the signal is consumed, so nothing
+/// can bounce the user back later.
+#[gpui::test]
+fn successor_hand_off_switches_the_foreground_and_consumes_the_signal(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::AppContext as _;
+
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    // The hand-off switches the foreground through the real attach path
+    // (OpenSession rides the wire), so the runtime must be allowed to park.
+    cx.background_executor.allow_parking();
+    let db_path = std::env::temp_dir().join(format!("manox-handoff-test-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+    let predecessor = ws
+        .read_with(&visual, |ws, _| ws.store.clone())
+        .expect("the ctor workspace has a leaf");
+
+    // The leaf records the hand-off exactly as the disposal frame does.
+    predecessor.update(cx, |handle, cx| {
+        handle.store.replaced_by = Some("succ-handoff".to_string());
+        cx.notify();
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let foreground = ws.read_with(&visual, |ws, cx| {
+            ws.store
+                .as_ref()
+                .map(|store| store.read(cx).session_id().to_string())
+        });
+        if foreground.as_deref() == Some("succ-handoff") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the foreground never switched onto the successor: {foreground:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // One-shot: the source store's signal was consumed when it was staged.
+    assert!(
+        predecessor.read_with(&visual, |handle, _| handle.store.replaced_by.is_none()),
+        "the hand-off signal must be consumed, not re-armed"
+    );
+
+    drop(ws);
+    drop(visual);
+    let _ = std::fs::remove_file(&db_path);
+}
+
 /// `turn_navigator_layout` matrix: the gutter/border compensation must keep
 /// the overlay centered over the message column's card interior at every
 /// combination of sidebar collapse, right pane, and context rail.
