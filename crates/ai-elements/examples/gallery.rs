@@ -148,7 +148,7 @@ impl Gallery {
             // The settled demos open with a body in place, so a folded block
             // has something to show before any control is touched.
             let seeded = *default_open == Some(true);
-            let markdown = cx.new(|_| {
+            let markdown = cx.new(|cx| {
                 Markdown::new(
                     ("reasoning-body", ix),
                     if seeded {
@@ -157,6 +157,10 @@ impl Gallery {
                         String::new()
                     },
                 )
+                // The renderer paints nothing without the theme's style table,
+                // so a body that only looks mounted would show as blank space
+                // — the one thing this gallery must not demonstrate.
+                .theme(Theme::global(cx))
             });
             demos.push(Demo {
                 title,

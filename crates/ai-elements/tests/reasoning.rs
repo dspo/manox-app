@@ -9,9 +9,11 @@ use std::time::Duration;
 
 use ai_elements::{AUTO_CLOSE_DELAY, Reasoning, ReasoningEvent, ReasoningState};
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
-    TestAppContext, VisualTestContext, Window, div,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
+    ParentElement as _, Render, TestAppContext, VisualTestContext, Window, div, px,
 };
+use gpui_component::Theme;
+use manox_components::markdown::Markdown;
 
 /// One block on screen. The body carries no selector of its own — the block's
 /// own `{id}-content` hook is what the mounting tests read.
@@ -350,4 +352,44 @@ fn the_trigger_answers_the_keyboard(cx: &mut TestAppContext) {
 
     visual.simulate_keystrokes("space");
     assert!(visual.update(|_, cx| state.read(cx).is_open()));
+}
+
+/// A block whose body is the real markdown component the conversation passes
+/// in, so the body slot is exercised end to end.
+struct MarkdownHarness {
+    state: Entity<ReasoningState>,
+    body: Entity<Markdown>,
+}
+
+impl Render for MarkdownHarness {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Reasoning::new(("reasoning", 0usize), &self.state).content(
+            div()
+                .debug_selector(|| "body-probe".into())
+                .child(self.body.clone()),
+        )
+    }
+}
+
+/// Both the gallery and the conversation pass a *themed* `Markdown` as the
+/// body. An unthemed one still occupies the tree while painting nothing, which
+/// reads as "the block opened and stayed blank" — so pin the painted height,
+/// not just the element's presence.
+#[gpui::test]
+fn a_themed_markdown_body_paints_inside_the_block(cx: &mut TestAppContext) {
+    init(cx);
+    let body = cx.update(|cx| {
+        cx.new(|cx| Markdown::new("body", "the thinking itself").theme(Theme::global(cx)))
+    });
+    let state = cx.update(|cx| cx.new(|cx| ReasoningState::new(cx).default_open(true)));
+    let (_, visual) = cx.add_window_view(|_, _| MarkdownHarness { state, body });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let bounds = visual
+        .debug_bounds("body-probe")
+        .expect("the body must be laid out");
+    assert!(
+        bounds.size.height > px(1.),
+        "a themed body must paint, not just occupy the tree: {bounds:?}"
+    );
 }
