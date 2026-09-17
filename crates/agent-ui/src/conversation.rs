@@ -460,15 +460,51 @@ pub struct AgentTaskItem {
     pub is_error: bool,
 }
 
-pub(crate) fn agent_task_labels(input: &serde_json::Value) -> (String, String) {
-    let subagent_type = input
-        .get("subagent_type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    // `description` is a retired CC-era field; the pi Agent tool ships only
-    // `subagent_type` + `prompt`, so fall back to the shared topic derivation
-    // the rail uses — both surfaces show the same title.
+/// One-line observation title for a delegated task's prompt: whitespace
+/// flattened and capped at 60 chars with an ellipsis. Local presentation
+/// rule (the runtime helper of the same shape was removed with the retired
+/// harness).
+pub(crate) fn subagent_topic(prompt: &str) -> String {
+    let flat: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flat.chars();
+    let head: String = chars.by_ref().take(60).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// The first non-empty line of a prompt, for the background-task card title
+/// and the restored sub-agent rail rows (local presentation rule, same as
+/// `subagent_topic`).
+pub(crate) fn first_line(prompt: &str) -> Option<String> {
+    prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether a tool call is a delegation. The runtime names its delegation
+/// tools after the agent definition and describes the call with
+/// `description` + `prompt`, with none of the retired Steer envelope keys —
+/// the same shape `manox_agent::subagent_restore` folds when it rebuilds the
+/// rail rows, so the card predicate and the restore agree by construction.
+pub(crate) fn is_agent_task_call(input: Option<&serde_json::Value>) -> bool {
+    input.is_some_and(|value| {
+        value.get("description").is_some()
+            && value.get("prompt").is_some()
+            && value.get("to").is_none()
+            && value.get("reason").is_none()
+    })
+}
+
+/// The card's `(subagent_type, description)`: the TYPE is the tool name
+/// (per-agent-definition), the description prefers the call's own
+/// `description` and falls back to the shared prompt-topic derivation the
+/// rail uses — both surfaces show the same title.
+pub(crate) fn agent_task_labels(name: &str, input: &serde_json::Value) -> (String, String) {
     let description = input
         .get("description")
         .and_then(serde_json::Value::as_str)
@@ -478,10 +514,10 @@ pub(crate) fn agent_task_labels(input: &serde_json::Value) -> (String, String) {
             input
                 .get("prompt")
                 .and_then(serde_json::Value::as_str)
-                .map(manox_agent::tools::subagent_topic)
+                .map(subagent_topic)
         })
         .unwrap_or_default();
-    (subagent_type, description)
+    (name.to_string(), description)
 }
 
 /// A single renderable conversation item list plus the turn-timing state that
@@ -1043,11 +1079,11 @@ impl ConversationState {
                 status,
                 input,
             } => {
-                if name == manox_agent::tools::AGENT {
+                if is_agent_task_call(input.as_ref()) {
                     let (subagent_type, description) = input
                         .as_ref()
-                        .map(agent_task_labels)
-                        .unwrap_or_default();
+                        .map(|input| agent_task_labels(name, input))
+                        .unwrap_or_else(|| (name.to_string(), String::new()));
                     if let Some(ix) = self.find_agent_task(id, cx) {
                         self.items[ix].update(cx, |item, cx| {
                             if let ConvItem::AgentTask(t) = item.kind_mut() {
@@ -2421,10 +2457,9 @@ mod tests {
         let messages = vec![
             Message::assistant(vec![MessageContent::ToolUse(LanguageModelToolUse {
                 id: "tu_agent".to_string(),
-                name: Arc::from("Agent"),
+                name: Arc::from("Explore"),
                 raw_input: String::new(),
                 input: serde_json::json!({
-                    "subagent_type": "researcher",
                     "description": "Inspect foo module",
                     "prompt": "research foo"
                 }),
@@ -2433,7 +2468,7 @@ mod tests {
             })]),
             Message::user_with_content(vec![MessageContent::ToolResult(LanguageModelToolResult {
                 tool_use_id: "tu_agent".to_string(),
-                tool_name: Arc::from("Agent"),
+                tool_name: Arc::from("Explore"),
                 is_error: false,
                 content: envelope,
             })]),
@@ -2446,7 +2481,10 @@ mod tests {
                 _ => None,
             })
             .expect("agent task item present");
-        assert_eq!(task.subagent_type, "researcher");
+        assert_eq!(
+            task.subagent_type, "Explore",
+            "the delegation TYPE is the tool name (dsh-isomorphic runtime)"
+        );
         assert_eq!(task.description, "Inspect foo module");
         assert_eq!(task.status, ToolCallStatus::Success);
         assert!(!task.is_error);
@@ -3034,23 +3072,37 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_labels_falls_back_to_prompt_topic() {
-        // The pi Agent tool ships only `subagent_type` + `prompt`; the row
-        // title must fall back to the shared topic derivation the rail uses.
-        let (subagent_type, description) = agent_task_labels(&serde_json::json!({
-            "subagent_type": "Explore",
-            "prompt": "  find   the\nauth module "
-        }));
+    fn agent_task_labels_read_the_real_delegation_shape() {
+        // The runtime's delegation call carries `description` + `prompt` and
+        // takes its TYPE from the tool name; a blank description falls back to
+        // the shared topic derivation.
+        assert!(is_agent_task_call(Some(&serde_json::json!({
+            "description": "",
+            "prompt": "find the auth module"
+        }))));
+        let (subagent_type, description) = agent_task_labels(
+            "Explore",
+            &serde_json::json!({ "description": "", "prompt": "find the auth module" }),
+        );
         assert_eq!(subagent_type, "Explore");
         assert_eq!(description, "find the auth module");
 
-        // A legacy non-empty `description` still wins when present.
-        let (_, description) = agent_task_labels(&serde_json::json!({
-            "subagent_type": "Explore",
-            "description": "review PR",
-            "prompt": "ignored"
-        }));
+        let (_, description) = agent_task_labels(
+            "Explore",
+            &serde_json::json!({ "description": "review PR", "prompt": "ignored" }),
+        );
         assert_eq!(description, "review PR");
+
+        // The retired Steer envelope and non-delegation inputs stay out.
+        assert!(!is_agent_task_call(Some(&serde_json::json!({
+            "description": "x",
+            "prompt": "y",
+            "to": "member"
+        }))));
+        assert!(!is_agent_task_call(Some(
+            &serde_json::json!({ "path": "/tmp" })
+        )));
+        assert!(!is_agent_task_call(None));
     }
 
     /// A live reasoning round opens expanded so the stream plays out

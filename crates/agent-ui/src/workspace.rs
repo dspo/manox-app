@@ -653,9 +653,7 @@ pub struct Workspace {
     pub(crate) sidebar: Entity<Sidebar>,
     /// Distinct bound-project paths of the active summaries, in list order
     /// (the project chip's "recent, unregistered" section; U2 push cache).
-    thread_projects: Vec<String>,
     /// Registered project folders (chip menu + the sidebar grouping push).
-    known_projects: Vec<String>,
     /// Repaint observer on the multiplexer's list/registry state (U2): its
     /// notify drives the sidebar rows and the workspace's model surfaces.
     _mux_lists: gpui::Subscription,
@@ -842,6 +840,10 @@ pub struct Workspace {
     /// #765 "picks a model, nothing happens" repro: the journal had both
     /// changes, the render never showed them).
     store_observe: Option<Subscription>,
+    /// A successor session the foreground must switch to at the next render
+    /// (a bind's identity hand-off arrived while this workspace held the
+    /// predecessor). Taken once, so the switch cannot re-trigger.
+    pending_successor: Option<String>,
     sidebar_sub: Option<Subscription>,
     input_sub: Option<Subscription>,
     editor_sub: Option<Subscription>,
@@ -1187,25 +1189,7 @@ impl Workspace {
         // feeds the chip-menu caches off the wire state (U2 cross-domain
         // #1: the store-read decoration snapshot retired — the registry
         // rides the Projects mirror, the per-thread projects ride the rows).
-        let _mux_lists = cx.observe(&multiplexer, |this, _, cx| {
-            let (projects, known) = {
-                let m = this.multiplexer.read(cx);
-                let mut projects: Vec<String> = Vec::new();
-                for row in m.thread_list() {
-                    if let Some(project) = row.project.as_deref()
-                        && !project.is_empty()
-                        && !projects.iter().any(|p| p == project)
-                    {
-                        projects.push(project.to_string());
-                    }
-                }
-                (projects, m.known_projects().to_vec())
-            };
-            this.thread_projects = projects;
-            this.known_projects = known;
-            this.sidebar.update(cx, |_, cx| cx.notify());
-            cx.notify();
-        });
+        let _mux_lists = cx.observe(&multiplexer, |_, _, cx| cx.notify());
         let recipient = thread.read(|t| t.self_author());
         let conversation = cx.new(|_| ConversationState::new(recipient));
         let context_rail =
@@ -1223,8 +1207,6 @@ impl Workspace {
             background_threads: Vec::new(),
             git_status_gen: 0,
             sidebar,
-            thread_projects: Vec::new(),
-            known_projects: Vec::new(),
             _mux_lists,
             conversation: conversation.clone(),
             input_state,
@@ -1288,6 +1270,7 @@ impl Workspace {
             blank_project_name_input: None,
             thread_sub: None,
             store_observe: None,
+            pending_successor: None,
             sidebar_sub: None,
             input_sub: None,
             editor_sub: None,
@@ -1686,7 +1669,24 @@ impl Workspace {
             .store
             .clone()
             .expect("subscribe_thread requires the foreground store");
-        let observe = cx.observe(&store, |_, _, cx| cx.notify());
+        let observe = cx.observe(&store, |this, store, cx| {
+            // Identity hand-off: the predecessor's store records the
+            // successor when the disposal arrives; the foreground moves onto
+            // it at the next render (the switch needs a window).
+            if let Some(next) = store.read(cx).store.replaced_by.clone()
+                && this
+                    .store
+                    .as_ref()
+                    .is_none_or(|s| s.read(cx).session_id() != next)
+            {
+                // One-shot: the signal is consumed here, so re-attaching the
+                // predecessor later cannot bounce the user back (review #39
+                // [sugg] 4).
+                store.update(cx, |handle, _| handle.store.replaced_by = None);
+                this.pending_successor = Some(next);
+            }
+            cx.notify();
+        });
         let events = cx.subscribe(&store, |this, _store, ev: &ThreadEvent, cx| {
             match ev {
                 ThreadEvent::ToolCallAuthorization {
