@@ -2414,57 +2414,6 @@ pub fn render_tool_call(
 /// `ToolResult` lands we mount the syntax-highlighted, scrollable `Markdown`.
 /// The container keeps a deterministic height either way so the parent card
 /// (and the list) reports a stable layout.
-/// Strip the hashline envelope from a `read_file` result for display: drop the
-/// leading `[path#TAG]` header and the `N:` line-number prefix on each numbered
-/// line, so the user sees raw file content rather than the anchoring prefixes
-/// the LLM relies on. Returns the input unchanged when the first line is not
-/// the `[path#TAG]` header — non-hashline output (errors, non-`read_file` tools)
-/// passes through verbatim. Only the first `digits:` run is stripped per line,
-/// so file content that itself begins with `digits:` is preserved. The
-/// persisted `ToolCallItem.output` is never touched; this is display-only.
-fn strip_hashline_numbering(raw: &str) -> String {
-    let mut lines = raw.split('\n');
-    let Some(header) = lines.next() else {
-        return String::new();
-    };
-    if !is_hashline_header(header) {
-        return raw.to_string();
-    }
-    let mut out = String::with_capacity(raw.len());
-    for (i, line) in lines.enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(strip_leading_line_number(line));
-    }
-    out
-}
-
-/// Recognize the `[path#TAG]` header `format_numbered` emits: bracketed, with
-/// a non-empty path and tag separated by the first `#`.
-fn is_hashline_header(line: &str) -> bool {
-    let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
-        return false;
-    };
-    let mut parts = inner.splitn(2, '#');
-    matches!((parts.next(), parts.next()), (Some(p), Some(t)) if !p.is_empty() && !t.is_empty())
-}
-
-/// Strip a leading `<digits>:` prefix if present; return the remainder. A line
-/// without the prefix passes through unchanged (per-line fallback).
-fn strip_leading_line_number(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i > 0 && i < bytes.len() && bytes[i] == b':' {
-        &line[i + 1..]
-    } else {
-        line
-    }
-}
-
 fn render_tool_output(
     item: &ToolCallItem,
     ix: usize,
@@ -2499,22 +2448,17 @@ fn render_tool_output(
     // per-frame. The persistent panel is the supported path; this only fires
     // for paths the conversation handler doesn't sync (e.g. a freshly built
     // entry before the first `ToolOutput`).
-    let display_output = if item.streaming {
+    let display = if item.streaming {
         live_tail(&item.output)
     } else {
         item.output.clone()
     };
-    // Display-only transform for `read_file`: hide the hashline `[path#TAG]`
-    // header and `N:` line numbers so the user sees raw file content. The raw
-    // `output` (LLM-facing, persisted, edit_file-anchored) is untouched, so
-    // copy-selection yields the display text while the LLM still sees numbered
-    // output on the next turn. Non-`read_file` tools borrow the raw output
-    // without allocating.
-    let display: std::borrow::Cow<'_, str> = if item.name == manox_agent::tools::READ {
-        std::borrow::Cow::Owned(strip_hashline_numbering(&display_output))
-    } else {
-        std::borrow::Cow::Borrowed(&display_output)
-    };
+    // The body goes to the panel (or, below, to a per-frame fallback block)
+    // verbatim: a `read_file` result is the model-facing hashline shape, and
+    // `PanelKind::Numbered` is what knows how to present it — the file's own
+    // line numbers, gap markers unnumbered. Stripping the prefixes here, as
+    // this layer used to, forced the panel to renumber from 1 and put a range
+    // read's numbers out of step with the file.
     let lang = lang_hint_for_tool(&item.name);
     let code = if let Some(l) = lang {
         format!("```{l}\n{display}\n```")
@@ -2954,12 +2898,13 @@ fn render_cache_miss(
 }
 
 /// Map a tool call to its panel rendering kind and the body text the panel
-/// renders. `read_file`/`write_file` → `File` (the agent-ui layer strips the
-/// hashline `[path#TAG]` header + `N:` prefixes for read_file so the panel shows
-/// plain content; write_file feeds the written content from the tool input).
-/// `edit_file` → `Diff` (the panel classifies the `+`/`-`/`@@` lines). Anything
-/// else → `Plain` (ANSI-parsed command output). Streaming bodies take the live
-/// tail so the most recent lines are in view as they stream in.
+/// renders. `read_file` → `Numbered` (the panel owns the model-facing hashline
+/// shape, so the file's own line numbers survive; see
+/// `manox_components::markdown::PanelKind`). `write_file` → `File`, fed the
+/// written content from the tool input. `edit_file` → `Diff` (the panel
+/// classifies the `+`/`-`/`@@` lines). Anything else → `Plain` (ANSI-parsed
+/// command output). Streaming bodies take the live tail so the most recent
+/// lines are in view as they stream in.
 fn tool_panel_body(entry: &ToolCallItem) -> (PanelKind, String) {
     let raw = if entry.streaming {
         live_tail(&entry.output)
@@ -2967,7 +2912,7 @@ fn tool_panel_body(entry: &ToolCallItem) -> (PanelKind, String) {
         entry.output.clone()
     };
     match entry.name.as_str() {
-        x if x == manox_agent::tools::READ => (PanelKind::File, strip_hashline_numbering(&raw)),
+        x if x == manox_agent::tools::READ => (PanelKind::Numbered, raw),
         // write_file's `output` is a one-line confirmation ("Wrote N bytes"), not
         // the file content; the content lives in the tool input. Show the written
         // content with a line-number gutter on success. On failure (`is_error`)
@@ -4321,34 +4266,6 @@ mod tests {
         let layout = segment_layout(&t);
         assert!(layout.expanded, "pending approval forces the segment open");
         assert_eq!(layout.visible, vec![0, 1]);
-    }
-
-    #[test]
-    fn strip_hashline_numbering_drops_header_and_line_prefixes() {
-        let raw = "[a.rs#1A2B]\n1:fn main() {\n2:}";
-        assert_eq!(strip_hashline_numbering(raw), "fn main() {\n}");
-    }
-
-    #[test]
-    fn strip_hashline_numbering_preserves_digit_colon_content() {
-        // File content that itself begins with `digits:` survives: only the
-        // first `N:` run (the hashline line number) is stripped.
-        let raw = "[cfg.toml#TAG]\n1:10: first\n2:20: second";
-        assert_eq!(strip_hashline_numbering(raw), "10: first\n20: second");
-    }
-
-    #[test]
-    fn strip_hashline_numbering_passes_through_non_header_output() {
-        // Errors and non-hashline shapes are returned verbatim.
-        let err = "file not found: missing.rs";
-        assert_eq!(strip_hashline_numbering(err), "file not found: missing.rs");
-        assert_eq!(strip_hashline_numbering(""), "");
-    }
-
-    #[test]
-    fn strip_hashline_numbering_keeps_blank_lines() {
-        let raw = "[a.rs#T]\n1:line one\n2:\n3:line three";
-        assert_eq!(strip_hashline_numbering(raw), "line one\n\nline three");
     }
 
     /// `MessageContent::Thinking` folds into the same activity segment as
