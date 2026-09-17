@@ -572,7 +572,13 @@ impl Sidebar {
         // registry that no longer matches its list.
         let (items, known) = {
             let mux = mux.read(cx);
-            (mux.thread_list().to_vec(), mux.known_projects().to_vec())
+            (
+                mux.thread_list().to_vec(),
+                mux.workspaces()
+                    .iter()
+                    .map(|row| row.path.clone())
+                    .collect::<Vec<_>>(),
+            )
         };
         for (partition, server) in wire_partition_orders(&items, &known) {
             let Some(target) = self.view.account.get(&partition) else {
@@ -1366,7 +1372,12 @@ impl Sidebar {
     fn partition_of_row(&self, id: &str, cx: &mut App) -> Option<String> {
         let mux = self.mux.as_ref()?;
         let list = mux.read(cx).thread_list().to_vec();
-        let known = mux.read(cx).known_projects().to_vec();
+        let known: Vec<String> = mux
+            .read(cx)
+            .workspaces()
+            .iter()
+            .map(|row| row.path.clone())
+            .collect();
         let row = list.iter().find(|r| r.id == id)?;
         let project = row.project.as_deref().unwrap_or_default();
         Some(
@@ -1718,7 +1729,13 @@ impl Render for Sidebar {
         let known_projects = self
             .mux
             .as_ref()
-            .map(|m| m.read(cx).known_projects().to_vec())
+            .map(|m| {
+                m.read(cx)
+                    .workspaces()
+                    .iter()
+                    .map(|row| row.path.clone())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         // Same per-frame prune for the per-project new-session keys (the
         // conversations-header sentinel always stays).

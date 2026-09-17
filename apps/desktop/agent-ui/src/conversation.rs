@@ -460,6 +460,42 @@ pub struct AgentTaskItem {
     pub is_error: bool,
 }
 
+/// One-line observation title for a delegated task's prompt: whitespace
+/// flattened and capped at 60 chars with an ellipsis. Local presentation
+/// rule (the runtime helper of the same shape was removed with the retired
+/// harness).
+pub(crate) fn subagent_topic(prompt: &str) -> String {
+    let flat: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flat.chars();
+    let head: String = chars.by_ref().take(60).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// The first non-empty line of a prompt, for the background-task card title
+/// and the restored sub-agent rail rows (local presentation rule, same as
+/// `subagent_topic`).
+pub(crate) fn first_line(prompt: &str) -> Option<String> {
+    prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether a tool call is a delegation: the dsh-isomorphic runtime names its
+/// delegation tools after the agent definition, so the card predicate reads
+/// the request shape (`subagent_type`) instead of a fixed tool name.
+pub(crate) fn is_agent_task_call(input: Option<&serde_json::Value>) -> bool {
+    input
+        .and_then(|value| value.get("subagent_type"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| !kind.trim().is_empty())
+}
+
 pub(crate) fn agent_task_labels(input: &serde_json::Value) -> (String, String) {
     let subagent_type = input
         .get("subagent_type")
@@ -478,7 +514,7 @@ pub(crate) fn agent_task_labels(input: &serde_json::Value) -> (String, String) {
             input
                 .get("prompt")
                 .and_then(serde_json::Value::as_str)
-                .map(manox_agent::tools::subagent_topic)
+                .map(subagent_topic)
         })
         .unwrap_or_default();
     (subagent_type, description)
@@ -1043,7 +1079,7 @@ impl ConversationState {
                 status,
                 input,
             } => {
-                if name == manox_agent::tools::AGENT {
+                if is_agent_task_call(input.as_ref()) {
                     let (subagent_type, description) = input
                         .as_ref()
                         .map(agent_task_labels)

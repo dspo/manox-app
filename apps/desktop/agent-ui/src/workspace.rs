@@ -842,6 +842,10 @@ pub struct Workspace {
     /// #765 "picks a model, nothing happens" repro: the journal had both
     /// changes, the render never showed them).
     store_observe: Option<Subscription>,
+    /// A successor session the foreground must switch to at the next render
+    /// (a bind's identity hand-off arrived while this workspace held the
+    /// predecessor). Taken once, so the switch cannot re-trigger.
+    pending_successor: Option<String>,
     sidebar_sub: Option<Subscription>,
     input_sub: Option<Subscription>,
     editor_sub: Option<Subscription>,
@@ -1199,7 +1203,16 @@ impl Workspace {
                         projects.push(project.to_string());
                     }
                 }
-                (projects, m.known_projects().to_vec())
+                (
+                    m.workspaces()
+                        .iter()
+                        .flat_map(|row| row.session_ids.iter().cloned())
+                        .collect::<Vec<String>>(),
+                    m.workspaces()
+                        .iter()
+                        .map(|row| row.path.clone())
+                        .collect::<Vec<String>>(),
+                )
             };
             this.thread_projects = projects;
             this.known_projects = known;
@@ -1288,6 +1301,7 @@ impl Workspace {
             blank_project_name_input: None,
             thread_sub: None,
             store_observe: None,
+            pending_successor: None,
             sidebar_sub: None,
             input_sub: None,
             editor_sub: None,
@@ -1686,7 +1700,20 @@ impl Workspace {
             .store
             .clone()
             .expect("subscribe_thread requires the foreground store");
-        let observe = cx.observe(&store, |_, _, cx| cx.notify());
+        let observe = cx.observe(&store, |this, store, cx| {
+            // Identity hand-off: the predecessor's store records the
+            // successor when the disposal arrives; the foreground moves onto
+            // it at the next render (the switch needs a window).
+            if let Some(next) = store.read(cx).store.replaced_by.clone()
+                && this
+                    .store
+                    .as_ref()
+                    .is_none_or(|s| s.read(cx).session_id() != next)
+            {
+                this.pending_successor = Some(next);
+            }
+            cx.notify();
+        });
         let events = cx.subscribe(&store, |this, _store, ev: &ThreadEvent, cx| {
             match ev {
                 ThreadEvent::ToolCallAuthorization {

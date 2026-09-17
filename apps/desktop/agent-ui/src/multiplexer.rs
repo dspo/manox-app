@@ -65,6 +65,9 @@ enum ListFetch {
     Threads,
     Models,
     Commands,
+    /// The durable workspace registry baseline (`ClientCall::Workspace`):
+    /// the directory-identity source the chip and the sidebar grouping read.
+    Workspaces,
 }
 
 /// Boot-race retry budget for an empty model snapshot: the `Ready` first
@@ -108,9 +111,13 @@ pub struct SessionMultiplexer {
     models: Vec<ModelInfo>,
     commands: serde_json::Value,
     /// U2 cross-domain #1: the known-projects registry snapshot (§D.5 list
-    /// channel family) — the sidebar grouping's wire source, pushed with
-    /// every ListThreads answer.
+    /// channel family) — pushed with every ListThreads answer.
     known_projects: Vec<String>,
+    /// The durable workspace registry (dsh parity): rows in host display
+    /// order plus the global archive set, maintained from the
+    /// `WorkspaceUpdate` state stream and the attach-time baseline pull.
+    workspaces: Vec<manox_protocol::workspace::WorkspaceWire>,
+    workspace_archived: Vec<String>,
     /// The epoch the server accepted (§D.5 `Ready`); the handshake pull only
     /// runs when it equals [`PROTOCOL_EPOCH`] (C1).
     ready_epoch: Option<u32>,
@@ -175,6 +182,8 @@ impl SessionMultiplexer {
             list_fetches: HashMap::new(),
             thread_list: Vec::new(),
             known_projects: Vec::new(),
+            workspaces: Vec::new(),
+            workspace_archived: Vec::new(),
             models: Vec::new(),
             commands: serde_json::json!([]),
             ready_epoch: None,
@@ -414,6 +423,76 @@ impl SessionMultiplexer {
         &self.known_projects
     }
 
+    /// The durable workspace rows in host display order (the directory
+    /// identity source for the chip and the sidebar grouping).
+    pub fn workspaces(&self) -> &[manox_protocol::workspace::WorkspaceWire] {
+        &self.workspaces
+    }
+
+    /// The global archive set layered over workspace accounting.
+    pub fn archived_session_ids(&self) -> &[String] {
+        &self.workspace_archived
+    }
+
+    /// The workspace row accounting `session_id`, if any (loose sessions
+    /// belong to none).
+    pub fn workspace_of_session(
+        &self,
+        session_id: &str,
+    ) -> Option<&manox_protocol::workspace::WorkspaceWire> {
+        self.workspaces
+            .iter()
+            .find(|row| row.session_ids.iter().any(|id| id == session_id))
+    }
+
+    /// The workspace row whose canonical path equals `path`.
+    pub fn workspace_for_path(
+        &self,
+        path: &str,
+    ) -> Option<&manox_protocol::workspace::WorkspaceWire> {
+        self.workspaces.iter().find(|row| row.path == path)
+    }
+
+    /// Fold one state-stream frame into the registry mirror (baseline
+    /// replaces, increments merge; ordering follows the host's frame).
+    fn apply_workspace_event(&mut self, event: manox_protocol::workspace::WorkspaceWireEvent) {
+        use manox_protocol::workspace::WorkspaceWireEvent as Event;
+        match event {
+            Event::Baseline {
+                workspaces,
+                archived_session_ids,
+            } => {
+                self.workspaces = workspaces;
+                self.workspace_archived = archived_session_ids;
+            }
+            Event::Upsert { workspace } => {
+                match self
+                    .workspaces
+                    .iter_mut()
+                    .find(|row| row.workspace_id == workspace.workspace_id)
+                {
+                    Some(row) => *row = workspace,
+                    None => self.workspaces.push(workspace),
+                }
+            }
+            Event::Remove { workspace_id } => {
+                self.workspaces
+                    .retain(|row| row.workspace_id != workspace_id);
+            }
+            Event::Order { workspace_ids } => {
+                self.workspaces.sort_by_key(|row| {
+                    workspace_ids
+                        .iter()
+                        .position(|id| *id == row.workspace_id)
+                        .unwrap_or(usize::MAX)
+                });
+            }
+            Event::Archived {
+                archived_session_ids,
+            } => self.workspace_archived = archived_session_ids,
+        }
+    }
+
     pub fn ready_epoch(&self) -> Option<u32> {
         self.ready_epoch
     }
@@ -424,6 +503,19 @@ impl SessionMultiplexer {
         self.fetch(ListFetch::Threads, ClientCall::ListThreads);
         self.fetch(ListFetch::Models, ClientCall::ListModels);
         self.fetch(ListFetch::Commands, ClientCall::ListCommands);
+        self.fetch_workspaces();
+    }
+
+    /// Pull the workspace baseline: the state stream carries increments
+    /// only, so every attach (handshake, reconnect) re-reads the whole
+    /// registry (dsh's reconnect-safe baseline).
+    pub fn fetch_workspaces(&mut self) {
+        self.fetch(
+            ListFetch::Workspaces,
+            ClientCall::Workspace {
+                call: manox_protocol::workspace::WorkspaceCall::List,
+            },
+        );
     }
 
     /// Re-pull the threads list through the gateway (the workspace's
@@ -566,7 +658,11 @@ impl SessionMultiplexer {
                 }
                 cx.notify();
             }
-            HostEvent::SessionDisposed { session_id } => {
+            HostEvent::WorkspaceUpdate { event } => {
+                self.apply_workspace_event(event.clone());
+                cx.notify();
+            }
+            HostEvent::SessionDisposed { session_id, .. } => {
                 // C4a: the leaf normalizes the disposal (store/emit); the
                 // v1 note was already a desktop no-op — nothing to inherit.
                 tracing::debug!(
@@ -619,6 +715,23 @@ impl SessionMultiplexer {
             // The commands snapshot is opaque wire JSON (the popover reads
             // name/description/kind/i18n_key off the entries).
             ListFetch::Commands => self.commands = value,
+            ListFetch::Workspaces => {
+                let workspaces = value
+                    .get("workspaces")
+                    .and_then(|rows| {
+                        serde_json::from_value::<Vec<manox_protocol::workspace::WorkspaceWire>>(
+                            rows.clone(),
+                        )
+                        .ok()
+                    })
+                    .unwrap_or_default();
+                let archived = value
+                    .get("archivedSessionIds")
+                    .and_then(|rows| serde_json::from_value::<Vec<String>>(rows.clone()).ok())
+                    .unwrap_or_default();
+                self.workspaces = workspaces;
+                self.workspace_archived = archived;
+            }
         }
         cx.notify();
     }
@@ -892,6 +1005,55 @@ mod tests {
     use gpui::TestAppContext;
     use manox_protocol::in_process_pair;
     use manox_session_core::agent_client::AgentClient;
+
+    /// The workspace state stream folds into the registry mirror: baseline
+    /// replaces, increments merge, order re-sorts, remove drops — and the
+    /// session→row lookup the chip and the sidebar grouping share.
+    #[gpui::test]
+    fn workspace_state_stream_folds_into_the_registry(cx: &mut TestAppContext) {
+        use manox_protocol::workspace::{WorkspaceWire, WorkspaceWireEvent};
+        let (mux, _server) = test_mux(cx);
+        let row = |id: &str, path: &str, sessions: &[&str]| WorkspaceWire {
+            workspace_id: id.into(),
+            path: path.into(),
+            title: path.rsplit('/').next().unwrap_or(path).into(),
+            session_ids: sessions.iter().map(|s| s.to_string()).collect(),
+            created_at: "2026-09-17T00:00:00Z".into(),
+            updated_at: "2026-09-17T00:00:00Z".into(),
+        };
+        mux.update(cx, |m, cx| {
+            m.apply_workspace_event(WorkspaceWireEvent::Baseline {
+                workspaces: vec![row("w1", "/p/a", &["s1"]), row("w2", "/p/b", &[])],
+                archived_session_ids: vec![],
+            });
+            assert_eq!(m.workspaces().len(), 2);
+            assert_eq!(
+                m.workspace_of_session("s1").map(|r| r.path.as_str()),
+                Some("/p/a")
+            );
+            m.apply_workspace_event(WorkspaceWireEvent::Upsert {
+                workspace: row("w2", "/p/b", &["s2"]),
+            });
+            assert_eq!(
+                m.workspace_of_session("s2").map(|r| r.path.as_str()),
+                Some("/p/b")
+            );
+            m.apply_workspace_event(WorkspaceWireEvent::Order {
+                workspace_ids: vec!["w2".into(), "w1".into()],
+            });
+            assert_eq!(m.workspaces()[0].workspace_id, "w2");
+            m.apply_workspace_event(WorkspaceWireEvent::Remove {
+                workspace_id: "w1".into(),
+            });
+            assert_eq!(m.workspaces().len(), 1);
+            assert!(m.workspace_of_session("s1").is_none());
+            m.apply_workspace_event(WorkspaceWireEvent::Archived {
+                archived_session_ids: vec!["s2".into()],
+            });
+            assert_eq!(m.archived_session_ids(), ["s2".to_string()]);
+            let _ = cx;
+        });
+    }
 
     /// A multiplexer backed by a raw connection pair so a test can inject
     /// `FromServer` frames from the server side without a live AgentServer

@@ -2044,24 +2044,32 @@ fn u2_thread_list_flows_through_the_gateway(cx: &mut gpui::TestAppContext) {
         "the wire row carries the server's projection of the store flag"
     );
 
-    // (c) The registry rides the wire: the server pushed the Projects
-    // snapshot with the ListThreads answer, and the multiplexer's
-    // notify fed the workspace's chip-menu cache (the sidebar reads
-    // the mux directly — nothing reads the kernel at render time any
-    // more).
+    // (c) The durable workspace registry rides the state stream: a row
+    // created in the host's domain reaches the multiplexer without any
+    // kernel read at render time (the chip and the sidebar grouping both
+    // read the mux).
+    manox_session_core::workspace_serve::store()
+        .create(std::path::Path::new("/"))
+        .expect("adopt the filesystem root as a workspace row");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut ws_known: Vec<String> = ws.read_with(&visual, |ws, _| ws.known_projects.clone());
     loop {
-        if ws_known.iter().any(|p| p == "/p/u2") {
+        cx.run_until_parked();
+        let rows: Vec<String> = ws.read_with(&visual, |ws, cx| {
+            ws.multiplexer
+                .read(cx)
+                .workspaces()
+                .iter()
+                .map(|row| row.path.clone())
+                .collect()
+        });
+        if rows.iter().any(|path| path == "/") {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the chip-menu project cache never rode the mux feed: {ws_known:?}"
+            "the workspace registry never rode the state stream: {rows:?}"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
-        cx.run_until_parked();
-        ws_known = ws.read_with(&visual, |ws, _| ws.known_projects.clone());
     }
 
     drop(ws);

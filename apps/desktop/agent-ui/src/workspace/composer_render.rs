@@ -958,8 +958,19 @@ impl Workspace {
         let open = self.project_chip_open;
         let workspace = cx.entity().downgrade();
 
-        let (icon, label): (Option<IconName>, SharedString) = match &project {
-            Some(dir) => {
+        // The directory identity is the workspace row accounting this
+        // session (dsh parity); the session's own project mirror is the
+        // fallback for sessions no row accounts (loose).
+        let row = self.store.as_ref().and_then(|s| {
+            let session_id = s.read(cx).session_id().to_string();
+            self.multiplexer
+                .read(cx)
+                .workspace_of_session(&session_id)
+                .cloned()
+        });
+        let (icon, label): (Option<IconName>, SharedString) = match (row, &project) {
+            (Some(row), _) => (Some(IconName::FolderOpen), row.title.clone().into()),
+            (None, Some(dir)) => {
                 let name = dir
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -967,7 +978,7 @@ impl Workspace {
                     .to_string();
                 (Some(IconName::FolderOpen), name.into())
             }
-            None => (
+            (None, None) => (
                 Some(IconName::FolderOpen),
                 i18n::t("workspace-project-choose"),
             ),
@@ -1021,49 +1032,29 @@ impl Workspace {
                 let theme = cx.theme().clone();
                 let ws_blank = ws.clone();
                 let ws_folder = ws.clone();
-                // U2: the chip's recency source is the pushed decoration
-                // cache (the same snapshot the sidebar groups by), never a
-                // kernel store read.
-                let known = this.known_projects.clone();
-                let bound = this.thread_projects.clone();
+                // The workspace registry (`WorkspaceUpdate` stream) is the
+                // recency + identity source; rows keep host display order.
+                let rows: Vec<(String, String)> = this
+                    .multiplexer
+                    .read(cx)
+                    .workspaces()
+                    .iter()
+                    .map(|row| (row.path.clone(), row.title.clone()))
+                    .collect();
 
                 let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
                     let mut menu = menu.max_w(gpui::px(320.)).scrollable(true);
                     menu = menu.label(i18n::t("sidebar-section-projects"));
 
-                    // Recent projects: registered folders first (newest
-                    // first), then session cwds not yet registered.
-                    let mut recent_projects: Vec<String> = Vec::new();
-                    let mut seen = std::collections::HashSet::new();
-                    for path in known.iter().rev() {
-                        if seen.insert(path.clone()) {
-                            recent_projects.push(path.clone());
-                        }
-                        if recent_projects.len() >= 20 {
-                            break;
-                        }
-                    }
-                    if recent_projects.len() < 20 {
-                        for path in &bound {
-                            if path.is_empty() || !seen.insert(path.clone()) {
-                                continue;
-                            }
-                            recent_projects.push(path.clone());
-                            if recent_projects.len() >= 20 {
-                                break;
-                            }
-                        }
-                    }
+                    // Recent projects: the workspace registry rows, in host
+                    // order and capped like before.
+                    let recent_projects: Vec<(String, String)> =
+                        rows.iter().take(20).cloned().collect();
 
                     let ws_recent = ws.clone();
                     let theme_recent = theme.clone();
-                    for path_str in &recent_projects {
-                        let path = std::path::PathBuf::from(path_str);
-                        let name = path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or(path_str)
-                            .to_string();
+                    for (path_str, name) in &recent_projects {
+                        let name = name.clone();
                         let display_path = path_str.clone();
                         let click_path = path_str.clone();
                         let ws_sel = ws_recent.clone();
