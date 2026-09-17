@@ -17,6 +17,9 @@ use gpui::{
 /// One block on screen, plus the count of header clicks it has reported.
 struct Harness {
     open: bool,
+    /// Upstream animates the reveal and keeps the steps mounted while closed;
+    /// a host that unmounts collapsed rows turns it off.
+    animated: bool,
     step_appear_animated: bool,
     toggles: Rc<Cell<usize>>,
 }
@@ -27,6 +30,7 @@ impl Render for Harness {
         let step_appear_animated = self.step_appear_animated;
         ChainOfThought::new(("cot", 0usize))
             .open(self.open)
+            .animated(self.animated)
             .on_toggle(move |_, _, _| toggles.set(toggles.get() + 1))
             .header(
                 ChainOfThoughtHeader::new(("cot", 0usize))
@@ -80,6 +84,7 @@ fn mount(cx: &mut TestAppContext, open: bool) -> (Entity<Harness>, &mut VisualTe
     let toggles = Rc::new(Cell::new(0));
     let (view, visual) = cx.add_window_view(|_, _| Harness {
         open,
+        animated: false,
         step_appear_animated: true,
         toggles,
     });
@@ -197,6 +202,7 @@ fn a_step_can_skip_its_entrance_animation(cx: &mut TestAppContext) {
     let toggles = Rc::new(Cell::new(0));
     let (_view, visual) = cx.add_window_view(|_, _| Harness {
         open: true,
+        animated: false,
         step_appear_animated: false,
         toggles,
     });
@@ -205,10 +211,10 @@ fn a_step_can_skip_its_entrance_animation(cx: &mut TestAppContext) {
     assert!(visual.debug_bounds("cot-body-0").is_some());
 }
 
-/// The reveal is opt-in, and opting in keeps the steps mounted while closed —
-/// that is what makes a height reveal reversible.
+/// The reveal is on by default (upstream's behaviour), and it keeps the steps
+/// mounted while closed — that is what makes a height reveal reversible.
 #[gpui::test]
-fn an_animated_block_keeps_its_steps_mounted_while_closed(cx: &mut TestAppContext) {
+fn the_default_reveal_keeps_its_steps_mounted_while_closed(cx: &mut TestAppContext) {
     init(cx);
     let toggles = Rc::new(Cell::new(0));
     struct Animated {
@@ -217,8 +223,8 @@ fn an_animated_block_keeps_its_steps_mounted_while_closed(cx: &mut TestAppContex
     impl Render for Animated {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             let toggles = self.toggles.clone();
+            // No `.animated`: the reveal is upstream's default.
             ChainOfThought::new(("cot", 0usize))
-                .animated(true)
                 .open(false)
                 .on_toggle(move |_, _, _| toggles.set(toggles.get() + 1))
                 .step(

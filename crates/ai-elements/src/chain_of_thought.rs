@@ -17,12 +17,16 @@
 //!   collapsing it into three states.
 //! - No `SearchResults` / `Image` elements. A host's aggregate counts belong on
 //!   the header it already draws them on, not as badges inside a step.
-//! - Only layout-neutral animation is built in: the chevron turns, the content
-//!   fades and slides, each step fades in as it mounts. All three leave layout
-//!   height alone (a `relative().top()` offset does not move anything else). The
-//!   height reveal is opt-in via [`ChainOfThought::animated`], because a host
-//!   that caches row heights — as a virtualized transcript does — would go stale
-//!   under a reveal that changes height frame by frame.
+//! - The layout-neutral animations — the chevron turning, the content fading and
+//!   sliding, each step fading in as it mounts — are always on, and leave layout
+//!   height alone (a `relative().top()` offset moves nothing else). The height
+//!   reveal is separate and switchable via [`ChainOfThought::animated`]: on by
+//!   default, as upstream's is, and off for a host whose layout cannot follow a
+//!   height that changes frame by frame.
+//!
+//! - No `status` enum, no `SearchResults` / `Image`, and a `meta` slot on the
+//!   header: each of those keeps a host's own vocabulary and content where the
+//!   host already draws them.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -78,7 +82,7 @@ impl ChainOfThought {
             on_toggle: None,
             header: None,
             steps: Vec::new(),
-            animated: false,
+            animated: true,
         }
     }
 
@@ -112,10 +116,11 @@ impl ChainOfThought {
 
     /// Whether opening and closing reveal the steps with a height animation.
     ///
-    /// Off by default, and deliberately so: the reveal changes layout height
-    /// over time, which a host caching row heights cannot follow. Turning it on
-    /// also keeps the steps mounted while closed, since that is what makes the
-    /// reveal reversible.
+    /// On by default, as upstream's is. It also keeps the steps mounted while
+    /// closed, since that is what makes the reveal reversible — so a host that
+    /// unmounts its collapsed rows, or that caches row heights (a virtualized
+    /// transcript cannot follow a height that changes frame by frame), turns it
+    /// off and gets upstream's other half: a closed panel is not rendered.
     pub fn animated(mut self, animated: bool) -> Self {
         self.animated = animated;
         self
