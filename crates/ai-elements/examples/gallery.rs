@@ -1,4 +1,4 @@
-//! Component gallery for `Reasoning`.
+//! Component gallery for `ai-elements`.
 //!
 //! Run with:
 //!
@@ -6,18 +6,19 @@
 //! cargo run -p ai-elements --example gallery
 //! ```
 //!
-//! Each row is one behaviour of the block, driven by its own controls: start a
+//! Left rail lists the components this crate ships; the main pane shows the
+//! selected one's behaviour demos, each with the controls that drive it. Start a
 //! scripted stream and watch the body open itself, the trigger shimmer, and the
 //! block fold a second after the stream ends; toggle by hand and watch the
-//! automatic behaviour stand down. This is the component's acceptance surface —
+//! automatic behaviour stand down. This is the components' acceptance surface —
 //! the chat panel wires the same states in from `ThreadEvent`s.
 
 use std::time::Duration;
 
 use ai_elements::{Reasoning, ReasoningState};
 use gpui::{
-    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, Window, div, prelude::*, px, size,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Window, div, prelude::*, px, size,
 };
 use gpui_component::{Root, Sizable as _, Theme, button::Button, h_flex, v_flex};
 use manox_components::markdown::Markdown;
@@ -36,6 +37,32 @@ const CHUNKS: &[&str] = &[
     "- `set_streaming(false)` when the stream ends.\n\n",
     "The fold, the duration clock, and the user-toggle pin all follow from those two calls.",
 ];
+
+/// A component this crate ships. Every variant appears in the rail; the selected
+/// one's demos fill the pane.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Component {
+    Reasoning,
+}
+
+impl Component {
+    const ALL: &'static [Component] = &[Component::Reasoning];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Reasoning => "Reasoning",
+        }
+    }
+
+    fn blurb(self) -> &'static str {
+        match self {
+            Self::Reasoning => {
+                "A collapsible block for one round of thinking: opens itself while the stream is \
+                 live, folds one second after it ends."
+            }
+        }
+    }
+}
 
 struct Demo {
     title: &'static str,
@@ -57,7 +84,8 @@ impl Demo {
 }
 
 struct Gallery {
-    demos: Vec<Demo>,
+    selected: Component,
+    reasoning: Vec<Demo>,
     /// Keeps every demo's state observed, so a fold the block performs on its
     /// own (the delayed one) reaches the screen without a click.
     _subscriptions: Vec<Subscription>,
@@ -65,6 +93,15 @@ struct Gallery {
 
 impl Gallery {
     fn new(cx: &mut Context<Self>) -> Self {
+        let (reasoning, subscriptions) = Self::build_reasoning(cx);
+        Self {
+            selected: Component::Reasoning,
+            reasoning,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn build_reasoning(cx: &mut Context<Self>) -> (Vec<Demo>, Vec<Subscription>) {
         #[allow(clippy::type_complexity)]
         let specs: &[(&'static str, &'static str, bool, bool, Option<bool>)] = &[
             (
@@ -177,21 +214,17 @@ impl Gallery {
         demos[4].state.update(cx, |state, cx| {
             state.set_duration(Some(0), cx);
         });
-
-        Self {
-            demos,
-            _subscriptions: subscriptions,
-        }
+        (demos, subscriptions)
     }
 
     /// Start the scripted stream: the block is told a stream began, then fed
     /// deltas, then told it ended — the same three calls the chat panel makes.
     fn start_stream(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let mounts_streaming = self.demos[ix].mounts_streaming;
-        self.demos[ix]
+        let mounts_streaming = self.reasoning[ix].mounts_streaming;
+        self.reasoning[ix]
             .markdown
             .update(cx, |md, cx| md.replace("", cx));
-        self.demos[ix].state.update(cx, |state, cx| {
+        self.reasoning[ix].state.update(cx, |state, cx| {
             state.set_duration(None, cx);
             // A block mounted mid-run is already streaming; feeding it another
             // rising edge would be a no-op, so only idle demos get one.
@@ -217,28 +250,28 @@ impl Gallery {
     }
 
     fn append_chunk(&mut self, ix: usize, chunk: &str, cx: &mut Context<Self>) {
-        self.demos[ix]
+        self.reasoning[ix]
             .markdown
             .update(cx, |md, cx| md.append(chunk, cx));
         cx.notify();
     }
 
     fn finish_stream(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.demos[ix]
+        self.reasoning[ix]
             .state
             .update(cx, |state, cx| state.set_streaming(false, cx));
         cx.notify();
     }
 
     fn toggle_by_hand(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.demos[ix]
+        self.reasoning[ix]
             .state
             .update(cx, |state, cx| state.toggle(cx));
         cx.notify();
     }
 
     fn demo_block(&self, ix: usize) -> impl IntoElement {
-        let demo = &self.demos[ix];
+        let demo = &self.reasoning[ix];
         let mut block =
             Reasoning::new(("reasoning", ix), &demo.state).content(demo.markdown.clone());
         if demo.custom_message {
@@ -257,80 +290,162 @@ impl Gallery {
         }
         block
     }
+
+    fn demo_row(
+        &self,
+        ix: usize,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (title, note) = (self.reasoning[ix].title, self.reasoning[ix].note);
+        let is_streaming = self.reasoning[ix].is_streaming(cx);
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_3()
+            .p_4()
+            .border_1()
+            .border_color(border)
+            .rounded(px(10.))
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(foreground)
+                            .child(SharedString::from(title)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(SharedString::from(note)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new(("start", ix))
+                            .xsmall()
+                            .outline()
+                            .label(if is_streaming { "Restart" } else { "Start" })
+                            .on_click(
+                                cx.listener(move |this, _, _window, cx| this.start_stream(ix, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new(("toggle", ix))
+                            .xsmall()
+                            .outline()
+                            .label("Toggle by hand")
+                            .on_click(
+                                cx.listener(move |this, _, _window, cx| {
+                                    this.toggle_by_hand(ix, cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(self.demo_block(ix))
+            .into_any_element()
+    }
+
+    /// The left rail: one row per component, the selected one tinted.
+    fn rail(
+        &mut self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+        secondary: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.selected;
+        v_flex()
+            .w(px(220.))
+            .h_full()
+            .flex_shrink_0()
+            .gap_1()
+            .p_3()
+            .border_r_1()
+            .border_color(border)
+            .child(
+                div()
+                    .px_2()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from("Components")),
+            )
+            .children(Component::ALL.iter().enumerate().map(|(ix, component)| {
+                let component = *component;
+                let is_selected = component == selected;
+                h_flex()
+                    .id(("component", ix))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(is_selected, |row| row.bg(secondary).text_color(foreground))
+                    .when(!is_selected, |row| {
+                        row.text_color(muted)
+                            .hover(move |row| row.bg(secondary.opacity(0.5)).text_color(foreground))
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.selected = component;
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(component.name()))
+            }))
+    }
 }
 
 impl Render for Gallery {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx);
-        let (muted, border, background, foreground) = (
+        let (muted, border, background, foreground, secondary) = (
             theme.muted_foreground,
             theme.border,
             theme.background,
             theme.foreground,
+            theme.secondary,
         );
-        let streaming: Vec<bool> = self
-            .demos
-            .iter()
-            .map(|demo| demo.is_streaming(cx))
+
+        let rows: Vec<AnyElement> = (0..self.reasoning.len())
+            .map(|ix| self.demo_row(ix, muted, border, foreground, cx))
             .collect();
 
-        let rows = (0..self.demos.len()).map(|ix| {
-            let (title, note) = (self.demos[ix].title, self.demos[ix].note);
-            let is_streaming = streaming[ix];
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .gap_3()
-                .p_4()
-                .border_1()
-                .border_color(border)
-                .rounded(px(10.))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(foreground)
-                                .child(SharedString::from(title)),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(SharedString::from(note)),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            Button::new(("start", ix))
-                                .xsmall()
-                                .outline()
-                                .label(if is_streaming { "Restart" } else { "Start" })
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    this.start_stream(ix, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new(("toggle", ix))
-                                .xsmall()
-                                .outline()
-                                .label("Toggle by hand")
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    this.toggle_by_hand(ix, cx)
-                                })),
-                        ),
-                )
-                .child(self.demo_block(ix))
-        });
-
-        v_flex()
-            .size_full()
-            .bg(background)
+        let pane = v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .px_6()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(
+                        div()
+                            .text_base()
+                            .text_color(foreground)
+                            .child(SharedString::from(self.selected.name())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(SharedString::from(self.selected.blurb())),
+                    ),
+            )
             .child(
                 div()
                     .id("gallery-scroll")
@@ -353,7 +468,13 @@ impl Render for Gallery {
                          (AUTO_CLOSE_DELAY). A hand toggle pins the block: nothing automatic moves \
                          it afterwards.",
                     )),
-            )
+            );
+
+        h_flex()
+            .size_full()
+            .bg(background)
+            .child(self.rail(muted, border, foreground, secondary, cx))
+            .child(pane)
     }
 }
 
@@ -361,14 +482,14 @@ fn main() {
     let app = gpui_platform::application().with_assets(gpui_kit_assets::Assets);
     app.run(|cx| {
         gpui_component::init(cx);
-        let bounds = gpui::WindowBounds::centered(size(px(880.), px(760.)), cx);
+        let bounds = gpui::WindowBounds::centered(size(px(1040.), px(760.)), cx);
         let _ = cx.open_window(
             gpui::WindowOptions {
                 window_bounds: Some(bounds),
                 ..Default::default()
             },
             |window, cx| {
-                window.set_window_title("ai-elements — Reasoning");
+                window.set_window_title("ai-elements — gallery");
                 let gallery = cx.new(Gallery::new);
                 cx.new(|cx| Root::new(gallery, window, cx))
             },
