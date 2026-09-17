@@ -9,21 +9,19 @@ manox-app 是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端�
 ### 代码结构
 
 ```
-apps/desktop/              # 应用侧 crate
+crates/                    # 全部 workspace 成员平铺于此（本仓只有一个交付物：桌面 app + 独立 bin 的 cx CLI）
   manox/                   # 主二进制入口（窗口 + 主题 + 托盘 + 接线）
   agent-ui/                # GPUI UI 层（Workspace/ConversationState/views）
   terminal-ui/             # 终端渲染层（TerminalElement/TerminalView；仿真核心在 dspo/manox 的 manox-terminal）
-  manox-components/        # 一方 gpui 组件库（markdown 渲染等）
+  manox-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
   manox-webview/           # wry 原生 webview + Tauri 式 IPC
   manox-webview-macros/    # webview IPC 过程宏
-crates/                    # 应用自有的非 UI-框架 crate
   cx/                      # cx headless 库（配置核心、launch-home、
                            #   chatgpt/vscode launch、probe db）
   cx-cli/                  # cx CLI bin（clap + ratatui TUI + relay + stats + `cx web`）
   manox-ext-agents/        # ext-agent 启动 API、会话管理、IPC relay、
                            #   cx_session 桥（SessionHandle → PtySource）
 ```
-
 上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真核心（manox-terminal）与 hyperlinks 已回流 dspo/manox（同经 git 依赖消费），`CxSessionSource` 桥留在本仓 manox-ext-agents。
 
 ### 与 manox 仓的联动开发
