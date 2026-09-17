@@ -1528,7 +1528,13 @@ pub fn render_thinking(
         return gpui::div().into_any_element();
     }
     let layout = segment_layout(t);
-    let mut chain = ChainOfThought::new(("activity-tree", ix)).open(layout.expanded);
+    // The list caches each row's height, so the segment's fold stays instant:
+    // a reveal that changes height frame by frame would go stale under it. The
+    // chevron, the content fade, and each step's entrance are layout-neutral
+    // and stay on.
+    let mut chain = ChainOfThought::new(("activity-tree", ix))
+        .open(layout.expanded)
+        .animated(false);
     for &eix in &layout.visible {
         chain = chain.step(render_activity_entry(
             &t.entries[eix],
