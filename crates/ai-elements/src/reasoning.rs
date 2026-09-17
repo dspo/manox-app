@@ -30,6 +30,8 @@ use gpui_component::{
     h_flex, shimmer::ShimmerText, v_flex,
 };
 
+use crate::animation::toggle_key;
+
 /// How long a block stays open after its stream ends before folding itself.
 ///
 /// Matches upstream's `AUTO_CLOSE_DELAY`, so a finished round plays out its
@@ -373,7 +375,7 @@ impl RenderOnce for ReasoningTrigger {
         let chevron = Icon::new(IconName::ChevronDown)
             .xsmall()
             .with_animation(
-                animation_key(&self.id, "chevron", toggle_gen),
+                toggle_key(&self.id, "chevron", toggle_gen),
                 Animation::new(TOGGLE_MOTION).with_easing(ease_in_out),
                 move |icon, t| {
                     // Upstream rotates a downward chevron a half turn when open;
@@ -565,7 +567,7 @@ impl RenderOnce for Reasoning {
             let inner = if animated {
                 wrapper
                     .with_animation(
-                        content_animation_id(&id, toggle_gen),
+                        toggle_key(&id, "fade", toggle_gen),
                         Animation::new(TOGGLE_MOTION).with_easing(ease_out_quint()),
                         move |body, t| {
                             let t = if is_open { t } else { 1.0 - t };
@@ -590,18 +592,6 @@ impl RenderOnce for Reasoning {
             None => collapsible.into_any_element(),
         }
     }
-}
-
-/// A toggle animation's identity. The generation is part of the key so the
-/// animation restarts when the block opens or closes, and only then — a
-/// re-render that leaves the state alone reuses the key and replays nothing.
-fn content_animation_id(id: &ElementId, toggle_gen: u64) -> ElementId {
-    animation_key(id, "fade", toggle_gen)
-}
-
-fn animation_key(id: &ElementId, role: &'static str, toggle_gen: u64) -> ElementId {
-    let role_id: ElementId = (id.clone(), role).into();
-    (role_id, format!("g{toggle_gen}")).into()
 }
 
 #[cfg(test)]

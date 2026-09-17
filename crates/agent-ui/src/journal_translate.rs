@@ -199,7 +199,13 @@ pub fn thread_event_of(entry: &JournalWireEntry) -> Option<ThreadEvent> {
             name: name.clone(),
             title: title.clone(),
             status: parse_status(status),
-            input: Some(input.clone()),
+            // The settle row of a call carries `input: null` and the bare tool
+            // name as its title — the arguments were already sent on the start
+            // row. `Some(Value::Null)` would read as "this event carries
+            // arguments" downstream, and the argument-derived title minted by
+            // the start row would be overwritten with the bare name. An absent
+            // payload is absence, not a null one.
+            input: (!input.is_null()).then(|| input.clone()),
         },
         JournalWireEvent::ToolResult {
             call_id,
@@ -557,7 +563,52 @@ mod tests {
     /// The claim instant (dsh `claimed`): a `user` row landing maps to
     /// `ThreadEvent::UserRowLanded` carrying the row's durable id — the
     /// client-minted steer id the server threads through. Assistant rows stay
-    /// event-less (they stream via deltas), so nothing else fires.
+    /// event-less (they stream via deltas), so nothing else fires.    /// The settle row of a tool call carries `input: null` and the bare tool
+    /// name; it must translate to *no* input, or downstream reads it as "this
+    /// event carries arguments" and overwrites the argument-derived title the
+    /// start row minted — every tool row would fall back to a bare "Read".
+    #[test]
+    fn tool_call_null_input_translates_to_absent() {
+        let settling = JournalWireEntry {
+            id: "e2".into(),
+            seq: 2,
+            parent_id: None,
+            timestamp: String::new(),
+            event: JournalWireEvent::ToolCall {
+                call_id: "c1".into(),
+                name: "Read".into(),
+                title: "Read".into(),
+                status: "success".into(),
+                input: serde_json::Value::Null,
+            },
+        };
+        let Some(ThreadEvent::ToolCall { input, .. }) = thread_event_of(&settling) else {
+            panic!("a tool_call row translates to a tool-call event");
+        };
+        assert!(
+            input.is_none(),
+            "a null payload is absence, not an empty argument set"
+        );
+
+        let starting = JournalWireEntry {
+            id: "e1".into(),
+            seq: 1,
+            parent_id: None,
+            timestamp: String::new(),
+            event: JournalWireEvent::ToolCall {
+                call_id: "c1".into(),
+                name: "Read".into(),
+                title: "Read src/lib.rs".into(),
+                status: "running".into(),
+                input: serde_json::json!({"path": "src/lib.rs"}),
+            },
+        };
+        let Some(ThreadEvent::ToolCall { input, title, .. }) = thread_event_of(&starting) else {
+            panic!("a tool_call row translates to a tool-call event");
+        };
+        assert!(input.is_some() && title == "Read src/lib.rs");
+    }
+
     #[test]
     fn user_message_rows_map_to_user_row_landed_by_id() {
         let ev = |role: &str| JournalWireEvent::Message {

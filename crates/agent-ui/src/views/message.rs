@@ -27,6 +27,7 @@ use crate::conversation::{
     UserImage, UserTurnMeta,
 };
 use crate::i18n;
+use ai_elements::{ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep};
 use base64::Engine as _;
 use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui::prelude::*;
@@ -1396,24 +1397,6 @@ fn lang_hint_for_tool(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
-/// A left-aligned disclosure chevron for collapsible MessageList rows.
-/// `ChevronRight` = collapsed, `ChevronDown` = expanded. xsmall + muted so it
-/// reads as secondary chrome, not a primary icon. Used by `render_thinking`
-/// and `render_activity_entry` so every collapsible affordance in the activity
-/// flow shares one system.
-fn disclosure_icon(collapsed: bool, theme: &Theme) -> gpui::AnyElement {
-    let name = if collapsed {
-        IconName::ChevronRight
-    } else {
-        IconName::ChevronDown
-    };
-    Icon::new(name)
-        .xsmall()
-        .text_color(theme.muted_foreground)
-        .into_any_element()
-}
-
 /// Aggregated per-kind counts rendered on a segment's cover row.
 struct SegmentStats {
     thinking_rounds: usize,
@@ -1501,13 +1484,18 @@ fn segment_layout(t: &ThinkingContainer) -> SegmentLayout {
     }
 }
 
-/// Render an activity segment as its shell: a header row carrying the model
-/// display name plus the cover (chevron + per-kind counts + elapsed +
-/// failure/approval badges) over the visible entries. Collapsed shows the
-/// header alone (live or settled); expanded nests every entry under a slight
-/// indent with a left rail. Segments with fewer than two entries render flat
-/// under a model-name-only header — folding a single row would only add a
+/// Render an activity segment as a chain of thought: a header row carrying the
+/// model display name plus the segment's cover (per-kind counts, elapsed,
+/// failure and approval badges) over one step per entry. Collapsed shows the
+/// header alone (live or settled); expanded lists every entry under it, each
+/// step drawing the connector rail. Segments with fewer than two entries render
+/// flat under a model-name-only header — folding a single row would only add a
 /// click.
+///
+/// The block is controlled: `layout.expanded` (which already folds in the
+/// pending-approval force-open) is the open state, and the click writes the
+/// container's own `collapsed` / `user_toggled`. None of the segment's policy
+/// moved into the component.
 pub fn render_thinking(
     t: &ThinkingContainer,
     ix: usize,
@@ -1522,45 +1510,107 @@ pub fn render_thinking(
         return gpui::div().into_any_element();
     }
     let layout = segment_layout(t);
+    // The list caches each row's height, so the segment's fold stays instant:
+    // a reveal that changes height frame by frame would go stale under it. The
+    // chevron, the content fade, and each step's entrance are layout-neutral
+    // and stay on.
+    let mut chain = ChainOfThought::new(("activity-tree", ix))
+        .open(layout.expanded)
+        .animated(false);
+    for &eix in &layout.visible {
+        chain = chain.step(render_activity_entry(
+            &t.entries[eix],
+            eix,
+            ix,
+            theme,
+            tool_ctx,
+            cx,
+        ));
+    }
+
     if !layout.cover {
+        // Too small to fold: the steps sit under a model-name-only row, with no
+        // cover to click.
         return v_flex()
             .w_full()
             .min_w_0()
             .gap_0p5()
             .debug_selector(|| format!("message-overflow-activity-tree-{ix}"))
             .child(segment_header_model(role, theme))
-            .children(
-                t.entries
-                    .iter()
-                    .enumerate()
-                    .map(|(eix, e)| render_activity_entry(e, eix, ix, theme, tool_ctx, cx)),
-            )
+            .child(chain)
             .into_any_element();
     }
+
     let stats = &layout.stats;
     let secs = if t.streaming {
         Some(t.started_at.elapsed().as_secs())
     } else {
         t.frozen_secs
     };
-    let interactive = tool_ctx.is_some();
     let weak_workspace = tool_ctx.map(|c| c.weak.clone());
-    let mut cover = h_flex()
-        .id(("activity-cover", ix))
-        .w_full()
-        .min_w_0()
-        .py_0p5()
-        .gap_1p5()
-        .items_center()
-        // Long tool-name chips (WebExploreNavigate×N …) wrap instead of
-        // overflowing the message column.
-        .flex_wrap()
-        .rounded(theme.radius)
-        .when(interactive, |row| {
-            row.cursor_pointer()
-                .hover(|s| s.bg(theme.secondary.opacity(0.3)))
-        })
-        .on_click(move |_, _window, cx: &mut App| {
+    let interactive = tool_ctx.is_some();
+
+    // The header's label is the model display name — the segment is the single
+    // place a turn's model shows, so it stays the row's identity rather than a
+    // generic "Chain of Thought". Everything the cover used to carry rides the
+    // meta slots, in the order it was shown.
+    let mut header = ChainOfThoughtHeader::new(("activity-cover", ix)).label(role.to_string());
+    if t.streaming {
+        header = header.meta(
+            BrailleSpinner::new()
+                .xsmall()
+                .color(theme.muted_foreground)
+                .into_any_element(),
+        );
+    }
+    if stats.thinking_rounds > 0 {
+        header = header.meta(
+            gpui::div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(format!(
+                    "{}×{}",
+                    i18n::t("message-reasoning"),
+                    stats.thinking_rounds
+                )),
+        );
+    }
+    for (name, count) in &stats.tools {
+        header = header.meta(
+            gpui::div()
+                .text_sm()
+                .font_family(theme.mono_font_family.clone())
+                .text_color(theme.muted_foreground)
+                .child(format!("{name}×{count}")),
+        );
+    }
+    if let Some(secs) = secs
+        && secs > 0
+    {
+        header = header.meta(
+            gpui::div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(i18n::t_count("thinking-duration", secs as i64).to_string()),
+        );
+    }
+    if stats.failed > 0 {
+        header = header.meta(
+            gpui::div()
+                .text_sm()
+                .text_color(theme.danger)
+                .child(i18n::t_count("activity-failed", stats.failed as i64).to_string()),
+        );
+    }
+    if stats.pending_approval > 0 {
+        header = header.meta(gpui::div().text_sm().text_color(theme.warning).child(
+            i18n::t_count("activity-awaiting-approval", stats.pending_approval as i64).to_string(),
+        ));
+    }
+    chain = chain.header(header);
+
+    if interactive {
+        chain = chain.on_toggle(move |_, _window, cx: &mut App| {
             let Some(weak) = weak_workspace.clone() else {
                 return;
             };
@@ -1579,97 +1629,23 @@ pub fn render_thinking(
                 });
                 cx.notify();
             });
-        })
-        .child(segment_header_model(role, theme))
-        .child(disclosure_icon(!layout.expanded, theme))
-        .when(t.streaming, |row| {
-            row.child(
-                BrailleSpinner::new()
-                    .xsmall()
-                    .color(theme.muted_foreground)
-                    .into_any_element(),
-            )
         });
-    if stats.thinking_rounds > 0 {
-        cover = cover.child(
-            gpui::div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(format!(
-                    "{}×{}",
-                    i18n::t("message-reasoning"),
-                    stats.thinking_rounds
-                )),
-        );
-    }
-    for (name, count) in &stats.tools {
-        cover = cover.child(
-            gpui::div()
-                .text_sm()
-                .font_family(theme.mono_font_family.clone())
-                .text_color(theme.muted_foreground)
-                .child(format!("{name}×{count}")),
-        );
-    }
-    if let Some(secs) = secs
-        && secs > 0
-    {
-        cover = cover.child(
-            gpui::div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(i18n::t_count("thinking-duration", secs as i64).to_string()),
-        );
-    }
-    if stats.failed > 0 {
-        cover = cover.child(
-            gpui::div()
-                .text_sm()
-                .text_color(theme.danger)
-                .child(i18n::t_count("activity-failed", stats.failed as i64).to_string()),
-        );
-    }
-    if stats.pending_approval > 0 {
-        cover = cover.child(gpui::div().text_sm().text_color(theme.warning).child(
-            i18n::t_count("activity-awaiting-approval", stats.pending_approval as i64).to_string(),
-        ));
     }
 
-    let mut col = v_flex()
+    v_flex()
         .w_full()
         .min_w_0()
         .gap_0p5()
         .debug_selector(|| format!("message-overflow-activity-tree-{ix}"))
-        .child(cover);
-    if !layout.visible.is_empty() {
-        let entries = v_flex().w_full().min_w_0().gap_0p5().children(
-            layout
-                .visible
-                .iter()
-                .map(|&eix| render_activity_entry(&t.entries[eix], eix, ix, theme, tool_ctx, cx)),
-        );
-        col = col.child(if layout.expanded {
-            // Slight indent + left rail: the entries read as one batched
-            // block under the cover without eating horizontal space.
-            gpui::div()
-                .w_full()
-                .min_w_0()
-                .ml_1()
-                .border_l_1()
-                .border_color(theme.border)
-                .pl_2()
-                .child(entries)
-                .into_any_element()
-        } else {
-            entries.into_any_element()
-        });
-    }
-    col.into_any_element()
+        .child(chain)
+        .into_any_element()
 }
 
-/// Render one activity entry (a reasoning round or a tool node) as a flat,
-/// self-collapsible row. No branch connector or left rail — entries sit at
-/// the same indentation level as the surrounding assistant text.
+/// Render one activity entry (a reasoning round or a tool node) as a step: the
+/// entry's status marker in the step's marker column, its clickable row as the
+/// step's label, and its body as the step's content. The step's id is the
+/// selector the overflow test measures, so a step's painted bounds are what that
+/// test compares.
 fn render_activity_entry(
     e: &ActivityEntry,
     eix: usize,
@@ -1677,19 +1653,20 @@ fn render_activity_entry(
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
     cx: &mut App,
-) -> gpui::AnyElement {
-    let entry = match e {
+) -> ChainOfThoughtStep {
+    let id = format!("message-overflow-activity-entry-{cix}-{eix}");
+    match e {
         ActivityEntry::Reasoning {
             text,
             streaming,
             collapsed,
-            user_toggled,
+            user_toggled: _,
             markdown,
-        } => render_reasoning_entry(
+        } => reasoning_step(
+            id,
             text,
             *streaming,
             *collapsed,
-            *user_toggled,
             markdown.clone(),
             eix,
             cix,
@@ -1697,114 +1674,73 @@ fn render_activity_entry(
             tool_ctx,
             cx,
         ),
-        ActivityEntry::Tool(tool) => render_tool_entry(tool, eix, theme, tool_ctx, cx),
-    };
-    // No branch/rail wrapper — a plain full-width overflow guard so the entry
-    // body stays within the message column on narrow widths. The debug
-    // selectors back the overflow test (which now covers the flat layout).
-    gpui::div()
-        .w_full()
-        .min_w_0()
-        .overflow_x_hidden()
-        .debug_selector(|| format!("message-overflow-activity-entry-{cix}-{eix}"))
-        .child(
-            gpui::div()
-                .min_w_0()
-                .overflow_x_hidden()
-                .debug_selector(|| format!("message-overflow-activity-entry-body-{cix}-{eix}"))
-                .child(entry),
-        )
-        .into_any_element()
+        ActivityEntry::Tool(tool) => tool_step(id, tool, eix, cix, theme, tool_ctx, cx),
+    }
 }
 
-/// Render a reasoning round entry in the activity tree: a lightweight node
-/// labeled "思考" that expands to show the raw thinking text. No card
-/// chrome — just a subtle hover affordance and muted styling.
+/// A reasoning round's step: the marker spins while the round streams, the body
+/// is the persistent markdown document the streaming path keeps in sync.
 #[allow(clippy::too_many_arguments)]
-fn render_reasoning_entry(
+fn reasoning_step(
+    id: String,
     text: &str,
     streaming: bool,
     collapsed: bool,
-    _user_toggled: bool,
     markdown: Option<Entity<Markdown>>,
     eix: usize,
     cix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> ChainOfThoughtStep {
     let weak_workspace = tool_ctx.map(|c| c.weak.clone());
-    let label = i18n::t("message-reasoning").to_string();
-    // Live rounds play open; the delayed auto-collapse folds the body once
-    // the stream is done. The header spinner still shows work in progress
-    // while collapsed.
-    let show_body = !collapsed;
+    let marker: gpui::AnyElement = if streaming {
+        BrailleSpinner::new()
+            .xsmall()
+            .color(theme.muted_foreground)
+            .into_any_element()
+    } else {
+        Icon::new(IconName::BookOpen)
+            .xsmall()
+            .text_color(theme.muted_foreground)
+            .into_any_element()
+    };
 
-    let mut row = v_flex().w_full().min_w_0().flex_1().italic().child(
-        h_flex()
-            .id(("reasoning-entry", eix))
-            .w_full()
-            .min_w_0()
-            .px_2()
-            .py_0p5()
-            .gap_1p5()
-            .items_center()
-            .rounded(theme.radius)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.secondary.opacity(0.3)))
-            .on_click(move |_, _window, cx: &mut App| {
-                let Some(weak) = weak_workspace.clone() else {
-                    return;
-                };
-                let _ = weak.update(cx, |w, cx| {
-                    let conv = w.conversation.clone();
-                    conv.update(cx, |c, cx| {
-                        // Toggle the specific container's reasoning entry by
-                        // index. `cix` is the container's position in the
-                        // conversation items list, captured at render time.
-                        if let Some(item) = c.items().get(cix) {
-                            item.update(cx, |item, cx| {
-                                if let ConvItem::Thinking(t) = item.kind_mut()
-                                    && let Some(ActivityEntry::Reasoning {
-                                        collapsed,
-                                        user_toggled,
-                                        ..
-                                    }) = t.entries.get_mut(eix)
-                                {
-                                    *collapsed = !*collapsed;
-                                    *user_toggled = true;
-                                }
-                                cx.notify();
-                            });
-                        }
-                    });
-                    cx.notify();
+    // The row's structure — chevron, hover, click, one-line clipped title — is
+    // the step's; this layer supplies the data and what a click means.
+    let mut step = ChainOfThoughtStep::new(id)
+        .icon(marker)
+        .title(i18n::t("message-reasoning"))
+        .disclosed(!collapsed, move |_, _window, cx: &mut App| {
+            let Some(weak) = weak_workspace.clone() else {
+                return;
+            };
+            let _ = weak.update(cx, |w, cx| {
+                let conv = w.conversation.clone();
+                conv.update(cx, |c, cx| {
+                    // Toggle the specific container's reasoning entry by
+                    // index. `cix` is the container's position in the
+                    // conversation items list, captured at render time.
+                    if let Some(item) = c.items().get(cix) {
+                        item.update(cx, |item, cx| {
+                            if let ConvItem::Thinking(t) = item.kind_mut()
+                                && let Some(ActivityEntry::Reasoning {
+                                    collapsed,
+                                    user_toggled,
+                                    ..
+                                }) = t.entries.get_mut(eix)
+                            {
+                                *collapsed = !*collapsed;
+                                *user_toggled = true;
+                            }
+                            cx.notify();
+                        });
+                    }
                 });
-            })
-            .child(disclosure_icon(collapsed, theme))
-            .child(if streaming {
-                BrailleSpinner::new()
-                    .xsmall()
-                    .color(theme.muted_foreground)
-                    .into_any_element()
-            } else {
-                Icon::new(IconName::BookOpen)
-                    .xsmall()
-                    .text_color(theme.muted_foreground)
-                    .into_any_element()
-            })
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_x_hidden()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(truncate(&label, 80)),
-            ),
-    );
-
-    if show_body && !text.is_empty() {
+                cx.notify();
+            });
+        });
+    if !collapsed && !text.is_empty() {
         // The persistent `Entity<Markdown>` (synced by the streaming/rebuild
         // path) carries parse-once incremental parsing + document-level
         // selection; fall back to a per-frame mount only before the first sync.
@@ -1812,30 +1748,34 @@ fn render_reasoning_entry(
             Some(md) => md.into_any_element(),
             None => markdown_tv(("reasoning-entry-body", eix), text, theme, false, cx),
         };
-        row = row.child(
+        step = step.content(
             gpui::div()
                 .id(("reasoning-body", eix))
                 .w_full()
                 .min_w_0()
-                .pl_6()
+                .overflow_x_hidden()
                 .py_1()
+                .italic()
                 .text_color(theme.muted_foreground)
+                .debug_selector(move || format!("message-overflow-activity-entry-body-{cix}-{eix}"))
                 .child(body),
         );
     }
-    row.into_any_element()
+    step
 }
 
-/// Render a tool entry in the activity tree: a compact execution node with
-/// status icon, tool name, and expandable output. No card chrome — just a
-/// lightweight row with a subtle hover affordance.
-fn render_tool_entry(
+/// A tool call's step: the marker carries the call's status, the label is its
+/// command summary, and the body is the terminal-styled output panel (which
+/// keeps its own frame — the single bordered box is the panel's, not the row's).
+fn tool_step(
+    id: String,
     e: &ToolCallItem,
     eix: usize,
+    cix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> ChainOfThoughtStep {
     use manox_agent::ToolCallStatus;
     let is_active = matches!(
         e.status,
@@ -1847,7 +1787,7 @@ fn render_tool_entry(
         ToolCallStatus::Error | ToolCallStatus::Denied => theme.danger,
         ToolCallStatus::Cancelled => theme.muted_foreground,
     };
-    let status_el: gpui::AnyElement = if is_active {
+    let marker: gpui::AnyElement = if is_active {
         BrailleSpinner::new()
             .xsmall()
             .color(status_color)
@@ -1864,7 +1804,7 @@ fn render_tool_entry(
         icon.xsmall().text_color(status_color).into_any_element()
     };
     // Live tools play open; the delayed auto-collapse folds the output once
-    // the result lands. The status icon still spins while running.
+    // the result lands. The status marker still spins while running.
     let show_output = !e.collapsed;
     let title = if !e.title.is_empty() {
         e.title.clone()
@@ -1876,75 +1816,44 @@ fn render_tool_entry(
     let id_for_toggle = e.id.clone();
     let weak_workspace = tool_ctx.map(|c| c.weak.clone());
 
-    // The terminal frame: a titlebar (command summary + status + disclosure)
-    // that toggles the body, and the body itself. One bordered rounded box so
-    // the pair reads as a single terminal window rather than a floating header
-    // above a detached panel.
-    let mut frame = v_flex()
-        .w_full()
-        .min_w_0()
-        .flex_1()
-        .italic()
-        .border_1()
-        .border_color(theme.border)
-        .rounded(theme.radius)
-        .overflow_hidden()
-        .child(
-            h_flex()
-                .id(("act-header", eix))
+    let mut step = ChainOfThoughtStep::new(id)
+        .icon(marker)
+        .title(title)
+        .disclosed(!e.collapsed, move |_, _window, cx: &mut App| {
+            let Some(weak) = weak_workspace.clone() else {
+                return;
+            };
+            let _ = weak.update(cx, |w, cx| {
+                let id = id_for_toggle.clone();
+                let conv = w.conversation.clone();
+                conv.update(cx, |c, cx| {
+                    if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
+                        && let Some(item) = c.items().get(cix)
+                    {
+                        item.update(cx, |item, cx| {
+                            if let ConvItem::Thinking(t) = item.kind_mut()
+                                && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(eix)
+                            {
+                                entry.collapsed = !entry.collapsed;
+                                entry.user_toggled = true;
+                            }
+                            cx.notify();
+                        });
+                    }
+                });
+                cx.notify();
+            });
+        });
+    if show_output && !e.output.is_empty() {
+        step = step.framed(true).content(
+            v_flex()
                 .w_full()
                 .min_w_0()
-                .px_2()
-                .py_0p5()
-                .gap_1p5()
-                .items_center()
-                .when(show_output, |h| h.border_b_1().border_color(theme.border))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.secondary.opacity(0.3)))
-                .on_click(move |_, _window, cx: &mut App| {
-                    let Some(weak) = weak_workspace.clone() else {
-                        return;
-                    };
-                    let _ = weak.update(cx, |w, cx| {
-                        let id = id_for_toggle.clone();
-                        let conv = w.conversation.clone();
-                        conv.update(cx, |c, cx| {
-                            if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
-                                && let Some(item) = c.items().get(cix)
-                            {
-                                item.update(cx, |item, cx| {
-                                    if let ConvItem::Thinking(t) = item.kind_mut()
-                                        && let Some(ActivityEntry::Tool(entry)) =
-                                            t.entries.get_mut(eix)
-                                    {
-                                        entry.collapsed = !entry.collapsed;
-                                        entry.user_toggled = true;
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        });
-                        cx.notify();
-                    });
-                })
-                .child(disclosure_icon(e.collapsed, theme))
-                .child(status_el)
-                .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_x_hidden()
-                        .text_sm()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(theme.muted_foreground)
-                        .child(truncate(&title, 80)),
-                ),
+                .debug_selector(move || format!("message-overflow-activity-entry-body-{cix}-{eix}"))
+                .child(render_tool_output(e, eix, theme, cx)),
         );
-
-    if show_output && !e.output.is_empty() {
-        frame = frame.child(render_tool_output(e, eix, theme, cx));
     }
-    frame.into_any_element()
+    step
 }
 
 /// Open a file path in VS Code. Strips `:line` and `:line-end` suffixes
@@ -2443,57 +2352,6 @@ pub fn render_tool_call(
 /// `ToolResult` lands we mount the syntax-highlighted, scrollable `Markdown`.
 /// The container keeps a deterministic height either way so the parent card
 /// (and the list) reports a stable layout.
-/// Strip the hashline envelope from a `read_file` result for display: drop the
-/// leading `[path#TAG]` header and the `N:` line-number prefix on each numbered
-/// line, so the user sees raw file content rather than the anchoring prefixes
-/// the LLM relies on. Returns the input unchanged when the first line is not
-/// the `[path#TAG]` header — non-hashline output (errors, non-`read_file` tools)
-/// passes through verbatim. Only the first `digits:` run is stripped per line,
-/// so file content that itself begins with `digits:` is preserved. The
-/// persisted `ToolCallItem.output` is never touched; this is display-only.
-fn strip_hashline_numbering(raw: &str) -> String {
-    let mut lines = raw.split('\n');
-    let Some(header) = lines.next() else {
-        return String::new();
-    };
-    if !is_hashline_header(header) {
-        return raw.to_string();
-    }
-    let mut out = String::with_capacity(raw.len());
-    for (i, line) in lines.enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(strip_leading_line_number(line));
-    }
-    out
-}
-
-/// Recognize the `[path#TAG]` header `format_numbered` emits: bracketed, with
-/// a non-empty path and tag separated by the first `#`.
-fn is_hashline_header(line: &str) -> bool {
-    let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
-        return false;
-    };
-    let mut parts = inner.splitn(2, '#');
-    matches!((parts.next(), parts.next()), (Some(p), Some(t)) if !p.is_empty() && !t.is_empty())
-}
-
-/// Strip a leading `<digits>:` prefix if present; return the remainder. A line
-/// without the prefix passes through unchanged (per-line fallback).
-fn strip_leading_line_number(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i > 0 && i < bytes.len() && bytes[i] == b':' {
-        &line[i + 1..]
-    } else {
-        line
-    }
-}
-
 fn render_tool_output(
     item: &ToolCallItem,
     ix: usize,
@@ -2528,22 +2386,17 @@ fn render_tool_output(
     // per-frame. The persistent panel is the supported path; this only fires
     // for paths the conversation handler doesn't sync (e.g. a freshly built
     // entry before the first `ToolOutput`).
-    let display_output = if item.streaming {
+    let display = if item.streaming {
         live_tail(&item.output)
     } else {
         item.output.clone()
     };
-    // Display-only transform for `read_file`: hide the hashline `[path#TAG]`
-    // header and `N:` line numbers so the user sees raw file content. The raw
-    // `output` (LLM-facing, persisted, edit_file-anchored) is untouched, so
-    // copy-selection yields the display text while the LLM still sees numbered
-    // output on the next turn. Non-`read_file` tools borrow the raw output
-    // without allocating.
-    let display: std::borrow::Cow<'_, str> = if item.name == manox_agent::tools::READ {
-        std::borrow::Cow::Owned(strip_hashline_numbering(&display_output))
-    } else {
-        std::borrow::Cow::Borrowed(&display_output)
-    };
+    // The body goes to the panel (or, below, to a per-frame fallback block)
+    // verbatim: a `read_file` result is the model-facing hashline shape, and
+    // `PanelKind::Numbered` is what knows how to present it — the file's own
+    // line numbers, gap markers unnumbered. Stripping the prefixes here, as
+    // this layer used to, forced the panel to renumber from 1 and put a range
+    // read's numbers out of step with the file.
     let lang = lang_hint_for_tool(&item.name);
     let code = if let Some(l) = lang {
         format!("```{l}\n{display}\n```")
@@ -2983,12 +2836,13 @@ fn render_cache_miss(
 }
 
 /// Map a tool call to its panel rendering kind and the body text the panel
-/// renders. `read_file`/`write_file` → `File` (the agent-ui layer strips the
-/// hashline `[path#TAG]` header + `N:` prefixes for read_file so the panel shows
-/// plain content; write_file feeds the written content from the tool input).
-/// `edit_file` → `Diff` (the panel classifies the `+`/`-`/`@@` lines). Anything
-/// else → `Plain` (ANSI-parsed command output). Streaming bodies take the live
-/// tail so the most recent lines are in view as they stream in.
+/// renders. `read_file` → `Numbered` (the panel owns the model-facing hashline
+/// shape, so the file's own line numbers survive; see
+/// `manox_components::markdown::PanelKind`). `write_file` → `File`, fed the
+/// written content from the tool input. `edit_file` → `Diff` (the panel
+/// classifies the `+`/`-`/`@@` lines). Anything else → `Plain` (ANSI-parsed
+/// command output). Streaming bodies take the live tail so the most recent
+/// lines are in view as they stream in.
 fn tool_panel_body(entry: &ToolCallItem) -> (PanelKind, String) {
     let raw = if entry.streaming {
         live_tail(&entry.output)
@@ -2996,7 +2850,7 @@ fn tool_panel_body(entry: &ToolCallItem) -> (PanelKind, String) {
         entry.output.clone()
     };
     match entry.name.as_str() {
-        x if x == manox_agent::tools::READ => (PanelKind::File, strip_hashline_numbering(&raw)),
+        x if x == manox_agent::tools::READ => (PanelKind::Numbered, raw),
         // write_file's `output` is a one-line confirmation ("Wrote N bytes"), not
         // the file content; the content lives in the tool input. Show the written
         // content with a line-number gutter on success. On failure (`is_error`)
@@ -4353,34 +4207,6 @@ mod tests {
         let layout = segment_layout(&t);
         assert!(layout.expanded, "pending approval forces the segment open");
         assert_eq!(layout.visible, vec![0, 1]);
-    }
-
-    #[test]
-    fn strip_hashline_numbering_drops_header_and_line_prefixes() {
-        let raw = "[a.rs#1A2B]\n1:fn main() {\n2:}";
-        assert_eq!(strip_hashline_numbering(raw), "fn main() {\n}");
-    }
-
-    #[test]
-    fn strip_hashline_numbering_preserves_digit_colon_content() {
-        // File content that itself begins with `digits:` survives: only the
-        // first `N:` run (the hashline line number) is stripped.
-        let raw = "[cfg.toml#TAG]\n1:10: first\n2:20: second";
-        assert_eq!(strip_hashline_numbering(raw), "10: first\n20: second");
-    }
-
-    #[test]
-    fn strip_hashline_numbering_passes_through_non_header_output() {
-        // Errors and non-hashline shapes are returned verbatim.
-        let err = "file not found: missing.rs";
-        assert_eq!(strip_hashline_numbering(err), "file not found: missing.rs");
-        assert_eq!(strip_hashline_numbering(""), "");
-    }
-
-    #[test]
-    fn strip_hashline_numbering_keeps_blank_lines() {
-        let raw = "[a.rs#T]\n1:line one\n2:\n3:line three";
-        assert_eq!(strip_hashline_numbering(raw), "line one\n\nline three");
     }
 
     /// `MessageContent::Thinking` folds into the same activity segment as

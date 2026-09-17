@@ -113,6 +113,7 @@ dependencies = [
 name = "agent-ui"
 version = "0.1.0"
 dependencies = [
+ "ai-elements",
  "anyhow",
  "async-channel",
  "base64 0.22.1",
