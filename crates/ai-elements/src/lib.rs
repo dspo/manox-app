@@ -12,8 +12,12 @@
 //! from here. Components therefore take content and localized strings from the
 //! caller rather than reading them from a session.
 
+mod animation;
+
+pub mod chain_of_thought;
 pub mod reasoning;
 
+pub use chain_of_thought::{ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep};
 pub use reasoning::{
     AUTO_CLOSE_DELAY, Reasoning, ReasoningContent, ReasoningEvent, ReasoningState,
     ReasoningTrigger, ThinkingMessage, default_thinking_message,
