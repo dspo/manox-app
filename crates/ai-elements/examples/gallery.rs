@@ -16,7 +16,8 @@
 use std::time::Duration;
 
 use ai_elements::{
-    ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep, Reasoning, ReasoningState,
+    BrailleSpinner, ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep, Reasoning,
+    ReasoningState,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
@@ -24,7 +25,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, Theme, button::Button, h_flex,
-    shimmer::ShimmerText, spinner::Spinner, v_flex,
+    shimmer::ShimmerText, v_flex,
 };
 use manox_components::markdown::{HeadingMode, Markdown};
 
@@ -1024,7 +1025,11 @@ fn marker(icon: IconName, color: gpui::Hsla) -> AnyElement {
 
 /// A step still in flight: the same slot, filled with something that moves. A
 /// static glyph for "running" reads as a frozen frame — the spinner is what says
-/// the work is still happening.
+/// the work is still happening. This crate offers the braille spinner; the
+/// rotating-circle one from the kit, or any other, would do just as well.
 fn running_marker(color: gpui::Hsla) -> AnyElement {
-    Spinner::new().xsmall().color(color).into_any_element()
+    BrailleSpinner::new()
+        .xsmall()
+        .color(color)
+        .into_any_element()
 }

@@ -33,10 +33,10 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, ElementId, Hsla, IntoElement,
-    RenderOnce, Window, div, ease_in_out, ease_out_quint, prelude::*, px, rems,
+    RenderOnce, SharedString, Window, div, ease_in_out, ease_out_quint, prelude::*, px, rems,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, collapsible::Collapsible, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, Theme, collapsible::Collapsible, h_flex, v_flex,
 };
 
 use crate::animation::toggle_key;
@@ -286,17 +286,29 @@ impl ChainOfThoughtHeader {
 /// One labeled step: a marker (dot, icon, or spinner) over a connector rail, and
 /// the label / description / content column beside it.
 ///
-/// The label is not interactive — upstream's step is not either. A host that
-/// wants the step to fold gives the label its own disclosure affordance.
+/// A step folds only when the host gives it a disclosure — upstream's step is
+/// not interactive either. [`ChainOfThoughtStep::disclosed`] wraps
+/// [`ChainOfThoughtStep::title`] in the affordance a folding row needs (chevron,
+/// hover, click); a host with its own row shape passes
+/// [`ChainOfThoughtStep::label`] instead.
 #[derive(IntoElement)]
 pub struct ChainOfThoughtStep {
     id: ElementId,
     icon: Option<AnyElement>,
+    title: Option<SharedString>,
+    disclosure: Option<StepDisclosure>,
     label: Option<AnyElement>,
     description: Option<AnyElement>,
     content: Option<AnyElement>,
+    framed: bool,
     rail: bool,
     appear_animated: bool,
+}
+
+/// The step's own fold: which way it is, and what a click reports.
+struct StepDisclosure {
+    open: bool,
+    on_toggle: ToggleHandler,
 }
 
 impl ChainOfThoughtStep {
@@ -304,9 +316,12 @@ impl ChainOfThoughtStep {
         Self {
             id: id.into(),
             icon: None,
+            title: None,
+            disclosure: None,
             label: None,
             description: None,
             content: None,
+            framed: false,
             rail: true,
             appear_animated: true,
         }
@@ -321,6 +336,36 @@ impl ChainOfThoughtStep {
 
     pub fn label(mut self, label: impl IntoElement) -> Self {
         self.label = Some(label.into_any_element());
+        self
+    }
+
+    /// The row's one-line identity, drawn the way a step's identity reads
+    /// everywhere in this crate: one line, monospace, muted, clipped to the
+    /// column. A host with its own typography passes
+    /// [`ChainOfThoughtStep::label`] instead.
+    pub fn title(mut self, title: impl Into<SharedString>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Makes the step fold: a chevron beside the title, a hover wash, and a
+    /// click that reports back. The affordance covers the title row only — a
+    /// step's body is text a user may be selecting, so it never toggles.
+    pub fn disclosed(
+        mut self,
+        open: bool,
+        on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.disclosure = Some(StepDisclosure {
+            open,
+            on_toggle: Rc::new(on_toggle),
+        });
+        self
+    }
+
+    /// Wraps the content in the bordered box a terminal-styled body wears.
+    pub fn framed(mut self, framed: bool) -> Self {
+        self.framed = framed;
         self
     }
 
@@ -389,11 +434,35 @@ impl RenderOnce for ChainOfThoughtStep {
                         .flex_1()
                         .min_w_0()
                         .gap_1()
-                        .children(self.label)
+                        .children(self.label.or_else(|| {
+                            self.title.map(|title| {
+                                title_row(
+                                    (self.id.clone(), "title").into(),
+                                    title,
+                                    self.disclosure,
+                                    cx.theme(),
+                                )
+                            })
+                        }))
                         .children(self.description.map(|description| {
                             div().text_xs().text_color(muted).child(description)
                         }))
-                        .children(self.content),
+                        .children(self.content.map(|content| {
+                            if self.framed {
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .italic()
+                                    .border_1()
+                                    .border_color(border)
+                                    .rounded(cx.theme().radius)
+                                    .overflow_hidden()
+                                    .child(content)
+                                    .into_any_element()
+                            } else {
+                                content
+                            }
+                        })),
                 );
 
         if self.appear_animated {
@@ -429,6 +498,70 @@ fn dot(color: Hsla) -> AnyElement {
         .rounded_full()
         .bg(color)
         .into_any_element()
+}
+
+/// How much of the row the hover wash tints.
+const HOVER_WASH: f32 = 0.3;
+
+/// A step title's one-line width — the conversation has always shown a tool
+/// call's command summary at this length.
+const TITLE_CHARS: usize = 80;
+
+/// The step's title as a row: an optional disclosure chevron, then the title
+/// itself clipped to one line.
+fn title_row(
+    id: ElementId,
+    title: SharedString,
+    disclosure: Option<StepDisclosure>,
+    theme: &Theme,
+) -> AnyElement {
+    let muted = theme.muted_foreground;
+    let mut row = h_flex()
+        .id(id)
+        .w_full()
+        .min_w_0()
+        .py_0p5()
+        .gap_1p5()
+        .items_center()
+        .italic()
+        .rounded(theme.radius);
+
+    if let Some(disclosure) = disclosure {
+        let on_toggle = disclosure.on_toggle;
+        let chevron = if disclosure.open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        row = row
+            .cursor_pointer()
+            .hover(move |row| row.bg(theme.secondary.opacity(HOVER_WASH)))
+            .child(Icon::new(chevron).xsmall().text_color(muted))
+            .on_click(move |event, window, cx| on_toggle(event, window, cx));
+    }
+
+    row.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_x_hidden()
+            .text_sm()
+            .font_family(theme.mono_font_family.clone())
+            .text_color(muted)
+            .child(one_line(&title, TITLE_CHARS)),
+    )
+    .into_any_element()
+}
+
+/// Collapse `s` to a single line, clipped to `max_chars` with an ellipsis.
+fn one_line(s: &str, max_chars: usize) -> SharedString {
+    let flat = s.replace('\n', " ");
+    if flat.chars().count() > max_chars {
+        let clipped: String = flat.chars().take(max_chars).collect();
+        format!("{clipped}…").into()
+    } else {
+        flat.into()
+    }
 }
 
 /// The generation a toggle animation is keyed on, for a block with no state
