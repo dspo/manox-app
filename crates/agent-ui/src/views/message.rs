@@ -1397,24 +1397,6 @@ fn lang_hint_for_tool(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
-/// A left-aligned disclosure chevron for collapsible MessageList rows.
-/// `ChevronRight` = collapsed, `ChevronDown` = expanded. xsmall + muted so it
-/// reads as secondary chrome, not a primary icon. Used by `render_thinking`
-/// and `render_activity_entry` so every collapsible affordance in the activity
-/// flow shares one system.
-fn disclosure_icon(collapsed: bool, theme: &Theme) -> gpui::AnyElement {
-    let name = if collapsed {
-        IconName::ChevronRight
-    } else {
-        IconName::ChevronDown
-    };
-    Icon::new(name)
-        .xsmall()
-        .text_color(theme.muted_foreground)
-        .into_any_element()
-}
-
 /// Aggregated per-kind counts rendered on a segment's cover row.
 struct SegmentStats {
     thinking_rounds: usize,
@@ -1712,7 +1694,6 @@ fn reasoning_step(
     cx: &mut App,
 ) -> ChainOfThoughtStep {
     let weak_workspace = tool_ctx.map(|c| c.weak.clone());
-    let label = i18n::t("message-reasoning").to_string();
     let marker: gpui::AnyElement = if streaming {
         BrailleSpinner::new()
             .xsmall()
@@ -1725,18 +1706,12 @@ fn reasoning_step(
             .into_any_element()
     };
 
-    let row = h_flex()
-        .id(("reasoning-entry", eix))
-        .w_full()
-        .min_w_0()
-        .py_0p5()
-        .gap_1p5()
-        .items_center()
-        .italic()
-        .rounded(theme.radius)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.secondary.opacity(0.3)))
-        .on_click(move |_, _window, cx: &mut App| {
+    // The row's structure — chevron, hover, click, one-line clipped title — is
+    // the step's; this layer supplies the data and what a click means.
+    let mut step = ChainOfThoughtStep::new(id)
+        .icon(marker)
+        .title(i18n::t("message-reasoning"))
+        .disclosed(!collapsed, move |_, _window, cx: &mut App| {
             let Some(weak) = weak_workspace.clone() else {
                 return;
             };
@@ -1764,19 +1739,7 @@ fn reasoning_step(
                 });
                 cx.notify();
             });
-        })
-        .child(disclosure_icon(collapsed, theme))
-        .child(
-            gpui::div()
-                .flex_1()
-                .min_w_0()
-                .overflow_x_hidden()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(truncate(&label, 80)),
-        );
-
-    let mut step = ChainOfThoughtStep::new(id).icon(marker).label(row);
+        });
     if !collapsed && !text.is_empty() {
         // The persistent `Entity<Markdown>` (synced by the streaming/rebuild
         // path) carries parse-once incremental parsing + document-level
@@ -1853,17 +1816,10 @@ fn tool_step(
     let id_for_toggle = e.id.clone();
     let weak_workspace = tool_ctx.map(|c| c.weak.clone());
 
-    let row = h_flex()
-        .id(("act-header", eix))
-        .w_full()
-        .min_w_0()
-        .py_0p5()
-        .gap_1p5()
-        .items_center()
-        .italic()
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.secondary.opacity(0.3)))
-        .on_click(move |_, _window, cx: &mut App| {
+    let mut step = ChainOfThoughtStep::new(id)
+        .icon(marker)
+        .title(title)
+        .disclosed(!e.collapsed, move |_, _window, cx: &mut App| {
             let Some(weak) = weak_workspace.clone() else {
                 return;
             };
@@ -1887,30 +1843,12 @@ fn tool_step(
                 });
                 cx.notify();
             });
-        })
-        .child(disclosure_icon(e.collapsed, theme))
-        .child(
-            gpui::div()
-                .flex_1()
-                .min_w_0()
-                .overflow_x_hidden()
-                .text_sm()
-                .font_family(theme.mono_font_family.clone())
-                .text_color(theme.muted_foreground)
-                .child(truncate(&title, 80)),
-        );
-
-    let mut step = ChainOfThoughtStep::new(id).icon(marker).label(row);
+        });
     if show_output && !e.output.is_empty() {
-        step = step.content(
+        step = step.framed(true).content(
             v_flex()
                 .w_full()
                 .min_w_0()
-                .italic()
-                .border_1()
-                .border_color(theme.border)
-                .rounded(theme.radius)
-                .overflow_hidden()
                 .debug_selector(move || format!("message-overflow-activity-entry-body-{cix}-{eix}"))
                 .child(render_tool_output(e, eix, theme, cx)),
         );
