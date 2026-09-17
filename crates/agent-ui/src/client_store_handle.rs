@@ -205,12 +205,19 @@ impl ClientStoreHandle {
                             });
                         cx.notify();
                     }
-                    HostEvent::SessionDisposed { session_id } if session_id == self.session_id => {
+                    HostEvent::SessionDisposed {
+                        session_id,
+                        successor,
+                    } if session_id == self.session_id => {
                         self.store.apply_server_note(
                             &manox_protocol::ServerNote::SessionDisposed {
                                 session_id: session_id.clone(),
                             },
                         );
+                        // Identity hand-off: remember the successor so the
+                        // workspace can move its foreground onto it.
+                        self.store.replaced_by = successor.clone();
+                        cx.notify();
                     }
                     HostEvent::Error {
                         session_id: Some(session_id),

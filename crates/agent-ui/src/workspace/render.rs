@@ -25,6 +25,13 @@ fn card_title_bar() -> TitleBar {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Identity hand-off: the successor takes the foreground, and the
+        // predecessor's thread parks with its transcript (its id keeps
+        // resolving server-side for stale sends).
+        if let Some(next) = self.pending_successor.take() {
+            self.open_thread(next, window, cx);
+            cx.notify();
+        }
         // gpui cancels a drag on any mouse-up that doesn't land inside a
         // payload-matching drop target (`on_drop` never runs) — prune the
         // queue-drag marker here, the same policy as the sidebar's rows. gpui

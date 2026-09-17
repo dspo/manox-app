@@ -3178,14 +3178,17 @@ impl ItemBuilder {
                                 }
                             }
                             MessageContent::ToolUse(tu) => {
-                                if tu.name.as_ref() == manox_agent::tools::AGENT {
+                                if crate::conversation::is_agent_task_call(Some(&tu.input)) {
                                     // Sub-agent tasks stay as standalone compact
                                     // rows; their full conversation lives in a
                                     // read-only right-pane tab.
                                     close_segment(items, self.active_segment_ix);
                                     self.active_segment_ix = None;
                                     let (subagent_type, description) =
-                                        crate::conversation::agent_task_labels(&tu.input);
+                                        crate::conversation::agent_task_labels(
+                                            tu.name.as_ref(),
+                                            &tu.input,
+                                        );
                                     items.push(ConvItem::AgentTask(AgentTaskItem {
                                         id: tu.id.clone(),
                                         subagent_type,

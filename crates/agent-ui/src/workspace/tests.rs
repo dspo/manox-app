@@ -2044,24 +2044,32 @@ fn u2_thread_list_flows_through_the_gateway(cx: &mut gpui::TestAppContext) {
         "the wire row carries the server's projection of the store flag"
     );
 
-    // (c) The registry rides the wire: the server pushed the Projects
-    // snapshot with the ListThreads answer, and the multiplexer's
-    // notify fed the workspace's chip-menu cache (the sidebar reads
-    // the mux directly — nothing reads the kernel at render time any
-    // more).
+    // (c) The durable workspace registry rides the state stream: a row
+    // created in the host's domain reaches the multiplexer without any
+    // kernel read at render time (the chip and the sidebar grouping both
+    // read the mux).
+    manox_session_core::workspace_serve::store()
+        .create(std::path::Path::new("/"))
+        .expect("adopt the filesystem root as a workspace row");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut ws_known: Vec<String> = ws.read_with(&visual, |ws, _| ws.known_projects.clone());
     loop {
-        if ws_known.iter().any(|p| p == "/p/u2") {
+        cx.run_until_parked();
+        let rows: Vec<String> = ws.read_with(&visual, |ws, cx| {
+            ws.multiplexer
+                .read(cx)
+                .workspaces()
+                .iter()
+                .map(|row| row.path.clone())
+                .collect()
+        });
+        if rows.iter().any(|path| path == "/") {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the chip-menu project cache never rode the mux feed: {ws_known:?}"
+            "the workspace registry never rode the state stream: {rows:?}"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
-        cx.run_until_parked();
-        ws_known = ws.read_with(&visual, |ws, _| ws.known_projects.clone());
     }
 
     drop(ws);
@@ -3429,6 +3437,87 @@ fn launcher_thread_cwd_tracks_the_foreground_projection(cx: &mut gpui::TestAppCo
             ws.store = saved;
         });
     });
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// The identity hand-off (review #39 round-2 [issue] 2): the predecessor's
+/// store records the successor, the observer stages it, the next render
+/// switches the foreground onto it — and the signal is consumed, so nothing
+/// can bounce the user back later.
+#[gpui::test]
+fn successor_hand_off_switches_the_foreground_and_consumes_the_signal(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::AppContext as _;
+
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    // The hand-off switches the foreground through the real attach path
+    // (OpenSession rides the wire), so the runtime must be allowed to park.
+    cx.background_executor.allow_parking();
+    let db_path = std::env::temp_dir().join(format!("manox-handoff-test-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+    let predecessor = ws
+        .read_with(&visual, |ws, _| ws.store.clone())
+        .expect("the ctor workspace has a leaf");
+
+    // The leaf records the hand-off exactly as the disposal frame does.
+    predecessor.update(cx, |handle, cx| {
+        handle.store.replaced_by = Some("succ-handoff".to_string());
+        cx.notify();
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let foreground = ws.read_with(&visual, |ws, cx| {
+            ws.store
+                .as_ref()
+                .map(|store| store.read(cx).session_id().to_string())
+        });
+        if foreground.as_deref() == Some("succ-handoff") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the foreground never switched onto the successor: {foreground:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // One-shot: the source store's signal was consumed when it was staged.
+    assert!(
+        predecessor.read_with(&visual, |handle, _| handle.store.replaced_by.is_none()),
+        "the hand-off signal must be consumed, not re-armed"
+    );
+
+    drop(ws);
+    drop(visual);
     let _ = std::fs::remove_file(&db_path);
 }
 
