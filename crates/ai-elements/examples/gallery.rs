@@ -15,12 +15,14 @@
 
 use std::time::Duration;
 
-use ai_elements::{Reasoning, ReasoningState};
+use ai_elements::{
+    ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep, Reasoning, ReasoningState,
+};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, Window, div, prelude::*, px, size,
 };
-use gpui_component::{Root, Sizable as _, Theme, button::Button, h_flex, v_flex};
+use gpui_component::{Icon, IconName, Root, Sizable as _, Theme, button::Button, h_flex, v_flex};
 use manox_components::markdown::{HeadingMode, Markdown};
 
 /// The scripted reasoning text. A scripted stream feeds it a few characters at a
@@ -69,14 +71,16 @@ fn scripted_deltas() -> Vec<&'static str> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Component {
     Reasoning,
+    ChainOfThought,
 }
 
 impl Component {
-    const ALL: &'static [Component] = &[Component::Reasoning];
+    const ALL: &'static [Component] = &[Component::Reasoning, Component::ChainOfThought];
 
     fn name(self) -> &'static str {
         match self {
             Self::Reasoning => "Reasoning",
+            Self::ChainOfThought => "Chain of Thought",
         }
     }
 
@@ -85,6 +89,10 @@ impl Component {
             Self::Reasoning => {
                 "A collapsible block for one round of thinking: opens itself while the stream is \
                  live, folds one second after it ends."
+            }
+            Self::ChainOfThought => {
+                "A controlled list of labeled steps with a connector rail. The component holds no \
+                 policy of its own — the host decides what open means."
             }
         }
     }
@@ -115,6 +123,9 @@ impl Demo {
 
 struct Gallery {
     selected: Component,
+    /// The chain of thought's open state — the host's, exactly as the
+    /// conversation owns its segment's.
+    chain_open: bool,
     reasoning: Vec<Demo>,
     /// The scripted stream's delta sequence, cut once.
     deltas: Vec<&'static str>,
@@ -128,6 +139,7 @@ impl Gallery {
         let (reasoning, subscriptions) = Self::build_reasoning(cx);
         Self {
             selected: Component::Reasoning,
+            chain_open: false,
             reasoning,
             deltas: scripted_deltas(),
             _subscriptions: subscriptions,
@@ -383,6 +395,103 @@ impl Gallery {
             .into_any_element()
     }
 
+    /// The chain of thought's demos. Both blocks are driven by the gallery — the
+    /// component neither opens nor folds itself.
+    fn chain_rows(
+        &self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        vec![
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Controlled by the host",
+                "The header click reports a toggle; the gallery owns `open`. Meta slots carry \
+                 whatever the host shows — counts, elapsed, a warning badge.",
+                ChainOfThought::new("gallery-chain-controlled")
+                    .open(self.chain_open)
+                    .on_toggle(cx.listener(|this, _, _window, cx| {
+                        this.chain_open = !this.chain_open;
+                        cx.notify();
+                    }))
+                    .header(
+                        ChainOfThoughtHeader::new("gallery-chain-controlled")
+                            .label(SharedString::from("deepseek-v4-flash"))
+                            .meta(meta_chip(muted, "思考×8"))
+                            .meta(meta_chip(muted, "12s"))
+                            .meta(
+                                div()
+                                    .text_sm()
+                                    .text_color(gpui::red())
+                                    .child(SharedString::from("1 failed")),
+                            ),
+                    )
+                    .step(
+                        ChainOfThoughtStep::new("gallery-chain-step-0")
+                            .icon(marker(IconName::Check, gpui::green()))
+                            .label(step_label(foreground, "Read src/chain_of_thought.rs"))
+                            .description(step_description(muted, "48 lines")),
+                    )
+                    .step(
+                        ChainOfThoughtStep::new("gallery-chain-step-1")
+                            .icon(marker(IconName::LoaderCircle, muted))
+                            .label(step_label(foreground, "grep -rn upstream/reasoning.tsx"))
+                            .content(div().text_xs().text_color(muted).child(SharedString::from(
+                                "step body — whatever the host puts here",
+                            ))),
+                    ),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Steps and their rail",
+                "Always open, no header: only the steps. Every step but the last draws the \
+                 connector; the marker column is a slot, so a status vocabulary stays the host's.",
+                ChainOfThought::new("gallery-chain-static")
+                    .open(true)
+                    .header(
+                        ChainOfThoughtHeader::new("gallery-chain-static")
+                            .label(SharedString::from("Chain of Thought"))
+                            .meta(meta_chip(muted, "4 steps")),
+                    )
+                    .step(
+                        ChainOfThoughtStep::new("gallery-static-step-0")
+                            .icon(marker(IconName::Check, gpui::green()))
+                            .label(step_label(foreground, "Explore — locate the component"))
+                            .description(step_description(muted, "done in 4s")),
+                    )
+                    .step(
+                        ChainOfThoughtStep::new("gallery-static-step-1")
+                            .icon(marker(IconName::Check, gpui::green()))
+                            .label(step_label(foreground, "Read — packages/elements"))
+                            .description(step_description(muted, "12 files")),
+                    )
+                    .step(
+                        ChainOfThoughtStep::new("gallery-static-step-2")
+                            .icon(marker(IconName::CircleX, gpui::red()))
+                            .label(step_label(
+                                foreground,
+                                "Bash — npx ai-elements add reasoning",
+                            ))
+                            .description(step_description(muted, "exit 1")),
+                    )
+                    .step(
+                        ChainOfThoughtStep::new("gallery-static-step-3")
+                            .icon(marker(IconName::LoaderCircle, muted))
+                            .label(step_label(foreground, "Write — crates/ai-elements/src"))
+                            .description(step_description(muted, "running")),
+                    ),
+            )
+            .into_any_element(),
+        ]
+    }
+
     /// The left rail: one row per component, the selected one tinted.
     fn rail(
         &mut self,
@@ -445,9 +554,12 @@ impl Render for Gallery {
             theme.secondary,
         );
 
-        let rows: Vec<AnyElement> = (0..self.reasoning.len())
-            .map(|ix| self.demo_row(ix, muted, border, foreground, cx))
-            .collect();
+        let rows: Vec<AnyElement> = match self.selected {
+            Component::Reasoning => (0..self.reasoning.len())
+                .map(|ix| self.demo_row(ix, muted, border, foreground, cx))
+                .collect(),
+            Component::ChainOfThought => self.chain_rows(muted, border, foreground, cx),
+        };
 
         let pane = v_flex()
             .flex_1()
@@ -542,4 +654,71 @@ fn main() {
             },
         );
     });
+}
+
+/// One demo card: a title, a note, and the component under test.
+fn demo_card(
+    muted: gpui::Hsla,
+    border: gpui::Hsla,
+    foreground: gpui::Hsla,
+    title: &'static str,
+    note: &'static str,
+    body: impl IntoElement,
+) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_3()
+        .p_4()
+        .border_1()
+        .border_color(border)
+        .rounded(px(10.))
+        .child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(foreground)
+                        .child(SharedString::from(title)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(note)),
+                ),
+        )
+        .child(body)
+}
+
+fn meta_chip(muted: gpui::Hsla, text: &'static str) -> impl IntoElement {
+    div()
+        .text_sm()
+        .text_color(muted)
+        .child(SharedString::from(text))
+}
+
+fn step_label(foreground: gpui::Hsla, text: &'static str) -> impl IntoElement {
+    div()
+        .text_sm()
+        .text_color(foreground)
+        .child(SharedString::from(text))
+}
+
+fn step_description(muted: gpui::Hsla, text: &'static str) -> impl IntoElement {
+    div()
+        .text_xs()
+        .text_color(muted)
+        .child(SharedString::from(text))
+}
+
+/// A step's marker: the status slot the host fills, so the component never
+/// learns the host's status vocabulary.
+fn marker(icon: IconName, color: gpui::Hsla) -> AnyElement {
+    Icon::new(icon)
+        .xsmall()
+        .text_color(color)
+        .into_any_element()
 }
