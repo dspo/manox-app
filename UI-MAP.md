@@ -125,19 +125,19 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 Top-level native window, title "manox", min 900×600.
 
-> Source: `apps/desktop/manox/src/main.rs`
+> Source: `crates/manox/src/main.rs`
 
 #### NativeMenuBar
 
 macOS menu bar built by `build_app_menus()`: `manox` (About/Settings…/Quit), `Terminal` (new/close tab), and `工具` (Tools) with two app cascades. `ChatGPT.app` → provider → model: models mirror the provider registry snapshot filtered by `visible_agents()` containing `ChatGPT.app` (Responses-capable models), grouped by provider; picking a model dispatches `LaunchChatGptApp { provider, model }`, routed through the App-level action handler to `Workspace::launch_chatgpt_app`, which starts ChatGPT.app via cx's injection path on a background thread (selected model = default; the provider's full Responses catalog is injected). `VS Code` → provider → model: models filtered by `visible_agents()` containing `VS Code` (Anthropic-wire models); picking a model dispatches `LaunchVSCode { provider, model }` → `Workspace::launch_vscode_app` → `cx::launch_vscode_app`, which resolves the login-shell env, overlays Claude Code BYOK env (`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` + provider/model env) at highest priority, and launches VS Code with `VSCODE_CLI=1` so the extension host, the Claude Code extension's bundled CLI, and integrated terminals inherit the injected env (a running VS Code is restarted after user confirmation; no settings.json writes, API key never persisted). A trailing 「打开」item dispatches `LaunchVSCodePlain` → `cx::launch_vscode_plain` (plain `open -a`). The VS Code submenu is disabled when VS Code is not installed. Text-only — gpui native menu items carry no images. Rebuilt by `i18n::rebuild_menus` on UI-language change, after a provider-registry reload, and once when the initial background provider registration lands.
 
-> Source: `apps/desktop/manox/src/main.rs`
+> Source: `crates/manox/src/main.rs`
 
 #### SystemTray
 
 Process-lifetime system tray installed right after the first main window opens (`tray::install` — ordered after window creation because the status item creates its own `NSStatusBarWindow`, which must not become a startup death mode when window-server resources are exhausted), the lifeline for reaching manox while no window exists. Backends: macOS/Windows use `tray-icon` (native status item + menu; both platforms pump the tray's messages on the gpui main thread), Linux uses `ksni` (StatusNotifierItem over D-Bus on its own thread, no GTK involvement). Menu items: 「打开 Manox」(`menu-open-manox`) and 「退出」(`menu-quit`), labels re-resolved through the `i18n::rebuild_menus` path on UI-language change. Windows additionally opens/focuses the window on left icon click (right click pops the menu); macOS pops the menu on icon click. Event bridge: gpui exposes no cross-thread wake, so a foreground task polls every 100ms and drains the backend's event channels into `TrayCmd::Open` / `TrayCmd::Quit`. With a tray, the app runs under `QuitMode::Explicit`: closing the main window parks the process instead of quitting it — the `Workspace` entity stashed in `agent_ui::dispatch` is process-lifetime, so the foreground thread and any parked background threads keep running through the close; 「打开 Manox」(or the macOS dock icon, via `on_reopen`) re-opens the window over that same workspace, restoring conversation, drafts, and thread list. Tray install failure keeps the platform default (quit-on-last-window-close off macOS) so the app never strands invisibly.
 
-> Source: `apps/desktop/manox/src/tray.rs`, `apps/desktop/manox/src/main.rs`
+> Source: `crates/manox/src/tray.rs`, `crates/manox/src/main.rs`
 
 ## 2. Workspace
 
@@ -145,7 +145,7 @@ Process-lifetime system tray installed right after the first main window opens (
 
 Root container, horizontal flex (`h_flex`), owns all sub-views.
 
-> Source: `apps/desktop/agent-ui/src/workspace.rs`
+> Source: `crates/agent-ui/src/workspace.rs`
 
 ### 2.1 ViewMode
 
@@ -190,19 +190,19 @@ Every non-Settings `ViewMode` renders through one shared shell ([WorkspaceShell]
 
 The shared window shell built by `Workspace::shell_root(sidebar, main)`: an `h_flex` root with an asymmetric gutter (`SHELL_PAD_LEFT` 10px on the left, `SHELL_PAD_EDGE` 4px on the top/bottom/right), holding `sidebar-slot | main card` flush against each other plus the mode-switching actions (`FocusConversation` / `FocusTerminal` / `NewTerminalTab` / `CloseTerminalTab`) and the sidebar drag/reset handling. The main slot is wrapped in the shell's card chrome (`border_1` + `rounded(theme.radius_lg)` + `bg:background` + `overflow_hidden`), and an invisible absolute [SidebarDivider](#sidebardivider) strip overlays the sidebar/card boundary (painted last, so its top patch stays draggable rather than being claimed by a drag zone). Window-drag hot zones cover everything above/outside the card's own title bar: a slim full-width strip on the top gutter, plus the sidebar slot's empty top band (gutter + `sidebar_top_inset()` — 28px on macOS for the traffic lights, 8px elsewhere) so dragging there feels identical to dragging the title bar (the seamless sidebar shows no bar of its own) while the band stops exactly where the sidebar's first interactive row begins; while the sidebar is collapsed the zone shrinks to the left gutter strip. In-card title bars are built by `card_title_bar()`: gpui-component's `TitleBar` chrome minus its hardcoded macOS `pl(80)` traffic-light reservation — the card never sits at the window's left edge, so leading controls (the [SidebarToggleBtn](#sidebartogglebtn)) hug the card edge. Every full-window `ViewMode` routes through it — the sidebar slot is the conversation `Sidebar` for Workspace / Terminal / ExternalSession modes and the [SettingsLeftNav](#settingsleftnav) for Settings; the Workspace mode chains the conversation-only actions (settings / editor / browser / completion / archive…) and the turn-navigator overlay onto it, and passes a [MainView](#mainview) (message column + right side view) as the main slot; the Terminal and ExternalSession modes pass a single-column [TerminalColumn](#terminalcolumn) instead. The divider drag/double-click-reset writes one shared width (`Workspace::sidebar_width`) and syncs it to both the `Sidebar` entity and the `SettingsView`, so the Settings page resizes its sidebar exactly like the app page. Terminal-style main views are built by `Workspace::render_terminal_column` ([TerminalColumn](#terminalcolumn)).
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### MainView
 
 The Workspace mode's main slot: an `h_flex` container holding the [MessageColumn](#messagecolumn) and, when any right-pane tab is open, the [EditorDivider](#editordivider) + [RightPane](#rightpane) as sub-columns, with the card-wide [TitleBar](#titlebar) overlay mounted last so it spans (and paints over) both. Nesting the right pane inside the main view keeps the shell uniformly `sidebar | main card` across every view mode — the right pane is no longer a third top-level shell column. The right side view's contents are per-thread: switching threads stashes the outgoing editor draft and restores the incoming one, so no thread ever shows another thread's right-side content, and returning to a thread recovers its editor text.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### TerminalColumn
 
 The terminal-style main column shared by [ViewMode::Terminal](#viewmodeterminal) and [ViewMode::ExternalSession](#viewmodeexternalsession): a [TitleBar](#titlebar) (leading icon + title) over a full-bleed terminal view (`flex_1`). One shape for both, so the two terminal surfaces read as peers inside the shared shell.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 ### 3.1 Sidebar
 
@@ -212,13 +212,13 @@ Left panel, fixed width (260px default, 200–480 draggable).
 
 Full-height left panel, vertical flex, seamless slot — no own background or border (the shell's gutter background shows through; the main card's left border is the only visible boundary).
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarScrollBody
 
 Scrollable body inside Sidebar (`overflow_y_scroll`, `.track_scroll` on a `ScrollHandle`). Its children are two fixed slots measured by the sticky overlay: child 0 = the Projects section (its section header + project-grouped threads, a zero-height slot when no registered projects exist), child 1 = the Conversations section (its section header + loose threads + external sessions). Both section headers live in-flow inside their own slot so the parent-child grouping (each header directly above its rows) is preserved; the sticky overlay only overlays a copy once a header would scroll away.
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarPinnedSectionHeader
 
@@ -228,31 +228,31 @@ Sticky overlay copy of the current section header, absolutely positioned above t
 
 Middle section: project-grouped threads (if any projects exist). Its section header sits in-flow directly above the folder groups (scroll-body child 0), preserving the parent-child grouping.
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarProjectGroup
 
 Collapsible folder: chevron + folder icon + project name, indented thread list, and a trailing ellipsis button opening the [SidebarProjectMenu](#sidebarprojectmenu). Threads inside a folder order as a team forest (`team_forest`): top-level rows merged by recency, each team leader followed by its member rows indented one level (`14px` per `depth`); a leader with members renders a collapse chevron and hides its subtree when folded. The header is also a drag source (`DraggedFolderRow` payload) and a drop target for reordering folders: while a folder drag is live, a 2px accent insertion line hugs the hovered header's top/bottom half (`drag_boundary`), and the drop forwards `MoveFolder` (`InsertGroupBefore`) with the anchor resolved against the rendered folder sequence (`folder_order`) — a drop back onto the dragged folder's own boundary, any already-in-place move, or a line whose host vanished mid-drag is a no-op (mirroring `move_in_account`), never an accidental append.
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarConversationsSection
 
 Loose (non-project) threads + external sessions (scroll-body child 1). Its section header sits in-flow directly above these rows and carries two header actions: the `+` button opening the `SidebarNewSessionMenu` popup and the ordering-mode toggle ([SidebarOrderToggle](#sidebarordertoggle)); the sticky overlay (`SidebarPinnedSectionHeader`) pins a copy when scrolled. Like the project folders, loose rows order as a team forest with member rows nested under their leader, fold at the quota behind a [SidebarShowMoreRow](#sidebarshowmorerow), and their thread rows carry the drag roles described under [SidebarThreadItem](#sidebarthreaditem).
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarNewSessionMenu
 
 `PopupMenu` anchored below the "Conversations" header `+` button — the flat new-session menu (project folders use the structured [SidebarProjectMenu](#sidebarprojectmenu) instead). One flat row (Manox → `NewThread`), one flat Terminal row (`sidebar-new-terminal` label shared with the project menu; plain PTY session in the workspace cwd → `SpawnPlainSession(Terminal, None)`, no cascade), one `submenu_with_icon` per external agent kind (Claude Code / Codex / GitHub Copilot), and a single flat VS Code entry (injection resolves from the persisted `vscode_app:` settings — no provider/model cascade; disabled when VS Code is not installed, parity with 工具 → VS Code). All top-level rows use the menu component's native icon slot with a monochrome brand SVG, keeping their icon and label columns aligned. Each agent submenu is a provider→model cascade built by the shared `build_model_cascade`: models from `manox_agent::provider_glue::global()` filtered by registration metadata `agents` containing the agent id (`claude` / `codex` / `copilot`), grouped by provider display name into provider submenus; a config model registered through several wire apis appears once per wire endpoint (dedup keyed on registration name + config id, parity with the composer model menu), each row carrying the same wire-api Tag (Anthropic/Responses/Completions) as the composer popup. The emitted payload is (provider display name, raw cx config key, optional cx wire key); the workspace forwards the wire key to `cx::AgentBuilder::wire_api` so the picked endpoint variant is the one launched (claude/codex cascades show a single wire after the visibility filter; copilot exposes all three). The Terminal entry skips the cascade entirely — the workspace spawns the user's shell through `spawn_plain_session` with no provider/model injection. Picking a model in a CLI-agent cascade emits `SpawnExternalSession(kind, provider, model, wire, None)` and the VS Code entry emits `LaunchVSCode(None)` — the workspace then launches VS Code through `cx::launch_vscode_app` with Claude Code BYOK env injected, opening the workspace cwd. An agent with no supporting model renders a muted "no model configured" label row instead of provider submenus.
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarOrderToggle
 
 Ghost `SortDescending`-icon toggle beside the Conversations header's `+` (tooltip "View options: &lt;mode&gt; → &lt;next&gt;", composed from `sidebar-view-options` and the two mode keys) and the sidebar's ordering-mode editor — its only surface. A click flips `OrderBy` between Last updated (`sidebar-order-updated`) and Manual (`sidebar-order-manual`) in place: a two-state preference renders its state on the button itself (`selected` + `toggled` mark Last updated) and states the pair it toggles through, so there is no popup, anchor, or dismissal subscription to carry. The flip is pure client state (never a kernel write): entering Last updated runs the one complete recency sort and leaving it keeps every current position while only stopping further promotion; entering Manual additionally reconciles — the drift the Updated account accumulated is replayed to the server's durable account as one minimal `MoveThread` batch, so the order the user lands on is the order a Manual drag edits against (see [SidebarThreadItem](#sidebarthreaditem)'s drag roles). Both edges live in `Sidebar::set_order_by`, and the mode persists in the sidebar-view file.
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarProjectMenu
 
@@ -298,34 +298,34 @@ sidebar) never leaves the insertion line or the ghosted source row stuck.
 
 Three-dot (`IconName::Ellipsis`) hover overflow trigger on a thread row's right edge, replacing the old single Inbox archive button; external rows keep their single hover button. The trigger toggles a `PopupMenu` anchored at its own window-space bottom-right corner: the wrapper div's `on_prepaint` records that corner into `Sidebar::row_menu_anchor`, and the deferred popup mounts through the shared `anchored_dropdown` helper — `deferred(anchored().anchor(TopRight).position(corner).offset((0, 2)))`, whose default `SwitchAnchor` fit mode keeps the menu below-right of the trigger when there is room and flips it to open upward when it would overflow the window's bottom edge (the old downward-only `top_full().right_0()` hang was clipped away out of reach near the list bottom). One row menu is open at a time; `occlude()` + the `DismissEvent` subscription close it on outside click. Two flat items: Archive / Unarchive (emits `ArchiveThread(id, !archived)`, reusing the archive path) and Add tag / Rename tag (sidebar-internal: mounts the inline tag `Input` on that row — at most one row edits at a time, `TagEdit { id, input }` on the Sidebar; the input is focused on mount, clamped to 10 chars on every change, commits on Enter/blur when non-empty via `SetThreadTag(id, Some(value))`, cancels on Escape). The same `anchored_dropdown` + per-trigger `on_prepaint` anchor flip is used by [SidebarNewSessionMenu](#sidebarnewsessionmenu) and [SidebarProjectMenu](#sidebarprojectmenu).
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarTagChip
 
 The persisted user tag rendered as an outlined secondary `Tag` beside the short-id tag chip (thread rows only; one tag per thread, persisted in the pi session sidecar's `tag` field via `ThreadStore::set_thread_tag`). A ghost xsmall ✕ button inside the chip clears it (`SetThreadTag(id, None)`); double-clicking the chip enters rename mode (the inline input prefilled with the current tag). Chip clicks stop propagation so they never trip the row's open-thread click.
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarShowMoreRow
 
 The reveal affordance of the per-partition fold (`folded_rows`): when a partition projects more than `COLLAPSED_ROWS` (5) rows, only whole leader units that fit the quota render and a ghost xsmall "Show {N} more" button (`sidebar-show-more`, `t_count`) closes the section — a quota landing mid-subtree cuts back to the unit's leader, so a member is never shown without its leader. One click sets that partition's `revealed` flag (transient per mount: closing the folder clears it, so reopening returns to the bounded projection) and renders the rest of the account; rows are hidden, never unloaded. Rendered by `render_partition_rows`, so both the project partitions and the loose Conversations partition fold identically.
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 
 #### ResumeSidecar
 
-Durable record of an unclosed external agent session (`apps/desktop/agent-ui/src/external_session.rs`): one `<id>.json` under `~/.manox/external-sessions/`, written at spawn (atomic temp+rename), deleted only on an explicit close (`×` / natural CLI exit), and re-scanned at `Workspace::new` into the `resumable_external` list — so a graceful quit or a crash leaves exactly the sessions the user never closed. Fields: `id` / `agent_id` (claude / codex / copilot) / `cwd` / `project` / `created_at` / `provider` / `model` / `wire_api` (optional cx wire key of the endpoint variant, replayed on resume; pre-wire sidecars lack it and resume falls back to the default wire derivation) / `title` / `cli_session_id` (the CLI's own session id — claude: assigned by manox at spawn via `--session-id <uuid>`; codex: captured from the rollout's `session_meta` by `Workspace::start_cli_session_watch` while the session runs — which also tracks claude forks such as `/clear`; `None` until captured, always for copilot). Clicking a resumable row routes through `Workspace::open_external_session` → `resume_external_session`: it re-spawns the CLI with `resume_args` via `cx::AgentBuilder::passthrough` on a background thread (the row shows a spinner meanwhile) and attaches the new `TerminalView`. With a captured `cli_session_id` the resume targets exactly that conversation (`claude --resume <id>` / `codex resume <id>`); without one the CLI shows its interactive picker — resume never silently guesses (`copilot` keeps `--continue`, no verifiable targeted flag). The sidecar is removed from `resumable_external` and disk when the session closes. Nothing is auto-resumed at launch — the user picks the row, mirroring the native-thread contract.
+Durable record of an unclosed external agent session (`crates/agent-ui/src/external_session.rs`): one `<id>.json` under `~/.manox/external-sessions/`, written at spawn (atomic temp+rename), deleted only on an explicit close (`×` / natural CLI exit), and re-scanned at `Workspace::new` into the `resumable_external` list — so a graceful quit or a crash leaves exactly the sessions the user never closed. Fields: `id` / `agent_id` (claude / codex / copilot) / `cwd` / `project` / `created_at` / `provider` / `model` / `wire_api` (optional cx wire key of the endpoint variant, replayed on resume; pre-wire sidecars lack it and resume falls back to the default wire derivation) / `title` / `cli_session_id` (the CLI's own session id — claude: assigned by manox at spawn via `--session-id <uuid>`; codex: captured from the rollout's `session_meta` by `Workspace::start_cli_session_watch` while the session runs — which also tracks claude forks such as `/clear`; `None` until captured, always for copilot). Clicking a resumable row routes through `Workspace::open_external_session` → `resume_external_session`: it re-spawns the CLI with `resume_args` via `cx::AgentBuilder::passthrough` on a background thread (the row shows a spinner meanwhile) and attaches the new `TerminalView`. With a captured `cli_session_id` the resume targets exactly that conversation (`claude --resume <id>` / `codex resume <id>`); without one the CLI shows its interactive picker — resume never silently guesses (`copilot` keeps `--continue`, no verifiable targeted flag). The sidecar is removed from `resumable_external` and disk when the session closes. Nothing is auto-resumed at launch — the user picks the row, mirroring the native-thread contract.
 Thread-bound (right-pane) spawns write no sidecar at all: the session belongs
 to its thread, so a restart must not resurface it as a top-level resumable row
 (the right pane drops Session tabs on restart anyway).
 
-> Source: `apps/desktop/agent-ui/src/views/sidebar.rs`
+> Source: `crates/agent-ui/src/views/sidebar.rs`
 
 #### SidebarDivider
 
 Invisible 6px drag handle overlaying the Sidebar/main-card boundary (absolute strip centered on it, `cursor:col-resize`, no layout space — the two panels sit flush), spanning the gutter-to-gutter content height. Constructed once inside [WorkspaceShell](#workspaceshell), so it appears — and behaves identically (drag-resize, double-click reset to the 260px default) — in the conversation, terminal, and external-session views.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 ### 3.2 MessageColumn
 
@@ -335,43 +335,43 @@ Central conversation column, flex-1 — the left sub-column of the [MainView](#m
 
 Vertical flex container, fills remaining width.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### TitleBar
 
 Absolute-positioned top bar at the [MainView](#mainview) level, height `TITLE_BAR_HEIGHT`, spanning the entire main card — the [MessageColumn](#messagecolumn) (with the [ContextRail](#contextrail) card floating under it) and the [RightPane](#rightpane) alike, painted after both columns so the whole card reads under a single bar. Contains thread title, the "..." menu, and the [RightPaneToggleBtn](#rightpanetogglebtn) at its right edge. The right pane reserves `pt(TITLE_BAR_HEIGHT)` so its [RightTabBar](#righttabbar) sits below the bar as a second row.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### TitleBarThreadTitle
 
 Thread title text, clickable → opens [TitleMenu](#titlemenu).
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### TitleBarMenuButton
 
 "..." button → opens [TitleMenu](#titlemenu) popup.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### SidebarToggleBtn
 
 Ghost icon button at the TitleBar's left edge toggling the sidebar slot's visibility (`Workspace::toggle_sidebar`, state `sidebar_visible`, in-memory only). The icon is `IconName::PanelLeftClose` while the sidebar is shown and `IconName::PanelLeftOpen` while collapsed (the lucide panel-left pair, mirroring the right pane's toggle). Collapsing drops the sidebar slot and its resize handle from the shell layout — the main card takes the full width and every width budget (`effective_sidebar_width()` → 0) follows — while the remembered drag width survives the round trip. The Settings page is exempt: its nav carries the only back control, so it stays visible regardless of the gate. The same button leads the [TerminalColumn](#terminalcolumn) TitleBar so a collapsed sidebar can be re-expanded from the terminal and external-session modes too.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### RightPaneToggleBtn
 
 Ghost icon button at the TitleBar's right edge toggling the [RightPane](#rightpane)'s visibility (`Workspace::toggle_right_pane`). The icon is lucide `panel-right-dashed` (a manox-local asset through `ExtrasAssetSource`) while the pane is hidden and `IconName::PanelRight` while shown. Hiding never discards tabs — the visibility gate (`right_pane_visible`) is orthogonal to the tab list; showing with no tabs opens a fresh [LauncherTab](#launchertab). Composer/ContextRail suppression keyed off an active Editor tab applies only while the pane is actually visible.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### Body
 
 Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses [Hero](#hero) (with the [LoadingIndicator](#loadingindicator) while an empty session restores) or [MessageArea](#messagearea) + [Footer](#footer).
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 
 #### 3.2.1 Hero
@@ -382,13 +382,13 @@ Shown when the thread has no substantive messages (and is not loading).
 
 Vertically centered welcome area: logo/heading + inline [Composer](#composer).
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### LoadingIndicator
 
 Centered BrailleSpinner + "Loading conversation…" (`workspace-loading-history`), shown inside the [Hero](#hero) while a sidebar-opened session's history is still restoring. The composer mounts immediately below it and accepts draft edits; send remains disabled and keyboard submission is gated on the thread's `HistoryPhase` until `Ready`. Preview batches stream into the [MessageArea](#messagearea) incrementally (`ThreadEvent::HistoryProgress`); once the first preview content lands, the composer moves to the [Footer](#footer) without waiting for the authoritative restore.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### 3.2.2 MessageArea
 
@@ -399,19 +399,19 @@ Shown when the thread has messages. Replaces [Hero](#hero).
 
 Wraps [MessageList](#messagelist).
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### MessageList
 
 Virtual list backed by native `gpui::list` (`gpui::list(list_state, render_item)`, `ListState` held directly on `Workspace`). GPUI owns virtualization, scroll, the per-item height cache, and tail-follow; `ListAlignment::Bottom` gives native chat-log semantics — short histories sit at the viewport bottom, long ones scroll — and `FollowMode::Tail` pins to the live end on each layout while following (disengaging on upward scroll, re-arming at the bottom). The row factory captures `Conversation` directly and is strictly read-only during list measurement/prepaint; Workspace-derived ask-card snapshots are synchronized before list construction. `MSG_LIST_OVERDRAW` pre-measures rows below the viewport. Visible rows re-measure every frame, but the pinned official GPUI revision retains off-screen row heights across width changes, so `MessageListWidthInvalidator` observes the final positive list width after layout, invalidates the complete cache with `remeasure_items`, and requests a settling frame while preserving the logical item/offset anchor. Count changes are reconciled via `splice` and in-place mutations via `remeasure_items`, both driven from the `ThreadEvent` handler's `ApplyOutcome`. Only the visible items render. Markdown text rows use Manox's public-API `RichText` leaf rather than GPUI `StyledText`: every width constraint is shaped independently, widths narrower than one em are treated as intrinsic probes, and prepaint reconciles shaping with the final allocated width. This prevents zero-width explosion from entering the list cache and makes painted glyph height match the row allocation without a Zed fork.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs` (`ListState` wiring, `MSG_LIST_OVERDRAW`), `apps/desktop/manox-components/src/markdown/rich_text.rs` (constraint-safe shaping and paint geometry)
+> Source: `crates/agent-ui/src/workspace/render.rs` (`ListState` wiring, `MSG_LIST_OVERDRAW`), `crates/manox-components/src/markdown/rich_text.rs` (constraint-safe shaping and paint geometry)
 
 #### MessageItem
 
 Single rendered conversation item, centered, full width (no fixed content cap — the transcript adapts to the window width). Each `MessageItem` renders one of the variant cards below based on `ConvItem` kind. Every kind that carries a text body — user (incl. peer deliveries), assistant, error, notice, recap, retry detail, plan review — mounts a persistent `Entity<Markdown>` (`MessageItem::markdown`, created lazily by `ensure_markdown`) instead of rebuilding one per frame: a per-frame `Entity` resets the document's `DocSelection`/`FocusHandle` on every render and breaks drag-select + Cmd/Ctrl+C (the old `markdown_tv` fallback), while a persistent body keeps its selection state alive across frames and leaves inline links clickable.
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 ##### MessageItem variants
 
@@ -419,24 +419,24 @@ Single rendered conversation item, centered, full width (no fixed content cap �
 
 Full-width user turn block rendered inside [TurnFrame](#turnframe): `{from} > {to}·ModelID·Time` metadata header (`user_turn_header`; empty segments drop, no `>` clause when nothing follows `from`), persistent selectable markdown body, copy btn (hover), and a permission-mode-colored frame captured at send time. `from` is the turn's real author — unattributed human input renders the localized "You", otherwise Captain (lead), Harness (host-injected turns, e.g. the plan-execution seed), or the named agent (team peer delivery, shown with a `theme.primary` peer accent); `to` is the agent whose conversation renders the turn (main thread shows Captain, a member thread its own name, a sub-agent panel the sub-agent type) — a view-side fact stamped by the owning `ConversationState`, never persisted. Peer deliveries share this same renderer live and after reload.
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### AssistantMessage
 
 Full-width block: model row + copy btn + markdown body (plain text while streaming). A reply that immediately follows an [ActivitySegment](#activitysegment) omits its own model row — the segment's header row carries the model name — and the copy btn overlays the body's top-right corner, revealed on hover.
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### ReasoningBlock
 
 Collapsible: chevron + "Reasoning" label + left-bordered muted body. Each reasoning round (an `ActivityEntry::Reasoning` inside a `Thinking` segment, plus the top-level `ConvItem::Reasoning`) owns a persistent `Entity<Markdown>` (`markdown` field) mounted on first sync — so drag-select + Cmd/Ctrl+C survive across frames (a per-frame `Entity` would reset the `DocSelection`/`FocusHandle` every render and break selection on reasoning text the same way it did on tool output). Italic styling propagates from the row's `Markdown::italic` toggle.
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### ActivitySegment
 
 One contiguous thinking + tool-call segment within a user turn, rendered as a fold shell (`render_thinking`). Header row: model display name + chevron + live braille spinner + per-kind counts (`Read×7`, `Edit×6`, `思考×8` via `message-reasoning`) + elapsed (`thinking-duration`) + red `activity-failed` / orange `activity-awaiting-approval` badges; clicking toggles the container's `collapsed` and sets `user_toggled` (manual state is sticky — auto-collapse never fights the user). Collapsed shows the header alone whether live or settled; expanded nests every entry under a slight indent with a left rail, each entry (`render_activity_entry`) itself collapsible to its full tool output via `render_tool_output`. Segments with fewer than two entries render flat under a model-name-only header. An approval-pending entry force-opens the segment so the interactive row is never hidden. The assistant reply that follows a segment renders no model row of its own — the header is the single place the model shows; counts and elapsed live on the header alone. The elapsed counter ticks every second via a gpui background timer spawned on `TurnStarted` and self-terminating on terminal `Stop`/`Error`; `frozen_secs` pins the final value so later re-renders don't inflate it. Ordinary tool calls fold here instead of producing standalone cards.
-> Source: `apps/desktop/agent-ui/src/views/message.rs` — `render_thinking`, `render_activity_entry`, `segment_layout`, `segment_stats`. Container state: `ConversationState` (`ConvItem::Thinking` / `ThinkingContainer`).
+> Source: `crates/agent-ui/src/views/message.rs` — `render_thinking`, `render_activity_entry`, `segment_layout`, `segment_stats`. Container state: `ConversationState` (`ConvItem::Thinking` / `ThinkingContainer`).
 
 #### ToolCallCard
 
@@ -444,49 +444,49 @@ A standalone tool-call card (`render_tool_call`) for the special-case tools that
 
 Statuses: `PendingApproval` | `Running` | `Success` | `Error` | `Denied` — see [ToolCallStatus](#tool-call-statuses).
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### AgentTaskCard
 
 Compact, single-line sub-agent row: `[status] type · short title`. Running and pending rows use a braille-dot spinner (`BrailleSpinner`); terminal rows use check, error, or minus icons. The title is always one line with truncation and a full-title tooltip. It deliberately renders no child text, nested messages, copy control, metrics, or expansion affordance; clicking stays a no-op. Live drill-down lives on the Agent tool-call card instead: the child session's streamed text/thinking deltas and tool lifecycle lines (`▸ Tool hint` / `✓ Tool` / `✗ Tool`) append to the card's output in real time (bridged through the Agent tool's progress channel).
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### BackgroundTaskCard
 
 Bordered card showing a background task's kind (Monitor command / Monitor WebSocket / Background Bash / subagent — async `Steer` Dispatch registered as `TaskKind::Subagent`), description, status badge (Running / Stopping / Completed / Failed / Timed out / Stopped / Session ended), event count, and total bytes. The title row keeps only the description's first line (a background bash description is the full command, heredoc body included) with single-line ellipsis; the complete text is shown in a hover tooltip. The detail row (failure summary or latest event) wraps in full — it is the only UI surface for a task's error text. Running tasks show a braille spinner and a Stop button that calls `background_task::stop` (cancels the child token the run task observes). Terminal tasks show a static status icon. Updated in-place by task ID via `ThreadEvent::BackgroundTaskUpdated` — the card is created when the first event snapshot arrives and never duplicated. A subagent's final text is delivered to the Captain via `BackendNotice::SteerDelivered{reason: Complete}` (facade injects a peer message + fires a turn), not via this card's Stop button; an explicit Abort settles silently (`TaskStatus::Stopped`).
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### ErrorMessage
 
 Rounded card, `bg:danger/0.06`, red text, "Error" label + copy btn. Body is a persistent selectable `Entity<Markdown>`.
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### NoticeMessage
 
 Rounded card, `bg:secondary/0.15`, muted text, "Notice" label + copy btn. Body is a persistent paginated `TerminalPanel` (`PanelKind::Plain`, no command/cwd) — the same folded surface as tool output: default `PAGE_SIZE` (20) lines with a `+N` load-more row; selection + pagination cursor survive across frames. Mounted by `MessageItem::ensure_notice_panel` (live) and `new_history_item` (reload).
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs` · panel: `apps/desktop/manox-components/src/markdown/terminal_panel.rs`
+> Source: `crates/agent-ui/src/views/message.rs` · panel: `crates/manox-components/src/markdown/terminal_panel.rs`
 
 #### RecapCard
 
 Collapsible compaction summary card: chevron + book icon + "Context compacted" label + copy btn. Body is the model-generated handoff summary (markdown, not localized), mounted as a persistent selectable `Entity<Markdown>`. Collapsed by default; emitted on `ThreadEvent::Compaction` and rebuilt from `MessageContent::Compaction` on thread reload.
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### CacheMissDivider
 
 Slim left-aligned divider rendered above an assistant turn whose request lost the prompt cache, matching oh-my-pi's `CacheInvalidationMarkerComponent`. Rendered as a 10-character rule + muted label `"cache miss · N tokens"` (tokens formatted by `format_tokens`). Emitted on `ThreadEvent::CacheInvalidation` and inserted as a `ConvItem::CacheMiss` into the conversation list.
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs` — `render_cache_miss`. Event handler: `apps/desktop/agent-ui/src/conversation.rs`. Enum: `apps/desktop/agent-ui/src/conversation.rs` (`ConvItem::CacheMiss`).
+> Source: `crates/agent-ui/src/views/message.rs` — `render_cache_miss`. Event handler: `crates/agent-ui/src/conversation.rs`. Enum: `crates/agent-ui/src/conversation.rs` (`ConvItem::CacheMiss`).
 
 #### RetryBadge
 
 Amber badge, `bg:warning/0.12`, braille spinner + "Retry N/M (in Xs)" text. The retry detail body, when present, is a persistent selectable `Entity<Markdown>`, re-synced when a coalesced retry rewrites the item's detail in place.
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs`
+> Source: `crates/agent-ui/src/views/message.rs`
 
 #### 3.2.3 Footer
 
@@ -499,7 +499,7 @@ ask/auth interaction cards render inline in the transcript
 ([AskDrawer](#askdrawer)), never by swapping the footer — cancel priority
 keeps the composer live underneath them.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 ##### Composer
 
@@ -515,7 +515,7 @@ A [TurnNavigator](#capability-matrix) `⌘↵` fill is a walk landing too: the w
 the draft the fill displaced is the working line `⌥↓` returns — `InputState::set_value` clears the input's undo
 history, so nothing else survives that replacement.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
 #### QueuedFollowUps
 
@@ -525,13 +525,13 @@ Dragging the grip handle reorders the parked **Queued** tail: the move uses the 
 
 Clicking Steer does **not** touch the message list: it sends the online `ClientCall::Steer` to the server (via `Workspace::send_steer_v2` — the desktop `thread` is an engine-less render mirror, so the old local `enqueue_steer` was a dead end) and turns the row into a **SteerPending** status line — an invisible grip-width spacer (to stay column-aligned), optional `image` badge, one-line summary, and a 「待引导」 badge on the right, no buttons (a live steer is already committed to the server and the protocol has no steer-withdrawal channel, so it is not removable, editable, or draggable). The message enters the conversation only at the **turn settle** boundary: a normal `TurnFinished{cancelled:false, failed:false}` moves every `SteerPending` card out of the queue and appends it to the message list as a persistent **steered** user bubble (「已引导」 badge, `meta.steered`), and the still-parked `Queued` cards then flush as the next turn — so the list order matches the real delivery order (injected steers first, then the batched queue). A cancelled/failed `TurnFinished` settles the group by the server's per-id verdict (`stranded_steer_ids`, FIFO): only the not-yet-injected tail turns into a red **Failed** row (立即-retry / Edit / Remove) — the injected head promotes with its `steered` bubble, so a retry can never double-deliver. A normal settle carries zero stranded and promotes the whole group. The client never observes the mid-turn injection instant; the settle is its earliest verifiable equivalent signal (dspo/manox's steer-continuation guarantee makes promote-at-settle honest: every accepted steer is injected this run or an auto-chained continuation, and an aborted run withdraws its stranded steers so a retry can't double-deliver). `⌘ + ⌥ + /` (`UndoLastQueued`) pops the last removable `Queued` card and skips any `SteerPending` at the tail (not undoable); `Failed` cards stay for the explicit retry/remove path. The 「待引导」 badge on the queue row is live-only (the steer hasn't reached the transcript yet), whereas 「已引导」 still appears only in the live list and drops on reload (the server builds the persisted steer row's `ui` without `steered` — a parity gap needing an upstream fix, not a regression here). Queues are retained in memory per task across task switches, but are not persisted across app restarts; the queue's per-view drag marker is dropped on thread switch (its indices are view-local).
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs` (`render_queued_follow_ups`, the SteerPending status row, `DraggedQueueRow`/`QueueRowDrag` drag types); `apps/desktop/agent-ui/src/workspace/composer.rs` (`steer_follow_up`, `enqueue_steer_pending`, `steer_group_insert_index`, `queue_move_index`, `commit_queue_drag`, `edit_follow_up`, `retire_injected_steer`, `promote_settled_steers`, `settle_steer_group`, `settle_parked_steer_group`); `apps/desktop/agent-ui/src/workspace.rs` (`send_steer_v2` + the `TurnFinished` settle routing, the `queue_drag` field); steered badge render in `apps/desktop/agent-ui/src/views/message.rs` (`render_user`). The facade's `BackendNotice::Settled` emits `SteerInjected` per steered id, but `manox-session-core/src/translate.rs` drops it on the v2 wire, so the client never receives it and the settle alone drives the outcome.
+> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_queued_follow_ups`, the SteerPending status row, `DraggedQueueRow`/`QueueRowDrag` drag types); `crates/agent-ui/src/workspace/composer.rs` (`steer_follow_up`, `enqueue_steer_pending`, `steer_group_insert_index`, `queue_move_index`, `commit_queue_drag`, `edit_follow_up`, `retire_injected_steer`, `promote_settled_steers`, `settle_steer_group`, `settle_parked_steer_group`); `crates/agent-ui/src/workspace.rs` (`send_steer_v2` + the `TurnFinished` settle routing, the `queue_drag` field); steered badge render in `crates/agent-ui/src/views/message.rs` (`render_user`). The facade's `BackendNotice::Settled` emits `SteerInjected` per steered id, but `manox-session-core/src/translate.rs` drops it on the v2 wire, so the client never receives it and the settle alone drives the outcome.
 
 #### ComposerDivider
 
 1px horizontal border above the composer.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
 #### AttachmentChips
 
@@ -541,32 +541,32 @@ rendered by `Workspace::render_attachments`): a file/image attachment row
 (`render_browser_chips`, persists across submits; removing a chip deactivates
 the ChromeUse / WebExplore tool suite).
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs` + `apps/desktop/agent-ui/src/views/composer_menu.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs` + `crates/agent-ui/src/views/composer_menu.rs`
 
 #### AttachmentChip
 
 Single attachment chip: icon + filename + remove btn.
 
-> Source: `apps/desktop/agent-ui/src/views/composer_menu.rs`
+> Source: `crates/agent-ui/src/views/composer_menu.rs`
 
 #### BrowserSuiteChip
 
 Single browser-tool-suite chip: globe/frame icon + localized suite name +
 remove btn. Removing it calls `deactivate_browser_tool_suite`.
 
-> Source: `apps/desktop/agent-ui/src/views/composer_menu.rs`
+> Source: `crates/agent-ui/src/views/composer_menu.rs`
 
 #### ComposerInputRow
 
 Horizontal flex: [InputField](#inputfield) + [SendBtn](#sendbtn) + chips.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
 #### InputField
 
 Multi-line auto-grow text input, placeholder text.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs` (via `gpui_component::Input`)
+> Source: `crates/agent-ui/src/workspace/composer_render.rs` (via `gpui_component::Input`)
 
 #### SendBtn
 
@@ -578,25 +578,25 @@ While an ask card is up, Enter/send submits the card (per-question selections +
 custom inputs), not a composer-fed free-text answer — the card-level supplement
 was retired by B2-PR-1 in favour of the per-question custom input.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
 #### ModelChip
 
 Dropdown chip showing `provider · model · effort` (the reasoning-effort wire value, `high`/`max`) → [ModelMenu](#modelmenu) popup.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
 #### AccessChip
 
 Dropdown chip showing [PermissionMode](#permission-modes) → [AccessMenu](#accessmenu) popup.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
 #### ProjectChip
 
 Dropdown chip showing current project → [ProjectMenu](#projectmenu) popup.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
 ##### AskDrawer
 
@@ -612,16 +612,16 @@ after having been confirmed in it settled remotely and is reconciled away.
 #### AskDrawer
 
 Multi-step question navigator rendered inside the conversation
-(`render_ask_user_card`, `apps/desktop/agent-ui/src/views/message.rs`); its
+(`render_ask_user_card`, `crates/agent-ui/src/views/message.rs`); its
 state (`Workspace::pending_ask` + snapshot sync) lives in `chips.rs`.
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `crates/agent-ui/src/workspace/chips.rs`
 
 #### AskDrawerHeader
 
 Title + stepper "N/M".
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `crates/agent-ui/src/workspace/chips.rs`
 
 #### AskDrawerQuestion
 
@@ -629,7 +629,7 @@ Header tag + question text, then an optional `detail` block — markdown support
 text rendered with the repo `Markdown` component (`markdown_tv`) beneath the
 question. The plan-review body rides here (see [PlanReviewAsAskCard](#planreviewasaskcard)).
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`)
+> Source: `crates/agent-ui/src/views/message.rs` (`render_ask_user_card`)
 
 #### AskDrawerOptions
 
@@ -637,7 +637,7 @@ Checkbox/radio list with labels + descriptions. Single-select resets siblings on
 toggle; multi-select toggles in place. Options are optional and unbounded — a
 detail/intent-only question is legal (B2-PR-1 lifted the 1..=3 / 2..=3 caps).
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs` (`toggle_ask_option`)
+> Source: `crates/agent-ui/src/workspace/chips.rs` (`toggle_ask_option`)
 
 #### AskDrawerCustomInput
 
@@ -650,7 +650,7 @@ single-select's selection and SUPPLEMENTS a multi-select's — free text can onl
 ever attach to its own question (the removed card-level "response" override is
 gone).
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `crates/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `crates/agent-ui/src/workspace/chips.rs`
 
 #### AskDrawerSkipButton
 
@@ -660,7 +660,7 @@ clears that question's selection and custom, settling the canonical row
 skip is distinct from closing the whole card (that is `dismiss_ask`, the Nav's
 Cancel leg).
 
-> Source: `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `apps/desktop/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
+> Source: `crates/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `crates/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
 
 #### AskDrawerNav
 
@@ -672,7 +672,7 @@ buttons. Submitting gathers every question's tri-state (`selected` +
 Dismiss keeps `{"dismissed": true}`; the generic approval card's allow/deny leg
 (`resolve_auth`, `{"allow": …}`) is unchanged.
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`)
+> Source: `crates/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`)
 
 #### PlanReviewAsAskCard
 
@@ -693,7 +693,7 @@ changes / custom / skip → refine, and a card close → stop and stay in plan m
 awaiting a message). The client sends no verdict enum. A free-form message while
 the card is up submits the card (per `AskDrawerNav`), not a separate dismissal.
 
-> Source: `apps/desktop/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `apps/desktop/agent-ui/src/views/message.rs` (`render_ask_user_card` Approve highlight)
+> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/agent-ui/src/views/message.rs` (`render_ask_user_card` Approve highlight)
 
 #### AskSettledElsewhereNotice
 
@@ -711,7 +711,7 @@ set and surfaces one transient `Notification::info` ("handled on another
 client"). A local settle (`resolve_ask` / `dismiss_ask` / `resolve_auth`) calls
 `retire_auth` so a later note for the same delivery cannot mis-fire the notice.
 
-> Source: `apps/desktop/agent-ui/src/client_store.rs` (`handle_delivery_cancelled`, `retire_auth`) + `apps/desktop/agent-ui/src/client_store_handle.rs` + `apps/desktop/agent-ui/src/multiplexer.rs` (broadcast) + `apps/desktop/agent-ui/src/workspace/chips.rs` (`notice_settled_elsewhere`)
+> Source: `crates/agent-ui/src/client_store.rs` (`handle_delivery_cancelled`, `retire_auth`) + `crates/agent-ui/src/client_store_handle.rs` + `crates/agent-ui/src/multiplexer.rs` (broadcast) + `crates/agent-ui/src/workspace/chips.rs` (`notice_settled_elsewhere`)
 
 #### 3.2.4 Popups & Dropdowns
 
@@ -721,31 +721,31 @@ client"). A local settle (`resolve_ask` / `dismiss_ask` / `resolve_auth`) calls
 
 Trigger: typing `/` (slash commands) or `@` (skills + subagents) at the caret in [InputField](#inputfield). A typeahead list anchored above the composer: filters live on every keystroke, navigated with up/down, confirmed with Tab or Enter, dismissed with Escape. While open the composer wrapper sets a `completion = open` key context so the `completion == open > Input` keybindings shadow the Input's own navigation bindings. A pure render overlay — [InputField](#inputfield) keeps focus throughout, so the query keeps filtering as the user types.
 
-> Source: `apps/desktop/agent-ui/src/views/completion.rs` (state + detection + rendering), wired in `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/views/completion.rs` (state + detection + rendering), wired in `crates/agent-ui/src/workspace/composer_render.rs`
 
 #### ModelMenu
 
 Trigger: [ModelChip](#modelchip). Model selector dropdown: provider submenus for the model list, then a Reasoning effort block (High / Max, current effort checked) under a separator.
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `crates/agent-ui/src/workspace/chips.rs`
 
 #### AccessMenu
 
 Trigger: [AccessChip](#accesschip). [PermissionMode](#permission-modes) selector: three title-only rows — Read Only / Workspace Access / Full Access, check on the current one. No header row, no "Learn more", no per-mode descriptions.
 
-> Source: `apps/desktop/agent-ui/src/workspace.rs` (`build_permission_content`)
+> Source: `crates/agent-ui/src/workspace.rs` (`build_permission_content`)
 
 #### ProjectMenu
 
 Trigger: [ProjectChip](#projectchip). Recent projects + create blank / select folder.
 
-> Source: `apps/desktop/agent-ui/src/workspace/chips.rs`
+> Source: `crates/agent-ui/src/workspace/chips.rs`
 
 #### TitleMenu
 
 Trigger: [TitleBarMenuButton](#titlebarmenubutton). Pin, archive, copy, schedule, new window.
 
-> Source: `apps/desktop/agent-ui/src/views/title_menu.rs`
+> Source: `crates/agent-ui/src/views/title_menu.rs`
 
 #### 3.2.5 Overlays
 
@@ -756,7 +756,7 @@ Absolute-positioned over [Body](#body), with scrim.
 
 Trigger: "Create blank project" from [ProjectMenu](#projectmenu). Centered modal: project name input + confirm.
 
-> Source: `apps/desktop/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
 ### 3.3 ContextRail
 
@@ -770,7 +770,7 @@ The card stays **hidden while the [EditorPane](#editorpane) is open** — openin
 
 Floating absolute card over the conversation column's top-right (`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`). Owns `Entity<Thread>` and renders the panel body (`render_panel`) which carries the card chrome (border / rounded / shadow / background + `p_3`/`gap_2`) at content height.
 
-> Source: `apps/desktop/agent-ui/src/views/context_rail.rs`
+> Source: `crates/agent-ui/src/views/context_rail.rs`
 
 #### ContextRailPanel
 
@@ -793,13 +793,13 @@ Contents, top to bottom:
 
 Each numeric cell animates scoreboard-style (`counter_animated`): a fresh `gen` is appended to the animation id on every value delta, so gpui fires a 600ms `ease_out_quint` tween from the previous rendered value to the new one. `env_counter_state: HashMap<String, (u64, u64)>` lives on `ContextRail`, rebuilt every render inside `render_usage_section` to auto-prune cells whose model disappeared.
 
-> Source: `apps/desktop/agent-ui/src/views/context_rail.rs` (`render_panel`)
+> Source: `crates/agent-ui/src/views/context_rail.rs` (`render_panel`)
 
 #### ContextRailCollapseBtn
 
 Ghost `xsmall` button in the panel header, `IconName::PanelRightClose`, tooltip i18n `context-rail-collapse`. Folds the rail into a drawer when narrow (the drawer's open affordance uses `context-rail-drawer-open` / `context-rail-expand`).
 
-> Source: `apps/desktop/agent-ui/src/views/context_rail.rs`
+> Source: `crates/agent-ui/src/views/context_rail.rs`
 
 #### ContextRailChangesRow
 
@@ -807,7 +807,7 @@ Working-tree diff stat line in the panel body. `env_row` with `Frame` icon, "Cha
 
 Stats come from `git diff --numstat HEAD` (binary rows `-`/`-` skipped) plus `git ls-files --others --exclude-standard` for untracked, shelled out via [`crate::git_status`](#git_status) on the global tokio runtime. Refreshed (debounced 400ms) by `Workspace` on thread attach and terminal `Stop`.
 
-> Source: `apps/desktop/agent-ui/src/views/context_rail.rs` (`render_changes_row`)
+> Source: `crates/agent-ui/src/views/context_rail.rs` (`render_changes_row`)
 
 #### ContextRailBranchRow
 
@@ -821,9 +821,9 @@ Resolved git identity block in the panel body (`render_branch_block`). When the 
   - "git unavailable" when the `git` binary is missing.
   - "--" before the first refresh lands; "No project" when no project is bound.
 
-Both glyphs live in manox's local asset bundle (`ExtrasAssetSource` in `apps/desktop/agent-ui/src/assets.rs`), not `gpui-kit-assets` — `IconName` is generated at compile time from the latter's directory and cannot reference them, so the rows construct `Icon::default().path("icons/…")` instead of `Icon::new(IconName::…)`. Branch resolution shells out to `git branch --show-current`, falling back to `git rev-parse --short HEAD` for detached HEAD. All via [`crate::git_status`](#git_status).
+Both glyphs live in manox's local asset bundle (`ExtrasAssetSource` in `crates/agent-ui/src/assets.rs`), not `gpui-kit-assets` — `IconName` is generated at compile time from the latter's directory and cannot reference them, so the rows construct `Icon::default().path("icons/…")` instead of `Icon::new(IconName::…)`. Branch resolution shells out to `git branch --show-current`, falling back to `git rev-parse --short HEAD` for detached HEAD. All via [`crate::git_status`](#git_status).
 
-> Source: `apps/desktop/agent-ui/src/views/context_rail.rs` (`render_branch_block`)
+> Source: `crates/agent-ui/src/views/context_rail.rs` (`render_branch_block`)
 
 #### ContextRailBranchMenu
 
@@ -832,7 +832,7 @@ Both glyphs live in manox's local asset bundle (`ExtrasAssetSource` in `apps/des
 - **Copy branch name** (i18n `workspace-env-git-copy-branch`) — shown when a branch resolved; writes to the clipboard silently.
 - **Copy working-directory path** (i18n `workspace-env-git-copy-path`) — shown when an effective cwd is reported.
 
-> Source: `apps/desktop/agent-ui/src/views/context_rail.rs` (`render_branch_row`)
+> Source: `crates/agent-ui/src/views/context_rail.rs` (`render_branch_row`)
 
 #### git_status
 
@@ -842,7 +842,7 @@ Pure parsing + tokio-bridged IO module backing [ContextRailChangesRow](#contextr
 - `gather` — runs `git rev-parse --show-toplevel`, `git branch --show-current` / `git rev-parse --short HEAD`, `git diff --numstat HEAD`, `git ls-files --others --exclude-standard` in one background task; returns `None` when the cwd is not under git.
 - `gather_bridged` — spawns `gather` on the tokio runtime and awaits the result from a gpui `cx.spawn`.
 
-> Source: `apps/desktop/agent-ui/src/git_status.rs`
+> Source: `crates/agent-ui/src/git_status.rs`
 
 ### 3.4 EditorPane
 
@@ -852,25 +852,25 @@ Right side view of the [MainView](#mainview), shown when any right-pane tab is o
 
 6px drag handle between MessageColumn and the right side view (conditional — shown while any right-pane tab is open).
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### RightPane
 
 Vertical flex, right sub-column of the [MainView](#mainview), topped by `pt(TITLE_BAR_HEIGHT)` so the card-wide [TitleBar](#titlebar) overlays its top strip and the [RightTabBar](#righttabbar) reads as a second row below it. A tab container holding the markdown editor, the [LauncherTab](#launchertab), browser views, sub-agent observers, and embedded [SessionTab](#sessiontab) terminals as peer tab types. Visibility is the `right_pane_visible` gate AND a non-empty `right_tabs` — the [RightPaneToggleBtn](#rightpanetogglebtn) hides/shows without discarding tabs, and closing the last tab hides the pane automatically. The active tab's content fills the body. The pane state (tab list, active tab, visibility) is **per-thread**: `attach_thread` stashes the outgoing pane into an in-session map (`right_pane_by_thread`, live tabs keep their webview/panel entities) and restores the incoming one, and every mutation persists the foreground thread's snapshot to `threads.db` (`thread_right_pane` — one opaque UI-layer-owned JSON row keyed by thread id). Subagent tabs are ephemeral — cleared on switch, never stashed or persisted. Browser tabs persist as their URL (rebuilt as fresh webviews after a restart, re-registered in the host routing table + title poll); Session tabs restore only while the external session is still alive — after a restart they drop (the sidebar's resumable rows remain the external-session recovery surface). The retired team-member observation tab (old `RightTab::Member` + `MemberPanel`) was removed with the `Entity<Team>` cleanup.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### RightTabBar
 
 Top-level underline tab bar over `right_tabs`. Every tab is fixed-width (`RIGHT_TAB_WIDTH`, 160px) with long labels capped at 16 chars + `…` (the full text rides the tab's tooltip); selecting a tab switches `active_right_tab`. Hovering a tab reveals a `×` suffix that closes the tab via `close_right_tab` (click stops propagation so it does not also select) — for every tab kind: the Editor keeps its draft-transfer semantics (`close_editor`), a Session kills the session (`close_external_session`). A `+` suffix button right of the last tab opens (or focuses) a [LauncherTab](#launchertab).
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### LauncherTab
 
 The right pane's "new tab" surface (`RightTab::Launcher`): five vertically centered shortcut rows — 打开集成浏览器 / 打开集成终端 / 打开 Claude Code / 打开 Codex / 打开 Github Copilot (i18n `launcher-open-*`). The picked view opens **on the tab itself**: the browser via `open_browser_tab(DEFAULT_URL)`; the terminal and the three CLI agents via `spawn_plain_session` / `spawn_external_session` with `SessionPlacement::RightPane` and the **active thread's cwd** as the spawn CWD (workspace-cwd fallback when unset). A CLI-agent row first opens the shared provider→model cascade (the popup anchored under the row; `views/model_cascade.rs`) and spawns on model pick.
 
-> Source: `apps/desktop/agent-ui/src/views/launcher.rs`, `apps/desktop/agent-ui/src/workspace/right_pane.rs` (content + picks), `apps/desktop/agent-ui/src/workspace/render.rs` (tab mount)
+> Source: `crates/agent-ui/src/views/launcher.rs`, `crates/agent-ui/src/workspace/right_pane.rs` (content + picks), `crates/agent-ui/src/workspace/render.rs` (tab mount)
 
 #### SessionTab
 
@@ -879,25 +879,25 @@ Sessions mounted here are thread-bound (`ExternalSession.thread_bound`):
 excluded from the sidebar's top-level list and sidecar-free; the tab `×` still
 kills through `close_external_session`.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### EditorWriteTab
 
 Plain-text multi-line [InputField](#inputfield) for markdown editing. A second-level Write/Preview toggle lives inside the Editor tab's content area. Cmd/Ctrl+Enter submits only after the active thread's authoritative history is ready; restoring sessions keep the draft intact and ignore the shortcut until then.
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### EditorPreviewTab
 
 Rendered markdown view (`Markdown`).
 
-> Source: `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`
 
 #### SubagentPanel
 
 A right-pane read-only observation tab for one Steer-bus sub-agent run (`RightTab::Subagent(address)`, equal citizen of the right tab bar). The tab label shows the subagent's **address** (`SubagentProgress.id`, e.g. `Sailor_0`); the panel's second-level header banner shows the **topic** — status indicator + mono topic text (the shared `subagent_topic` / dispatch-prompt first-line derivation, address fallback when empty). Body: a miniature conversation rendered through the **same `ConversationState` + message pipeline as the main conversation** — it opens with the Captain's dispatch prompt as a user bubble (captured from the Steer tool call into `Workspace::subagent_prompts` with its send time), header reading `Captain > {recipient}·{model}·{time}` where `recipient` is the sub-agent type (the conversation's `to`) and `model` is the child session's dispatch-reported model (`SubagentChildEvent::Model`, sent once at dispatch; the parent's live model label stands in until then and after reload), then the bridged child events translated to the shared `ThreadEvent` contract (`AgentText` / `AgentThinking` / `ToolCall` / `ToolResult`, child tool ids pair start/end under parallel child execution and titles derive via the shared `tool_title`) — assistant bubbles, reasoning folds, tool cards, tail-follow scrolling. The live accumulation lives in `Workspace::subagent_transcripts` and is kept for the session lifetime (no longer trimmed at terminal status), so a tab opened after the run replays the full work; a panel opened after a reload falls back to `subagent_final_text` replayed as the assistant message plus the `subagent-panel-final-note` hint. Opened by clicking the sub-agent row in the [ContextRail](#contextrail) agents section; tabs are dropped together with their transcripts on thread switch (`clear_subagent_observation`, which reseats the active tab for bulk removal).
 
-> Source: `apps/desktop/agent-ui/src/views/subagent_panel.rs`, `apps/desktop/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/views/subagent_panel.rs`, `crates/agent-ui/src/workspace/render.rs`
 
 #### BrowserView
 
@@ -908,7 +908,7 @@ Two transient banners render between the chrome row and the content area, both d
 - **Yield banner** — shown while a `web_explore_yield` call is parked. A "Done" button resolves the parked Task via `WorkspaceBrowserHost::resolve_handback` (the page-side `user_handback` notify is ignored by design — an untrusted page must not resume a parked yield). Retired by the "Done" click, by navigation, or by Stop/Error cleanup (`clear_yields_for_thread`).
 - **Read hint** — a muted one-liner shown after `read_text` / `read_dom` / `screenshot` / `eval_script` extracts content from an `https://` origin, signalling that logged-in page content was exposed to the agent.
 
-> Source: `apps/desktop/agent-ui/src/views/browser_view.rs`
+> Source: `crates/agent-ui/src/views/browser_view.rs`
 
 
 ## 4. ViewMode::Settings
@@ -919,97 +919,97 @@ Full-window settings page rendered through the shared [WorkspaceShell](#workspac
 
 Unified "back to app" control — `ArrowLeft` + label row (px_2/py_1p5/gap_2, accent hover wash, `theme.radius`). Mounted as the first row of the [SettingsLeftNav](#settingsleftnav) pinned top slot (above the search input and group list) so the back affordance reads as a peer of the sidebar menu items, not an isolated button. The settings page no longer ships a shared management TitleBar — each management surface reuses the app-page scaffold (sidebar + overlay TitleBar in the main column), and the back control lives in the sidebar.
 
-> Source: `apps/desktop/agent-ui/src/views/management_shell.rs`
+> Source: `crates/agent-ui/src/views/management_shell.rs`
 
 #### SettingsView
 
 Settings page state + renderers. `render_nav` produces the sidebar slot element and `render_main` the main-column element; the Workspace mounts both into the shared shell. Holds the sidebar `width` (synced from `Workspace::sidebar_width` by the divider drag, and seeded on entry) so the settings sidebar resizes exactly like the app sidebar. The main column is a relative `v_flex` with an absolute [SettingsTitleBar](#settingstitlebar) overlay on top and [SettingsRightPane](#settingsrightpane) content below `pt(TITLE_BAR_HEIGHT)`.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsTitleBar
 
 Absolute-positioned `TitleBar` overlay (`h(TITLE_BAR_HEIGHT)`, `top_0/left_0/right_0`) in the settings main column — same chrome as the conversation column's TitleBar. Pure window-drag region: it renders no text (the selected item's identity is carried by each panel's own big page heading, mirroring ChatGPT.app Settings). Carries macOS traffic-light avoidance. No back button — back lives in [SettingsLeftNav](#settingsleftnav).
 
-> Source: `apps/desktop/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsLeftNav
 
 Settings sidebar (`bg:background`, right border) rendered at the shared sidebar width; no standalone TitleBar, the macOS traffic-light buttons float over its transparent top (`pt(top_inset)`, 28px on macOS / 8px elsewhere). The back control + search input live in a pinned top slot that never scrolls; only the [SettingsGroupList](#settingsgrouplist) scrolls (`overflow_y_scroll`) beneath them.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsSearchInput
 
 Search/filter input in left nav.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsGroupList
 
 Scrollable list of settings groups with section headers.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsGroup
 
 A labeled group of settings items. Groups: General, Integrations, Coding, External Tools, Archived.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsItem
 
 Single settings row: icon + label, clickable, highlights when selected. An item may carry an optional `custom_icon` (an embedded SVG asset path, e.g. `icons/blocks.svg`) rendered via `Icon::default().path(...)` in preference to the `IconName` (same mechanism as the sidebar's external-session rows); the General → Models item (`blocks`) and the External Tools → ChatGPT.app / VS Code items use it.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsRightPane
 
 Right content area, dispatches to panel renderers. Each panel/content view owns its own scroll and padding.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsPanel
 
 A specific settings panel rendered in the right pane. Implemented panels: General, Config, Models (the cx provider config editor, see [SettingsModelsPanel](#settingsmodelspanel)), Personalization, Environment, ChatGPT.app (External Tools, see [SettingsChatGptAppPanel](#settingschatgptapppanel)). Every other left-nav item (Appearance, Pets, Keyboard, Snapshots, Plugins, Browser, Computer, Hooks, …) renders the shared "Coming soon" placeholder.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/panels.rs`
+> Source: `crates/agent-ui/src/views/settings/panels.rs`
 
 #### SettingsModelsPanel
 
 Settings → General → Models: two-column form editor for the cx provider config (`~/.manox/cx.providers.config.yaml`). Left column is a tree nav: provider nodes (double-click header renames inline) whose expanded children are the four module names — 基本信息 / 环境变量 / 端点配置 / 模型列表 — and a dashed 「+ 添加 Provider」 button at the list end; clicking a module child selects (provider, module) and the wide right column renders that module's form in a bordered panel: 基本信息 (API Key kind dropdown/value pair), 环境变量 (indented key/value rows with per-row 「-」/「+」), 端点配置 (one card per endpoint) or 模型列表 (one card per model, 手动配置 / 自动获取 tab). Add-item buttons are dashed full-width and sit at the end of their lists. Remove controls are uniform 「-」 buttons with two-step confirmation (first click arms with a danger tint, second deletes); block-level removes (model / endpoint) sit outside the block's right edge, vertically centered; selected tree items use `theme.info` text; form blocks carry no background fill; the 手动配置 / 自动获取 tabs underline the active choice in `theme.info`; double-click provider rename exits on blur, Enter or mouse-down-out and autosaves. Every edit debounces into an autosave: validate, atomically write the whole config back (top-level `agents:` preserved verbatim), then reload the provider registry off the main thread. Autosave is disabled while the file fails to parse. Endpoints are unique per Wire API and displayed as Anthropic Messages / OpenAI Responses / OpenAI Completions; `agents:` filters are badge pickers fed by a dropdown (empty selection = all agents); supports_tools / supports_images echo their effective defaults instead of an unset state.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/models.rs`
+> Source: `crates/agent-ui/src/views/settings/models.rs`
 
 #### SettingsChatGptAppPanel
 
 Settings → External Tools → ChatGPT.app: visualizes and edits the ChatGPT.app injection settings (`manox_providers::ChatGptAppSettings`, top-level `chatgpt_app:` section of `cx.providers.config.yaml`, shared by the CLI and GUI launch paths). Visual language mirrors ChatGPT.app Settings: a big page heading (`text_xl`, the TitleBar renders no text), then per-block name (14px foreground, non-bold) + muted description left-aligned **above** a border-only rounded card (no fill) whose rows are separated by hairlines; each row is two-line (name foreground + description muted, left) with the value right-aligned. Four blocks: **Codex Home** (read-only CODEX_HOME value with copy / reveal-in-Finder), **Model Injection** (display nickname input — replaces the injected provider name when set, whatever provider is launched — plus the injection mode as a segmented two-choice — model list via CDP vs single model via the official config.toml mechanism, active segment a filled pill / inactive plain muted text, with the CDP risk note as the row's inline description — plus a read-only Providers & LLMs catalog, one two-line row per provider, per-provider fetch failures shown as a "failed to load" row rather than omitted), **Variable Injection** (custom env key/value rows with add/remove; reserved keys rejected on save), **More Settings** (`supports_websockets` switch, default false). Editable items autosave through the same debounced touch/save_generation mechanism as the Models panel; the Models panel carries `chatgpt_app:` over from a fresh disk read on save so the two panels never clobber each other. Launch args and the CDP script injection are internal mechanics and are not surfaced.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/chatgpt.rs`
+> Source: `crates/agent-ui/src/views/settings/chatgpt.rs`
 
 #### SettingsSectionCard
 
 Rounded container, `bg:secondary`, holds rows with hairline dividers.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/panels.rs`
+> Source: `crates/agent-ui/src/views/settings/panels.rs`
 
 #### SettingsRow
 
 Single row: title (left) + control (right), optional description.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/panels.rs`
+> Source: `crates/agent-ui/src/views/settings/panels.rs`
 
 #### SettingsSectionHeader
 
 Small bold label for a subsection.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/panels.rs`
+> Source: `crates/agent-ui/src/views/settings/panels.rs`
 
 #### SettingsHairline
 
 1px divider between rows.
 
-> Source: `apps/desktop/agent-ui/src/views/settings/panels.rs`
+> Source: `crates/agent-ui/src/views/settings/panels.rs`
 
 ---
 
@@ -1027,19 +1027,19 @@ Full-window terminal emulator, rendered through the shared [WorkspaceShell](#wor
 
 Root view, `size_full`. Owns the focus handle; `focus(&self, window, cx)` is called after spawning/attaching/switching an external-agent session so the TUI receives keystrokes immediately. The focused root intercepts `tab` / `shift-tab` (when no search overlay is open) and forwards them to the PTY as `\t` / `\x1b[Z` with `stop_propagation`, so tab never escapes into GPUI focus traversal. Mouse-wheel events are forwarded to the PTY as xterm mouse reports when a TUI app captures the mouse (e.g. claude code / vim / htop), so its own viewport scrolls; on the alt screen without mouse capture the wheel becomes arrow-key presses (xterm alternateScroll, DECRST 1007 permitting); otherwise the local scrollback scrolls. Click count picks selection granularity (1 = char, 2 = semantic word, 3 = line). Hovering text tracks a target — OSC 8 hyperlink span first, else a semantic word that looks like a URL or a path (`:` is not a word separator, so URLs hover whole): the grid underlines the span, a tooltip anchored under the span shows the target text, and cmd/ctrl+click opens it (URLs in the browser; paths revealed in the file manager — directories open, `~` expands, relative paths resolve against the terminal cwd). Overlay chips: a starting indicator at the top right until the shell/agent TUI reports ready (OSC 6973 marker tap, output-quiet window, or fallback timeout), and the foreground process name at the bottom right while something other than the shell owns the foreground process group (1s poll). OSC 10/11/12 color queries are answered from the active theme. The cursor blinks per the `cursor_blink` setting (`off` / `on` / `terminal` = follow the program's DECSET 12/DECSCUSR flag) on a 530ms phase timer; selection, IME preedit, and input within the last 500ms pin it visible. A 2px scrollbar (8px hit area) shows at the right edge while scrollback exists; click/drag maps the y fraction onto the display offset, sharing `display_offset` with wheel/vi scrolling.
 
-> Source: `apps/desktop/terminal-ui/src/terminal_view.rs`
+> Source: `crates/terminal-ui/src/terminal_view.rs`
 
 #### TerminalTabBar
 
 Tab bar for multiple terminal tabs.
 
-> Source: `apps/desktop/terminal-ui/src/terminal_view.rs`
+> Source: `crates/terminal-ui/src/terminal_view.rs`
 
 #### TerminalGrid
 
 Monospace grid renderer, `flex_1`. Shapes text runs per line through a content-fingerprint cache (`layout_cache::LineShapeCache`, keyed by alacritty grid line + FNV-1a over each line's cells) so frames that repaint unchanged lines skip `shape_line`; a theme switch clears the cache and a per-frame sweep bounds it to the visible window. The cursor glyph honors the program's DECSCUSR shape (block / underline / beam / hollow-block / hidden) and is skipped on blinked-out phases. The scrollbar track/thumb quads paint here; the element writes the track bounds back to the view for hit-testing.
 
-> Source: `apps/desktop/terminal-ui/src/terminal_view.rs`
+> Source: `crates/terminal-ui/src/terminal_view.rs`
 
 ---
 
@@ -1077,7 +1077,7 @@ First-party selectable text panel (`manox-components::markdown::TerminalPanel`, 
 
 **Pagination.** A finalized body renders `PAGE_SIZE` (20) lines at a time; a "load more" affordance below the body (a centered `ChevronDown` + `+N` count, top-bordered, hover-tinted) grows the window by another page via `show_more`, clamped to the total. Streaming bodies render the whole live output (no pagination); on the streaming→finalized transition the cursor resets to the first page so the result opens at the top. The panel has **no internal vertical scroll** — the message-list `message-list` div scrolls the whole panel — so `show_more` never touches a scroll handle: growing the window appends lines below the current viewport without jumping to the tail. The pixel-anchored, tail-following message-list arbitration (recomputed each frame in `on_prepaint`) keeps the viewport at the user's reading position across the growth, so successive "load more" clicks stay anchored to the current line rather than snapping to the end.
 
-> Source: `apps/desktop/manox-components/src/markdown/terminal_panel.rs` · wired by `apps/desktop/agent-ui/src/views/message.rs` (`tool_panel_body` → `ensure_tool_panel` / `sync_tool_*_panel` / `rebuild_tool_panels`, titlebar frame in `render_tool_entry` / `render_tool_call`) + `apps/desktop/agent-ui/src/conversation.rs` (`apply` ToolOutput/ToolResult arms, `rebuild_from_messages`)
+> Source: `crates/manox-components/src/markdown/terminal_panel.rs` · wired by `crates/agent-ui/src/views/message.rs` (`tool_panel_body` → `ensure_tool_panel` / `sync_tool_*_panel` / `rebuild_tool_panels`, titlebar frame in `render_tool_entry` / `render_tool_call`) + `crates/agent-ui/src/conversation.rs` (`apply` ToolOutput/ToolResult arms, `rebuild_from_messages`)
 
 #### Markdown
 
@@ -1087,7 +1087,7 @@ Self-built stateful markdown renderer (`manox-components::markdown::Markdown`, a
 
 Shared framed text container (`manox-components::turn_frame::TurnFrame`) used for user turns. It paints one continuous accent-colored stroke path for the door-shaped frame, leaving the bottom center open while preserving rounded `╰─` / `─╯` corners. The lower stroke is lifted slightly into the bottom padding so the open edge visually hugs the final text line without letting markdown content overflow its layout box. The component does not fill the content background, does not rely on masking a complete border, and avoids assembling the frame from independent rail nodes. Callers provide header, trailing controls, and body content.
 
-> Source: `apps/desktop/manox-components/src/turn_frame.rs`
+> Source: `crates/manox-components/src/turn_frame.rs`
 
 #### Icon
 
@@ -1097,7 +1097,7 @@ Named icon from the icon set (e.g., `IconName::Folder`, `IconName::Search`).
 
 Text-based braille-dot spinner cycling through `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` (10 frames, 800 ms cycle). Used wherever an in-progress indicator is needed, replacing the old rotating-circle `Spinner`.
 
-> Source: `apps/desktop/agent-ui/src/views/braille_spinner.rs`
+> Source: `crates/agent-ui/src/views/braille_spinner.rs`
 
 #### ScrollHandle / ScrollableElement
 

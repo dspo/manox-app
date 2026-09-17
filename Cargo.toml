@@ -1,12 +1,13 @@
 # manox-app —— GPUI 桌面应用与 cx 启动器（完整应用仓）。
 #
-# workspace 根。成员：
-#   - apps/desktop/manox:             主二进制（窗口 + 主题 + 托盘 + 接线）
-#   - apps/desktop/agent-ui:          GPUI UI 层（Workspace/ConversationState/views）
-#   - apps/desktop/terminal-ui:       终端渲染层（TerminalElement/TerminalView）
-#   - apps/desktop/manox-components:  一方 gpui 组件库（markdown 渲染等）
-#   - apps/desktop/manox-webview:     wry 原生 webview + Tauri 式 IPC
-#   - apps/desktop/manox-webview-macros: webview IPC 过程宏
+# workspace 根。全部成员平铺在 crates/ 下（本仓只有一个交付物：桌面应用 +
+# 独立 bin 的 cx CLI），按「应用侧 / 运行时侧 / 组件层」三档排列：
+#   - crates/manox:                   主二进制（窗口 + 主题 + 托盘 + 接线）
+#   - crates/agent-ui:                GPUI UI 层（Workspace/ConversationState/views）
+#   - crates/terminal-ui:             终端渲染层（TerminalElement/TerminalView）
+#   - crates/manox-components:        app chrome 与基础渲染件（markdown/终端面板）
+#   - crates/manox-webview:           wry 原生 webview + Tauri 式 IPC
+#   - crates/manox-webview-macros:    webview IPC 过程宏
 #   - crates/cx:                      cx headless 库（SessionHandle 驱动、chatgpt/
 #                                     vscode 设置与 launch、probe db、配置核心）
 #   - crates/cx-cli:                  cx CLI bin（clap + ratatui TUI + `cx web`）
@@ -26,12 +27,12 @@ members = [
 	"crates/cx",
 	"crates/cx-cli",
 	"crates/manox-ext-agents",
-	"apps/desktop/agent-ui",
-	"apps/desktop/manox",
-	"apps/desktop/terminal-ui",
-	"apps/desktop/manox-components",
-	"apps/desktop/manox-webview",
-	"apps/desktop/manox-webview-macros",
+	"crates/agent-ui",
+	"crates/manox",
+	"crates/terminal-ui",
+	"crates/manox-components",
+	"crates/manox-webview",
+	"crates/manox-webview-macros",
 ]
 resolver = "2"
 
@@ -54,12 +55,12 @@ manox-terminal = { git = "https://github.com/dspo/manox.git", branch = "main" }
 hyperlinks = { git = "https://github.com/dspo/manox.git", branch = "main" }
 
 # —— 本仓成员（path 依赖；经 `foo.workspace = true` 引用）——
-agent-ui = { path = "apps/desktop/agent-ui" }
-manox = { path = "apps/desktop/manox" }
-terminal-ui = { path = "apps/desktop/terminal-ui" }
-manox-components = { path = "apps/desktop/manox-components" }
-manox-webview = { path = "apps/desktop/manox-webview" }
-manox-webview-macros = { path = "apps/desktop/manox-webview-macros" }
+agent-ui = { path = "crates/agent-ui" }
+manox = { path = "crates/manox" }
+terminal-ui = { path = "crates/terminal-ui" }
+manox-components = { path = "crates/manox-components" }
+manox-webview = { path = "crates/manox-webview" }
+manox-webview-macros = { path = "crates/manox-webview-macros" }
 manox-ext-agents = { path = "crates/manox-ext-agents" }
 # cx —— headless 库（原 dspo/cx 仓库并入 manox，拆分时随应用侧迁入本仓）。
 cx = { path = "crates/cx" }

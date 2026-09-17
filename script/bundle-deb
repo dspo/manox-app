@@ -18,7 +18,7 @@ set -euo pipefail
 #   /usr/share/applications/<bundle-id>.desktop      desktop entry
 #   /usr/share/icons/hicolor/{128x128,256x256}/apps/<bundle-id>.png
 #
-# Identity comes from [package.metadata.bundle] in apps/desktop/manox/Cargo.toml
+# Identity comes from [package.metadata.bundle] in crates/manox/Cargo.toml
 # (the same single source of truth bundle-mac reads); the executable name is
 # the bundle display name lowercased with spaces mapped to dashes, so future
 # flavor bundles can coexist as distinct /usr/bin entries.
@@ -87,8 +87,8 @@ cx_bin_path="target/${target_dir}/cx"
 
 # --- Read bundle configuration from Cargo.toml ---
 # Same extraction as bundle-mac: [package.metadata.bundle] in
-# apps/desktop/manox/Cargo.toml is the single source of truth.
-bundle_toml="apps/desktop/manox/Cargo.toml"
+# crates/manox/Cargo.toml is the single source of truth.
+bundle_toml="crates/manox/Cargo.toml"
 read_bundle_value() {
     local section="$1" key="$2"
     awk -v section="$section" -v key="$key" '
@@ -154,7 +154,7 @@ chmod 755 "${pkg_root}/usr/bin/${exe_name}"
 cp "${cx_bin_path}" "${pkg_root}/usr/bin/cx"
 chmod 755 "${pkg_root}/usr/bin/cx"
 
-icon_resources_dir="apps/desktop/manox/resources"
+icon_resources_dir="crates/manox/resources"
 if [[ -f "${icon_resources_dir}/app-icon.png" ]]; then
     cp "${icon_resources_dir}/app-icon.png" "${pkg_root}/usr/share/icons/hicolor/128x128/apps/${bundle_id}.png"
 fi
