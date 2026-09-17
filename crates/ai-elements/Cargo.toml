@@ -1,0 +1,21 @@
+[package]
+name = "ai-elements"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ai_elements"
+path = "src/lib.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform.workspace = true
+gpui-kit-assets.workspace = true
+# The gallery renders reasoning bodies through the real markdown component, so
+# the demonstrated content is what the app shows rather than a stand-in.
+manox-components.workspace = true

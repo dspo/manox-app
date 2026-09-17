@@ -13,6 +13,7 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
   manox/                   # 主二进制入口（窗口 + 主题 + 托盘 + 接线）
   agent-ui/                # GPUI UI 层（Workspace/ConversationState/views）
   terminal-ui/             # 终端渲染层（TerminalElement/TerminalView；仿真核心在 dspo/manox 的 manox-terminal）
+  ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   manox-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
   manox-webview/           # wry 原生 webview + Tauri 式 IPC
   manox-webview-macros/    # webview IPC 过程宏
@@ -22,6 +23,12 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
   manox-ext-agents/        # ext-agent 启动 API、会话管理、IPC relay、
                            #   cx_session 桥（SessionHandle → PtySource）
 ```
+
+组件层边界：`ai-elements` 承载 agent 对话语义（Reasoning、工具、消息流），渲染机械
+（markdown、终端输出）归 `manox-components`。`ai-elements` 不依赖
+`manox-agent`/`agent-ui` —— 正文与本地化文案由调用方注入，所以组件级验证走
+`cargo run -p ai-elements --example gallery`。
+
 上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真核心（manox-terminal）与 hyperlinks 已回流 dspo/manox（同经 git 依赖消费），`CxSessionSource` 桥留在本仓 manox-ext-agents。
 
 ### 与 manox 仓的联动开发
