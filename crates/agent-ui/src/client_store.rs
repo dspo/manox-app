@@ -406,14 +406,17 @@ impl ClientStore {
 
     /// Every field `materialize_projection` writes, as one comparable string.
     /// Exists so the coverage guard can observe whether a key reached a field
-    /// rather than trusting a hand-kept list of names.
+    /// rather than trusting a hand-kept list of names. A field added by an arm
+    /// but omitted here makes that arm's probe invisible, so the guard fails
+    /// closed (reports the key unmirrored) rather than passing silently.
     #[cfg(test)]
     fn mirrored_fields(&self) -> String {
         format!(
-            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             self.display_title,
             self.cwd,
             self.project,
+            self.model,
             self.model_id,
             self.permission_mode,
             self.reasoning_effort,
@@ -743,6 +746,21 @@ mod tests {
             "projection keys declared upstream but reaching no field: {unmirrored:?} \
              — materialize them in `merge_projection`, or list them in \
              DISPLAY_ONLY_PROJECTION_KEYS with a reason"
+        );
+        // The reverse direction: a display-only entry for a key the protocol
+        // has since dropped would otherwise linger unnoticed.
+        let declared: std::collections::BTreeSet<&str> = manox_protocol::surface::PROJECTION_KEYS
+            .iter()
+            .copied()
+            .collect();
+        let stale: Vec<&str> = DISPLAY_ONLY_PROJECTION_KEYS
+            .iter()
+            .copied()
+            .filter(|key| !declared.contains(key))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "listed as display-only but no longer declared upstream: {stale:?}"
         );
     }
 

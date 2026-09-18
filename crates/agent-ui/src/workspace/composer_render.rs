@@ -509,22 +509,26 @@ impl Workspace {
                     // committed chip leaves plan mode.
                     let target = if pending { active } else { false };
                     this.set_thread_plan_mode(target, cx);
-                    // "Full write access restored" only holds when plan mode
-                    // was actually in force; cancelling a queued switch-on
-                    // never took that access away.
-                    if active {
-                        this.add_info_message(
-                            i18n::t(if exiting {
-                                "plan-mode-on-notice"
-                            } else {
-                                "plan-mode-off-notice"
-                            })
-                            .to_string(),
-                            NoticeAnchor::TurnEnd,
-                            None,
-                            cx,
-                        );
-                    }
+                    // The notice must track what actually happened:
+                    // - cancelling a queued switch-on never took write access
+                    //   away, so "full write access restored" would be false;
+                    //   `/plan` already announced it as on, so the cancel needs
+                    //   its own notice to retract that.
+                    // - cancelling a queued exit returns to plan mode, which is
+                    //   still in force.
+                    // - a committed chip either leaves plan mode or was already
+                    //   off, in which case the chip was not rendered.
+                    let key = match (active, pending) {
+                        (false, true) => "plan-mode-cancel-notice",
+                        (true, true) => "plan-mode-on-notice",
+                        _ => "plan-mode-off-notice",
+                    };
+                    this.add_info_message(
+                        i18n::t(key).to_string(),
+                        NoticeAnchor::TurnEnd,
+                        None,
+                        cx,
+                    );
                 }))
                 .child(
                     Icon::new(IconName::LayoutDashboard)
