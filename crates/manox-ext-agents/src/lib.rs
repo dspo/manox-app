@@ -43,7 +43,10 @@ pub mod warp;
 const LAUNCH_HOME_DIR_NAME: &str = "cx-launch-homes";
 const LAUNCH_HOME_TTL_SECS: u64 = 60 * 60 * 24;
 const ADD_PROVIDER_SENTINEL: &str = "+ 添加 Provider";
-const DEFAULT_PROVIDER_CONFIG_YAML: &str = include_str!("../config/providers.default.yaml");
+/// Embedded baseline `create_default_provider_config` writes when no config
+/// exists yet: the agent registry plus a placeholder provider, never a personal
+/// provider list.
+pub const DEFAULT_PROVIDER_CONFIG_YAML: &str = include_str!("../config/providers.example.yaml");
 
 // ══════════════════════════════════════════════════
 // File helpers

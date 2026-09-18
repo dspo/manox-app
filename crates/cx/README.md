@@ -58,18 +58,21 @@ from your shell rc file.
 at runtime. If an older `~/.manox/config.yaml` exists, it is migrated to the
 new path automatically on first use.
 
-The repo keeps `config/providers.default.yaml` as the published baseline
-reference. Typical workflows:
+The provider list is per-machine and stays out of this repo. The repo ships the
+format contract and a sanitized sample instead:
+`crates/manox-ext-agents/config/cx.providers.config.schema.yaml` and
+`crates/manox-ext-agents/config/providers.example.yaml`. Typical workflows:
 
 ```bash
 cx add
-cx patch config/providers.default.yaml
+cx patch <your-own-file>
 cx patch --url <url>
 cx patch --refresh
 ```
 
 If `~/.manox/cx.providers.config.yaml` is missing, `cx` creates it from the
-published baseline automatically on first use. You can also edit it directly.
+embedded sample on first use: the agent registry is filled in, and the provider
+entry is a placeholder to replace. You can also edit the file directly.
 
 `cx add` launches a TUI wizard rooted at the Providers list. From there you can:
 

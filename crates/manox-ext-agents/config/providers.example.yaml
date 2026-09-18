@@ -1,0 +1,33 @@
+# Sanitized provider-config example, and the baseline `cx` writes to
+# ~/.manox/cx.providers.config.yaml on first run, when no config exists yet.
+#
+# The provider list belongs to the user: this file carries a placeholder, never
+# real endpoints, keychain services or a personal model catalog. Replace it, or
+# build your own config with `cx add` / `cx patch <your-file>`.
+#
+# The `agents:` section is not a placeholder. Agent resolution reads it and has
+# no built-in fallback, so an empty section leaves every model unlaunchable.
+#
+# Format reference: cx.providers.config.schema.yaml in this directory.
+
+agents:
+  - id: copilot
+    bin: copilot
+  - id: claude
+    bin: claude
+  - id: codex
+    bin: codex
+
+providers:
+  - name: Example
+    apikey_source: "env:EXAMPLE_API_KEY"
+    endpoints:
+      anthropic:
+        url: https://api.example.com/anthropic
+        copilot_auth: bearer_token
+      completions:
+        url: https://api.example.com/v1
+    models:
+      example-model:
+        desc: "Placeholder — replace with a real model id"
+        wire_apis: [anthropic, completions]

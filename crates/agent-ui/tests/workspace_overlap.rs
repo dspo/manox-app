@@ -1,7 +1,8 @@
 //! Full-workspace containment diagnostic for the message-list overlap bug.
 //!
-//! Rebuilds the production workspace from the real failing session
-//! (`dfd73eed`) and walks the interaction matrix the live app exercises:
+//! Rebuilds the production workspace from a real session transcript, whose path
+//! comes from `MANOX_OVERLAP_SESSION`, and walks the interaction matrix the live
+//! app exercises:
 //! resize across the content-max threshold while parked at several scroll
 //! offsets, then rebuild the conversation mid-scroll (thread switch /
 //! `HistoryRestored` shape). Every message body that the walk's scroll matrix
@@ -11,9 +12,9 @@
 //! regression guard.
 //!
 //! Compiled only under the `test-support` feature (the `Workspace::diagnostic_*`
-//! hooks it uses are feature-gated), and a no-op when the local fixture is
-//! absent, so CI and other machines stay green. Run locally via:
-//! `cargo test -p agent-ui --features test-support --test workspace_overlap`.
+//! hooks it uses are feature-gated), and a no-op when the session path is unset
+//! or the file is missing, so CI and other machines stay green. Run locally via:
+//! `MANOX_OVERLAP_SESSION=<session>.jsonl cargo test -p agent-ui --features test-support --test workspace_overlap`.
 //!
 //! Lives in its own test binary because it initializes process-global
 //! singletons (`manox_agent::runtime`, `pi_providers`, `thread_store`) that cannot
@@ -26,11 +27,15 @@ use agent_ui::Workspace;
 use gpui::{AppContext as _, FollowMode, TestAppContext, VisualTestContext, px, size};
 use gpui_component::Theme;
 
-const FIXTURE: &str =
-    "/Users/chenzhongrun/.manox/sessions/dfd73eed-847d-4f42-97e5-72692ef39277.jsonl";
+const FIXTURE_ENV: &str = "MANOX_OVERLAP_SESSION";
 
-fn load_real_session_messages() -> Vec<manox_agent::Message> {
-    let source = std::fs::read_to_string(FIXTURE).expect("real session fixture");
+fn fixture_path() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var_os(FIXTURE_ENV)?);
+    path.exists().then_some(path)
+}
+
+fn load_real_session_messages(fixture: &std::path::Path) -> Vec<manox_agent::Message> {
+    let source = std::fs::read_to_string(fixture).expect("session fixture is readable");
     let harness_messages = source
         .lines()
         // The first 118 events cover the turns visible in the failure
@@ -96,9 +101,9 @@ fn assert_workspace_bodies_contained(
 
 #[gpui::test]
 async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
-    if !std::path::Path::new(FIXTURE).exists() {
+    let Some(fixture) = fixture_path() else {
         return;
-    }
+    };
     cx.update(gpui_component::init);
     register_lilex(cx);
     cx.update(|_cx| {
@@ -106,7 +111,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
         manox_agent::provider_glue::init();
         manox_agent::thread_store::init();
     });
-    let messages = load_real_session_messages();
+    let messages = load_real_session_messages(&fixture);
     let display: Vec<manox_agent::db::HistoryEntry> = messages
         .iter()
         .cloned()

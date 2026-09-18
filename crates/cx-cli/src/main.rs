@@ -1225,7 +1225,7 @@ fn format_exit_status(status: &std::process::ExitStatus) -> Option<String> {
 
 /// 格式化退出摘要，包含 agent 信息、会话时长和 token 用量。
 ///
-/// 示例：`退出 claude | Provider: 百炼 | Model: MiniMax-M2.7 | 3m12s | 123k Tokens`
+/// 示例：`退出 claude | Provider: Example | Model: example-model | 3m12s | 123k Tokens`
 ///
 /// 仅测试使用（生产路径走 `format_exit_summary_inline`），故 gate 在 `cfg(test)` 下避免 release 死代码告警。
 #[cfg(test)]
@@ -1412,7 +1412,7 @@ fn collect_new_provider_operation(
         "cx add",
         "输入新的 Provider 名称",
         "",
-        "示例：百炼 / Packy API / Xiaomi MIMO",
+        "示例：Example / acme-gateway",
         |value| validate_provider_name(config, value),
     )? {
         PromptOutcome::Submit(value) => value,
@@ -1552,7 +1552,7 @@ fn collect_endpoint_operation(
             wire_api.display()
         ),
         "",
-        "示例：https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "示例：https://api.example.com/v1",
         validate_endpoint_url,
     )? {
         PromptOutcome::Submit(value) => value,
@@ -1642,7 +1642,7 @@ fn collect_model_draft(
             wire_api.display()
         ),
         "",
-        "示例：qwen3.6-plus / claude-opus-4-7 / mimo-v2.5-pro",
+        "示例：claude-opus-4-7 / example-model",
         |value| validate_model_id(provider, value),
     )? {
         PromptOutcome::Submit(value) => value,
@@ -3038,9 +3038,9 @@ mod tests {
     #[test]
     fn clap_parse_patch_source_path() {
         assert_eq!(
-            parse(&["patch", "./config/providers.default.yaml"]),
+            parse(&["patch", "./config/providers.example.yaml"]),
             Some(CxCommand::Patch {
-                source: Some("./config/providers.default.yaml".into()),
+                source: Some("./config/providers.example.yaml".into()),
                 url: None,
                 refresh: false
             })
@@ -4977,24 +4977,38 @@ trust_level = "trusted"
         create_default_provider_config(&path).unwrap();
 
         let config = read_config_file(&path).unwrap();
-        assert!(!config.providers.is_empty());
         assert!(!config.agents.is_empty());
-        let packy = config
+        let resolved = resolved_agents(&config);
+        for agent in ["claude", "codex", "copilot"] {
+            assert!(
+                resolved.iter().any(|entry| entry.id == agent),
+                "baseline must register {agent}"
+            );
+        }
+        let example = config
             .providers
             .iter()
-            .find(|provider| provider.name == "Packy API")
-            .expect("baseline should include Packy API");
-        let packy_anthropic = packy
+            .find(|provider| provider.name == "Example")
+            .expect("baseline should carry the sanitized example provider");
+        let example_anthropic = example
             .normalized_endpoints()
             .into_iter()
             .find(|endpoint| endpoint.wire_api == "anthropic")
-            .expect("Packy API should include an anthropic endpoint");
+            .expect("example provider should include an anthropic endpoint");
         assert_eq!(
-            CopilotAuth::from_endpoint(&packy_anthropic),
+            CopilotAuth::from_endpoint(&example_anthropic),
             CopilotAuth::BearerToken
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn embedded_baseline_carries_no_local_secret_binding() {
+        // The baseline lands on every fresh machine, so it must never bind a
+        // machine-local secret service or a personal provider.
+        assert!(!DEFAULT_PROVIDER_CONFIG_YAML.contains("keychain:"));
+        assert!(!DEFAULT_PROVIDER_CONFIG_YAML.contains("literal:"));
     }
 
     #[test]
