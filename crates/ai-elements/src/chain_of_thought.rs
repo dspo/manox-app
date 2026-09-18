@@ -15,28 +15,29 @@
 //! - No `status` enum. A step takes an icon slot, so a host whose vocabulary is
 //!   richer than upstream's `complete | active | pending` keeps it instead of
 //!   collapsing it into three states.
-//! - No `SearchResults` / `Image` elements. A host's aggregate counts belong on
-//!   the header it already draws them on, not as badges inside a step.
+//! - No `SearchResults` / `Image` elements, and a `meta` slot on the header
+//!   instead: a host's aggregate counts and other trailing detail belong on the
+//!   row it already draws them on, not inside a step.
+//! - The last step draws no connector rail. Upstream paints one under every
+//!   step, so its list ends on a stub hanging below the final marker.
 //! - The layout-neutral animations — the chevron turning, the content fading and
 //!   sliding, each step fading in as it mounts — are always on, and leave layout
 //!   height alone (a `relative().top()` offset moves nothing else). The height
 //!   reveal is separate and switchable via [`ChainOfThought::animated`]: on by
 //!   default, as upstream's is, and off for a host whose layout cannot follow a
 //!   height that changes frame by frame.
-//!
-//! - No `status` enum, no `SearchResults` / `Image`, and a `meta` slot on the
-//!   header: each of those keeps a host's own vocabulary and content where the
-//!   host already draws them.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClickEvent, ElementId, Hsla, IntoElement,
-    RenderOnce, SharedString, Window, div, ease_in_out, ease_out_quint, prelude::*, px, rems,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, ElementId, FocusHandle, Hsla,
+    IntoElement, RenderOnce, SharedString, Window, div, ease_in_out, ease_out_quint, prelude::*,
+    px, rems,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, Theme, collapsible::Collapsible, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, ThemeStyled as _, collapsible::Collapsible,
+    h_flex, v_flex,
 };
 
 use crate::animation::toggle_key;
@@ -232,7 +233,7 @@ impl ChainOfThoughtHeader {
         open: bool,
         on_toggle: Option<ToggleHandler>,
         generation: u64,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
         let (muted, foreground) = {
@@ -253,6 +254,12 @@ impl ChainOfThoughtHeader {
             )
             .into_any_element();
 
+        // A row the pointer can toggle is a tab stop the keyboard can answer
+        // too. A focused gpui div already turns enter / space into a
+        // `ClickEvent::Keyboard` delivered to its own click listeners, so the
+        // row needs no key handler of its own — one would toggle twice; it
+        // only needs to be focusable.
+        let focus = on_toggle.is_some().then(|| row_focus(window, cx, &self.id));
         h_flex()
             .id(self.id.clone())
             .debug_selector({
@@ -271,6 +278,15 @@ impl ChainOfThoughtHeader {
             .when(on_toggle.is_some(), |row| {
                 row.cursor_pointer()
                     .hover(move |row| row.text_color(foreground))
+            })
+            .when_some(focus, |row, focus| {
+                row.track_focus(&focus)
+                    .tab_index(0)
+                    // The ring is a focus affordance only: a resting row draws
+                    // none.
+                    .when(focus.is_focused(window), |row| {
+                        row.focus_ring_style(window, cx)
+                    })
             })
             .when_some(on_toggle, |row, on_toggle| {
                 row.on_click(move |event, window, cx| on_toggle(event, window, cx))
@@ -339,6 +355,11 @@ impl ChainOfThoughtStep {
         self
     }
 
+    /// A host's own row for the step's identity. It replaces the default title
+    /// row outright: mutually exclusive with [`ChainOfThoughtStep::title`] and
+    /// [`ChainOfThoughtStep::disclosed`] — a step given both renders only the
+    /// label, and the disclosure's affordance vanishes with the row it belongs
+    /// to (asserted in debug builds).
     pub fn label(mut self, label: impl IntoElement) -> Self {
         self.label = Some(label.into_any_element());
         self
@@ -354,8 +375,11 @@ impl ChainOfThoughtStep {
     }
 
     /// Makes the step fold: a chevron beside the title, a hover wash, and a
-    /// click that reports back. The affordance covers the title row only — a
-    /// step's body is text a user may be selecting, so it never toggles.
+    /// click that reports back (enter / space answer it once the row is
+    /// focused). The affordance covers the title row only — a step's body is
+    /// text a user may be selecting, so it never toggles. It belongs to the
+    /// default title row: pairing it with [`ChainOfThoughtStep::label`] is a
+    /// contract violation (asserted in debug builds).
     pub fn disclosed(
         mut self,
         open: bool,
@@ -403,7 +427,12 @@ impl ChainOfThoughtStep {
 }
 
 impl RenderOnce for ChainOfThoughtStep {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        debug_assert!(
+            self.label.is_none() || self.disclosure.is_none(),
+            "`label` replaces the default title row: a step given both `label` \
+             and `disclosed` never shows its disclosure"
+        );
         let (border, muted) = {
             let theme = cx.theme();
             (theme.border, theme.muted_foreground)
@@ -445,7 +474,8 @@ impl RenderOnce for ChainOfThoughtStep {
                                     (self.id.clone(), "title").into(),
                                     title,
                                     self.disclosure,
-                                    cx.theme(),
+                                    window,
+                                    cx,
                                 )
                             })
                         }))
@@ -513,14 +543,26 @@ const HOVER_WASH: f32 = 0.3;
 const TITLE_CHARS: usize = 80;
 
 /// The step's title as a row: an optional disclosure chevron, then the title
-/// itself clipped to one line.
+/// itself clipped to one line. A disclosed row is a tab stop, so the fold is
+/// keyboard-reachable exactly like the header row (see
+/// [`ChainOfThoughtHeader::into_row`] for why it carries no key handler).
 fn title_row(
     id: ElementId,
     title: SharedString,
     disclosure: Option<StepDisclosure>,
-    theme: &Theme,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
-    let muted = theme.muted_foreground;
+    let focus = disclosure.is_some().then(|| row_focus(window, cx, &id));
+    let (muted, radius, hover_wash, mono_font) = {
+        let theme = cx.theme();
+        (
+            theme.muted_foreground,
+            theme.radius,
+            theme.secondary.opacity(HOVER_WASH),
+            theme.mono_font_family.clone(),
+        )
+    };
     let mut row = h_flex()
         .id(id)
         .w_full()
@@ -529,7 +571,7 @@ fn title_row(
         .gap_1p5()
         .items_center()
         .italic()
-        .rounded(theme.radius);
+        .rounded(radius);
 
     if let Some(disclosure) = disclosure {
         let on_toggle = disclosure.on_toggle;
@@ -540,18 +582,26 @@ fn title_row(
         };
         row = row
             .cursor_pointer()
-            .hover(move |row| row.bg(theme.secondary.opacity(HOVER_WASH)))
+            .hover(move |row| row.bg(hover_wash))
             .child(Icon::new(chevron).xsmall().text_color(muted))
             .on_click(move |event, window, cx| on_toggle(event, window, cx));
     }
 
-    row.child(
+    row.when_some(focus, |row, focus| {
+        row.track_focus(&focus)
+            .tab_index(0)
+            // The ring is a focus affordance only: a resting row draws none.
+            .when(focus.is_focused(window), |row| {
+                row.focus_ring_style(window, cx)
+            })
+    })
+    .child(
         div()
             .flex_1()
             .min_w_0()
             .overflow_x_hidden()
             .text_sm()
-            .font_family(theme.mono_font_family.clone())
+            .font_family(mono_font)
             .text_color(muted)
             .child(one_line(&title, TITLE_CHARS)),
     )
@@ -559,6 +609,9 @@ fn title_row(
 }
 
 /// Collapse `s` to a single line, clipped to `max_chars` with an ellipsis.
+///
+/// `agent-ui`'s `message.rs` carries a line-for-line twin, `truncate` — the
+/// crate boundary keeps the two apart, so change one and change the other.
 fn one_line(s: &str, max_chars: usize) -> SharedString {
     let flat = s.replace('\n', " ");
     if flat.chars().count() > max_chars {
@@ -572,23 +625,81 @@ fn one_line(s: &str, max_chars: usize) -> SharedString {
 /// The generation a toggle animation is keyed on, for a block with no state
 /// entity to hold one.
 ///
-/// It lives in window-scoped element state instead: the generation advances on
-/// the frame the open state differs from the last one seen, and stays put on
-/// every other frame. The extra repaint that mutating this state costs lands on
-/// the frame that already changed — a toggle is user-driven, never per delta.
-#[derive(Default)]
+/// It lives in window-scoped element state: the generation advances on the
+/// frame the open state differs from the last one seen, and stays put on every
+/// other frame. Tracking it costs no extra repaint — `Entity::update` without
+/// `cx.notify` never wakes the `use_keyed_state` observer, and the frame that
+/// reads a new value is re-rendering for the host's own reason anyway.
 struct ToggleTrack {
     open: bool,
     generation: u64,
 }
 
-fn toggle_generation(window: &mut Window, cx: &mut App, id: &ElementId, open: bool) -> u64 {
-    let track = window.use_keyed_state((id.clone(), "toggle"), cx, |_, _| ToggleTrack::default());
-    track.update(cx, |track, _| {
-        if track.open != open {
-            track.open = open;
-            track.generation = track.generation.wrapping_add(1);
+impl ToggleTrack {
+    /// Fold one rendered `open` value in and report the generation to key the
+    /// toggle animations on.
+    fn advance(&mut self, open: bool) -> u64 {
+        if self.open != open {
+            self.open = open;
+            self.generation = self.generation.wrapping_add(1);
         }
-        track.generation
-    })
+        self.generation
+    }
+}
+
+fn toggle_generation(window: &mut Window, cx: &mut App, id: &ElementId, open: bool) -> u64 {
+    // The first frame seeds the track with the value the host mounts with, so
+    // a block that is already open opens no generation — the toggle animations
+    // replay only on a change the host actually made.
+    let track = window.use_keyed_state((id.clone(), "toggle"), cx, |_, _| ToggleTrack {
+        open,
+        generation: 0,
+    });
+    track.update(cx, |track, _| track.advance(open))
+}
+
+/// A clickable row's focus handle, for a block that carries no state entity of
+/// its own. Like [`toggle_generation`], it lives in window-scoped element
+/// state, so the tab stop and its focus ring survive re-renders.
+struct RowFocus {
+    handle: FocusHandle,
+}
+
+fn row_focus(window: &mut Window, cx: &mut App, id: &ElementId) -> FocusHandle {
+    let track = window.use_keyed_state((id.clone(), "focus"), cx, |_, cx| RowFocus {
+        handle: cx.focus_handle(),
+    });
+    track.read(cx).handle.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The generation tracks host toggles, not renders: it advances only when
+    /// `open` flips, and repeated frames of the same value hold it still.
+    #[test]
+    fn generation_advances_only_when_the_host_changes_open() {
+        let mut track = ToggleTrack {
+            open: false,
+            generation: 0,
+        };
+        assert_eq!(track.advance(false), 0);
+        assert_eq!(track.advance(true), 1);
+        assert_eq!(track.advance(true), 1);
+        assert_eq!(track.advance(true), 1);
+        assert_eq!(track.advance(false), 2);
+    }
+
+    /// A block mounted open seeds the track with its mount value, so the first
+    /// frame does not read as a toggle and replay the expansion animation.
+    #[test]
+    fn a_block_mounted_open_does_not_advance_on_its_first_frame() {
+        let mut track = ToggleTrack {
+            open: true,
+            generation: 0,
+        };
+        assert_eq!(track.advance(true), 0);
+        assert_eq!(track.advance(false), 1);
+    }
 }

@@ -28,7 +28,7 @@ pub mod selection;
 pub mod terminal_panel;
 pub mod theme;
 
-pub use terminal_panel::{PanelKind, TerminalPanel};
+pub use terminal_panel::{PanelKind, TerminalPanel, hashline_text};
 
 use std::cell::RefCell;
 use std::collections::HashMap;

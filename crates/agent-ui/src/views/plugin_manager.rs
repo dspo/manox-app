@@ -28,7 +28,7 @@ use gpui_component::{
 };
 use manox_agent::plugin::PluginManager;
 
-use crate::views::braille_spinner::BrailleSpinner;
+use ai_elements::BrailleSpinner;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PluginManagerTab {

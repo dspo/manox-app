@@ -2654,7 +2654,7 @@ fn render_thread_item(
             .into_any_element()
     } else if item.resuming {
         // A resume is in flight: the loading indicator replaces the idle icon.
-        crate::views::braille_spinner::BrailleSpinner::new()
+        ai_elements::BrailleSpinner::new()
             .xsmall()
             .color(theme.muted_foreground)
             .into_any_element()
