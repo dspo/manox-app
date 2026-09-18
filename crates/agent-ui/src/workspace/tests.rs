@@ -4484,11 +4484,16 @@ fn a_plain_ask_carries_no_intent() {
     );
 }
 
-/// The §二.3 stop notice at the chrome level: an exhausted reopen budget
-/// paints the dismissible banner above the message area; the retry click
-/// drops it and re-arms the leaf's budget (backoff churn stays silent, the
-/// retry's own terminal exhaustion re-shows it); the dismiss click silences
-/// the banner for this session through a later automatic stop.
+/// The §二.3 stop notice at the chrome level, on the production
+/// notification chain: the workspace adopts the foreground leaf through
+/// its own `subscribe_thread` entry and frames are drawn with no
+/// whole-tree refresh, so the only mechanism that can move the banner is
+/// the leaf's `cx.notify()` dirtying the workspace through the observer.
+/// An exhausted reopen budget paints the dismissible banner above the
+/// message area; a retry click with no multiplexer wired changes nothing
+/// (the notice stays and no attempt is spent); the dismiss click
+/// silences the banner for this session and a later automatic stop
+/// cannot un-silence it.
 #[gpui::test]
 fn a_stopped_follow_shares_a_dismissible_notice(cx: &mut gpui::TestAppContext) {
     use gpui::AppContext as _;
@@ -4520,23 +4525,28 @@ fn a_stopped_follow_shares_a_dismissible_notice(cx: &mut gpui::TestAppContext) {
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     let ws = captured.borrow().clone().expect("workspace captured");
 
-    // Swap in an outbound-less leaf and burn its reopen budget with resync
-    // frames (no multiplexer in the loop: the stop state is deterministic).
-    let leaf = visual.update(|_window, cx| {
-        ws.update(cx, |ws, cx| {
-            let leaf = cx.new(|cx| {
-                crate::client_store_handle::ClientStoreHandle::leaf("follow-stop-test", cx)
-            });
-            ws.store = Some(leaf.clone());
-            leaf
-        })
+    // Adopt an outbound-less leaf as the foreground through the
+    // production wiring entry: `attach_thread` runs exactly this ritual
+    // after a rebind — set the store, re-run `subscribe_thread`, assign
+    // the same fields (the assignment drops the constructor's landing
+    // subscriptions, so from here on only this leaf drives the chrome).
+    // Resync frames burn its reopen budget (no multiplexer in the loop:
+    // the stop state is deterministic).
+    let leaf = ws.update(cx, |ws, cx| {
+        let leaf = cx
+            .new(|cx| crate::client_store_handle::ClientStoreHandle::leaf("follow-stop-test", cx));
+        ws.store = Some(leaf.clone());
+        let (thread_events, store_changes) = ws.subscribe_thread(cx);
+        ws.thread_sub = Some(thread_events);
+        ws.store_observe = Some(store_changes);
+        leaf
     });
-    // `refresh` forces a whole-tree re-render: the swapped-in leaf carries
-    // no `subscribe_thread` observer, so a leaf notify alone would never
-    // dirty the workspace under test.
+    // Draw one frame: gpui re-renders only entities marked dirty, and
+    // the observer wired above is the sole source of workspace dirt here.
+    // A `window.refresh()` would repaint the whole tree and hide a broken
+    // notification chain — the hole this test exists to close.
     let draw = |visual: &mut gpui::VisualTestContext| {
         visual.update(|window, cx| {
-            window.refresh();
             window.draw(cx).clear(cx);
         });
     };
@@ -4576,7 +4586,8 @@ fn a_stopped_follow_shares_a_dismissible_notice(cx: &mut gpui::TestAppContext) {
     );
 
     // Dismiss click: out for this session, and a later automatic stop
-    // cannot bring it back.
+    // cannot bring it back — the post-dismiss frames repaint only through
+    // the same notification chain, so a stale canvas cannot fake the pass.
     let dismiss = visual
         .debug_bounds("follow-stop-dismiss-btn")
         .expect("the banner carries its dismiss control");
