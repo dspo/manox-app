@@ -1002,8 +1002,10 @@ pub fn render_config(view: &mut SettingsView, cx: &mut Context<SettingsView>) ->
             row_with_control(
                 i18n::t("settings-row-config-version"),
                 None,
-                // Build identifier captured at compile time — commit SHA and
-                // build type. Not routed through i18n.
+                // Build identifier captured at compile time — the dspo/manox
+                // runtime crate's version, commit SHA and build type (the app's
+                // own version is the About window's headline). Not routed
+                // through i18n.
                 muted_text(
                     SharedString::from(manox_agent::version::full_version_string()),
                     muted,

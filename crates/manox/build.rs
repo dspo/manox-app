@@ -44,34 +44,47 @@ fn main() {
     let locked = locked.as_deref();
     let package = |name: &str| locked.and_then(|pkgs| pkgs.iter().find(|(n, _, _)| n == name));
 
-    let gpui_component = package("gpui-component").map(|(_, version, _)| version.as_str());
-    let gpui = package("gpui-pre").map(|(_, version, _)| version.as_str());
+    let gpui_component = package("gpui-component");
+    let gpui = package("gpui-pre");
     let manox_rev = package("manox-agent")
         .and_then(|(_, _, source)| source.as_deref())
         .and_then(|source| source.strip_prefix("git+https://github.com/dspo/manox.git"))
         .and_then(|rest| rest.rsplit_once('#'))
         .map(|(_, rev)| rev);
 
-    println!(
-        "cargo:rustc-env=MANOX_APP_COMMIT={}",
-        head_commit(&manifest_dir).unwrap_or_default()
+    let inject = |key: &str, value: Option<&str>| {
+        println!("cargo:rustc-env={key}={}", value.unwrap_or_default());
+    };
+    inject("MANOX_APP_COMMIT", head_commit(&repo_root).as_deref());
+    inject("MANOX_UPSTREAM_REV", manox_rev);
+    // The About rows render each pin from its resolved version plus, when the
+    // lockfile records one, the source it came from.
+    inject(
+        "GPUI_COMPONENT_VERSION",
+        gpui_component.map(|(_, version, _)| version.as_str()),
     );
-    println!(
-        "cargo:rustc-env=GPUI_COMPONENT_VERSION={}",
-        gpui_component.unwrap_or_default()
+    inject(
+        "GPUI_COMPONENT_SOURCE",
+        gpui_component.and_then(|(_, _, source)| source.as_deref()),
     );
-    println!("cargo:rustc-env=GPUI_VERSION={}", gpui.unwrap_or_default());
-    println!(
-        "cargo:rustc-env=MANOX_UPSTREAM_REV={}",
-        manox_rev.unwrap_or_default()
+    inject("GPUI_VERSION", gpui.map(|(_, version, _)| version.as_str()));
+    inject(
+        "GPUI_SOURCE",
+        gpui.and_then(|(_, _, source)| source.as_deref()),
     );
 }
 
-/// Commit of the manox-app worktree this build reads from.
-fn head_commit(manifest_dir: &Path) -> Option<String> {
+/// Commit of the manox-app checkout this build reads from. A tree without its
+/// own `.git` (packaged source, vendored copy) yields nothing: git would
+/// otherwise walk up to some enclosing repository and report its HEAD as if it
+/// were this app's commit.
+fn head_commit(repo_root: &Path) -> Option<String> {
+    if !repo_root.join(".git").exists() {
+        return None;
+    }
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(manifest_dir)
+        .current_dir(repo_root)
         .output()
         .ok()?;
     if !output.status.success() {

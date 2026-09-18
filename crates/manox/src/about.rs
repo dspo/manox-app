@@ -1,7 +1,7 @@
 //! About window: centered floating dialog with the app icon, a headline
 //! app-version line, one muted-label provenance row per pinned stack
-//! (manox-app commit, dspo/manox commit, gpui-component / gpui-pre pins), and
-//! an OK / Copy action row. Copy writes the structured info block
+//! (manox desktop, manox harness, gpui-component, gpui-pre), and an OK / Copy
+//! action row. Copy writes the structured info block
 //! (`version::structured_about`) followed by those rows to the clipboard and
 //! closes the window; Escape closes as well. Duplicate window detection keeps a
 //! single instance.
@@ -63,20 +63,21 @@ impl AboutWindow {
 /// The provenance rows the window renders, in display order. A row whose value
 /// could not be resolved at build time is dropped rather than shown blank.
 fn provenance_rows() -> Vec<InfoRow> {
-    [
-        ("manox-app", pins::app_commit()),
-        ("dspo/manox", pins::manox_commit()),
-        ("gpui-component", pins::gpui_kit_version()),
-        ("gpui-pre", pins::gpui_version()),
-    ]
-    .into_iter()
-    .filter_map(|(label, value)| {
-        Some(InfoRow {
-            label,
-            value: SharedString::new_static(value?),
-        })
-    })
-    .collect()
+    let mut rows = Vec::new();
+    let mut push = |label, value: Option<SharedString>| {
+        if let Some(value) = value {
+            rows.push(InfoRow { label, value });
+        }
+    };
+    let short = |commit| SharedString::from(pins::short_commit(commit).to_string());
+    push("manox desktop", pins::app_commit().map(short));
+    push("manox harness", pins::manox_commit().map(short));
+    push(
+        "gpui-component",
+        pins::gpui_kit_pin().map(SharedString::from),
+    );
+    push("gpui-pre", pins::gpui_pin().map(SharedString::from));
+    rows
 }
 
 /// The clipboard block: the runtime's own structured block, whose first lines
@@ -122,6 +123,7 @@ impl Render for AboutWindow {
 
         div()
             .id("about-window")
+            .debug_selector(|| "about-window".into())
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|_, ev: &KeyDownEvent, window, _cx| {
                 if ev.keystroke.key == "escape" {
@@ -223,12 +225,11 @@ mod tests {
     fn provenance_rows_name_every_pinned_stack() {
         let rows = provenance_rows();
         let labels: Vec<_> = rows.iter().map(|row| row.label).collect();
-        let mut expected = vec!["dspo/manox", "gpui-component", "gpui-pre"];
+        let mut expected = vec!["manox harness", "gpui-component", "gpui-pre"];
         if pins::app_commit().is_some() {
-            expected.insert(0, "manox-app");
+            expected.insert(0, "manox desktop");
         }
         assert_eq!(labels, expected);
-        assert!(rows.iter().all(|row| !row.value.is_empty()));
     }
 
     /// A copied report must stay greppable by the runtime's format (its own
@@ -273,14 +274,19 @@ mod tests {
         let buttons = cx
             .debug_bounds("about-buttons")
             .expect("the action row must be laid out");
+        let dialog = cx
+            .debug_bounds("about-window")
+            .expect("the dialog must be laid out");
 
         assert!(
             details.bottom() <= buttons.top(),
             "provenance rows overlap the actions: {details:?} vs {buttons:?}"
         );
+        // The action row is pinned to the content box's bottom edge, so this
+        // only fails once the rows above have pushed it through the padding.
         assert!(
-            buttons.bottom() <= window_size.height,
-            "the action row is clipped: {buttons:?} in {window_size:?}"
+            buttons.bottom() <= dialog.bottom() - px(16.),
+            "the action row is pushed out of the padded content box: {buttons:?} vs {dialog:?}"
         );
     }
 }

@@ -47,7 +47,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### 顶层
 
-- [Window](#window) · [NativeMenuBar](#nativemenubar) · [Workspace](#workspace) · [WorkspaceShell](#workspaceshell) · [MainView](#mainview) · [TerminalColumn](#terminalcolumn) · [ViewMode](#viewmode) · [ViewMode::Workspace](#viewmodeworkspace-layout) · [ViewMode::Settings](#viewmodesettings) · [ViewMode::Terminal](#viewmodeterminal) · [ViewMode::ExternalSession](#viewmodeexternalsession)
+- [Window](#window) · [NativeMenuBar](#nativemenubar) · [AboutWindow](#aboutwindow) · [Workspace](#workspace) · [WorkspaceShell](#workspaceshell) · [MainView](#mainview) · [TerminalColumn](#terminalcolumn) · [ViewMode](#viewmode) · [ViewMode::Workspace](#viewmodeworkspace-layout) · [ViewMode::Settings](#viewmodesettings) · [ViewMode::Terminal](#viewmodeterminal) · [ViewMode::ExternalSession](#viewmodeexternalsession)
 
 ### Sidebar
 
@@ -132,6 +132,12 @@ Top-level native window, title "manox", min 900×600.
 macOS menu bar built by `build_app_menus()`: `manox` (About/Settings…/Quit), `Terminal` (new/close tab), and `工具` (Tools) with two app cascades. `ChatGPT.app` → provider → model: models mirror the provider registry snapshot filtered by `visible_agents()` containing `ChatGPT.app` (Responses-capable models), grouped by provider; picking a model dispatches `LaunchChatGptApp { provider, model }`, routed through the App-level action handler to `Workspace::launch_chatgpt_app`, which starts ChatGPT.app via cx's injection path on a background thread (selected model = default; the provider's full Responses catalog is injected). `VS Code` → provider → model: models filtered by `visible_agents()` containing `VS Code` (Anthropic-wire models); picking a model dispatches `LaunchVSCode { provider, model }` → `Workspace::launch_vscode_app` → `cx::launch_vscode_app`, which resolves the login-shell env, overlays Claude Code BYOK env (`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` + provider/model env) at highest priority, and launches VS Code with `VSCODE_CLI=1` so the extension host, the Claude Code extension's bundled CLI, and integrated terminals inherit the injected env (a running VS Code is restarted after user confirmation; no settings.json writes, API key never persisted). A trailing 「打开」item dispatches `LaunchVSCodePlain` → `cx::launch_vscode_plain` (plain `open -a`). The VS Code submenu is disabled when VS Code is not installed. Text-only — gpui native menu items carry no images. Rebuilt by `i18n::rebuild_menus` on UI-language change, after a provider-registry reload, and once when the initial background provider registration lands.
 
 > Source: `crates/manox/src/main.rs`
+
+#### AboutWindow
+
+Centered, non-resizable floating dialog (440×440, `WINDOW_WIDTH` / `WINDOW_HEIGHT` in `about.rs`) opened by the `OpenAbout` action from the native menu bar / tray path, single-instance (an existing About window is activated instead of a second one). Two direct children of the root (`about-window`, `p_4`, `justify_between`): `details` (`about-details`) — the app icon, the headline `Manox <app version> (<build type>)`, and then one muted-label provenance row per pinned stack, `manox desktop` (this repository's short commit), `manox harness` (the dspo/manox runtime commit), `gpui-component` and `gpui-pre` (the lockfile pins, rendered as their version literal or `owner/repo @ rev` when resolved from git); a row whose value the build could not resolve is absent — and `about-buttons` (`about-buttons`) with the OK / Copy pair (`about-ok` closes, `about-copy` writes the clipboard block and closes). Escape closes the window. Rows come from `provenance_rows()`; the clipboard block is the runtime's `version::structured_about()` followed by one `label: value` line per row.
+
+> Source: `crates/manox/src/about.rs`
 
 #### SystemTray
 
