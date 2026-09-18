@@ -735,6 +735,7 @@ impl Render for MessageItem {
             tool_ctx.as_ref(),
             body,
             notice_panel,
+            Some(self.weak_workspace.clone()),
             cx,
         ))
         .debug_selector(|| format!("message-item-body-{}", self.id))
@@ -771,6 +772,7 @@ pub fn render_item(
     tool_ctx: Option<&ToolCallCtx>,
     body: Option<Entity<Markdown>>,
     notice_panel: Option<Entity<TerminalPanel>>,
+    weak: Option<WeakEntity<Workspace>>,
     cx: &mut App,
 ) -> gpui::AnyElement {
     match item {
@@ -791,7 +793,22 @@ pub fn render_item(
             streaming: _,
             token_usage: _,
             activity_header,
-        } => render_assistant(text, ix, role, *activity_header, theme, body, cx),
+            entry_id,
+        } => render_assistant(
+            AssistantRenderContent {
+                text,
+                role,
+                activity_header: *activity_header,
+            },
+            ix,
+            theme,
+            body,
+            AssistantActions {
+                entry_id: entry_id.clone(),
+                weak,
+            },
+            cx,
+        ),
         ConvItem::Thinking(t) => render_thinking(t, ix, role, theme, tool_ctx, cx),
         ConvItem::ToolCall(t) => {
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
@@ -1023,20 +1040,42 @@ fn format_user_turn_time(timestamp: i64) -> String {
     }
 }
 
+/// The two things the assistant action row needs beyond the reply body: the
+/// reply's durable journal entry id (the fork anchor) and the owning workspace
+/// that can act on it. `entry_id` is `None` while a reply is still streaming
+/// (no durable row exists yet), which withholds the branch control.
+#[derive(Clone, Default)]
+pub struct AssistantActions {
+    pub entry_id: Option<String>,
+    pub weak: Option<WeakEntity<Workspace>>,
+}
+
+/// The assistant reply's own render inputs, grouped so the render entry point
+/// keeps a readable signature (`render_user`'s `UserRenderContent` is the
+/// precedent).
+pub struct AssistantRenderContent<'a> {
+    pub text: &'a str,
+    pub role: &'a str,
+    pub activity_header: bool,
+}
+
 /// Render an assistant message. A reply that follows an activity segment
-/// (`activity_header`) renders the body alone — the segment's header row
-/// already carries the model name — with the copy button overlaid on the
-/// body's top-right corner; a bare reply renders its own model row + copy
-/// button over the body.
+/// (`activity_header`) suppresses its own model row — the segment's header
+/// already carries the model name. The action row (copy / fork) always renders
+/// beneath the body, never overlaid on it.
 pub fn render_assistant(
-    text: &str,
+    content: AssistantRenderContent<'_>,
     ix: usize,
-    role: &str,
-    activity_header: bool,
     theme: &Theme,
     body: Option<Entity<Markdown>>,
+    actions: AssistantActions,
     cx: &mut App,
 ) -> gpui::AnyElement {
+    let AssistantRenderContent {
+        text,
+        role,
+        activity_header,
+    } = content;
     // Owned `Entity<Markdown>` (persistent → selection + streaming survive);
     // fall back to a per-frame mount for embedded sub-message bodies.
     let body_el = match body {
@@ -1044,49 +1083,74 @@ pub fn render_assistant(
         None => markdown_tv(("assistant", ix), text.to_string(), theme, false, cx),
     };
     let group = format!("assistant-{ix}");
-    let mut body_wrap = gpui::div()
-        .relative()
-        .w_full()
-        .min_w_0()
-        .overflow_x_hidden()
-        .child(body_el);
-    if activity_header {
-        // No model row to host the copy button: overlay it on the body's
-        // top-right, revealed on hover like every other transcript copy.
-        body_wrap = body_wrap.child(
-            gpui::div()
-                .absolute()
-                .top_0()
-                .right_0()
-                .opacity(0.0)
-                .group_hover(group.clone(), |s| s.opacity(1.0))
-                .child(copy_button(ix, "copy-assistant", text.to_string())),
-        );
-    }
     let mut col = v_flex().group(group.clone()).w_full().min_w_0().gap_1();
     if !activity_header {
         col = col.child(
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .items_center()
-                .child(
-                    gpui::div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(role.to_string()),
-                )
-                .child(gpui::div().flex_1())
-                .child(copy_button_hoverable(
-                    ix,
-                    "copy-assistant",
-                    group,
-                    text.to_string(),
-                )),
+            h_flex().w_full().min_w_0().gap_1().items_center().child(
+                gpui::div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(role.to_string()),
+            ),
         );
     }
-    col.child(body_wrap).into_any_element()
+    // The action row sits under the body (never overlaid on it), matching the
+    // reference web layout: copy / fork / usage / elapsed / clock.
+    col.child(
+        gpui::div()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .overflow_x_hidden()
+            .child(body_el),
+    )
+    .child(assistant_action_row(ix, &group, text, actions))
+    .into_any_element()
+}
+
+/// The assistant reply's action row: copy then fork, rendered beneath the body
+/// so no control ever covers prose. The whole row is hover-revealed like every
+/// other transcript affordance.
+fn assistant_action_row(
+    ix: usize,
+    group: &str,
+    text: &str,
+    actions: AssistantActions,
+) -> gpui::Div {
+    let mut row = h_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1()
+        .items_center()
+        .opacity(0.0)
+        .group_hover(group.to_string(), |s| s.opacity(1.0))
+        .child(copy_button(ix, "copy-assistant", text.to_string()));
+    // Fork needs both a durable anchor and a live owner to route the call
+    // through; a dropped workspace leaves copy as the row's only action.
+    if let (Some(entry_id), Some(weak)) = (actions.entry_id, actions.weak) {
+        row = row.child(fork_button(ix, weak, &entry_id));
+    }
+    row
+}
+
+/// Fork this session at the reply this button belongs to.
+///
+/// The button is revealed with the rest of the action row. A fork runs through
+/// the owning `Workspace` (which owns the outgoing call and the child bind), so
+/// the row only carries the durable anchor id.
+fn fork_button(ix: usize, weak: WeakEntity<Workspace>, entry_id: &str) -> Button {
+    let entry_id = entry_id.to_string();
+    Button::new(("fork-assistant", ix))
+        .ghost()
+        .xsmall()
+        .icon(gpui_kit_assets::IconName::GitBranch)
+        .tooltip(i18n::t("message-fork-here"))
+        .on_click(move |_, _window, cx: &mut App| {
+            let entry_id = entry_id.clone();
+            let _ = weak.update(cx, |workspace, cx| {
+                workspace.fork_session_at(&entry_id, cx);
+            });
+        })
 }
 
 /// Optional collapsible slot for `render_banner`: turns the label row into a
@@ -3161,6 +3225,7 @@ impl ItemBuilder {
                                         .as_deref()
                                         .and_then(|id| usage.get(id).copied()),
                                     activity_header,
+                                    entry_id: Some(m.id.clone()),
                                 });
                             }
                             MessageContent::Thinking { text, .. } => {
@@ -3697,6 +3762,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                             cx,
                         ))
                         .child(render_item(
@@ -3708,6 +3774,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                             cx,
                         ))
                         .child(render_item(
@@ -3715,6 +3782,7 @@ mod tests {
                             2,
                             "test-model",
                             &theme,
+                            None,
                             None,
                             None,
                             None,
@@ -4539,6 +4607,7 @@ mod tests {
             streaming: true,
             token_usage: None,
             activity_header: false,
+            entry_id: None,
         };
         assert_eq!(text_body_of(&assistant), Some((true, "hi".into())));
 
@@ -4582,5 +4651,33 @@ mod tests {
         // `TerminalPanel`) and must not mount a body markdown entity.
         let thinking = ConvItem::Thinking(ThinkingContainer::new());
         assert_eq!(text_body_of(&thinking), None);
+    }
+
+    /// A fork needs a durable anchor: only a landed reply carries an entry id,
+    /// so a still-streaming reply must not offer the branch control (there is
+    /// no `through_entry_id` to send). The builder is the only place the id is
+    /// attached, so assert it there rather than on a hand-built item.
+    #[test]
+    fn built_assistant_replies_carry_the_durable_entry_id() {
+        let usage = HashMap::new();
+        let mut items = Vec::new();
+        let mut builder = ItemBuilder::new(None);
+
+        let mut reply = Message::assistant(vec![MessageContent::Text("done".to_string())]);
+        reply.id = "entry-42".to_string();
+        builder.extend(&[reply], &usage, &mut items);
+
+        let entry_id = items
+            .iter()
+            .find_map(|item| match item {
+                ConvItem::Assistant { entry_id, .. } => Some(entry_id.clone()),
+                _ => None,
+            })
+            .expect("the batch produces an assistant item");
+        assert_eq!(
+            entry_id.as_deref(),
+            Some("entry-42"),
+            "a landed reply must expose its durable id so the row can fork"
+        );
     }
 }

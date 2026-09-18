@@ -102,6 +102,11 @@ pub enum ConvItem {
         /// the segment's header row carries the model name, so this reply
         /// renders no model row of its own (pure-text answers stay bare).
         activity_header: bool,
+        /// The reply's durable journal entry id (`ClientCall::ForkSession`'s
+        /// `through_entry_id`). `None` while streaming: the row has no
+        /// durable identity until it lands in the journal, so a fork has
+        /// nothing to anchor on yet.
+        entry_id: Option<String>,
     },
     /// One contiguous activity segment within a user turn, rendered as a
     /// segment shell: a header row carrying the model display name plus the
@@ -1003,6 +1008,9 @@ impl ConversationState {
                                 streaming: true,
                                 token_usage: None,
                                 activity_header,
+                                // A live stream has no durable row yet; the
+                                // authoritative rebuild supplies the id.
+                                entry_id: None,
                             },
                             role.to_string(),
                             id,

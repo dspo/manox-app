@@ -760,4 +760,47 @@ impl Workspace {
         let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
         self.attach_thread(thread, true, window, cx);
     }
+
+    /// Fork the current session at a durable entry, then open the child
+    /// (`ClientCall::ForkSession`, #775).
+    ///
+    /// The child is a prefix copy of this session's active chain through
+    /// `through_entry_id`; it lands as an independent sidebar row. Failure
+    /// leaves the current view untouched — a fork that cannot be created must
+    /// not disturb the transcript the user is reading.
+    pub(crate) fn fork_session_at(&mut self, through_entry_id: &str, cx: &mut Context<Self>) {
+        let Some(source_session_id) = self.session_id.clone() else {
+            tracing::warn!("fork: no session bound, ignoring");
+            return;
+        };
+        let ws = cx.weak_entity();
+        let entry_id = through_entry_id.to_string();
+        self.multiplexer.update(cx, |m, _| {
+            m.fork_session_intent(
+                &source_session_id,
+                &entry_id,
+                Box::new(move |done, cx| {
+                    let sid = match done {
+                        crate::multiplexer::CreateSessionDone::Created { session_id, .. } => {
+                            tracing::info!(session_id = %session_id, "fork landed");
+                            session_id
+                        }
+                        crate::multiplexer::CreateSessionDone::Failed { message } => {
+                            tracing::warn!(error = %message, "ForkSession failed");
+                            return;
+                        }
+                    };
+                    // Same borrow rule as the create path: this callback runs
+                    // inside the mux pump and opening the child re-enters the
+                    // mux, so the bind lands on a later tick.
+                    cx.spawn(async move |_, cx| {
+                        let _ = ws.update_in(cx, |this, window, cx| {
+                            this.open_thread(sid, window, cx);
+                        });
+                    })
+                    .detach();
+                }),
+            );
+        });
+    }
 }

@@ -908,6 +908,36 @@ impl SessionMultiplexer {
         self.create_callbacks.insert(id, on_done);
     }
 
+    /// Fork a session at a durable entry (`ClientCall::ForkSession`, #775).
+    ///
+    /// The fork is a prefix copy of the source's active chain up to and
+    /// including `through_entry_id`; the server mints the child id and answers
+    /// `{session_id}`, the same shape `CreateSession` returns — so the caller's
+    /// continuation is the same `CreateSessionDone` (on success the child is
+    /// registered and following, and the caller opens it).
+    ///
+    /// Every intent field is left `None`: the fork inherits the source's
+    /// model / cwd / approval / effort / project from the copied journal rather
+    /// than the global defaults, which is the behavior a "branch from here"
+    /// affordance wants.
+    pub fn fork_session_intent(
+        &mut self,
+        source_session_id: &str,
+        through_entry_id: &str,
+        on_done: CreateCallback,
+    ) {
+        let id = self.client.send_call(ClientCall::ForkSession {
+            source_session_id: source_session_id.to_string(),
+            through_entry_id: through_entry_id.to_string(),
+            cwd: None,
+            project: None,
+            initial_model: None,
+            approval_mode: None,
+            reasoning_effort: None,
+        });
+        self.create_callbacks.insert(id, on_done);
+    }
+
     /// Client-side focus transition (§F.2/GW5): the newly attached
     /// session's leaf goes active (clearing its monotonic unread/errored
     /// mirrors); the previously attached one goes inert. Selection is

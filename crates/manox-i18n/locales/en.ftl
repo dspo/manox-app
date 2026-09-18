@@ -133,6 +133,8 @@ message-user-role = You
 
 message-harness-role = Harness
 
+message-fork-here = Fork a new session from here
+
 recap-card-title = Context compacted
 
 cache-miss-label = cache miss · { $tokens } tokens

@@ -121,6 +121,8 @@ message-user-role = 你
 
 message-harness-role = Harness
 
+message-fork-here = 从此处分叉新会话
+
 recap-card-title = 上下文已压缩
 
 cache-miss-label = 缓存未命中 · { $tokens } tokens

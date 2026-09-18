@@ -491,6 +491,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
                 streaming: true,
                 token_usage: None,
                 activity_header: false,
+                entry_id: None,
             },
             "DeepSeek".into(),
             0,
@@ -504,6 +505,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
                 streaming: false,
                 token_usage: None,
                 activity_header: false,
+                entry_id: None,
             },
             "DeepSeek".into(),
             1,
@@ -590,6 +592,7 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
             streaming: false,
             token_usage: None,
             activity_header: false,
+            entry_id: None,
         },
         ConvItem::User {
             text: "需要修本项目吗？".into(),
@@ -602,6 +605,7 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
             streaming: false,
             token_usage: None,
             activity_header: false,
+            entry_id: None,
         },
     ]
     .into_iter()

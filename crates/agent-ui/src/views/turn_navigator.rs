@@ -420,6 +420,7 @@ mod tests {
             streaming: false,
             token_usage: None,
             activity_header: false,
+            entry_id: None,
         }
     }
 
