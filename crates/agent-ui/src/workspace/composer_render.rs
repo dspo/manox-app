@@ -458,6 +458,11 @@ impl Workspace {
     /// A selection that has not committed yet renders as a muted outline: the
     /// engine applies it at the next turn boundary, so the chip must not claim
     /// the new state before the boundary passes.
+    ///
+    /// `plan_mode_pending` carries no direction (`enabled != committed`), so
+    /// `active && pending` means an exit is already requested while plan mode
+    /// still gates writes. Clicking there must cancel back to `active`;
+    /// re-sending `false` would re-request the same exit and change nothing.
     pub(super) fn render_plan_chip(
         &self,
         theme: &Theme,
@@ -474,6 +479,9 @@ impl Workspace {
         if !active && !pending {
             return None;
         }
+        // Exiting: plan mode is in force but a leave is queued for the
+        // boundary. Entering: a switch-on is queued while still inactive.
+        let exiting = active && pending;
         Some(
             h_flex()
                 .id("plan-mode-chip")
@@ -489,21 +497,34 @@ impl Workspace {
                 .hover(|s| s.bg(theme.warning.opacity(0.22)))
                 .cursor_pointer()
                 .tooltip(move |window, cx| {
-                    let key = if pending {
-                        "plan-chip-pending-tooltip"
-                    } else {
-                        "plan-chip-exit-tooltip"
+                    let key = match (pending, exiting) {
+                        (true, true) => "plan-chip-pending-exit-tooltip",
+                        (true, false) => "plan-chip-pending-enter-tooltip",
+                        _ => "plan-chip-exit-tooltip",
                     };
                     Tooltip::new(i18n::t(key)).build(window, cx)
                 })
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.set_thread_plan_mode(false, cx);
-                    this.add_info_message(
-                        i18n::t("plan-mode-off-notice").to_string(),
-                        NoticeAnchor::TurnEnd,
-                        None,
-                        cx,
-                    );
+                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    // Pending cancels by re-selecting the committed state; a
+                    // committed chip leaves plan mode.
+                    let target = if pending { active } else { false };
+                    this.set_thread_plan_mode(target, cx);
+                    // "Full write access restored" only holds when plan mode
+                    // was actually in force; cancelling a queued switch-on
+                    // never took that access away.
+                    if active {
+                        this.add_info_message(
+                            i18n::t(if exiting {
+                                "plan-mode-on-notice"
+                            } else {
+                                "plan-mode-off-notice"
+                            })
+                            .to_string(),
+                            NoticeAnchor::TurnEnd,
+                            None,
+                            cx,
+                        );
+                    }
                 }))
                 .child(
                     Icon::new(IconName::LayoutDashboard)
@@ -514,10 +535,10 @@ impl Workspace {
                     gpui::div()
                         .text_xs()
                         .text_color(theme.warning)
-                        .child(i18n::t(if pending {
-                            "plan-chip-pending-label"
-                        } else {
-                            "plan-chip-label"
+                        .child(i18n::t(match (pending, exiting) {
+                            (true, true) => "plan-chip-pending-exit-label",
+                            (true, false) => "plan-chip-pending-enter-label",
+                            _ => "plan-chip-label",
                         })),
                 )
                 .into_any_element(),

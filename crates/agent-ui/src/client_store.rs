@@ -404,6 +404,37 @@ impl ClientStore {
         self.projections.get(key)
     }
 
+    /// Every field `materialize_projection` writes, as one comparable string.
+    /// Exists so the coverage guard can observe whether a key reached a field
+    /// rather than trusting a hand-kept list of names.
+    #[cfg(test)]
+    fn mirrored_fields(&self) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            self.display_title,
+            self.cwd,
+            self.project,
+            self.model_id,
+            self.permission_mode,
+            self.reasoning_effort,
+            self.plan_mode,
+            self.plan_mode_pending,
+            self.persisted_plan,
+            self.goal,
+            self.running,
+            self.has_interacted,
+            self.pinned,
+            self.archived,
+            self.depth,
+            self.branch,
+            self.browser_suites,
+            self.pending_auth_set,
+            self.background_tasks,
+            self.agent_label,
+            self.self_author,
+        )
+    }
+
     fn materialize_projection(&mut self, key: &str, value: &Value) {
         match key {
             "title" => self.display_title = value.as_str().unwrap_or_default().to_string(),
@@ -651,63 +682,67 @@ impl ClientStore {
 mod tests {
     use super::*;
 
-    /// Keys the protocol declares that this store deliberately does not mirror.
-    /// Each entry needs a reason; the list is the only sanctioned way to
-    /// acknowledge an unmirrored key. Empty is the healthy state.
+    /// Keys the protocol declares that this store deliberately does not
+    /// materialize onto a field (display-only, or read straight from the
+    /// `projections` slot by a view). Each entry needs a reason; the list is
+    /// the only sanctioned way to acknowledge an unmirrored key.
     const DISPLAY_ONLY_PROJECTION_KEYS: &[&str] = &[];
 
-    /// Keys `merge_projection` mirrors onto a field, in the match arm's own
-    /// order. Keep in lockstep with those arms: the test below fails when this
-    /// list and the protocol disagree in either direction.
-    const MIRRORED_PROJECTION_KEYS: &[&str] = &[
-        "title",
-        "cwd",
-        "project",
-        "model",
-        "permission_mode",
-        "reasoning_effort",
-        "plan_mode",
-        "plan_mode_pending",
-        "plan",
-        "goal",
-        "running",
-        "has_interacted",
-        "pinned",
-        "archived",
-        "depth",
-        "branch",
-        "browser_suites",
-        "pending_auth",
-        "background_tasks",
-        "agent_label",
-        "self_author",
-    ];
+    /// A probe value per declared key, in the shape that key's arm parses.
+    /// `None` means the key is expected to reach no field (and must therefore
+    /// be listed in `DISPLAY_ONLY_PROJECTION_KEYS`). The guard requires the
+    /// store to react to its probe, so a key whose match arm is deleted while
+    /// its declaration stays fails here — which comparing two handwritten
+    /// lists of names cannot see.
+    fn probe_for(key: &str) -> Option<Value> {
+        Some(match key {
+            "title" | "cwd" | "project" | "agent_label" => Value::String("lead".into()),
+            // Routing names resolve through `MessageAuthor::from_routing`; the
+            // default author is `Agent("")`, so this maps to a distinct arm.
+            "self_author" => Value::String("harness".into()),
+            "model" => serde_json::json!({ "modelId": "probe-model" }),
+            "permission_mode" => Value::String("read-only".into()),
+            "reasoning_effort" => Value::String("max".into()),
+            "plan_mode" | "plan_mode_pending" | "running" | "has_interacted" | "pinned"
+            | "archived" => Value::Bool(true),
+            "plan" | "goal" => serde_json::json!({ "probe": true }),
+            "depth" => Value::from(7u64),
+            "branch" => Value::String("probe-branch".into()),
+            "browser_suites" => Value::Array(vec![Value::String("webexplore".into())]),
+            "pending_auth" => serde_json::json!({ "auth-1": true }),
+            "background_tasks" => serde_json::json!({ "task-1": { "id": "task-1" } }),
+            _ => return None,
+        })
+    }
 
-    /// Every key the protocol declares must be mirrored here or be listed as
+    /// Every key the protocol declares must reach a field, or be listed as
     /// display-only. The merge match ends in `_ => {}`, so an upstream key
     /// this client does not know is dropped in silence — no compile error, no
-    /// runtime warning. This test is the missing guard: adding a key upstream
-    /// turns into a failure here rather than a field that never updates.
-    ///
-    /// Both directions are checked, so a stale entry for a key the protocol
-    /// has since dropped fails too.
+    /// runtime warning.
     #[test]
     fn every_declared_projection_key_is_mirrored() {
-        let declared: std::collections::BTreeSet<&str> = manox_protocol::surface::PROJECTION_KEYS
+        let unmirrored: Vec<&str> = manox_protocol::surface::PROJECTION_KEYS
             .iter()
             .copied()
+            .filter(|key| !DISPLAY_ONLY_PROJECTION_KEYS.contains(key))
+            .filter(|key| {
+                let Some(probe) = probe_for(key) else {
+                    // No probe: the guard cannot observe this key, so it must
+                    // be acknowledged as display-only rather than silently
+                    // pass. The assertion below reports it either way.
+                    return true;
+                };
+                let mut store = ClientStore::default();
+                let before = store.mirrored_fields();
+                store.merge_projection(key, probe, 1);
+                store.mirrored_fields() == before
+            })
             .collect();
-        let handled: std::collections::BTreeSet<&str> = MIRRORED_PROJECTION_KEYS
-            .iter()
-            .copied()
-            .chain(DISPLAY_ONLY_PROJECTION_KEYS.iter().copied())
-            .collect();
-        let unhandled: Vec<_> = declared.difference(&handled).collect();
-        let stale: Vec<_> = handled.difference(&declared).collect();
         assert!(
-            unhandled.is_empty() && stale.is_empty(),
-            "projection key coverage drifted — declared upstream but not mirrored here: \
-             {unhandled:?}; listed here but no longer declared upstream: {stale:?}"
+            unmirrored.is_empty(),
+            "projection keys declared upstream but reaching no field: {unmirrored:?} \
+             — materialize them in `merge_projection`, or list them in \
+             DISPLAY_ONLY_PROJECTION_KEYS with a reason"
         );
     }
 
