@@ -9,7 +9,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use gpui::{App, AppContext as _, Entity, SharedString, WeakEntity};
@@ -455,9 +454,21 @@ impl ThinkingContainer {
 /// are addressed by id at click time (a render-time index into `items` can
 /// outlive the list shape it counted into), exactly as tool entries carry the
 /// protocol's tool-call id.
+///
+/// The minted shape — a `reasoning:` namespace over a fresh UUID — keeps the
+/// two id spaces [`ThinkingContainer::find_entry_index`] resolves disjoint
+/// by construction rather than by luck: a wire tool-call id is an opaque
+/// provider token and never takes this shape, so the wire-id lookups
+/// (`item_contains_tool`, `pair_tool_result`) can never land on a reasoning
+/// round. A plain counter (`reasoning-N`) sat inside the space of plausible
+/// wire ids and only avoided collisions accidentally.
+///
+/// Minted ids are process-local render-side names: nothing is persisted, and
+/// a history rebuild mints fresh ids rather than replaying the live round's.
+/// An id is only ever read back within the render→click cycle that carries
+/// it, so the churn across that boundary is unobservable.
 pub fn next_reasoning_entry_id() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    format!("reasoning-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+    format!("reasoning:{}", uuid::Uuid::new_v4())
 }
 
 impl Default for ThinkingContainer {
@@ -2846,6 +2857,67 @@ mod tests {
         }));
         assert!(t.get_tool_entry_mut("tu_1").is_some());
         assert!(t.get_tool_entry_mut("nonexistent").is_none());
+    }
+
+    /// The two id spaces `find_entry_index` resolves are disjoint by
+    /// construction: a reasoning round carries the UI-minted
+    /// `reasoning:{uuid}`, and no wire tool-call id can address it.
+    #[test]
+    fn reasoning_entry_ids_do_not_collide_with_protocol_tool_call_ids() {
+        let minted = next_reasoning_entry_id();
+        let (namespace, suffix) = minted.split_once(':').expect("namespaced id");
+        assert_eq!(namespace, "reasoning");
+        uuid::Uuid::parse_str(suffix).expect("uuid-suffixed mint");
+        assert_ne!(
+            minted,
+            next_reasoning_entry_id(),
+            "each round mints a fresh id"
+        );
+
+        let mut t = ThinkingContainer::new();
+        t.entries.push(ActivityEntry::Reasoning {
+            id: minted.clone(),
+            text: "round".into(),
+            streaming: false,
+            collapsed: true,
+            user_toggled: false,
+            markdown: None,
+        });
+        // A wire id in the counter shape a naive mint would have produced:
+        // it must address the tool entry, never the reasoning round.
+        t.entries.push(ActivityEntry::Tool(ToolCallItem {
+            id: "reasoning-0".into(),
+            name: "Read".into(),
+            title: String::new(),
+            status: ToolCallStatus::Success,
+            output: String::new(),
+            is_error: false,
+            input: serde_json::Value::Null,
+            streaming: false,
+            collapsed: false,
+            user_toggled: false,
+            panel: None,
+        }));
+        assert_eq!(t.find_entry_index(&minted), Some(0));
+        assert_eq!(t.find_entry_index("reasoning-0"), Some(1));
+        assert_eq!(t.find_entry_index("reasoning-1"), None);
+
+        // The wire-id-driven `item_contains_tool` path is the same lookup: a
+        // segment holding only reasoning rounds reports no tool for any wire
+        // id of the old counter shape.
+        let mut solo = ThinkingContainer::new();
+        solo.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
+            text: "round".into(),
+            streaming: false,
+            collapsed: true,
+            user_toggled: false,
+            markdown: None,
+        });
+        assert!(
+            !item_contains_tool(&ConvItem::Thinking(solo), "reasoning-0"),
+            "a wire id must never read a reasoning round as a tool entry"
+        );
     }
 
     /// Joined reasoning text of a segment's reasoning rounds, for ordering

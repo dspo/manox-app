@@ -433,6 +433,12 @@ impl RenderOnce for ChainOfThoughtStep {
             "`label` replaces the default title row: a step given both `label` \
              and `disclosed` never shows its disclosure"
         );
+        debug_assert!(
+            self.label.is_none() || self.title.is_none(),
+            "`label` replaces the default title row outright: `title` and \
+             `label` are the same slot, and a step given both never shows its \
+             title"
+        );
         let (border, muted) = {
             let theme = cx.theme();
             (theme.border, theme.muted_foreground)
