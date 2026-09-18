@@ -35,6 +35,7 @@ gpui-kit-assets.workspace = true
 rust-embed.workspace = true
 
 manox-agent.workspace = true
+manox-i18n.workspace = true
 manox-terminal.workspace = true
 terminal-ui.workspace = true
 manox-components.workspace = true

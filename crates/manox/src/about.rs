@@ -13,7 +13,8 @@ use gpui_component::{
     StyledExt as _, Theme,
     button::{Button, ButtonVariants as _},
 };
-use manox_agent::{i18n, version};
+use manox_agent::version;
+use manox_i18n as i18n;
 
 use crate::pins;
 

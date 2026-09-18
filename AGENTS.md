@@ -15,6 +15,7 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
   terminal-ui/             # 终端渲染层（TerminalElement/TerminalView；仿真核心在 dspo/manox 的 manox-terminal）
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   manox-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
+  manox-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
   manox-webview/           # wry 原生 webview + Tauri 式 IPC
   manox-webview-macros/    # webview IPC 过程宏
   cx/                      # cx headless 库（配置核心、launch-home、
@@ -69,7 +70,15 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 
 ## 提示词与 i18n
 
-模型面向字符串一律英文、绝不本地化；UI chrome 本地化经 `manox_agent::i18n::t("key")`（Fluent 资源与规则在 dspo/manox 仓的 `crates/manox-agent/locales/`）。提示词模板维护在 manox 仓，本仓不得内嵌多段落提示词散文。
+本仓是 i18n 的**唯一归属地**：`crates/manox-i18n` 自带 Fluent 栈与全部资源（`crates/manox-i18n/locales/{zh-CN,en}.ftl`），中文为第一语言（primary + 默认），英文为次（fallback）。调用经 `agent_ui::i18n::t("key")`（gpui 层 `SharedString` 包装）或 `manox_i18n::t`（无 gpui 依赖的层）。
+
+**i18n 只覆盖 app chrome**：侧栏、设置面板、菜单栏、托盘、About、终端 overlay 等本仓自产的界面文案。
+
+**manox runtime 传入的值一律原样渲染，禁止二次本地化**——工具 title/summary、slash 命令 description（runtime 给英文）、plan 文本、`AskUserQuestion` 的 header、模型产出内容。新增 UI 文案 = 在 `crates/manox-i18n/locales/` 两个 `.ftl` 各加一个键（缺一不可，parity 由单测守护）+ 调用处换 `t("key")`。
+
+模型面向字符串（提示词模板、工具 description）一律英文且**不在本仓维护**：多段落提示词散文全部在 dspo/manox 仓，本仓不得内嵌。
+
+语言配置 `ui_language` 由本仓拥有（`manox_i18n::{load_ui_language, persist_ui_language}`，读写 `~/.manox/settings.toml` 中该键且只碰该键）；`agent_language` 键已随 manox 侧语言轴退役而废除，不再有意涵。
 
 ## 工作流约定
 

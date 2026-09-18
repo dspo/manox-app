@@ -578,27 +578,19 @@ pub fn render_general(view: &mut SettingsView, cx: &mut Context<SettingsView>) -
                 mock_dropdown_with_post(
                     "ui-language",
                     view.ui_language.clone(),
-                    vec![
-                        (SharedString::from("English"), SharedString::from("en")),
-                        (SharedString::from("简体中文"), SharedString::from("zh-CN")),
-                    ],
+                    // Endonym is the label, token the persisted value; both come
+                    // from the enum so the picker cannot drift from the parser.
+                    [manox_i18n::Language::ZhCn, manox_i18n::Language::En]
+                        .into_iter()
+                        .map(|lang| {
+                            (
+                                SharedString::from(lang.endonym()),
+                                SharedString::from(lang.token()),
+                            )
+                        })
+                        .collect(),
                     entity.clone(),
                     Arc::new(|this, value, cx| this.persist_ui_language(value.clone(), cx)),
-                ),
-            ),
-            hairline(theme.border.opacity(0.6)),
-            row_with_control(
-                i18n::t("settings-row-agent-language"),
-                Some(muted_text(i18n::t("settings-desc-agent-language"), muted)),
-                mock_dropdown_with_post(
-                    "agent-language",
-                    view.agent_language.clone(),
-                    vec![
-                        (SharedString::from("English"), SharedString::from("en")),
-                        (SharedString::from("简体中文"), SharedString::from("zh-CN")),
-                    ],
-                    entity.clone(),
-                    Arc::new(|this, value, cx| this.persist_agent_language(value.clone(), cx)),
                 ),
             ),
             hairline(theme.border.opacity(0.6)),

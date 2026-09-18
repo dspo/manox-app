@@ -337,7 +337,7 @@ impl SlashCommand for ModeCommand {
         builtin_meta("mode").name
     }
     fn description(&self) -> SharedString {
-        i18n::t(builtin_meta("mode").description_key)
+        builtin_meta("mode").description.into()
     }
     fn execute(
         &self,
@@ -385,7 +385,7 @@ impl SlashCommand for PlanCommand {
         builtin_meta("plan").name
     }
     fn description(&self) -> SharedString {
-        i18n::t(builtin_meta("plan").description_key)
+        builtin_meta("plan").description.into()
     }
     fn execute(
         &self,
@@ -434,7 +434,7 @@ impl SlashCommand for CompactCommand {
         builtin_meta("compact").name
     }
     fn description(&self) -> SharedString {
-        i18n::t(builtin_meta("compact").description_key)
+        builtin_meta("compact").description.into()
     }
     fn execute(
         &self,
@@ -473,7 +473,7 @@ impl SlashCommand for GoalCommand {
         builtin_meta("goal").name
     }
     fn description(&self) -> SharedString {
-        i18n::t(builtin_meta("goal").description_key)
+        builtin_meta("goal").description.into()
     }
     fn execute(
         &self,
@@ -625,7 +625,7 @@ impl SlashCommand for ExitCommand {
         builtin_meta("exit").name
     }
     fn description(&self) -> SharedString {
-        i18n::t(builtin_meta("exit").description_key)
+        builtin_meta("exit").description.into()
     }
     fn aliases(&self) -> &[&str] {
         builtin_meta("exit").aliases
@@ -651,7 +651,7 @@ impl SlashCommand for NewCommand {
         builtin_meta("new").name
     }
     fn description(&self) -> SharedString {
-        i18n::t(builtin_meta("new").description_key)
+        builtin_meta("new").description.into()
     }
     fn aliases(&self) -> &[&str] {
         builtin_meta("new").aliases

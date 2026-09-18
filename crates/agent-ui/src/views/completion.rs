@@ -94,9 +94,10 @@ pub fn detect(value: &str, cursor: usize) -> Option<Detection> {
 /// skills), filtered + sorted by `query`. U2: the listing is the gateway's
 /// command snapshot (§D.5 `Commands` / `ListCommands` — the server projects
 /// the same registries the desktop's dispatch adapters mirror), so a remote
-/// server's registry drives the popover. Built-ins carry their fluent
-/// `i18n_key` (description null) and localize here; macros and skills carry
-/// their frontmatter description verbatim. Execution still dispatches
+/// server's registry drives the popover. Every description is rendered
+/// verbatim: built-ins carry the runtime's English copy and macros/skills
+/// carry their frontmatter description, and none of it is app chrome, so it
+/// is never resolved through the local bundles. Execution still dispatches
 /// through the desktop-local registry (`slash_command::parse`/`dispatch`).
 pub fn slash_source(query: &str, commands: &serde_json::Value) -> Vec<CompletionItem> {
     let Some(entries) = commands.as_array() else {
@@ -110,14 +111,11 @@ pub fn slash_source(query: &str, commands: &serde_json::Value) -> Vec<Completion
                 Some("skill") => CompletionKind::Skill,
                 _ => CompletionKind::Command,
             };
-            let description = match entry.get("description").and_then(|d| d.as_str()) {
-                Some(d) => d.to_string(),
-                None => entry
-                    .get("i18n_key")
-                    .and_then(|k| k.as_str())
-                    .map(|k| i18n::t(k).to_string())
-                    .unwrap_or_default(),
-            };
+            let description = entry
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or_default()
+                .to_string();
             Some(CompletionItem {
                 name: name.into(),
                 description: description.into(),

@@ -107,11 +107,13 @@ impl Workspace {
         if self.conversation.read(cx).find_tool(id, cx).is_some() {
             return;
         }
-        let title = if summary.trim().is_empty() {
-            i18n::t("workspace-clarify-title").to_string()
-        } else {
-            summary.to_string()
-        };
+        // The runtime always supplies a non-empty English summary for its own
+        // tool call (`CLARIFY_TITLE`), so there is no empty case to fall back
+        // from and no local bundle should be consulted — runtime-supplied
+        // values are never re-localized here. The card's own empty-header
+        // fallback lives at the render site, where the runtime value can
+        // actually be absent.
+        let title = summary.to_string();
         let role = self.model_label(cx);
         let weak = cx.weak_entity();
         self.conversation.update(cx, |conversation, cx| {

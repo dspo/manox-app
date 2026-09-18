@@ -85,8 +85,7 @@ impl BrowserView {
         let webview = cx.new(|cx| manox_webview::webview::WebView::new(wry, window, cx));
 
         let address = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(manox_agent::i18n::t("browser-address-placeholder"))
+            InputState::new(window, cx).placeholder(manox_i18n::t("browser-address-placeholder"))
         });
         address.update(cx, |s, cx| s.set_value(url, window, cx));
 
@@ -245,13 +244,13 @@ impl Render for BrowserView {
                             .min_w_0()
                             .text_color(theme.foreground)
                             .text_sm()
-                            .child(manox_agent::i18n::t("browser-yield-hint")),
+                            .child(manox_i18n::t("browser-yield-hint")),
                     )
                     .child(
                         Button::new("browser-yield-complete")
                             .small()
                             .primary()
-                            .label(manox_agent::i18n::t("browser-yield-complete"))
+                            .label(manox_i18n::t("browser-yield-complete"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 // Resume the parked yield Task via the host;
                                 // clear the banner locally either way.
@@ -268,7 +267,7 @@ impl Render for BrowserView {
                     .text_color(theme.muted_foreground)
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(manox_agent::i18n::t("browser-read-hint"))
+                    .child(manox_i18n::t("browser-read-hint"))
             }))
             .child(
                 div()

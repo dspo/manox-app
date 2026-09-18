@@ -35,6 +35,7 @@ members = [
 	"crates/manox-components",
 	"crates/manox-webview",
 	"crates/manox-webview-macros",
+	"crates/manox-i18n",
 ]
 resolver = "2"
 
@@ -68,6 +69,7 @@ manox-ext-agents = { path = "crates/manox-ext-agents" }
 # cx —— headless 库（原 dspo/cx 仓库并入 manox，拆分时随应用侧迁入本仓）。
 cx = { path = "crates/cx" }
 cx-cli = { path = "crates/cx-cli" }
+manox-i18n = { path = "crates/manox-i18n" }
 
 anyhow = "1"
 async-channel = "2"
@@ -81,6 +83,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 http = "1"
+# fluent + BCP47 —— manox-app 自己的 UI chrome 本地化栈（crates/manox-i18n）。
+# 仅服务 app chrome；manox runtime 传入的值不经过它。
+fluent = "0.17"
+unic-langid = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"

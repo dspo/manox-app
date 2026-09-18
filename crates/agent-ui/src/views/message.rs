@@ -1937,11 +1937,7 @@ fn render_ask_user_card(
     let can_prev = step > 0;
     let can_next = step + 1 < total;
 
-    let title = if snapshot.question.header.trim().is_empty() {
-        i18n::t("workspace-clarify-title")
-    } else {
-        snapshot.question.header.clone().into()
-    };
+    let title = question_card_title(&snapshot.question.header);
 
     let weak_prev = weak.clone();
     let weak_next = weak.clone();
@@ -3442,8 +3438,41 @@ fn pair_tool_result(items: &mut Vec<ConvItem>, tr: &LanguageModelToolResult) {
     }
 }
 
+/// Title for a `AskUserQuestion` card.
+///
+/// A header comes from the model/runtime and is shown as-is. The runtime does
+/// not require it (`parse_pending_ask` tolerates a missing field), so an empty
+/// header falls back to this app's own chrome label rather than rendering a
+/// blank card.
+fn question_card_title(header: &str) -> SharedString {
+    if header.trim().is_empty() {
+        i18n::t("workspace-clarify-title")
+    } else {
+        header.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// An empty question header is reachable (the runtime's validation does not
+    /// require the field), so the card must fall back to app chrome rather
+    /// than render a blank title. A present header is shown verbatim.
+    #[test]
+    fn question_card_title_falls_back_for_an_empty_header() {
+        let fallback = i18n::t("workspace-clarify-title");
+        assert_ne!(
+            fallback.as_ref(),
+            "workspace-clarify-title",
+            "the fallback key is missing from the bundles"
+        );
+        for empty in ["", "   ", "\n"] {
+            assert_eq!(question_card_title(empty), fallback, "header: {empty:?}");
+        }
+        assert_eq!(question_card_title("Pick a database"), "Pick a database");
+        // Runtime-supplied text is never re-localized, even when it is Chinese.
+        assert_eq!(question_card_title("选一个数据库"), "选一个数据库");
+    }
     use super::*;
     use gpui::{
         AnyWindowHandle, Bounds, Pixels, Render, TestAppContext, VisualTestContext, Window, size,
