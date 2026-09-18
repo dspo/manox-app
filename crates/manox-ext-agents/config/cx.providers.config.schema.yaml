@@ -1,5 +1,6 @@
-# cx providers config schema — for downstream validation (e.g. manox).
-# Mirror of docs/cx-config-schema.yaml; update both when the shape changes.
+# cx providers config schema — the format contract for
+# ~/.manox/cx.providers.config.yaml. The provider list itself is user-owned;
+# providers.example.yaml in this directory carries a sanitized sample.
 
 providers:
   - name: "string (required, unique)"

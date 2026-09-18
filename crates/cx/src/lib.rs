@@ -39,7 +39,9 @@ pub mod probe;
 
 pub const LAUNCH_HOME_DIR_NAME: &str = "cx-launch-homes";
 pub const LAUNCH_HOME_TTL_SECS: u64 = 60 * 60 * 24;
-pub const DEFAULT_PROVIDER_CONFIG_YAML: &str = include_str!("../config/providers.default.yaml");
+// Single owner of the first-run baseline: cx and its embedders both read the
+// copy manox-ext-agents embeds.
+pub use manox_ext_agents::DEFAULT_PROVIDER_CONFIG_YAML;
 // Add-wizard 词汇：providers_for_agent 追加的哨兵 provider 与操作标签（cx-cli 的
 // Add 向导与嵌入方按同名识别）。
 pub const ADD_PROVIDER_SENTINEL: &str = "+ 添加 Provider";

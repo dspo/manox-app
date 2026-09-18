@@ -56,7 +56,7 @@ Rust **1.95.0**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`ru
 
 ## 工具链 & Skills
 
-涉及 GPUI/UI 开发时，先通过 Skill 工具加载 `.claude/skills/` 下的 skill：
+涉及 GPUI/UI 开发时，先通过 Skill 工具加载 `.claude/skills/` 下的 skill（该目录不托管进 git，只在本地存在）：
 - `gpui` — GPUI 框架（Entity/Render/actions/keybindings/async/layout）
 - `gpui-component` — gpui-component 组件库（Button/Input/List/Sidebar 等）
 - `gpui-component-dev` — 为 gpui-component 贡献新组件时额外加载
