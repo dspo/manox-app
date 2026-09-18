@@ -454,17 +454,24 @@ impl Workspace {
     /// research + plan-file writes), so the state is never silent. Clicking
     /// it leaves plan mode — the escape hatch when a review card is missed
     /// or the model stalls in research.
+    ///
+    /// A selection that has not committed yet renders as a muted outline: the
+    /// engine applies it at the next turn boundary, so the chip must not claim
+    /// the new state before the boundary passes.
     pub(super) fn render_plan_chip(
         &self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self
+        let (active, pending) = self
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.plan_mode)
-            .expect("foreground store present")
-        {
+            .map(|s| {
+                let store = s.read(cx);
+                (store.store.plan_mode, store.store.plan_mode_pending)
+            })
+            .expect("foreground store present");
+        if !active && !pending {
             return None;
         }
         Some(
@@ -475,11 +482,19 @@ impl Workspace {
                 .px_2()
                 .py_1()
                 .rounded(theme.radius)
-                .bg(theme.warning.opacity(0.12))
+                .when(pending, |chip| {
+                    chip.border_1().border_color(theme.warning.opacity(0.5))
+                })
+                .bg(theme.warning.opacity(if pending { 0.05 } else { 0.12 }))
                 .hover(|s| s.bg(theme.warning.opacity(0.22)))
                 .cursor_pointer()
                 .tooltip(move |window, cx| {
-                    Tooltip::new(i18n::t("plan-chip-exit-tooltip")).build(window, cx)
+                    let key = if pending {
+                        "plan-chip-pending-tooltip"
+                    } else {
+                        "plan-chip-exit-tooltip"
+                    };
+                    Tooltip::new(i18n::t(key)).build(window, cx)
                 })
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.set_thread_plan_mode(false, cx);
@@ -499,7 +514,11 @@ impl Workspace {
                     gpui::div()
                         .text_xs()
                         .text_color(theme.warning)
-                        .child(i18n::t("plan-chip-label")),
+                        .child(i18n::t(if pending {
+                            "plan-chip-pending-label"
+                        } else {
+                            "plan-chip-label"
+                        })),
                 )
                 .into_any_element(),
         )
