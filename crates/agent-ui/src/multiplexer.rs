@@ -158,10 +158,10 @@ impl SessionMultiplexer {
             tracing::error!("mux pump exited (channel closed)");
             // Transport end = receipts can no longer arrive (disconnect /
             // same-client-id reseat / server shutdown): drain the pending
-            // create/fork continuations through their `Failed` arm so
+            // create/fork continuations and the MsgId fetch tables so
             // caller-side guards (the workspace's fork-in-flight flag)
-            // clear instead of sticking forever.
-            let _ = this.update(cx, |m, cx| m.fail_pending_creates(cx));
+            // clear and nothing idles past the boundary.
+            let _ = this.update(cx, |m, cx| m.drain_pending_on_transport_end(cx));
         });
         let (leaf_tx, leaf_rx) = async_channel::unbounded::<LeafRequest>();
         let _leaf_pump = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
@@ -944,15 +944,20 @@ impl SessionMultiplexer {
         self.create_callbacks.insert(id, on_done);
     }
 
-    /// Fail every pending create/fork continuation (transport end).
+    /// Drain every MsgId-keyed in-flight table (transport end).
     ///
     /// Receipts ride the request channel: once it is closed no `Response`
     /// can ever arrive, so waiting one out would leave a continuation (and
     /// any user-visible guard hanging off it, like the workspace's
     /// fork-in-flight flag) stuck for the multiplexer's remaining life.
-    /// Draining through the ordinary `Failed` arm keeps a lost receipt
-    /// equivalent to a rejected call.
-    fn fail_pending_creates(&mut self, cx: &mut Context<Self>) {
+    /// Create/fork continuations drain through the ordinary `Failed` arm,
+    /// keeping a lost receipt equivalent to a rejected call.
+    ///
+    /// The fetch tables have no continuation to fail: their work is
+    /// re-issued by any future reopen/refetch, and feeding the leaves an
+    /// `Err` here would spin reopen chains against the dead wire. They are
+    /// dropped with a trace instead.
+    fn drain_pending_on_transport_end(&mut self, cx: &mut Context<Self>) {
         let pending: Vec<CreateCallback> = self
             .create_callbacks
             .drain()
@@ -965,6 +970,20 @@ impl SessionMultiplexer {
                 },
                 cx,
             );
+        }
+        if !self.info_fetches.is_empty()
+            || !self.page_fetches.is_empty()
+            || !self.list_fetches.is_empty()
+        {
+            tracing::warn!(
+                info = self.info_fetches.len(),
+                page = self.page_fetches.len(),
+                list = self.list_fetches.len(),
+                "transport closed with pending fetches; dropping them"
+            );
+            self.info_fetches.clear();
+            self.page_fetches.clear();
+            self.list_fetches.clear();
         }
     }
 

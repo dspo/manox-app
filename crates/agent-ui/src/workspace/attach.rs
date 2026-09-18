@@ -782,8 +782,10 @@ impl Workspace {
         // One fork in flight at a time: the call is a round trip, and a second
         // click on any reply would otherwise mint another child for the same
         // intent. The guard clears when the verdict lands (either way); a
-        // receipt that can never arrive is failed by the multiplexer when the
-        // transport ends, so the guard cannot outlive the round trip.
+        // receipt lost to a transport end is failed by the multiplexer at
+        // that boundary. A receipt lost to a hung handler on a living
+        // channel is upstream always-answer territory — no timer
+        // compensates for it here.
         if self.fork_in_flight {
             tracing::debug!("fork: already in flight, ignoring");
             return;
