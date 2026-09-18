@@ -45,6 +45,16 @@ tray-icon.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 ksni.workspace = true
 
+[dev-dependencies]
+# gpui test-support — the headless layout check in src/about.rs measures the
+# About dialog's rendered bounds, matching what the other UI crates do.
+gpui = { workspace = true, features = ["test-support"] }
+
+[build-dependencies]
+# Cargo.lock 是本次构建所 pin 依赖的唯一事实来源（GPUI 栈版本、dspo/manox rev）；
+# About 窗口直接报告它，而不是手工维护的常量表。
+toml.workspace = true
+
 [package.metadata.bundle]
 identifier = "dev.dspo.manox"
 name = "Manox"

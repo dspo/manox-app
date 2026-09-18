@@ -9,6 +9,7 @@ use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use std::borrow::Cow;
 
 mod about;
+mod pins;
 mod tray;
 
 // The harness backend is selected at build time; exactly one must be active.

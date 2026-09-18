@@ -305,10 +305,7 @@ impl Workspace {
                             .w_full()
                             .gap_3()
                             .items_center()
-                            .child(
-                                crate::views::braille_spinner::BrailleSpinner::new()
-                                    .color(theme.muted_foreground),
-                            )
+                            .child(ai_elements::BrailleSpinner::new().color(theme.muted_foreground))
                             .child(
                                 gpui::div()
                                     .text_xs()

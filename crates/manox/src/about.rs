@@ -1,8 +1,10 @@
 //! About window: centered floating dialog with the app icon, a headline
-//! version line, muted-label commit/version rows, and an OK / Copy action
-//! row. Copy writes the structured info block (`version::structured_about`)
-//! to the clipboard and closes the window; Escape closes as well. Duplicate
-//! window detection keeps a single instance.
+//! app-version line, one muted-label provenance row per pinned stack
+//! (manox desktop, manox harness, gpui-component, gpui-pre), and an OK / Copy
+//! action row. Copy writes the structured info block
+//! (`version::structured_about`) followed by those rows to the clipboard and
+//! closes the window; Escape closes as well. Duplicate window detection keeps a
+//! single instance.
 
 use std::sync::Arc;
 
@@ -13,12 +15,26 @@ use gpui_component::{
 };
 use manox_agent::{i18n, version};
 
+use crate::pins;
+
+/// About dialog size. The height has to fit the icon, the headline and one
+/// label/value pair per provenance row without clipping; `rows_fit_in_window`
+/// pins that.
+const WINDOW_WIDTH: f32 = 440.;
+const WINDOW_HEIGHT: f32 = 440.;
+
+/// One provenance row: a stack identifier label and its build-time value.
+/// Labels are package/product identifiers, so they stay untranslated.
+struct InfoRow {
+    label: &'static str,
+    value: SharedString,
+}
+
 struct AboutWindow {
     focus_handle: FocusHandle,
     app_icon: Arc<Image>,
     message: SharedString,
-    commit: Option<SharedString>,
-    full_version: SharedString,
+    rows: Vec<InfoRow>,
 }
 
 impl AboutWindow {
@@ -31,18 +47,48 @@ impl AboutWindow {
             )),
             message: SharedString::from(format!(
                 "Manox {} ({})",
-                version::PKG_VERSION,
+                env!("CARGO_PKG_VERSION"),
                 version::build_type()
             )),
-            commit: version::COMMIT_SHA.map(SharedString::from),
-            full_version: SharedString::from(version::full_version_string()),
+            rows: provenance_rows(),
         }
     }
 
     fn copy_details(&self, window: &mut Window, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(version::structured_about()));
+        cx.write_to_clipboard(ClipboardItem::new_string(details_block(&self.rows)));
         window.remove_window();
     }
+}
+
+/// The provenance rows the window renders, in display order. A row whose value
+/// could not be resolved at build time is dropped rather than shown blank.
+fn provenance_rows() -> Vec<InfoRow> {
+    let mut rows = Vec::new();
+    let mut push = |label, value: Option<SharedString>| {
+        if let Some(value) = value {
+            rows.push(InfoRow { label, value });
+        }
+    };
+    let short = |commit| SharedString::from(pins::short_commit(commit).to_string());
+    push("manox desktop", pins::app_commit().map(short));
+    push("manox harness", pins::manox_commit().map(short));
+    push(
+        "gpui-component",
+        pins::gpui_kit_pin().map(SharedString::from),
+    );
+    push("gpui-pre", pins::gpui_pin().map(SharedString::from));
+    rows
+}
+
+/// The clipboard block: the runtime's own structured block, whose first lines
+/// are a stable format, followed by one line per provenance row so a pasted
+/// report carries every identity the window shows.
+fn details_block(rows: &[InfoRow]) -> String {
+    let mut block = version::structured_about();
+    for row in rows {
+        block.push_str(&format!("\n{}: {}", row.label, row.value));
+    }
+    block
 }
 
 impl Render for AboutWindow {
@@ -50,8 +96,34 @@ impl Render for AboutWindow {
         let theme = Theme::global(cx);
         let muted = theme.muted_foreground;
 
+        let mut details = div()
+            .id("about-details")
+            .debug_selector(|| "about-details".into())
+            .v_flex()
+            .w_full()
+            .gap_2()
+            .items_center()
+            .child(gpui::img(self.app_icon.clone()).size_16().flex_none())
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.message.clone()),
+            );
+        for row in &self.rows {
+            details = details
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::new_static(row.label)),
+                )
+                .child(div().text_sm().child(row.value.clone()));
+        }
+
         div()
             .id("about-window")
+            .debug_selector(|| "about-window".into())
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|_, ev: &KeyDownEvent, window, _cx| {
                 if ev.keystroke.key == "escape" {
@@ -66,38 +138,11 @@ impl Render for AboutWindow {
             .gap_4()
             .text_center()
             .justify_between()
+            .child(details)
             .child(
                 div()
-                    .v_flex()
-                    .w_full()
-                    .gap_2()
-                    .items_center()
-                    .child(gpui::img(self.app_icon.clone()).size_16().flex_none())
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(self.message.clone()),
-                    )
-                    .when_some(self.commit.clone(), |this, commit| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(i18n::t("about-commit")),
-                        )
-                        .child(div().text_sm().child(commit))
-                    })
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(i18n::t("about-version")),
-                    )
-                    .child(div().text_sm().child(self.full_version.clone())),
-            )
-            .child(
-                div()
+                    .id("about-buttons")
+                    .debug_selector(|| "about-buttons".into())
                     .h_flex()
                     .w_full()
                     .gap_1()
@@ -137,7 +182,7 @@ pub fn open_about_window(cx: &mut App) {
     }
 
     // Compute bounds before spawning so we can use &App.
-    let bounds = WindowBounds::centered(size(px(440.), px(300.)), cx);
+    let bounds = WindowBounds::centered(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
 
     cx.spawn(async move |cx| {
         let options = WindowOptions {
@@ -158,4 +203,90 @@ pub fn open_about_window(cx: &mut App) {
             .expect("failed to open about window");
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    // Imported by name, not via `super::*`: the file glob-imports gpui, whose
+    // re-exported `test` attribute macro would shadow the built-in `#[test]`.
+    use manox_agent::version;
+
+    use gpui::{TestAppContext, VisualTestContext, px, size};
+
+    use super::{AboutWindow, WINDOW_HEIGHT, WINDOW_WIDTH, details_block, provenance_rows};
+    use crate::pins;
+
+    /// The window must name every pinned stack, in display order; a wrong label
+    /// or a dropped row would otherwise only be visible to a human eyeballing
+    /// the dialog. Rows whose value this build cannot resolve are absent by
+    /// design, so the expectation follows `app_commit` (the one value that needs
+    /// git metadata in the manox-app checkout).
+    #[test]
+    fn provenance_rows_name_every_pinned_stack() {
+        let rows = provenance_rows();
+        let labels: Vec<_> = rows.iter().map(|row| row.label).collect();
+        let mut expected = vec!["manox harness", "gpui-component", "gpui-pre"];
+        if pins::app_commit().is_some() {
+            expected.insert(0, "manox desktop");
+        }
+        assert_eq!(labels, expected);
+    }
+
+    /// A copied report must stay greppable by the runtime's format (its own
+    /// lines first, untouched) while carrying the rows unique to this build.
+    #[test]
+    fn details_block_appends_every_row_to_the_runtime_block() {
+        let rows = provenance_rows();
+        let block = details_block(&rows);
+
+        let runtime = version::structured_about();
+        assert!(
+            block.starts_with(&runtime),
+            "runtime block must lead: {block}"
+        );
+        for row in &rows {
+            assert!(
+                block.contains(&format!("\n{}: {}", row.label, row.value)),
+                "missing {}: {block}",
+                row.label
+            );
+        }
+    }
+
+    /// The dialog is sized once and never resizable, so one more row or a taller
+    /// text style would push the action row off the bottom edge. Measure the
+    /// rendered frame instead of trusting the pixel arithmetic; a provenance
+    /// value too wide for the row shows up here as well, since it wraps and
+    /// makes the block taller.
+    #[gpui::test]
+    fn rows_fit_in_window(cx: &mut TestAppContext) {
+        let window_size = size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT));
+        // The dialog reads its colors from the global component theme, which the
+        // real binary installs at startup.
+        cx.update(gpui_component::init);
+        let window = cx.open_window(window_size, |_, cx| AboutWindow::new(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let details = cx
+            .debug_bounds("about-details")
+            .expect("the provenance block must be laid out");
+        let buttons = cx
+            .debug_bounds("about-buttons")
+            .expect("the action row must be laid out");
+        let dialog = cx
+            .debug_bounds("about-window")
+            .expect("the dialog must be laid out");
+
+        assert!(
+            details.bottom() <= buttons.top(),
+            "provenance rows overlap the actions: {details:?} vs {buttons:?}"
+        );
+        // The action row is pinned to the content box's bottom edge, so this
+        // only fails once the rows above have pushed it through the padding.
+        assert!(
+            buttons.bottom() <= dialog.bottom() - px(16.),
+            "the action row is pushed out of the padded content box: {buttons:?} vs {dialog:?}"
+        );
+    }
 }

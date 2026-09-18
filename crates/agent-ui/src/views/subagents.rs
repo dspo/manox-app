@@ -10,7 +10,7 @@ use gpui::prelude::*;
 use gpui_component::{Icon, IconName, Sizable as _, Theme};
 use manox_agent::ToolCallStatus;
 
-use crate::views::braille_spinner::BrailleSpinner;
+use ai_elements::BrailleSpinner;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SubagentInfo {

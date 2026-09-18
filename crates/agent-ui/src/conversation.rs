@@ -263,6 +263,11 @@ pub enum ActivityEntry {
     /// call, assistant text, or terminal stop. Auto-collapses ~1s after
     /// streaming ends unless the user toggled it.
     Reasoning {
+        /// The round's stable identity, minted at creation
+        /// ([`next_reasoning_entry_id`]). The UI addresses the entry by it
+        /// exactly as a tool entry is addressed by its tool-call id — see
+        /// [`ThinkingContainer::find_entry_index`].
+        id: String,
         text: String,
         streaming: bool,
         collapsed: bool,
@@ -409,11 +414,14 @@ impl ThinkingContainer {
         self.recompute_streaming();
     }
 
-    /// Find a tool entry by id. Returns its index within `entries`.
-    pub fn find_tool_entry_index(&self, id: &str) -> Option<usize> {
+    /// Find an activity entry — a reasoning round or a tool call — by its id.
+    /// Ids are unique across the two kinds (tool entries carry the protocol's
+    /// tool-call id, reasoning rounds an id minted at creation), so one lookup
+    /// serves both. Returns the entry's index within `entries`.
+    pub fn find_entry_index(&self, id: &str) -> Option<usize> {
         self.entries.iter().position(|e| match e {
+            ActivityEntry::Reasoning { id: entry_id, .. } => entry_id == id,
             ActivityEntry::Tool(t) => t.id == id,
-            _ => false,
         })
     }
 
@@ -439,6 +447,28 @@ impl ThinkingContainer {
             )
         })
     }
+}
+
+/// Mint the identity of a new reasoning round. Thinking deltas carry no
+/// protocol id, so the UI gives each round one at creation: activity entries
+/// are addressed by id at click time (a render-time index into `items` can
+/// outlive the list shape it counted into), exactly as tool entries carry the
+/// protocol's tool-call id.
+///
+/// The minted shape — a `reasoning:` namespace over a fresh UUID — keeps the
+/// two id spaces [`ThinkingContainer::find_entry_index`] resolves disjoint
+/// by construction rather than by luck: a wire tool-call id is an opaque
+/// provider token and never takes this shape, so the wire-id lookups
+/// (`item_contains_tool`, `pair_tool_result`) can never land on a reasoning
+/// round. A plain counter (`reasoning-N`) sat inside the space of plausible
+/// wire ids and only avoided collisions accidentally.
+///
+/// Minted ids are process-local render-side names: nothing is persisted, and
+/// a history rebuild mints fresh ids rather than replaying the live round's.
+/// An id is only ever read back within the render→click cycle that carries
+/// it, so the churn across that boundary is unobservable.
+pub fn next_reasoning_entry_id() -> String {
+    format!("reasoning:{}", uuid::Uuid::new_v4())
 }
 
 impl Default for ThinkingContainer {
@@ -742,14 +772,15 @@ impl ConversationState {
             .position(|e| matches!(e.read(cx).kind(), ConvItem::AgentTask(t) if t.id == id))
     }
 
-    /// Locate a `Thinking` container's tool entry by id. Returns
-    /// `(container_index, entry_index)` so the caller can update the entry in
-    /// place. Scans every container in arrival order so an id always resolves
-    /// to its owning batch regardless of which trailing container is active.
+    /// Locate a `Thinking` container's entry — a reasoning round or a tool
+    /// call — by id. Returns `(container_index, entry_index)` so the caller can
+    /// update the entry in place. Scans every container in arrival order so an
+    /// id always resolves to its owning entry regardless of which trailing
+    /// container is active or what was inserted above it since the id was read.
     pub fn find_thinking_entry(&self, id: &str, cx: &App) -> Option<(usize, usize)> {
         for (cix, e) in self.items.iter().enumerate() {
             if let ConvItem::Thinking(t) = e.read(cx).kind()
-                && let Some(eix) = t.find_tool_entry_index(id)
+                && let Some(eix) = t.find_entry_index(id)
             {
                 return Some((cix, eix));
             }
@@ -1045,6 +1076,7 @@ impl ConversationState {
                             // Start a new reasoning round.
                             let eix = t.entries.len();
                             t.entries.push(ActivityEntry::Reasoning {
+                                id: next_reasoning_entry_id(),
                                 text: delta,
                                 streaming: true,
                                 collapsed: false,
@@ -1932,7 +1964,7 @@ fn new_history_item(
 fn item_contains_tool(it: &ConvItem, tool_call_id: &str) -> bool {
     match it {
         ConvItem::ToolCall(t) => t.id == tool_call_id,
-        ConvItem::Thinking(t) => t.find_tool_entry_index(tool_call_id).is_some(),
+        ConvItem::Thinking(t) => t.find_entry_index(tool_call_id).is_some(),
         _ => false,
     }
 }
@@ -2595,6 +2627,7 @@ mod tests {
         // A streaming reasoning round (the model thought before emitting the
         // tool call) plus the terminal tool entry.
         t.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
             text: "round 1".into(),
             streaming: true,
             collapsed: false,
@@ -2656,6 +2689,7 @@ mod tests {
     fn close_for_text_stops_accepting_entries() {
         let mut t = ThinkingContainer::new();
         t.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
             text: "round 1".into(),
             streaming: true, // still-live if finalize_reasoning_rounds was skipped
             collapsed: false,
@@ -2699,6 +2733,7 @@ mod tests {
     fn finalize_reasoning_rounds_closes_round_keeps_segment_open() {
         let mut t = ThinkingContainer::new();
         t.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
             text: "round 1".into(),
             streaming: true,
             collapsed: false,
@@ -2757,6 +2792,7 @@ mod tests {
 
         // Push a non-streaming reasoning entry.
         t.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
             text: "done".into(),
             streaming: false,
             collapsed: true,
@@ -2767,6 +2803,7 @@ mod tests {
 
         // Push a streaming reasoning entry.
         t.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
             text: "active".into(),
             streaming: true,
             collapsed: false,
@@ -2798,6 +2835,7 @@ mod tests {
     fn get_tool_entry_mut_skips_reasoning() {
         let mut t = ThinkingContainer::new();
         t.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
             text: "thinking".into(),
             streaming: false,
             collapsed: true,
@@ -2819,6 +2857,67 @@ mod tests {
         }));
         assert!(t.get_tool_entry_mut("tu_1").is_some());
         assert!(t.get_tool_entry_mut("nonexistent").is_none());
+    }
+
+    /// The two id spaces `find_entry_index` resolves are disjoint by
+    /// construction: a reasoning round carries the UI-minted
+    /// `reasoning:{uuid}`, and no wire tool-call id can address it.
+    #[test]
+    fn reasoning_entry_ids_do_not_collide_with_protocol_tool_call_ids() {
+        let minted = next_reasoning_entry_id();
+        let (namespace, suffix) = minted.split_once(':').expect("namespaced id");
+        assert_eq!(namespace, "reasoning");
+        uuid::Uuid::parse_str(suffix).expect("uuid-suffixed mint");
+        assert_ne!(
+            minted,
+            next_reasoning_entry_id(),
+            "each round mints a fresh id"
+        );
+
+        let mut t = ThinkingContainer::new();
+        t.entries.push(ActivityEntry::Reasoning {
+            id: minted.clone(),
+            text: "round".into(),
+            streaming: false,
+            collapsed: true,
+            user_toggled: false,
+            markdown: None,
+        });
+        // A wire id in the counter shape a naive mint would have produced:
+        // it must address the tool entry, never the reasoning round.
+        t.entries.push(ActivityEntry::Tool(ToolCallItem {
+            id: "reasoning-0".into(),
+            name: "Read".into(),
+            title: String::new(),
+            status: ToolCallStatus::Success,
+            output: String::new(),
+            is_error: false,
+            input: serde_json::Value::Null,
+            streaming: false,
+            collapsed: false,
+            user_toggled: false,
+            panel: None,
+        }));
+        assert_eq!(t.find_entry_index(&minted), Some(0));
+        assert_eq!(t.find_entry_index("reasoning-0"), Some(1));
+        assert_eq!(t.find_entry_index("reasoning-1"), None);
+
+        // The wire-id-driven `item_contains_tool` path is the same lookup: a
+        // segment holding only reasoning rounds reports no tool for any wire
+        // id of the old counter shape.
+        let mut solo = ThinkingContainer::new();
+        solo.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
+            text: "round".into(),
+            streaming: false,
+            collapsed: true,
+            user_toggled: false,
+            markdown: None,
+        });
+        assert!(
+            !item_contains_tool(&ConvItem::Thinking(solo), "reasoning-0"),
+            "a wire id must never read a reasoning round as a tool entry"
+        );
     }
 
     /// Joined reasoning text of a segment's reasoning rounds, for ordering
@@ -3013,7 +3112,7 @@ mod tests {
                 };
                 assert_eq!(reasoning_text(stale), "old");
                 assert!(
-                    stale.find_tool_entry_index("tu_new").is_none(),
+                    stale.find_entry_index("tu_new").is_none(),
                     "stale segment above the bubble must not absorb the new turn's tool call"
                 );
                 // New segment holds the tool call.
@@ -3022,7 +3121,7 @@ mod tests {
                     _ => panic!("expected Thinking at index 3"),
                 };
                 assert!(
-                    fresh.find_tool_entry_index("tu_new").is_some(),
+                    fresh.find_entry_index("tu_new").is_some(),
                     "new turn's tool call must open a fresh segment below the user bubble"
                 );
             });

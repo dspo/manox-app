@@ -560,6 +560,7 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
     activity.user_toggled = true;
     activity.entries = vec![
         ActivityEntry::Reasoning {
+            id: agent_ui::conversation::next_reasoning_entry_id(),
             text: "我会先检查 tools_param 在 completions 和 responses 两条 wire 的实现。".repeat(8),
             streaming: false,
             collapsed: false,

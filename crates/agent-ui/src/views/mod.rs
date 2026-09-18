@@ -1,6 +1,5 @@
 //! View rendering layer for the conversation.
 
-pub mod braille_spinner;
 pub mod browser_view;
 pub mod completion;
 pub mod composer_menu;
