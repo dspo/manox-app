@@ -466,7 +466,7 @@ impl Workspace {
                     cwd,
                     // These rows are this session's journal replayed, so their
                     // entry ids are forkable anchors.
-                    fork_source: self.session_id.clone(),
+                    fork_source: self.fork_source_session(cx),
                 },
                 cx,
             );
@@ -772,14 +772,18 @@ impl Workspace {
     /// leaves the current view untouched — a fork that cannot be created must
     /// not disturb the transcript the user is reading.
     pub(crate) fn fork_session_at(&mut self, through_entry_id: &str, cx: &mut Context<Self>) {
-        let Some(source_session_id) = self.session_id.clone() else {
+        // The source is read exactly where the row's anchor was stamped
+        // (`fork_source`): an entry id is only addressable within the session
+        // it was replayed from.
+        let Some(source_session_id) = self.fork_source_session(cx) else {
             tracing::warn!("fork: no session bound, ignoring");
             return;
         };
         // One fork in flight at a time: the call is a round trip, and a second
         // click on any reply would otherwise mint another child for the same
-        // intent. The guard clears when the verdict lands (either way), so a
-        // failed fork is retryable.
+        // intent. The guard clears when the verdict lands (either way); a
+        // receipt that can never arrive is failed by the multiplexer when the
+        // transport ends, so the guard cannot outlive the round trip.
         if self.fork_in_flight {
             tracing::debug!("fork: already in flight, ignoring");
             return;

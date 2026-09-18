@@ -1059,8 +1059,10 @@ pub(crate) struct AssistantActions {
 /// that cannot say what it wants is a dead end, so each reason carries copy.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ForkUnavailable {
-    /// The reply is still streaming — no durable row exists to anchor on.
-    Streaming,
+    /// The reply has no durable row to anchor on yet — it is still streaming,
+    /// or the turn stopped but the authoritative rebuild that carries the
+    /// anchor has not landed. Either way the fork opens when the row does.
+    NotLanded,
     /// The reply closes a step but not the turn: it carries a tool call whose
     /// result rides a later entry, so a prefix ending here would be replanted
     /// with a synthetic "No result provided" outcome.
@@ -1074,7 +1076,7 @@ pub enum ForkUnavailable {
 impl ForkUnavailable {
     fn notice_key(self) -> &'static str {
         match self {
-            Self::Streaming => "message-fork-unavailable-streaming",
+            Self::NotLanded => "message-fork-unavailable-not-landed",
             Self::MidTurn => "message-fork-unavailable-mid-turn",
             Self::NotReplayed => "message-fork-unavailable-not-replayed",
         }
@@ -4799,31 +4801,5 @@ mod tests {
         let (anchor, gate) = assistant_conv(&build(&[mid_turn], true));
         assert_eq!(anchor, None);
         assert_eq!(gate, Some(ForkUnavailable::MidTurn));
-    }
-
-    /// A still-streaming reply has no durable row, so its fork control is
-    /// disabled with a reason rather than absent — the row keeps its shape and
-    /// the user learns why.
-    #[test]
-    fn streaming_reply_withholds_the_fork_anchor_but_keeps_the_control() {
-        let streaming = ConvItem::Assistant {
-            text: "partial".into(),
-            streaming: true,
-            token_usage: None,
-            activity_header: false,
-            entry_id: None,
-            fork_unavailable: Some(ForkUnavailable::Streaming),
-        };
-        assert!(
-            matches!(
-                streaming,
-                ConvItem::Assistant {
-                    entry_id: None,
-                    fork_unavailable: Some(ForkUnavailable::Streaming),
-                    ..
-                }
-            ),
-            "a streamed row must not carry an anchor, and must name its reason"
-        );
     }
 }

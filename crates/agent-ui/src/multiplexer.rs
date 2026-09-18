@@ -156,6 +156,12 @@ impl SessionMultiplexer {
                 }
             }
             tracing::error!("mux pump exited (channel closed)");
+            // Transport end = receipts can no longer arrive (disconnect /
+            // same-client-id reseat / server shutdown): drain the pending
+            // create/fork continuations through their `Failed` arm so
+            // caller-side guards (the workspace's fork-in-flight flag)
+            // clear instead of sticking forever.
+            let _ = this.update(cx, |m, cx| m.fail_pending_creates(cx));
         });
         let (leaf_tx, leaf_rx) = async_channel::unbounded::<LeafRequest>();
         let _leaf_pump = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
@@ -938,6 +944,30 @@ impl SessionMultiplexer {
         self.create_callbacks.insert(id, on_done);
     }
 
+    /// Fail every pending create/fork continuation (transport end).
+    ///
+    /// Receipts ride the request channel: once it is closed no `Response`
+    /// can ever arrive, so waiting one out would leave a continuation (and
+    /// any user-visible guard hanging off it, like the workspace's
+    /// fork-in-flight flag) stuck for the multiplexer's remaining life.
+    /// Draining through the ordinary `Failed` arm keeps a lost receipt
+    /// equivalent to a rejected call.
+    fn fail_pending_creates(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<CreateCallback> = self
+            .create_callbacks
+            .drain()
+            .map(|(_, callback)| callback)
+            .collect();
+        for callback in pending {
+            callback(
+                CreateSessionDone::Failed {
+                    message: "connection closed".into(),
+                },
+                cx,
+            );
+        }
+    }
+
     /// Client-side focus transition (§F.2/GW5): the newly attached
     /// session's leaf goes active (clearing its monotonic unread/errored
     /// mirrors); the previously attached one goes inert. Selection is
@@ -1588,5 +1618,42 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A receipt that can never arrive must not strand its continuation:
+    /// when the transport ends (disconnect / same-id reseat / server
+    /// shutdown) the pending fork continuation drains through `Failed` —
+    /// the workspace's fork-in-flight guard clears there, so a lost
+    /// receipt disables fork for one round trip, not forever.
+    #[gpui::test]
+    async fn a_dead_transport_drains_pending_forks_as_failed(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        let verdict = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+        let slot = verdict.clone();
+        mux.update(cx, |m, _| {
+            m.fork_session_intent(
+                "source-1",
+                "entry-1",
+                Box::new(move |done, _| {
+                    *slot.borrow_mut() = Some(match done {
+                        CreateSessionDone::Created { .. } => "created".into(),
+                        CreateSessionDone::Failed { message } => message,
+                    });
+                }),
+            );
+        });
+        assert_eq!(
+            *verdict.borrow(),
+            None,
+            "a live transport leaves the continuation pending"
+        );
+
+        server_conn.disconnect();
+        cx.run_until_parked();
+        assert_eq!(
+            *verdict.borrow(),
+            Some("connection closed".to_string()),
+            "the transport's end must fail the pending fork, not strand it"
+        );
     }
 }

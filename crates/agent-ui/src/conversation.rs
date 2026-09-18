@@ -1030,7 +1030,7 @@ impl ConversationState {
                                 // authoritative rebuild supplies the anchor.
                                 entry_id: None,
                                 fork_unavailable: Some(
-                                    crate::views::message::ForkUnavailable::Streaming,
+                                    crate::views::message::ForkUnavailable::NotLanded,
                                 ),
                             },
                             role.to_string(),
@@ -2121,6 +2121,57 @@ mod tests {
                 assert_eq!(c.items().len(), 2);
             });
         });
+    }
+
+    /// A live-streamed reply has no durable journal row, so its fork control
+    /// is withheld its anchor and disabled with a named reason — through the
+    /// real `AgentText` fold, not a hand-built item: the gate must survive a
+    /// change to the delta arm the same way the row does.
+    #[gpui::test]
+    fn a_streaming_reply_carries_no_anchor_and_names_the_reason(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            cwd: None,
+            fork_source: Some("session-1".into()),
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                c.apply(
+                    &ThreadEvent::AgentText("partial".into()),
+                    "model",
+                    None,
+                    ctx,
+                    cx,
+                );
+            });
+        });
+        let (entry_id, gate) = cx.update(|cx| {
+            conversation
+                .read(cx)
+                .items()
+                .iter()
+                .find_map(|item| match item.read(cx).kind() {
+                    ConvItem::Assistant {
+                        entry_id,
+                        fork_unavailable,
+                        ..
+                    } => Some((entry_id.clone(), *fork_unavailable)),
+                    _ => None,
+                })
+                .expect("the delta builds an assistant item")
+        });
+        assert_eq!(
+            entry_id, None,
+            "a streamed row must not carry an anchor — the live delta carries no durable id"
+        );
+        assert_eq!(
+            gate,
+            Some(crate::views::message::ForkUnavailable::NotLanded),
+            "the withheld control must name its reason rather than disappear"
+        );
     }
 
     /// The `HistoryProgress` preview batch event must never mutate the

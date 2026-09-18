@@ -346,7 +346,7 @@ mod tests {
             "settings-row-ui-language",
             "workspace-rename-confirm",
             "message-fork-here",
-            "message-fork-unavailable-streaming",
+            "message-fork-unavailable-not-landed",
             "message-fork-unavailable-mid-turn",
             "message-fork-unavailable-not-replayed",
         ];
