@@ -115,6 +115,7 @@ impl Workspace {
         let project_chip = self.render_project_chip_pi(theme, cx);
         let goal_chip = self.render_goal_chip(theme, cx);
         let plan_chip = self.render_plan_chip(theme, cx);
+        let follow_stop_chip = self.render_follow_stop_chip(theme, cx);
         let access = self.render_access_placeholder(theme, cx);
         let model = self.render_model_selector_pi(theme, cx);
         // Absolute cancel priority: the stop form is driven by the raw
@@ -221,7 +222,11 @@ impl Workspace {
                             .child(project_chip)
                             .when_some(goal_chip, |el, chip| el.child(chip))
                             .when_some(plan_chip, |el, chip| el.child(chip))
-                            .child(access),
+                            .child(access)
+                            // The stopped-follow projection rides at the
+                            // group's tail: its arrival must never shift
+                            // the stable controls, only extend the row.
+                            .when_some(follow_stop_chip, |el, chip| el.child(chip)),
                     )
                     .child(
                         h_flex()
@@ -500,6 +505,61 @@ impl Workspace {
                         .text_xs()
                         .text_color(theme.warning)
                         .child(i18n::t("plan-chip-label")),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Persistent projection of the §二.3 follow-stop state: a compact
+    /// footer chip that lives in the composer's own chip group — the
+    /// place the user reaches to resend/retry — and NEVER disappears on
+    /// its own. Unlike the dismissible banner (which hides only the
+    /// broadcast), the chip's condition reads `follow_stop()` and
+    /// deliberately ignores `dismissed`: the state outlives the
+    /// dismissal, so a stuck lease or an exhausted budget always leaves a
+    /// visible status and a live retry entry; the frozen transcript is
+    /// never left signal-less. The chip IS the retry action: clicking it
+    /// fires the same `retry_follow` the banner's Retry button wires (a
+    /// no-op with no multiplexer, keeping the contract that the entry
+    /// never vanishes on a click), and its tooltip previews that
+    /// consequence. Geometry: `flex_shrink_0` at the chip-group tail so
+    /// the chip's arrival or departure can never squeeze or shift the
+    /// pinned model/send controls. Copy is keyed per reason via
+    /// `indicator_key()`.
+    fn render_follow_stop_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let stop = self.store.as_ref()?.read(cx).follow_stop()?;
+        Some(
+            h_flex()
+                .id("follow-stop-projection")
+                .debug_selector(|| "follow-stop-projection".into())
+                .flex_shrink_0()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded(theme.radius)
+                .bg(theme.danger.opacity(0.12))
+                .hover(|s| s.bg(theme.danger.opacity(0.22)))
+                .cursor_pointer()
+                .tooltip(move |window, cx| {
+                    Tooltip::new(i18n::t("follow-stop-indicator-retry")).build(window, cx)
+                })
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    let Some(store) = this.store.clone() else {
+                        return;
+                    };
+                    store.update(cx, |handle, cx| handle.retry_follow(cx));
+                }))
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .xsmall()
+                        .text_color(theme.danger),
+                )
+                .child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(i18n::t(stop.reason.indicator_key())),
                 )
                 .into_any_element(),
         )

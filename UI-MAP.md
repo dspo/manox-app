@@ -59,7 +59,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### MessageColumn
 
-- [MessageColumn](#messagecolumn) · [TitleBar](#titlebar) · [TitleBarThreadTitle](#titlebarthreadtitle) · [TitleBarMenuButton](#titlebarmenubutton) · [SidebarToggleBtn](#sidebartogglebtn) · [RightPaneToggleBtn](#rightpanetogglebtn) · [Body](#body)
+- [MessageColumn](#messagecolumn) · [TitleBar](#titlebar) · [TitleBarThreadTitle](#titlebarthreadtitle) · [TitleBarMenuButton](#titlebarmenubutton) · [SidebarToggleBtn](#sidebartogglebtn) · [RightPaneToggleBtn](#rightpanetogglebtn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice)
 
 ### ContextRail
 
@@ -79,7 +79,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Footer / Composer
 
-- [Footer](#footer) · [Composer](#composer) · [QueuedFollowUps](#queuedfollowups) · [ComposerDivider](#composerdivider) · [AttachmentChips](#attachmentchips) · [AttachmentChip](#attachmentchip) · [BrowserSuiteChip](#browsersuitechip) · [ComposerInputRow](#composerinputrow) · [InputField](#inputfield) · [SendBtn](#sendbtn) · [ModelChip](#modelchip) · [AccessChip](#accesschip) · [ProjectChip](#projectchip)
+- [Footer](#footer) · [Composer](#composer) · [QueuedFollowUps](#queuedfollowups) · [ComposerDivider](#composerdivider) · [AttachmentChips](#attachmentchips) · [AttachmentChip](#attachmentchip) · [BrowserSuiteChip](#browsersuitechip) · [ComposerInputRow](#composerinputrow) · [InputField](#inputfield) · [SendBtn](#sendbtn) · [ModelChip](#modelchip) · [AccessChip](#accesschip) · [ProjectChip](#projectchip) · [FollowStopProjection](#followstapprojection)
 
 ### AskDrawer
 
@@ -379,9 +379,21 @@ Ghost icon button at the TitleBar's right edge toggling the [RightPane](#rightpa
 
 #### Body
 
-Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses [Hero](#hero) (with the [LoadingIndicator](#loadingindicator) while an empty session restores) or [MessageArea](#messagearea) + [Footer](#footer).
+Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNotice](#followstoppednotice) (only while the follow stream has stopped) and then [Hero](#hero) (with the [LoadingIndicator](#loadingindicator) while an empty session restores) or [MessageArea](#messagearea) + [Footer](#footer).
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
+
+#### FollowStoppedNotice
+
+Dismissible BROADCAST banner above the message area, shown while the foreground leaf's §二.3 reopen budget is exhausted AND this session's notice is not dismissed (the transcript silently keeps its last window). Row: `IconName::TriangleAlert` + reason copy (a Fluent key chosen by the leaf's typed `FollowStopReason` — today only `follow-stop-stream-failing`, deliberately cause-agnostic because the client cannot observe more; the server-side lease-holder signal, dspo/manox#811, lands as a new variant + key, not a wire-code guess), a ghost **Retry** button (leaf `retry_follow`: re-arms the budget and requests one follow re-open) and a ghost `×` dismiss (leaf `dismiss_follow_stop`). Dismissing hides ONLY the broadcast — the permanent [FollowStopProjection](#followstapprojection) in the composer's footer chip group keeps the state visible and the retry entry live forever after (one trigger, the write-lease arm, never self-heals; the frozen view may never be signal-less). Dismissal lives on the leaf — per session: no automatic path re-shows the banner (a re-exhaustion keeps the flag), a good snapshot withdraws the whole state (both surfaces retire together), and a thread switch builds a fresh leaf. A manual retry's own terminal exhaustion re-shows the banner undismissed (an explicit user action's outcome must be visible).
+
+> Source: `crates/agent-ui/src/workspace/render.rs` (`render_follow_stop_banner`); state: `crates/agent-ui/src/client_store_handle.rs` (`FollowStop` / `FollowStopReason`)
+
+#### FollowStopProjection
+
+Permanent minimal projection of the stopped-follow state: a compact danger chip in the composer's footer chip group (tail of the left cluster, beside the send control — where the user reaches to resend/retry; a global overlay was rejected: the status belongs beside the recovery action). Shown while the foreground leaf's `follow_stop()` is `Some` — it deliberately does NOT read `dismissed`: the state outlives the broadcast's dismissal, so the entry never disappears on its own (only a good snapshot or a live retry retires it). The chip IS the retry entry: clicking fires the same leaf `retry_follow` the banner's Retry button wires (no-op with no multiplexer — the entry survives its own dead click), and its tooltip previews that consequence. Visible copy is a per-reason Fluent key (`FollowStopReason::indicator_key()` — today `follow-stop-indicator-stream-failing`), so a new reason adds a variant + key, never edited prose. Geometry: `flex_shrink_0` at the group tail; arrival/departure can never squeeze or shift the pinned model/send controls.
+
+> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_follow_stop_chip`); state: `crates/agent-ui/src/client_store_handle.rs` (`FollowStop` / `FollowStopReason`)
 
 
 #### 3.2.1 Hero

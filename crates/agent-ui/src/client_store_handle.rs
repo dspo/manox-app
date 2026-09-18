@@ -50,6 +50,48 @@ pub enum LeafRequest {
     RefreshList,
 }
 
+/// Why the leaf stopped reopening the follow stream (§二.3 budget
+/// exhausted). The cause is a typed value, not log prose, so the notice can
+/// name a specific cause once one is observable: a variant is added when
+/// the server starts distinguishing them (e.g. another instance holding
+/// this session's write lease, dspo/manox#811) and the notice's only change
+/// is a new copy key. The leaf never infers a cause from wire error codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowStopReason {
+    /// Every reopen since the last good snapshot ended in `Failure` /
+    /// `Resync` — repeated stream failure, cause unnamed.
+    StreamFailing,
+}
+
+impl FollowStopReason {
+    /// The Fluent key of this reason's broadcast copy (the dismissible
+    /// banner). The strings live in the locale resources, keyed per reason;
+    /// copy must not hardcode a cause the client cannot observe.
+    pub fn notice_key(self) -> &'static str {
+        match self {
+            Self::StreamFailing => "follow-stop-stream-failing",
+        }
+    }
+
+    /// The Fluent key of this reason's persistent-projection copy (the
+    /// always-visible footer chip). Split from the broadcast key because
+    /// the chip is a compact status, not a sentence; a new reason variant
+    /// adds exactly one new key here too.
+    pub fn indicator_key(self) -> &'static str {
+        match self {
+            Self::StreamFailing => "follow-stop-indicator-stream-failing",
+        }
+    }
+}
+
+/// The leaf's stopped-follow surface: why following ended, and whether the
+/// user dismissed this session's notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FollowStop {
+    pub reason: FollowStopReason,
+    pub dismissed: bool,
+}
+
 /// A gpui entity that owns a single session's [`ClientStore`], the v2
 /// [`JournalFold`] engine, and re-emits the live fold as `ThreadEvent`s. The
 /// multiplexer is the sole writer (retained `ServerNote`s) and the sole
@@ -84,6 +126,11 @@ pub struct ClientStoreHandle {
     /// leaf stops reopening (the view keeps its last window) instead of
     /// spinning forever against a stream that keeps failing.
     reopen_attempts: u32,
+    /// §二.3: `Some` once the reopen budget is exhausted — the stop the
+    /// user must see. Per-session by construction: the leaf IS the session
+    /// and the notice lives with it, so a switch to another thread (a fresh
+    /// leaf) starts with a fresh, un-dismissed notice.
+    follow_stop: Option<FollowStop>,
 }
 
 impl EventEmitter<ThreadEvent> for ClientStoreHandle {}
@@ -112,6 +159,7 @@ impl ClientStoreHandle {
             info_debounce: None,
             active: false,
             reopen_attempts: 0,
+            follow_stop: None,
         }
     }
 
@@ -248,8 +296,10 @@ impl ClientStoreHandle {
                 if snap.session_id != self.session_id {
                     return;
                 }
-                // A good snapshot lands: the reopen budget resets (§二.3).
+                // A good snapshot lands: the reopen budget resets and the
+                // stop notice is withdrawn (§二.3).
                 self.reopen_attempts = 0;
+                self.follow_stop = None;
                 let outs = self.fold.snapshot(snap.cursor, snap.records.clone());
                 // The snapshot's full projection baseline (§D.1) seeds the
                 // P-face; merge it before folding so materialized fields are
@@ -464,6 +514,42 @@ impl ClientStoreHandle {
         cx.notify();
     }
 
+    /// The stop-notice surface for the session chrome: `Some` once the
+    /// §二.3 reopen budget is exhausted (the view keeps its last window and
+    /// no longer updates), `None` while following or reopening under
+    /// backoff.
+    pub fn follow_stop(&self) -> Option<FollowStop> {
+        self.follow_stop
+    }
+
+    /// Silence this session's stop notice. Automatic paths never re-show it
+    /// (the terminal budget arm keeps the dismissal); the notice returns
+    /// only after the stream resumes, or after a manual retry dies again.
+    pub fn dismiss_follow_stop(&mut self, cx: &mut Context<Self>) {
+        if let Some(stop) = self.follow_stop.as_mut() {
+            stop.dismissed = true;
+            cx.notify();
+        }
+    }
+
+    /// The notice's retry entry: re-arm the §二.3 budget and ask the
+    /// multiplexer to open the follow stream once more. With a multiplexer
+    /// wired the notice drops immediately, and a fresh exhaustion re-raises it
+    /// undismissed; with none wired there is nothing to re-open, so this is a
+    /// no-op and the notice it cannot act on stays — a retry is a user action
+    /// whose outcome must be visible either way.
+    pub fn retry_follow(&mut self, cx: &mut Context<Self>) {
+        // A retry is a user action, so its outcome has to be visible: with no
+        // multiplexer wired there is nothing to re-open, and dropping the
+        // notice here would erase the only signal the view ever shows.
+        if self.outbound.is_none() {
+            return;
+        }
+        self.reopen_attempts = 0;
+        self.follow_stop = None;
+        self.request_reopen(cx);
+    }
+
     /// Deliver a `PageHistory` response the leaf requested. Correlated by
     /// MsgId; a late/foreign reply is dropped.
     pub fn apply_page_response(
@@ -542,7 +628,14 @@ impl ClientStoreHandle {
             // engine that never materializes past the server-side
             // deadline) must not spin reopens forever. The fold keeps the
             // last good window; a manual thread switch builds a fresh
-            // leaf and retries from zero.
+            // leaf and retries from zero. The stop is user-facing, never
+            // just a log line: the session chrome renders a notice from
+            // this state. A re-exhaustion keeps an existing dismissal so
+            // no automatic path can pop the banner back.
+            self.follow_stop = Some(FollowStop {
+                reason: FollowStopReason::StreamFailing,
+                dismissed: self.follow_stop.is_some_and(|stop| stop.dismissed),
+            });
             tracing::error!(
                 session = %self.session_id,
                 attempts = self.reopen_attempts,
@@ -1847,6 +1940,150 @@ mod tests {
         assert!(
             !leaf_c.read_with(cx, |h, _| h.store.unread),
             "ensure_leaf auto-activates the focused session's leaf"
+        );
+    }
+
+    /// §二.3 user-visible stop: the sixth terminal failure sets a
+    /// `FollowStop` the session chrome renders; a dismissal is remembered
+    /// for this session and later stops cannot re-show it; a good snapshot
+    /// withdraws the notice and refills the budget.
+    #[gpui::test]
+    fn follow_stop_lifecycle(cx: &mut TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|cx| ClientStoreHandle::leaf("s1", cx)));
+        let resync = FromServer::StreamEnd {
+            stream_id: StreamId::new("s1"),
+            reason: manox_protocol::StreamEndReason::Resync,
+        };
+        let fail = |cx: &mut TestAppContext, n: u32| {
+            for _ in 0..n {
+                handle.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+            }
+        };
+        // While the budget lasts, failures stay in backoff — not stopped.
+        fail(cx, 5);
+        assert_eq!(handle.read_with(cx, |h, _| h.follow_stop()), None);
+        // The sixth is terminal: the notice is raised, undismissed.
+        fail(cx, 1);
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.follow_stop()),
+            Some(FollowStop {
+                reason: FollowStopReason::StreamFailing,
+                dismissed: false,
+            })
+        );
+        // Dismissed sticks: further (automatic) terminal failures never
+        // bring the banner back.
+        handle.update(cx, |h, cx| h.dismiss_follow_stop(cx));
+        fail(cx, 3);
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.follow_stop().map(|s| s.dismissed)),
+            Some(true)
+        );
+        // A snapshot resumes following: notice withdrawn, budget refilled.
+        handle.update(cx, |h, cx| {
+            h.apply_from_server(item("s1", snapshot("s1", 0, vec![])), cx)
+        });
+        assert_eq!(handle.read_with(cx, |h, _| h.follow_stop()), None);
+        fail(cx, 5);
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.follow_stop()),
+            None,
+            "the budget restarted from zero"
+        );
+        fail(cx, 1);
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.follow_stop()),
+            Some(FollowStop {
+                reason: FollowStopReason::StreamFailing,
+                dismissed: false,
+            }),
+            "a fresh stop is a fresh notice, even after a dismissed one"
+        );
+    }
+
+    /// The notice's retry entry: `retry_follow` clears the notice, re-arms
+    /// the budget, and rides the outbound channel with fresh `Reopen`
+    /// requests exactly like the automatic path.
+    #[gpui::test]
+    fn retry_follow_rearms_the_budget_and_reopens(cx: &mut TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|cx| ClientStoreHandle::leaf("s1", cx)));
+        let (tx, rx) = async_channel::unbounded::<LeafRequest>();
+        handle.update(cx, |h, _| h.set_outbound(tx));
+        let resync = FromServer::StreamEnd {
+            stream_id: StreamId::new("s1"),
+            reason: manox_protocol::StreamEndReason::Resync,
+        };
+        let fail = |cx: &mut TestAppContext, n: u32| {
+            for _ in 0..n {
+                handle.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+            }
+        };
+        fail(cx, 6);
+        handle.update(cx, |h, cx| {
+            assert!(h.follow_stop().is_some());
+            h.dismiss_follow_stop(cx);
+            h.retry_follow(cx);
+        });
+        assert_eq!(handle.read_with(cx, |h, _| h.follow_stop()), None);
+        // Budget re-armed: the retry spent attempt 1, four more failures
+        // stay in backoff...
+        fail(cx, 4);
+        assert_eq!(handle.read_with(cx, |h, _| h.follow_stop()), None);
+        // ...and the next one stops again — undismissed, because the retry
+        // was an explicit user action whose outcome must be visible.
+        fail(cx, 1);
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.follow_stop()),
+            Some(FollowStop {
+                reason: FollowStopReason::StreamFailing,
+                dismissed: false,
+            })
+        );
+        // Every non-terminal attempt scheduled exactly one backoff reopen
+        // (attempts 1-5 before the retry, 1-5 after); the clock past the
+        // whole ladder drains them all onto the channel.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(9000));
+        cx.run_until_parked();
+        let mut reopens = 0;
+        while let Ok(req) = rx.try_recv() {
+            assert!(
+                matches!(req, LeafRequest::Reopen { session_id, .. }
+                    if session_id.as_str() == "s1"),
+                "only Reopen requests ride the channel"
+            );
+            reopens += 1;
+        }
+        assert_eq!(reopens, 10, "five pre-retry + five post-retry reopens");
+    }
+
+    /// The retry contract with nothing to re-open: with no multiplexer wired
+    /// the click must leave the notice it cannot act on, and must not spend an
+    /// attempt on it.
+    #[gpui::test]
+    fn retry_without_an_outbound_leaves_the_notice_up(cx: &mut TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|cx| ClientStoreHandle::leaf("s1", cx)));
+        let resync = FromServer::StreamEnd {
+            stream_id: StreamId::new("s1"),
+            reason: manox_protocol::StreamEndReason::Resync,
+        };
+        for _ in 0..6 {
+            handle.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+        }
+        assert!(handle.read_with(cx, |h, _| h.follow_stop()).is_some());
+        handle.update(cx, |h, cx| h.retry_follow(cx));
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.follow_stop()),
+            Some(FollowStop {
+                reason: FollowStopReason::StreamFailing,
+                dismissed: false,
+            }),
+            "a retry with nothing to re-open must leave the notice up"
+        );
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.reopen_attempts),
+            6,
+            "and must not spend an attempt on it"
         );
     }
 }

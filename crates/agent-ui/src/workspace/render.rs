@@ -729,6 +729,7 @@ impl Workspace {
                         .when(show_rail, |this| {
                             this.pr(px(crate::views::context_rail::ENV_CONTENT_INSET))
                         })
+                        .children(self.render_follow_stop_banner(&theme, cx))
                         // Empty first screen shows the centered hero in place
                         // of the (empty) message list; otherwise a bottom-
                         // anchored, tail-following native list.
@@ -1226,5 +1227,86 @@ impl Workspace {
                     ),
             )
             .child(v_flex().flex_1().h_full().w_full().child(content))
+    }
+
+    /// §二.3 stop notice — the dismissible BROADCAST arm. Shown above the
+    /// message area while the foreground leaf's reopen budget is exhausted
+    /// AND not dismissed. It names what stopped (the reason copy is keyed
+    /// by the leaf's observable cause) and carries the retry action, but
+    /// it is not the only signal: the persistent projection (`Workspace::
+    /// render_follow_stop_chip`, in the footer's composer chip group)
+    /// stays visible regardless of dismissal. Dismissing this banner hides
+    /// only the broadcast; the state and its retry entry survive in the
+    /// footer, so a stuck lease — which never self-heals — can never leave
+    /// the frozen transcript signal-less. Dismissal still belongs to the
+    /// leaf (per session): the banner stays out until the stream resumes
+    /// or a retry dies again.
+    fn render_follow_stop_banner(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let stop = self
+            .store
+            .as_ref()?
+            .read(cx)
+            .follow_stop()
+            .filter(|stop| !stop.dismissed)?;
+        Some(
+            h_flex()
+                .debug_selector(|| "follow-stopped-notice".into())
+                .flex_shrink_0()
+                .items_center()
+                .gap_2()
+                .mx_2()
+                .mt_1()
+                .px_3()
+                .py_1p5()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.danger.opacity(0.35))
+                .bg(theme.danger.opacity(0.08))
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .xsmall()
+                        .text_color(theme.danger),
+                )
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(i18n::t(stop.reason.notice_key())),
+                )
+                .child(
+                    Button::new("follow-stop-retry")
+                        .label(i18n::t("follow-stop-retry"))
+                        .ghost()
+                        .small()
+                        .debug_selector(|| "follow-stop-retry-btn".into())
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            let Some(store) = this.store.clone() else {
+                                return;
+                            };
+                            store.update(cx, |handle, cx| handle.retry_follow(cx));
+                        })),
+                )
+                .child(
+                    Button::new("follow-stop-dismiss")
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .tooltip(i18n::t("follow-stop-dismiss"))
+                        .debug_selector(|| "follow-stop-dismiss-btn".into())
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            let Some(store) = this.store.clone() else {
+                                return;
+                            };
+                            store.update(cx, |handle, cx| handle.dismiss_follow_stop(cx));
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 }

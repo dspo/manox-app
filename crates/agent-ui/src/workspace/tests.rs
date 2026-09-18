@@ -4483,3 +4483,295 @@ fn a_plain_ask_carries_no_intent() {
         "no detail → no markdown block"
     );
 }
+
+/// The §二.3 stop notice at the chrome level, on the production
+/// notification chain: the workspace adopts the foreground leaf through
+/// its own `subscribe_thread` entry and frames are drawn with no
+/// whole-tree refresh, so the only mechanism that can move the banner is
+/// the leaf's `cx.notify()` dirtying the workspace through the observer.
+/// An exhausted reopen budget paints the dismissible banner above the
+/// message area; a retry click with no multiplexer wired changes nothing
+/// (the notice stays and no attempt is spent); the dismiss click
+/// silences the banner for this session and a later automatic stop
+/// cannot un-silence it.
+#[gpui::test]
+fn a_stopped_follow_shares_a_dismissible_notice(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path =
+        std::env::temp_dir().join(format!("manox-follow-stop-test-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    // Adopt an outbound-less leaf as the foreground through the
+    // production wiring entry: `attach_thread` runs exactly this ritual
+    // after a rebind — set the store, re-run `subscribe_thread`, assign
+    // the same fields (the assignment drops the constructor's landing
+    // subscriptions, so from here on only this leaf drives the chrome).
+    // Resync frames burn its reopen budget (no multiplexer in the loop:
+    // the stop state is deterministic).
+    let leaf = ws.update(cx, |ws, cx| {
+        let leaf = cx
+            .new(|cx| crate::client_store_handle::ClientStoreHandle::leaf("follow-stop-test", cx));
+        ws.store = Some(leaf.clone());
+        let (thread_events, store_changes) = ws.subscribe_thread(cx);
+        ws.thread_sub = Some(thread_events);
+        ws.store_observe = Some(store_changes);
+        leaf
+    });
+    // Draw one frame: gpui re-renders only entities marked dirty, and
+    // the observer wired above is the sole source of workspace dirt here.
+    // A `window.refresh()` would repaint the whole tree and hide a broken
+    // notification chain — the hole this test exists to close.
+    let draw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    };
+    let resync = manox_protocol::FromServer::StreamEnd {
+        stream_id: manox_protocol::StreamId::new("follow-stop-test"),
+        reason: manox_protocol::StreamEndReason::Resync,
+    };
+    for _ in 0..6 {
+        leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    }
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "an exhausted reopen budget must show the stopped-follow banner"
+    );
+
+    // A retry with no multiplexer wired is a no-op: there is nothing to
+    // re-open, and clearing the banner would erase the only signal the view
+    // has. The attempt is not spent either.
+    let retry = visual
+        .debug_bounds("follow-stop-retry-btn")
+        .expect("the banner carries its retry control");
+    visual.simulate_click(retry.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "a retry with nothing to re-open must leave the banner up"
+    );
+    // Further automatic failures keep the same banner: the budget is already
+    // terminal, so the notice is neither withdrawn nor re-raised.
+    leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "an automatic failure must not churn the banner"
+    );
+
+    // Dismiss click: out for this session, and a later automatic stop
+    // cannot bring it back — the post-dismiss frames repaint only through
+    // the same notification chain, so a stale canvas cannot fake the pass.
+    let dismiss = visual
+        .debug_bounds("follow-stop-dismiss-btn")
+        .expect("the banner carries its dismiss control");
+    visual.simulate_click(dismiss.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "the dismiss click must clear the banner"
+    );
+    leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "a dismissed session must not re-show the banner"
+    );
+
+    drop(ws);
+    drop(visual);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// The permanent projection of a stopped follow, at the chrome level and
+/// on the production notification chain (the same `subscribe_thread`
+/// adoption as the banner test; repaints ride only the leaf's
+/// `cx.notify()`). Pins the dismissal contract: dismissing the banner
+/// hides the BROADCAST only — the footer chip beside the composer stays
+/// while `follow_stop` is alive, ignores `dismissed`, and IS the retry
+/// entry (same `retry_follow` action): a click with no multiplexer is the
+/// contract no-op (nothing spent, chip and banner untouched), a click
+/// with a multiplexer retried exactly once (one outbound `Reopen`, budget
+/// re-armed — the next terminal failure re-raises the broadcast too,
+/// because a user-initiated retry's outcome must be visible).
+#[gpui::test]
+fn a_dismissed_stop_keeps_a_permanent_retry_entry(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path = std::env::temp_dir().join(format!(
+        "manox-follow-projection-test-{}.db",
+        uuid_like_id()
+    ));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    // The same adoption ritual as the banner test: an outbound-less leaf
+    // becomes the foreground through `subscribe_thread`, and Resync frames
+    // burn the reopen budget deterministically.
+    let leaf = ws.update(cx, |ws, cx| {
+        let leaf = cx.new(|cx| {
+            crate::client_store_handle::ClientStoreHandle::leaf("follow-projection-test", cx)
+        });
+        ws.store = Some(leaf.clone());
+        let (thread_events, store_changes) = ws.subscribe_thread(cx);
+        ws.thread_sub = Some(thread_events);
+        ws.store_observe = Some(store_changes);
+        leaf
+    });
+    let draw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    };
+    let resync = manox_protocol::FromServer::StreamEnd {
+        stream_id: manox_protocol::StreamId::new("follow-projection-test"),
+        reason: manox_protocol::StreamEndReason::Resync,
+    };
+    for _ in 0..6 {
+        leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    }
+    draw(&mut visual);
+
+    // (c) While the stop is alive and undismissed, the broadcast and the
+    // projection show together: dismissing later hides ONLY the broadcast.
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "the banner must show on a fresh stop"
+    );
+    assert!(
+        visual.debug_bounds("follow-stop-projection").is_some(),
+        "the permanent projection must show beside the composer"
+    );
+
+    // (b) The projection with no multiplexer wired: the click is the
+    // contract no-op — the state survives, so chip AND banner stay put
+    // (a dead entry is never mistaken for a spent one).
+    let chip = visual
+        .debug_bounds("follow-stop-projection")
+        .expect("the footer carries the projection");
+    visual.simulate_click(chip.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stop-projection").is_some(),
+        "a no-op retry must not consume the entry"
+    );
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "a no-op retry must not consume the broadcast either"
+    );
+
+    // (a) Dismiss the banner: the broadcast goes, the projection stays —
+    // it never reads `dismissed`.
+    let dismiss = visual
+        .debug_bounds("follow-stop-dismiss-btn")
+        .expect("the banner carries its dismiss control");
+    visual.simulate_click(dismiss.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "dismiss must clear the broadcast"
+    );
+    assert!(
+        visual.debug_bounds("follow-stop-projection").is_some(),
+        "dismiss hides the broadcast, never the state"
+    );
+
+    // (b, wiring) Now give the leaf a multiplexer and click the projection:
+    // this is the same `retry_follow` action, so it clears the state (both
+    // surfaces go) and rides the channel with exactly one `Reopen`.
+    let (tx, _rx) = async_channel::unbounded::<crate::client_store_handle::LeafRequest>();
+    leaf.update(cx, |h, _| h.set_outbound(tx));
+    let chip = visual
+        .debug_bounds("follow-stop-projection")
+        .expect("the entry is live even with the banner dismissed");
+    visual.simulate_click(chip.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stop-projection").is_none(),
+        "a real retry clears the state, so the projection retires"
+    );
+    // Only the retry's immediate effect is asserted here. Clearing
+    // `follow_stop` is what retires both surfaces, and it happens on the
+    // click; the re-open itself rides a backoff timer on the real
+    // background executor, and waking that thread is the non-determinism
+    // the test scheduler rejects. The wire side is covered at the leaf
+    // level instead (`retry_follow_rearms_the_budget_and_reopens`).
+    assert!(
+        leaf.read_with(cx, |h, _| h.follow_stop()).is_none(),
+        "the click ran the retry: the state it acts on is gone"
+    );
+
+    // (c, closure) With the broadcast dismissed but the budget re-armed by
+    // the entry's own retry, the next terminal failure re-raises the
+    // banner undismissed (a user-initiated retry's outcome must be
+    // visible) — while the projection, being the state itself, never
+    // blinked out in between.
+    for _ in 0..5 {
+        leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    }
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "the retry's own exhaustion re-raises the broadcast"
+    );
+    assert!(
+        visual.debug_bounds("follow-stop-projection").is_some(),
+        "the projection held the whole time"
+    );
+
+    drop(ws);
+    drop(visual);
+    let _ = std::fs::remove_file(&db_path);
+}
