@@ -126,6 +126,7 @@ dependencies = [
  "manox-components",
  "manox-ext-agents",
  "manox-harness",
+ "manox-i18n",
  "manox-protocol",
  "manox-providers",
  "manox-session-core",
@@ -4573,7 +4574,7 @@ dependencies = [
 [[package]]
 name = "hyperlinks"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 
 [[package]]
 name = "iana-time-zone"
@@ -5498,7 +5499,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "lsp"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5629,6 +5630,7 @@ dependencies = [
  "ksni",
  "manox-agent",
  "manox-ext-agents",
+ "manox-i18n",
  "manox-terminal",
  "supervisor",
  "terminal-ui",
@@ -5640,7 +5642,7 @@ dependencies = [
 [[package]]
 name = "manox-agent"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5649,7 +5651,6 @@ dependencies = [
  "brush-builtins",
  "brush-core",
  "chrono",
- "fluent",
  "futures",
  "globset",
  "grep-regex",
@@ -5681,7 +5682,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
- "unic-langid",
  "uuid",
  "xxhash-rust",
  "zstd",
@@ -5730,7 +5730,7 @@ dependencies = [
 [[package]]
 name = "manox-harness"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5767,9 +5767,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "manox-i18n"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fluent",
+ "toml 0.8.23",
+ "tracing",
+ "unic-langid",
+]
+
+[[package]]
 name = "manox-protocol"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "async-channel",
  "base64 0.22.1",
@@ -5781,7 +5792,7 @@ dependencies = [
 [[package]]
 name = "manox-providers"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -5794,7 +5805,7 @@ dependencies = [
 [[package]]
 name = "manox-session-core"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -5818,7 +5829,7 @@ dependencies = [
 [[package]]
 name = "manox-terminal"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5876,7 +5887,7 @@ dependencies = [
 [[package]]
 name = "manox-workspace"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9655,7 +9666,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "supervisor"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?branch=main#6dc7649915ccd7bba9f841cfbb53616d9055ee91"
+source = "git+https://github.com/dspo/manox.git?branch=main#f80f38a6d3fa595d2a75dc3cb6e4b7d4f6808d08"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -10039,6 +10050,7 @@ dependencies = [
  "gpui-kit-assets",
  "gpui-pre",
  "manox-agent",
+ "manox-i18n",
  "manox-terminal",
  "serde",
  "tracing",

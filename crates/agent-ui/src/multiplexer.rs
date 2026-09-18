@@ -412,7 +412,7 @@ impl SessionMultiplexer {
     }
 
     /// The slash-command / skill registry snapshot (wire JSON array of
-    /// `{name, description, kind, argument_hint, i18n_key?}` entries, U2).
+    /// `{name, description, kind, argument_hint}` entries, U2).
     pub fn commands(&self) -> &serde_json::Value {
         &self.commands
     }
@@ -713,7 +713,7 @@ impl SessionMultiplexer {
                 }
             },
             // The commands snapshot is opaque wire JSON (the popover reads
-            // name/description/kind/i18n_key off the entries).
+            // name/description/kind off the entries).
             ListFetch::Commands => self.commands = value,
             ListFetch::Workspaces => {
                 let workspaces = value

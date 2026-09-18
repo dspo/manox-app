@@ -101,6 +101,9 @@ fn main() {
         // before `manox_agent::init` computes host-scoped state.
         manox_agent::host::set_host(manox_agent::host::Host::ManoxApp);
         manox_agent::init();
+        // UI-chrome locale before anything renders: menus, the tray, and the
+        // first window all resolve labels through `manox_i18n::t`.
+        manox_i18n::init();
         // `terminal` runs its PTY pumps on the shared process-global tokio
         // runtime; hand it the handle before `manox_terminal::init` builds the store.
         manox_terminal::runtime::set_runtime(manox_agent::runtime::handle().clone());
@@ -522,29 +525,23 @@ fn build_app_menus() -> Vec<Menu> {
     {
         vec![
             Menu::new("manox").items([
-                MenuItem::action(manox_agent::i18n::t("menu-about"), OpenAbout),
+                MenuItem::action(manox_i18n::t("menu-about"), OpenAbout),
                 MenuItem::separator(),
-                MenuItem::action(
-                    manox_agent::i18n::t("menu-settings"),
-                    agent_ui::OpenSettings,
-                ),
+                MenuItem::action(manox_i18n::t("menu-settings"), agent_ui::OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action(manox_agent::i18n::t("menu-quit"), Quit),
+                MenuItem::action(manox_i18n::t("menu-quit"), Quit),
             ]),
             build_tools_menu(),
         ]
     }
     #[cfg(not(target_os = "macos"))]
     {
-        vec![Menu::new(manox_agent::i18n::t("menu-file")).items([
-            MenuItem::action(manox_agent::i18n::t("menu-about"), OpenAbout),
+        vec![Menu::new(manox_i18n::t("menu-file")).items([
+            MenuItem::action(manox_i18n::t("menu-about"), OpenAbout),
             MenuItem::separator(),
-            MenuItem::action(
-                manox_agent::i18n::t("menu-settings"),
-                agent_ui::OpenSettings,
-            ),
+            MenuItem::action(manox_i18n::t("menu-settings"), agent_ui::OpenSettings),
             MenuItem::separator(),
-            MenuItem::action(manox_agent::i18n::t("menu-quit"), Quit),
+            MenuItem::action(manox_i18n::t("menu-quit"), Quit),
         ])]
     }
 }
@@ -564,20 +561,17 @@ fn build_tools_menu() -> Menu {
     // VS Code 单一入口：注入目标由持久化 `vscode_app:` 设置决定
     //（Settings → 外部工具 → Visual Studio Code.app），启动时无选择级联。
     // VS Code 未安装时禁用——此时没有任何 VS Code 实例可打开/注入。
-    let vscode = MenuItem::action(
-        manox_agent::i18n::t("menu-vscode-open"),
-        agent_ui::LaunchVSCode,
-    )
-    .disabled(!manox_ext_agents::vscode_app_installed());
-    Menu::new(manox_agent::i18n::t("menu-tools")).items([MenuItem::submenu(chatgpt), vscode])
+    let vscode = MenuItem::action(manox_i18n::t("menu-vscode-open"), agent_ui::LaunchVSCode)
+        .disabled(!manox_ext_agents::vscode_app_installed());
+    Menu::new(manox_i18n::t("menu-tools")).items([MenuItem::submenu(chatgpt), vscode])
 }
 
 /// Items inside the `ChatGPT.app` submenu: one nested submenu per provider
 /// that exposes models visible to the `ChatGPT.app` agent (i.e. Responses-capable
 /// models), one action item per model. Mirrors the provider registry snapshot
-/// at build time — `manox_agent::i18n::rebuild_menus` re-runs menu construction after
-/// a registry reload. Provider submenus keep the registry's first-appearance
-/// order; models keep registry order within their provider.
+/// at build time — `agent_ui::menu::rebuild_menus` re-runs menu construction
+/// after a registry reload. Provider submenus keep the registry's
+/// first-appearance order; models keep registry order within their provider.
 #[cfg(target_os = "macos")]
 fn build_chatgpt_menu_items() -> Vec<MenuItem> {
     let mut providers: Vec<(String, Vec<String>)> = Vec::new();

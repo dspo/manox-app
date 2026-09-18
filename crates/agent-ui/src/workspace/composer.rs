@@ -314,11 +314,11 @@ impl Workspace {
             let submit_text = format!("/{key} {args}");
             let _ = self.send_submit_v2(submit_text, Vec::new(), cx);
         } else {
-            let i18n_key = match kind {
+            let notice_key = match kind {
                 RegistryTurnKind::Command => "workspace-unknown-command",
                 RegistryTurnKind::Skill => "workspace-unknown-skill",
             };
-            tracing::warn!("unknown {}", i18n::t_str(i18n_key, &[("name", key)]));
+            tracing::warn!("unknown {}", i18n::t_str(notice_key, &[("name", key)]));
         }
         // Persist on submit so the sidebar shows the new entry immediately
         // (cross-domain #5: the wire refetch — the server self-holds the

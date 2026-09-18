@@ -17,6 +17,7 @@ serde.workspace = true
 tracing.workspace = true
 manox-terminal.workspace = true
 manox-agent.workspace = true
+manox-i18n.workspace = true
 
 [lints.clippy]
 dbg_macro = "deny"

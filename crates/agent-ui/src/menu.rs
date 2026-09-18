@@ -1,10 +1,10 @@
-//! Menu rebuilder — the gpui-dependent twin of `manox_agent::i18n`.
+//! Menu rebuilder — the gpui-dependent half of UI-locale switching.
 //!
 //! The bin owns the native-menu construction (`Quit` action and `Menu`/`MenuItem`
 //! live there). When the UI locale changes the native menus must be re-`set_menus`'d
 //! with fresh `t()`-resolved labels; this module holds the indirection that keeps
-//! the rebuild closure out of the `agent` crate (it cannot depend on `gpui::App`)
-//! without scattering menu-rebuild calls across the UI layer.
+//! the rebuild closure out of the code that cannot depend on `gpui::App` without
+//! scattering menu-rebuild calls across the UI layer.
 
 use std::sync::OnceLock;
 

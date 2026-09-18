@@ -29,6 +29,7 @@ terminal-ui.workspace = true
 supervisor.workspace = true
 
 anyhow.workspace = true
+manox-i18n.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true

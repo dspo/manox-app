@@ -35,7 +35,7 @@ const QUIT_ID: &str = "tray-quit";
 const POLL: Duration = Duration::from_millis(100);
 
 /// Install the platform tray backend. Must run on the gpui main thread after
-/// `manox_agent::init` (labels resolve through `manox_agent::i18n::t`) and after the main
+/// `manox_agent::init` (labels resolve through `manox_i18n::t`) and after the main
 /// window has opened: the status item creates its own window
 /// (`NSStatusBarWindow` on macOS), and ordering it after a successful window
 /// open keeps tray creation from becoming a startup death mode on systems
@@ -47,7 +47,7 @@ pub fn install() -> anyhow::Result<()> {
 }
 
 /// Rebuild the tray menu so labels re-resolve under a new UI locale. Called
-/// from the native-menu rebuilder path (`manox_agent::i18n::set_ui_language` →
+/// from the native-menu rebuilder path (`manox_i18n::set_ui_language` →
 /// `rebuild_menus`), which runs on the main thread.
 pub fn rebuild_menus() {
     backend::rebuild_menus();
@@ -150,8 +150,8 @@ mod backend {
     }
 
     fn build_menu() -> anyhow::Result<Menu> {
-        let open = MenuItem::with_id(OPEN_ID, manox_agent::i18n::t("menu-open-manox"), true, None);
-        let quit = MenuItem::with_id(QUIT_ID, manox_agent::i18n::t("menu-quit"), true, None);
+        let open = MenuItem::with_id(OPEN_ID, manox_i18n::t("menu-open-manox"), true, None);
+        let quit = MenuItem::with_id(QUIT_ID, manox_i18n::t("menu-quit"), true, None);
         Menu::with_items(&[&open, &PredefinedMenuItem::separator(), &quit])
             .map_err(|e| anyhow::anyhow!("tray menu build failed: {e}"))
     }
@@ -252,14 +252,14 @@ mod backend {
         fn menu(&self) -> Vec<MenuItem<Self>> {
             vec![
                 StandardItem {
-                    label: manox_agent::i18n::t("menu-open-manox").to_string(),
+                    label: manox_i18n::t("menu-open-manox").to_string(),
                     activate: Box::new(|this: &mut Self| this.send(TrayCmd::Open)),
                     ..Default::default()
                 }
                 .into(),
                 MenuItem::Separator,
                 StandardItem {
-                    label: manox_agent::i18n::t("menu-quit").to_string(),
+                    label: manox_i18n::t("menu-quit").to_string(),
                     activate: Box::new(|this: &mut Self| this.send(TrayCmd::Quit)),
                     ..Default::default()
                 }
