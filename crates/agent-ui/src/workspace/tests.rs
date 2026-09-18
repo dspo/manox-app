@@ -4775,3 +4775,137 @@ fn a_dismissed_stop_keeps_a_permanent_retry_entry(cx: &mut gpui::TestAppContext)
     drop(visual);
     let _ = std::fs::remove_file(&db_path);
 }
+
+/// The healthy gate of the §二.3 stop surfaces, on the same production
+/// adoption and notification chain as the two stop tests above: neither
+/// the dismissible banner nor the permanent projection may render while
+/// the leaf holds no stop state. A fresh foreground leaf draws nothing;
+/// an in-budget reopen schedule (terminal failures still under the cap,
+/// backoff pending) still draws nothing; exactly the sixth failure
+/// raises both surfaces. The last step doubles as the undismissed half
+/// of the no-signal-less gate — a live stop is never left without a
+/// visible entry — and proves the asserted absences were observed on a
+/// live canvas with live selectors, not on a blind one. No multiplexer
+/// is ever wired, so nothing here reaches the background executor's
+/// backoff timers.
+#[gpui::test]
+fn a_healthy_follow_shows_no_stop_surfaces(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path =
+        std::env::temp_dir().join(format!("manox-follow-healthy-test-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    // The same adoption ritual as the two stop tests: the outbound-less
+    // leaf becomes the foreground through `subscribe_thread`, so every
+    // repaint below rides only the leaf's `cx.notify()` through the
+    // observer — no whole-tree refresh can mask a dead chain or fake a
+    // retired surface.
+    let leaf = ws.update(cx, |ws, cx| {
+        let leaf = cx.new(|cx| {
+            crate::client_store_handle::ClientStoreHandle::leaf("follow-healthy-test", cx)
+        });
+        ws.store = Some(leaf.clone());
+        let (thread_events, store_changes) = ws.subscribe_thread(cx);
+        ws.thread_sub = Some(thread_events);
+        ws.store_observe = Some(store_changes);
+        leaf
+    });
+    let draw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    };
+
+    // (1) No stop has ever been raised: neither surface renders. The
+    // permanent projection is gated on the state, not on time — a
+    // healthy session must carry zero stop chrome.
+    assert!(
+        leaf.read_with(cx, |h, _| h.follow_stop()).is_none(),
+        "a fresh leaf holds no stop state"
+    );
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "a healthy session must not show the stop banner"
+    );
+    assert!(
+        visual.debug_bounds("follow-stop-projection").is_none(),
+        "a healthy session must not show the stop projection"
+    );
+
+    // (2) Backoff pending is still healthy chrome: while the budget
+    // lasts there is no stop to project, so the chrome renders nothing
+    // even though reopen attempts are in flight.
+    let resync = manox_protocol::FromServer::StreamEnd {
+        stream_id: manox_protocol::StreamId::new("follow-healthy-test"),
+        reason: manox_protocol::StreamEndReason::Resync,
+    };
+    for _ in 0..5 {
+        leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    }
+    assert!(
+        leaf.read_with(cx, |h, _| h.follow_stop()).is_none(),
+        "an in-budget reopen schedule is not a stop"
+    );
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "in-budget failures must not pre-render the banner"
+    );
+    assert!(
+        visual.debug_bounds("follow-stop-projection").is_none(),
+        "in-budget failures must not pre-render the projection"
+    );
+
+    // (3) The sixth terminal failure is the state's first instant, and
+    // the very next draw carries both surfaces: nothing signals earlier,
+    // and no live stop is ever left without a visible retry entry. The
+    // dismissal half of this invariant (dismissed leaves exactly the
+    // projection) is pinned by the test above.
+    leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    assert_eq!(
+        leaf.read_with(cx, |h, _| h.follow_stop()),
+        Some(crate::client_store_handle::FollowStop {
+            reason: crate::client_store_handle::FollowStopReason::StreamFailing,
+            dismissed: false,
+        }),
+        "the exhausted budget raises an undismissed stop"
+    );
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "a fresh stop must show its broadcast"
+    );
+    assert!(
+        visual.debug_bounds("follow-stop-projection").is_some(),
+        "a live stop must never leave the view without a visible entry"
+    );
+
+    drop(ws);
+    drop(visual);
+    let _ = std::fs::remove_file(&db_path);
+}
