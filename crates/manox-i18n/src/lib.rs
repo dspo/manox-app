@@ -438,4 +438,29 @@ mod tests {
         let full = t_str("workspace-mode-notice", &[("mode", "dangerfullaccess")]);
         assert!(full.contains("完全访问"), "got: {full}");
     }
+
+    /// Both directions of the plan chip's pending state must resolve in both
+    /// bundles. `plan_mode_pending` is directionless (`enabled != committed`),
+    /// so a queued switch-on and a queued exit need separate copy — one label
+    /// cannot describe both. Missing from `en.ftl` a term renders the raw key;
+    /// missing from `zh-CN.ftl` it renders the English fallback.
+    #[test]
+    fn plan_chip_pending_localized() {
+        let _g = TEST_LANG_LOCK.lock().unwrap();
+        set_lang(Language::En);
+        assert_eq!(
+            t("plan-chip-pending-enter-label").as_str(),
+            "Plan mode pending"
+        );
+        assert!(t("plan-chip-pending-enter-tooltip").contains("next turn"));
+        assert!(t("plan-chip-pending-exit-label").contains("exiting"));
+        assert!(t("plan-chip-pending-exit-tooltip").contains("stay blocked"));
+        assert!(t("plan-mode-cancel-notice").contains("stays writable"));
+        set_lang(Language::ZhCn);
+        assert!(t("plan-chip-pending-enter-label").contains("待生效"));
+        assert!(t("plan-chip-pending-enter-tooltip").contains("下一轮"));
+        assert!(t("plan-chip-pending-exit-label").contains("待退出"));
+        assert!(t("plan-chip-pending-exit-tooltip").contains("写权限"));
+        assert!(t("plan-mode-cancel-notice").contains("保持可写"));
+    }
 }

@@ -44,6 +44,12 @@ pub struct ClientStore {
     pub branch: Option<String>,
     pub goal: Option<Value>,
     pub plan_mode: bool,
+    /// A plan-mode selection that targets a state other than `plan_mode` and
+    /// has not yet committed at a turn boundary. The pair is the wire's
+    /// `{ active, pending }` view: `plan_mode` alone cannot express an
+    /// outstanding selection, because the engine journals the request and
+    /// commits only at the next boundary.
+    pub plan_mode_pending: bool,
     pub persisted_plan: Option<Value>,
     pub browser_suites: Vec<manox_agent::engine::BrowserSuite>,
     pub running: bool,
@@ -177,6 +183,7 @@ impl Default for ClientStore {
             branch: None,
             goal: None,
             plan_mode: false,
+            plan_mode_pending: false,
             persisted_plan: None,
             browser_suites: Vec::new(),
             running: false,
@@ -397,6 +404,40 @@ impl ClientStore {
         self.projections.get(key)
     }
 
+    /// Every field `materialize_projection` writes, as one comparable string.
+    /// Exists so the coverage guard can observe whether a key reached a field
+    /// rather than trusting a hand-kept list of names. A field added by an arm
+    /// but omitted here makes that arm's probe invisible, so the guard fails
+    /// closed (reports the key unmirrored) rather than passing silently.
+    #[cfg(test)]
+    fn mirrored_fields(&self) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            self.display_title,
+            self.cwd,
+            self.project,
+            self.model,
+            self.model_id,
+            self.permission_mode,
+            self.reasoning_effort,
+            self.plan_mode,
+            self.plan_mode_pending,
+            self.persisted_plan,
+            self.goal,
+            self.running,
+            self.has_interacted,
+            self.pinned,
+            self.archived,
+            self.depth,
+            self.branch,
+            self.browser_suites,
+            self.pending_auth_set,
+            self.background_tasks,
+            self.agent_label,
+            self.self_author,
+        )
+    }
+
     fn materialize_projection(&mut self, key: &str, value: &Value) {
         match key {
             "title" => self.display_title = value.as_str().unwrap_or_default().to_string(),
@@ -424,6 +465,7 @@ impl ClientStore {
                     serde_json::from_value(Value::String(effort.to_string())).unwrap_or_default();
             }
             "plan_mode" => self.plan_mode = value.as_bool().unwrap_or(false),
+            "plan_mode_pending" => self.plan_mode_pending = value.as_bool().unwrap_or(false),
             "plan" => self.persisted_plan = Some(value.clone()),
             "goal" => self.goal = Some(value.clone()),
             "running" => self.running = value.as_bool().unwrap_or(false),
@@ -643,6 +685,85 @@ impl ClientStore {
 mod tests {
     use super::*;
 
+    /// Keys the protocol declares that this store deliberately does not
+    /// materialize onto a field (display-only, or read straight from the
+    /// `projections` slot by a view). Each entry needs a reason; the list is
+    /// the only sanctioned way to acknowledge an unmirrored key.
+    const DISPLAY_ONLY_PROJECTION_KEYS: &[&str] = &[];
+
+    /// A probe value per declared key, in the shape that key's arm parses.
+    /// `None` means the key is expected to reach no field (and must therefore
+    /// be listed in `DISPLAY_ONLY_PROJECTION_KEYS`). The guard requires the
+    /// store to react to its probe, so a key whose match arm is deleted while
+    /// its declaration stays fails here — which comparing two handwritten
+    /// lists of names cannot see.
+    fn probe_for(key: &str) -> Option<Value> {
+        Some(match key {
+            "title" | "cwd" | "project" | "agent_label" => Value::String("lead".into()),
+            // Routing names resolve through `MessageAuthor::from_routing`; the
+            // default author is `Agent("")`, so this maps to a distinct arm.
+            "self_author" => Value::String("harness".into()),
+            "model" => serde_json::json!({ "modelId": "probe-model" }),
+            "permission_mode" => Value::String("read-only".into()),
+            "reasoning_effort" => Value::String("max".into()),
+            "plan_mode" | "plan_mode_pending" | "running" | "has_interacted" | "pinned"
+            | "archived" => Value::Bool(true),
+            "plan" | "goal" => serde_json::json!({ "probe": true }),
+            "depth" => Value::from(7u64),
+            "branch" => Value::String("probe-branch".into()),
+            "browser_suites" => Value::Array(vec![Value::String("webexplore".into())]),
+            "pending_auth" => serde_json::json!({ "auth-1": true }),
+            "background_tasks" => serde_json::json!({ "task-1": { "id": "task-1" } }),
+            _ => return None,
+        })
+    }
+
+    /// Every key the protocol declares must reach a field, or be listed as
+    /// display-only. The merge match ends in `_ => {}`, so an upstream key
+    /// this client does not know is dropped in silence — no compile error, no
+    /// runtime warning.
+    #[test]
+    fn every_declared_projection_key_is_mirrored() {
+        let unmirrored: Vec<&str> = manox_protocol::surface::PROJECTION_KEYS
+            .iter()
+            .copied()
+            .filter(|key| !DISPLAY_ONLY_PROJECTION_KEYS.contains(key))
+            .filter(|key| {
+                let Some(probe) = probe_for(key) else {
+                    // No probe: the guard cannot observe this key, so it must
+                    // be acknowledged as display-only rather than silently
+                    // pass. The assertion below reports it either way.
+                    return true;
+                };
+                let mut store = ClientStore::default();
+                let before = store.mirrored_fields();
+                store.merge_projection(key, probe, 1);
+                store.mirrored_fields() == before
+            })
+            .collect();
+        assert!(
+            unmirrored.is_empty(),
+            "projection keys declared upstream but reaching no field: {unmirrored:?} \
+             — materialize them in `merge_projection`, or list them in \
+             DISPLAY_ONLY_PROJECTION_KEYS with a reason"
+        );
+        // The reverse direction: a display-only entry for a key the protocol
+        // has since dropped would otherwise linger unnoticed.
+        let declared: std::collections::BTreeSet<&str> = manox_protocol::surface::PROJECTION_KEYS
+            .iter()
+            .copied()
+            .collect();
+        let stale: Vec<&str> = DISPLAY_ONLY_PROJECTION_KEYS
+            .iter()
+            .copied()
+            .filter(|key| !declared.contains(key))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "listed as display-only but no longer declared upstream: {stale:?}"
+        );
+    }
+
     // T10c: the v1 note-fold tests retired with the fold. Their coverage
     // moved to the v2 equivalents below / in the §F.2 section:
     //   thread_info_updates_all_fields   → projections_materialize_mirror_fields
@@ -783,6 +904,7 @@ mod tests {
         store.merge_projection("permission_mode", Value::String("read-only".into()), 1);
         store.merge_projection("reasoning_effort", Value::String("max".into()), 1);
         store.merge_projection("plan_mode", Value::Bool(true), 1);
+        store.merge_projection("plan_mode_pending", Value::Bool(true), 1);
         store.merge_projection("running", Value::Bool(true), 1);
         store.merge_projection("depth", Value::from(2u64), 1);
         store.merge_projection("agent_label", Value::String("lead".into()), 1);
@@ -812,6 +934,7 @@ mod tests {
             manox_agent::thread::PermissionMode::DangerFullAccess
         );
         assert!(store.plan_mode);
+        assert!(store.plan_mode_pending);
         assert!(store.running);
         assert_eq!(store.depth, 2);
         assert_eq!(store.agent_label, "lead");
