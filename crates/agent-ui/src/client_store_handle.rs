@@ -64,12 +64,22 @@ pub enum FollowStopReason {
 }
 
 impl FollowStopReason {
-    /// The Fluent key of this reason's notice copy (the strings live in the
-    /// locale resources, keyed per reason; copy must not hardcode a cause
-    /// the client cannot observe).
+    /// The Fluent key of this reason's broadcast copy (the dismissible
+    /// banner). The strings live in the locale resources, keyed per reason;
+    /// copy must not hardcode a cause the client cannot observe.
     pub fn notice_key(self) -> &'static str {
         match self {
             Self::StreamFailing => "follow-stop-stream-failing",
+        }
+    }
+
+    /// The Fluent key of this reason's persistent-projection copy (the
+    /// always-visible footer chip). Split from the broadcast key because
+    /// the chip is a compact status, not a sentence; a new reason variant
+    /// adds exactly one new key here too.
+    pub fn indicator_key(self) -> &'static str {
+        match self {
+            Self::StreamFailing => "follow-stop-indicator-stream-failing",
         }
     }
 }
@@ -523,9 +533,11 @@ impl ClientStoreHandle {
     }
 
     /// The notice's retry entry: re-arm the §二.3 budget and ask the
-    /// multiplexer to open the follow stream once more. The notice drops
-    /// immediately; a fresh exhaustion re-raises it undismissed, because a
-    /// retry is a user action whose outcome must be visible.
+    /// multiplexer to open the follow stream once more. With a multiplexer
+    /// wired the notice drops immediately, and a fresh exhaustion re-raises it
+    /// undismissed; with none wired there is nothing to re-open, so this is a
+    /// no-op and the notice it cannot act on stays — a retry is a user action
+    /// whose outcome must be visible either way.
     pub fn retry_follow(&mut self, cx: &mut Context<Self>) {
         // A retry is a user action, so its outcome has to be visible: with no
         // multiplexer wired there is nothing to re-open, and dropping the
@@ -2043,5 +2055,35 @@ mod tests {
             reopens += 1;
         }
         assert_eq!(reopens, 10, "five pre-retry + five post-retry reopens");
+    }
+
+    /// The retry contract with nothing to re-open: with no multiplexer wired
+    /// the click must leave the notice it cannot act on, and must not spend an
+    /// attempt on it.
+    #[gpui::test]
+    fn retry_without_an_outbound_leaves_the_notice_up(cx: &mut TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|cx| ClientStoreHandle::leaf("s1", cx)));
+        let resync = FromServer::StreamEnd {
+            stream_id: StreamId::new("s1"),
+            reason: manox_protocol::StreamEndReason::Resync,
+        };
+        for _ in 0..6 {
+            handle.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+        }
+        assert!(handle.read_with(cx, |h, _| h.follow_stop()).is_some());
+        handle.update(cx, |h, cx| h.retry_follow(cx));
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.follow_stop()),
+            Some(FollowStop {
+                reason: FollowStopReason::StreamFailing,
+                dismissed: false,
+            }),
+            "a retry with nothing to re-open must leave the notice up"
+        );
+        assert_eq!(
+            handle.read_with(cx, |h, _| h.reopen_attempts),
+            6,
+            "and must not spend an attempt on it"
+        );
     }
 }

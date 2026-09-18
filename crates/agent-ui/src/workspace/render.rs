@@ -1229,14 +1229,18 @@ impl Workspace {
             .child(v_flex().flex_1().h_full().w_full().child(content))
     }
 
-    /// §二.3 stop notice: the dismissible banner shown above the message
-    /// area while the foreground leaf's reopen budget is exhausted. The
-    /// transcript silently keeps its last window, so the banner is the
-    /// sole signal that the view no longer updates; it says what stopped
-    /// (the reason copy is keyed by the leaf's observable cause) and
-    /// carries the action the user actually wants — one manual retry.
-    /// Dismissal belongs to the leaf (per session): the banner stays out
-    /// until the stream resumes or a retry dies again.
+    /// §二.3 stop notice — the dismissible BROADCAST arm. Shown above the
+    /// message area while the foreground leaf's reopen budget is exhausted
+    /// AND not dismissed. It names what stopped (the reason copy is keyed
+    /// by the leaf's observable cause) and carries the retry action, but
+    /// it is not the only signal: the persistent projection (`Workspace::
+    /// render_follow_stop_chip`, in the footer's composer chip group)
+    /// stays visible regardless of dismissal. Dismissing this banner hides
+    /// only the broadcast; the state and its retry entry survive in the
+    /// footer, so a stuck lease — which never self-heals — can never leave
+    /// the frozen transcript signal-less. Dismissal still belongs to the
+    /// leaf (per session): the banner stays out until the stream resumes
+    /// or a retry dies again.
     fn render_follow_stop_banner(
         &self,
         theme: &Theme,
