@@ -116,6 +116,9 @@ impl SubagentPanel {
         let ctx = ApplyCtx {
             weak: weak_workspace.clone(),
             cwd: None,
+            // The panel's rows are a child session's display, and its answer
+            // backfill is locally minted — no row here is a forkable anchor.
+            fork_source: None,
         };
         let final_note = backfill.is_empty() && final_text.is_some();
         let role_for_conv = role.clone();
@@ -187,6 +190,9 @@ impl SubagentPanel {
         let ctx = ApplyCtx {
             weak: self.weak_workspace.clone(),
             cwd: None,
+            // The panel's rows are a child session's display, and its answer
+            // backfill is locally minted — no row here is a forkable anchor.
+            fork_source: None,
         };
         self.conversation
             .update(cx, |c, cx| c.apply(&event, &role, usage, ctx, cx));

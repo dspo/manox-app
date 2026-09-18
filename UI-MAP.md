@@ -75,7 +75,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### MessageItem 变体
 
-- [UserMessage](#usermessage) · [AssistantMessage](#assistantmessage) · [ReasoningBlock](#reasoningblock) · [ActivitySegment](#activitysegment) · [ToolCallCard](#toolcallcard) · [AgentTaskCard](#agenttaskcard) · [BackgroundTaskCard](#backgroundtaskcard) · [ErrorMessage](#errormessage) · [NoticeMessage](#noticemessage) · [RecapCard](#recapcard) · [CacheMissDivider](#cachemissdivider) · [RetryBadge](#retrybadge)
+- [UserMessage](#usermessage) · [AssistantMessage](#assistantmessage) · [AssistantActions](#assistantactions) · [ReasoningBlock](#reasoningblock) · [ActivitySegment](#activitysegment) · [ToolCallCard](#toolcallcard) · [AgentTaskCard](#agenttaskcard) · [BackgroundTaskCard](#backgroundtaskcard) · [ErrorMessage](#errormessage) · [NoticeMessage](#noticemessage) · [RecapCard](#recapcard) · [CacheMissDivider](#cachemissdivider) · [RetryBadge](#retrybadge)
 
 ### Footer / Composer
 
@@ -445,9 +445,17 @@ Full-width user turn block rendered inside [TurnFrame](#turnframe): `{from} > {t
 
 #### AssistantMessage
 
-Full-width block: model row + copy btn + markdown body (plain text while streaming). A reply that immediately follows an [ActivitySegment](#activitysegment) omits its own model row — the segment's header row carries the model name — and the copy btn overlays the body's top-right corner, revealed on hover.
+Full-width block: optional model row + markdown body (plain text while streaming) + a hover-revealed action row beneath the body. A reply that immediately follows an [ActivitySegment](#activitysegment) omits its own model row — the segment's header row carries the model name. The action row (`assistant_action_row`) renders **under** the body, never overlaid on prose, and carries the copy button followed by the fork button; the whole row fades in on hover of the enclosing group.
 
 > Source: `crates/agent-ui/src/views/message.rs`
+
+#### AssistantActions
+
+Fork affordance for an assistant reply (`ClientCall::ForkSession`, dspo/manox#775). The branch button is **always present** (the row keeps a stable shape) and is *disabled with a tooltip naming the reason* whenever the reply is not a forkable anchor — a control that disappears cannot teach the rule it enforces. Three gates, resolved at build time (`ConvItem::Assistant`'s `fork_unavailable`): the rows must be a faithful replay of the session journal (`NotReplayed` — a sub-agent panel's answer backfill or a compaction retained tail has no id of its own); the reply must close its turn (`MidTurn` — an entry carrying a tool call has its result on a later entry, so a prefix ending there would be repaired with a synthetic "No result provided" and the child would start from false history); and the reply must have landed (`Streaming`). When all three hold, clicking forks the session at that reply — the child is a prefix copy of the source's active chain through that entry, lands as an independent sidebar row, and is opened in place; a failed fork leaves the current view untouched and stays retryable. One fork may be outstanding at a time (`Workspace::fork_in_flight`), so a double click cannot mint two children. The fork inherits the source's model / cwd / approval / effort because every intent field is left unset. Fork rides `Workspace::fork_session_at` → `SessionMultiplexer::fork_session_intent`, whose `{session_id}` receipt reuses the `CreateSession` continuation (`CreateSessionDone`).
+
+Note: the child inherits the source's **title** — a fork copies the prefix including the journal `title` entry the auto-titler writes after the first response — so the sidebar shows two same-named rows. The runtime exposes no rename primitive yet (`thread_store::rename_thread` is still only referenced in a comment), so no `increaseTitle` increment is applied.
+
+> Source: `crates/agent-ui/src/views/message.rs`, `crates/agent-ui/src/workspace/attach.rs`, `crates/agent-ui/src/multiplexer.rs`
 
 #### ReasoningBlock
 

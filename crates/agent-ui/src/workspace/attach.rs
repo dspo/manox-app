@@ -464,6 +464,9 @@ impl Workspace {
                 crate::conversation::ApplyCtx {
                     weak: weak.clone(),
                     cwd,
+                    // These rows are this session's journal replayed, so their
+                    // entry ids are forkable anchors.
+                    fork_source: self.fork_source_session(cx),
                 },
                 cx,
             );
@@ -759,5 +762,68 @@ impl Workspace {
         // the id is server-known by construction.
         let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
         self.attach_thread(thread, true, window, cx);
+    }
+
+    /// Fork the current session at a durable entry, then open the child
+    /// (`ClientCall::ForkSession`, #775).
+    ///
+    /// The child is a prefix copy of this session's active chain through
+    /// `through_entry_id`; it lands as an independent sidebar row. Failure
+    /// leaves the current view untouched — a fork that cannot be created must
+    /// not disturb the transcript the user is reading.
+    pub(crate) fn fork_session_at(&mut self, through_entry_id: &str, cx: &mut Context<Self>) {
+        // The source is read exactly where the row's anchor was stamped
+        // (`fork_source`): an entry id is only addressable within the session
+        // it was replayed from.
+        let Some(source_session_id) = self.fork_source_session(cx) else {
+            tracing::warn!("fork: no session bound, ignoring");
+            return;
+        };
+        // One fork in flight at a time: the call is a round trip, and a second
+        // click on any reply would otherwise mint another child for the same
+        // intent. The guard clears when the verdict lands (either way); a
+        // receipt lost to a transport end is failed by the multiplexer at
+        // that boundary. A receipt lost to a hung handler on a living
+        // channel is upstream always-answer territory — no timer
+        // compensates for it here.
+        if self.fork_in_flight {
+            tracing::debug!("fork: already in flight, ignoring");
+            return;
+        }
+        self.fork_in_flight = true;
+        let ws = cx.weak_entity();
+        let entry_id = through_entry_id.to_string();
+        self.multiplexer.update(cx, |m, _| {
+            m.fork_session_intent(
+                &source_session_id,
+                &entry_id,
+                Box::new(move |done, cx| {
+                    let sid = match done {
+                        crate::multiplexer::CreateSessionDone::Created { session_id, .. } => {
+                            tracing::info!(session_id = %session_id, "fork landed");
+                            session_id
+                        }
+                        crate::multiplexer::CreateSessionDone::Failed { message } => {
+                            tracing::warn!(error = %message, "ForkSession failed");
+                            let _ = ws.update(cx, |this, cx| {
+                                this.fork_in_flight = false;
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    };
+                    // Same borrow rule as the create path: this callback runs
+                    // inside the mux pump and opening the child re-enters the
+                    // mux, so the bind lands on a later tick.
+                    cx.spawn(async move |_, cx| {
+                        let _ = ws.update_in(cx, |this, window, cx| {
+                            this.fork_in_flight = false;
+                            this.open_thread(sid, window, cx);
+                        });
+                    })
+                    .detach();
+                }),
+            );
+        });
     }
 }

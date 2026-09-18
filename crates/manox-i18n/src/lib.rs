@@ -345,6 +345,10 @@ mod tests {
             "menu-quit",
             "settings-row-ui-language",
             "workspace-rename-confirm",
+            "message-fork-here",
+            "message-fork-unavailable-not-landed",
+            "message-fork-unavailable-mid-turn",
+            "message-fork-unavailable-not-replayed",
         ];
         for key in keys {
             set_lang(Language::ZhCn);

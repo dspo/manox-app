@@ -844,6 +844,11 @@ pub struct Workspace {
     /// (a bind's identity hand-off arrived while this workspace held the
     /// predecessor). Taken once, so the switch cannot re-trigger.
     pending_successor: Option<String>,
+    /// A `ForkSession` round trip is outstanding. The fork control is a button
+    /// on every forkable reply, and the verdict takes a round trip, so without
+    /// this a double click mints two children for one intent. Cleared on both
+    /// verdicts so a failed fork stays retryable.
+    fork_in_flight: bool,
     sidebar_sub: Option<Subscription>,
     input_sub: Option<Subscription>,
     editor_sub: Option<Subscription>,
@@ -1271,6 +1276,7 @@ impl Workspace {
             thread_sub: None,
             store_observe: None,
             pending_successor: None,
+            fork_in_flight: false,
             sidebar_sub: None,
             input_sub: None,
             editor_sub: None,
@@ -1631,6 +1637,9 @@ impl Workspace {
             .map(|s| s.read(cx).store.running)
             .expect("foreground store present");
         let cwd = thread_cwd(&self.thread, &self.store, cx);
+        // A rebuild from the thread is that session's journal replayed, so its
+        // rows may anchor forks.
+        let fork_source = self.fork_source_session(cx);
         let new_conv = cx.new(|cx| {
             ConversationState::rebuild_from_display(
                 &display,
@@ -1641,6 +1650,7 @@ impl Workspace {
                 crate::conversation::ApplyCtx {
                     weak: weak.clone(),
                     cwd,
+                    fork_source,
                 },
                 cx,
             )
@@ -1862,7 +1872,11 @@ impl Workspace {
                             ev,
                             &role,
                             None,
-                            crate::conversation::ApplyCtx { weak, cwd },
+                            crate::conversation::ApplyCtx {
+                                weak,
+                                cwd,
+                                fork_source: this.fork_source_session(cx),
+                            },
                             cx,
                         )
                     });
@@ -1924,7 +1938,11 @@ impl Workspace {
                             ev,
                             &role,
                             usage,
-                            crate::conversation::ApplyCtx { weak, cwd },
+                            crate::conversation::ApplyCtx {
+                                weak,
+                                cwd,
+                                fork_source: this.fork_source_session(cx),
+                            },
                             cx,
                         )
                     });
@@ -2144,7 +2162,11 @@ impl Workspace {
                             ev,
                             &role,
                             usage,
-                            crate::conversation::ApplyCtx { weak, cwd },
+                            crate::conversation::ApplyCtx {
+                                weak,
+                                cwd,
+                                fork_source: this.fork_source_session(cx),
+                            },
                             cx,
                         )
                     });
@@ -2781,6 +2803,17 @@ impl Workspace {
     /// label; a team member thread shows its own member name.
     fn recipient_author(&self) -> manox_agent::MessageAuthor {
         self.thread.read(|t| t.self_author())
+    }
+
+    /// The session the transcript's rows belong to: the single source for
+    /// stamping journal-replayed rows as fork anchors (`fork_source`) and
+    /// for the outgoing `ForkSession` source — an entry id is only
+    /// addressable within the session it was replayed from, so both sides
+    /// must read one id.
+    pub(crate) fn fork_source_session(&self, cx: &App) -> Option<String> {
+        self.store
+            .as_ref()
+            .map(|s| s.read(cx).session_id().to_string())
     }
 
     fn user_turn_meta(&self, cx: &mut Context<Self>) -> UserTurnMeta {

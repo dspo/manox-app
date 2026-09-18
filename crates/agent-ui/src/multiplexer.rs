@@ -156,6 +156,12 @@ impl SessionMultiplexer {
                 }
             }
             tracing::error!("mux pump exited (channel closed)");
+            // Transport end = receipts can no longer arrive (disconnect /
+            // same-client-id reseat / server shutdown): drain the pending
+            // create/fork continuations and the MsgId fetch tables so
+            // caller-side guards (the workspace's fork-in-flight flag)
+            // clear and nothing idles past the boundary.
+            let _ = this.update(cx, |m, cx| m.drain_pending_on_transport_end(cx));
         });
         let (leaf_tx, leaf_rx) = async_channel::unbounded::<LeafRequest>();
         let _leaf_pump = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
@@ -908,6 +914,79 @@ impl SessionMultiplexer {
         self.create_callbacks.insert(id, on_done);
     }
 
+    /// Fork a session at a durable entry (`ClientCall::ForkSession`, #775).
+    ///
+    /// The fork is a prefix copy of the source's active chain up to and
+    /// including `through_entry_id`; the server mints the child id and answers
+    /// `{session_id}`, the same shape `CreateSession` returns — so the caller's
+    /// continuation is the same `CreateSessionDone` (on success the child is
+    /// registered and following, and the caller opens it).
+    ///
+    /// Every intent field is left `None`: the fork inherits the source's
+    /// model / cwd / approval / effort / project from the copied journal rather
+    /// than the global defaults, which is the behavior a "branch from here"
+    /// affordance wants.
+    pub fn fork_session_intent(
+        &mut self,
+        source_session_id: &str,
+        through_entry_id: &str,
+        on_done: CreateCallback,
+    ) {
+        let id = self.client.send_call(ClientCall::ForkSession {
+            source_session_id: source_session_id.to_string(),
+            through_entry_id: through_entry_id.to_string(),
+            cwd: None,
+            project: None,
+            initial_model: None,
+            approval_mode: None,
+            reasoning_effort: None,
+        });
+        self.create_callbacks.insert(id, on_done);
+    }
+
+    /// Drain every MsgId-keyed in-flight table (transport end).
+    ///
+    /// Receipts ride the request channel: once it is closed no `Response`
+    /// can ever arrive, so waiting one out would leave a continuation (and
+    /// any user-visible guard hanging off it, like the workspace's
+    /// fork-in-flight flag) stuck for the multiplexer's remaining life.
+    /// Create/fork continuations drain through the ordinary `Failed` arm,
+    /// keeping a lost receipt equivalent to a rejected call.
+    ///
+    /// The fetch tables have no continuation to fail: their work is
+    /// re-issued by any future reopen/refetch, and feeding the leaves an
+    /// `Err` here would spin reopen chains against the dead wire. They are
+    /// dropped with a trace instead.
+    fn drain_pending_on_transport_end(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<CreateCallback> = self
+            .create_callbacks
+            .drain()
+            .map(|(_, callback)| callback)
+            .collect();
+        for callback in pending {
+            callback(
+                CreateSessionDone::Failed {
+                    message: "connection closed".into(),
+                },
+                cx,
+            );
+        }
+        if !self.info_fetches.is_empty()
+            || !self.page_fetches.is_empty()
+            || !self.list_fetches.is_empty()
+        {
+            tracing::warn!(
+                info = self.info_fetches.len(),
+                page = self.page_fetches.len(),
+                list = self.list_fetches.len(),
+                "transport closed with pending fetches; dropping them"
+            );
+            self.info_fetches.clear();
+            self.page_fetches.clear();
+            self.list_fetches.clear();
+        }
+    }
+
     /// Client-side focus transition (§F.2/GW5): the newly attached
     /// session's leaf goes active (clearing its monotonic unread/errored
     /// mirrors); the previously attached one goes inert. Selection is
@@ -1558,5 +1637,42 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A receipt that can never arrive must not strand its continuation:
+    /// when the transport ends (disconnect / same-id reseat / server
+    /// shutdown) the pending fork continuation drains through `Failed` —
+    /// the workspace's fork-in-flight guard clears there, so a lost
+    /// receipt disables fork for one round trip, not forever.
+    #[gpui::test]
+    async fn a_dead_transport_drains_pending_forks_as_failed(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        let verdict = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+        let slot = verdict.clone();
+        mux.update(cx, |m, _| {
+            m.fork_session_intent(
+                "source-1",
+                "entry-1",
+                Box::new(move |done, _| {
+                    *slot.borrow_mut() = Some(match done {
+                        CreateSessionDone::Created { .. } => "created".into(),
+                        CreateSessionDone::Failed { message } => message,
+                    });
+                }),
+            );
+        });
+        assert_eq!(
+            *verdict.borrow(),
+            None,
+            "a live transport leaves the continuation pending"
+        );
+
+        server_conn.disconnect();
+        cx.run_until_parked();
+        assert_eq!(
+            *verdict.borrow(),
+            Some("connection closed".to_string()),
+            "the transport's end must fail the pending fork, not strand it"
+        );
     }
 }
