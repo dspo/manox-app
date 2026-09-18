@@ -59,7 +59,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### MessageColumn
 
-- [MessageColumn](#messagecolumn) · [TitleBar](#titlebar) · [TitleBarThreadTitle](#titlebarthreadtitle) · [TitleBarMenuButton](#titlebarmenubutton) · [SidebarToggleBtn](#sidebartogglebtn) · [RightPaneToggleBtn](#rightpanetogglebtn) · [Body](#body)
+- [MessageColumn](#messagecolumn) · [TitleBar](#titlebar) · [TitleBarThreadTitle](#titlebarthreadtitle) · [TitleBarMenuButton](#titlebarmenubutton) · [SidebarToggleBtn](#sidebartogglebtn) · [RightPaneToggleBtn](#rightpanetogglebtn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice)
 
 ### ContextRail
 
@@ -373,9 +373,15 @@ Ghost icon button at the TitleBar's right edge toggling the [RightPane](#rightpa
 
 #### Body
 
-Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses [Hero](#hero) (with the [LoadingIndicator](#loadingindicator) while an empty session restores) or [MessageArea](#messagearea) + [Footer](#footer).
+Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNotice](#followstoppednotice) (only while the follow stream has stopped) and then [Hero](#hero) (with the [LoadingIndicator](#loadingindicator) while an empty session restores) or [MessageArea](#messagearea) + [Footer](#footer).
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
+
+#### FollowStoppedNotice
+
+Dismissible banner above the message area, shown while the foreground leaf's §二.3 reopen budget is exhausted (the transcript silently keeps its last window; the banner is the sole signal the view no longer updates). Row: `IconName::TriangleAlert` + reason copy (a Fluent key chosen by the leaf's typed `FollowStopReason` — today only `follow-stop-stream-failing`, deliberately cause-agnostic because the client cannot observe more; the server-side lease-holder signal, dspo/manox#811, lands as a new variant + key, not a wire-code guess), a ghost **Retry** button (leaf `retry_follow`: re-arms the budget and requests one follow re-open) and a ghost `×` dismiss (leaf `dismiss_follow_stop`). Dismissal lives on the leaf — per session: no automatic path re-shows it (a re-exhaustion keeps the flag), a good snapshot withdraws the whole notice, and a thread switch builds a fresh leaf. A manual retry's own terminal exhaustion re-shows the banner undismissed (an explicit user action's outcome must be visible).
+
+> Source: `crates/agent-ui/src/workspace/render.rs` (`render_follow_stop_banner`); state: `crates/agent-ui/src/client_store_handle.rs` (`FollowStop` / `FollowStopReason`)
 
 
 #### 3.2.1 Hero
@@ -433,14 +439,15 @@ Full-width block: model row + copy btn + markdown body (plain text while streami
 
 #### ReasoningBlock
 
-Collapsible: chevron + "Reasoning" label + muted italic body, rendered as the label and content of a [Chain of Thought](#activitysegment) step — the round's status marker (spinner while streaming, book-open when settled) sits in the step's marker column rather than in this row. The `ai_elements::Reasoning` component itself is not wired here yet; this still uses the entry's own row and body. Each reasoning round (an `ActivityEntry::Reasoning` inside a `Thinking` segment, plus the top-level `ConvItem::Reasoning`) owns a persistent `Entity<Markdown>` (`markdown` field) mounted on first sync — so drag-select + Cmd/Ctrl+C survive across frames (a per-frame `Entity` would reset the `DocSelection`/`FocusHandle` every render and break selection on reasoning text the same way it did on tool output). Italic styling propagates from the row's `Markdown::italic` toggle.
+Collapsible: chevron + "Reasoning" label + left-bordered muted body. Each reasoning round (an `ActivityEntry::Reasoning` inside a `Thinking` segment, plus the top-level `ConvItem::Reasoning`) owns a persistent `Entity<Markdown>` (`markdown` field) mounted on first sync — so drag-select + Cmd/Ctrl+C survive across frames (a per-frame `Entity` would reset the `DocSelection`/`FocusHandle` every render and break selection on reasoning text the same way it did on tool output). Italic styling propagates from the row's `Markdown::italic` toggle.
 
 > Source: `crates/agent-ui/src/views/message.rs`
 
 #### ActivitySegment
 
-One contiguous thinking + tool-call segment within a user turn, rendered as a **Chain of Thought** (`ai_elements::ChainOfThought`, `render_thinking`) — the first `ai-elements` component wired into the conversation. Header row: model display name (the row's label) + chevron + live braille spinner + per-kind counts (`Read×7`, `Edit×6`, `思考×8` via `message-reasoning`) + elapsed (`thinking-duration`) + red `activity-failed` / orange `activity-awaiting-approval` badges — counts, spinner and badges ride the header's `meta` slots; clicking the row fires the component's `on_toggle`, which writes the container's `collapsed` and sets `user_toggled` (manual state is sticky — auto-collapse never fights the user). Collapsed shows the header alone whether live or settled; expanded lists one `ChainOfThoughtStep` per entry (`render_activity_entry`), each drawing the connector rail below its marker — the last step draws none, so the list does not end on a stub. A step's marker column carries the entry's status (braille spinner while a reasoning round streams or a tool runs; book-open / check / cross / minus once settled), its label is the entry's own clickable row (chevron + title), and its content is the entry's body (the reasoning round's persistent `Entity<Markdown>`, or a tool's terminal-styled output panel). **The component holds no policy**: `open` is `layout.expanded` — which already folds in the approval force-open — and the click handler is the host's; `animated(false)` keeps the reveal layout-neutral so the list's cached row heights stay honest. Segments with fewer than two entries render flat under a model-name-only header with no cover to click. An approval-pending entry force-opens the segment so the interactive row is never hidden. The assistant reply that follows a segment renders no model row of its own — the header is the single place the model shows. The elapsed counter ticks every second via a gpui background timer spawned on `TurnStarted` and self-terminating on terminal `Stop`/`Error`; `frozen_secs` pins the final value so later re-renders don't inflate it. Ordinary tool calls fold here instead of producing standalone cards.
-> Source: `crates/agent-ui/src/views/message.rs` — `render_thinking`, `render_activity_entry`, `reasoning_step`, `tool_step`, `segment_layout`, `segment_stats`. Component: `crates/ai-elements/src/chain_of_thought.rs`. Container state: `ConversationState` (`ConvItem::Thinking` / `ThinkingContainer`).
+One contiguous thinking + tool-call segment within a user turn, rendered as a fold shell (`render_thinking`). Header row: model display name + chevron + live braille spinner + per-kind counts (`Read×7`, `Edit×6`, `思考×8` via `message-reasoning`) + elapsed (`thinking-duration`) + red `activity-failed` / orange `activity-awaiting-approval` badges; clicking toggles the container's `collapsed` and sets `user_toggled` (manual state is sticky — auto-collapse never fights the user). Collapsed shows the header alone whether live or settled; expanded nests every entry under a slight indent with a left rail, each entry (`render_activity_entry`) itself collapsible to its full tool output via `render_tool_output`. Segments with fewer than two entries render flat under a model-name-only header. An approval-pending entry force-opens the segment so the interactive row is never hidden. The assistant reply that follows a segment renders no model row of its own — the header is the single place the model shows; counts and elapsed live on the header alone. The elapsed counter ticks every second via a gpui background timer spawned on `TurnStarted` and self-terminating on terminal `Stop`/`Error`; `frozen_secs` pins the final value so later re-renders don't inflate it. Ordinary tool calls fold here instead of producing standalone cards.
+> Source: `crates/agent-ui/src/views/message.rs` — `render_thinking`, `render_activity_entry`, `segment_layout`, `segment_stats`. Container state: `ConversationState` (`ConvItem::Thinking` / `ThinkingContainer`).
+
 #### ToolCallCard
 
 A standalone tool-call card (`render_tool_call`) for the special-case tools that don't fold into an [ActivitySegment](#activitysegment) batch — today `agent` sub-agent calls and `AskUserQuestion`. A model response's other tool calls batch into the `Thinking` container; their output renders via [TerminalPanel](#terminalpanel).

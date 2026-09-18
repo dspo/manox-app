@@ -4483,3 +4483,125 @@ fn a_plain_ask_carries_no_intent() {
         "no detail → no markdown block"
     );
 }
+
+/// The §二.3 stop notice at the chrome level: an exhausted reopen budget
+/// paints the dismissible banner above the message area; the retry click
+/// drops it and re-arms the leaf's budget (backoff churn stays silent, the
+/// retry's own terminal exhaustion re-shows it); the dismiss click silences
+/// the banner for this session through a later automatic stop.
+#[gpui::test]
+fn a_stopped_follow_shares_a_dismissible_notice(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path =
+        std::env::temp_dir().join(format!("manox-follow-stop-test-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    // Swap in an outbound-less leaf and burn its reopen budget with resync
+    // frames (no multiplexer in the loop: the stop state is deterministic).
+    let leaf = visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            let leaf = cx.new(|cx| {
+                crate::client_store_handle::ClientStoreHandle::leaf("follow-stop-test", cx)
+            });
+            ws.store = Some(leaf.clone());
+            leaf
+        })
+    });
+    // `refresh` forces a whole-tree re-render: the swapped-in leaf carries
+    // no `subscribe_thread` observer, so a leaf notify alone would never
+    // dirty the workspace under test.
+    let draw = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+    };
+    let resync = manox_protocol::FromServer::StreamEnd {
+        stream_id: manox_protocol::StreamId::new("follow-stop-test"),
+        reason: manox_protocol::StreamEndReason::Resync,
+    };
+    for _ in 0..6 {
+        leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    }
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "an exhausted reopen budget must show the stopped-follow banner"
+    );
+
+    // Retry click: the banner drops immediately (a fresh attempt cycle is
+    // live); backoff reopens do not churn it; the retry's own terminal
+    // exhaustion re-shows it.
+    let retry = visual
+        .debug_bounds("follow-stop-retry-btn")
+        .expect("the banner carries its retry control");
+    visual.simulate_click(retry.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "the retry click must drop the banner"
+    );
+    // The retry click spent attempt 1; attempts 2-5 stay in backoff.
+    for _ in 0..4 {
+        leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    }
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "backoff reopens must not churn the banner"
+    );
+    leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "the retry's terminal exhaustion re-shows the banner"
+    );
+
+    // Dismiss click: out for this session, and a later automatic stop
+    // cannot bring it back.
+    let dismiss = visual
+        .debug_bounds("follow-stop-dismiss-btn")
+        .expect("the banner carries its dismiss control");
+    visual.simulate_click(dismiss.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "the dismiss click must clear the banner"
+    );
+    leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
+    draw(&mut visual);
+    assert!(
+        visual.debug_bounds("follow-stopped-notice").is_none(),
+        "a dismissed session must not re-show the banner"
+    );
+
+    drop(ws);
+    drop(visual);
+    let _ = std::fs::remove_file(&db_path);
+}
