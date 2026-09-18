@@ -421,6 +421,7 @@ mod tests {
             token_usage: None,
             activity_header: false,
             entry_id: None,
+            fork_unavailable: None,
         }
     }
 

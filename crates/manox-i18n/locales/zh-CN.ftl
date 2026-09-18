@@ -123,6 +123,13 @@ message-harness-role = Harness
 
 message-fork-here = 从此处分叉新会话
 
+message-fork-unavailable-streaming = 回复生成中，完成后可从此处分叉
+
+message-fork-unavailable-mid-turn = 仅可从已完成轮次的最后一条消息分叉
+
+message-fork-unavailable-not-replayed = 该行不属于会话记录，无法分叉
+
+
 recap-card-title = 上下文已压缩
 
 cache-miss-label = 缓存未命中 · { $tokens } tokens

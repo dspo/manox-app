@@ -346,6 +346,9 @@ mod tests {
             "settings-row-ui-language",
             "workspace-rename-confirm",
             "message-fork-here",
+            "message-fork-unavailable-streaming",
+            "message-fork-unavailable-mid-turn",
+            "message-fork-unavailable-not-replayed",
         ];
         for key in keys {
             set_lang(Language::ZhCn);

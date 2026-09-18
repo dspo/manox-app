@@ -103,10 +103,14 @@ pub enum ConvItem {
         /// renders no model row of its own (pure-text answers stay bare).
         activity_header: bool,
         /// The reply's durable journal entry id (`ClientCall::ForkSession`'s
-        /// `through_entry_id`). `None` while streaming: the row has no
-        /// durable identity until it lands in the journal, so a fork has
-        /// nothing to anchor on yet.
+        /// `through_entry_id`) when it is a forkable anchor. `None` when it is
+        /// not — `fork_unavailable` then says why, so the control stays
+        /// visible and explains itself instead of vanishing.
         entry_id: Option<String>,
+        /// Why this reply cannot be forked, or `None` when it can. Resolved
+        /// where the journal context is known (the builder), so rendering only
+        /// decides how to draw the control.
+        fork_unavailable: Option<crate::views::message::ForkUnavailable>,
     },
     /// One contiguous activity segment within a user turn, rendered as a
     /// segment shell: a header row carrying the model display name plus the
@@ -641,6 +645,14 @@ pub enum ApplyOutcome {
 pub struct ApplyCtx {
     pub weak: WeakEntity<Workspace>,
     pub cwd: Option<SharedString>,
+    /// The session whose journal these rows came from, when the rows are a
+    /// faithful replay of it. `Some` only for the main conversation: rows
+    /// rebuilt from a journal carry that session's durable entry ids, so a
+    /// fork anchored on them is addressable. Synthetic rows (the sub-agent
+    /// panel's answer backfill, compaction retained tails) leave this `None`
+    /// — their ids are locally minted or borrowed from another entry, so a
+    /// fork anchored on one would name an entry the session does not have.
+    pub fork_source: Option<String>,
 }
 
 impl ConversationState {
@@ -832,7 +844,13 @@ impl ConversationState {
         ctx: ApplyCtx,
         cx: &mut App,
     ) -> ApplyOutcome {
-        let ApplyCtx { weak, cwd } = ctx;
+        // `fork_source` is unused here: this folds live events, and a live
+        // stream has no durable row to anchor a fork on.
+        let ApplyCtx {
+            weak,
+            cwd,
+            fork_source: _,
+        } = ctx;
         // A trailing `Retry` badge is stale the moment a real content or
         // terminal-error event lands — that event means the retry either
         // succeeded (assistant text / tool call) or exhausted the budget
@@ -1009,8 +1027,11 @@ impl ConversationState {
                                 token_usage: None,
                                 activity_header,
                                 // A live stream has no durable row yet; the
-                                // authoritative rebuild supplies the id.
+                                // authoritative rebuild supplies the anchor.
                                 entry_id: None,
+                                fork_unavailable: Some(
+                                    crate::views::message::ForkUnavailable::Streaming,
+                                ),
                             },
                             role.to_string(),
                             id,
@@ -1783,8 +1804,12 @@ impl ConversationState {
         ctx: ApplyCtx,
         cx: &mut App,
     ) -> Self {
-        let ApplyCtx { weak, cwd } = ctx;
-        let mut builder = ItemBuilder::new(Some(recipient.clone()));
+        let ApplyCtx {
+            weak,
+            cwd,
+            fork_source,
+        } = ctx;
+        let mut builder = ItemBuilder::new(Some(recipient.clone())).with_fork_source(fork_source);
         let mut kinds: Vec<ConvItem> = Vec::new();
         let mut pending: Vec<Message> = Vec::new();
         let mut deferred: Vec<&UiNoteRecord> = Vec::new();
@@ -1868,7 +1893,13 @@ impl ConversationState {
         if messages.is_empty() {
             return ApplyOutcome::Unchanged;
         }
-        let ApplyCtx { weak, cwd } = ctx;
+        // `fork_source` is unused here: this appends streaming history, whose
+        // rows have no durable id yet.
+        let ApplyCtx {
+            weak,
+            cwd,
+            fork_source: _,
+        } = ctx;
         let builder_recipient = self.recipient.clone();
         let builder = self
             .history_builder
@@ -2043,6 +2074,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: weak.clone(),
             cwd: None,
+            fork_source: None,
         };
 
         cx.update(|cx| {
@@ -2101,7 +2133,11 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let weak = gpui::WeakEntity::<Workspace>::new_invalid();
-        let ctx = ApplyCtx { weak, cwd: None };
+        let ctx = ApplyCtx {
+            weak,
+            cwd: None,
+            fork_source: None,
+        };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 let outcome = c.apply(
@@ -2128,6 +2164,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
 
         cx.update(|cx| {
@@ -2160,6 +2197,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
 
         cx.update(|cx| {
@@ -2270,6 +2308,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             let conv = ConversationState::rebuild_from_display(
@@ -2328,6 +2367,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             let conv = ConversationState::rebuild_from_display(
@@ -2390,6 +2430,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             let conv = ConversationState::rebuild_from_display(
@@ -2951,6 +2992,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: weak.clone(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3222,6 +3264,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3269,6 +3312,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3329,6 +3373,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3372,6 +3417,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3444,6 +3490,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         let canonical = r#"{"answers":[{"id":"a1","selected":["Blue"]}]}"#;
         let weak = ctx.weak.clone();
@@ -3504,6 +3551,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3572,6 +3620,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3637,6 +3686,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: gpui::WeakEntity::<Workspace>::new_invalid(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3832,6 +3882,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: weak.clone(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3903,6 +3954,7 @@ mod tests {
         let ctx = ApplyCtx {
             weak: weak.clone(),
             cwd: None,
+            fork_source: None,
         };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
@@ -3956,7 +4008,11 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let weak = gpui::WeakEntity::<Workspace>::new_invalid();
-        let ctx = ApplyCtx { weak, cwd: None };
+        let ctx = ApplyCtx {
+            weak,
+            cwd: None,
+            fork_source: None,
+        };
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 let outcome = c.apply(

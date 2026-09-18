@@ -794,6 +794,7 @@ pub fn render_item(
             token_usage: _,
             activity_header,
             entry_id,
+            fork_unavailable,
         } => render_assistant(
             AssistantRenderContent {
                 text,
@@ -806,6 +807,7 @@ pub fn render_item(
             AssistantActions {
                 entry_id: entry_id.clone(),
                 weak,
+                unavailable: *fork_unavailable,
             },
             cx,
         ),
@@ -1045,25 +1047,54 @@ fn format_user_turn_time(timestamp: i64) -> String {
 /// that can act on it. `entry_id` is `None` while a reply is still streaming
 /// (no durable row exists yet), which withholds the branch control.
 #[derive(Clone, Default)]
-pub struct AssistantActions {
+pub(crate) struct AssistantActions {
     pub entry_id: Option<String>,
     pub weak: Option<WeakEntity<Workspace>>,
+    pub unavailable: Option<ForkUnavailable>,
+}
+
+/// Why a reply cannot be forked, in the user's terms — or `None` when it can.
+/// The reason is resolved while building the item (where the journal context is
+/// known), so the render layer only decides how to draw it: a disabled control
+/// that cannot say what it wants is a dead end, so each reason carries copy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ForkUnavailable {
+    /// The reply is still streaming — no durable row exists to anchor on.
+    Streaming,
+    /// The reply closes a step but not the turn: it carries a tool call whose
+    /// result rides a later entry, so a prefix ending here would be replanted
+    /// with a synthetic "No result provided" outcome.
+    MidTurn,
+    /// The row is not a faithful replay of a session journal (a sub-agent
+    /// panel's answer backfill, a compaction retained tail), so its id names
+    /// no entry of the session it would be forked from.
+    NotReplayed,
+}
+
+impl ForkUnavailable {
+    fn notice_key(self) -> &'static str {
+        match self {
+            Self::Streaming => "message-fork-unavailable-streaming",
+            Self::MidTurn => "message-fork-unavailable-mid-turn",
+            Self::NotReplayed => "message-fork-unavailable-not-replayed",
+        }
+    }
 }
 
 /// The assistant reply's own render inputs, grouped so the render entry point
 /// keeps a readable signature (`render_user`'s `UserRenderContent` is the
 /// precedent).
-pub struct AssistantRenderContent<'a> {
-    pub text: &'a str,
-    pub role: &'a str,
-    pub activity_header: bool,
+pub(crate) struct AssistantRenderContent<'a> {
+    text: &'a str,
+    role: &'a str,
+    activity_header: bool,
 }
 
 /// Render an assistant message. A reply that follows an activity segment
 /// (`activity_header`) suppresses its own model row — the segment's header
 /// already carries the model name. The action row (copy / fork) always renders
 /// beneath the body, never overlaid on it.
-pub fn render_assistant(
+pub(crate) fn render_assistant(
     content: AssistantRenderContent<'_>,
     ix: usize,
     theme: &Theme,
@@ -1111,6 +1142,10 @@ pub fn render_assistant(
 /// The assistant reply's action row: copy then fork, rendered beneath the body
 /// so no control ever covers prose. The whole row is hover-revealed like every
 /// other transcript affordance.
+///
+/// The fork control is always present so the row keeps a stable shape: when the
+/// reply cannot be forked it stays visible and disabled, its tooltip naming the
+/// reason. A control that disappears cannot teach the rule it enforces.
 fn assistant_action_row(
     ix: usize,
     group: &str,
@@ -1125,28 +1160,41 @@ fn assistant_action_row(
         .opacity(0.0)
         .group_hover(group.to_string(), |s| s.opacity(1.0))
         .child(copy_button(ix, "copy-assistant", text.to_string()));
-    // Fork needs both a durable anchor and a live owner to route the call
-    // through; a dropped workspace leaves copy as the row's only action.
-    if let (Some(entry_id), Some(weak)) = (actions.entry_id, actions.weak) {
-        row = row.child(fork_button(ix, weak, &entry_id));
+    // Fork additionally needs a live owner to route the call through; a
+    // dropped workspace leaves copy as the row's only actionable control.
+    if let Some(weak) = actions.weak {
+        row = row.child(fork_button(ix, weak, actions.entry_id, actions.unavailable));
     }
     row
 }
 
-/// Fork this session at the reply this button belongs to.
+/// Fork this session at the reply this button belongs to, or — when the reply
+/// is not a forkable anchor — the same control, disabled, explaining why.
 ///
-/// The button is revealed with the rest of the action row. A fork runs through
-/// the owning `Workspace` (which owns the outgoing call and the child bind), so
-/// the row only carries the durable anchor id.
-fn fork_button(ix: usize, weak: WeakEntity<Workspace>, entry_id: &str) -> Button {
-    let entry_id = entry_id.to_string();
+/// A fork runs through the owning `Workspace` (which owns the outgoing call and
+/// the child bind), so the row carries only the durable anchor id.
+fn fork_button(
+    ix: usize,
+    weak: WeakEntity<Workspace>,
+    entry_id: Option<String>,
+    unavailable: Option<ForkUnavailable>,
+) -> Button {
+    let Some(entry_id) = entry_id.filter(|_| unavailable.is_none()) else {
+        let reason = unavailable.unwrap_or(ForkUnavailable::NotReplayed);
+        return Button::new(("fork-assistant", ix))
+            .ghost()
+            .xsmall()
+            .icon(gpui_kit_assets::IconName::GitBranch)
+            .tooltip(i18n::t(reason.notice_key()))
+            .disabled(true);
+    };
     Button::new(("fork-assistant", ix))
         .ghost()
         .xsmall()
         .icon(gpui_kit_assets::IconName::GitBranch)
         .tooltip(i18n::t("message-fork-here"))
+        .debug_selector(move || format!("fork-assistant-{ix}"))
         .on_click(move |_, _window, cx: &mut App| {
-            let entry_id = entry_id.clone();
             let _ = weak.update(cx, |workspace, cx| {
                 workspace.fork_session_at(&entry_id, cx);
             });
@@ -3093,6 +3141,11 @@ pub struct ItemBuilder {
     /// bubble's header `to`. `None` omits the segment (a bare rebuild with no
     /// owning view).
     recipient: Option<manox_agent::MessageAuthor>,
+    /// The session these messages were replayed from, when they are a faithful
+    /// journal replay. Fork anchors are attached only then: a synthetic row's
+    /// id does not name an entry the session has, so offering a fork on it
+    /// would build a button that can only fail.
+    fork_source: Option<String>,
 }
 
 impl ItemBuilder {
@@ -3101,6 +3154,14 @@ impl ItemBuilder {
             recipient,
             ..Default::default()
         }
+    }
+
+    /// Mark these rows as a faithful replay of `session_id`, so their assistant
+    /// replies can carry fork anchors. Without this the builder is building
+    /// display-only content (synthetic backfill, borrowed compaction rows).
+    pub fn with_fork_source(mut self, session_id: Option<String>) -> Self {
+        self.fork_source = session_id;
+        self
     }
 
     /// Append items for `messages` to `items`. A trailing open activity
@@ -3207,6 +3268,18 @@ impl ItemBuilder {
                     }
                 }
                 Role::Assistant => {
+                    // A fork may only anchor on a *completed turn tail*: a
+                    // prefix that ends mid-turn would carry an unresolved tool
+                    // call, which the runtime repairs with a synthetic
+                    // "No result provided" outcome — the child would start
+                    // from a fabricated history. An entry that carries a
+                    // `ToolUse` is by construction not a turn tail: its result
+                    // rides the *next* entry, and the loop continues. Only
+                    // entries without one can close a turn.
+                    let closes_turn = !m
+                        .content
+                        .iter()
+                        .any(|c| matches!(c, MessageContent::ToolUse(_)));
                     for c in &m.content {
                         match c {
                             MessageContent::Text(t) => {
@@ -3225,7 +3298,20 @@ impl ItemBuilder {
                                         .as_deref()
                                         .and_then(|id| usage.get(id).copied()),
                                     activity_header,
-                                    entry_id: Some(m.id.clone()),
+                                    // Anchor eligibility is resolved here,
+                                    // where the journal context is known: only
+                                    // a faithful replay makes `m.id` name an
+                                    // entry of the session, and only a reply
+                                    // with no tool call closes its turn.
+                                    entry_id: (closes_turn && self.fork_source.is_some())
+                                        .then(|| m.id.clone()),
+                                    fork_unavailable: if self.fork_source.is_none() {
+                                        Some(ForkUnavailable::NotReplayed)
+                                    } else if !closes_turn {
+                                        Some(ForkUnavailable::MidTurn)
+                                    } else {
+                                        None
+                                    },
                                 });
                             }
                             MessageContent::Thinking { text, .. } => {
@@ -4608,6 +4694,7 @@ mod tests {
             token_usage: None,
             activity_header: false,
             entry_id: None,
+            fork_unavailable: None,
         };
         assert_eq!(text_body_of(&assistant), Some((true, "hi".into())));
 
@@ -4653,31 +4740,90 @@ mod tests {
         assert_eq!(text_body_of(&thinking), None);
     }
 
-    /// A fork needs a durable anchor: only a landed reply carries an entry id,
-    /// so a still-streaming reply must not offer the branch control (there is
-    /// no `through_entry_id` to send). The builder is the only place the id is
-    /// attached, so assert it there rather than on a hand-built item.
+    /// A fork anchor is only attached where a fork is actually valid, and the
+    /// control explains every case where it is not. Three gates: the rows must
+    /// be a faithful journal replay, the reply must close its turn (no tool
+    /// call, whose result rides a later entry), and the reply must have landed
+    /// (a streamed delta has no durable row).
     #[test]
-    fn built_assistant_replies_carry_the_durable_entry_id() {
+    fn fork_anchor_eligibility_follows_replay_and_turn_tail() {
         let usage = HashMap::new();
-        let mut items = Vec::new();
-        let mut builder = ItemBuilder::new(None);
 
+        let build = |messages: &[Message], replayed: bool| -> Vec<ConvItem> {
+            let mut items = Vec::new();
+            let source = replayed.then(|| "session-1".to_string());
+            let mut builder = ItemBuilder::new(None).with_fork_source(source);
+            builder.extend(messages, &usage, &mut items);
+            items
+        };
+
+        let assistant_conv = |items: &[ConvItem]| -> (Option<String>, Option<ForkUnavailable>) {
+            items
+                .iter()
+                .find_map(|item| match item {
+                    ConvItem::Assistant {
+                        entry_id,
+                        fork_unavailable,
+                        ..
+                    } => Some((entry_id.clone(), *fork_unavailable)),
+                    _ => None,
+                })
+                .expect("the batch produces an assistant item")
+        };
+
+        // A plain text reply that closes its turn, replayed: forkable.
         let mut reply = Message::assistant(vec![MessageContent::Text("done".to_string())]);
-        reply.id = "entry-42".to_string();
-        builder.extend(&[reply], &usage, &mut items);
+        reply.id = "entry-1".to_string();
+        let (anchor, gate) = assistant_conv(&build(&[reply.clone()], true));
+        assert_eq!(anchor.as_deref(), Some("entry-1"));
+        assert_eq!(gate, None, "a completed turn tail must be forkable");
 
-        let entry_id = items
-            .iter()
-            .find_map(|item| match item {
-                ConvItem::Assistant { entry_id, .. } => Some(entry_id.clone()),
-                _ => None,
-            })
-            .expect("the batch produces an assistant item");
+        // The same reply in a display-only rebuild (sub-agent panel, synthetic
+        // backfill): its id names no entry of the session, so no anchor.
+        let (anchor, gate) = assistant_conv(&build(&[reply.clone()], false));
+        assert_eq!(anchor, None);
         assert_eq!(
-            entry_id.as_deref(),
-            Some("entry-42"),
-            "a landed reply must expose its durable id so the row can fork"
+            gate,
+            Some(ForkUnavailable::NotReplayed),
+            "a row outside the session record must say so rather than offer a doomed call"
+        );
+
+        // A reply that carries a tool call does not close its turn: its result
+        // rides the next entry, so a prefix ending here would be repaired with
+        // a synthetic result and the child would start from false history.
+        let mut mid_turn = Message::assistant(vec![
+            MessageContent::Text("let me check".to_string()),
+            tu("tu_1", "Read", serde_json::json!({"path": "a.rs"})),
+        ]);
+        mid_turn.id = "entry-2".to_string();
+        let (anchor, gate) = assistant_conv(&build(&[mid_turn], true));
+        assert_eq!(anchor, None);
+        assert_eq!(gate, Some(ForkUnavailable::MidTurn));
+    }
+
+    /// A still-streaming reply has no durable row, so its fork control is
+    /// disabled with a reason rather than absent — the row keeps its shape and
+    /// the user learns why.
+    #[test]
+    fn streaming_reply_withholds_the_fork_anchor_but_keeps_the_control() {
+        let streaming = ConvItem::Assistant {
+            text: "partial".into(),
+            streaming: true,
+            token_usage: None,
+            activity_header: false,
+            entry_id: None,
+            fork_unavailable: Some(ForkUnavailable::Streaming),
+        };
+        assert!(
+            matches!(
+                streaming,
+                ConvItem::Assistant {
+                    entry_id: None,
+                    fork_unavailable: Some(ForkUnavailable::Streaming),
+                    ..
+                }
+            ),
+            "a streamed row must not carry an anchor, and must name its reason"
         );
     }
 }

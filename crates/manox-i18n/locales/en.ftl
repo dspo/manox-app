@@ -135,6 +135,13 @@ message-harness-role = Harness
 
 message-fork-here = Fork a new session from here
 
+message-fork-unavailable-streaming = Available once this reply finishes
+
+message-fork-unavailable-mid-turn = Only the last message of a completed turn can branch
+
+message-fork-unavailable-not-replayed = This row is not part of the session record
+
+
 recap-card-title = Context compacted
 
 cache-miss-label = cache miss · { $tokens } tokens
