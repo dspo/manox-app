@@ -24,10 +24,10 @@ use std::time::Instant;
 
 use crate::conversation::{
     ActivityEntry, AgentTaskItem, BackgroundTaskItem, ConvItem, ThinkingContainer, ToolCallItem,
-    UserImage, UserTurnMeta,
+    UserImage, UserTurnMeta, next_reasoning_entry_id,
 };
 use crate::i18n;
-use ai_elements::{ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep};
+use ai_elements::{BrailleSpinner, ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep};
 use base64::Engine as _;
 use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui::prelude::*;
@@ -50,7 +50,7 @@ use manox_agent::thread::PermissionMode;
 use manox_agent::{Message, TokenUsage, ToolCallStatus};
 use manox_components::markdown::ast::LinkKind;
 use manox_components::markdown::terminal_panel::GitSummary;
-use manox_components::markdown::{HeadingMode, Markdown, PanelKind, TerminalPanel};
+use manox_components::markdown::{HeadingMode, Markdown, PanelKind, TerminalPanel, hashline_text};
 
 /// Message body type size: one step below the chrome `text_base` (14px) so
 /// dense conversation text reads lighter. Composer + Editor tab pin the same
@@ -60,7 +60,6 @@ use manox_components::turn_frame::TurnFrame;
 use std::path::{Path, PathBuf};
 
 use crate::Workspace;
-use crate::views::braille_spinner::BrailleSpinner;
 use crate::views::centered;
 use crate::workspace::AskCardSnapshot;
 
@@ -1657,6 +1656,7 @@ fn render_activity_entry(
     let id = format!("message-overflow-activity-entry-{cix}-{eix}");
     match e {
         ActivityEntry::Reasoning {
+            id: entry_id,
             text,
             streaming,
             collapsed,
@@ -1664,6 +1664,7 @@ fn render_activity_entry(
             markdown,
         } => reasoning_step(
             id,
+            entry_id,
             text,
             *streaming,
             *collapsed,
@@ -1680,9 +1681,13 @@ fn render_activity_entry(
 
 /// A reasoning round's step: the marker spins while the round streams, the body
 /// is the persistent markdown document the streaming path keeps in sync.
+// One arg per slot the step is assembled from (selector identity, fold data,
+// body document, render positions for the debug selectors, host context);
+// a config struct would only rename the same values.
 #[allow(clippy::too_many_arguments)]
 fn reasoning_step(
     id: String,
+    entry_id: &str,
     text: &str,
     streaming: bool,
     collapsed: bool,
@@ -1694,6 +1699,7 @@ fn reasoning_step(
     cx: &mut App,
 ) -> ChainOfThoughtStep {
     let weak_workspace = tool_ctx.map(|c| c.weak.clone());
+    let toggle_id = entry_id.to_string();
     let marker: gpui::AnyElement = if streaming {
         BrailleSpinner::new()
             .xsmall()
@@ -1716,12 +1722,17 @@ fn reasoning_step(
                 return;
             };
             let _ = weak.update(cx, |w, cx| {
+                let id = toggle_id.clone();
                 let conv = w.conversation.clone();
                 conv.update(cx, |c, cx| {
-                    // Toggle the specific container's reasoning entry by
-                    // index. `cix` is the container's position in the
-                    // conversation items list, captured at render time.
-                    if let Some(item) = c.items().get(cix) {
+                    // Address the round by its stable id, exactly like the
+                    // tool step: the (container, entry) indices captured at
+                    // render time can point at the wrong container by the
+                    // time the click fires (a notice inserts above the
+                    // segment; the toggle must never land on a stranger).
+                    if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
+                        && let Some(item) = c.items().get(cix)
+                    {
                         item.update(cx, |item, cx| {
                             if let ConvItem::Thinking(t) = item.kind_mut()
                                 && let Some(ActivityEntry::Reasoning {
@@ -2391,12 +2402,17 @@ fn render_tool_output(
     } else {
         item.output.clone()
     };
-    // The body goes to the panel (or, below, to a per-frame fallback block)
-    // verbatim: a `read_file` result is the model-facing hashline shape, and
-    // `PanelKind::Numbered` is what knows how to present it — the file's own
-    // line numbers, gap markers unnumbered. Stripping the prefixes here, as
-    // this layer used to, forced the panel to renumber from 1 and put a range
-    // read's numbers out of step with the file.
+    // The panel gets the body verbatim: a `read_file` result is the model-facing
+    // hashline shape, and `PanelKind::Numbered` is what presents it — the file's
+    // own line numbers, gap markers unnumbered. This fallback paints no panel, so
+    // it asks `manox-components` for the same parse's display text rather than
+    // reading the envelope a second time here; either way the user never sees
+    // `[path#TAG]` or an `N:` gutter.
+    let display = if item.name == manox_agent::tools::READ {
+        hashline_text(&display)
+    } else {
+        display
+    };
     let lang = lang_hint_for_tool(&item.name);
     let code = if let Some(l) = lang {
         format!("```{l}\n{display}\n```")
@@ -2957,6 +2973,11 @@ fn live_tail(output: &str) -> String {
     s
 }
 
+/// Collapse `s` to a single line, clipped to `max_chars` with an ellipsis.
+///
+/// `ai-elements`' `chain_of_thought.rs` carries a line-for-line twin,
+/// `one_line` — the crate boundary keeps the two apart, so change one and
+/// change the other.
 fn truncate(s: &str, max_chars: usize) -> String {
     let one_line = s.replace('\n', " ");
     if one_line.chars().count() > max_chars {
@@ -3151,6 +3172,7 @@ impl ItemBuilder {
                                 // A reasoning block before any tool calls opens the
                                 // segment; subsequent reasoning and tools share it.
                                 let entry = ActivityEntry::Reasoning {
+                                    id: next_reasoning_entry_id(),
                                     text: text.clone(),
                                     streaming: false,
                                     collapsed: true,
@@ -3352,7 +3374,7 @@ fn pair_tool_result(items: &mut Vec<ConvItem>, tr: &LanguageModelToolResult) {
     let ix = items.iter().position(|i| match i {
         ConvItem::AgentTask(t) => t.id == tr.tool_use_id,
         ConvItem::ToolCall(t) => t.id == tr.tool_use_id,
-        ConvItem::Thinking(t) => match t.find_tool_entry_index(&tr.tool_use_id) {
+        ConvItem::Thinking(t) => match t.find_entry_index(&tr.tool_use_id) {
             Some(eix) => {
                 thinking_eix = Some(eix);
                 true
@@ -3561,6 +3583,7 @@ mod tests {
             thinking.collapsed = false;
             thinking.streaming = false;
             thinking.entries.push(ActivityEntry::Reasoning {
+                id: next_reasoning_entry_id(),
                 text: "reasoning ".repeat(300),
                 streaming: false,
                 collapsed: false,
@@ -4113,6 +4136,7 @@ mod tests {
         };
         let mut t = ThinkingContainer::new();
         t.entries.push(ActivityEntry::Reasoning {
+            id: next_reasoning_entry_id(),
             text: "hmm".into(),
             streaming: false,
             collapsed: true,

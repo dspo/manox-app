@@ -758,7 +758,7 @@ impl ContextRail {
         use manox_agent::ToolCallStatus;
         match status {
             ToolCallStatus::PendingApproval | ToolCallStatus::Running => {
-                crate::views::braille_spinner::BrailleSpinner::new()
+                ai_elements::BrailleSpinner::new()
                     .xsmall()
                     .color(theme.accent_foreground)
                     .into_any_element()

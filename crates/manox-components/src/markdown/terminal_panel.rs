@@ -272,12 +272,7 @@ impl TerminalPanel {
             PanelKind::Numbered => {
                 // The file's own numbers, so the gutter width comes from the
                 // largest number rather than from the line count.
-                let lines: Vec<HashlineLine<'_>> = self
-                    .output
-                    .lines()
-                    .filter(|line| !is_hashline_header(line))
-                    .map(parse_hashline_line)
-                    .collect();
+                let lines = hashline_lines(&self.output);
                 let total = lines.len();
                 let v = self.visible_count(total);
                 let widest = lines
@@ -570,6 +565,37 @@ fn parse_hashline_line(line: &str) -> HashlineLine<'_> {
         };
     }
     HashlineLine::Plain(line)
+}
+
+/// Split a model-facing read body into its display lines: every `[path#TAG]`
+/// header is dropped and each remaining line classified by its prefix. This is
+/// the one parse of that shape — the panel's gutter and [`hashline_text`] both
+/// come off it, so the two can never disagree about where a number ends and
+/// content begins.
+fn hashline_lines(raw: &str) -> Vec<HashlineLine<'_>> {
+    raw.lines()
+        .filter(|line| !is_hashline_header(line))
+        .map(parse_hashline_line)
+        .collect()
+}
+
+/// The model-facing read body as plain display text: the `[path#TAG]` header
+/// dropped, each line's `N:` prefix stripped, and the `...` marker between
+/// disjoint windows kept as its own unnumbered line.
+///
+/// [`PanelKind::Numbered`] paints the same lines with the file's own numbers in
+/// a gutter; this is what a host shows when it renders a read's body somewhere
+/// the panel does not — the envelope is model-facing, never something the user
+/// reads, so shedding it is the shared half of the two paths.
+pub fn hashline_text(raw: &str) -> String {
+    hashline_lines(raw)
+        .iter()
+        .map(|line| match line {
+            HashlineLine::Numbered { content, .. } | HashlineLine::Plain(content) => *content,
+            HashlineLine::Gap => GAP_MARKER,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Recognize the `[path#TAG]` header the read tool puts above the numbered body:
@@ -1105,5 +1131,36 @@ mod tests {
         assert_eq!(total, 3);
         assert_eq!(v, 2);
         assert_eq!(text, "line one\nline two");
+    }
+
+    #[test]
+    fn hashline_text_sheds_the_envelope_the_model_reads_and_the_user_does_not() {
+        // The header and the `N:` prefixes are the model's anchoring shape; the
+        // gap marker is content — it says where the read skipped.
+        assert_eq!(
+            hashline_text("[src/foo.rs#A1B2]\n142:fn main() {\n143:    let x = 1;\n...\n200:}"),
+            "fn main() {\n    let x = 1;\n...\n}"
+        );
+    }
+
+    #[test]
+    fn hashline_text_keeps_lines_that_only_look_numbered() {
+        // Output that never carried the envelope (an error, a non-`read` tool)
+        // passes through, and digits that are not a `<n>:` prefix are content.
+        assert_eq!(
+            hashline_text("error: no such file\n404 not found"),
+            "error: no such file\n404 not found"
+        );
+        assert_eq!(hashline_text(""), "");
+    }
+
+    /// The gutter body and the plain text come off one parse, so they cover the
+    /// same lines — a host that cannot mount the panel shows the read's content,
+    /// just without the numbers.
+    #[test]
+    fn hashline_text_and_the_numbered_gutter_agree_on_the_line_set() {
+        let raw = "[src/foo.rs#A1B2]\n1:alpha\n2:beta\n...\n9:omega";
+        let (_text, total, _v) = panel_body(PanelKind::Numbered, raw, 10, false);
+        assert_eq!(hashline_text(raw).lines().count(), total);
     }
 }
