@@ -527,6 +527,12 @@ impl ClientStoreHandle {
     /// immediately; a fresh exhaustion re-raises it undismissed, because a
     /// retry is a user action whose outcome must be visible.
     pub fn retry_follow(&mut self, cx: &mut Context<Self>) {
+        // A retry is a user action, so its outcome has to be visible: with no
+        // multiplexer wired there is nothing to re-open, and dropping the
+        // notice here would erase the only signal the view ever shows.
+        if self.outbound.is_none() {
+            return;
+        }
         self.reopen_attempts = 0;
         self.follow_stop = None;
         self.request_reopen(cx);

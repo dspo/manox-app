@@ -4553,9 +4553,9 @@ fn a_stopped_follow_shares_a_dismissible_notice(cx: &mut gpui::TestAppContext) {
         "an exhausted reopen budget must show the stopped-follow banner"
     );
 
-    // Retry click: the banner drops immediately (a fresh attempt cycle is
-    // live); backoff reopens do not churn it; the retry's own terminal
-    // exhaustion re-shows it.
+    // A retry with no multiplexer wired is a no-op: there is nothing to
+    // re-open, and clearing the banner would erase the only signal the view
+    // has. The attempt is not spent either.
     let retry = visual
         .debug_bounds("follow-stop-retry-btn")
         .expect("the banner carries its retry control");
@@ -4563,23 +4563,16 @@ fn a_stopped_follow_shares_a_dismissible_notice(cx: &mut gpui::TestAppContext) {
     visual.run_until_parked();
     draw(&mut visual);
     assert!(
-        visual.debug_bounds("follow-stopped-notice").is_none(),
-        "the retry click must drop the banner"
+        visual.debug_bounds("follow-stopped-notice").is_some(),
+        "a retry with nothing to re-open must leave the banner up"
     );
-    // The retry click spent attempt 1; attempts 2-5 stay in backoff.
-    for _ in 0..4 {
-        leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
-    }
-    draw(&mut visual);
-    assert!(
-        visual.debug_bounds("follow-stopped-notice").is_none(),
-        "backoff reopens must not churn the banner"
-    );
+    // Further automatic failures keep the same banner: the budget is already
+    // terminal, so the notice is neither withdrawn nor re-raised.
     leaf.update(cx, |h, cx| h.apply_from_server(resync.clone(), cx));
     draw(&mut visual);
     assert!(
         visual.debug_bounds("follow-stopped-notice").is_some(),
-        "the retry's terminal exhaustion re-shows the banner"
+        "an automatic failure must not churn the banner"
     );
 
     // Dismiss click: out for this session, and a later automatic stop
