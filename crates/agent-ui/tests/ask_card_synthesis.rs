@@ -42,7 +42,11 @@ async fn ask_card_synthesized_when_rebuild_misses_the_tool_item(cx: &mut TestApp
             "test-model",
             manox_agent::MessageAuthor::Lead,
             true,
-            ApplyCtx { weak, cwd: None },
+            ApplyCtx {
+                weak,
+                cwd: None,
+                fork_source: None,
+            },
             cx,
         )
     });

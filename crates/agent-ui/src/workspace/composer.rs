@@ -114,6 +114,15 @@ impl Workspace {
             // `response` free text). The composer text is a supplement the user
             // may type but it no longer rides the answer.
             if !text.trim().is_empty() || self.pending_ask_has_selection() {
+                // Completeness gate (dsh `submitDrafts` parity): a question
+                // that was never touched must not silently fold to a skip.
+                // The walk jumps to the first incomplete question — the blank
+                // card IS the feedback — and the composer text survives.
+                if let Some(missing) = self.first_incomplete_ask_question() {
+                    self.ask_step = missing;
+                    cx.notify();
+                    return;
+                }
                 self.input_state
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 // Submitting ends the walk: nothing is left to return to.

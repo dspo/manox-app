@@ -697,6 +697,16 @@ workspace-ask-settled-elsewhere = 已在另一客户端处理
 
 workspace-ask-recommended = 推荐
 
+workspace-ask-plan-review-label = Plan 评审
+
+workspace-ask-discuss = 继续讨论
+
+workspace-ask-next = 下一步
+
+workspace-ask-submit = 提交
+
+workspace-ask-skip = 跳过
+
 workspace-cancel = 取消
 
 pending-auth-title = 审批请求

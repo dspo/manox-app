@@ -3686,9 +3686,15 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
 
     // Idle: the same control submits the ask card (B2-PR-1: the per-question
     // custom inputs are the free-text leg now — the composer no longer rides
-    // the answer, it just clears and settles the card, Enter-semantics).
+    // the answer, it just clears and settles the card, Enter-semantics). The
+    // question is answered first: the completeness gate blocks the settle of
+    // an untouched question (its own test below), and this edge pins the
+    // answered path — the composer text is consumed, the card retires.
     visual.update(|window, cx| {
-        ws.update(cx, |ws, cx| ws.send_button_clicked(window, cx));
+        ws.update(cx, |ws, cx| {
+            ws.toggle_ask_option(0, 0, cx);
+            ws.send_button_clicked(window, cx);
+        });
     });
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
@@ -4908,4 +4914,165 @@ fn a_healthy_follow_shows_no_stop_surfaces(cx: &mut gpui::TestAppContext) {
     drop(ws);
     drop(visual);
     let _ = std::fs::remove_file(&db_path);
+}
+
+/// The plan-review decision card's one-click verdict, pinned to the WIRE: a
+/// decision click folds exactly the clicked option into the canonical reply
+/// (`selected: [label]`) and settles the card in the same activation. The
+/// runtime maps Approve → keep / Approve & compact → compact / anything else
+/// → refine off this payload, so the row IS the verdict — an assertion on
+/// `pending_ask.is_none()` alone would pass for a mis-folded answer too.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn decide_ask_option_replies_with_the_clicked_option(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy_with(
+        cx,
+        serde_json::json!({
+            "questions": [
+                { "question": "Review the plan.", "header": "Plan",
+                  "detail": "# Plan\n- step one",
+                  "intent": { "kind": "plan-review", "approve": "Approve" },
+                  "options": [
+                    { "label": "Approve", "description": "start executing" },
+                    { "label": "Approve & compact" },
+                    { "label": "Request changes" }
+                  ] }
+            ]
+        }),
+    );
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    // The decline-shaped decision click ("Request changes").
+    ws.update(&mut visual, |ws, cx| ws.decide_ask_option(0, 2, cx));
+    let answers = ask_answer_frames(cx, &f.rx, "plan-review decision");
+    assert_eq!(
+        answers,
+        vec![serde_json::json!({ "id": "q0", "selected": ["Request changes"] })],
+        "the clicked option IS the verdict row; no `custom` key rides along"
+    );
+    ws.read_with(&visual, |ws, _| {
+        assert!(
+            ws.pending_ask.is_none(),
+            "the decision click settles the card in the same activation"
+        );
+    });
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// The footer Skip is never a dead end (deepseek `skipQuestion` parity): a
+/// mid-card skip clears that question's draft and ADVANCES the walk with the
+/// card still parked, and the last question's skip settles the whole card
+/// with every walked question emitted — the skipped ones as canonical
+/// `{selected: []}` rows. Before this contract a skip + submit died silently
+/// behind the composer's empty-input gate.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn skip_advances_mid_card_and_settles_on_the_last_question(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy_with(
+        cx,
+        serde_json::json!({
+            "questions": [
+                { "question": "First?", "options": [{ "label": "A" }, { "label": "B" }] },
+                { "question": "Second?", "options": [{ "label": "C" }] }
+            ]
+        }),
+    );
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.toggle_ask_option(0, 0, cx);
+            ws.skip_ask_question(0, window, cx);
+        });
+    });
+    ws.read_with(&visual, |ws, _| {
+        assert!(ws.pending_ask.is_some(), "a mid-card skip never settles");
+        assert_eq!(ws.ask_step, 1, "the skip advances to the next question");
+    });
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.skip_ask_question(1, window, cx));
+    });
+    let answers = ask_answer_frames(cx, &f.rx, "skip-walk settle");
+    assert_eq!(
+        answers,
+        vec![
+            serde_json::json!({ "id": "q0", "selected": [] }),
+            serde_json::json!({ "id": "q1", "selected": [] }),
+        ],
+        "every question in the walk is emitted, skipped or not"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// The submit completeness gate (dsh `submitDrafts` parity): answering ONLY a
+/// later question and submitting must NOT settle — an untouched earlier
+/// question is never silently folded to a skip. The walk jumps back to the
+/// first incomplete question (the blank card is the feedback), nothing rides
+/// the wire, and the composer text survives for the retry.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn an_untouched_question_blocks_the_submit_and_jumps_back(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy_with(
+        cx,
+        serde_json::json!({
+            "questions": [
+                { "question": "First?", "options": [{ "label": "A" }, { "label": "B" }] },
+                { "question": "Second?", "options": [{ "label": "C" }] }
+            ]
+        }),
+    );
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    // The pager path past an unanswered question, then answer question 2 only.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.ask_next(cx);
+            ws.toggle_ask_option(1, 0, cx);
+        });
+    });
+    // Enter-semantics submit with supplement text in the composer.
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.input_state
+                .update(cx, |s, cx| s.replace("supplement", window, cx));
+            ws.submit_input(window, cx);
+        });
+    });
+    ws.read_with(&visual, |ws, cx| {
+        assert!(
+            ws.pending_ask.is_some(),
+            "the untouched question blocks the settle"
+        );
+        assert_eq!(
+            ws.ask_step, 0,
+            "the walk jumps back to the incomplete question"
+        );
+        assert_eq!(
+            ws.input_state.read(cx).value().trim(),
+            "supplement",
+            "the blocked submit never consumes the composer text"
+        );
+    });
+    assert!(
+        f.rx.try_recv().is_err(),
+        "the blocked submit sends nothing on the wire"
+    );
+    // Completing the walk (skip question 1 explicitly, question 2 is already
+    // answered) now settles with the answered row intact.
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.skip_ask_question(0, window, cx));
+    });
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.submit_input(window, cx));
+    });
+    let answers = ask_answer_frames(cx, &f.rx, "completeness-gated settle");
+    assert_eq!(
+        answers,
+        vec![
+            serde_json::json!({ "id": "q0", "selected": [] }),
+            serde_json::json!({ "id": "q1", "selected": ["C"] }),
+        ],
+        "the explicit skip folds to `selected: []`; the answer rides untouched"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
 }

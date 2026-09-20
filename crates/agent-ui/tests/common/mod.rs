@@ -64,7 +64,6 @@ impl ThreadEngine for FakeEngine {
     fn set_model(&self, _model: PiModel) {}
     fn set_thinking_level(&self, _level: Option<String>) {}
     fn open_session(&self, _path: PathBuf) {}
-    fn new_session(&self, _cwd: PathBuf, _project: Option<PathBuf>) {}
     fn active_session_path(&self) -> Option<PathBuf> {
         None
     }

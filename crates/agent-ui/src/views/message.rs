@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Workspace;
 use crate::views::centered;
-use crate::workspace::AskCardSnapshot;
+use crate::workspace::{AskCardQuestion, AskCardSnapshot};
 
 /// Render-time context for sub-agent task rows. `None` when the owning
 /// workspace has been dropped; the row remains visible but clicks become a
@@ -2028,7 +2028,10 @@ fn open_file_in_vscode(raw: &str, cwd: Option<&Path>) {
     }
 }
 
-fn render_ask_user_card(
+/// The ask card's render entry and presentation router. `pub(crate)` so the
+/// test-support diagnostic probe (`Workspace::diagnostic_ask_card_element`)
+/// can render the card outside the conversation list.
+pub(crate) fn render_ask_user_card(
     item: &ToolCallItem,
     ix: usize,
     theme: &Theme,
@@ -2045,19 +2048,220 @@ fn render_ask_user_card(
         return render_tool_call(item, ix, theme, tool_ctx, cx);
     }
 
-    let weak = ctx.weak.clone();
+    // One takeover, two presentations: a plan review is one decision over one
+    // plan, so it takes the decision card; every other ask takes the generic
+    // stepper flow. The routing lives at the one entry that renders the card,
+    // so neither presentation can claim an ask the other is already showing.
+    if snapshot.total == 1
+        && let Some(approve_ix) = plan_review_approve_index(&snapshot.question)
+    {
+        return render_plan_review_card(ix, theme, ctx.weak.clone(), &snapshot, approve_ix, cx);
+    }
+    render_question_card(ix, theme, ctx.weak.clone(), snapshot, cx)
+}
+
+/// The plan-review decision presentation's approve option: the ask must carry
+/// a `plan-review` intent whose `approve` label names one of the question's
+/// own options, and the question must be single-select — `decide_ask_option`
+/// clears siblings, which would destroy answers on a multi-select. `None`
+/// renders the generic question card. The label match runs against the
+/// DISPLAY label — the server's `(Recommended)` suffix was already stripped
+/// at parse — while the server validated the raw label, so a model-minted
+/// intent can miss and degrade to the generic card. That asymmetry is the
+/// intended safe fallback, not a bug to align away. (dsh's `planReviewOf`
+/// also caps options at two, shaping its two-button panel; our footer is N
+/// buttons over the gateway's three minted options, so that guard MUST NOT
+/// be copied.)
+fn plan_review_approve_index(question: &AskCardQuestion) -> Option<usize> {
+    let intent = question.intent.as_ref()?;
+    if intent.kind != "plan-review" || intent.approve.is_empty() || question.multi_select {
+        return None;
+    }
+    question
+        .options
+        .iter()
+        .position(|opt| opt.label == intent.approve)
+}
+
+/// The plan-review decision card: a tinted strip, the plan as the body that
+/// owns the scroll (so the strip and the decision row stay reachable on a
+/// long plan), and a fixed decision row at the BOTTOM — the approve option as
+/// the primary button, the remaining options as outline buttons, and a quiet
+/// discuss action carrying the dismissal leg. A click IS the verdict
+/// (`decide_ask_option`): no selection-then-confirm two-step.
+fn render_plan_review_card(
+    ix: usize,
+    theme: &Theme,
+    weak: WeakEntity<Workspace>,
+    snapshot: &AskCardSnapshot,
+    approve_ix: usize,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let weak_esc = weak.clone();
+    let weak_discuss = weak.clone();
+
+    let strip = h_flex()
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .bg(theme.warning.opacity(0.12))
+        .child(gpui::div().size(px(8.)).rounded_full().bg(theme.warning))
+        .child(
+            gpui::div()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_sm()
+                .text_color(theme.warning)
+                .child(i18n::t("workspace-ask-plan-review-label")),
+        );
+
+    let lead = gpui::div()
+        .w_full()
+        .min_w_0()
+        .text_base()
+        .text_color(theme.foreground)
+        .child(snapshot.question.question.clone());
+    let plan_body = (!snapshot.question.detail.trim().is_empty()).then(|| {
+        markdown_tv(
+            format!("plan-review-detail-{ix}"),
+            snapshot.question.detail.clone(),
+            theme,
+            false,
+            cx,
+        )
+    });
+    let body = gpui::div()
+        .id(format!("plan-review-body-{ix}"))
+        .debug_selector(move || format!("plan-review-body-{ix}"))
+        .w_full()
+        .min_w_0()
+        .max_h(px(520.))
+        .overflow_y_scroll()
+        .px_3()
+        .pt_2p5()
+        .pb_1()
+        .child(lead)
+        .children(plan_body);
+
+    let mut footer = h_flex()
+        .debug_selector(move || format!("plan-review-footer-{ix}"))
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .justify_end()
+        .flex_wrap()
+        .gap_2()
+        .px_3()
+        .pt_1p5()
+        .pb_1()
+        .child(
+            Button::new(format!("plan-review-discuss-{ix}"))
+                .ghost()
+                .small()
+                .icon(gpui_kit_assets::IconName::SquarePen)
+                .label(i18n::t("workspace-ask-discuss"))
+                .on_click(move |_, _, cx: &mut App| {
+                    let _ = weak_discuss.update(cx, |w, cx| w.dismiss_ask(cx));
+                }),
+        );
+    for (oi, opt) in snapshot.question.options.iter().enumerate() {
+        if oi == approve_ix {
+            continue;
+        }
+        let weak_decide = weak.clone();
+        let mut button = Button::new(format!("plan-review-decide-{ix}-{oi}"))
+            .outline()
+            .small()
+            .label(opt.label.clone())
+            .on_click(move |_, _, cx: &mut App| {
+                let _ = weak_decide.update(cx, |w, cx| w.decide_ask_option(0, oi, cx));
+            });
+        if !opt.description.trim().is_empty() {
+            button = button.tooltip(opt.description.clone());
+        }
+        footer = footer.child(button);
+    }
+    let weak_approve = weak.clone();
+    let approve = &snapshot.question.options[approve_ix];
+    let mut approve_button = Button::new(format!("plan-review-approve-{ix}"))
+        .primary()
+        .small()
+        .label(approve.label.clone())
+        .on_click(move |_, _, cx: &mut App| {
+            let _ = weak_approve.update(cx, |w, cx| w.decide_ask_option(0, approve_ix, cx));
+        });
+    if !approve.description.trim().is_empty() {
+        approve_button = approve_button.tooltip(approve.description.clone());
+    }
+    footer = footer.child(approve_button);
+
+    v_flex()
+        .id(format!(
+            "plan-review-card-{}-{}",
+            snapshot.id, snapshot.transition_gen
+        ))
+        .key_context("AskDrawer")
+        // The discuss action is the decision card's only exit. The AskDrawer
+        // Esc binding is context-scoped and only lands while focus sits
+        // INSIDE the card, and nothing on this card takes focus (gpui
+        // buttons avoid focus on mouse-down) — a deliberate button-only
+        // surface, same as dsh's PlanReviewPanel.
+        .on_action(move |_: &crate::AskCancel, _window, cx: &mut App| {
+            let _ = weak_esc.update(cx, |w, cx| w.dismiss_ask(cx));
+        })
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .rounded(px(18.))
+        .border_1()
+        .border_color(theme.warning.opacity(0.45))
+        .bg(theme.background)
+        .shadow_lg()
+        // The extra bottom padding plus negative margin lets the composer
+        // cover the card tail, the same contract as the generic ask card.
+        .pb_5()
+        .mb(px(-10.))
+        .child(strip)
+        .child(body)
+        .child(footer)
+        .with_animation(
+            format!("plan-review-slide-{}", snapshot.transition_gen),
+            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+            |el, delta| el.mt(px(8. * (1. - delta))).opacity(delta),
+        )
+        .into_any_element()
+}
+
+/// The generic multi-step question card: title + close in the header; the
+/// question, its detail, the options and the custom supplement in a capped
+/// scrollable body; and a fixed footer with the pager on the left and the
+/// skip + next/submit actions on the right — the decision actions sit where
+/// the reading finishes, never pinned above the content they settle.
+fn render_question_card(
+    ix: usize,
+    theme: &Theme,
+    weak: WeakEntity<Workspace>,
+    snapshot: AskCardSnapshot,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let weak_close = weak.clone();
+    let weak_esc = weak.clone();
     let step = snapshot.step;
     let total = snapshot.total;
     let can_prev = step > 0;
     let can_next = step + 1 < total;
+    // dsh parity: the primary is gated on the CURRENT question being answered
+    // (a pick or typed custom). Without the gate, "submit an unanswered card"
+    // hits the composer's silent submit gate and dies as a no-op the user
+    // reads as a broken button; the footer Skip is the always-available way
+    // through (it advances, or settles on the last question).
+    let answered_current =
+        snapshot.selections.iter().any(|s| *s) || !snapshot.custom.trim().is_empty();
 
     let title = question_card_title(&snapshot.question.header);
 
-    let weak_prev = weak.clone();
-    let weak_next = weak.clone();
-    let weak_submit = weak.clone();
-    let weak_close = weak.clone();
-    let weak_dismiss = weak.clone();
     let header = h_flex()
         .w_full()
         .min_w_0()
@@ -2073,55 +2277,15 @@ fn render_ask_user_card(
                 .child(title),
         )
         .child(
-            h_flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    Button::new(("ask-card-prev", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ChevronLeft)
-                        .when(!can_prev, |b| b.disabled(true))
-                        .on_click(move |_, _, cx: &mut App| {
-                            let _ = weak_prev.update(cx, |w, cx| w.ask_prev(cx));
-                        }),
-                )
-                .child(
-                    gpui::div()
-                        .min_w(px(44.))
-                        .text_center()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("{} of {total}", step + 1)),
-                )
-                .child(
-                    Button::new(("ask-card-next", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(if can_next {
-                            IconName::ChevronRight
-                        } else {
-                            IconName::Check
-                        })
-                        .on_click(move |_, window, cx: &mut App| {
-                            if can_next {
-                                let _ = weak_next.update(cx, |w, cx| w.ask_next(cx));
-                            } else {
-                                let _ = weak_submit.update(cx, |w, cx| w.submit_input(window, cx));
-                            }
-                        }),
-                )
-                .child(
-                    Button::new(("ask-card-cancel", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .on_click(move |_, _, cx: &mut App| {
-                            // Close (not deny): the dismissal marker, never
-                            // the allow/deny exit the approval card owns.
-                            let _ = weak_close.update(cx, |w, cx| w.dismiss_ask(cx));
-                        }),
-                ),
+            Button::new(("ask-card-cancel", ix))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Close)
+                .on_click(move |_, _, cx: &mut App| {
+                    // Close (not deny): the dismissal marker, never
+                    // the allow/deny exit the approval card owns.
+                    let _ = weak_close.update(cx, |w, cx| w.dismiss_ask(cx));
+                }),
         );
 
     let question_row = gpui::div()
@@ -2277,33 +2441,110 @@ fn render_ask_user_card(
     let custom_state: Option<Entity<InputState>> = weak
         .upgrade()
         .and_then(|ws| ws.read(cx).ask_custom_state(step));
+    let custom_row = custom_state.map(|state| {
+        h_flex().w_full().min_w_0().mt_0p5().child(
+            Input::new(&state).appearance(false).prefix(
+                gpui::div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(i18n::t("workspace-ask-supplement-label")),
+            ),
+        )
+    });
+
+    // The body is the card's scrollport: a long detail (a plan body rides a
+    // generic ask when the intent fallback fires) caps here instead of
+    // pushing the footer's decision actions out of reach.
+    let body = gpui::div()
+        .id(format!("ask-card-body-{ix}-{step}"))
+        .debug_selector(move || format!("ask-card-body-{ix}-{step}"))
+        .w_full()
+        .min_w_0()
+        .max_h(px(520.))
+        .overflow_y_scroll()
+        .child(question_row)
+        .children(detail_block)
+        .child(options_block)
+        .children(custom_row);
+
+    let weak_prev = weak.clone();
+    let weak_next = weak.clone();
+    let weak_advance = weak.clone();
+    let weak_submit = weak.clone();
     let weak_skip = weak.clone();
-    let skip_row = h_flex()
+    let pager = h_flex()
+        .items_center()
+        .gap_1()
+        .child(
+            Button::new(("ask-card-prev", ix))
+                .ghost()
+                .xsmall()
+                .icon(IconName::ChevronLeft)
+                .disabled(!can_prev)
+                .on_click(move |_, _, cx: &mut App| {
+                    let _ = weak_prev.update(cx, |w, cx| w.ask_prev(cx));
+                }),
+        )
+        .child(
+            gpui::div()
+                .min_w(px(44.))
+                .text_center()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(format!("{} of {total}", step + 1)),
+        )
+        .child(
+            Button::new(("ask-card-next", ix))
+                .ghost()
+                .xsmall()
+                .icon(IconName::ChevronRight)
+                .disabled(!can_next)
+                .on_click(move |_, _, cx: &mut App| {
+                    let _ = weak_advance.update(cx, |w, cx| w.ask_next(cx));
+                }),
+        );
+    let primary_action = if can_next {
+        Button::new(format!("ask-card-advance-{ix}-{step}"))
+            .primary()
+            .small()
+            .disabled(!answered_current)
+            .label(i18n::t("workspace-ask-next"))
+            .on_click(move |_, _, cx: &mut App| {
+                let _ = weak_next.update(cx, |w, cx| w.ask_next(cx));
+            })
+    } else {
+        Button::new(format!("ask-card-submit-{ix}-{step}"))
+            .primary()
+            .small()
+            .disabled(!answered_current)
+            .label(i18n::t("workspace-ask-submit"))
+            .on_click(move |_, window, cx: &mut App| {
+                let _ = weak_submit.update(cx, |w, cx| w.submit_input(window, cx));
+            })
+    };
+    let footer = h_flex()
+        .debug_selector(move || format!("ask-card-footer-{ix}-{step}"))
         .w_full()
         .min_w_0()
         .items_center()
+        .justify_between()
         .gap_2()
+        .child(pager)
         .child(
-            gpui::div()
-                .flex_1()
-                .min_w_0()
-                .children(custom_state.map(|state| {
-                    Input::new(&state).appearance(false).prefix(
-                        gpui::div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(i18n::t("workspace-ask-supplement-label")),
-                    )
-                })),
-        )
-        .child(
-            Button::new(format!("ask-card-skip-{ix}-{step}"))
-                .ghost()
-                .xsmall()
-                .icon(IconName::Minus)
-                .on_click(move |_, window, cx: &mut App| {
-                    let _ = weak_skip.update(cx, |w, cx| w.skip_ask_question(step, window, cx));
-                }),
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new(format!("ask-card-skip-{ix}-{step}"))
+                        .outline()
+                        .small()
+                        .label(i18n::t("workspace-ask-skip"))
+                        .on_click(move |_, window, cx: &mut App| {
+                            let _ =
+                                weak_skip.update(cx, |w, cx| w.skip_ask_question(step, window, cx));
+                        }),
+                )
+                .child(primary_action),
         );
 
     v_flex()
@@ -2315,7 +2556,7 @@ fn render_ask_user_card(
         // Esc inside the drawer closes it unanswered — the same dismissal
         // leg as the X button, never the approval card's deny.
         .on_action(move |_: &crate::AskCancel, _window, cx: &mut App| {
-            let _ = weak_dismiss.update(cx, |w, cx| w.dismiss_ask(cx));
+            let _ = weak_esc.update(cx, |w, cx| w.dismiss_ask(cx));
         })
         .w_full()
         .min_w_0()
@@ -2332,10 +2573,8 @@ fn render_ask_user_card(
         .bg(theme.background)
         .shadow_lg()
         .child(header)
-        .child(question_row)
-        .children(detail_block)
-        .child(options_block)
-        .child(skip_row)
+        .child(body)
+        .child(footer)
         .with_animation(
             format!("ask-card-slide-{}", snapshot.transition_gen),
             Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
@@ -3625,6 +3864,83 @@ mod tests {
         assert_eq!(question_card_title("Pick a database"), "Pick a database");
         // Runtime-supplied text is never re-localized, even when it is Chinese.
         assert_eq!(question_card_title("选一个数据库"), "选一个数据库");
+    }
+
+    /// The plan-review routing is exact: the intent must name `plan-review`
+    /// AND its `approve` label must match one of the question's own option
+    /// labels; anything else renders the generic question card.
+    #[test]
+    fn plan_review_approve_index_requires_a_matching_option() {
+        use crate::workspace::{AskCardIntent, AskCardOption, AskCardQuestion};
+
+        let question = |intent: Option<AskCardIntent>, multi_select: bool| AskCardQuestion {
+            question: String::new(),
+            header: String::new(),
+            detail: String::new(),
+            intent,
+            multi_select,
+            options: vec![
+                AskCardOption {
+                    label: "Approve".into(),
+                    description: String::new(),
+                    recommended: false,
+                },
+                AskCardOption {
+                    label: "Request changes".into(),
+                    description: String::new(),
+                    recommended: false,
+                },
+            ],
+        };
+        let plan_review = Some(AskCardIntent {
+            kind: "plan-review".into(),
+            approve: "Approve".into(),
+        });
+        assert_eq!(
+            plan_review_approve_index(&question(plan_review.clone(), false)),
+            Some(0),
+            "the approve label resolves to its option's index"
+        );
+        for (case, (intent, multi_select)) in [
+            ("no intent", (None, false)),
+            (
+                "empty approve label",
+                (
+                    Some(AskCardIntent {
+                        kind: "plan-review".into(),
+                        approve: String::new(),
+                    }),
+                    false,
+                ),
+            ),
+            (
+                "approve label matches no option",
+                (
+                    Some(AskCardIntent {
+                        kind: "plan-review".into(),
+                        approve: "Nope".into(),
+                    }),
+                    false,
+                ),
+            ),
+            (
+                "foreign intent kind",
+                (
+                    Some(AskCardIntent {
+                        kind: "clarify".into(),
+                        approve: "Approve".into(),
+                    }),
+                    false,
+                ),
+            ),
+            ("multi-select question", (plan_review, true)),
+        ] {
+            assert_eq!(
+                plan_review_approve_index(&question(intent, multi_select)),
+                None,
+                "case: {case}"
+            );
+        }
     }
     use super::*;
     use gpui::{

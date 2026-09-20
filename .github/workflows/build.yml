@@ -78,6 +78,13 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --no-fail-fast
 
+      # agent-ui's test-support suite (interactive-card wire regressions)
+      # compiles ONLY under the feature flag, so the workspace run above
+      # never sees it — run it explicitly or it rots silently on upstream
+      # API changes (it did exactly that after #52).
+      - name: Test (agent-ui test-support)
+        run: cargo test -p agent-ui --features test-support --no-fail-fast
+
       - name: Save target cache
         if: github.event_name == 'push' && success()
         continue-on-error: true

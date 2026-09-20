@@ -125,7 +125,11 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
             "deepseek-v4-flash",
             manox_agent::MessageAuthor::Lead,
             true,
-            agent_ui::conversation::ApplyCtx { weak, cwd: None },
+            agent_ui::conversation::ApplyCtx {
+                weak,
+                cwd: None,
+                fork_source: None,
+            },
             cx,
         )
     });
@@ -200,6 +204,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
             agent_ui::conversation::ApplyCtx {
                 weak: gpui::WeakEntity::<Workspace>::new_invalid(),
                 cwd: None,
+                fork_source: None,
             },
             cx,
         )

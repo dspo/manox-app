@@ -251,6 +251,44 @@ impl Workspace {
         })
     }
 
+    /// Diagnostic-only: the interactive ask card element for the CURRENT
+    /// pending-ask snapshot, as the conversation list would render it. The
+    /// workspace's message list only paints through the live event path, so
+    /// render-level probe tests pull the card out and mount it directly.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ask_card_element(
+        &self,
+        weak: gpui::WeakEntity<Workspace>,
+        ix: usize,
+        cx: &mut App,
+    ) -> Option<gpui::AnyElement> {
+        let id = self.pending_ask.as_ref()?.id.clone();
+        let snapshot = self.ask_card_snapshot(&id, cx)?;
+        let item = crate::conversation::ToolCallItem {
+            id,
+            name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
+            title: String::new(),
+            status: manox_agent::ToolCallStatus::PendingApproval,
+            output: String::new(),
+            is_error: false,
+            input: serde_json::Value::Null,
+            streaming: false,
+            collapsed: false,
+            user_toggled: false,
+            panel: None,
+        };
+        Some(crate::views::message::render_ask_user_card(
+            &item,
+            ix,
+            &cx.theme().clone(),
+            Some(&crate::views::message::ToolCallCtx {
+                weak,
+                ask: Some(snapshot),
+            }),
+            cx,
+        ))
+    }
+
     /// Synchronize Workspace-derived ask state before the native list starts
     /// measuring. Updating a `MessageItem` from the row callback dirties the
     /// same entity tree whose height GPUI is currently caching, which can make
@@ -296,6 +334,26 @@ impl Workspace {
         })
     }
 
+    /// The first question that is neither answered nor explicitly skipped —
+    /// the completeness gate's jump target (dsh `submitDrafts`'s
+    /// `findIndex(!completed)` parity). An untouched question must never
+    /// silently fold to a skip at the settle boundary.
+    pub(crate) fn first_incomplete_ask_question(&self) -> Option<usize> {
+        let ask = self.pending_ask.as_ref()?;
+        (0..ask.questions.len()).find(|&qi| {
+            let answered = ask
+                .selections
+                .get(qi)
+                .is_some_and(|sel| sel.iter().any(|s| *s))
+                || self
+                    .ask_custom_text
+                    .get(qi)
+                    .is_some_and(|custom| !custom.trim().is_empty());
+            let skipped = self.ask_skipped.get(qi).copied().unwrap_or(false);
+            !answered && !skipped
+        })
+    }
+
     pub(super) fn composer_can_submit(&self, running: bool, cx: &App) -> bool {
         // T10c: the v1 `history_phase` loading gate retired with the fold
         // (the restore boundary is now the §D.1 snapshot; a pending-snapshot
@@ -335,6 +393,28 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// One-click plan-review decision: fold option `oi` of question `qi` in
+    /// as that question's single selection and settle the card in the same
+    /// activation. The decision card's buttons ARE the options, so there is
+    /// no separate confirm step — the reply carries exactly the clicked
+    /// option (the in-process fallback rides `resolve_ask`'s wire path).
+    /// Single-select by construction: the server mints plan-review cards
+    /// `multiSelect:false`, and a one-click verdict has no meaning on a
+    /// multi-select question — the decision presentation only routes those.
+    pub(crate) fn decide_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            for s in sel.iter_mut() {
+                *s = false;
+            }
+            if let Some(slot) = sel.get_mut(oi) {
+                *slot = true;
+            }
+        }
+        self.resolve_ask(cx);
     }
 
     pub(crate) fn ask_prev(&mut self, cx: &mut Context<Self>) {
@@ -406,6 +486,11 @@ impl Workspace {
             self.client
                 .send_reply(msg_id, Ok(serde_json::json!({ "answers": wire })));
             self.retire_wire_auth(&id, cx);
+            // Same repaint contract as the in-process leg and `dismiss_ask`:
+            // the settled card must leave the tree on this frame's notify,
+            // not coast until an unrelated redraw (a reviewer-flagged gap —
+            // the wire branch used to return without notifying).
+            cx.notify();
             return;
         }
         // In-process fallback (no wire MsgId): the canonical rows built above
@@ -421,11 +506,13 @@ impl Workspace {
 
     /// Drop the ask custom-answer state — call whenever the pending ask is
     /// seeded, resolved, dismissed, or reconciled away so a stale custom never
-    /// leaks into the next card or a re-surfaced walk.
+    /// leaks into the next card or a re-surfaced walk. The explicit-skip
+    /// markers ride the same lifecycle.
     pub(super) fn reset_ask_custom(&mut self) {
         self.ask_custom_inputs.clear();
         self.ask_custom_subs.clear();
         self.ask_custom_text.clear();
+        self.ask_skipped.clear();
     }
 
     /// Align the per-question custom-answer scratch with the current ask:
@@ -445,9 +532,13 @@ impl Workspace {
             }
             return;
         }
-        if self.ask_custom_text.len() != count || self.ask_custom_inputs.len() != count {
+        if self.ask_custom_text.len() != count
+            || self.ask_custom_inputs.len() != count
+            || self.ask_skipped.len() != count
+        {
             self.reset_ask_custom();
             self.ask_custom_text = vec![String::new(); count];
+            self.ask_skipped = vec![false; count];
             self.ask_custom_inputs = vec![None; count];
         }
         for qi in 0..count {
@@ -484,9 +575,14 @@ impl Workspace {
         self.ask_custom_inputs.get(qi).and_then(|slot| slot.clone())
     }
 
-    /// Skip question `qi`: clear its selection and its `custom` text, so the
-    /// settled answer is the canonical explicit skip (`selected: []`, no
-    /// `custom`) rather than a card dismissal.
+    /// Skip question `qi` (deepseek `QuestionFlow.skipQuestion` semantics):
+    /// clear its selection and its `custom` text and mark it EXPLICITLY
+    /// skipped — the settled answer is the canonical explicit skip
+    /// (`selected: []`, no `custom`), never a card dismissal — then either
+    /// advance the walk or, on the last question, settle the whole card. The
+    /// settle runs the same completeness gate as the submit: questions that
+    /// were never touched jump the walk back instead of silently folding to
+    /// skips. A skip can never strand the user: the walk always moves.
     pub(crate) fn skip_ask_question(
         &mut self,
         qi: usize,
@@ -503,10 +599,25 @@ impl Workspace {
         if let Some(slot) = self.ask_custom_text.get_mut(qi) {
             slot.clear();
         }
+        if let Some(slot) = self.ask_skipped.get_mut(qi) {
+            *slot = true;
+        }
         if let Some(state) = self.ask_custom_inputs.get(qi).and_then(|slot| slot.clone()) {
             state.update(cx, |st, cx| st.set_value("", window, cx));
         }
-        cx.notify();
+        let has_next = self
+            .pending_ask
+            .as_ref()
+            .is_some_and(|ask| qi + 1 < ask.questions.len());
+        if has_next {
+            self.ask_step = qi + 1;
+            cx.notify();
+        } else if let Some(missing) = self.first_incomplete_ask_question() {
+            self.ask_step = missing;
+            cx.notify();
+        } else {
+            self.resolve_ask(cx);
+        }
     }
 
     /// Wire api string → Tag variant + label for the pi model menu.
