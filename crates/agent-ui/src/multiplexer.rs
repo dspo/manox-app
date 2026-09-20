@@ -219,7 +219,36 @@ impl SessionMultiplexer {
             LeafRequest::Reopen {
                 session_id,
                 stream_id,
-            } => self.open_follow(&session_id, stream_id),
+                reattach,
+            } => {
+                // The user-facing retry is a full re-attach: the attach's
+                // OpenSession may have failed once (a startup-window
+                // transient), and the server answers a bare StreamOpen for a
+                // session not in its table with a terminal
+                // `session/not-found`. Same-connection ordering puts the
+                // OpenSession ahead of the StreamOpen; for a live session it
+                // is the phase-1 reown, whose SessionCreated push and
+                // adjudication replay are idempotent for this client (the
+                // has_follow guard keeps one stream; re-delivered cards
+                // re-record per kind+id).
+                //
+                // Automatic reopens stay pure StreamOpen: OpenSession is
+                // raw-id keyed (phase-1 lookup, phase-3 insert) while its
+                // load resolves supersede redirects, so on an
+                // already-superseded id it would insert a ghost ServerSession
+                // under the old id — a leaked session, an idle pump, and a
+                // second engine on the successor's journal (the ghost's
+                // ThreadCore never sees the successor's events, so it is a
+                // leak, not a duplicate-routing hazard) — the alias branch
+                // handles that flavor safely, and the dead-end lands in the
+                // stop whose retry is the recovery entry.
+                if reattach {
+                    self.client.send_call(ClientCall::OpenSession {
+                        session_id: session_id.clone(),
+                    });
+                }
+                self.open_follow(&session_id, stream_id);
+            }
             LeafRequest::PageHistory {
                 id,
                 session_id,
@@ -1174,6 +1203,94 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// The follow-stop retry's `Reopen` ask (`reattach`) is a full re-attach
+    /// on the wire: exactly one `OpenSession` precedes the `StreamOpen`, so
+    /// the retry also recovers the attach's OpenSession having failed once
+    /// (the server answers a bare StreamOpen for a session outside its table
+    /// with a terminal `session/not-found`, and a retry that never re-sends
+    /// OpenSession cannot clear it).
+    #[gpui::test]
+    fn retry_reopen_sends_open_session_before_the_stream_open(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        let tx = mux.update(cx, |m, cx| {
+            m.ensure_leaf("s-cold", cx);
+            m.leaf_tx.clone()
+        });
+        tx.try_send(crate::client_store_handle::LeafRequest::Reopen {
+            session_id: "s-cold".into(),
+            stream_id: StreamId::new("st-retry-1".to_string()),
+            reattach: true,
+        })
+        .unwrap();
+        // The leaf pump is a `cx.spawn` task parked on the channel: one
+        // run_until_parked drains the ask deterministically.
+        cx.run_until_parked();
+        let wire: Vec<FromClient> = std::iter::from_fn(|| server_conn.client_rx().try_recv().ok())
+            .filter(|msg| match msg {
+                FromClient::Request { call, .. } => matches!(
+                    call,
+                    ClientCall::OpenSession { session_id } if session_id == "s-cold"
+                ),
+                FromClient::StreamOpen { stream_kind, .. } => matches!(
+                    stream_kind,
+                    StreamKind::FollowSession { session_id, .. } if session_id == "s-cold"
+                ),
+                _ => false,
+            })
+            .collect();
+        // Exact slice: OpenSession first, exactly once each.
+        assert!(
+            matches!(
+                wire.as_slice(),
+                [
+                    FromClient::Request {
+                        call: ClientCall::OpenSession { .. },
+                        ..
+                    },
+                    FromClient::StreamOpen { .. },
+                ]
+            ),
+            "the retry must put exactly one OpenSession ahead of the StreamOpen, got {wire:?}"
+        );
+    }
+
+    /// Automatic reopens stay pure `StreamOpen`: `OpenSession` is raw-id
+    /// keyed, and on an already-superseded id it would make the server build
+    /// a second pump on the successor's thread (the GW2 double-pump failure
+    /// class) — only the user-facing retry pays it.
+    #[gpui::test]
+    fn automatic_reopen_stays_a_pure_stream_open(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        let tx = mux.update(cx, |m, cx| {
+            m.ensure_leaf("s-cold", cx);
+            m.leaf_tx.clone()
+        });
+        tx.try_send(crate::client_store_handle::LeafRequest::Reopen {
+            session_id: "s-cold".into(),
+            stream_id: StreamId::new("st-auto-1".to_string()),
+            reattach: false,
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let wire: Vec<FromClient> = std::iter::from_fn(|| server_conn.client_rx().try_recv().ok())
+            .filter(|msg| match msg {
+                FromClient::Request { call, .. } => matches!(
+                    call,
+                    ClientCall::OpenSession { session_id } if session_id == "s-cold"
+                ),
+                FromClient::StreamOpen { stream_kind, .. } => matches!(
+                    stream_kind,
+                    StreamKind::FollowSession { session_id, .. } if session_id == "s-cold"
+                ),
+                _ => false,
+            })
+            .collect();
+        assert!(
+            matches!(wire.as_slice(), [FromClient::StreamOpen { .. }]),
+            "an automatic reopen must carry no OpenSession, got {wire:?}"
+        );
     }
 
     /// U2 cross-domain #1: the Projects host mirror fills the
