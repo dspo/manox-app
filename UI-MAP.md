@@ -35,7 +35,7 @@ Component names use PascalCase. The hierarchy mirrors the visual containment tre
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
 | Sub-agent 观察 | ✅ 部分 | rail 观察行（生命周期/活动）+ Agent 工具卡片实时流式子转录（text/thinking delta、工具 ▸/✓/✗ 行）；独立钻取面板随 manox 移除，卡片体即钻取面 |
-| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewAsAskCard](#planreviewasaskcard)，三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
+| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewDecisionCard](#planreviewdecisioncard)（底部一键裁决卡），三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
 分层纪律：crates/manox-harness/src/core 只做 TS Pi 对齐与扩展点；harness 能力扩展一律走
@@ -83,7 +83,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### AskDrawer
 
-- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerCustomInput](#askdrawercustominput) · [AskDrawerSkipButton](#askdrawerskipbutton) · [AskDrawerNav](#askdrawernav) · [PlanReviewAsAskCard](#planreviewasaskcard) · [AskSettledElsewhereNotice](#asksettledelsewherenotice)
+- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerCustomInput](#askdrawercustominput) · [AskDrawerFooter](#askdrawerfooter) · [AskDrawerSkipButton](#askdrawerskipbutton) · [AskDrawerNav](#askdrawernav) · [PlanReviewDecisionCard](#planreviewdecisioncard) · [AskSettledElsewhereNotice](#asksettledelsewherenotice)
 
 ### Popups & Dropdowns
 
@@ -645,25 +645,34 @@ after having been confirmed in it settled remotely and is reconciled away.
 
 #### AskDrawer
 
-Multi-step question navigator rendered inside the conversation
-(`render_ask_user_card`, `crates/agent-ui/src/views/message.rs`); its
-state (`Workspace::pending_ask` + snapshot sync) lives in `chips.rs`.
+Multi-step question navigator rendered inside the conversation. The card
+carries two presentations routed at the one render entry
+(`render_ask_user_card`, `crates/agent-ui/src/views/message.rs`): a
+single-question ask with a `plan-review` intent whose `approve` label matches
+one of its own options renders the [PlanReviewDecisionCard](#planreviewdecisioncard);
+every other ask renders the generic stepper flow (`render_question_card`).
+Decision actions live in a fixed footer BELOW the content (pager + skip +
+next/submit), never above it; the body caps at 520px and scrolls internally so
+the footer stays reachable on a long plan. The ask state
+(`Workspace::pending_ask` + snapshot sync) lives in `chips.rs`.
 
 > Source: `crates/agent-ui/src/workspace/chips.rs`
 
 #### AskDrawerHeader
 
-Title + stepper "N/M".
+Title + close (X, the dismissal leg). The stepper moved to
+[AskDrawerFooter](#askdrawerfooter).
 
-> Source: `crates/agent-ui/src/workspace/chips.rs`
+> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`)
 
 #### AskDrawerQuestion
 
 Header tag + question text, then an optional `detail` block — markdown support
 text rendered with the repo `Markdown` component (`markdown_tv`) beneath the
-question. The plan-review body rides here (see [PlanReviewAsAskCard](#planreviewasaskcard)).
+question. On the generic card the plan-review body rides here when the intent
+fallback fires (see [PlanReviewDecisionCard](#planreviewdecisioncard)).
 
-> Source: `crates/agent-ui/src/views/message.rs` (`render_ask_user_card`)
+> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`)
 
 #### AskDrawerOptions
 
@@ -682,25 +691,36 @@ Per-question free-text `custom` input, rendered under the options with an
 `Workspace::ask_custom_text[qi]`. At the settle fold a `custom` REPLACES a
 single-select's selection and SUPPLEMENTS a multi-select's — free text can only
 ever attach to its own question (the removed card-level "response" override is
-gone).
+gone). The skip affordance that used to sit beside it moved to
+[AskDrawerFooter](#askdrawerfooter).
 
-> Source: `crates/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `crates/agent-ui/src/workspace/chips.rs`
+> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs`
+
+#### AskDrawerFooter
+
+Fixed decision row BELOW the scrollable body (which caps at 520px): left the
+pager — Prev / "N of M" / Next ghost steppers; right the Skip outline button
+and the primary action — 「下一步」 until the last question, then 「提交」
+(last step submits via the composer's `submit_input` gate). Decision actions
+sit where the reading finishes, never pinned above the content they settle.
+
+> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`)
 
 #### AskDrawerSkipButton
 
-Explicit per-question skip (`IconName::Minus`, ghost) beside the custom input:
-clears that question's selection and custom, settling the canonical row
-`{id, selected: []}` with no `custom` (the server's `AskAnswer::is_skip`). A
-skip is distinct from closing the whole card (that is `dismiss_ask`, the Nav's
-Cancel leg).
+Explicit per-question skip (footer outline button): clears that question's
+selection and custom, settling the canonical row `{id, selected: []}` with no
+`custom` (the server's `AskAnswer::is_skip`). A skip is distinct from closing
+the whole card (that is `dismiss_ask`, the header X / Esc leg).
 
-> Source: `crates/agent-ui/src/views/message.rs` (`render_ask_user_card`) + `crates/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
+> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
 
 #### AskDrawerNav
 
-Prev / Next (last step submits) / Cancel (close ⇒ `{"dismissed": true}`)
-buttons. Submitting gathers every question's tri-state (`selected` +
-`custom`, skipped ones carry `selected: []`) into the canonical reply frame
+Footer Prev / Next steppers plus the primary 下一步/提交 action (the last step
+submits); the header keeps only the Cancel leg (close ⇒ `{"dismissed": true}`).
+Submitting gathers every question's tri-state (`selected` + `custom`, skipped
+ones carry `selected: []`) into the canonical reply frame
 `{"answers":[{"id","selected","custom"?}]}` — the legacy positional
 `[[question, answer]]` pair and the card-level `response` are removed.
 Dismiss keeps `{"dismissed": true}`; the generic approval card's allow/deny leg
@@ -708,7 +728,7 @@ Dismiss keeps `{"dismissed": true}`; the generic approval card's allow/deny leg
 
 > Source: `crates/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`)
 
-#### PlanReviewAsAskCard
+#### PlanReviewDecisionCard
 
 B2-PR-5: a proposed plan is no longer a dedicated `PlanVerdict` drawer with a
 four-choice verdict (that surface, its `PendingPlanReview` state / stash /
@@ -716,18 +736,27 @@ overlay, and the `ExecuteFresh` create-and-reseed path are deleted). It reaches
 the client as a single-question [AskDrawer](#askdrawer) whose `input` carries
 `detail` = the plan body (markdown) and `intent = {kind: "plan-review",
 approve: "Approve"}` over three options — **Approve**, **Approve & compact**,
-**Request changes**. The card derives from those fields (no `PlanReady` event,
-no `ServerCall::PlanVerdict`): `intent.kind == "plan-review"` marks it a
-plan-review, and the affirmative option (`intent.approve`, matched against the
-question's own labels) renders highlighted (a `theme.primary` tint + border).
+**Request changes**. When the routing (`plan_review_approve_index`: single
+question, `intent.kind == "plan-review"`, `approve` matching one of the
+question's own labels) fires, the ask renders as a decision card in the
+deepseek-harness `PlanReviewPanel` shape: a warning-tinted strip (dot +
+「Plan 评审」), the plan as the body that owns the internal scroll, and a fixed
+BOTTOM decision row — the approve option as the primary button, the remaining
+options as outline buttons (description in the tooltip), and a quiet
+「继续讨论」 ghost action carrying the dismissal leg (`dismiss_ask`). A click
+IS the verdict (`decide_ask_option` folds the clicked option in and settles in
+the same activation — no selection-then-confirm two-step); Esc carries the
+same discuss leg.
 
 The user's answer rides the normal canonical reply; the SERVER owns the verdict
 mapping (Approve → keep, Approve & compact → compact, anything else — Request
 changes / custom / skip → refine, and a card close → stop and stay in plan mode
 awaiting a message). The client sends no verdict enum. A free-form message while
-the card is up submits the card (per `AskDrawerNav`), not a separate dismissal.
+the card is up submits the card (per [AskDrawerNav](#askdrawernav)), not a
+separate dismissal. A plan-review ask that fails the routing (extra questions,
+unmatched `approve`) renders the generic stepper flow instead.
 
-> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/agent-ui/src/views/message.rs` (`render_ask_user_card` Approve highlight)
+> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/agent-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`decide_ask_option`)
 
 #### AskSettledElsewhereNotice
 

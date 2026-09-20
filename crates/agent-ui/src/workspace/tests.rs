@@ -4909,3 +4909,76 @@ fn a_healthy_follow_shows_no_stop_surfaces(cx: &mut gpui::TestAppContext) {
     drop(visual);
     let _ = std::fs::remove_file(&db_path);
 }
+
+/// The plan-review decision card's one-click verdict: `decide_ask_option`
+/// folds the clicked option in as that question's single selection and
+/// settles the card on the same activation — the click IS the answer, with
+/// no separate confirm step to fall out of sync with the selection.
+#[gpui::test]
+fn decide_ask_option_settles_the_card_with_the_clicked_option(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path = std::env::temp_dir().join(format!("manox-decide-ask-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(1_120.), gpui::px(780.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+
+    // The exact shape the runtime mints for a proposed plan: one question,
+    // `plan-review` intent naming the Approve option, plan body in `detail`.
+    let ask_payload = serde_json::json!({
+        "questions": [
+            { "question": "Review the plan.", "header": "Plan",
+              "detail": "# Plan\n- step one",
+              "intent": { "kind": "plan-review", "approve": "Approve" },
+              "options": [
+                { "label": "Approve", "description": "start executing" },
+                { "label": "Approve & compact" },
+                { "label": "Request changes" }
+              ] }
+        ]
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, _cx| {
+            ws.pending_ask = super::parse_pending_ask("plan1".into(), ask_payload);
+            assert!(ws.pending_ask.is_some(), "plan-review ask must parse");
+        });
+    });
+    // A decision click on the last option ("Request changes") settles the
+    // card in the same activation.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| ws.decide_ask_option(0, 2, cx));
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, _cx| {
+            assert!(
+                ws.pending_ask.is_none(),
+                "the decision click settles the card without a confirm step"
+            );
+        });
+    });
+    drop(ws);
+    drop(visual);
+    let _ = std::fs::remove_file(&db_path);
+}

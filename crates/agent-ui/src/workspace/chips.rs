@@ -337,6 +337,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// One-click plan-review decision: fold option `oi` of question `qi` in
+    /// as that question's single selection and settle the card in the same
+    /// activation. The decision card's buttons ARE the options, so there is
+    /// no separate confirm step — the reply carries exactly the clicked
+    /// option (the in-process fallback rides `resolve_ask`'s wire path).
+    pub(crate) fn decide_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            for s in sel.iter_mut() {
+                *s = false;
+            }
+            if let Some(slot) = sel.get_mut(oi) {
+                *slot = true;
+            }
+        }
+        self.resolve_ask(cx);
+    }
+
     pub(crate) fn ask_prev(&mut self, cx: &mut Context<Self>) {
         if self.ask_step > 0 {
             self.ask_step -= 1;

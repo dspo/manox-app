@@ -710,6 +710,16 @@ workspace-ask-settled-elsewhere = Handled in another client
 
 workspace-ask-recommended = Recommended
 
+workspace-ask-plan-review-label = Plan review
+
+workspace-ask-discuss = Discuss
+
+workspace-ask-next = Next
+
+workspace-ask-submit = Submit
+
+workspace-ask-skip = Skip
+
 workspace-cancel = Cancel
 
 pending-auth-title = Approval requested
