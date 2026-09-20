@@ -251,6 +251,44 @@ impl Workspace {
         })
     }
 
+    /// Diagnostic-only: the interactive ask card element for the CURRENT
+    /// pending-ask snapshot, as the conversation list would render it. The
+    /// workspace's message list only paints through the live event path, so
+    /// render-level probe tests pull the card out and mount it directly.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ask_card_element(
+        &self,
+        weak: gpui::WeakEntity<Workspace>,
+        ix: usize,
+        cx: &mut App,
+    ) -> Option<gpui::AnyElement> {
+        let id = self.pending_ask.as_ref()?.id.clone();
+        let snapshot = self.ask_card_snapshot(&id, cx)?;
+        let item = crate::conversation::ToolCallItem {
+            id,
+            name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
+            title: String::new(),
+            status: manox_agent::ToolCallStatus::PendingApproval,
+            output: String::new(),
+            is_error: false,
+            input: serde_json::Value::Null,
+            streaming: false,
+            collapsed: false,
+            user_toggled: false,
+            panel: None,
+        };
+        Some(crate::views::message::render_ask_user_card(
+            &item,
+            ix,
+            &cx.theme().clone(),
+            Some(&crate::views::message::ToolCallCtx {
+                weak,
+                ask: Some(snapshot),
+            }),
+            cx,
+        ))
+    }
+
     /// Synchronize Workspace-derived ask state before the native list starts
     /// measuring. Updating a `MessageItem` from the row callback dirties the
     /// same entity tree whose height GPUI is currently caching, which can make
@@ -342,6 +380,9 @@ impl Workspace {
     /// activation. The decision card's buttons ARE the options, so there is
     /// no separate confirm step — the reply carries exactly the clicked
     /// option (the in-process fallback rides `resolve_ask`'s wire path).
+    /// Single-select by construction: the server mints plan-review cards
+    /// `multiSelect:false`, and a one-click verdict has no meaning on a
+    /// multi-select question — the decision presentation only routes those.
     pub(crate) fn decide_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
         if let Some(ask) = self.pending_ask.as_mut()
             && let Some(sel) = ask.selections.get_mut(qi)
@@ -503,9 +544,12 @@ impl Workspace {
         self.ask_custom_inputs.get(qi).and_then(|slot| slot.clone())
     }
 
-    /// Skip question `qi`: clear its selection and its `custom` text, so the
-    /// settled answer is the canonical explicit skip (`selected: []`, no
-    /// `custom`) rather than a card dismissal.
+    /// Skip question `qi` (deepseek `QuestionFlow.skipQuestion` semantics):
+    /// clear its selection and its `custom` text — the settled answer is the
+    /// canonical explicit skip (`selected: []`, no `custom`), never a card
+    /// dismissal — then either advance the walk or, on the last question,
+    /// settle the whole card. A skip can never strand the user behind the
+    /// composer's silent submit gate: the walk always moves.
     pub(crate) fn skip_ask_question(
         &mut self,
         qi: usize,
@@ -525,7 +569,16 @@ impl Workspace {
         if let Some(state) = self.ask_custom_inputs.get(qi).and_then(|slot| slot.clone()) {
             state.update(cx, |st, cx| st.set_value("", window, cx));
         }
-        cx.notify();
+        let has_next = self
+            .pending_ask
+            .as_ref()
+            .is_some_and(|ask| qi + 1 < ask.questions.len());
+        if has_next {
+            self.ask_step = qi + 1;
+            cx.notify();
+        } else {
+            self.resolve_ask(cx);
+        }
     }
 
     /// Wire api string → Tag variant + label for the pi model menu.

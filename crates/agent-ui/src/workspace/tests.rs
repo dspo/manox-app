@@ -4910,75 +4910,90 @@ fn a_healthy_follow_shows_no_stop_surfaces(cx: &mut gpui::TestAppContext) {
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// The plan-review decision card's one-click verdict: `decide_ask_option`
-/// folds the clicked option in as that question's single selection and
-/// settles the card on the same activation — the click IS the answer, with
-/// no separate confirm step to fall out of sync with the selection.
+/// The plan-review decision card's one-click verdict, pinned to the WIRE: a
+/// decision click folds exactly the clicked option into the canonical reply
+/// (`selected: [label]`) and settles the card in the same activation. The
+/// runtime maps Approve → keep / Approve & compact → compact / anything else
+/// → refine off this payload, so the row IS the verdict — an assertion on
+/// `pending_ask.is_none()` alone would pass for a mis-folded answer too.
 #[gpui::test]
-fn decide_ask_option_settles_the_card_with_the_clicked_option(cx: &mut gpui::TestAppContext) {
-    use gpui::AppContext as _;
-    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _store = store_test_guard();
-    cx.update(gpui_component::init);
-    let db_path = std::env::temp_dir().join(format!("manox-decide-ask-{}.db", uuid_like_id()));
-    let db = std::sync::Arc::new(
-        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+#[cfg(feature = "test-support")]
+fn decide_ask_option_replies_with_the_clicked_option(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy_with(
+        cx,
+        serde_json::json!({
+            "questions": [
+                { "question": "Review the plan.", "header": "Plan",
+                  "detail": "# Plan\n- step one",
+                  "intent": { "kind": "plan-review", "approve": "Approve" },
+                  "options": [
+                    { "label": "Approve", "description": "start executing" },
+                    { "label": "Approve & compact" },
+                    { "label": "Request changes" }
+                  ] }
+            ]
+        }),
     );
-    cx.update(|_cx| {
-        manox_agent::runtime::init();
-        manox_agent::provider_glue::init();
-        manox_agent::thread_store::init_for_test(db.clone());
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    // The decline-shaped decision click ("Request changes").
+    ws.update(&mut visual, |ws, cx| ws.decide_ask_option(0, 2, cx));
+    let answers = ask_answer_frames(cx, &f.rx, "plan-review decision");
+    assert_eq!(
+        answers,
+        vec![serde_json::json!({ "id": "q0", "selected": ["Request changes"] })],
+        "the clicked option IS the verdict row; no `custom` key rides along"
+    );
+    ws.read_with(&visual, |ws, _| {
+        assert!(
+            ws.pending_ask.is_none(),
+            "the decision click settles the card in the same activation"
+        );
     });
-    cx.background_executor.allow_parking();
-    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let slot = captured.clone();
-    let window = cx.open_window(
-        gpui::size(gpui::px(1_120.), gpui::px(780.)),
-        move |window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(window, cx));
-            *slot.borrow_mut() = Some(workspace.clone());
-            gpui_component::Root::new(workspace, window, cx)
-        },
-    );
-    cx.run_until_parked();
-    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-    let ws = captured.borrow().clone().expect("workspace captured");
+    let _ = std::fs::remove_file(&f.db_path);
+}
 
-    // The exact shape the runtime mints for a proposed plan: one question,
-    // `plan-review` intent naming the Approve option, plan body in `detail`.
-    let ask_payload = serde_json::json!({
-        "questions": [
-            { "question": "Review the plan.", "header": "Plan",
-              "detail": "# Plan\n- step one",
-              "intent": { "kind": "plan-review", "approve": "Approve" },
-              "options": [
-                { "label": "Approve", "description": "start executing" },
-                { "label": "Approve & compact" },
-                { "label": "Request changes" }
-              ] }
-        ]
-    });
-    visual.update(|_window, cx| {
-        ws.update(cx, |ws, _cx| {
-            ws.pending_ask = super::parse_pending_ask("plan1".into(), ask_payload);
-            assert!(ws.pending_ask.is_some(), "plan-review ask must parse");
+/// The footer Skip is never a dead end (deepseek `skipQuestion` parity): a
+/// mid-card skip clears that question's draft and ADVANCES the walk with the
+/// card still parked, and the last question's skip settles the whole card
+/// with every walked question emitted — the skipped ones as canonical
+/// `{selected: []}` rows. Before this contract a skip + submit died silently
+/// behind the composer's empty-input gate.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn skip_advances_mid_card_and_settles_on_the_last_question(cx: &mut gpui::TestAppContext) {
+    let f = seeded_ask_wire_spy_with(
+        cx,
+        serde_json::json!({
+            "questions": [
+                { "question": "First?", "options": [{ "label": "A" }, { "label": "B" }] },
+                { "question": "Second?", "options": [{ "label": "C" }] }
+            ]
+        }),
+    );
+    let mut visual = f.visual;
+    let ws = f.ws.clone();
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.toggle_ask_option(0, 0, cx);
+            ws.skip_ask_question(0, window, cx);
         });
     });
-    // A decision click on the last option ("Request changes") settles the
-    // card in the same activation.
-    visual.update(|_window, cx| {
-        ws.update(cx, |ws, cx| ws.decide_ask_option(0, 2, cx));
+    ws.read_with(&visual, |ws, _| {
+        assert!(ws.pending_ask.is_some(), "a mid-card skip never settles");
+        assert_eq!(ws.ask_step, 1, "the skip advances to the next question");
     });
-    visual.update(|_window, cx| {
-        ws.update(cx, |ws, _cx| {
-            assert!(
-                ws.pending_ask.is_none(),
-                "the decision click settles the card without a confirm step"
-            );
-        });
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.skip_ask_question(1, window, cx));
     });
-    drop(ws);
-    drop(visual);
-    let _ = std::fs::remove_file(&db_path);
+    let answers = ask_answer_frames(cx, &f.rx, "skip-walk settle");
+    assert_eq!(
+        answers,
+        vec![
+            serde_json::json!({ "id": "q0", "selected": [] }),
+            serde_json::json!({ "id": "q1", "selected": [] }),
+        ],
+        "every question in the walk is emitted, skipped or not"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
 }

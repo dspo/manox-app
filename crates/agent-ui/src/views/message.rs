@@ -2028,7 +2028,10 @@ fn open_file_in_vscode(raw: &str, cwd: Option<&Path>) {
     }
 }
 
-fn render_ask_user_card(
+/// The ask card's render entry and presentation router. `pub(crate)` so the
+/// test-support diagnostic probe (`Workspace::diagnostic_ask_card_element`)
+/// can render the card outside the conversation list.
+pub(crate) fn render_ask_user_card(
     item: &ToolCallItem,
     ix: usize,
     theme: &Theme,
@@ -2060,7 +2063,11 @@ fn render_ask_user_card(
 /// The plan-review decision presentation's approve option: the ask must carry
 /// a `plan-review` intent whose `approve` label names one of the question's
 /// own options (server-validated, matched exactly). `None` renders the
-/// generic question card.
+/// generic question card. The match runs against the DISPLAY label — the
+/// server's `(Recommended)` suffix was already stripped at parse — while the
+/// server validated the raw label, so a model-minted intent can miss and
+/// degrade to the generic card. That asymmetry is the intended safe fallback,
+/// not a bug to align away.
 fn plan_review_approve_index(question: &AskCardQuestion) -> Option<usize> {
     let intent = question.intent.as_ref()?;
     if intent.kind != "plan-review" || intent.approve.is_empty() {
@@ -2123,6 +2130,7 @@ fn render_plan_review_card(
     });
     let body = gpui::div()
         .id(format!("plan-review-body-{ix}"))
+        .debug_selector(move || format!("plan-review-body-{ix}"))
         .w_full()
         .min_w_0()
         .max_h(px(520.))
@@ -2134,6 +2142,7 @@ fn render_plan_review_card(
         .children(plan_body);
 
     let mut footer = h_flex()
+        .debug_selector(move || format!("plan-review-footer-{ix}"))
         .w_full()
         .min_w_0()
         .items_center()
@@ -2236,6 +2245,13 @@ fn render_question_card(
     let total = snapshot.total;
     let can_prev = step > 0;
     let can_next = step + 1 < total;
+    // dsh parity: the primary is gated on the CURRENT question being answered
+    // (a pick or typed custom). Without the gate, "submit an unanswered card"
+    // hits the composer's silent submit gate and dies as a no-op the user
+    // reads as a broken button; the footer Skip is the always-available way
+    // through (it advances, or settles on the last question).
+    let answered_current =
+        snapshot.selections.iter().any(|s| *s) || !snapshot.custom.trim().is_empty();
 
     let title = question_card_title(&snapshot.question.header);
 
@@ -2434,6 +2450,7 @@ fn render_question_card(
     // pushing the footer's decision actions out of reach.
     let body = gpui::div()
         .id(format!("ask-card-body-{ix}-{step}"))
+        .debug_selector(move || format!("ask-card-body-{ix}-{step}"))
         .w_full()
         .min_w_0()
         .max_h(px(520.))
@@ -2483,6 +2500,7 @@ fn render_question_card(
         Button::new(format!("ask-card-advance-{ix}-{step}"))
             .primary()
             .small()
+            .disabled(!answered_current)
             .label(i18n::t("workspace-ask-next"))
             .on_click(move |_, _, cx: &mut App| {
                 let _ = weak_next.update(cx, |w, cx| w.ask_next(cx));
@@ -2491,12 +2509,14 @@ fn render_question_card(
         Button::new(format!("ask-card-submit-{ix}-{step}"))
             .primary()
             .small()
+            .disabled(!answered_current)
             .label(i18n::t("workspace-ask-submit"))
             .on_click(move |_, window, cx: &mut App| {
                 let _ = weak_submit.update(cx, |w, cx| w.submit_input(window, cx));
             })
     };
     let footer = h_flex()
+        .debug_selector(move || format!("ask-card-footer-{ix}-{step}"))
         .w_full()
         .min_w_0()
         .items_center()
