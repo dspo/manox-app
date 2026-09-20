@@ -334,6 +334,26 @@ impl Workspace {
         })
     }
 
+    /// The first question that is neither answered nor explicitly skipped —
+    /// the completeness gate's jump target (dsh `submitDrafts`'s
+    /// `findIndex(!completed)` parity). An untouched question must never
+    /// silently fold to a skip at the settle boundary.
+    pub(crate) fn first_incomplete_ask_question(&self) -> Option<usize> {
+        let ask = self.pending_ask.as_ref()?;
+        (0..ask.questions.len()).find(|&qi| {
+            let answered = ask
+                .selections
+                .get(qi)
+                .is_some_and(|sel| sel.iter().any(|s| *s))
+                || self
+                    .ask_custom_text
+                    .get(qi)
+                    .is_some_and(|custom| !custom.trim().is_empty());
+            let skipped = self.ask_skipped.get(qi).copied().unwrap_or(false);
+            !answered && !skipped
+        })
+    }
+
     pub(super) fn composer_can_submit(&self, running: bool, cx: &App) -> bool {
         // T10c: the v1 `history_phase` loading gate retired with the fold
         // (the restore boundary is now the §D.1 snapshot; a pending-snapshot
@@ -466,6 +486,11 @@ impl Workspace {
             self.client
                 .send_reply(msg_id, Ok(serde_json::json!({ "answers": wire })));
             self.retire_wire_auth(&id, cx);
+            // Same repaint contract as the in-process leg and `dismiss_ask`:
+            // the settled card must leave the tree on this frame's notify,
+            // not coast until an unrelated redraw (a reviewer-flagged gap —
+            // the wire branch used to return without notifying).
+            cx.notify();
             return;
         }
         // In-process fallback (no wire MsgId): the canonical rows built above
@@ -481,11 +506,13 @@ impl Workspace {
 
     /// Drop the ask custom-answer state — call whenever the pending ask is
     /// seeded, resolved, dismissed, or reconciled away so a stale custom never
-    /// leaks into the next card or a re-surfaced walk.
+    /// leaks into the next card or a re-surfaced walk. The explicit-skip
+    /// markers ride the same lifecycle.
     pub(super) fn reset_ask_custom(&mut self) {
         self.ask_custom_inputs.clear();
         self.ask_custom_subs.clear();
         self.ask_custom_text.clear();
+        self.ask_skipped.clear();
     }
 
     /// Align the per-question custom-answer scratch with the current ask:
@@ -505,9 +532,13 @@ impl Workspace {
             }
             return;
         }
-        if self.ask_custom_text.len() != count || self.ask_custom_inputs.len() != count {
+        if self.ask_custom_text.len() != count
+            || self.ask_custom_inputs.len() != count
+            || self.ask_skipped.len() != count
+        {
             self.reset_ask_custom();
             self.ask_custom_text = vec![String::new(); count];
+            self.ask_skipped = vec![false; count];
             self.ask_custom_inputs = vec![None; count];
         }
         for qi in 0..count {
@@ -545,11 +576,13 @@ impl Workspace {
     }
 
     /// Skip question `qi` (deepseek `QuestionFlow.skipQuestion` semantics):
-    /// clear its selection and its `custom` text — the settled answer is the
-    /// canonical explicit skip (`selected: []`, no `custom`), never a card
-    /// dismissal — then either advance the walk or, on the last question,
-    /// settle the whole card. A skip can never strand the user behind the
-    /// composer's silent submit gate: the walk always moves.
+    /// clear its selection and its `custom` text and mark it EXPLICITLY
+    /// skipped — the settled answer is the canonical explicit skip
+    /// (`selected: []`, no `custom`), never a card dismissal — then either
+    /// advance the walk or, on the last question, settle the whole card. The
+    /// settle runs the same completeness gate as the submit: questions that
+    /// were never touched jump the walk back instead of silently folding to
+    /// skips. A skip can never strand the user: the walk always moves.
     pub(crate) fn skip_ask_question(
         &mut self,
         qi: usize,
@@ -566,6 +599,9 @@ impl Workspace {
         if let Some(slot) = self.ask_custom_text.get_mut(qi) {
             slot.clear();
         }
+        if let Some(slot) = self.ask_skipped.get_mut(qi) {
+            *slot = true;
+        }
         if let Some(state) = self.ask_custom_inputs.get(qi).and_then(|slot| slot.clone()) {
             state.update(cx, |st, cx| st.set_value("", window, cx));
         }
@@ -575,6 +611,9 @@ impl Workspace {
             .is_some_and(|ask| qi + 1 < ask.questions.len());
         if has_next {
             self.ask_step = qi + 1;
+            cx.notify();
+        } else if let Some(missing) = self.first_incomplete_ask_question() {
+            self.ask_step = missing;
             cx.notify();
         } else {
             self.resolve_ask(cx);

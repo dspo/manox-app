@@ -701,17 +701,26 @@ gone). The skip affordance that used to sit beside it moved to
 Fixed decision row BELOW the scrollable body (which caps at 520px): left the
 pager — Prev / "N of M" / Next ghost steppers; right the Skip outline button
 and the primary action — 「下一步」 until the last question, then 「提交」
-(last step submits via the composer's `submit_input` gate). Decision actions
-sit where the reading finishes, never pinned above the content they settle.
+(last step submits via the composer's `submit_input` gate) — DISABLED until
+the CURRENT question is answered (a pick or typed custom; dsh
+`disabled={!answered}` parity), so the composer's silent submit gate can never
+be reached as a no-op that reads as a broken button. Decision actions sit
+where the reading finishes, never pinned above the content they settle.
 
 > Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`)
 
 #### AskDrawerSkipButton
 
 Explicit per-question skip (footer outline button): clears that question's
-selection and custom, settling the canonical row `{id, selected: []}` with no
-`custom` (the server's `AskAnswer::is_skip`). A skip is distinct from closing
-the whole card (that is `dismiss_ask`, the header X / Esc leg).
+selection and custom, MARKS it explicitly skipped (`Workspace.ask_skipped`,
+dsh `QuestionDraftAnswer.skipped` parity), and moves the walk — a mid-card
+skip advances to the next question; the last question's skip settles the card
+through the same completeness gate as the submit. The settled canonical row is
+`{id, selected: []}` with no `custom` (the server's `AskAnswer::is_skip`). A
+skip is distinct from closing the whole card (that is `dismiss_ask`, the
+header X; the AskDrawer Esc binding only lands while focus sits INSIDE the
+card — reachable on the generic card after clicking the custom input, never
+on the decision card, which takes no focus).
 
 > Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
 
@@ -719,14 +728,17 @@ the whole card (that is `dismiss_ask`, the header X / Esc leg).
 
 Footer Prev / Next steppers plus the primary 下一步/提交 action (the last step
 submits); the header keeps only the Cancel leg (close ⇒ `{"dismissed": true}`).
-Submitting gathers every question's tri-state (`selected` + `custom`, skipped
-ones carry `selected: []`) into the canonical reply frame
-`{"answers":[{"id","selected","custom"?}]}` — the legacy positional
-`[[question, answer]]` pair and the card-level `response` are removed.
-Dismiss keeps `{"dismissed": true}`; the generic approval card's allow/deny leg
-(`resolve_auth`, `{"allow": …}`) is unchanged.
+Submitting is completeness-gated (dsh `submitDrafts`'s `findIndex(!completed)`
+parity): a question that was never touched blocks the settle and the walk
+jumps back to the first incomplete question — the blank card IS the feedback;
+only answered or EXPLICITLY skipped questions settle. The reply frame gathers
+every question's tri-state (`selected` + `custom`, skipped ones carry
+`selected: []`) into the canonical `{"answers":[{"id","selected","custom"?}]}`
+— the legacy positional `[[question, answer]]` pair and the card-level
+`response` are removed. Dismiss keeps `{"dismissed": true}`; the generic
+approval card's allow/deny leg (`resolve_auth`, `{"allow": …}`) is unchanged.
 
-> Source: `crates/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`)
+> Source: `crates/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`, `first_incomplete_ask_question`) + `crates/agent-ui/src/workspace/composer.rs` (`submit_input` gate)
 
 #### PlanReviewDecisionCard
 
@@ -737,16 +749,19 @@ the client as a single-question [AskDrawer](#askdrawer) whose `input` carries
 `detail` = the plan body (markdown) and `intent = {kind: "plan-review",
 approve: "Approve"}` over three options — **Approve**, **Approve & compact**,
 **Request changes**. When the routing (`plan_review_approve_index`: single
-question, `intent.kind == "plan-review"`, `approve` matching one of the
-question's own labels) fires, the ask renders as a decision card in the
-deepseek-harness `PlanReviewPanel` shape: a warning-tinted strip (dot +
+question, single-select, `intent.kind == "plan-review"`, `approve` matching
+one of the question's own labels) fires, the ask renders as a decision card in
+the deepseek-harness `PlanReviewPanel` shape: a warning-tinted strip (dot +
 「Plan 评审」), the plan as the body that owns the internal scroll, and a fixed
 BOTTOM decision row — the approve option as the primary button, the remaining
 options as outline buttons (description in the tooltip), and a quiet
 「继续讨论」 ghost action carrying the dismissal leg (`dismiss_ask`). A click
 IS the verdict (`decide_ask_option` folds the clicked option in and settles in
-the same activation — no selection-then-confirm two-step); Esc carries the
-same discuss leg.
+the same activation — no selection-then-confirm two-step). 「继续讨论」 is the
+decision card's only keyboard-free exit: the AskDrawer Esc binding is
+context-scoped and lands only while focus sits INSIDE the card, and this card
+takes no focus (buttons avoid focus on mouse-down) — a deliberate button-only
+surface, same as dsh's `PlanReviewPanel`.
 
 The user's answer rides the normal canonical reply; the SERVER owns the verdict
 mapping (Approve → keep, Approve & compact → compact, anything else — Request
@@ -754,7 +769,8 @@ changes / custom / skip → refine, and a card close → stop and stay in plan m
 awaiting a message). The client sends no verdict enum. A free-form message while
 the card is up submits the card (per [AskDrawerNav](#askdrawernav)), not a
 separate dismissal. A plan-review ask that fails the routing (extra questions,
-unmatched `approve`) renders the generic stepper flow instead.
+a multi-select question, unmatched `approve`) renders the generic stepper flow
+instead.
 
 > Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/agent-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`decide_ask_option`)
 

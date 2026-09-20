@@ -781,6 +781,12 @@ pub struct Workspace {
     /// into each canonical `AskAnswer`. The `InputState` entities above mirror
     /// this for live editing; tests drive this directly. Reset with the ask.
     ask_custom_text: Vec<String>,
+    /// Per-question explicit-skip markers (index-aligned with
+    /// `pending_ask.questions`): set by the footer Skip, cleared with the ask.
+    /// The submit completeness gate reads them — an untouched question is
+    /// never silently folded to a skip, but an explicitly skipped one counts
+    /// as completed (dsh `QuestionDraftAnswer.skipped` parity).
+    ask_skipped: Vec<bool>,
     pub(crate) model_open: bool,
     /// PopupMenu entity for the open model selector; created on open, destroyed on close.
     model_menu: Option<Entity<PopupMenu>>,
@@ -1248,6 +1254,7 @@ impl Workspace {
             ask_custom_inputs: Vec::new(),
             ask_custom_subs: Vec::new(),
             ask_custom_text: Vec::new(),
+            ask_skipped: Vec::new(),
             model_open: false,
             model_menu: None,
             model_menu_sub: None,

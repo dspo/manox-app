@@ -2062,15 +2062,19 @@ pub(crate) fn render_ask_user_card(
 
 /// The plan-review decision presentation's approve option: the ask must carry
 /// a `plan-review` intent whose `approve` label names one of the question's
-/// own options (server-validated, matched exactly). `None` renders the
-/// generic question card. The match runs against the DISPLAY label — the
-/// server's `(Recommended)` suffix was already stripped at parse — while the
-/// server validated the raw label, so a model-minted intent can miss and
-/// degrade to the generic card. That asymmetry is the intended safe fallback,
-/// not a bug to align away.
+/// own options, and the question must be single-select — `decide_ask_option`
+/// clears siblings, which would destroy answers on a multi-select. `None`
+/// renders the generic question card. The label match runs against the
+/// DISPLAY label — the server's `(Recommended)` suffix was already stripped
+/// at parse — while the server validated the raw label, so a model-minted
+/// intent can miss and degrade to the generic card. That asymmetry is the
+/// intended safe fallback, not a bug to align away. (dsh's `planReviewOf`
+/// also caps options at two, shaping its two-button panel; our footer is N
+/// buttons over the gateway's three minted options, so that guard MUST NOT
+/// be copied.)
 fn plan_review_approve_index(question: &AskCardQuestion) -> Option<usize> {
     let intent = question.intent.as_ref()?;
-    if intent.kind != "plan-review" || intent.approve.is_empty() {
+    if intent.kind != "plan-review" || intent.approve.is_empty() || question.multi_select {
         return None;
     }
     question
@@ -2199,8 +2203,11 @@ fn render_plan_review_card(
             snapshot.id, snapshot.transition_gen
         ))
         .key_context("AskDrawer")
-        // Esc carries the same discuss leg as the ghost action — a card close
-        // is "back to chatting", never an approve.
+        // The discuss action is the decision card's only exit. The AskDrawer
+        // Esc binding is context-scoped and only lands while focus sits
+        // INSIDE the card, and nothing on this card takes focus (gpui
+        // buttons avoid focus on mouse-down) — a deliberate button-only
+        // surface, same as dsh's PlanReviewPanel.
         .on_action(move |_: &crate::AskCancel, _window, cx: &mut App| {
             let _ = weak_esc.update(cx, |w, cx| w.dismiss_ask(cx));
         })
@@ -3866,12 +3873,12 @@ mod tests {
     fn plan_review_approve_index_requires_a_matching_option() {
         use crate::workspace::{AskCardIntent, AskCardOption, AskCardQuestion};
 
-        let question = |intent: Option<AskCardIntent>| AskCardQuestion {
+        let question = |intent: Option<AskCardIntent>, multi_select: bool| AskCardQuestion {
             question: String::new(),
             header: String::new(),
             detail: String::new(),
             intent,
-            multi_select: false,
+            multi_select,
             options: vec![
                 AskCardOption {
                     label: "Approve".into(),
@@ -3890,36 +3897,46 @@ mod tests {
             approve: "Approve".into(),
         });
         assert_eq!(
-            plan_review_approve_index(&question(plan_review)),
+            plan_review_approve_index(&question(plan_review.clone(), false)),
             Some(0),
             "the approve label resolves to its option's index"
         );
-        for (case, intent) in [
-            ("no intent", None),
+        for (case, (intent, multi_select)) in [
+            ("no intent", (None, false)),
             (
                 "empty approve label",
-                Some(AskCardIntent {
-                    kind: "plan-review".into(),
-                    approve: String::new(),
-                }),
+                (
+                    Some(AskCardIntent {
+                        kind: "plan-review".into(),
+                        approve: String::new(),
+                    }),
+                    false,
+                ),
             ),
             (
                 "approve label matches no option",
-                Some(AskCardIntent {
-                    kind: "plan-review".into(),
-                    approve: "Nope".into(),
-                }),
+                (
+                    Some(AskCardIntent {
+                        kind: "plan-review".into(),
+                        approve: "Nope".into(),
+                    }),
+                    false,
+                ),
             ),
             (
                 "foreign intent kind",
-                Some(AskCardIntent {
-                    kind: "clarify".into(),
-                    approve: "Approve".into(),
-                }),
+                (
+                    Some(AskCardIntent {
+                        kind: "clarify".into(),
+                        approve: "Approve".into(),
+                    }),
+                    false,
+                ),
             ),
+            ("multi-select question", (plan_review, true)),
         ] {
             assert_eq!(
-                plan_review_approve_index(&question(intent)),
+                plan_review_approve_index(&question(intent, multi_select)),
                 None,
                 "case: {case}"
             );
