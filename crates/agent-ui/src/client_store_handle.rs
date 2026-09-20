@@ -28,7 +28,11 @@ const INFO_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120)
 /// A signal the leaf asks the multiplexer to carry on the shared connection.
 #[derive(Debug, Clone)]
 pub enum LeafRequest {
-    /// Open (re-open) the follow stream for this session.
+    /// Re-attach the follow stream for this session: the multiplexer re-sends
+    /// `OpenSession` before the `StreamOpen`, so a reopen also recovers from
+    /// the attach's OpenSession having failed once (the server answers a bare
+    /// StreamOpen for a session outside its table with a terminal
+    /// `session/not-found`).
     Reopen {
         session_id: String,
         stream_id: StreamId,
@@ -533,8 +537,10 @@ impl ClientStoreHandle {
     }
 
     /// The notice's retry entry: re-arm the §二.3 budget and ask the
-    /// multiplexer to open the follow stream once more. With a multiplexer
-    /// wired the notice drops immediately, and a fresh exhaustion re-raises it
+    /// multiplexer for a full re-attach (`OpenSession` + `StreamOpen`), so a
+    /// retry genuinely recovers the attach's OpenSession having failed once —
+    /// the failure the stop most often stands for. With a multiplexer wired
+    /// the notice drops immediately, and a fresh exhaustion re-raises it
     /// undismissed; with none wired there is nothing to re-open, so this is a
     /// no-op and the notice it cannot act on stays — a retry is a user action
     /// whose outcome must be visible either way.

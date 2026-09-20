@@ -219,7 +219,19 @@ impl SessionMultiplexer {
             LeafRequest::Reopen {
                 session_id,
                 stream_id,
-            } => self.open_follow(&session_id, stream_id),
+            } => {
+                // A reopen doubles as a re-attach: the attach's OpenSession may
+                // have failed once (a startup-window transient), and the server
+                // answers a bare StreamOpen for a session not in its table with
+                // a terminal `session/not-found` — budgeted reopens would
+                // dead-end without this. Re-sending OpenSession first is free
+                // for a live session (`reown_existing`, no IO). Same-connection
+                // ordering puts it ahead of the StreamOpen.
+                self.client.send_call(ClientCall::OpenSession {
+                    session_id: session_id.clone(),
+                });
+                self.open_follow(&session_id, stream_id);
+            }
             LeafRequest::PageHistory {
                 id,
                 session_id,
@@ -1174,6 +1186,69 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A leaf's `Reopen` ask is a full re-attach on the wire: `OpenSession`
+    /// precedes the `StreamOpen`, so a reopen also recovers from the attach's
+    /// OpenSession having failed once (the server answers a bare StreamOpen
+    /// for a session outside its table with a terminal `session/not-found`,
+    /// and a reopen loop that never re-sends OpenSession cannot clear it).
+    #[gpui::test]
+    fn leaf_reopen_request_sends_open_session_before_the_stream_open(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        let tx = mux.update(cx, |m, cx| {
+            m.ensure_leaf("s-cold", cx);
+            m.leaf_tx.clone()
+        });
+        tx.try_send(crate::client_store_handle::LeafRequest::Reopen {
+            session_id: "s-cold".into(),
+            stream_id: StreamId::new("st-reopen-1".to_string()),
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let rx = server_conn.client_rx();
+        let mut seen: Vec<FromClient> = Vec::new();
+        let relevant: Vec<&FromClient> = loop {
+            cx.run_until_parked();
+            while let Ok(msg) = rx.try_recv() {
+                seen.push(msg);
+            }
+            let relevant: Vec<&FromClient> = seen
+                .iter()
+                .filter(|msg| match msg {
+                    FromClient::Request { call, .. } => matches!(
+                        call,
+                        ClientCall::OpenSession { session_id } if session_id == "s-cold"
+                    ),
+                    FromClient::StreamOpen { stream_kind, .. } => matches!(
+                        stream_kind,
+                        StreamKind::FollowSession { session_id, .. } if session_id == "s-cold"
+                    ),
+                    _ => false,
+                })
+                .collect();
+            if relevant.len() >= 2 {
+                break relevant;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the Reopen ask never became OpenSession + StreamOpen"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(
+            matches!(
+                relevant.as_slice(),
+                [
+                    FromClient::Request {
+                        call: ClientCall::OpenSession { .. },
+                        ..
+                    },
+                    FromClient::StreamOpen { .. },
+                ]
+            ),
+            "the reopen must put OpenSession ahead of the StreamOpen, got {relevant:?}"
+        );
     }
 
     /// U2 cross-domain #1: the Projects host mirror fills the
