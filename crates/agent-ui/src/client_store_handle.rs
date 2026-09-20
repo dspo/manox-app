@@ -28,14 +28,16 @@ const INFO_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120)
 /// A signal the leaf asks the multiplexer to carry on the shared connection.
 #[derive(Debug, Clone)]
 pub enum LeafRequest {
-    /// Re-attach the follow stream for this session: the multiplexer re-sends
-    /// `OpenSession` before the `StreamOpen`, so a reopen also recovers from
-    /// the attach's OpenSession having failed once (the server answers a bare
-    /// StreamOpen for a session outside its table with a terminal
-    /// `session/not-found`).
+    /// Re-open the follow stream for this session. `reattach` (the user's
+    /// banner/chip retry only) also re-sends `OpenSession` ahead of the
+    /// `StreamOpen`, so the retry recovers the attach's OpenSession having
+    /// failed once; automatic reopens stay pure `StreamOpen` — a bare
+    /// OpenSession on an already-superseded id would build a second pump on
+    /// the successor's thread server-side.
     Reopen {
         session_id: String,
         stream_id: StreamId,
+        reattach: bool,
     },
     /// Fetch a journal page ending at `through_seq` and deliver it back via
     /// [`ClientStoreHandle::apply_page_response`] correlated by `id`.
@@ -553,7 +555,7 @@ impl ClientStoreHandle {
         }
         self.reopen_attempts = 0;
         self.follow_stop = None;
-        self.request_reopen(cx);
+        self.request_reopen_inner(cx, true);
     }
 
     /// Deliver a `PageHistory` response the leaf requested. Correlated by
@@ -628,6 +630,17 @@ impl ClientStoreHandle {
     }
 
     fn request_reopen(&mut self, cx: &mut Context<Self>) {
+        self.request_reopen_inner(cx, false);
+    }
+
+    /// `reattach` marks the USER-facing retry: the multiplexer re-sends
+    /// `OpenSession` ahead of the `StreamOpen` so the retry also recovers the
+    /// attach's OpenSession having failed once. Automatic reopens stay pure
+    /// `StreamOpen` — a bare OpenSession on an already-superseded id would
+    /// make the server build a second pump on the successor's thread (the
+    /// GW2 double-pump failure class), and only the banner/chip retry is
+    /// user-visible on a live foreground id.
+    fn request_reopen_inner(&mut self, cx: &mut Context<Self>, reattach: bool) {
         self.reopen_attempts += 1;
         let Some(delay) = Self::reopen_backoff(self.reopen_attempts) else {
             // Terminal: a stream that keeps failing (corrupt journal, an
@@ -660,6 +673,7 @@ impl ClientStoreHandle {
             let _ = outbound.try_send(LeafRequest::Reopen {
                 session_id,
                 stream_id,
+                reattach,
             });
         } else {
             // Backoff on the background executor (the info_debounce
@@ -669,6 +683,7 @@ impl ClientStoreHandle {
                 let _ = outbound.try_send(LeafRequest::Reopen {
                     session_id,
                     stream_id,
+                    reattach,
                 });
             })
             .detach();
@@ -2008,8 +2023,9 @@ mod tests {
     }
 
     /// The notice's retry entry: `retry_follow` clears the notice, re-arms
-    /// the budget, and rides the outbound channel with fresh `Reopen`
-    /// requests exactly like the automatic path.
+    /// the budget, and rides the outbound channel — its own request carries
+    /// `reattach` (the multiplexer turns it into `OpenSession` +
+    /// `StreamOpen`), the automatic path's do not.
     #[gpui::test]
     fn retry_follow_rearms_the_budget_and_reopens(cx: &mut TestAppContext) {
         let handle = cx.update(|cx| cx.new(|cx| ClientStoreHandle::leaf("s1", cx)));
@@ -2052,15 +2068,30 @@ mod tests {
             .advance_clock(std::time::Duration::from_millis(9000));
         cx.run_until_parked();
         let mut reopens = 0;
+        let mut reattached = 0;
         while let Ok(req) = rx.try_recv() {
-            assert!(
-                matches!(req, LeafRequest::Reopen { session_id, .. }
-                    if session_id.as_str() == "s1"),
-                "only Reopen requests ride the channel"
-            );
-            reopens += 1;
+            match req {
+                LeafRequest::Reopen {
+                    session_id,
+                    reattach,
+                    ..
+                } => {
+                    assert_eq!(
+                        session_id.as_str(),
+                        "s1",
+                        "only s1 reopens ride the channel"
+                    );
+                    reopens += 1;
+                    reattached += u32::from(reattach);
+                }
+                other => panic!("only Reopen requests ride the channel, got {other:?}"),
+            }
         }
         assert_eq!(reopens, 10, "five pre-retry + five post-retry reopens");
+        assert_eq!(
+            reattached, 1,
+            "only the user-facing retry re-attaches; automatic reopens stay pure StreamOpen"
+        );
     }
 
     /// The retry contract with nothing to re-open: with no multiplexer wired

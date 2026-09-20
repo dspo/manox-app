@@ -219,17 +219,30 @@ impl SessionMultiplexer {
             LeafRequest::Reopen {
                 session_id,
                 stream_id,
+                reattach,
             } => {
-                // A reopen doubles as a re-attach: the attach's OpenSession may
-                // have failed once (a startup-window transient), and the server
-                // answers a bare StreamOpen for a session not in its table with
-                // a terminal `session/not-found` — budgeted reopens would
-                // dead-end without this. Re-sending OpenSession first is free
-                // for a live session (`reown_existing`, no IO). Same-connection
-                // ordering puts it ahead of the StreamOpen.
-                self.client.send_call(ClientCall::OpenSession {
-                    session_id: session_id.clone(),
-                });
+                // The user-facing retry is a full re-attach: the attach's
+                // OpenSession may have failed once (a startup-window
+                // transient), and the server answers a bare StreamOpen for a
+                // session not in its table with a terminal
+                // `session/not-found`. Same-connection ordering puts the
+                // OpenSession ahead of the StreamOpen; for a live session it
+                // is the phase-1 reown, whose SessionCreated push and
+                // adjudication replay are idempotent for this client (the
+                // has_follow guard keeps one stream; re-delivered cards
+                // re-record per kind+id).
+                //
+                // Automatic reopens stay pure StreamOpen: OpenSession is
+                // raw-id keyed, so on an already-superseded id it would build
+                // a second pump on the successor's thread (the GW2
+                // double-pump failure class) — the alias branch handles that
+                // flavor safely, and the dead-end lands in the stop whose
+                // retry is the recovery entry.
+                if reattach {
+                    self.client.send_call(ClientCall::OpenSession {
+                        session_id: session_id.clone(),
+                    });
+                }
                 self.open_follow(&session_id, stream_id);
             }
             LeafRequest::PageHistory {
@@ -1188,13 +1201,14 @@ mod tests {
         }
     }
 
-    /// A leaf's `Reopen` ask is a full re-attach on the wire: `OpenSession`
-    /// precedes the `StreamOpen`, so a reopen also recovers from the attach's
-    /// OpenSession having failed once (the server answers a bare StreamOpen
-    /// for a session outside its table with a terminal `session/not-found`,
-    /// and a reopen loop that never re-sends OpenSession cannot clear it).
+    /// The follow-stop retry's `Reopen` ask (`reattach`) is a full re-attach
+    /// on the wire: exactly one `OpenSession` precedes the `StreamOpen`, so
+    /// the retry also recovers the attach's OpenSession having failed once
+    /// (the server answers a bare StreamOpen for a session outside its table
+    /// with a terminal `session/not-found`, and a retry that never re-sends
+    /// OpenSession cannot clear it).
     #[gpui::test]
-    fn leaf_reopen_request_sends_open_session_before_the_stream_open(cx: &mut TestAppContext) {
+    fn retry_reopen_sends_open_session_before_the_stream_open(cx: &mut TestAppContext) {
         let (mux, server_conn) = test_mux(cx);
         let tx = mux.update(cx, |m, cx| {
             m.ensure_leaf("s-cold", cx);
@@ -1202,43 +1216,30 @@ mod tests {
         });
         tx.try_send(crate::client_store_handle::LeafRequest::Reopen {
             session_id: "s-cold".into(),
-            stream_id: StreamId::new("st-reopen-1".to_string()),
+            stream_id: StreamId::new("st-retry-1".to_string()),
+            reattach: true,
         })
         .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let rx = server_conn.client_rx();
-        let mut seen: Vec<FromClient> = Vec::new();
-        let relevant: Vec<&FromClient> = loop {
-            cx.run_until_parked();
-            while let Ok(msg) = rx.try_recv() {
-                seen.push(msg);
-            }
-            let relevant: Vec<&FromClient> = seen
-                .iter()
-                .filter(|msg| match msg {
-                    FromClient::Request { call, .. } => matches!(
-                        call,
-                        ClientCall::OpenSession { session_id } if session_id == "s-cold"
-                    ),
-                    FromClient::StreamOpen { stream_kind, .. } => matches!(
-                        stream_kind,
-                        StreamKind::FollowSession { session_id, .. } if session_id == "s-cold"
-                    ),
-                    _ => false,
-                })
-                .collect();
-            if relevant.len() >= 2 {
-                break relevant;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the Reopen ask never became OpenSession + StreamOpen"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        };
+        // The leaf pump is a `cx.spawn` task parked on the channel: one
+        // run_until_parked drains the ask deterministically.
+        cx.run_until_parked();
+        let wire: Vec<FromClient> = std::iter::from_fn(|| server_conn.client_rx().try_recv().ok())
+            .filter(|msg| match msg {
+                FromClient::Request { call, .. } => matches!(
+                    call,
+                    ClientCall::OpenSession { session_id } if session_id == "s-cold"
+                ),
+                FromClient::StreamOpen { stream_kind, .. } => matches!(
+                    stream_kind,
+                    StreamKind::FollowSession { session_id, .. } if session_id == "s-cold"
+                ),
+                _ => false,
+            })
+            .collect();
+        // Exact slice: OpenSession first, exactly once each.
         assert!(
             matches!(
-                relevant.as_slice(),
+                wire.as_slice(),
                 [
                     FromClient::Request {
                         call: ClientCall::OpenSession { .. },
@@ -1247,7 +1248,44 @@ mod tests {
                     FromClient::StreamOpen { .. },
                 ]
             ),
-            "the reopen must put OpenSession ahead of the StreamOpen, got {relevant:?}"
+            "the retry must put exactly one OpenSession ahead of the StreamOpen, got {wire:?}"
+        );
+    }
+
+    /// Automatic reopens stay pure `StreamOpen`: `OpenSession` is raw-id
+    /// keyed, and on an already-superseded id it would make the server build
+    /// a second pump on the successor's thread (the GW2 double-pump failure
+    /// class) — only the user-facing retry pays it.
+    #[gpui::test]
+    fn automatic_reopen_stays_a_pure_stream_open(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        let tx = mux.update(cx, |m, cx| {
+            m.ensure_leaf("s-cold", cx);
+            m.leaf_tx.clone()
+        });
+        tx.try_send(crate::client_store_handle::LeafRequest::Reopen {
+            session_id: "s-cold".into(),
+            stream_id: StreamId::new("st-auto-1".to_string()),
+            reattach: false,
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let wire: Vec<FromClient> = std::iter::from_fn(|| server_conn.client_rx().try_recv().ok())
+            .filter(|msg| match msg {
+                FromClient::Request { call, .. } => matches!(
+                    call,
+                    ClientCall::OpenSession { session_id } if session_id == "s-cold"
+                ),
+                FromClient::StreamOpen { stream_kind, .. } => matches!(
+                    stream_kind,
+                    StreamKind::FollowSession { session_id, .. } if session_id == "s-cold"
+                ),
+                _ => false,
+            })
+            .collect();
+        assert!(
+            matches!(wire.as_slice(), [FromClient::StreamOpen { .. }]),
+            "an automatic reopen must carry no OpenSession, got {wire:?}"
         );
     }
 
