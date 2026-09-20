@@ -233,11 +233,15 @@ impl SessionMultiplexer {
                 // re-record per kind+id).
                 //
                 // Automatic reopens stay pure StreamOpen: OpenSession is
-                // raw-id keyed, so on an already-superseded id it would build
-                // a second pump on the successor's thread (the GW2
-                // double-pump failure class) — the alias branch handles that
-                // flavor safely, and the dead-end lands in the stop whose
-                // retry is the recovery entry.
+                // raw-id keyed (phase-1 lookup, phase-3 insert) while its
+                // load resolves supersede redirects, so on an
+                // already-superseded id it would insert a ghost ServerSession
+                // under the old id — a leaked session, an idle pump, and a
+                // second engine on the successor's journal (the ghost's
+                // ThreadCore never sees the successor's events, so it is a
+                // leak, not a duplicate-routing hazard) — the alias branch
+                // handles that flavor safely, and the dead-end lands in the
+                // stop whose retry is the recovery entry.
                 if reattach {
                     self.client.send_call(ClientCall::OpenSession {
                         session_id: session_id.clone(),

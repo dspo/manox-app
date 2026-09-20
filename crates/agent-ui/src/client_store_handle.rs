@@ -32,8 +32,9 @@ pub enum LeafRequest {
     /// banner/chip retry only) also re-sends `OpenSession` ahead of the
     /// `StreamOpen`, so the retry recovers the attach's OpenSession having
     /// failed once; automatic reopens stay pure `StreamOpen` — a bare
-    /// OpenSession on an already-superseded id would build a second pump on
-    /// the successor's thread server-side.
+    /// OpenSession on an already-superseded id would insert a ghost
+    /// `ServerSession` under the old id server-side (a leaked session, an
+    /// idle pump, and a second engine on the successor's journal).
     Reopen {
         session_id: String,
         stream_id: StreamId,
@@ -637,9 +638,9 @@ impl ClientStoreHandle {
     /// `OpenSession` ahead of the `StreamOpen` so the retry also recovers the
     /// attach's OpenSession having failed once. Automatic reopens stay pure
     /// `StreamOpen` — a bare OpenSession on an already-superseded id would
-    /// make the server build a second pump on the successor's thread (the
-    /// GW2 double-pump failure class), and only the banner/chip retry is
-    /// user-visible on a live foreground id.
+    /// insert a ghost `ServerSession` under the old id (a leaked session, an
+    /// idle pump, and a second engine on the successor's journal), and only
+    /// the banner/chip retry is user-visible on a live foreground id.
     fn request_reopen_inner(&mut self, cx: &mut Context<Self>, reattach: bool) {
         self.reopen_attempts += 1;
         let Some(delay) = Self::reopen_backoff(self.reopen_attempts) else {
@@ -2121,6 +2122,22 @@ mod tests {
             handle.read_with(cx, |h, _| h.reopen_attempts),
             6,
             "and must not spend an attempt on it"
+        );
+    }
+
+    /// The manox-i18n scan gate resolves whatever these helpers return, but a
+    /// rename would silently point them at an unregistered key and the gate
+    /// would stay green — pin the literals here, next to the match that owns
+    /// them.
+    #[test]
+    fn follow_stop_reason_keys_are_the_registered_literals() {
+        assert_eq!(
+            FollowStopReason::StreamFailing.notice_key(),
+            "follow-stop-stream-failing"
+        );
+        assert_eq!(
+            FollowStopReason::StreamFailing.indicator_key(),
+            "follow-stop-indicator-stream-failing"
         );
     }
 }
