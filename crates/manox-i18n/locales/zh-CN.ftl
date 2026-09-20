@@ -738,6 +738,16 @@ workspace-project-name-prompt = 项目文件夹名称
 workspace-empty-prompt = 我们该做什么？
 
 workspace-loading-history = 正在加载对话…
+
+follow-stop-stream-failing = 实时跟进已停止：多次重连失败，视图停留在最后收到的内容。点「重试」可重新连接。
+
+follow-stop-indicator-stream-failing = 跟进已停止
+
+follow-stop-retry = 重试
+
+follow-stop-dismiss = 关闭
+
+follow-stop-indicator-retry = 点击重新连接实时跟进
 ### views/composer_menu.rs
 
 composer-add-label = 添加

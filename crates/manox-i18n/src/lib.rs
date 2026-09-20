@@ -467,4 +467,106 @@ mod tests {
         assert!(t("plan-chip-pending-exit-tooltip").contains("写权限"));
         assert!(t("plan-mode-cancel-notice").contains("保持可写"));
     }
+
+    /// Keys the agent-ui sources reference only through helper return values —
+    /// never as a literal `i18n::t("…")` argument — so the source scan below
+    /// cannot see them. Pin them here; the comment names the owning helper so
+    /// a rename drags the pin along.
+    const DYNAMICALLY_REFERENCED_KEYS: &[&str] = &[
+        // `FollowStopReason::{notice_key, indicator_key}` (agent-ui
+        // client_store_handle.rs).
+        "follow-stop-stream-failing",
+        "follow-stop-indicator-stream-failing",
+    ];
+
+    /// Every literal key an `i18n::t*` call site in agent-ui passes must
+    /// resolve in BOTH locales, and so must the dynamically referenced set.
+    /// This is the class gate for the follow-stop leak: keys registered in
+    /// code but never landed in the `.ftl` resources render as their own
+    /// names, and the parity gate cannot see a key missing from both files at
+    /// once. Lives here rather than in agent-ui because flipping the
+    /// process-global `LANG` needs this module's `TEST_LANG_LOCK`
+    /// serialization; the sibling sources sit one workspace-relative step
+    /// away.
+    #[test]
+    fn agent_ui_referenced_keys_resolve_in_both_locales() {
+        const NEEDLE: &str = "i18n::t";
+
+        fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        /// The first string literal of the call, if its first argument is a
+        /// literal (a variable or computed argument yields `None`).
+        fn literal_key(call: &str) -> Option<String> {
+            let rest = call.trim_start().strip_prefix('(')?.trim_start();
+            let quoted = rest.strip_prefix('"')?;
+            let end = quoted.find('"')?;
+            let key = &quoted[..end];
+            (!key.is_empty()).then(|| key.to_string())
+        }
+
+        let mut sources = Vec::new();
+        collect_rs(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../agent-ui/src"),
+            &mut sources,
+        );
+        assert!(
+            !sources.is_empty(),
+            "the agent-ui sources are not where the scan expects them"
+        );
+
+        let mut keys: Vec<String> = DYNAMICALLY_REFERENCED_KEYS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect();
+        for file in &sources {
+            let Ok(source) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            for (idx, _) in source.match_indices(NEEDLE) {
+                // Whole-identifier check: `crate::i18n::t` and `manox_i18n::t`
+                // are the same API; a longer name merely containing the needle
+                // is not.
+                if source[..idx]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                {
+                    continue;
+                }
+                let rest = &source[idx + NEEDLE.len()..];
+                let rest = rest
+                    .strip_prefix("_str_count")
+                    .or_else(|| rest.strip_prefix("_str"))
+                    .or_else(|| rest.strip_prefix("_count"))
+                    .unwrap_or(rest);
+                if let Some(key) = literal_key(rest) {
+                    keys.push(key);
+                }
+            }
+        }
+        assert!(
+            keys.iter().any(|key| key == "follow-stop-retry"),
+            "the scan found no agent-ui keys — it is scanning the wrong tree"
+        );
+
+        let _g = TEST_LANG_LOCK.lock().unwrap();
+        for key in &keys {
+            set_lang(Language::ZhCn);
+            assert_ne!(t(key).as_str(), key, "missing zh-CN copy for {key}");
+            set_lang(Language::En);
+            assert_ne!(t(key).as_str(), key, "missing en copy for {key}");
+        }
+    }
 }
