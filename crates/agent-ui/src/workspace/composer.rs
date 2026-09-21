@@ -307,9 +307,9 @@ impl Workspace {
         // body is the model-facing text, and `display_text` keeps the bubble
         // showing the compact `/key args` invocation after a reload — the same
         // form the live view shows at send time.
-        let weak = cx.weak_entity();
+        let _weak = cx.weak_entity();
         self.chat.conversation.update(cx, |c, cx| {
-            c.push_user(display_text, Vec::new(), meta, weak, cx)
+            c.push_user(display_text, Vec::new(), meta, self.chat.host.clone(), cx)
         });
         self.sync_list_count(cx);
         // Re-engage tail-follow so the streaming reply stays in view.
@@ -438,7 +438,7 @@ impl Workspace {
         {
             return;
         }
-        let weak = cx.weak_entity();
+        let _weak = cx.weak_entity();
         let follow_tail = self.chat.list_state.is_following_tail();
         let mut promoted = false;
         let mut retain: Vec<QueuedFollowUp> = Vec::new();
@@ -454,7 +454,7 @@ impl Workspace {
                             item.turn.text.clone(),
                             item.turn.user_images.clone(),
                             meta,
-                            weak.clone(),
+                            self.chat.host.clone(),
                             cx,
                         )
                     });
@@ -499,7 +499,7 @@ impl Workspace {
             return;
         };
         self.chat.queue_drag = None;
-        let weak = cx.weak_entity();
+        let _weak = cx.weak_entity();
         let follow_tail = self.chat.list_state.is_following_tail();
         let mut meta = item.turn.meta.clone();
         // The 「已引导」 badge rides `meta.steered` (rendered in `render_user`).
@@ -509,7 +509,7 @@ impl Workspace {
                 item.turn.text.clone(),
                 item.turn.user_images.clone(),
                 meta,
-                weak,
+                self.chat.host.clone(),
                 cx,
             )
         });
@@ -524,7 +524,7 @@ impl Workspace {
     pub(super) fn append_and_run_user_turn(
         &mut self,
         turn: DeferredUserTurn,
-        weak: WeakEntity<Workspace>,
+        _weak: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) {
         // UI state tracking (always) — conversation bubble + list housekeeping.
@@ -533,7 +533,7 @@ impl Workspace {
                 turn.text.clone(),
                 turn.user_images.clone(),
                 turn.meta.clone(),
-                weak,
+                self.chat.host.clone(),
                 cx,
             )
         });
@@ -560,7 +560,7 @@ impl Workspace {
         if self.chat.queued_follow_ups.is_empty() {
             return;
         }
-        let weak = cx.weak_entity();
+        let _weak = cx.weak_entity();
         let follow_tail = self.chat.list_state.is_following_tail();
         let mut retain: Vec<QueuedFollowUp> = Vec::new();
         let mut drained_turns: Vec<DeferredUserTurn> = Vec::new();
@@ -572,7 +572,7 @@ impl Workspace {
                             item.turn.text.clone(),
                             item.turn.user_images.clone(),
                             item.turn.meta.clone(),
-                            weak.clone(),
+                            self.chat.host.clone(),
                             cx,
                         )
                     });

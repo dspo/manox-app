@@ -93,6 +93,9 @@ use terminal_ui::terminal_proxy::TerminalProxy;
 mod attach;
 mod chat_column;
 use chat_column::ChatColumn;
+use manox_agent_chat_ui::ask_card::{
+    AskCardIntent, AskCardOption, AskCardQuestion, AskCardSnapshot,
+};
 mod chips;
 mod composer_render;
 mod render;
@@ -433,45 +436,6 @@ pub(crate) struct PendingAsk {
     questions: Vec<AskQuestion>,
     /// Per-question toggled option flags, aligned with `questions[i].options`.
     selections: Vec<Vec<bool>>,
-}
-
-#[derive(Clone, PartialEq)]
-pub(crate) struct AskCardSnapshot {
-    pub id: String,
-    pub step: usize,
-    pub total: usize,
-    pub transition_gen: u64,
-    pub question: AskCardQuestion,
-    pub selections: Vec<bool>,
-    /// Current step's free-text custom answer (the per-question input's live
-    /// value), so the card can reflect it and gate the skip affordance.
-    pub custom: String,
-}
-
-#[derive(Clone, PartialEq)]
-pub(crate) struct AskCardQuestion {
-    pub question: String,
-    pub header: String,
-    /// Optional markdown support text beneath the question.
-    pub detail: String,
-    /// Optional specialised-surface intent (`kind` + the `approve` option
-    /// label). Empty `kind` means a plain ask.
-    pub intent: Option<AskCardIntent>,
-    pub multi_select: bool,
-    pub options: Vec<AskCardOption>,
-}
-
-#[derive(Clone, PartialEq)]
-pub(crate) struct AskCardIntent {
-    pub kind: String,
-    pub approve: String,
-}
-
-#[derive(Clone, PartialEq)]
-pub(crate) struct AskCardOption {
-    pub label: String,
-    pub description: String,
-    pub recommended: bool,
 }
 
 struct AskQuestion {
@@ -1028,7 +992,9 @@ impl Workspace {
         let context_rail =
             { cx.new(|_| crate::views::context_rail::ContextRail::new(Some(store.clone()))) };
         let weak_ws = cx.weak_entity();
-        context_rail.update(cx, |r, _| r.set_workspace(weak_ws));
+        let chat_host: manox_agent_chat_ui::host::ChatHostHandle =
+            std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
+        context_rail.update(cx, |r, _| r.set_host(chat_host.clone()));
 
         let mut ws = Self {
             cwd,
@@ -1074,6 +1040,7 @@ impl Workspace {
             cli_session_claims: std::collections::HashMap::new(),
             active_external: None,
             chat: ChatColumn {
+                host: chat_host,
                 thread,
                 store: Some(store),
                 session_id: Some(session_id),
@@ -1470,7 +1437,7 @@ impl Workspace {
             .expect("foreground store present");
         let role = self.model_label(cx);
         let recipient = self.recipient_author();
-        let weak = cx.weak_entity();
+        let _weak = cx.weak_entity();
         let running = self
             .chat
             .store
@@ -1489,7 +1456,7 @@ impl Workspace {
                 recipient,
                 running,
                 crate::conversation::ApplyCtx {
-                    weak: weak.clone(),
+                    host: self.chat.host.clone(),
                     cwd,
                     fork_source,
                 },
@@ -1711,7 +1678,7 @@ impl Workspace {
                     // segment accepting entries — a perpetual spinner and the
                     // root condition for the next turn's thinking folding into
                     // a segment above the new user bubble.
-                    let weak = cx.weak_entity();
+                    let _weak = cx.weak_entity();
                     let role = this.model_label(cx);
                     let cwd = thread_cwd(&this.chat.thread, &this.chat.store, cx);
                     let outcome = this.chat.conversation.update(cx, |c, cx| {
@@ -1720,7 +1687,7 @@ impl Workspace {
                             &role,
                             None,
                             crate::conversation::ApplyCtx {
-                                weak,
+                                host: this.chat.host.clone(),
                                 cwd,
                                 fork_source: this.fork_source_session(cx),
                             },
@@ -1768,7 +1735,7 @@ impl Workspace {
                     cx.notify();
                 }
                 ThreadEvent::Stop(reason) => {
-                    let weak = cx.weak_entity();
+                    let _weak = cx.weak_entity();
                     let role = this.model_label(cx);
                     let usage = this.chat.store.as_ref().and_then(|s| {
                         s.read(cx).store.last_token_usage.as_ref().map(|u| {
@@ -1787,7 +1754,7 @@ impl Workspace {
                             &role,
                             usage,
                             crate::conversation::ApplyCtx {
-                                weak,
+                                host: this.chat.host.clone(),
                                 cwd,
                                 fork_source: this.fork_source_session(cx),
                             },
@@ -1995,7 +1962,7 @@ impl Workspace {
                             );
                         }
                     }
-                    let weak = cx.weak_entity();
+                    let _weak = cx.weak_entity();
                     let role = this.model_label(cx);
                     let usage = this.chat.store.as_ref().and_then(|s| {
                         s.read(cx).store.last_token_usage.as_ref().map(|u| {
@@ -2014,7 +1981,7 @@ impl Workspace {
                             &role,
                             usage,
                             crate::conversation::ApplyCtx {
-                                weak,
+                                host: this.chat.host.clone(),
                                 cwd,
                                 fork_source: this.fork_source_session(cx),
                             },
@@ -2746,11 +2713,10 @@ impl Workspace {
         tool_call_id: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let weak = cx.weak_entity();
-        let ix = self
-            .chat
-            .conversation
-            .update(cx, |c, cx| c.push_notice(text.clone(), anchor, weak, cx));
+        let _weak = cx.weak_entity();
+        let ix = self.chat.conversation.update(cx, |c, cx| {
+            c.push_notice(text.clone(), anchor, self.chat.host.clone(), cx)
+        });
         self.apply_list_insert(ix);
         self.append_ui_note(manox_agent::db::UiNoteKind::Notice, text, tool_call_id, cx);
         // Tail-follow keeps the viewport pinned to the live end, so a

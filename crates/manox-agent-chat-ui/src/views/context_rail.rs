@@ -24,7 +24,7 @@ use crate::client_store_handle::ClientStoreHandle;
 use crate::i18n;
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, MouseButton, MouseUpEvent, Render,
-    SharedString, WeakEntity, Window, prelude::*, px,
+    SharedString, Window, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, TITLE_BAR_HEIGHT, Theme, WindowExt as _,
@@ -36,7 +36,6 @@ use std::path::PathBuf;
 
 use manox_agent::{PlanSnapshot, PlanStepStatus};
 
-use crate::Workspace;
 use crate::cockpit::{CockpitPhase, cache_read_ratio, context_budget_pct, format_cache_hit};
 use crate::git_status::{GitBranchDisplay, GitChangeStats};
 use crate::views::subagents::{SubagentInfo, status_indicator, subagent_display_title};
@@ -46,10 +45,10 @@ use crate::views::subagents::{SubagentInfo, status_indicator, subagent_display_t
 /// Floating card width. Wide enough for the per-model usage block: model id
 /// on the top line, then `├─ pct% used/cap` and `└─ ↑input ↓output Rcache
 /// CHhit%` tree rows underneath.
-pub(crate) const ENV_CARD_WIDTH: f32 = 260.;
+pub const ENV_CARD_WIDTH: f32 = 260.;
 /// Right inset the conversation body reserves for the floating card: the
 /// card width plus a gutter so the message list clears the card's shadow.
-pub(crate) const ENV_CONTENT_INSET: f32 = ENV_CARD_WIDTH + 36.;
+pub const ENV_CONTENT_INSET: f32 = ENV_CARD_WIDTH + 36.;
 /// Below this main-column width the card folds away and the conversation
 /// column takes the full body. Matches the old env-card gate so a narrow
 /// window never crowds the conversation.
@@ -61,7 +60,7 @@ const RAIL_NARROW_BREAK: f32 = 900.;
 /// plan snapshot, per-cell counter animation state) and renders the
 /// environment/cockpit panel that used to float as an absolute card over the
 /// conversation.
-pub(crate) struct ContextRail {
+pub struct ContextRail {
     /// The AgentServer-backed store mirroring kernel state via
     /// `ServerNote`s (U7b: the rail's only read face — per-model usage,
     /// project, cwd and title all read this leaf; the γ-2a dual-read
@@ -71,35 +70,45 @@ pub(crate) struct ContextRail {
     store: Option<Entity<ClientStoreHandle>>,
     /// Coarse run phase. Derived from `ThreadEvent`s routed here by
     /// `Workspace`; used to determine the main agent's status indicator.
-    pub(crate) cockpit_phase: CockpitPhase,
+    pub cockpit_phase: CockpitPhase,
     /// The model's current execution plan, published via `UpdatePlan` and
     /// recovered from history on reload. `None` until the model publishes one
     /// (or after it clears its list). The rail renders the snapshot's own
     /// step statuses verbatim — nothing here infers progress.
-    pub(crate) plan: Option<PlanSnapshot>,
+    pub plan: Option<PlanSnapshot>,
     /// Whether the plan section is collapsed (`ToggleCockpitTasks` /
     /// cmd/ctrl-shift-m toggles). Hidden still renders the run-status row.
-    pub(crate) cockpit_hide_tasks: bool,
+    pub cockpit_hide_tasks: bool,
     /// Whether a plan has been seen for the current thread yet. The first
     /// snapshot auto-collapses when it is long enough; subsequent updates
     /// preserve whatever collapse state the user last chose.
-    pub(crate) plan_seen: bool,
+    pub plan_seen: bool,
     agents: Vec<SubagentInfo>,
-    pub(crate) side_calls: Vec<manox_agent::SideCallMetric>,
-    pub(crate) main_call: Option<manox_agent::SideCallMetric>,
+    pub side_calls: Vec<manox_agent::SideCallMetric>,
+    pub main_call: Option<manox_agent::SideCallMetric>,
     /// Latest git change stats for the thread's cwd. Refreshed (debounced) by
     /// `Workspace` on thread attach and terminal stop.
-    pub(crate) git_change_stats: Option<GitChangeStats>,
+    pub git_change_stats: Option<GitChangeStats>,
     /// Latest resolved branch display for the thread's cwd. `None` until the
     /// first refresh completes; the changes/branch rows render placeholders
     /// until then.
-    pub(crate) git_branch_display: Option<GitBranchDisplay>,
+    pub git_branch_display: Option<GitBranchDisplay>,
     /// Reaches the workspace so agent rows can open their observation panel.
-    weak_workspace: WeakEntity<Workspace>,
+    host: Option<crate::host::ChatHostHandle>,
+}
+
+/// Wire-api accent color for the rail's model row (moved from the
+/// workspace; a pure palette function).
+pub fn pi_wire_text_color(api: &str, theme: &gpui_component::Theme) -> gpui::Hsla {
+    match api {
+        "responses" => theme.info,
+        "anthropic" => theme.accent,
+        _ => theme.muted_foreground,
+    }
 }
 
 impl ContextRail {
-    pub(crate) fn new(store: Option<Entity<ClientStoreHandle>>) -> Self {
+    pub fn new(store: Option<Entity<ClientStoreHandle>>) -> Self {
         Self {
             store,
             cockpit_phase: CockpitPhase::Idle,
@@ -111,14 +120,14 @@ impl ContextRail {
             main_call: None,
             git_change_stats: None,
             git_branch_display: None,
-            weak_workspace: WeakEntity::new_invalid(),
+            host: None,
         }
     }
 
     /// Injected by the owning workspace after construction so agent rows can
     /// open their observation panel.
-    pub(crate) fn set_workspace(&mut self, weak: WeakEntity<Workspace>) {
-        self.weak_workspace = weak;
+    pub fn set_host(&mut self, host: crate::host::ChatHostHandle) {
+        self.host = Some(host);
     }
 
     /// Re-bind the rail's read face to the newly attached thread's leaf.
@@ -127,20 +136,13 @@ impl ContextRail {
     /// the ATTACHED session, so a rail left bound to a previous leaf
     /// renders a permanently frozen status row and usage face (the
     /// rail-freeze regression from the visual-acceptance run).
-    pub(crate) fn bind_store(
-        &mut self,
-        store: Option<Entity<ClientStoreHandle>>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn bind_store(&mut self, store: Option<Entity<ClientStoreHandle>>, cx: &mut Context<Self>) {
         self.store = store;
         cx.notify();
     }
 
     /// Diagnostic: the entity id of the bound store leaf (the rail-freeze
-    /// regression asserts the attach-time re-bind). Unit-test-only callers,
-    /// so the gate is `cfg(test)` — a feature-gated build would compile it
-    /// without its callers and trip dead-code.
-    #[cfg(test)]
+    /// regression asserts the attach-time re-bind).
     pub fn diagnostic_store_id(&self) -> Option<gpui::EntityId> {
         self.store.as_ref().map(|s| s.entity_id())
     }
@@ -148,7 +150,7 @@ impl ContextRail {
     /// Whether the floating context card is shown at the given main-column
     /// body width. `None` means the window is too narrow: the card folds away
     /// and the conversation column takes the full body.
-    pub(crate) fn rail_width_for(main_body_w: gpui::Pixels) -> Option<f32> {
+    pub fn rail_width_for(main_body_w: gpui::Pixels) -> Option<f32> {
         if main_body_w < px(RAIL_NARROW_BREAK) {
             None
         } else {
@@ -161,7 +163,7 @@ impl ContextRail {
     /// apply to the incoming one. Mirrors the old `Workspace::set_active_thread`
     /// reset. Also clears the cached git stats so the incoming thread shows
     /// placeholders until its own refresh lands.
-    pub(crate) fn reset_for_thread_switch(&mut self, running: bool, cx: &mut Context<Self>) {
+    pub fn reset_for_thread_switch(&mut self, running: bool, cx: &mut Context<Self>) {
         self.side_calls.clear();
         self.main_call = None;
         self.agents.clear();
@@ -183,7 +185,7 @@ impl ContextRail {
 
     /// Replace the cached git stats/branch display. Called by `Workspace`
     /// after a debounced background `git_status::gather` resolves.
-    pub(crate) fn set_git_status(
+    pub fn set_git_status(
         &mut self,
         stats: Option<GitChangeStats>,
         display: Option<GitBranchDisplay>,
@@ -199,7 +201,7 @@ impl ContextRail {
     /// `ToolCallAuthorization` are handled in their dedicated arms on `Workspace`;
     /// this only covers the residual transitions routed here from the workspace
     /// event handler.
-    pub(crate) fn update_cockpit_phase(&mut self, ev: &ThreadEvent, cx: &mut Context<Self>) {
+    pub fn update_cockpit_phase(&mut self, ev: &ThreadEvent, cx: &mut Context<Self>) {
         match ev {
             ThreadEvent::AgentText(_) => {
                 self.cockpit_phase = CockpitPhase::Streaming;
@@ -234,7 +236,7 @@ impl ContextRail {
     /// the retired manox harness maintained its list from child threads
     /// instead). `health` carries the watchdog's one-line verdict while the
     /// run is live; `None` leaves the stored verdict untouched.
-    pub(crate) fn apply_subagent_progress(
+    pub fn apply_subagent_progress(
         &mut self,
         id: &str,
         subagent_type: &str,
@@ -276,7 +278,7 @@ impl ContextRail {
     /// An empty snapshot clears the plan. The first plan seen for a thread sets
     /// the collapse state by length; later updates preserve the user's choice,
     /// so an update never yanks a plan the user manually expanded back closed.
-    pub(crate) fn set_plan(&mut self, snapshot: PlanSnapshot, cx: &mut Context<Self>) {
+    pub fn set_plan(&mut self, snapshot: PlanSnapshot, cx: &mut Context<Self>) {
         if snapshot.is_empty() {
             self.plan = None;
             cx.notify();
@@ -512,7 +514,7 @@ impl ContextRail {
                             gpui::div()
                                 .min_w_0()
                                 .truncate()
-                                .text_color(Workspace::pi_wire_text_color(&m.api, theme))
+                                .text_color(pi_wire_text_color(&m.api, theme))
                                 .child(manox_agent::provider_glue::display_name(&m)),
                         )
                         .into_any_element(),
@@ -817,7 +819,9 @@ impl ContextRail {
                 Some(health) => format!("{title} — {health}"),
                 None => title.clone(),
             };
-            let weak = self.weak_workspace.clone();
+            let Some(host) = self.host.clone() else {
+                return gpui::div().into_any_element();
+            };
             let id = info.id.clone();
             let subagent_type = info.subagent_type.clone();
             let topic = info.description.clone();
@@ -845,11 +849,7 @@ impl ContextRail {
                 .cursor_pointer()
                 .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
                 .on_click(move |_, _window, cx| {
-                    if let Some(ws) = weak.upgrade() {
-                        ws.update(cx, |ws, cx| {
-                            ws.open_subagent_tab(&id, &subagent_type, &topic, status, cx);
-                        });
-                    }
+                    host.open_subagent_tab(&id, &subagent_type, &topic, status, cx);
                 })
                 .child(status_indicator(info.status, theme))
                 .child(

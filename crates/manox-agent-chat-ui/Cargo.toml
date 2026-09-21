@@ -12,23 +12,40 @@ path = "src/lib.rs"
 # external-agent wiring (PLAN-CHROME-CHAT-SPLIT §1 — the dependency invariant
 # is the executable definition of the chrome/chat decoupling; enforced by
 # script/check-chat-crate-deps.sh in CI).
+[features]
+default = []
+# Diagnostic hooks for the message-rendering overlap walk — enabled by
+# agent-ui's own test-support feature.
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
 chrono.workspace = true
 futures.workspace = true
 serde.workspace = true
+base64.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 gpui.workspace = true
+gpui-component.workspace = true
+gpui-kit-assets.workspace = true
+
+ai-elements.workspace = true
+manox-components.workspace = true
+manox-i18n.workspace = true
+open.workspace = true
 
 manox-agent.workspace = true
 manox-harness.workspace = true
 manox-protocol.workspace = true
 manox-session-core.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 
 [lints.clippy]
 dbg_macro = "deny"

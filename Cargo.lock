@@ -5696,15 +5696,22 @@ dependencies = [
 name = "manox-agent-chat-ui"
 version = "0.1.0"
 dependencies = [
+ "ai-elements",
  "anyhow",
  "async-channel",
+ "base64 0.22.1",
  "chrono",
  "futures",
+ "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "manox-agent",
+ "manox-components",
  "manox-harness",
+ "manox-i18n",
  "manox-protocol",
  "manox-session-core",
+ "open",
  "serde",
  "serde_json",
  "tokio",

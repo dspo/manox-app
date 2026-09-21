@@ -678,7 +678,7 @@ impl Workspace {
             &backfill,
             prompt.map(|p| (p.text, p.dispatched_at)),
             final_text,
-            cx.weak_entity(),
+            self.chat.host.clone(),
             cx,
         );
         self.subagent_panels.insert(id.to_string(), panel);
@@ -817,9 +817,9 @@ impl Workspace {
             return;
         }
         let meta = self.user_turn_meta(cx);
-        let weak = cx.weak_entity();
+        let _weak = cx.weak_entity();
         self.chat.conversation.update(cx, |c, cx| {
-            c.push_user(text.clone(), Vec::new(), meta, weak, cx)
+            c.push_user(text.clone(), Vec::new(), meta, self.chat.host.clone(), cx)
         });
         self.sync_list_count(cx);
         self.follow_message_tail();

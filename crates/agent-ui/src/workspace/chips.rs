@@ -118,7 +118,7 @@ impl Workspace {
         // actually be absent.
         let title = summary.to_string();
         let role = self.model_label(cx);
-        let weak = cx.weak_entity();
+        let _weak = cx.weak_entity();
         self.chat.conversation.update(cx, |conversation, cx| {
             conversation.push_tool_call(
                 crate::conversation::ToolCallItem {
@@ -135,7 +135,7 @@ impl Workspace {
                     panel: None,
                 },
                 role,
-                weak,
+                self.chat.host.clone(),
                 cx,
             );
         });
@@ -268,7 +268,7 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_ask_card_element(
         &self,
-        weak: gpui::WeakEntity<Workspace>,
+        host: manox_agent_chat_ui::host::ChatHostHandle,
         ix: usize,
         cx: &mut App,
     ) -> Option<gpui::AnyElement> {
@@ -295,7 +295,7 @@ impl Workspace {
             ix,
             &cx.theme().clone(),
             Some(&crate::views::message::ToolCallCtx {
-                weak,
+                host,
                 ask: Some(snapshot),
             }),
             &crate::views::message::CopyFeedback::inert(&copy_registry),
@@ -590,14 +590,6 @@ impl Workspace {
         }
     }
 
-    /// The `custom` input entity for question `qi`, if the card is live.
-    pub(crate) fn ask_custom_state(&self, qi: usize) -> Option<Entity<InputState>> {
-        self.chat
-            .ask_custom_inputs
-            .get(qi)
-            .and_then(|slot| slot.clone())
-    }
-
     /// Skip question `qi` (deepseek `QuestionFlow.skipQuestion` semantics):
     /// clear its selection and its `custom` text and mark it EXPLICITLY
     /// skipped — the settled answer is the canonical explicit skip
@@ -664,12 +656,7 @@ impl Workspace {
     /// (matching `mode_chip_visual` and the settings panel) so both surfaces
     /// follow the active light/dark theme automatically.
     pub(crate) fn pi_wire_text_color(api: &str, theme: &Theme) -> gpui::Hsla {
-        match api {
-            "anthropic" => theme.info,
-            "openai_responses" => theme.success,
-            "openai_completions" => theme.warning,
-            _ => theme.muted_foreground,
-        }
+        crate::views::context_rail::pi_wire_text_color(api, theme)
     }
 
     /// The foreground session's model identity from the `model` projection:

@@ -458,7 +458,7 @@ impl Workspace {
             .expect("foreground store present");
         let role = self.model_label(cx);
         let recipient = self.recipient_author();
-        let weak = cx.weak_entity();
+        let _weak = cx.weak_entity();
         let running = self
             .chat
             .store
@@ -474,7 +474,7 @@ impl Workspace {
                 recipient,
                 running,
                 crate::conversation::ApplyCtx {
-                    weak: weak.clone(),
+                    host: self.chat.host.clone(),
                     cwd,
                     // These rows are this session's journal replayed, so their
                     // entry ids are forkable anchors.
@@ -482,7 +482,8 @@ impl Workspace {
                 },
                 cx,
             );
-            conversation.restore_background_tasks(&background_tasks, &role, weak.clone(), cx);
+            let host = self.chat.host.clone();
+            conversation.restore_background_tasks(&background_tasks, &role, host, cx);
             conversation
         });
         self.chat.conversation = new_conv;

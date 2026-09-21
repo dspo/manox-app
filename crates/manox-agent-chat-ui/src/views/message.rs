@@ -60,27 +60,27 @@ pub const MESSAGE_BODY_SIZE: gpui::Pixels = gpui::px(13.);
 use manox_components::turn_frame::TurnFrame;
 use std::path::{Path, PathBuf};
 
-use crate::Workspace;
+use crate::ask_card::{AskCardQuestion, AskCardSnapshot};
+use crate::host::ChatHostHandle;
 use crate::views::centered;
-use crate::workspace::{AskCardQuestion, AskCardSnapshot};
 
 /// Render-time context for sub-agent task rows. `None` when the owning
 /// workspace has been dropped; the row remains visible but clicks become a
 /// no-op.
 #[derive(Clone)]
 pub struct AgentTaskCtx {
-    pub weak: WeakEntity<Workspace>,
+    pub host: ChatHostHandle,
 }
 
-/// Render-time context for plain tool-call cards. Carries a weak handle to the
+/// Render-time context for plain tool-call cards. Carries a host handle to the
 /// owning `Workspace` so the card's header can toggle its own `collapsed` flag
 /// (the flag lives on the `ToolCallItem` so the user's choice survives scroll-
 /// driven remounts). `None` after the Workspace drops — clicks no-op and the
 /// card stays in whatever state it last rendered.
 #[derive(Clone)]
 pub struct ToolCallCtx {
-    pub weak: WeakEntity<Workspace>,
-    pub(crate) ask: Option<AskCardSnapshot>,
+    pub host: ChatHostHandle,
+    pub ask: Option<AskCardSnapshot>,
 }
 
 /// Markdown renderer with theme-aware syntax highlighting.
@@ -176,7 +176,7 @@ pub struct MessageItem {
     id: usize,
     /// Weak handle to the owning `Workspace`, used by interactive message
     /// rows such as `AgentTask` to open their peer right-pane view.
-    weak_workspace: WeakEntity<Workspace>,
+    host: ChatHostHandle,
     markdown: Option<Entity<Markdown>>,
     /// Persistent `Entity<TerminalPanel>` for a `ConvItem::Notice` body: the
     /// same paginated surface as tool output (default `PAGE_SIZE` lines, `+N`
@@ -188,7 +188,7 @@ pub struct MessageItem {
     /// Ask-card snapshot budgeted by `Workspace` before the native list starts
     /// measuring rows, so `render` never reads the owning `Workspace` and the
     /// list callback remains read-only.
-    pub(crate) ask_snapshot: Option<AskCardSnapshot>,
+    pub ask_snapshot: Option<AskCardSnapshot>,
     /// Copy controls' copied-feedback state, keyed by each control's
     /// `ElementId` (see `copy_feedback`).
     copied: CopiedRegistry,
@@ -201,12 +201,12 @@ impl CopyFeedbackHost for MessageItem {
 }
 
 impl MessageItem {
-    pub fn new(kind: ConvItem, role: String, id: usize, weak: WeakEntity<Workspace>) -> Self {
+    pub fn new(kind: ConvItem, role: String, id: usize, host: ChatHostHandle) -> Self {
         Self {
             kind,
             role,
             id,
-            weak_workspace: weak,
+            host,
             markdown: None,
             notice_panel: None,
             ask_snapshot: None,
@@ -638,7 +638,7 @@ impl MessageItem {
 const ENTRY_AUTO_COLLAPSE_DELAY: Duration = Duration::from_millis(1000);
 
 /// Target of a delayed auto-collapse.
-pub(crate) enum AutoCollapseTarget {
+pub enum AutoCollapseTarget {
     /// A reasoning round inside an activity segment, by entry index (entries
     /// are append-only, so the index stays valid).
     ReasoningEntry(usize),
@@ -654,15 +654,12 @@ pub(crate) enum AutoCollapseTarget {
 /// when the user toggled the entry (either before scheduling or within the
 /// delay window) — afterwards the entry is fully user-driven. A missing entry
 /// (thread switch, cleared conversation) makes the fire a no-op.
-pub(crate) fn schedule_auto_collapse(
-    target: AutoCollapseTarget,
-    cx: &mut gpui::Context<MessageItem>,
-) {
-    cx.spawn(async move |weak, cx| {
+pub fn schedule_auto_collapse(target: AutoCollapseTarget, cx: &mut gpui::Context<MessageItem>) {
+    cx.spawn(async move |host, cx| {
         cx.background_executor()
             .timer(ENTRY_AUTO_COLLAPSE_DELAY)
             .await;
-        let Some(item) = weak.upgrade() else {
+        let Some(item) = host.upgrade() else {
             return;
         };
         item.update(cx, |item, cx| {
@@ -721,11 +718,11 @@ impl Render for MessageItem {
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let agent_ctx = self.weak_workspace.upgrade().map(|ws| AgentTaskCtx {
-            weak: ws.downgrade(),
+        let agent_ctx = Some(AgentTaskCtx {
+            host: self.host.clone(),
         });
-        let tool_ctx = self.weak_workspace.upgrade().map(|ws| ToolCallCtx {
-            weak: ws.downgrade(),
+        let tool_ctx = Some(ToolCallCtx {
+            host: self.host.clone(),
             ask: self.ask_snapshot.clone(),
         });
         // The owned markdown document for text-bearing items (persistent across
@@ -750,7 +747,7 @@ impl Render for MessageItem {
             tool_ctx.as_ref(),
             body,
             notice_panel,
-            Some(self.weak_workspace.clone()),
+            Some(self.host.clone()),
             &copy,
             cx,
         ))
@@ -765,7 +762,7 @@ impl Render for MessageItem {
 
 /// Render a `ConvItem` as an element. `ix` is the entry index (stable key for
 /// collapsibles and text-block element ids). `agent_ctx` supplies expansion
-/// state for `AgentTask` cards; `tool_ctx` carries the workspace weak handle
+/// state for `AgentTask` cards; `tool_ctx` carries the workspace host handle
 /// for `ToolCall` cards to flip their own collapse flag. `None` renders them
 /// in a static state with no-op clicks (used when the owning Workspace is gone).
 ///
@@ -779,7 +776,7 @@ impl Render for MessageItem {
 // public API. Bundling would only forward the same values through an
 // intermediate struct without reducing complexity.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_item(
+pub fn render_item(
     item: &ConvItem,
     ix: usize,
     role: &str,
@@ -788,7 +785,7 @@ pub(crate) fn render_item(
     tool_ctx: Option<&ToolCallCtx>,
     body: Option<Entity<Markdown>>,
     notice_panel: Option<Entity<TerminalPanel>>,
-    weak: Option<WeakEntity<Workspace>>,
+    host: Option<ChatHostHandle>,
     copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
@@ -824,7 +821,7 @@ pub(crate) fn render_item(
             body,
             AssistantActions {
                 entry_id: entry_id.clone(),
-                weak,
+                host,
                 unavailable: *fork_unavailable,
             },
             copy,
@@ -883,7 +880,7 @@ pub(crate) fn render_item(
 /// that mount copy controls: which controls are currently lit (the owning
 /// `MessageItem`'s `CopiedRegistry`) and the owner their clicks report back to
 /// for the lit + revert cycle.
-pub(crate) struct CopyFeedback<'a> {
+pub struct CopyFeedback<'a> {
     registry: &'a CopiedRegistry,
     /// `None` in render paths that mount no copy controls (probe renders) —
     /// by construction `button` is never reached there, and a missing owner
@@ -897,8 +894,7 @@ impl CopyFeedback<'_> {
     /// probe renders and the test-support diagnostic mounts — where the copy
     /// state has no entity to report back to. `button` is unreachable there
     /// by construction.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn inert(registry: &CopiedRegistry) -> CopyFeedback<'_> {
+    pub fn inert(registry: &CopiedRegistry) -> CopyFeedback<'_> {
         CopyFeedback {
             registry,
             owner: None,
@@ -1102,9 +1098,9 @@ fn format_user_turn_time(timestamp: i64) -> String {
 /// that can act on it. `entry_id` is `None` while a reply is still streaming
 /// (no durable row exists yet), which withholds the branch control.
 #[derive(Clone, Default)]
-pub(crate) struct AssistantActions {
+pub struct AssistantActions {
     pub entry_id: Option<String>,
-    pub weak: Option<WeakEntity<Workspace>>,
+    pub host: Option<ChatHostHandle>,
     pub unavailable: Option<ForkUnavailable>,
 }
 
@@ -1141,7 +1137,7 @@ impl ForkUnavailable {
 /// The assistant reply's own render inputs, grouped so the render entry point
 /// keeps a readable signature (`render_user`'s `UserRenderContent` is the
 /// precedent).
-pub(crate) struct AssistantRenderContent<'a> {
+pub struct AssistantRenderContent<'a> {
     text: &'a str,
     role: &'a str,
     activity_header: bool,
@@ -1151,7 +1147,7 @@ pub(crate) struct AssistantRenderContent<'a> {
 /// (`activity_header`) suppresses its own model row — the segment's header
 /// already carries the model name. The action row (copy / fork) always renders
 /// beneath the body, never overlaid on it.
-pub(crate) fn render_assistant(
+pub fn render_assistant(
     content: AssistantRenderContent<'_>,
     ix: usize,
     theme: &Theme,
@@ -1221,8 +1217,8 @@ fn assistant_action_row(
         .child(copy.button(("copy-assistant", ix).into(), text.to_string()));
     // Fork additionally needs a live owner to route the call through; a
     // dropped workspace leaves copy as the row's only actionable control.
-    if let Some(weak) = actions.weak {
-        row = row.child(fork_button(ix, weak, actions.entry_id, actions.unavailable));
+    if let Some(host) = actions.host {
+        row = row.child(fork_button(ix, host, actions.entry_id, actions.unavailable));
     }
     row
 }
@@ -1234,7 +1230,7 @@ fn assistant_action_row(
 /// the child bind), so the row carries only the durable anchor id.
 fn fork_button(
     ix: usize,
-    weak: WeakEntity<Workspace>,
+    host: ChatHostHandle,
     entry_id: Option<String>,
     unavailable: Option<ForkUnavailable>,
 ) -> Button {
@@ -1254,9 +1250,7 @@ fn fork_button(
         .tooltip(i18n::t("message-fork-here"))
         .debug_selector(move || format!("fork-assistant-{ix}"))
         .on_click(move |_, _window, cx: &mut App| {
-            let _ = weak.update(cx, |workspace, cx| {
-                workspace.fork_session_at(&entry_id, cx);
-            });
+            host.fork_session_at(&entry_id, cx);
         })
 }
 
@@ -1364,7 +1358,7 @@ fn render_banner(
 }
 
 /// Render an error message + copy button.
-pub(crate) fn render_error(
+pub fn render_error(
     msg: &str,
     ix: usize,
     theme: &Theme,
@@ -1394,7 +1388,7 @@ pub(crate) fn render_error(
 /// fallback (the panel is mounted synchronously for every `Notice` item)
 /// renders plain text so the notice body never falls back to markdown
 /// interpretation.
-pub(crate) fn render_notice(
+pub fn render_notice(
     msg: &str,
     ix: usize,
     theme: &Theme,
@@ -1426,7 +1420,7 @@ pub(crate) fn render_notice(
 // Mirrors render_banner: each param maps to one card slot (summary/body,
 // collapsed/fold, copy); bundling would obscure the one call site.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_recap(
+pub fn render_recap(
     summary: &str,
     collapsed: bool,
     ix: usize,
@@ -1436,14 +1430,16 @@ pub(crate) fn render_recap(
     copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
-    let weak_workspace = tool_ctx.map(|c| c.weak.clone());
+    let host = tool_ctx.map(|c| c.host.clone());
     let on_click = Box::new(move |_cx: &mut App| {
-        let Some(weak) = weak_workspace.clone() else {
+        let Some(host) = host.clone() else {
             return;
         };
         let ix_click = ix;
-        let _ = weak.update(_cx, |w, cx| {
-            let conv = w.chat.conversation.clone();
+        let Some(conv) = host.conversation(_cx) else {
+            return;
+        };
+        conv.update(_cx, |_cs, cx| {
             conv.update(cx, |c, cx| {
                 if let Some(item) = c.items().get(ix_click) {
                     item.update(cx, |item, cx| {
@@ -1490,7 +1486,7 @@ pub(crate) fn render_recap(
 // Mirrors render_banner: each param maps to one banner slot (attempt/max/secs
 // for the badge, reason/detail for the body, collapsed/tool_ctx for the fold).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_retry(
+pub fn render_retry(
     attempt: u32,
     max_attempts: u32,
     delay_secs: u64,
@@ -1514,13 +1510,15 @@ pub(crate) fn render_retry(
         ],
     );
     let copy_text = badge.to_string();
-    let weak_workspace = tool_ctx.map(|c| c.weak.clone());
+    let host = tool_ctx.map(|c| c.host.clone());
     let on_click = Box::new(move |_cx: &mut App| {
-        let Some(weak) = weak_workspace.clone() else {
+        let Some(host) = host.clone() else {
             return;
         };
-        let _ = weak.update(_cx, |w, cx| {
-            let conv = w.chat.conversation.clone();
+        let Some(conv) = host.conversation(_cx) else {
+            return;
+        };
+        conv.update(_cx, |_cs, cx| {
             conv.update(cx, |c, cx| {
                 if let Some(item) = c.items().get(ix) {
                     item.update(cx, |item, cx| {
@@ -1730,7 +1728,7 @@ pub fn render_thinking(
     } else {
         t.frozen_secs
     };
-    let weak_workspace = tool_ctx.map(|c| c.weak.clone());
+    let host = tool_ctx.map(|c| c.host.clone());
     let interactive = tool_ctx.is_some();
 
     // The header's label is the model display name — the segment is the single
@@ -1794,11 +1792,13 @@ pub fn render_thinking(
 
     if interactive {
         chain = chain.on_toggle(move |_, _window, cx: &mut App| {
-            let Some(weak) = weak_workspace.clone() else {
+            let Some(host) = host.clone() else {
                 return;
             };
-            let _ = weak.update(cx, |w, cx| {
-                let conv = w.chat.conversation.clone();
+            let Some(conv) = host.conversation(cx) else {
+                return;
+            };
+            conv.update(cx, |_cs, cx| {
                 conv.update(cx, |c, cx| {
                     if let Some(item) = c.items().get(ix) {
                         item.update(cx, |item, cx| {
@@ -1882,7 +1882,7 @@ fn reasoning_step(
     tool_ctx: Option<&ToolCallCtx>,
     cx: &mut App,
 ) -> ChainOfThoughtStep {
-    let weak_workspace = tool_ctx.map(|c| c.weak.clone());
+    let host = tool_ctx.map(|c| c.host.clone());
     let toggle_id = entry_id.to_string();
     let marker: gpui::AnyElement = if streaming {
         BrailleSpinner::new()
@@ -1902,12 +1902,14 @@ fn reasoning_step(
         .icon(marker)
         .title(i18n::t("message-reasoning"))
         .disclosed(!collapsed, move |_, _window, cx: &mut App| {
-            let Some(weak) = weak_workspace.clone() else {
+            let Some(host) = host.clone() else {
                 return;
             };
-            let _ = weak.update(cx, |w, cx| {
+            let Some(conv) = host.conversation(cx) else {
+                return;
+            };
+            conv.update(cx, |_cs, cx| {
                 let id = toggle_id.clone();
-                let conv = w.chat.conversation.clone();
                 conv.update(cx, |c, cx| {
                     // Address the round by its stable id, exactly like the
                     // tool step: the (container, entry) indices captured at
@@ -2009,18 +2011,20 @@ fn tool_step(
         i18n::t("thinking-tool-result").to_string()
     };
     let id_for_toggle = e.id.clone();
-    let weak_workspace = tool_ctx.map(|c| c.weak.clone());
+    let host = tool_ctx.map(|c| c.host.clone());
 
     let mut step = ChainOfThoughtStep::new(id)
         .icon(marker)
         .title(title)
         .disclosed(!e.collapsed, move |_, _window, cx: &mut App| {
-            let Some(weak) = weak_workspace.clone() else {
+            let Some(host) = host.clone() else {
                 return;
             };
-            let _ = weak.update(cx, |w, cx| {
+            let Some(conv) = host.conversation(cx) else {
+                return;
+            };
+            conv.update(cx, |_cs, cx| {
                 let id = id_for_toggle.clone();
-                let conv = w.chat.conversation.clone();
                 conv.update(cx, |c, cx| {
                     if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
                         && let Some(item) = c.items().get(cix)
@@ -2101,7 +2105,7 @@ fn open_file_in_vscode(raw: &str, cwd: Option<&Path>) {
 /// The ask card's render entry and presentation router. `pub(crate)` so the
 /// test-support diagnostic probe (`Workspace::diagnostic_ask_card_element`)
 /// can render the card outside the conversation list.
-pub(crate) fn render_ask_user_card(
+pub fn render_ask_user_card(
     item: &ToolCallItem,
     ix: usize,
     theme: &Theme,
@@ -2126,9 +2130,9 @@ pub(crate) fn render_ask_user_card(
     if snapshot.total == 1
         && let Some(approve_ix) = plan_review_approve_index(&snapshot.question)
     {
-        return render_plan_review_card(ix, theme, ctx.weak.clone(), &snapshot, approve_ix, cx);
+        return render_plan_review_card(ix, theme, ctx.host.clone(), &snapshot, approve_ix, cx);
     }
-    render_question_card(ix, theme, ctx.weak.clone(), snapshot, cx)
+    render_question_card(ix, theme, ctx.host.clone(), snapshot, cx)
 }
 
 /// The plan-review decision presentation's approve option: the ask must carry
@@ -2163,13 +2167,13 @@ fn plan_review_approve_index(question: &AskCardQuestion) -> Option<usize> {
 fn render_plan_review_card(
     ix: usize,
     theme: &Theme,
-    weak: WeakEntity<Workspace>,
+    host: ChatHostHandle,
     snapshot: &AskCardSnapshot,
     approve_ix: usize,
     cx: &mut App,
 ) -> gpui::AnyElement {
-    let weak_esc = weak.clone();
-    let weak_discuss = weak.clone();
+    let host_esc = host.clone();
+    let host_discuss = host.clone();
 
     let strip = h_flex()
         .w_full()
@@ -2234,34 +2238,34 @@ fn render_plan_review_card(
                 .icon(gpui_kit_assets::IconName::SquarePen)
                 .label(i18n::t("workspace-ask-discuss"))
                 .on_click(move |_, _, cx: &mut App| {
-                    let _ = weak_discuss.update(cx, |w, cx| w.dismiss_ask(cx));
+                    host_discuss.dismiss_ask(cx);
                 }),
         );
     for (oi, opt) in snapshot.question.options.iter().enumerate() {
         if oi == approve_ix {
             continue;
         }
-        let weak_decide = weak.clone();
+        let host_decide = host.clone();
         let mut button = Button::new(format!("plan-review-decide-{ix}-{oi}"))
             .outline()
             .small()
             .label(opt.label.clone())
             .on_click(move |_, _, cx: &mut App| {
-                let _ = weak_decide.update(cx, |w, cx| w.decide_ask_option(0, oi, cx));
+                host_decide.decide_ask_option(0, oi, cx);
             });
         if !opt.description.trim().is_empty() {
             button = button.tooltip(opt.description.clone());
         }
         footer = footer.child(button);
     }
-    let weak_approve = weak.clone();
+    let host_approve = host.clone();
     let approve = &snapshot.question.options[approve_ix];
     let mut approve_button = Button::new(format!("plan-review-approve-{ix}"))
         .primary()
         .small()
         .label(approve.label.clone())
         .on_click(move |_, _, cx: &mut App| {
-            let _ = weak_approve.update(cx, |w, cx| w.decide_ask_option(0, approve_ix, cx));
+            host_approve.decide_ask_option(0, approve_ix, cx);
         });
     if !approve.description.trim().is_empty() {
         approve_button = approve_button.tooltip(approve.description.clone());
@@ -2280,7 +2284,7 @@ fn render_plan_review_card(
         // buttons avoid focus on mouse-down) — a deliberate button-only
         // surface, same as dsh's PlanReviewPanel.
         .on_action(move |_: &crate::AskCancel, _window, cx: &mut App| {
-            let _ = weak_esc.update(cx, |w, cx| w.dismiss_ask(cx));
+            host_esc.dismiss_ask(cx);
         })
         .w_full()
         .min_w_0()
@@ -2313,12 +2317,12 @@ fn render_plan_review_card(
 fn render_question_card(
     ix: usize,
     theme: &Theme,
-    weak: WeakEntity<Workspace>,
+    host: ChatHostHandle,
     snapshot: AskCardSnapshot,
     cx: &mut App,
 ) -> gpui::AnyElement {
-    let weak_close = weak.clone();
-    let weak_esc = weak.clone();
+    let host_close = host.clone();
+    let host_esc = host.clone();
     let step = snapshot.step;
     let total = snapshot.total;
     let can_prev = step > 0;
@@ -2355,7 +2359,7 @@ fn render_question_card(
                 .on_click(move |_, _, cx: &mut App| {
                     // Close (not deny): the dismissal marker, never
                     // the allow/deny exit the approval card owns.
-                    let _ = weak_close.update(cx, |w, cx| w.dismiss_ask(cx));
+                    host_close.dismiss_ask(cx);
                 }),
         );
 
@@ -2421,7 +2425,7 @@ fn render_question_card(
                 .border_1()
                 .border_color(theme.border)
         };
-        let weak_for_option = weak.clone();
+        let host_for_option = host.clone();
         // B2-PR-5: a plan-review ask (single question, `intent.kind ==
         // "plan-review"`) highlights the affirmative option (`intent.approve`,
         // "Approve") so the verdict card reads at a glance. `intent.approve`
@@ -2450,9 +2454,7 @@ fn render_question_card(
             )))
             .cursor(CursorStyle::PointingHand)
             .on_click(move |_, _, cx: &mut App| {
-                let _ = weak_for_option.update(cx, |w, cx| {
-                    w.toggle_ask_option(step, oi, cx);
-                });
+                host_for_option.toggle_ask_option(step, oi, cx);
             })
             .child(indicator)
             .child(
@@ -2509,9 +2511,7 @@ fn render_question_card(
     // distinct from closing the whole card). The `custom` entity is allocated on
     // the render path (see `ensure_ask_custom_inputs`) because an `InputState`
     // needs a `Window`; if it isn't present yet the row simply carries the skip.
-    let custom_state: Option<Entity<InputState>> = weak
-        .upgrade()
-        .and_then(|ws| ws.read(cx).ask_custom_state(step));
+    let custom_state: Option<Entity<InputState>> = host.ask_custom_state(step, cx);
     let custom_row = custom_state.map(|state| {
         h_flex().w_full().min_w_0().mt_0p5().child(
             Input::new(&state).appearance(false).prefix(
@@ -2538,11 +2538,11 @@ fn render_question_card(
         .child(options_block)
         .children(custom_row);
 
-    let weak_prev = weak.clone();
-    let weak_next = weak.clone();
-    let weak_advance = weak.clone();
-    let weak_submit = weak.clone();
-    let weak_skip = weak.clone();
+    let host_prev = host.clone();
+    let host_next = host.clone();
+    let host_advance = host.clone();
+    let host_submit = host.clone();
+    let host_skip = host.clone();
     let pager = h_flex()
         .items_center()
         .gap_1()
@@ -2553,7 +2553,7 @@ fn render_question_card(
                 .icon(IconName::ChevronLeft)
                 .disabled(!can_prev)
                 .on_click(move |_, _, cx: &mut App| {
-                    let _ = weak_prev.update(cx, |w, cx| w.ask_prev(cx));
+                    host_prev.ask_prev(cx);
                 }),
         )
         .child(
@@ -2571,7 +2571,7 @@ fn render_question_card(
                 .icon(IconName::ChevronRight)
                 .disabled(!can_next)
                 .on_click(move |_, _, cx: &mut App| {
-                    let _ = weak_advance.update(cx, |w, cx| w.ask_next(cx));
+                    host_advance.ask_next(cx);
                 }),
         );
     let primary_action = if can_next {
@@ -2581,7 +2581,7 @@ fn render_question_card(
             .disabled(!answered_current)
             .label(i18n::t("workspace-ask-next"))
             .on_click(move |_, _, cx: &mut App| {
-                let _ = weak_next.update(cx, |w, cx| w.ask_next(cx));
+                host_next.ask_next(cx);
             })
     } else {
         Button::new(format!("ask-card-submit-{ix}-{step}"))
@@ -2590,7 +2590,7 @@ fn render_question_card(
             .disabled(!answered_current)
             .label(i18n::t("workspace-ask-submit"))
             .on_click(move |_, window, cx: &mut App| {
-                let _ = weak_submit.update(cx, |w, cx| w.submit_input(window, cx));
+                host_submit.submit_input(window, cx);
             })
     };
     let footer = h_flex()
@@ -2611,8 +2611,7 @@ fn render_question_card(
                         .small()
                         .label(i18n::t("workspace-ask-skip"))
                         .on_click(move |_, window, cx: &mut App| {
-                            let _ =
-                                weak_skip.update(cx, |w, cx| w.skip_ask_question(step, window, cx));
+                            host_skip.skip_ask_question(step, window, cx);
                         }),
                 )
                 .child(primary_action),
@@ -2627,7 +2626,7 @@ fn render_question_card(
         // Esc inside the drawer closes it unanswered — the same dismissal
         // leg as the X button, never the approval card's deny.
         .on_action(move |_: &crate::AskCancel, _window, cx: &mut App| {
-            let _ = weak_esc.update(cx, |w, cx| w.dismiss_ask(cx));
+            host_esc.dismiss_ask(cx);
         })
         .w_full()
         .min_w_0()
@@ -2659,7 +2658,7 @@ fn render_question_card(
 /// `AskUserQuestion` whose interactive snapshot is gone (and the defensive
 /// orphan in `render_item`'s ToolCall dispatch). Ordinary tool calls no longer
 /// reach this path — they fold into a `Thinking` batch via `render_thinking`.
-pub(crate) fn render_tool_call(
+pub fn render_tool_call(
     item: &ToolCallItem,
     ix: usize,
     theme: &Theme,
@@ -2692,7 +2691,7 @@ pub(crate) fn render_tool_call(
     };
 
     let id_for_toggle = item.id.clone();
-    let weak_workspace = tool_ctx.map(|c| c.weak.clone());
+    let host = tool_ctx.map(|c| c.host.clone());
 
     // Tool-call chrome and output render as Lilex italic to set them apart
     // from upright body text (#140). This card is now only the AskUserQuestion
@@ -2722,12 +2721,14 @@ pub(crate) fn render_tool_call(
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.secondary.opacity(0.5)))
                 .on_click(move |_, _window, cx: &mut App| {
-                    let Some(weak) = weak_workspace.clone() else {
+                    let Some(host) = host.clone() else {
                         return;
                     };
-                    let _ = weak.update(cx, |w, cx| {
+                    let Some(conv) = host.conversation(cx) else {
+                        return;
+                    };
+                    conv.update(cx, |_cs, cx| {
                         let id = id_for_toggle.clone();
-                        let conv = w.chat.conversation.clone();
                         conv.update(cx, |c, cx| {
                             if let Some(ix) = c.find_tool(&id, &*cx)
                                 && let Some(item) = c.items().get(ix)
@@ -3031,7 +3032,7 @@ pub fn render_agent_task(
     let tooltip_text = display_title.clone();
     let open_target = agent_ctx.map(|ctx| {
         (
-            ctx.weak.clone(),
+            ctx.host.clone(),
             item.id.clone(),
             item.subagent_type.clone(),
             item.description.clone(),
@@ -3052,14 +3053,10 @@ pub fn render_agent_task(
         .hover(|s| s.bg(theme.secondary.opacity(0.5)))
         .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
         .on_click(move |_, _window, cx| {
-            let Some((weak, id, subagent_type, topic, status)) = &open_target else {
+            let Some((host, id, subagent_type, topic, status)) = &open_target else {
                 return;
             };
-            if let Some(ws) = weak.upgrade() {
-                ws.update(cx, |ws, cx| {
-                    ws.open_subagent_tab(id, subagent_type, topic, *status, cx);
-                });
-            }
+            host.open_subagent_tab(id, subagent_type, topic, *status, cx);
         });
 
     row.child(icon_el)
@@ -3944,7 +3941,7 @@ mod tests {
     /// labels; anything else renders the generic question card.
     #[test]
     fn plan_review_approve_index_requires_a_matching_option() {
-        use crate::workspace::{AskCardIntent, AskCardOption, AskCardQuestion};
+        use crate::ask_card::{AskCardIntent, AskCardOption, AskCardQuestion};
 
         let question = |intent: Option<AskCardIntent>, multi_select: bool| AskCardQuestion {
             question: String::new(),

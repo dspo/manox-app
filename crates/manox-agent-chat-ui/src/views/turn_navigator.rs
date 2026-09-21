@@ -25,7 +25,7 @@ use crate::views::popup_menu::{
 use crate::{CopySelectedTurn, FillComposerTurn};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TurnEntry {
+pub struct TurnEntry {
     pub item_ix: usize,
     pub text: String,
     pub display: String,
@@ -51,7 +51,7 @@ impl TurnEntry {
     }
 }
 
-pub(crate) fn collect_user_turns<'a>(
+pub fn collect_user_turns<'a>(
     items: impl Iterator<Item = (usize, &'a ConvItem)>,
 ) -> Vec<TurnEntry> {
     let mut turns: Vec<_> = items
@@ -83,7 +83,7 @@ fn filter_turns(turns: &[TurnEntry], query: &str) -> Vec<usize> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TurnNavigatorEvent {
+pub enum TurnNavigatorEvent {
     Navigate {
         item_ix: usize,
     },
@@ -94,7 +94,7 @@ pub(crate) enum TurnNavigatorEvent {
     Dismiss,
 }
 
-pub(crate) struct TurnNavigator {
+pub struct TurnNavigator {
     all: Vec<TurnEntry>,
     filtered: Vec<usize>,
     selected: usize,

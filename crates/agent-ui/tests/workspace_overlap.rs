@@ -126,7 +126,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
             manox_agent::MessageAuthor::Lead,
             true,
             agent_ui::conversation::ApplyCtx {
-                weak,
+                host: manox_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },
@@ -202,7 +202,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
             manox_agent::MessageAuthor::Lead,
             true,
             agent_ui::conversation::ApplyCtx {
-                weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+                host: manox_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },
