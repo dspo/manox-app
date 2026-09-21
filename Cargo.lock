@@ -5720,6 +5720,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "manox-agent-chrome-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui-component",
+ "gpui-pre",
+ "gpui-pre-macos",
+ "gpui-pre-platform",
+ "image",
+ "manox-agent",
+ "manox-i18n",
+ "manox-terminal",
+ "manox-webview",
+ "rust-embed",
+ "terminal-ui",
+]
+
+[[package]]
 name = "manox-components"
 version = "0.1.0"
 dependencies = [

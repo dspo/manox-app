@@ -12,6 +12,10 @@ manox-app 是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端�
 crates/                    # 全部 workspace 成员平铺于此（本仓只有一个交付物：桌面 app + 独立 bin 的 cx CLI）
   manox/                   # 主二进制入口（窗口 + 主题 + 托盘 + 接线）
   agent-ui/                # GPUI UI 层（Workspace/ConversationState/views）
+  manox-agent-chrome-ui/   # 应用壳 crate（agents-window 复刻搬运：2026-Light 令牌/
+                           #   SessionList/右栏 ToolTab/底部 dock/MainSurface 槽；
+                           #   无数据源，example shell 为目视验收面，拆分计划见
+                           #   PLAN-CHROME-CHAT-SPLIT.md）
   terminal-ui/             # 终端渲染层（TerminalElement/TerminalView；仿真核心在 dspo/manox 的 manox-terminal）
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   manox-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
