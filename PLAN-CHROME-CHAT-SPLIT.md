@@ -1,13 +1,14 @@
 # 拆分计划：manox-agent-chrome-ui + manox-agent-chat-ui
 
-> 状态：**Phase 3、Phase 1、Phase 2 首期均已落地**（2026-09-21：Phase 3 = PR #58
-> chrome crate + example + 离屏验收，顺序相对 D4 提前；Phase 1 = PR #59
-> ChatColumn 56 字段结构体拆分；Phase 2 首期 = PR #60 `feat/chat-crate`（叠在
-> #59 上）——manox-agent-chat-ui crate 落地，journal 投影四件套 + client_store
-> 簇（含裁决#7 handle 随迁）+ cockpit/git_status 迁入，依赖不变量
-> （无 terminal-ui/webview/ext-agents）经 script/check-chat-crate-deps.sh 进 CI；
-> ConversationState/消息视图/composer 族与 ChatColumn 实体化留后续批次）。
-> Phase 2 余量与 Phase 4 未开工。
+> 状态：**Phase 3、Phase 1、Phase 2（首期+二期）均已落地**（2026-09-21：Phase 3
+> = PR #58 chrome crate；Phase 1 = PR #59 ChatColumn 字段拆分；Phase 2 首期
+> = PR #60 chat crate 数据地基；Phase 2 二期 = PR #61 `feat/chat-crate-2`
+> （叠 #60）——ChatHost 端口落地（12 方法 + NoopHost 测试替身 +
+> WorkspaceChatHost 实现），conversation/六个视图模块/AskCard 类型/chunk
+> 动作族/overlap_diag 迁入，~30 处 weak 调用点转 host 调用）。剩余：Phase 2
+> 尾（ChatColumn 实体化 + composer/chips/plan_review 族迁移）与 Phase 4
+> 装配换壳。中途 ask-card 几何探针抓到一次真回归（diagnostic 挂载点误用活
+> host），已修——探针价值实证。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
