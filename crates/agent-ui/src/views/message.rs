@@ -1443,7 +1443,7 @@ pub(crate) fn render_recap(
         };
         let ix_click = ix;
         let _ = weak.update(_cx, |w, cx| {
-            let conv = w.conversation.clone();
+            let conv = w.chat.conversation.clone();
             conv.update(cx, |c, cx| {
                 if let Some(item) = c.items().get(ix_click) {
                     item.update(cx, |item, cx| {
@@ -1520,7 +1520,7 @@ pub(crate) fn render_retry(
             return;
         };
         let _ = weak.update(_cx, |w, cx| {
-            let conv = w.conversation.clone();
+            let conv = w.chat.conversation.clone();
             conv.update(cx, |c, cx| {
                 if let Some(item) = c.items().get(ix) {
                     item.update(cx, |item, cx| {
@@ -1798,7 +1798,7 @@ pub fn render_thinking(
                 return;
             };
             let _ = weak.update(cx, |w, cx| {
-                let conv = w.conversation.clone();
+                let conv = w.chat.conversation.clone();
                 conv.update(cx, |c, cx| {
                     if let Some(item) = c.items().get(ix) {
                         item.update(cx, |item, cx| {
@@ -1907,7 +1907,7 @@ fn reasoning_step(
             };
             let _ = weak.update(cx, |w, cx| {
                 let id = toggle_id.clone();
-                let conv = w.conversation.clone();
+                let conv = w.chat.conversation.clone();
                 conv.update(cx, |c, cx| {
                     // Address the round by its stable id, exactly like the
                     // tool step: the (container, entry) indices captured at
@@ -2020,7 +2020,7 @@ fn tool_step(
             };
             let _ = weak.update(cx, |w, cx| {
                 let id = id_for_toggle.clone();
-                let conv = w.conversation.clone();
+                let conv = w.chat.conversation.clone();
                 conv.update(cx, |c, cx| {
                     if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
                         && let Some(item) = c.items().get(cix)
@@ -2727,7 +2727,7 @@ pub(crate) fn render_tool_call(
                     };
                     let _ = weak.update(cx, |w, cx| {
                         let id = id_for_toggle.clone();
-                        let conv = w.conversation.clone();
+                        let conv = w.chat.conversation.clone();
                         conv.update(cx, |c, cx| {
                             if let Some(ix) = c.find_tool(&id, &*cx)
                                 && let Some(item) = c.items().get(ix)

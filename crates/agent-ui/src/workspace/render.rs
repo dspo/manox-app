@@ -28,7 +28,7 @@ impl Render for Workspace {
         // Identity hand-off: the successor takes the foreground, and the
         // predecessor's thread parks with its transcript (its id keeps
         // resolving server-side for stale sends).
-        if let Some(next) = self.pending_successor.take() {
+        if let Some(next) = self.chat.pending_successor.take() {
             self.open_thread(next, window, cx);
             cx.notify();
         }
@@ -37,8 +37,8 @@ impl Render for Workspace {
         // queue-drag marker here, the same policy as the sidebar's rows. gpui
         // refreshes on that cancel, so this clears the same frame; without it
         // the source row would stay dimmed and the insertion line pinned.
-        if !cx.has_active_drag() && self.queue_drag.is_some() {
-            self.queue_drag = None;
+        if !cx.has_active_drag() && self.chat.queue_drag.is_some() {
+            self.chat.queue_drag = None;
         }
         self.render_manox(window, cx)
     }
@@ -105,6 +105,7 @@ impl Workspace {
         // `TerminalElement`.
         if matches!(self.view_mode, ViewMode::Terminal) {
             let title_text: SharedString = self
+                .chat
                 .store
                 .as_ref()
                 .and_then(|s| {
@@ -135,7 +136,7 @@ impl Workspace {
                 .shell_root(self.sidebar.clone(), column, cx)
                 .on_action(
                     cx.listener(|this, _: &crate::ToggleCockpitTasks, _window, cx| {
-                        this.context_rail.update(cx, |r, cx| {
+                        this.chat.context_rail.update(cx, |r, cx| {
                             r.cockpit_hide_tasks = !r.cockpit_hide_tasks;
                             cx.notify();
                         });
@@ -188,6 +189,7 @@ impl Workspace {
         }
         let theme = cx.theme().clone();
         let running = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
@@ -195,7 +197,7 @@ impl Workspace {
 
         self.ensure_blank_project_input(window, cx);
 
-        if self.blocking_overlay_active() && self.turn_navigator.is_some() {
+        if self.blocking_overlay_active() && self.chat.turn_navigator.is_some() {
             self.close_turn_navigator(window, cx);
         }
 
@@ -208,6 +210,7 @@ impl Workspace {
         // first screen stays branded before any title is generated.
         let title_text: SharedString = {
             let s = self
+                .chat
                 .store
                 .as_ref()
                 .map(|s| s.read(cx).store.with(|st| st.display_title.clone()))
@@ -221,7 +224,7 @@ impl Workspace {
         // Restoring history keeps the composer mounted so the user can draft
         // immediately, while submission remains gated until the transcript is
         // authoritative.
-        let first_screen = self.conversation.read(cx).is_empty(cx) && !running;
+        let first_screen = self.chat.conversation.read(cx).is_empty(cx) && !running;
         // T10c (§D.6): the v1 `history_phase` mirror retired with the fold —
         // at HEAD the field was unwritten (default `Ready`), so the loading
         // branch already never fired. The §D.1 snapshot is the restore
@@ -241,6 +244,7 @@ impl Workspace {
         let show_rail = !first_screen
             && (!editor_open || !right_pane_open)
             && self
+                .chat
                 .store
                 .as_ref()
                 .map(|s| s.read(cx).store.has_interacted)
@@ -272,7 +276,8 @@ impl Workspace {
         // show them as a temporary banner below the composer so the user sees
         // the feedback without leaving the first-screen view.
         let hero_notices = if first_screen {
-            self.conversation
+            self.chat
+                .conversation
                 .read(cx)
                 .items()
                 .iter()
@@ -739,7 +744,7 @@ impl Workspace {
                             // GPUI invokes it while measuring and prepainting;
                             // mutating a MessageItem here invalidates the same
                             // entity tree whose height is being cached.
-                            let conversation = self.conversation.clone();
+                            let conversation = self.chat.conversation.clone();
                             let diag_enabled = crate::overlap_diag::enabled();
                             let processor = move |ix: usize, _window: &mut Window, cx: &mut App| {
                                 let item = conversation.read(cx).items().get(ix).cloned();
@@ -777,10 +782,10 @@ impl Workspace {
                                     None => gpui::div().into_any_element(),
                                 }
                             };
-                            let list_state = self.list_state.clone();
-                            let width_state = self.list_state.clone();
-                            let message_list_width = self.message_list_width.clone();
-                            let diag_state = self.list_state.clone();
+                            let list_state = self.chat.list_state.clone();
+                            let width_state = self.chat.list_state.clone();
+                            let message_list_width = self.chat.message_list_width.clone();
+                            let diag_state = self.chat.list_state.clone();
                             let mono_family = theme.mono_font_family.clone();
                             (!first_screen).then(move || {
                                 // Native `gpui::list`: it owns virtualization,
@@ -848,7 +853,7 @@ impl Workspace {
                 // body wrapper's `pr` keep the message list clear). Hidden
                 // while the editor pane is open, on the first screen, before
                 // the thread interacts, or below the narrow width gate.
-                .when(show_rail, |this| this.child(self.context_rail.clone()))
+                .when(show_rail, |this| this.child(self.chat.context_rail.clone()))
         };
         // The main view is the shell's main slot: the message column plus the
         // right side view (editor / launcher / browser / session tabs) as its
@@ -1247,6 +1252,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let stop = self
+            .chat
             .store
             .as_ref()?
             .read(cx)
@@ -1286,7 +1292,7 @@ impl Workspace {
                         .small()
                         .debug_selector(|| "follow-stop-retry-btn".into())
                         .on_click(cx.listener(|this, _, _window, cx| {
-                            let Some(store) = this.store.clone() else {
+                            let Some(store) = this.chat.store.clone() else {
                                 return;
                             };
                             store.update(cx, |handle, cx| handle.retry_follow(cx));
@@ -1300,7 +1306,7 @@ impl Workspace {
                         .tooltip(i18n::t("follow-stop-dismiss"))
                         .debug_selector(|| "follow-stop-dismiss-btn".into())
                         .on_click(cx.listener(|this, _, _window, cx| {
-                            let Some(store) = this.store.clone() else {
+                            let Some(store) = this.chat.store.clone() else {
                                 return;
                             };
                             store.update(cx, |handle, cx| handle.dismiss_follow_stop(cx));

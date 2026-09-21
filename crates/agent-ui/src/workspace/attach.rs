@@ -10,7 +10,7 @@ use super::*;
 impl Workspace {
     /// Minimal subscription for a thread parked in `background_threads`. Unlike
     /// `subscribe_thread`, this only coordinates running state and the parked
-    /// follow-up stash. It never touches `conversation` or `self.thread`, so a
+    /// follow-up stash. It never touches `conversation` or `self.chat.thread`, so a
     /// background thread's streaming deltas and tool events cannot be
     /// misrouted into the foreground view.
     /// The parked entry is left in `background_threads` (reclaimed on a later
@@ -109,7 +109,7 @@ impl Workspace {
         // pre-snapshot fallback (the #765 round-2 repro: reading the mirror
         // alone lost model AND project on every new thread).
         let inherited_project = project.or_else(|| {
-            self.store.as_ref().and_then(|s| {
+            self.chat.store.as_ref().and_then(|s| {
                 s.read(cx)
                     .store
                     .with(|st| st.project.clone())
@@ -119,6 +119,7 @@ impl Workspace {
         });
         let project = inherited_project;
         let model = self
+            .chat
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.with(|st| st.model.clone()))
@@ -128,20 +129,22 @@ impl Workspace {
                 (!provider.is_empty() && !id.is_empty()).then(|| format!("{provider}/{id}"))
             })
             .or_else(|| {
-                self.thread
+                self.chat
+                    .thread
                     .read(|t| t.model().map(|m| format!("{}/{}", m.provider, m.id)))
             });
-        let approval = serde_json::to_value(self.store.as_ref().map_or_else(
-            || self.thread.read(|t| t.permission_mode()),
+        let approval = serde_json::to_value(self.chat.store.as_ref().map_or_else(
+            || self.chat.thread.read(|t| t.permission_mode()),
             |s| s.read(cx).store.with(|st| st.permission_mode),
         ))
         .ok()
         .and_then(|v| v.as_str().map(str::to_string));
         let effort = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.with(|st| st.reasoning_effort))
-            .unwrap_or_else(|| self.thread.read(|t| t.reasoning_effort()));
+            .unwrap_or_else(|| self.chat.thread.read(|t| t.reasoning_effort()));
         let effort_str = match effort {
             manox_agent::language_model::ReasoningEffort::High => Some("high".to_string()),
             manox_agent::language_model::ReasoningEffort::Max => Some("max".to_string()),
@@ -234,7 +237,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.close_turn_navigator(window, cx);
-        let old_thread = self.thread.clone();
+        let old_thread = self.chat.thread.clone();
         let old_id = old_thread.read(|t| t.id.0.clone());
         let new_id = new_thread.read(|t| t.id.0.clone());
 
@@ -253,11 +256,11 @@ impl Workspace {
         // While the walk runs the composer holds borrowed history — a recall
         // step's turn or a navigator fill — so the user's draft is the walk's
         // working line, not what is on screen.
-        let outgoing = match self.recall_draft.as_deref() {
-            Some(draft) if self.recall_index >= 0 => draft.to_string(),
-            _ => self.input_state.read(cx).value().to_string(),
+        let outgoing = match self.chat.recall_draft.as_deref() {
+            Some(draft) if self.chat.recall_index >= 0 => draft.to_string(),
+            _ => self.chat.input_state.read(cx).value().to_string(),
         };
-        self.drafts.insert(old_id.clone(), outgoing);
+        self.chat.drafts.insert(old_id.clone(), outgoing);
         self.end_recall_walk();
         // The editor pane is a right-side resource of the outgoing thread:
         // stash its text so a switch-back restores the draft (mirrors the
@@ -269,21 +272,22 @@ impl Workspace {
 
         // Queue state is session-local but belongs to a thread, not to the
         // currently visible workspace. Move it aside before rebinding.
-        let outgoing_follow_ups = std::mem::take(&mut self.queued_follow_ups);
+        let outgoing_follow_ups = std::mem::take(&mut self.chat.queued_follow_ups);
         // A live queue drag belongs to the outgoing view: its indices mean
         // nothing against the incoming thread's queue — drop the marker.
-        self.queue_drag = None;
+        self.chat.queue_drag = None;
         if outgoing_follow_ups.is_empty() {
-            self.queued_follow_ups_by_thread.remove(&old_id);
+            self.chat.queued_follow_ups_by_thread.remove(&old_id);
         } else {
-            self.queued_follow_ups_by_thread
+            self.chat
+                .queued_follow_ups_by_thread
                 .insert(old_id.clone(), outgoing_follow_ups);
         }
         // Restore the incoming thread's stashed follow-up queue (moved aside
         // when it was last switched away); without this the queue silently
         // vanishes on switch-back.
-        if let Some(queue) = self.queued_follow_ups_by_thread.remove(&new_id) {
-            self.queued_follow_ups = queue;
+        if let Some(queue) = self.chat.queued_follow_ups_by_thread.remove(&new_id) {
+            self.chat.queued_follow_ups = queue;
         }
 
         // Park a still-running old thread in the background (U6b⑤: the
@@ -299,6 +303,7 @@ impl Workspace {
         // and its deltas already fed every mirror. An idle old thread's
         // session has no activity to preserve, so it detaches.
         let old_running = (self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
@@ -306,8 +311,8 @@ impl Workspace {
             || manox_agent::background_task::thread_has_running_tasks(&old_id))
             && old_id != new_id;
         if old_running {
-            let old_store = self.store.take();
-            let old_sid = self.session_id.take();
+            let old_store = self.chat.store.take();
+            let old_sid = self.chat.session_id.take();
             let sub = self.subscribe_background_thread(
                 old_store
                     .as_ref()
@@ -334,8 +339,8 @@ impl Workspace {
             self.multiplexer.update(cx, |m, _| {
                 m.forget(&old_id);
             });
-            self.store = None;
-            self.session_id = None;
+            self.chat.store = None;
+            self.chat.session_id = None;
         }
 
         // If the new thread was previously parked in the background, reclaim it
@@ -344,8 +349,8 @@ impl Workspace {
         // connection, so no `OpenSession` is needed on reclaim.
         if let Some(pos) = self.background_threads.iter().position(|b| b.id == new_id) {
             let bg = self.background_threads.remove(pos);
-            self.store = bg.store;
-            self.session_id = bg.session_id;
+            self.chat.store = bg.store;
+            self.chat.session_id = bg.session_id;
         }
 
         // A brand-new foreground thread gets its own session on the shared
@@ -353,7 +358,7 @@ impl Workspace {
         // (history replays as the follow-stream `Snapshot`), otherwise a
         // fresh one via `CreateSession`. The multiplexer registers the leaf
         // handle before sending so the server's reply routes straight to it.
-        if self.store.is_none() {
+        if self.chat.store.is_none() {
             let new_sid = new_id.clone();
             let cwd = thread_cwd(&new_thread, &None, cx)
                 .unwrap_or_default()
@@ -365,23 +370,25 @@ impl Workspace {
                 m.set_focused(Some(&new_sid), cx);
                 handle
             });
-            self.store = Some(store);
-            self.session_id = Some(new_sid);
+            self.chat.store = Some(store);
+            self.chat.session_id = Some(new_sid);
         }
 
         // Persist the old thread's current state before switching away. The
         // spawned-task save backstop in `run_turn` will persist again when the
         // turn actually finishes, capturing the final assistant messages.
 
-        self.thread = new_thread;
+        self.chat.thread = new_thread;
         // The chips derive from the bound thread's authoritative mirror; the
         // previous thread's suites never bleed across the switch.
-        self.active_browser_suites = self
+        self.chat.active_browser_suites = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.browser_suites.clone())
             .expect("foreground store present");
         let id = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.id.0.clone())
@@ -391,6 +398,7 @@ impl Workspace {
         // (L6, mechanical transcription), and cloning the whole transcript
         // here would copy it on the main thread on every switch.
         let (plan_from_messages, subagent_rows) = self
+            .chat
             .store
             .as_ref()
             .map(|s| {
@@ -402,11 +410,13 @@ impl Workspace {
             })
             .expect("foreground store present");
         let display: Vec<manox_agent::db::HistoryEntry> = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.display.clone())
             .expect("foreground store present");
         let usage = self
+            .chat
             .store
             .as_ref()
             .map(|s| {
@@ -429,6 +439,7 @@ impl Workspace {
             })
             .expect("foreground store present");
         let background_tasks = self
+            .chat
             .store
             .as_ref()
             .map(|s| {
@@ -449,11 +460,12 @@ impl Workspace {
         let recipient = self.recipient_author();
         let weak = cx.weak_entity();
         let running = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
             .expect("foreground store present");
-        let cwd = thread_cwd(&self.thread, &self.store, cx);
+        let cwd = thread_cwd(&self.chat.thread, &self.chat.store, cx);
         let new_conv = cx.new(|cx| {
             let mut conversation = ConversationState::rebuild_from_display(
                 &display,
@@ -473,14 +485,15 @@ impl Workspace {
             conversation.restore_background_tasks(&background_tasks, &role, weak.clone(), cx);
             conversation
         });
-        self.conversation = new_conv;
+        self.chat.conversation = new_conv;
         self.observe_conversation(cx);
         // Restore the incoming thread's saved draft, or clear the input if it
         // has none — without this the previous thread's text would bleed into
         // the new one (Bug 1). `set_value` is silent (no Change event), so
         // re-sync the slash menu by hand in case the draft begins with `/`.
-        let saved = self.drafts.remove(&new_id).unwrap_or_default();
-        self.input_state
+        let saved = self.chat.drafts.remove(&new_id).unwrap_or_default();
+        self.chat
+            .input_state
             .update(cx, |s, cx| s.set_value(saved, window, cx));
         self.sync_completion(window, cx);
         // Restore the incoming thread's stashed editor draft, or clear the
@@ -501,20 +514,20 @@ impl Workspace {
         // auto-disengages follow the moment the user scrolls up. Using
         // `Normal` here would leave a one-shot scroll that never re-pins if a
         // late delta or notice lands after the user scrolls.
-        let count = self.conversation.read(cx).items().len();
-        self.list_state.reset(count);
-        self.list_count = count;
-        self.list_state.set_follow_mode(FollowMode::Tail);
-        self.pending_ask = None;
-        self.pending_auth = None;
+        let count = self.chat.conversation.read(cx).items().len();
+        self.chat.list_state.reset(count);
+        self.chat.list_count = count;
+        self.chat.list_state.set_follow_mode(FollowMode::Tail);
+        self.chat.pending_ask = None;
+        self.chat.pending_auth = None;
         let (thread_events, store_changes) = self.subscribe_thread(cx);
-        self.thread_sub = Some(thread_events);
-        self.store_observe = Some(store_changes);
+        self.chat.thread_sub = Some(thread_events);
+        self.chat.store_observe = Some(store_changes);
         // The thinking ticker belongs to the outgoing thread: bump its
         // generation so the old ticker self-terminates, then mirror the incoming
         // thread's running state. A parked thread resumed mid-turn keeps the
         // "for Xs" counter live; a completed history thread is idle.
-        self.turn_active = running;
+        self.chat.turn_active = running;
         if running {
             self.spawn_thinking_ticker(cx);
         }
@@ -525,20 +538,21 @@ impl Workspace {
         // calls, falling back to the independent sidecar snapshot (the facade
         // mirrors the persisted copy on every `PlanUpdated` / `Ready`).
         let restored_plan = plan_from_messages.or_else(|| {
-            self.store
+            self.chat
+                .store
                 .as_ref()
                 .and_then(|s| s.read(cx).store.persisted_plan.as_ref())
                 .and_then(|v| {
                     serde_json::from_value::<manox_agent::plan::PlanSnapshot>(v.clone()).ok()
                 })
         });
-        let rail_leaf = self.store.clone();
-        self.context_rail.update(cx, |r, cx| {
+        let rail_leaf = self.chat.store.clone();
+        self.chat.context_rail.update(cx, |r, cx| {
             // Rail-freeze fix (the visual-acceptance report): the store is
             // the rail's only read face (U7b), and the SessionStatus deltas
             // and info-fetch responses feeding it only reach the ATTACHED
             // session's leaf — re-bind to the incoming leaf (already swapped
-            // on `self.store` above) so the status row and the usage
+            // on `self.chat.store` above) so the status row and the usage
             // sections track the live thread instead of the
             // construction-time one.
             r.bind_store(rail_leaf, cx);
@@ -594,6 +608,7 @@ impl Workspace {
     /// the store, which refreshes the sidebar list.
     pub(super) fn archive_active_thread_if_idle(&mut self, cx: &mut Context<Self>) -> bool {
         if self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
@@ -602,6 +617,7 @@ impl Workspace {
             return false;
         }
         let id = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.id.0.clone())
@@ -628,13 +644,15 @@ impl Workspace {
         if !self.archive_active_thread_if_idle(cx) {
             return;
         }
-        let old = self.thread.clone();
+        let old = self.chat.thread.clone();
         let cwd = self
+            .chat
             .store
             .as_ref()
             .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))
             .unwrap_or_else(|| old.read(|t| t.cwd().to_path_buf()));
         let project = self
+            .chat
             .store
             .as_ref()
             .and_then(|s| {
@@ -647,11 +665,13 @@ impl Workspace {
             .or_else(|| old.read(|t| t.project().cloned()));
         let model = old.read(|t| t.model().cloned());
         let effort = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.reasoning_effort)
             .unwrap_or_else(|| old.read(|t| t.reasoning_effort()));
         let permission = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.permission_mode)
@@ -724,6 +744,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if !self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
@@ -731,7 +752,7 @@ impl Workspace {
         {
             return;
         }
-        let project = self.store.as_ref().and_then(|s| {
+        let project = self.chat.store.as_ref().and_then(|s| {
             s.read(cx)
                 .store
                 .project
@@ -786,11 +807,11 @@ impl Workspace {
         // that boundary. A receipt lost to a hung handler on a living
         // channel is upstream always-answer territory — no timer
         // compensates for it here.
-        if self.fork_in_flight {
+        if self.chat.fork_in_flight {
             tracing::debug!("fork: already in flight, ignoring");
             return;
         }
-        self.fork_in_flight = true;
+        self.chat.fork_in_flight = true;
         let ws = cx.weak_entity();
         let entry_id = through_entry_id.to_string();
         self.multiplexer.update(cx, |m, _| {
@@ -806,7 +827,7 @@ impl Workspace {
                         crate::multiplexer::CreateSessionDone::Failed { message } => {
                             tracing::warn!(error = %message, "ForkSession failed");
                             let _ = ws.update(cx, |this, cx| {
-                                this.fork_in_flight = false;
+                                this.chat.fork_in_flight = false;
                                 cx.notify();
                             });
                             return;
@@ -817,7 +838,7 @@ impl Workspace {
                     // mux, so the bind lands on a later tick.
                     cx.spawn(async move |_, cx| {
                         let _ = ws.update_in(cx, |this, window, cx| {
-                            this.fork_in_flight = false;
+                            this.chat.fork_in_flight = false;
                             this.open_thread(sid, window, cx);
                         });
                     })

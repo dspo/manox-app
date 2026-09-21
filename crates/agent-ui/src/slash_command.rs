@@ -487,6 +487,7 @@ impl SlashCommand for GoalCommand {
         // via the store); edit/budget/rounds read the current values since
         // `edit_goal` overwrites objective/budget/rounds in place.
         let current_goal: Option<manox_agent::goal::ThreadGoal> = workspace
+            .chat
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.goal.as_ref())

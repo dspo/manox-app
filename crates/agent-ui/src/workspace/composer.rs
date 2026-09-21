@@ -47,7 +47,7 @@ impl Workspace {
     /// origin_rpc still rides the Submit for the entry correlation.
     /// `SteerPending`/`Failed` cards stay parked for the user.
     pub(super) fn flush_parked_follow_ups(&mut self, thread_id: &str, _cx: &mut Context<Self>) {
-        let Some(queue) = self.queued_follow_ups_by_thread.get_mut(thread_id) else {
+        let Some(queue) = self.chat.queued_follow_ups_by_thread.get_mut(thread_id) else {
             return;
         };
         let mut retain: std::collections::VecDeque<QueuedFollowUp> =
@@ -61,7 +61,7 @@ impl Workspace {
             }
         }
         if retain.is_empty() {
-            self.queued_follow_ups_by_thread.remove(thread_id);
+            self.chat.queued_follow_ups_by_thread.remove(thread_id);
         } else {
             *queue = retain;
         }
@@ -103,10 +103,10 @@ impl Workspace {
         // and HEAD already carried an unwritten (default `Ready`) phase.
         // Successor gate (when §K.5 lands): a "no snapshot yet" flag on the
         // v2 fold.
-        let text = self.input_state.read(cx).value().to_string();
-        let attachments = std::mem::take(&mut self.pending_attachments);
-        if self.pending_ask.is_some() {
-            self.pending_attachments = attachments;
+        let text = self.chat.input_state.read(cx).value().to_string();
+        let attachments = std::mem::take(&mut self.chat.pending_attachments);
+        if self.chat.pending_ask.is_some() {
+            self.chat.pending_attachments = attachments;
             // A send/Enter while an ask card is up submits the card, not a
             // message: the tri-state answers are collected from the card's own
             // per-question selections + custom inputs (there is no card-level
@@ -119,11 +119,12 @@ impl Workspace {
                 // The walk jumps to the first incomplete question — the blank
                 // card IS the feedback — and the composer text survives.
                 if let Some(missing) = self.first_incomplete_ask_question() {
-                    self.ask_step = missing;
+                    self.chat.ask_step = missing;
                     cx.notify();
                     return;
                 }
-                self.input_state
+                self.chat
+                    .input_state
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 // Submitting ends the walk: nothing is left to return to.
                 self.end_recall_walk();
@@ -138,15 +139,16 @@ impl Workspace {
         // dropped. A message submitted while a turn is running is *not* dropped
         // here — it is routed through `send_user_turn`, which enqueues it as a
         // follow-up instead of interrupting the running turn.
-        if (text.trim().is_empty() && attachments.is_empty()) || self.project_picker_pending {
+        if (text.trim().is_empty() && attachments.is_empty()) || self.chat.project_picker_pending {
             tracing::info!(
-                pending_picker = self.project_picker_pending,
+                pending_picker = self.chat.project_picker_pending,
                 "submit swallowed by composer guard"
             );
-            self.pending_attachments = attachments;
+            self.chat.pending_attachments = attachments;
             return;
         }
-        self.input_state
+        self.chat
+            .input_state
             .update(cx, |state, cx| state.set_value("", window, cx));
         // Submitting ends the walk: nothing is left to return to.
         self.end_recall_walk();
@@ -166,6 +168,7 @@ impl Workspace {
         // race the streaming conversation); the queued text flushes at turn
         // end.
         let running = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
@@ -264,7 +267,8 @@ impl Workspace {
     /// Stage a clipboard image as a pending attachment chip. Resize happens
     /// off-thread on submit; here we only record the image and re-render.
     pub(super) fn handle_pasted_image(&mut self, image: gpui::Image, cx: &mut Context<Self>) {
-        self.pending_attachments
+        self.chat
+            .pending_attachments
             .push(PendingAttachment::ClipboardImage(image));
         cx.notify();
     }
@@ -304,7 +308,7 @@ impl Workspace {
         // showing the compact `/key args` invocation after a reload — the same
         // form the live view shows at send time.
         let weak = cx.weak_entity();
-        self.conversation.update(cx, |c, cx| {
+        self.chat.conversation.update(cx, |c, cx| {
             c.push_user(display_text, Vec::new(), meta, weak, cx)
         });
         self.sync_list_count(cx);
@@ -355,13 +359,14 @@ impl Workspace {
         // A turn is running — every new message first parks as a visible
         // follow-up. Steering is an explicit per-item action.
         if self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
             .expect("foreground store present")
         {
-            self.queue_drag = None;
-            self.queued_follow_ups.push_back(QueuedFollowUp {
+            self.chat.queue_drag = None;
+            self.chat.queued_follow_ups.push_back(QueuedFollowUp {
                 turn,
                 state: FollowUpState::Queued,
             });
@@ -426,6 +431,7 @@ impl Workspace {
     /// batched queue). `Failed` cards stay parked for a retry.
     pub(super) fn promote_settled_steers(&mut self, cx: &mut Context<Self>) {
         if !self
+            .chat
             .queued_follow_ups
             .iter()
             .any(|item| matches!(item.state, FollowUpState::SteerPending { .. }))
@@ -433,17 +439,17 @@ impl Workspace {
             return;
         }
         let weak = cx.weak_entity();
-        let follow_tail = self.list_state.is_following_tail();
+        let follow_tail = self.chat.list_state.is_following_tail();
         let mut promoted = false;
         let mut retain: Vec<QueuedFollowUp> = Vec::new();
-        while let Some(item) = self.queued_follow_ups.pop_front() {
+        while let Some(item) = self.chat.queued_follow_ups.pop_front() {
             match item.state {
                 FollowUpState::SteerPending { .. } => {
                     let mut meta = item.turn.meta.clone();
                     // The 「已引导」 badge rides `meta.steered` (rendered in
                     // `render_user`), now that the pending bubble is gone.
                     meta.steered = true;
-                    self.conversation.update(cx, |c, cx| {
+                    self.chat.conversation.update(cx, |c, cx| {
                         c.push_user(
                             item.turn.text.clone(),
                             item.turn.user_images.clone(),
@@ -457,16 +463,16 @@ impl Workspace {
                 _ => retain.push(item),
             }
         }
-        self.queued_follow_ups.extend(retain);
+        self.chat.queued_follow_ups.extend(retain);
         if !promoted {
             return;
         }
-        self.queue_drag = None;
+        self.chat.queue_drag = None;
         self.sync_list_count(cx);
         if follow_tail {
             self.follow_message_tail();
         }
-        self.list_state.remeasure();
+        self.chat.list_state.remeasure();
         cx.notify();
     }
 
@@ -479,6 +485,7 @@ impl Workspace {
     /// a row that raced it.
     pub(super) fn retire_injected_steer(&mut self, message_id: &str, cx: &mut Context<Self>) {
         let Some(pos) = self
+            .chat
             .queued_follow_ups
             .iter()
             .position(|item| match &item.state {
@@ -488,16 +495,16 @@ impl Workspace {
         else {
             return;
         };
-        let Some(item) = self.queued_follow_ups.remove(pos) else {
+        let Some(item) = self.chat.queued_follow_ups.remove(pos) else {
             return;
         };
-        self.queue_drag = None;
+        self.chat.queue_drag = None;
         let weak = cx.weak_entity();
-        let follow_tail = self.list_state.is_following_tail();
+        let follow_tail = self.chat.list_state.is_following_tail();
         let mut meta = item.turn.meta.clone();
         // The 「已引导」 badge rides `meta.steered` (rendered in `render_user`).
         meta.steered = true;
-        self.conversation.update(cx, |c, cx| {
+        self.chat.conversation.update(cx, |c, cx| {
             c.push_user(
                 item.turn.text.clone(),
                 item.turn.user_images.clone(),
@@ -510,7 +517,7 @@ impl Workspace {
         if follow_tail {
             self.follow_message_tail();
         }
-        self.list_state.remeasure();
+        self.chat.list_state.remeasure();
         cx.notify();
     }
 
@@ -521,7 +528,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // UI state tracking (always) — conversation bubble + list housekeeping.
-        self.conversation.update(cx, |c, cx| {
+        self.chat.conversation.update(cx, |c, cx| {
             c.push_user(
                 turn.text.clone(),
                 turn.user_images.clone(),
@@ -550,17 +557,17 @@ impl Workspace {
     /// ([`Self::mark_stranded_steers_failed`]) — before this runs, so none
     /// reach here.
     pub(super) fn flush_queued_follow_ups(&mut self, cx: &mut Context<Self>) {
-        if self.queued_follow_ups.is_empty() {
+        if self.chat.queued_follow_ups.is_empty() {
             return;
         }
         let weak = cx.weak_entity();
-        let follow_tail = self.list_state.is_following_tail();
+        let follow_tail = self.chat.list_state.is_following_tail();
         let mut retain: Vec<QueuedFollowUp> = Vec::new();
         let mut drained_turns: Vec<DeferredUserTurn> = Vec::new();
-        while let Some(item) = self.queued_follow_ups.pop_front() {
+        while let Some(item) = self.chat.queued_follow_ups.pop_front() {
             match item.state {
                 FollowUpState::Queued => {
-                    self.conversation.update(cx, |c, cx| {
+                    self.chat.conversation.update(cx, |c, cx| {
                         c.push_user(
                             item.turn.text.clone(),
                             item.turn.user_images.clone(),
@@ -578,14 +585,14 @@ impl Workspace {
                 _ => retain.push(item),
             }
         }
-        self.queued_follow_ups.extend(retain);
+        self.chat.queued_follow_ups.extend(retain);
         if drained_turns.is_empty() {
             cx.notify();
             return;
         }
         // The `Queued` group just shifted: any in-flight drag's indices are
         // stale — void the gesture rather than move the wrong row.
-        self.queue_drag = None;
+        self.chat.queue_drag = None;
         let n = drained_turns.len();
         for (i, turn) in drained_turns.into_iter().enumerate() {
             let attachments: Vec<manox_protocol::ImageAttachment> = turn
@@ -621,8 +628,9 @@ impl Workspace {
     /// the whole group. The drag marker is dropped: the group just moved.
     pub(super) fn settle_steer_group(&mut self, stranded: usize, cx: &mut Context<Self>) {
         if stranded > 0 {
-            self.queue_drag = None;
+            self.chat.queue_drag = None;
             let positions: Vec<usize> = self
+                .chat
                 .queued_follow_ups
                 .iter()
                 .enumerate()
@@ -632,7 +640,7 @@ impl Workspace {
             let n = positions.len();
             let to_fail = stranded.min(n);
             for &ix in &positions[n - to_fail..] {
-                self.queued_follow_ups[ix].state = FollowUpState::Failed;
+                self.chat.queued_follow_ups[ix].state = FollowUpState::Failed;
             }
         }
         self.promote_settled_steers(cx);
@@ -643,7 +651,7 @@ impl Workspace {
     /// has no live list; the injected ones surface through the transcript on
     /// switch-back).
     pub(super) fn settle_parked_steer_group(&mut self, thread_id: &str, stranded: usize) {
-        let Some(queue) = self.queued_follow_ups_by_thread.get_mut(thread_id) else {
+        let Some(queue) = self.chat.queued_follow_ups_by_thread.get_mut(thread_id) else {
             return;
         };
         let positions: Vec<usize> = queue
@@ -663,7 +671,7 @@ impl Workspace {
             queue.remove(ix);
         }
         if queue.is_empty() {
-            self.queued_follow_ups_by_thread.remove(thread_id);
+            self.chat.queued_follow_ups_by_thread.remove(thread_id);
         }
     }
 
@@ -675,11 +683,12 @@ impl Workspace {
     /// turn instead.
     pub(super) fn steer_follow_up(&mut self, idx: usize, cx: &mut Context<Self>) {
         let running = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
             .expect("foreground store present");
-        let Some(mut item) = self.queued_follow_ups.remove(idx) else {
+        let Some(mut item) = self.chat.queued_follow_ups.remove(idx) else {
             return;
         };
         match item.state {
@@ -696,9 +705,9 @@ impl Workspace {
                     }
                     // The group just changed: any in-flight drag's indices are
                     // stale (undo is a keyboard action and can land mid-drag).
-                    self.queue_drag = None;
-                    let insert_at = Self::steer_group_insert_index(&self.queued_follow_ups);
-                    self.queued_follow_ups.insert(insert_at, item);
+                    self.chat.queue_drag = None;
+                    let insert_at = Self::steer_group_insert_index(&self.chat.queued_follow_ups);
+                    self.chat.queued_follow_ups.insert(insert_at, item);
                     cx.notify();
                 } else {
                     let weak = cx.weak_entity();
@@ -708,8 +717,8 @@ impl Workspace {
             FollowUpState::SteerPending { .. } => {
                 // Already handed to the server steer queue; restore untouched
                 // (wherever the last settle left it).
-                let insert_at = Self::steer_group_insert_index(&self.queued_follow_ups);
-                self.queued_follow_ups.insert(insert_at, item);
+                let insert_at = Self::steer_group_insert_index(&self.chat.queued_follow_ups);
+                self.chat.queued_follow_ups.insert(insert_at, item);
             }
         }
     }
@@ -754,14 +763,14 @@ impl Workspace {
     /// is session UI state only — the flush order the model eventually sees is
     /// the queue's own order, so no server round-trip is involved.
     pub(super) fn commit_queue_drag(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.queue_drag.take() else {
+        let Some(drag) = self.chat.queue_drag.take() else {
             cx.notify();
             return;
         };
-        if let Some(insert) = Self::queue_move_index(&self.queued_follow_ups, drag)
-            && let Some(item) = self.queued_follow_ups.remove(drag.dragged)
+        if let Some(insert) = Self::queue_move_index(&self.chat.queued_follow_ups, drag)
+            && let Some(item) = self.chat.queued_follow_ups.remove(drag.dragged)
         {
-            self.queued_follow_ups.insert(insert, item);
+            self.chat.queued_follow_ups.insert(insert, item);
         }
         cx.notify();
     }
@@ -776,26 +785,27 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(item) = self.queued_follow_ups.remove(idx) else {
+        let Some(item) = self.chat.queued_follow_ups.remove(idx) else {
             return;
         };
         if matches!(item.state, FollowUpState::SteerPending { .. }) {
-            self.queued_follow_ups.insert(idx, item);
+            self.chat.queued_follow_ups.insert(idx, item);
             return;
         }
-        self.queue_drag = None;
-        let current = self.input_state.read(cx).value();
+        self.chat.queue_drag = None;
+        let current = self.chat.input_state.read(cx).value();
         let merged = if current.trim().is_empty() {
             item.turn.text.clone()
         } else {
             format!("{current}\n{}", item.turn.text)
         };
-        self.input_state.update(cx, |state, cx| {
+        self.chat.input_state.update(cx, |state, cx| {
             state.set_value(merged, window, cx);
             state.focus(window, cx);
         });
         for image in item.turn.user_images {
-            self.pending_attachments
+            self.chat
+                .pending_attachments
                 .push(PendingAttachment::ClipboardImage((*image.0).clone()));
         }
         cx.notify();
@@ -806,14 +816,14 @@ impl Workspace {
         // the server and the protocol has no steer-withdrawal channel, so
         // deleting the card would let it inject invisibly (see the composer
         // render's disabled delete). `Queued` and `Failed` cards drop freely.
-        let Some(item) = self.queued_follow_ups.get(idx) else {
+        let Some(item) = self.chat.queued_follow_ups.get(idx) else {
             return;
         };
         if matches!(item.state, FollowUpState::SteerPending { .. }) {
             return;
         }
-        self.queued_follow_ups.remove(idx);
-        self.queue_drag = None;
+        self.chat.queued_follow_ups.remove(idx);
+        self.chat.queue_drag = None;
         cx.notify();
     }
 
@@ -822,14 +832,14 @@ impl Workspace {
         // `SteerPending` cards sitting at the tail — an online steer can't be
         // withdrawn, so it isn't undoable — and leave `Failed` cards for the
         // explicit retry/remove path.
-        let Some(item) = self.queued_follow_ups.back() else {
+        let Some(item) = self.chat.queued_follow_ups.back() else {
             return;
         };
         if matches!(item.state, FollowUpState::Queued) {
-            self.queued_follow_ups.pop_back();
+            self.chat.queued_follow_ups.pop_back();
             // A keyboard action can land mid-drag: void the stale marker so a
             // release can never move the wrong row.
-            self.queue_drag = None;
+            self.chat.queue_drag = None;
             cx.notify();
         }
     }
@@ -922,16 +932,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let turns = self.recall_turns(cx);
-        let value = self.input_state.read(cx).value().to_string();
+        let value = self.chat.input_state.read(cx).value().to_string();
         let (index, draft, step) = Self::recall_step(
             direction,
             &value,
-            self.recall_index,
-            self.recall_draft.as_deref(),
+            self.chat.recall_index,
+            self.chat.recall_draft.as_deref(),
             &turns,
         );
-        self.recall_index = index;
-        self.recall_draft = draft;
+        self.chat.recall_index = index;
+        self.chat.recall_draft = draft;
         match step {
             RecallStep::None => {}
             RecallStep::Recall(text) => {
@@ -954,7 +964,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.input_state.update(cx, |state, cx| {
+        self.chat.input_state.update(cx, |state, cx| {
             state.set_value(text.into(), window, cx);
             let end = RopeExt::offset_to_position(state.text(), state.text().len());
             state.set_cursor_position(end, window, cx);
@@ -964,8 +974,8 @@ impl Workspace {
 
     /// End a running recall walk and drop its working line.
     pub(super) fn end_recall_walk(&mut self) {
-        self.recall_index = -1;
-        self.recall_draft = None;
+        self.chat.recall_index = -1;
+        self.chat.recall_draft = None;
     }
 
     /// Refill the composer with a past turn picked in the turn navigator
@@ -987,18 +997,19 @@ impl Workspace {
             .position(|turn| *turn == text)
             .map(|ix| ix as i64);
         if let Some(index) = landed {
-            let displaced = self.input_state.read(cx).value().to_string();
-            if self.recall_index < 0 {
-                self.recall_draft =
+            let displaced = self.chat.input_state.read(cx).value().to_string();
+            if self.chat.recall_index < 0 {
+                self.chat.recall_draft =
                     (!displaced.is_empty() && displaced != text).then(|| displaced.clone());
             }
-            self.recall_index = index;
+            self.chat.recall_index = index;
         } else {
             self.end_recall_walk();
         }
         self.close_completion(cx);
         self.set_composer_text(text, window, cx);
-        self.input_state
+        self.chat
+            .input_state
             .update(cx, |state, cx| state.focus(window, cx));
     }
 
@@ -1006,7 +1017,8 @@ impl Workspace {
     /// `collect_user_turns` ordering minus image-only/empty turns.
     pub(super) fn recall_turns(&self, cx: &App) -> Vec<String> {
         collect_user_turns(
-            self.conversation
+            self.chat
+                .conversation
                 .read(cx)
                 .items()
                 .iter()
