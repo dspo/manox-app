@@ -83,7 +83,13 @@ mod backend {
 
     pub(super) fn apply(count: usize) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
-            tracing::warn!("dock badge skipped: not on the main thread");
+            // The pump retries every poll and the count stays uncached, so
+            // this branch would log at 2 Hz forever — warn once instead.
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!("dock badge skipped: not on the main thread; badge stays stale");
+            }
             return false;
         };
         let tile = NSApplication::sharedApplication(mtm).dockTile();
