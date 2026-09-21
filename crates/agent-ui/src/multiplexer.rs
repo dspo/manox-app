@@ -1063,6 +1063,33 @@ impl SessionMultiplexer {
             .collect()
     }
 
+    /// How many sessions currently owe the user attention — the dock badge
+    /// source. One point per thread row; archived rows are dismissed by
+    /// definition (the sidebar still paints their attention marks — the one
+    /// place the two surfaces deliberately diverge). A parked ask /
+    /// tool-approval card (`pending_auth`) and a plan review awaiting a
+    /// verdict (`pending_plan`) count until answered; the client-owned
+    /// `unread` mirror counts until the user focuses the thread. `errored`
+    /// follows the §D.5 mirror rule — only the next list snapshot clears it
+    /// — so that point retires on the server's schedule, not on a user
+    /// gesture, exactly like the sidebar's danger triangle it mirrors. The
+    /// leaf's live unread mirror wins over the row flag — the same
+    /// preference `SidebarThreadItem::from_wire` applies, so on live rows
+    /// the badge and the sidebar cannot disagree.
+    pub fn attention_count(&self, cx: &App) -> usize {
+        let unread = self.unread_map(cx);
+        self.thread_list
+            .iter()
+            .filter(|row| {
+                !row.archived
+                    && (unread.get(&row.id).copied().unwrap_or(row.unread)
+                        || row.errored
+                        || row.pending_auth
+                        || row.pending_plan)
+            })
+            .count()
+    }
+
     /// Raise a parked session's client-owned unread mirror from local
     /// knowledge (GW5): facts the server deltas do not carry — a parked
     /// error or a background-task update — light the badge through the
@@ -1620,6 +1647,154 @@ mod tests {
                 !m.thread_list()[1].unread,
                 "GW5: the focused row never lights up"
             );
+        });
+    }
+
+    /// The dock badge aggregate (`attention_count`): one point per
+    /// non-archived row that parks an interaction object or carries an
+    /// attention mark, the leaf's live unread mirror wins over the row
+    /// flag, and focusing a thread retires its point.
+    #[gpui::test]
+    async fn attention_count_tracks_pending_interaction_and_unseen_settles(
+        cx: &mut TestAppContext,
+    ) {
+        let (mux, server_conn) = test_mux(cx);
+        let delta = |host: HostEvent| FromServer::Host { host };
+
+        let mut archived = wire_row("t-arch");
+        archived.archived = true;
+        server_conn.send_to_client(FromServer::Host {
+            host: HostEvent::ThreadsUpdated {
+                threads: vec![wire_row("t1"), wire_row("t2"), archived.clone()],
+            },
+        });
+        cx.run_until_parked();
+        mux.read_with(cx, |m, cx| {
+            assert_eq!(m.attention_count(cx), 0, "clean rows owe nothing");
+        });
+
+        // A parked approval on t1 + an unseen settle on t2 = two points;
+        // the archived row's pending flag never counts.
+        server_conn.send_to_client(delta(HostEvent::SessionStatus {
+            session_id: "t1".into(),
+            running: None,
+            errored: None,
+            unread: None,
+            pending_auth: Some(true),
+            pending_plan: None,
+            background_work: None,
+        }));
+        server_conn.send_to_client(delta(HostEvent::SessionStatus {
+            session_id: "t2".into(),
+            running: None,
+            errored: None,
+            unread: Some(true),
+            pending_auth: None,
+            pending_plan: None,
+            background_work: None,
+        }));
+        server_conn.send_to_client(delta(HostEvent::SessionStatus {
+            session_id: "t-arch".into(),
+            running: None,
+            errored: None,
+            unread: None,
+            pending_auth: Some(true),
+            pending_plan: None,
+            background_work: None,
+        }));
+        cx.run_until_parked();
+        mux.read_with(cx, |m, cx| {
+            assert_eq!(m.attention_count(cx), 2, "archived rows never count");
+        });
+
+        // The leaf's live unread mirror counts even while no snapshot has
+        // carried it into the row flag (GW5: leaf wins). The snapshot that
+        // resolves t1's parked approval would drop t1 from the count if
+        // the leaf mirror were ignored.
+        mux.update(cx, |m, cx| {
+            m.open_or_create("t1", "/p", false, cx);
+        });
+        mux.update(cx, |m, cx| m.note_unread("t1", cx));
+        server_conn.send_to_client(FromServer::Host {
+            host: HostEvent::ThreadsUpdated {
+                threads: vec![wire_row("t1"), wire_row("t2"), archived],
+            },
+        });
+        cx.run_until_parked();
+        mux.read_with(cx, |m, cx| {
+            assert!(
+                !m.thread_list()[0].pending_auth,
+                "the snapshot resolved t1's parked approval"
+            );
+            assert_eq!(
+                m.attention_count(cx),
+                2,
+                "t1 stays counted through its leaf unread mirror"
+            );
+        });
+
+        // Focusing a thread is the interaction that retires its point.
+        mux.update(cx, |m, cx| m.set_focused(Some("t1"), cx));
+        mux.read_with(cx, |m, cx| {
+            assert_eq!(m.attention_count(cx), 1, "focusing t1 retired its point");
+        });
+        mux.update(cx, |m, cx| m.set_focused(Some("t2"), cx));
+        mux.read_with(cx, |m, cx| {
+            assert_eq!(m.attention_count(cx), 0, "focusing t2 retired the last");
+        });
+    }
+
+    /// The errored point follows the §D.5 mirror rule, not the focus
+    /// gesture: focus retires the unread mark but never `errored` — only
+    /// the next list snapshot does. Pinned because `errored` is the one
+    /// flag whose clear path differs from the interaction-driven ones.
+    #[gpui::test]
+    async fn attention_count_errored_point_retires_on_snapshot_only(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        server_conn.send_to_client(FromServer::Host {
+            host: HostEvent::ThreadsUpdated {
+                threads: vec![wire_row("t1")],
+            },
+        });
+        cx.run_until_parked();
+        server_conn.send_to_client(FromServer::Host {
+            host: HostEvent::SessionStatus {
+                session_id: "t1".into(),
+                running: None,
+                errored: Some(true),
+                unread: Some(true),
+                pending_auth: None,
+                pending_plan: None,
+                background_work: None,
+            },
+        });
+        cx.run_until_parked();
+        mux.read_with(cx, |m, cx| {
+            assert_eq!(m.attention_count(cx), 1, "one row, one point");
+        });
+
+        // Focusing the thread retires the unread mark but NOT the errored
+        // point — no user gesture clears that one.
+        mux.update(cx, |m, cx| m.set_focused(Some("t1"), cx));
+        cx.run_until_parked();
+        mux.read_with(cx, |m, cx| {
+            assert!(!m.thread_list()[0].unread, "focus cleared the unread mark");
+            assert_eq!(
+                m.attention_count(cx),
+                1,
+                "focus never retires the errored point"
+            );
+        });
+
+        // The next list snapshot is the only clear path.
+        server_conn.send_to_client(FromServer::Host {
+            host: HostEvent::ThreadsUpdated {
+                threads: vec![wire_row("t1")],
+            },
+        });
+        cx.run_until_parked();
+        mux.read_with(cx, |m, cx| {
+            assert_eq!(m.attention_count(cx), 0, "the snapshot retired the point");
         });
     }
 

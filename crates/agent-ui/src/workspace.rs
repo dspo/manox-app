@@ -2361,6 +2361,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// How many sessions currently owe the user a look or a verdict — the
+    /// dock badge source (`SessionMultiplexer::attention_count`). The
+    /// aggregate reads the multiplexer's rows plus the leaves' unread
+    /// mirrors, so any state edge that moves the sidebar's attention marks
+    /// moves this count on the next read.
+    pub fn attention_count(&self, cx: &App) -> usize {
+        self.multiplexer.read(cx).attention_count(cx)
+    }
+
     fn subscribe_input(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         let input = self.input_state.clone();
         cx.subscribe_in(

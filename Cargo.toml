@@ -113,6 +113,15 @@ tray-icon = "0.24"
 # runtime-agnostic path, which also fixes ashpd and accesskit_unix
 # (see manox PR #767).
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+# objc2 / objc2-foundation / objc2-app-kit —— macOS Dock badge
+# (NSDockTile.setBadgeLabel). Exact-pinned to the copies the gpui stack
+# already locks, so no new duplicate versions enter the tree (the older
+# 0.2.2/0.5.2 generation in Cargo.lock belongs to accesskit_macos, the
+# accessibility stack behind gpui-pre-macos; wry rides this same
+# 0.3.2/0.6.4 generation via objc2-web-kit).
+objc2 = "=0.6.4"
+objc2-foundation = "=0.3.2"
+objc2-app-kit = "=0.3.2"
 # rust-embed — embed SVG icons into the binary at compile time so manox stays a
 # single-binary deliverable; the ExtrasAssetSource overlays custom agent icons
 # (claude/codex/copilot) on top of gpui-kit-assets.
