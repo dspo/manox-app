@@ -1,12 +1,13 @@
 # 拆分计划：manox-agent-chrome-ui + manox-agent-chat-ui
 
-> 状态：**Phase 3 与 Phase 1 均已落地**（2026-09-21：Phase 3 = PR #58
-> `feat/chrome-crate`，chrome crate + example + 离屏验收，顺序相对 D4 提前；
-> Phase 1 = PR #59 `feat/chat-column-split`，ChatColumn 56 字段结构体拆分，
-> 零视觉变化——实体化与 ChatHost 端口随 Phase 2 落地）。Phase 2/4 未开工。
-> 开工前如与现状冲突，以代码为准并回改本文。
-> 壳子来源仓：`~/projects/dspo/agents-window-gpui`（gpui 像素级复刻 VS Code 1.139
-> Agents Window；commit 见该仓 git log，搬运时以其 HEAD 为准再核对一遍差异）。
+> 状态：**Phase 3、Phase 1、Phase 2 首期均已落地**（2026-09-21：Phase 3 = PR #58
+> chrome crate + example + 离屏验收，顺序相对 D4 提前；Phase 1 = PR #59
+> ChatColumn 56 字段结构体拆分；Phase 2 首期 = PR #60 `feat/chat-crate`（叠在
+> #59 上）——manox-agent-chat-ui crate 落地，journal 投影四件套 + client_store
+> 簇（含裁决#7 handle 随迁）+ cockpit/git_status 迁入，依赖不变量
+> （无 terminal-ui/webview/ext-agents）经 script/check-chat-crate-deps.sh 进 CI；
+> ConversationState/消息视图/composer 族与 ChatColumn 实体化留后续批次）。
+> Phase 2 余量与 Phase 4 未开工。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
