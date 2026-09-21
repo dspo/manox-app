@@ -145,6 +145,12 @@ Process-lifetime system tray installed right after the first main window opens (
 
 > Source: `crates/manox/src/tray.rs`, `crates/manox/src/main.rs`
 
+#### DockBadge
+
+The count on the macOS Dock icon (`NSDockTile.setBadgeLabel` via `objc2-app-kit`), mirroring the sessions currently owing the user attention: a parked ask / tool-approval card (`pending_auth`), a plan review awaiting a verdict (`pending_plan`), an errored thread, or an unseen settle on a non-focused thread (the client-owned unread mirror). One point per non-archived thread row; the aggregate lives on `Workspace::attention_count` → `SessionMultiplexer::attention_count` (the leaf's live unread mirror wins over the row flag, so the badge and the sidebar's attention marks can never disagree). Not fed from state edges — local unread raises only notify the leaf entity — so a foreground task polls every 500ms (the tray pump's pattern) and only crosses into AppKit when the count changed; counts above 99 render as `99+`. Windows (taskbar overlay icon) and Linux have no backend yet: they keep a clean no-op behind the same API. The pump starts with the tray install block but runs regardless of it.
+
+> Source: `crates/manox/src/badge.rs`, `crates/manox/src/main.rs`, `crates/agent-ui/src/multiplexer.rs`
+
 ## 2. Workspace
 
 #### Workspace

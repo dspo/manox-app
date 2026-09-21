@@ -46,6 +46,13 @@ tray-icon.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 ksni.workspace = true
 
+# Dock badge (macOS): NSApplication.dockTile.setBadgeLabel on the gpui main
+# thread; other platforms have no badge backend (see src/badge.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+
 [dev-dependencies]
 # gpui test-support — the headless layout check in src/about.rs measures the
 # About dialog's rendered bounds, matching what the other UI crates do.

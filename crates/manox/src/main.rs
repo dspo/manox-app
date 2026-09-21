@@ -9,6 +9,7 @@ use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use std::borrow::Cow;
 
 mod about;
+mod badge;
 mod pins;
 mod tray;
 
@@ -407,6 +408,12 @@ fn main() {
                         "system tray unavailable: {e:#}; closing the last window quits"
                     ),
                 }
+
+                // Dock badge pump: mirrors the workspace's attention count
+                // onto the dock icon. Runs regardless of the tray — the
+                // badge is dock-affordance, not tray state, and the tray
+                // install failing must not take the badge with it.
+                badge::spawn_pump(cx);
             });
 
             // Wire the process-wide browser host: bind it to the main
