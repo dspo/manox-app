@@ -37,6 +37,7 @@ members = [
 	"crates/manox-webview-macros",
 	"crates/manox-i18n",
 	"crates/manox-agent-chat-ui",
+	"crates/manox-agent-chrome-ui",
 ]
 resolver = "2"
 
@@ -72,6 +73,7 @@ cx = { path = "crates/cx" }
 cx-cli = { path = "crates/cx-cli" }
 manox-i18n = { path = "crates/manox-i18n" }
 manox-agent-chat-ui = { path = "crates/manox-agent-chat-ui" }
+manox-agent-chrome-ui = { path = "crates/manox-agent-chrome-ui" }
 
 anyhow = "1"
 async-channel = "2"
