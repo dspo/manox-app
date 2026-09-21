@@ -304,6 +304,8 @@ settings-desc-chatgpt-top = 配置 cx 启动 ChatGPT.app 时注入的内容。
 
 settings-btn-copy = 复制
 
+settings-btn-copied = 已复制
+
 settings-btn-reveal = 在 Finder 中显示
 
 settings-section-chatgpt-home = Codex Home

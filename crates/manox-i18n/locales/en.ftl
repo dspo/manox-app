@@ -316,6 +316,8 @@ settings-desc-chatgpt-top = Configure what cx injects when launching ChatGPT.app
 
 settings-btn-copy = Copy
 
+settings-btn-copied = Copied
+
 settings-btn-reveal = Reveal in Finder
 
 settings-section-chatgpt-home = Codex Home

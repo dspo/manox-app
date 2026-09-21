@@ -267,6 +267,47 @@ fn map_align(a: &AlignKind) -> TableAlign {
     }
 }
 
+/// Serialize parsed table data back to a GFM pipe table, one row per line with
+/// the alignment row carrying the parsed column alignment. This — not the raw
+/// source slice — is what the table's copy control hands to the clipboard: the
+/// parse already normalized leading pipes and column padding, and a
+/// deterministic re-serialization copies every table identically regardless of
+/// how the source formatted it.
+pub fn table_markdown(rows: &[Vec<InlineRuns>], align: &[TableAlign]) -> String {
+    // A raw `|` inside a cell would split the column on re-parse, so escape
+    // it; cells are single-line by construction, but a `<br>`-style newline
+    // surviving inline collection would break the row, so flatten it too.
+    let cell_text = |cell: &InlineRuns| cell.text.replace('|', "\\|").replace('\n', " ");
+    let mut out = String::new();
+    let Some(header) = rows.first() else {
+        return out;
+    };
+    let push_row = |row: &[InlineRuns], out: &mut String| {
+        out.push('|');
+        for cell in row {
+            out.push(' ');
+            out.push_str(&cell_text(cell));
+            out.push_str(" |");
+        }
+        out.push('\n');
+    };
+    push_row(header, &mut out);
+    out.push('|');
+    for c in 0..header.len() {
+        out.push_str(match align.get(c).copied().unwrap_or_default() {
+            TableAlign::Left => " :--- |",
+            TableAlign::Center => " :---: |",
+            TableAlign::Right => " ---: |",
+            TableAlign::None => " --- |",
+        });
+    }
+    out.push('\n');
+    for row in &rows[1..] {
+        push_row(row, &mut out);
+    }
+    out
+}
+
 /// A fenced code run is a git merge conflict when it carries both the opening
 /// `<<<<<<<` and closing `>>>>>>>` markers. The pair (rather than just one) is
 /// required so a stray `>>>>>>>` in commentary does not mis-route a real code
@@ -596,6 +637,51 @@ mod tests {
             Some(Block::Table { rows, .. }) => assert_eq!(rows.len(), 2),
             _ => panic!("expected table"),
         }
+    }
+
+    #[test]
+    fn table_markdown_round_trips_a_parsed_table() {
+        let blocks = parse("| Name | Age |\n| --- | ---: |\n| Alice | 30 |\n");
+        match blocks.first() {
+            Some(Block::Table { rows, align }) => {
+                assert_eq!(
+                    table_markdown(rows, align),
+                    "| Name | Age |\n| --- | ---: |\n| Alice | 30 |\n"
+                );
+            }
+            _ => panic!("expected table"),
+        }
+    }
+
+    #[test]
+    fn table_markdown_escapes_pipes_and_flattens_newlines() {
+        let cell = |text: &str| InlineRuns {
+            text: text.to_string(),
+            ..InlineRuns::default()
+        };
+        let rows = vec![vec![cell("a | b"), cell("two\nlines")]];
+        assert_eq!(
+            table_markdown(&rows, &[TableAlign::None]),
+            "| a \\| b | two lines |\n| --- | --- |\n"
+        );
+    }
+
+    #[test]
+    fn table_markdown_header_only_table_has_no_body_rows() {
+        let cell = |text: &str| InlineRuns {
+            text: text.to_string(),
+            ..InlineRuns::default()
+        };
+        let rows = vec![vec![cell("h")]];
+        assert_eq!(
+            table_markdown(&rows, &[TableAlign::Center]),
+            "| h |\n| :---: |\n"
+        );
+    }
+
+    #[test]
+    fn table_markdown_empty_rows_is_empty() {
+        assert_eq!(table_markdown(&[], &[]), "");
     }
 
     #[test]
