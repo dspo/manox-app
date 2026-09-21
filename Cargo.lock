@@ -5730,10 +5730,12 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "manox-agent",
+ "manox-agent-chat-ui",
  "manox-i18n",
  "manox-terminal",
  "manox-webview",
  "rust-embed",
+ "serde_json",
  "terminal-ui",
 ]
 

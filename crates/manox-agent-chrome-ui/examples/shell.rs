@@ -16,11 +16,16 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyView, AppContext as _, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px, svg,
+    ListAlignment, ListState, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Window, div, px, svg,
 };
 use gpui_component::Root;
+use manox_agent_chat_ui::conversation::{ConvItem, ToolCallItem};
+use manox_agent_chat_ui::host::noop_host;
+use manox_agent_chat_ui::views::message::MessageItem;
 use manox_agent_chrome_ui::right_pane::TabStore;
 use manox_agent_chrome_ui::session_list::SessionStatus;
 use manox_agent_chrome_ui::shell::SessionRow;
@@ -40,9 +45,11 @@ fn main() {
 
         cx.open_window(window_options(cx), |window, cx| {
             window.activate_window();
-            let chat: AnyView = cx.new(|_| PlaceholderChat).into();
-            let shell = cx.new(|cx| Shell::new(shell_config(chat), window, cx));
-            start_pump(shell.clone(), cx);
+            let chat = cx.new(|cx| ChatPreview::new(window, cx));
+            let titles: TitleMap = Default::default();
+            let shell =
+                cx.new(|cx| Shell::new(shell_config(chat.clone(), titles.clone()), window, cx));
+            start_pump(shell.clone(), titles, cx);
             cx.new(|cx| Root::new(shell, window, cx))
         })
         .expect("failed to open window");
@@ -76,9 +83,9 @@ fn configure(cx: &mut gpui::App) {
 
 /// Everything the shell needs from this host. `main_view` is the
 /// placeholder chat column's pre-created view.
-fn shell_config(main_view: AnyView) -> ShellConfig {
+fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig {
     ShellConfig {
-        main: Arc::new(PlaceholderMain { view: main_view }),
+        main: Arc::new(PreviewMain { view: main_view }),
         tool_kinds: vec![
             Arc::new(BrowserKind),
             Arc::new(TerminalKind::shell()),
@@ -141,7 +148,24 @@ fn shell_config(main_view: AnyView) -> ShellConfig {
             on_pin: Some(Box::new(|id, _w, _cx| store_toggle_pin(id))),
             on_archive: Some(Box::new(|id, _w, _cx| store_set_archived(id))),
             on_new_session: None,
-            on_select: None,
+            on_select: Some(Box::new({
+                let titles = titles.clone();
+                move |id, _w, cx| {
+                    // Selection drives the preview: re-seed a short
+                    // conversation whose user bubble quotes the real thread
+                    // title.
+                    let title = titles
+                        .borrow()
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| "Session".into());
+                    PREVIEW.with(|p| {
+                        if let Some(p) = p.borrow().as_ref() {
+                            p.update(cx, |preview, cx| preview.reseed(&title, cx));
+                        }
+                    });
+                }
+            })),
         },
     }
 }
@@ -152,7 +176,7 @@ fn shell_config(main_view: AnyView) -> ShellConfig {
 /// (off the first frame); afterwards the store's change events drive
 /// snapshot-only reads — calling `refresh_thread_list` from an event
 /// callback would loop (refresh is an async scan that re-emits the event).
-fn start_pump(shell: Entity<Shell>, cx: &mut gpui::App) {
+fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
     manox_agent::thread_store::refresh_thread_list();
     let rx = manox_agent::thread_store::global().subscribe();
     cx.spawn(async move |cx| {
@@ -160,6 +184,7 @@ fn start_pump(shell: Entity<Shell>, cx: &mut gpui::App) {
         async fn push(
             shell: &Entity<Shell>,
             boot_selected: &mut bool,
+            titles: &TitleMap,
             cx: &mut gpui::AsyncApp,
         ) -> anyhow::Result<()> {
             let rows = cx.background_spawn(async { load_rows() }).await;
@@ -169,14 +194,18 @@ fn start_pump(shell: Entity<Shell>, cx: &mut gpui::App) {
                     *boot_selected = true;
                     shell.active = Some(rows[0].id.clone());
                 }
+                titles.borrow_mut().clear();
+                for r in &rows {
+                    titles.borrow_mut().insert(r.id.clone(), r.title.clone());
+                }
                 shell.set_sessions(rows);
                 cx.notify();
             });
             anyhow::Ok(())
         }
-        push(&shell, &mut boot_selected, cx).await?;
+        push(&shell, &mut boot_selected, &titles, cx).await?;
         while rx.recv().await.is_ok() {
-            if push(&shell, &mut boot_selected, cx).await.is_err() {
+            if push(&shell, &mut boot_selected, &titles, cx).await.is_err() {
                 break;
             }
         }
@@ -666,35 +695,164 @@ impl PanelSurface for TerminalPanel {
     }
 }
 
-// ── main surface placeholder ──────────────────────────────────────────────
+// ── main surface: the real message pipeline on seeded content ────────────
 
-/// The chat column's seat until manox-agent-chat-ui lands.
-struct PlaceholderChat;
+/// Titles of the live thread rows, shared between the pump (writer) and the
+/// selection hook / surface title (readers).
+type TitleMap = std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>;
 
-impl Render for PlaceholderChat {
+// The preview instance registry — the selection hook runs on `&mut App`
+// without a context handle, so the example keeps the preview reachable
+// through a thread-local slot set at window construction.
+thread_local! {
+    static PREVIEW: std::cell::RefCell<Option<Entity<ChatPreview>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The chat column preview: real `MessageItem`s (the manox-agent-chat-ui
+/// pipeline) over a seeded conversation, in the virtualized list pattern the
+/// workspace uses. Actions route through the noop host — the preview shows
+/// rendering, not a live session.
+struct ChatPreview {
+    items: Vec<Entity<MessageItem>>,
+    list_state: ListState,
+    title: SharedString,
+}
+
+impl ChatPreview {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        PREVIEW.with(|p| *p.borrow_mut() = Some(cx.entity()));
+        let _ = window;
+        let mut this = Self {
+            items: Vec::new(),
+            list_state: ListState::new(0, ListAlignment::Bottom, px(400.)),
+            title: "Manox".into(),
+        };
+        this.reseed("聊聊这个仓库的结构", cx);
+        this
+    }
+
+    /// Rebuild the seeded conversation. `thread_title` comes from the real
+    /// thread row the user selected — the bubble quotes it so selection is
+    /// visibly wired end to end.
+    fn reseed(&mut self, thread_title: &str, cx: &mut Context<Self>) {
+        let mut items = Vec::new();
+        let mut id = 0usize;
+        let mut next_id = |items: &mut Vec<Entity<MessageItem>>,
+                           item: ConvItem,
+                           role: &str,
+                           cx: &mut Context<Self>| {
+            items.push(cx.new(|_| MessageItem::new(item, role.to_string(), id, noop_host())));
+            id += 1;
+        };
+        next_id(
+            &mut items,
+            ConvItem::User {
+                text: thread_title.to_string(),
+                images: Vec::new(),
+                meta: None,
+            },
+            "",
+            cx,
+        );
+        next_id(
+            &mut items,
+            ConvItem::ToolCall(ToolCallItem {
+                id: "seed-read".into(),
+                name: "read_file".into(),
+                title: "read_file(PLAN-CHROME-CHAT-SPLIT.md)".into(),
+                status: manox_agent::ToolCallStatus::Success,
+                output: "# 拆分计划：manox-agent-chrome-ui + manox-agent-chat-ui\n…".into(),
+                is_error: false,
+                input: serde_json::json!({"path": "PLAN-CHROME-CHAT-SPLIT.md"}),
+                streaming: false,
+                collapsed: false,
+                user_toggled: true,
+                panel: None,
+            }),
+            "",
+            cx,
+        );
+        next_id(
+            &mut items,
+            ConvItem::Assistant {
+                text: "主栏现在由 **manox-agent-chat-ui** 的消息管线渲染——`MessageItem` 直接挂在 chrome 壳的 MainSurface 槽里：\n\n- 流式文本与 markdown（代码块、列表、**加粗**）\n- 工具卡片（上面的 `read_file`，可展开/收起）\n- hover 动作与 fork 按钮走 `ChatHost` 端口（预览态为 inert）\n\n```rust\n窗口 = chrome::Shell(MainSurface = ChatColumn, ToolTab 注册表)\n```\n\n侧栏选中任一真实线程，这条预览会以它的标题重新播种。".into(),
+                streaming: false,
+                token_usage: None,
+                activity_header: true,
+                entry_id: Some("seed-reply".into()),
+                fork_unavailable: None,
+            },
+            "GLM-5.3",
+            cx,
+        );
+        next_id(
+            &mut items,
+            ConvItem::Notice("预览说明：动作（复制除外）经 NoopHost，为 inert。".into()),
+            "",
+            cx,
+        );
+        self.items = items;
+        self.title = thread_title.into();
+        self.list_state = ListState::new(self.items.len(), ListAlignment::Bottom, px(400.));
+        cx.notify();
+    }
+}
+
+impl Render for ChatPreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let conversation_items = self.items.clone();
+        let processor =
+            move |ix: usize, _window: &mut Window, _cx: &mut gpui::App| match conversation_items
+                .get(ix)
+                .cloned()
+            {
+                Some(item) => div()
+                    .w_full()
+                    .pt_1()
+                    .pb_4()
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .child(item)
+                    .into_any_element(),
+                None => div().into_any_element(),
+            };
         div()
+            .id("chat-preview")
             .size_full()
             .flex()
-            .items_center()
-            .justify_center()
-            .text_color(theme::FG_FAINT)
-            .text_size(px(13.))
-            .child("manox-agent-chat-ui mounts here (Phase 2)")
+            .flex_col()
+            .bg(theme::CARD_BG)
+            .px_4()
+            .py_4()
+            .child(
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .child(gpui::list(self.list_state.clone(), processor)),
+            )
+            .when(self.items.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_color(theme::FG_FAINT)
+                        .text_size(px(13.))
+                        .child("no conversation"),
+                )
+            })
     }
 }
 
-struct PlaceholderMain {
-    view: AnyView,
+struct PreviewMain {
+    view: Entity<ChatPreview>,
 }
 
-impl MainSurface for PlaceholderMain {
+impl MainSurface for PreviewMain {
     fn view(&self) -> AnyView {
-        self.view.clone()
+        self.view.clone().into()
     }
 
-    fn title(&self, _cx: &gpui::App) -> SharedString {
-        "Manox".into()
+    fn title(&self, cx: &gpui::App) -> SharedString {
+        self.view.read(cx).title.clone()
     }
 }
 

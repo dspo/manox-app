@@ -13,6 +13,9 @@ use gpui::{
     AnyView, AppContext as _, IntoElement, ParentElement, Styled, VisualTestAppContext, px, size,
 };
 use gpui_component::Root;
+use manox_agent_chat_ui::conversation::{ConvItem, ToolCallItem};
+use manox_agent_chat_ui::host::noop_host;
+use manox_agent_chat_ui::views::message::MessageItem;
 use manox_agent_chrome_ui::right_pane::TabStore;
 use manox_agent_chrome_ui::session_list::SessionStatus;
 use manox_agent_chrome_ui::shell::SessionRow;
@@ -47,7 +50,7 @@ fn main() {
 
     let handle = cx
         .open_offscreen_window(size(px(1280.), px(820.)), |window, cx| {
-            let main: AnyView = cx.new(|_| MainPlaceholder).into();
+            let main: AnyView = cx.new(|cx| ChatPreviewStub::new(cx)).into();
             let shell = cx.new(|cx| Shell::new(shell_config(main), window, cx));
             shell.update(cx, |shell, _cx| {
                 shell.set_sessions(snapshot_rows());
@@ -169,21 +172,97 @@ fn snapshot_rows() -> Vec<SessionRow> {
 
 // ── main-surface seat ─────────────────────────────────────────────────────
 
-struct MainPlaceholder;
+/// A minimal seeded message list (the chat pipeline's real `MessageItem`s),
+/// so the acceptance capture shows chat content inside the shell.
+struct ChatPreviewStub {
+    items: Vec<gpui::Entity<MessageItem>>,
+    list_state: gpui::ListState,
+}
 
-impl gpui::Render for MainPlaceholder {
+impl ChatPreviewStub {
+    fn new(cx: &mut gpui::Context<Self>) -> Self {
+        let mk = |cx: &mut gpui::Context<Self>, item: ConvItem, role: &str| {
+            cx.new(|_| MessageItem::new(item, role.to_string(), 0, noop_host()))
+        };
+        let items = vec![
+            mk(
+                cx,
+                ConvItem::User {
+                    text: "聊聊这个仓库的结构".into(),
+                    images: Vec::new(),
+                    meta: None,
+                },
+                "",
+            ),
+            mk(
+                cx,
+                ConvItem::ToolCall(ToolCallItem {
+                    id: "seed-read".into(),
+                    name: "read_file".into(),
+                    title: "read_file(PLAN-CHROME-CHAT-SPLIT.md)".into(),
+                    status: manox_agent::ToolCallStatus::Success,
+                    output: "# 拆分计划…".into(),
+                    is_error: false,
+                    input: serde_json::Value::Null,
+                    streaming: false,
+                    collapsed: false,
+                    user_toggled: true,
+                    panel: None,
+                }),
+                "",
+            ),
+            mk(
+                cx,
+                ConvItem::Assistant {
+                    text: "主栏由 **manox-agent-chat-ui** 的消息管线渲染。\n\n- markdown 列表\n- `代码` 与代码块\n\n```rust\nlet shell = chrome::Shell::new(config, window, cx);\n```".into(),
+                    streaming: false,
+                    token_usage: None,
+                    activity_header: true,
+                    entry_id: None,
+                    fork_unavailable: None,
+                },
+                "GLM-5.3",
+            ),
+        ];
+        let list_state = gpui::ListState::new(items.len(), gpui::ListAlignment::Bottom, px(400.));
+        Self { items, list_state }
+    }
+}
+
+impl gpui::Render for ChatPreviewStub {
     fn render(
         &mut self,
         _window: &mut gpui::Window,
         _cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
+        let items = self.items.clone();
+        let processor = move |ix: usize, _w: &mut gpui::Window, _cx: &mut gpui::App| match items
+            .get(ix)
+            .cloned()
+        {
+            Some(item) => gpui::div()
+                .w_full()
+                .pt_1()
+                .pb_4()
+                .flex_shrink_0()
+                .min_w_0()
+                .child(item)
+                .into_any_element(),
+            None => gpui::div().into_any_element(),
+        };
         gpui::div()
             .size_full()
             .flex()
-            .items_center()
-            .justify_center()
-            .text_color(manox_agent_chrome_ui::theme::FG_FAINT)
-            .child("main surface")
+            .flex_col()
+            .px_4()
+            .py_4()
+            .child(
+                gpui::div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .child(gpui::list(self.list_state.clone(), processor)),
+            )
     }
 }
 

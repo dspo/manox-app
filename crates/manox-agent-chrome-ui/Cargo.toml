@@ -26,11 +26,13 @@ manox-i18n.workspace = true
 # sidebar, a PTY terminal and a native webview as tool tabs. None of these
 # leak into the library's dependency surface — the lib stays data-free.
 manox-agent.workspace = true
+manox-agent-chat-ui.workspace = true
 manox-terminal.workspace = true
 terminal-ui.workspace = true
 manox-webview.workspace = true
 rust-embed.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
 image.workspace = true
 gpui_platform.workspace = true
 # test-support must also reach the macOS platform layer: render_to_image's
