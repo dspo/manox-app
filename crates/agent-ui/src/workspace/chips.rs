@@ -277,6 +277,9 @@ impl Workspace {
             user_toggled: false,
             panel: None,
         };
+        // The diagnostic mount shows the card's controls but nothing copies
+        // from it, so the copy-feedback context is ownerless.
+        let copy_registry = manox_components::copy_feedback::CopiedRegistry::default();
         Some(crate::views::message::render_ask_user_card(
             &item,
             ix,
@@ -285,6 +288,7 @@ impl Workspace {
                 weak,
                 ask: Some(snapshot),
             }),
+            &crate::views::message::CopyFeedback::inert(&copy_registry),
             cx,
         ))
     }

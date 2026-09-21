@@ -49,9 +49,7 @@ use gpui_component::{Theme, h_flex, v_flex};
 use ropey::Rope;
 
 use crate::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_button};
-use crate::markdown::ast::{
-    Block, InlineRuns, LinkKind, LinkSpan, ListItem, TableAlign, table_markdown,
-};
+use crate::markdown::ast::{Block, InlineRuns, LinkKind, LinkSpan, ListItem, TableAlign};
 use crate::markdown::incremental::IncrementalParser;
 use crate::markdown::rich_text::{CodeSpan, RichText};
 use crate::markdown::selection::DocSelection;
@@ -304,6 +302,7 @@ impl Render for Markdown {
         let mut cursor = 0usize;
         let owner = cx.entity().downgrade();
         let ctx = BlockCtx {
+            source: &self.source,
             selection: &selection,
             owner: &owner,
             copied: &self.copied,
@@ -455,10 +454,13 @@ impl Element for Sentinel {
     }
 }
 
-/// The context every block renderer threads: the shared document selection the
-/// block's text registers into, and the copy controls' feedback state — the
-/// registry read that lights a control and the owner its click reports to.
+/// The context every block renderer threads: the document the blocks were
+/// parsed from (block-carried source ranges slice against it), the shared
+/// document selection the block's text registers into, and the copy controls'
+/// feedback state — the registry read that lights a control and the owner its
+/// click reports to.
 struct BlockCtx<'a> {
+    source: &'a str,
     selection: &'a DocSelection,
     owner: &'a WeakEntity<Markdown>,
     copied: &'a CopiedRegistry,
@@ -491,7 +493,9 @@ fn render_block(
         Block::List { ordered, items } => {
             list_block(ordered, items, styles, mode, idx, cursor, ctx)
         }
-        Block::Table { rows, align } => table_block(rows, align, styles, idx, cursor, ctx),
+        Block::Table { rows, align, range } => {
+            table_block(rows, align, range, styles, idx, cursor, ctx)
+        }
         Block::ThematicBreak => div()
             .w_full()
             .h(px(1.))
@@ -1087,19 +1091,25 @@ fn blockquote(
 /// wide tables from collapsing, overflowing horizontally into the scroll
 /// viewport instead of clipping. Every cell carries right + bottom borders so
 /// the grid is visible even on the transparent body rows. A hover-revealed
-/// button copies the whole table as re-serialized GFM markdown.
+/// button copies the table's own source markdown — the block-carried range
+/// sliced verbatim, so links, emphasis, and image targets survive exactly as
+/// written (the parsed cell text has already dropped them).
 fn table_block(
     rows: Vec<Vec<InlineRuns>>,
     align: Vec<TableAlign>,
+    range: Range<usize>,
     styles: &MdStyles,
     idx: usize,
     cursor: &mut usize,
     ctx: &BlockCtx,
 ) -> AnyElement {
-    // Serialize before the row loop consumes the parsed data.
-    let table_md = table_markdown(&rows, &align);
     let group = format!("table-{idx}");
     let copy_id: ElementId = ("table-copy", idx).into();
+    let table_md = ctx
+        .source
+        .get(range.clone())
+        .unwrap_or_default()
+        .to_string();
     let mut scroll = v_flex()
         .id(("table", idx))
         .w_full()

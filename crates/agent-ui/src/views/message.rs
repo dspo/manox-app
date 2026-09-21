@@ -893,10 +893,12 @@ pub(crate) struct CopyFeedback<'a> {
 }
 
 impl CopyFeedback<'_> {
-    /// An ownerless context for render paths that mount no copy controls
-    /// (probe renders); `button` is unreachable there by construction.
-    #[cfg(test)]
-    fn inert(registry: &CopiedRegistry) -> CopyFeedback<'_> {
+    /// An ownerless context for render paths that mount no copy controls —
+    /// probe renders and the test-support diagnostic mounts — where the copy
+    /// state has no entity to report back to. `button` is unreachable there
+    /// by construction.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn inert(registry: &CopiedRegistry) -> CopyFeedback<'_> {
         CopyFeedback {
             registry,
             owner: None,
