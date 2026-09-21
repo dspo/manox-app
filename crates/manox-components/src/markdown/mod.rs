@@ -306,6 +306,7 @@ impl Render for Markdown {
             selection: &selection,
             owner: &owner,
             copied: &self.copied,
+            blockquote_depth: 0,
         };
         for (i, block) in blocks_owned.into_iter().enumerate() {
             let is_last = streaming && i == block_count.saturating_sub(1);
@@ -459,11 +460,16 @@ impl Element for Sentinel {
 /// document selection the block's text registers into, and the copy controls'
 /// feedback state — the registry read that lights a control and the owner its
 /// click reports to.
+#[derive(Clone, Copy)]
 struct BlockCtx<'a> {
     source: &'a str,
     selection: &'a DocSelection,
     owner: &'a WeakEntity<Markdown>,
     copied: &'a CopiedRegistry,
+    /// Enclosing blockquotes, counting the ones the block sits inside. A
+    /// table's source span keeps the continuation lines' `>` markers, so a
+    /// nonzero depth means the copy must strip them (see `table_block`).
+    blockquote_depth: usize,
 }
 
 fn render_block(
@@ -1081,9 +1087,39 @@ fn blockquote(
         .pl_3()
         .gap_2();
     for (i, block) in inner.into_iter().enumerate() {
-        col = col.child(render_block(block, styles, mode, i, false, cursor, ctx));
+        let inner_ctx = BlockCtx {
+            blockquote_depth: ctx.blockquote_depth + 1,
+            ..*ctx
+        };
+        col = col.child(render_block(
+            block, styles, mode, i, false, cursor, &inner_ctx,
+        ));
     }
     col.into_any_element()
+}
+
+/// Strip the leading blockquote markers (`>`, repeatedly for nesting, each
+/// with one optional space) from every line of a copied table slice. mdast
+/// spans quote children verbatim except for the first line's own marker, so a
+/// table inside a blockquote would otherwise copy out with `>` still on its
+/// continuation rows — not a valid GFM table when pasted. Table rows never
+/// begin with `>` themselves, so the strip cannot eat cell content.
+fn strip_quote_markers(slice: &str) -> String {
+    slice
+        .lines()
+        .map(|line| {
+            let mut rest = line;
+            loop {
+                let trimmed = rest.trim_start();
+                let Some(after) = trimmed.strip_prefix('>') else {
+                    break;
+                };
+                rest = after.strip_prefix(' ').unwrap_or(after);
+            }
+            rest
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// GFM table. Rows stretch to the scroll width so `flex_1` cells land in
@@ -1093,7 +1129,9 @@ fn blockquote(
 /// the grid is visible even on the transparent body rows. A hover-revealed
 /// button copies the table's own source markdown — the block-carried range
 /// sliced verbatim, so links, emphasis, and image targets survive exactly as
-/// written (the parsed cell text has already dropped them).
+/// written (the parsed cell text has already dropped them). Inside a
+/// blockquote the continuation lines' `>` markers are stripped so the pasted
+/// text re-parses as a table.
 fn table_block(
     rows: Vec<Vec<InlineRuns>>,
     align: Vec<TableAlign>,
@@ -1105,11 +1143,14 @@ fn table_block(
 ) -> AnyElement {
     let group = format!("table-{idx}");
     let copy_id: ElementId = ("table-copy", idx).into();
-    let table_md = ctx
+    let mut table_md = ctx
         .source
         .get(range.clone())
         .unwrap_or_default()
         .to_string();
+    if ctx.blockquote_depth > 0 {
+        table_md = strip_quote_markers(&table_md);
+    }
     let mut scroll = v_flex()
         .id(("table", idx))
         .w_full()
@@ -1267,6 +1308,24 @@ mod tests {
 
     fn styles() -> MdStyles {
         MdStyles::from_theme(&Theme::default())
+    }
+
+    #[test]
+    fn strip_quote_markers_yields_valid_gfm_for_quoted_tables() {
+        // The exact shape the review probed: mdast keeps the continuation
+        // lines' `>` markers inside the table span, which pastes as prose +
+        // quote lines, not a table.
+        assert_eq!(
+            strip_quote_markers("| a | b |\n> | --- | --- |\n> | 1 | 2 |"),
+            "| a | b |\n| --- | --- |\n| 1 | 2 |"
+        );
+        // Nested quotes and marker-without-space both unwrap fully; a top
+        // row is untouched (it never begins with `>`).
+        assert_eq!(
+            strip_quote_markers("> | a |\n> > | --- |"),
+            "| a |\n| --- |"
+        );
+        assert_eq!(strip_quote_markers("| x |\n>| --- |"), "| x |\n| --- |");
     }
 
     #[test]

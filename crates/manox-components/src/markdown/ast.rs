@@ -258,10 +258,7 @@ pub(crate) fn block_of(node: &Node, base: usize) -> Option<Block> {
             })
         }
         Node::ThematicBreak(_) => Some(Block::ThematicBreak),
-        table_node @ Node::Table(_) => {
-            let Node::Table(t) = table_node else {
-                unreachable!("pattern guarantees a table");
-            };
+        Node::Table(t) => {
             let rows = t
                 .children
                 .iter()
@@ -281,7 +278,7 @@ pub(crate) fn block_of(node: &Node, base: usize) -> Option<Block> {
             // Positions are populated by default in markdown-rs; a missing
             // position (never observed) degrades to an empty copy rather than
             // a wrong-slice copy.
-            let range = match table_node.position() {
+            let range = match node.position() {
                 Some(p) => base + p.start.offset..base + p.end.offset,
                 None => 0..0,
             };
