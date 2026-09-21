@@ -25,7 +25,7 @@ impl ChatHost for WorkspaceChatHost {
     fn conversation(&self, cx: &App) -> Option<Entity<ConversationState>> {
         self.0
             .upgrade()
-            .map(|ws| ws.read(cx).chat.conversation.clone())
+            .map(|ws| ws.read(cx).chat.read(cx).conversation.clone())
     }
 
     fn dismiss_ask(&self, cx: &mut App) {
@@ -78,6 +78,7 @@ impl ChatHost for WorkspaceChatHost {
         self.0.upgrade().and_then(|ws| {
             let ws = ws.read(cx);
             ws.chat
+                .read(cx)
                 .ask_custom_inputs
                 .get(qi)
                 .and_then(|slot| slot.clone())
