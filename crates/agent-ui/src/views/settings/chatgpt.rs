@@ -25,7 +25,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity,
     InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString, Styled as _,
-    Window, div, px,
+    WeakEntity, Window, div, px,
 };
 use gpui_component::theme::Theme;
 use gpui_component::{
@@ -39,6 +39,7 @@ use gpui_component::{
 };
 
 use crate::i18n;
+use manox_components::copy_feedback::{CopiedRegistry, CopyFeedbackHost, fire_copied};
 use manox_providers::{ChatGptAppSettings, ModelInjection};
 
 use super::SettingsView;
@@ -83,6 +84,17 @@ pub struct ChatGptPanelState {
     /// A save completed since the last blur; the next blur surfaces a "Saved"
     /// toast.
     pending_saved_toast: bool,
+    /// Copy controls' copied-feedback state, keyed by each control's
+    /// `ElementId` (see `copy_feedback`).
+    copied: CopiedRegistry,
+}
+
+/// The copy feedback is owned by the settings view (the entity that re-renders
+/// when a control fires); the registry itself lives on this panel's state.
+impl CopyFeedbackHost for SettingsView {
+    fn copied(&mut self) -> &mut CopiedRegistry {
+        &mut self.chatgpt_panel.copied
+    }
 }
 
 struct EnvRow {
@@ -112,6 +124,7 @@ impl ChatGptPanelState {
             window_handle: window.window_handle(),
             dirty: false,
             pending_saved_toast: false,
+            copied: CopiedRegistry::default(),
         };
         match manox_ext_agents::chatgpt_app_settings() {
             Ok(settings) => state.apply_settings(window, cx, settings),
@@ -445,7 +458,7 @@ pub fn render_chatgpt_app(view: &mut SettingsView, cx: &mut Context<SettingsView
         );
     }
 
-    let home_block = render_home_block(view, &theme);
+    let home_block = render_home_block(view, &theme, cx.entity().downgrade());
     let injection_block = render_injection_block(view, &theme, cx);
     let env_block = render_env_block(view, &theme, cx);
     let more_block = render_more_block(view, &theme, cx);
@@ -464,11 +477,23 @@ pub fn render_chatgpt_app(view: &mut SettingsView, cx: &mut Context<SettingsView
 
 /// Codex Home: the CODEX_HOME env var and its value (read-only, with copy /
 /// reveal-in-Finder actions).
-fn render_home_block(view: &mut SettingsView, theme: &Theme) -> AnyElement {
+fn render_home_block(
+    view: &mut SettingsView,
+    theme: &Theme,
+    owner: WeakEntity<SettingsView>,
+) -> AnyElement {
     let muted = theme.muted_foreground;
     let codex_home: SharedString = view.chatgpt_panel.codex_home.clone().into();
     let home_for_reveal = view.chatgpt_panel.codex_home.clone();
     let home_for_copy = codex_home.clone();
+    let copy_id: gpui::ElementId = "chatgpt-copy-home".into();
+    // Text control, so the feedback swaps the label instead of the icon.
+    let copied = view.chatgpt_panel.copied.is_active(&copy_id);
+    let copy_label = if copied {
+        i18n::t("settings-btn-copied")
+    } else {
+        i18n::t("settings-btn-copy")
+    };
 
     let rows = vec![row_with_control(
         SharedString::from("CODEX_HOME"),
@@ -478,12 +503,15 @@ fn render_home_block(view: &mut SettingsView, theme: &Theme) -> AnyElement {
             .items_center()
             .child(div().text_xs().text_color(muted).child(codex_home))
             .child(
-                Button::new("chatgpt-copy-home")
-                    .label(i18n::t("settings-btn-copy"))
+                Button::new(copy_id.clone())
+                    .label(copy_label)
                     .outline()
                     .small()
-                    .on_click(move |_ev, _window, cx| {
+                    .on_click(move |_ev, _window, cx: &mut App| {
                         cx.write_to_clipboard(ClipboardItem::new_string(home_for_copy.to_string()));
+                        let _ = owner.update(cx, |view, cx| {
+                            fire_copied(view, copy_id.clone(), cx);
+                        });
                     }),
             )
             .child(

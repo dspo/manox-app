@@ -48,6 +48,7 @@ use gpui_component::{
 use manox_agent::language_model::{LanguageModelToolResult, MessageContent, Role};
 use manox_agent::thread::PermissionMode;
 use manox_agent::{Message, TokenUsage, ToolCallStatus};
+use manox_components::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_button};
 use manox_components::markdown::ast::LinkKind;
 use manox_components::markdown::terminal_panel::GitSummary;
 use manox_components::markdown::{HeadingMode, Markdown, PanelKind, TerminalPanel, hashline_text};
@@ -188,6 +189,15 @@ pub struct MessageItem {
     /// measuring rows, so `render` never reads the owning `Workspace` and the
     /// list callback remains read-only.
     pub(crate) ask_snapshot: Option<AskCardSnapshot>,
+    /// Copy controls' copied-feedback state, keyed by each control's
+    /// `ElementId` (see `copy_feedback`).
+    copied: CopiedRegistry,
+}
+
+impl CopyFeedbackHost for MessageItem {
+    fn copied(&mut self) -> &mut CopiedRegistry {
+        &mut self.copied
+    }
 }
 
 impl MessageItem {
@@ -200,6 +210,7 @@ impl MessageItem {
             markdown: None,
             notice_panel: None,
             ask_snapshot: None,
+            copied: CopiedRegistry::default(),
         }
     }
 
@@ -726,6 +737,10 @@ impl Render for MessageItem {
         // The owned paginated `TerminalPanel` for a `Notice` body (`None` for
         // every other kind).
         let notice_panel = self.ensure_notice_panel(cx);
+        let copy = CopyFeedback {
+            registry: &self.copied,
+            owner: Some(cx.entity().downgrade()),
+        };
         centered(render_item(
             &self.kind,
             self.id,
@@ -736,6 +751,7 @@ impl Render for MessageItem {
             body,
             notice_panel,
             Some(self.weak_workspace.clone()),
+            &copy,
             cx,
         ))
         .debug_selector(|| format!("message-item-body-{}", self.id))
@@ -763,7 +779,7 @@ impl Render for MessageItem {
 // public API. Bundling would only forward the same values through an
 // intermediate struct without reducing complexity.
 #[allow(clippy::too_many_arguments)]
-pub fn render_item(
+pub(crate) fn render_item(
     item: &ConvItem,
     ix: usize,
     role: &str,
@@ -773,6 +789,7 @@ pub fn render_item(
     body: Option<Entity<Markdown>>,
     notice_panel: Option<Entity<TerminalPanel>>,
     weak: Option<WeakEntity<Workspace>>,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     match item {
@@ -786,6 +803,7 @@ pub fn render_item(
             role,
             theme,
             body,
+            copy,
             cx,
         ),
         ConvItem::Assistant {
@@ -809,28 +827,29 @@ pub fn render_item(
                 weak,
                 unavailable: *fork_unavailable,
             },
+            copy,
             cx,
         ),
         ConvItem::Thinking(t) => render_thinking(t, ix, role, theme, tool_ctx, cx),
         ConvItem::ToolCall(t) => {
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
-                render_ask_user_card(t, ix, theme, tool_ctx, cx)
+                render_ask_user_card(t, ix, theme, tool_ctx, copy, cx)
             } else {
                 // Ordinary tool calls fold into `Thinking`; a top-level
                 // ToolCall here is the answered-state fallback for an
                 // `AskUserQuestion` whose interactive snapshot is gone, or a
                 // defensive orphan — render it as a plain card.
-                render_tool_call(t, ix, theme, tool_ctx, cx)
+                render_tool_call(t, ix, theme, tool_ctx, copy, cx)
             }
         }
         ConvItem::AgentTask(t) => render_agent_task(t, ix, theme, agent_ctx, tool_ctx, cx),
-        ConvItem::Error(msg) => render_error(msg, ix, theme, body, cx),
-        ConvItem::Notice(msg) => render_notice(msg, ix, theme, notice_panel, cx),
+        ConvItem::Error(msg) => render_error(msg, ix, theme, body, copy, cx),
+        ConvItem::Notice(msg) => render_notice(msg, ix, theme, notice_panel, copy, cx),
         ConvItem::Recap {
             summary,
             collapsed,
             user_toggled: _,
-        } => render_recap(summary, *collapsed, ix, theme, tool_ctx, body, cx),
+        } => render_recap(summary, *collapsed, ix, theme, tool_ctx, body, copy, cx),
         ConvItem::Retry {
             attempt,
             max_attempts,
@@ -850,6 +869,7 @@ pub fn render_item(
             theme,
             tool_ctx,
             body,
+            copy,
             cx,
         ),
         ConvItem::BackgroundTask(bt) => render_background_task(bt, ix, theme, tool_ctx, cx),
@@ -859,15 +879,47 @@ pub fn render_item(
     }
 }
 
-/// Copy button: writes `text` to the clipboard on click.
-fn copy_button(ix: usize, prefix: &'static str, text: String) -> Button {
-    Button::new((prefix, ix))
-        .ghost()
-        .xsmall()
-        .icon(IconName::Copy)
-        .on_click(move |_, _, cx: &mut App| {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-        })
+/// Render-time copy-feedback context threaded through the message renderers
+/// that mount copy controls: which controls are currently lit (the owning
+/// `MessageItem`'s `CopiedRegistry`) and the owner their clicks report back to
+/// for the lit + revert cycle.
+pub(crate) struct CopyFeedback<'a> {
+    registry: &'a CopiedRegistry,
+    /// `None` in render paths that mount no copy controls (probe renders) —
+    /// by construction `button` is never reached there, and a missing owner
+    /// degrades the control to a plain clipboard write, the same way
+    /// dropped-workspace rows degrade.
+    owner: Option<WeakEntity<MessageItem>>,
+}
+
+impl CopyFeedback<'_> {
+    /// An ownerless context for render paths that mount no copy controls —
+    /// probe renders and the test-support diagnostic mounts — where the copy
+    /// state has no entity to report back to. `button` is unreachable there
+    /// by construction.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn inert(registry: &CopiedRegistry) -> CopyFeedback<'_> {
+        CopyFeedback {
+            registry,
+            owner: None,
+        }
+    }
+
+    /// The standard copy control for `id`: a ghost icon button writing `text`
+    /// to the clipboard, showing a check while `id` is lit.
+    fn button(&self, id: gpui::ElementId, text: String) -> Button {
+        let Some(owner) = self.owner.clone() else {
+            return Button::new(id.clone())
+                .ghost()
+                .xsmall()
+                .icon(IconName::Copy)
+                .on_click(move |_, _, cx: &mut App| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                });
+        };
+        let active = self.registry.is_active(&id);
+        copy_button(id, text, active, owner)
+    }
 }
 
 /// Copy button visible only when the parent element (group) is hovered.
@@ -877,12 +929,13 @@ fn copy_button_hoverable(
     prefix: &'static str,
     group: impl Into<gpui::SharedString>,
     text: String,
+    copy: &CopyFeedback,
 ) -> gpui::Div {
     let group = group.into();
     gpui::div()
         .opacity(0.0)
         .group_hover(group, |s| s.opacity(1.0))
-        .child(copy_button(ix, prefix, text))
+        .child(copy.button((prefix, ix).into(), text))
 }
 
 /// Display name of an agent in a turn header: the main agent uses the
@@ -930,6 +983,7 @@ fn render_user(
     model: &str,
     theme: &Theme,
     body: Option<Entity<Markdown>>,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let UserRenderContent { text, images, meta } = content;
@@ -999,6 +1053,7 @@ fn render_user(
             "copy-user",
             group,
             text.to_string(),
+            copy,
         ))
         .child(
             v_flex()
@@ -1102,6 +1157,7 @@ pub(crate) fn render_assistant(
     theme: &Theme,
     body: Option<Entity<Markdown>>,
     actions: AssistantActions,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let AssistantRenderContent {
@@ -1137,7 +1193,7 @@ pub(crate) fn render_assistant(
             .overflow_x_hidden()
             .child(body_el),
     )
-    .child(assistant_action_row(ix, &group, text, actions))
+    .child(assistant_action_row(ix, &group, text, actions, copy))
     .into_any_element()
 }
 
@@ -1153,6 +1209,7 @@ fn assistant_action_row(
     group: &str,
     text: &str,
     actions: AssistantActions,
+    copy: &CopyFeedback,
 ) -> gpui::Div {
     let mut row = h_flex()
         .w_full()
@@ -1161,7 +1218,7 @@ fn assistant_action_row(
         .items_center()
         .opacity(0.0)
         .group_hover(group.to_string(), |s| s.opacity(1.0))
-        .child(copy_button(ix, "copy-assistant", text.to_string()));
+        .child(copy.button(("copy-assistant", ix).into(), text.to_string()));
     // Fork additionally needs a live owner to route the call through; a
     // dropped workspace leaves copy as the row's only actionable control.
     if let Some(weak) = actions.weak {
@@ -1232,6 +1289,7 @@ fn render_banner(
     body: gpui::AnyElement,
     theme: &Theme,
     collapsible: Option<CollapsibleBanner>,
+    copy: &CopyFeedback,
 ) -> gpui::AnyElement {
     let group = group.into();
     let mut left = h_flex()
@@ -1264,6 +1322,7 @@ fn render_banner(
             copy_prefix,
             group.clone(),
             copy_text,
+            copy,
         ));
     // `.id()` turns `Div` into `Stateful<Div>`, so erase to `AnyElement` to
     // keep the collapsible and non-collapsible branches one type. Read the
@@ -1305,11 +1364,12 @@ fn render_banner(
 }
 
 /// Render an error message + copy button.
-pub fn render_error(
+pub(crate) fn render_error(
     msg: &str,
     ix: usize,
     theme: &Theme,
     body: Option<Entity<Markdown>>,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     render_banner(
@@ -1323,6 +1383,7 @@ pub fn render_error(
         body_or_static(body, ("error", ix), msg.to_string(), theme, cx),
         theme,
         None,
+        copy,
     )
 }
 /// Render an ephemeral system notice — status toggles, slash-command acks.
@@ -1333,11 +1394,12 @@ pub fn render_error(
 /// fallback (the panel is mounted synchronously for every `Notice` item)
 /// renders plain text so the notice body never falls back to markdown
 /// interpretation.
-pub fn render_notice(
+pub(crate) fn render_notice(
     msg: &str,
     ix: usize,
     theme: &Theme,
     notice_panel: Option<Entity<TerminalPanel>>,
+    copy: &CopyFeedback,
     _cx: &mut App,
 ) -> gpui::AnyElement {
     render_banner(
@@ -1353,6 +1415,7 @@ pub fn render_notice(
             .unwrap_or_else(|| gpui::div().child(msg.to_string()).into_any_element()),
         theme,
         None,
+        copy,
     )
 }
 
@@ -1360,13 +1423,17 @@ pub fn render_notice(
 /// was folded into a handoff note. Collapsed by default; the summary body is
 /// model-generated markdown (not localized), only the title is. Toggling
 /// follows the same `user_toggled`-stamped pattern as reasoning blocks.
-pub fn render_recap(
+// Mirrors render_banner: each param maps to one card slot (summary/body,
+// collapsed/fold, copy); bundling would obscure the one call site.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_recap(
     summary: &str,
     collapsed: bool,
     ix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
     body: Option<Entity<Markdown>>,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let weak_workspace = tool_ctx.map(|c| c.weak.clone());
@@ -1410,6 +1477,7 @@ pub fn render_recap(
             collapsed,
             on_click,
         }),
+        copy,
     )
 }
 
@@ -1422,7 +1490,7 @@ pub fn render_recap(
 // Mirrors render_banner: each param maps to one banner slot (attempt/max/secs
 // for the badge, reason/detail for the body, collapsed/tool_ctx for the fold).
 #[allow(clippy::too_many_arguments)]
-pub fn render_retry(
+pub(crate) fn render_retry(
     attempt: u32,
     max_attempts: u32,
     delay_secs: u64,
@@ -1433,6 +1501,7 @@ pub fn render_retry(
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
     body: Option<Entity<Markdown>>,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let badge: SharedString = i18n::t_str(
@@ -1498,6 +1567,7 @@ pub fn render_retry(
         body_el,
         theme,
         collapsible,
+        copy,
     )
 }
 
@@ -2036,16 +2106,17 @@ pub(crate) fn render_ask_user_card(
     ix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let Some(ctx) = tool_ctx else {
-        return render_tool_call(item, ix, theme, tool_ctx, cx);
+        return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
     };
     let Some(snapshot) = ctx.ask.clone() else {
-        return render_tool_call(item, ix, theme, tool_ctx, cx);
+        return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
     };
     if item.status != ToolCallStatus::PendingApproval {
-        return render_tool_call(item, ix, theme, tool_ctx, cx);
+        return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
     }
 
     // One takeover, two presentations: a plan review is one decision over one
@@ -2588,11 +2659,12 @@ fn render_question_card(
 /// `AskUserQuestion` whose interactive snapshot is gone (and the defensive
 /// orphan in `render_item`'s ToolCall dispatch). Ordinary tool calls no longer
 /// reach this path — they fold into a `Thinking` batch via `render_thinking`.
-pub fn render_tool_call(
+pub(crate) fn render_tool_call(
     item: &ToolCallItem,
     ix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     use manox_agent::ToolCallStatus;
@@ -2692,6 +2764,7 @@ pub fn render_tool_call(
                     "copy-tool",
                     format!("tool-{ix}"),
                     item.output.clone(),
+                    copy,
                 ))
                 .child(
                     gpui::div()
@@ -4145,6 +4218,8 @@ mod tests {
                 recent_events: Vec::new(),
             });
             let theme = cx.theme().clone();
+            let copy_registry = CopiedRegistry::default();
+            let copy = CopyFeedback::inert(&copy_registry);
             gpui::div()
                 .id("message-overflow-probe")
                 .w(px(260.))
@@ -4167,6 +4242,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            &copy,
                             cx,
                         ))
                         .child(render_item(
@@ -4179,6 +4255,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            &copy,
                             cx,
                         ))
                         .child(render_item(
@@ -4191,6 +4268,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            &copy,
                             cx,
                         )),
                 )

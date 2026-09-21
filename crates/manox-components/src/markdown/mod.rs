@@ -39,19 +39,16 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClipboardItem, Element, ElementId, FocusHandle, FontWeight,
-    GlobalElementId, HighlightStyle, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Style, Window, div,
-    px, rems,
+    AbsoluteLength, AnyElement, App, Element, ElementId, FocusHandle, FontWeight, GlobalElementId,
+    HighlightStyle, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Style, WeakEntity, Window, div, px,
+    rems,
 };
 use gpui_component::highlighter::SyntaxHighlighter;
-use gpui_component::{
-    IconName, Sizable, Theme,
-    button::{Button, ButtonVariants},
-    h_flex, v_flex,
-};
+use gpui_component::{Theme, h_flex, v_flex};
 use ropey::Rope;
 
+use crate::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_button};
 use crate::markdown::ast::{Block, InlineRuns, LinkKind, LinkSpan, ListItem, TableAlign};
 use crate::markdown::incremental::IncrementalParser;
 use crate::markdown::rich_text::{CodeSpan, RichText};
@@ -94,6 +91,9 @@ pub struct Markdown {
     /// `body_size`. Headings resolve against it per `HeadingMode`.
     body_size: AbsoluteLength,
     selection: DocSelection,
+    /// Copy controls' copied-feedback state, keyed by each control's
+    /// `ElementId` (see `copy_feedback`).
+    copied: CopiedRegistry,
     /// Lazily created on first render so `new` needs no `cx` (callers construct
     /// `Markdown` inside `cx.new` and may not have a handle handy).
     focus: Option<FocusHandle>,
@@ -121,6 +121,7 @@ impl Markdown {
             heading_mode: HeadingMode::default(),
             body_size: rems(1.).into(),
             selection: DocSelection::new(),
+            copied: CopiedRegistry::default(),
             focus: None,
             link_opener: None,
         }
@@ -246,6 +247,12 @@ impl Markdown {
     }
 }
 
+impl CopyFeedbackHost for Markdown {
+    fn copied(&mut self) -> &mut CopiedRegistry {
+        &mut self.copied
+    }
+}
+
 impl Render for Markdown {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let mut styles = match self.styles.clone() {
@@ -293,6 +300,14 @@ impl Render for Markdown {
         }
 
         let mut cursor = 0usize;
+        let owner = cx.entity().downgrade();
+        let ctx = BlockCtx {
+            source: &self.source,
+            selection: &selection,
+            owner: &owner,
+            copied: &self.copied,
+            blockquote_depth: 0,
+        };
         for (i, block) in blocks_owned.into_iter().enumerate() {
             let is_last = streaming && i == block_count.saturating_sub(1);
             col = col.child(render_block(
@@ -302,7 +317,7 @@ impl Render for Markdown {
                 i,
                 is_last,
                 &mut cursor,
-                &selection,
+                &ctx,
             ));
         }
 
@@ -440,6 +455,23 @@ impl Element for Sentinel {
     }
 }
 
+/// The context every block renderer threads: the document the blocks were
+/// parsed from (block-carried source ranges slice against it), the shared
+/// document selection the block's text registers into, and the copy controls'
+/// feedback state — the registry read that lights a control and the owner its
+/// click reports to.
+#[derive(Clone, Copy)]
+struct BlockCtx<'a> {
+    source: &'a str,
+    selection: &'a DocSelection,
+    owner: &'a WeakEntity<Markdown>,
+    copied: &'a CopiedRegistry,
+    /// Enclosing blockquotes, counting the ones the block sits inside. A
+    /// table's source span keeps the continuation lines' `>` markers, so a
+    /// nonzero depth means the copy must strip them (see `table_block`).
+    blockquote_depth: usize,
+}
+
 fn render_block(
     block: Block,
     styles: &MdStyles,
@@ -447,11 +479,11 @@ fn render_block(
     idx: usize,
     streaming_tail: bool,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
     match block {
-        Block::Paragraph(runs) => paragraph(&runs, styles, streaming_tail, cursor, selection),
-        Block::Heading { runs, depth } => heading(&runs, mode, depth, styles, cursor, selection),
+        Block::Paragraph(runs) => paragraph(&runs, styles, streaming_tail, cursor, ctx),
+        Block::Heading { runs, depth } => heading(&runs, mode, depth, styles, cursor, ctx),
         Block::Code { lang, value } => code_block(
             &value,
             lang.as_deref(),
@@ -459,15 +491,17 @@ fn render_block(
             idx,
             streaming_tail,
             cursor,
-            selection,
+            ctx,
         ),
-        Block::Diff { value } => diff_block(&value, styles, idx, cursor, selection),
-        Block::Conflict { value } => conflict_block(&value, styles, idx, cursor, selection),
-        Block::Blockquote(inner) => blockquote(inner, styles, mode, idx, cursor, selection),
+        Block::Diff { value } => diff_block(&value, styles, idx, cursor, ctx),
+        Block::Conflict { value } => conflict_block(&value, styles, idx, cursor, ctx),
+        Block::Blockquote(inner) => blockquote(inner, styles, mode, idx, cursor, ctx),
         Block::List { ordered, items } => {
-            list_block(ordered, items, styles, mode, idx, cursor, selection)
+            list_block(ordered, items, styles, mode, idx, cursor, ctx)
         }
-        Block::Table { rows, align } => table_block(rows, align, styles, idx, cursor, selection),
+        Block::Table { rows, align, range } => {
+            table_block(rows, align, range, styles, idx, cursor, ctx)
+        }
         Block::ThematicBreak => div()
             .w_full()
             .h(px(1.))
@@ -506,7 +540,7 @@ fn paragraph(
     styles: &MdStyles,
     streaming_tail: bool,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
     let text = if streaming_tail {
         format!("{}▌", runs.text)
@@ -520,7 +554,7 @@ fn paragraph(
         .min_w_0()
         .overflow_hidden()
         .child(
-            RichText::new(text, doc_start, selection.clone())
+            RichText::new(text, doc_start, ctx.selection.clone())
                 .highlights(runs.highlights.clone())
                 .code_spans(code_spans(runs, styles))
                 .link_spans(link_spans(runs))
@@ -645,14 +679,14 @@ fn heading(
     depth: u8,
     styles: &MdStyles,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
     let doc_start = *cursor;
     *cursor += runs.text.len();
     mode.spec(depth)
         .apply(div().w_full().min_w_0().overflow_hidden())
         .child(
-            RichText::new(runs.text.clone(), doc_start, selection.clone())
+            RichText::new(runs.text.clone(), doc_start, ctx.selection.clone())
                 .highlights(runs.highlights.clone())
                 .code_spans(code_spans(runs, styles))
                 .link_spans(link_spans(runs))
@@ -675,7 +709,7 @@ fn code_block(
     idx: usize,
     transient: bool,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
     // Fenced-code values carry a trailing `\n` (the closing fence sits on its
     // own line); strip it so the gutter count and the painted run agree —
@@ -686,6 +720,7 @@ fn code_block(
     let gutter: String = (1..=line_count).map(|n| format!("{n:>3}\n")).collect();
     let gutter = gutter.trim_end_matches('\n');
     let group = format!("code-{idx}");
+    let copy_id: ElementId = ("code-copy", idx).into();
 
     let doc_start = *cursor;
     *cursor += value.len();
@@ -727,7 +762,7 @@ fn code_block(
                     RichText::new(
                         SharedString::from(value.to_string()),
                         doc_start,
-                        selection.clone(),
+                        ctx.selection.clone(),
                     )
                     .highlights(highlights)
                     .selection_bg(styles.selection_bg),
@@ -740,21 +775,14 @@ fn code_block(
                 .right_1()
                 .opacity(0.)
                 .group_hover(group, |s| s.opacity(1.))
-                .child(copy_button(idx, value.to_string())),
+                .child(copy_button(
+                    copy_id.clone(),
+                    value.to_string(),
+                    ctx.copied.is_active(&copy_id),
+                    ctx.owner.clone(),
+                )),
         )
         .into_any_element()
-}
-
-/// Copy-the-whole-block button: writes `text` to the clipboard on click.
-/// Revealed only while the enclosing `.group` is hovered.
-fn copy_button(idx: usize, text: String) -> Button {
-    Button::new(("code-copy", idx))
-        .ghost()
-        .xsmall()
-        .icon(IconName::Copy)
-        .on_click(move |_, _, cx: &mut App| {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-        })
 }
 
 /// Syntax highlighting for a code run, memoized by `(lang, content, theme)`.
@@ -804,7 +832,7 @@ fn diff_block(
     styles: &MdStyles,
     idx: usize,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
     let mut inner = v_flex().min_w_0();
     for (i, line) in value.lines().enumerate() {
@@ -829,7 +857,7 @@ fn diff_block(
                     RichText::new(
                         SharedString::from(line.to_string()),
                         doc_start,
-                        selection.clone(),
+                        ctx.selection.clone(),
                     )
                     .join_before(join_before)
                     .selection_bg(styles.selection_bg),
@@ -992,7 +1020,7 @@ fn conflict_block(
     styles: &MdStyles,
     idx: usize,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
     let value = value.trim_end_matches('\n');
     let mut inner = v_flex().min_w_0();
@@ -1014,7 +1042,7 @@ fn conflict_block(
                 RichText::new(
                     SharedString::from(line.to_string()),
                     doc_start,
-                    selection.clone(),
+                    ctx.selection.clone(),
                 )
                 .join_before(join_before)
                 .selection_bg(styles.selection_bg),
@@ -1048,7 +1076,7 @@ fn blockquote(
     mode: HeadingMode,
     idx: usize,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
     let mut col = v_flex()
         .id(("md-bq", idx))
@@ -1059,26 +1087,70 @@ fn blockquote(
         .pl_3()
         .gap_2();
     for (i, block) in inner.into_iter().enumerate() {
+        let inner_ctx = BlockCtx {
+            blockquote_depth: ctx.blockquote_depth + 1,
+            ..*ctx
+        };
         col = col.child(render_block(
-            block, styles, mode, i, false, cursor, selection,
+            block, styles, mode, i, false, cursor, &inner_ctx,
         ));
     }
     col.into_any_element()
+}
+
+/// Strip the leading blockquote markers (`>`, repeatedly for nesting, each
+/// with one optional space) from every line of a copied table slice. mdast
+/// spans quote children verbatim except for the first line's own marker, so a
+/// table inside a blockquote would otherwise copy out with `>` still on its
+/// continuation rows — not a valid GFM table when pasted. Table rows never
+/// begin with `>` themselves, so the strip cannot eat cell content.
+fn strip_quote_markers(slice: &str) -> String {
+    slice
+        .lines()
+        .map(|line| {
+            let mut rest = line;
+            loop {
+                let trimmed = rest.trim_start();
+                let Some(after) = trimmed.strip_prefix('>') else {
+                    break;
+                };
+                rest = after.strip_prefix(' ').unwrap_or(after);
+            }
+            rest
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// GFM table. Rows stretch to the scroll width so `flex_1` cells land in
 /// equal-width columns and align row-to-row; a per-cell `min_w` floor keeps
 /// wide tables from collapsing, overflowing horizontally into the scroll
 /// viewport instead of clipping. Every cell carries right + bottom borders so
-/// the grid is visible even on the transparent body rows.
+/// the grid is visible even on the transparent body rows. A hover-revealed
+/// button copies the table's own source markdown — the block-carried range
+/// sliced verbatim, so links, emphasis, and image targets survive exactly as
+/// written (the parsed cell text has already dropped them). Inside a
+/// blockquote the continuation lines' `>` markers are stripped so the pasted
+/// text re-parses as a table.
 fn table_block(
     rows: Vec<Vec<InlineRuns>>,
     align: Vec<TableAlign>,
+    range: Range<usize>,
     styles: &MdStyles,
     idx: usize,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
+    let group = format!("table-{idx}");
+    let copy_id: ElementId = ("table-copy", idx).into();
+    let mut table_md = ctx
+        .source
+        .get(range.clone())
+        .unwrap_or_default()
+        .to_string();
+    if ctx.blockquote_depth > 0 {
+        table_md = strip_quote_markers(&table_md);
+    }
     let mut scroll = v_flex()
         .id(("table", idx))
         .w_full()
@@ -1110,7 +1182,7 @@ fn table_block(
                 .border_b_1()
                 .border_color(styles.border)
                 .child(
-                    RichText::new(cell.text.clone(), doc_start, selection.clone())
+                    RichText::new(cell.text.clone(), doc_start, ctx.selection.clone())
                         .highlights(cell.highlights.clone())
                         .code_spans(code_spans(&cell, styles))
                         .link_spans(link_spans(&cell))
@@ -1133,6 +1205,8 @@ fn table_block(
         scroll = scroll.child(row_flex);
     }
     div()
+        .group(group.clone())
+        .relative()
         .w_full()
         .min_w_0()
         .rounded_md()
@@ -1140,6 +1214,20 @@ fn table_block(
         .border_1()
         .border_color(styles.border)
         .child(scroll)
+        .child(
+            div()
+                .absolute()
+                .top_1()
+                .right_1()
+                .opacity(0.)
+                .group_hover(group, |s| s.opacity(1.))
+                .child(copy_button(
+                    copy_id.clone(),
+                    table_md,
+                    ctx.copied.is_active(&copy_id),
+                    ctx.owner.clone(),
+                )),
+        )
         .into_any_element()
 }
 
@@ -1150,7 +1238,7 @@ fn list_block(
     mode: HeadingMode,
     idx: usize,
     cursor: &mut usize,
-    selection: &DocSelection,
+    ctx: &BlockCtx,
 ) -> AnyElement {
     // Vertical rhythm matches the document body: items (and the blocks inside
     // a multi-block item) sit gap_2 apart — the same paragraph gap the root
@@ -1177,7 +1265,7 @@ fn list_block(
     for (i, item) in items.into_iter().enumerate() {
         let mut item_col = v_flex().flex_1().min_w_0().gap_2();
         for (j, b) in item.blocks.into_iter().enumerate() {
-            item_col = item_col.child(render_block(b, styles, mode, j, false, cursor, selection));
+            item_col = item_col.child(render_block(b, styles, mode, j, false, cursor, ctx));
         }
         col = col.child(
             h_flex()
@@ -1220,6 +1308,24 @@ mod tests {
 
     fn styles() -> MdStyles {
         MdStyles::from_theme(&Theme::default())
+    }
+
+    #[test]
+    fn strip_quote_markers_yields_valid_gfm_for_quoted_tables() {
+        // The exact shape the review probed: mdast keeps the continuation
+        // lines' `>` markers inside the table span, which pastes as prose +
+        // quote lines, not a table.
+        assert_eq!(
+            strip_quote_markers("| a | b |\n> | --- | --- |\n> | 1 | 2 |"),
+            "| a | b |\n| --- | --- |\n| 1 | 2 |"
+        );
+        // Nested quotes and marker-without-space both unwrap fully; a top
+        // row is untouched (it never begins with `>`).
+        assert_eq!(
+            strip_quote_markers("> | a |\n> > | --- |"),
+            "| a |\n| --- |"
+        );
+        assert_eq!(strip_quote_markers("| x |\n>| --- |"), "| x |\n| --- |");
     }
 
     #[test]

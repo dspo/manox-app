@@ -79,7 +79,7 @@ impl IncrementalParser {
 
         if can_append {
             let tail = &full_text[self.frozen_offset..];
-            let tail_blocks = ast::parse_tail(tail);
+            let tail_blocks = ast::parse_tail(tail, self.frozen_offset);
             let mut combined: Vec<Block> =
                 Vec::with_capacity(self.frozen_blocks.len() + tail_blocks.len());
             combined.extend((*self.frozen_blocks).clone());
@@ -120,6 +120,9 @@ impl IncrementalParser {
     /// contain `\n\n` — that separator proves `block[i]` is complete and the
     /// tail re-parse will start cleanly at `block[i+1]`.
     ///
+    /// Tail positions are absolute in the full document (`parse_tail` shifts
+    /// them by the tail's base), so they index `full_text` directly.
+    ///
     /// Freeze guards:
     /// 1. **List guard**: never freeze right after a `List` block — a loose
     ///    list can be extended by a following same-marker item across a blank
@@ -139,13 +142,13 @@ impl IncrementalParser {
 
         for i in 0..tail_blocks.len() {
             let (_, _, end) = &tail_blocks[i];
-            let end_in_full = self.frozen_offset + *end;
+            let end_in_full = *end;
 
-            // The boundary candidate: start of the next block (in full doc
-            // coords). If this is the last tail block, the boundary is the
-            // end of the `\n\n` after this block (if any).
+            // The boundary candidate: start of the next block (absolute). If
+            // this is the last tail block, the boundary is the end of the
+            // `\n\n` after this block (if any).
             let boundary = if i + 1 < tail_blocks.len() {
-                self.frozen_offset + tail_blocks[i + 1].1
+                tail_blocks[i + 1].1
             } else {
                 // Last block: find the end of the `\n\n` separator after it.
                 match full_text[end_in_full..].find("\n\n") {
@@ -196,7 +199,7 @@ impl IncrementalParser {
     /// happened (non-append or fallback), so the extra `parse_tail` cost is on
     /// the full text and only for position data.
     fn freeze_prefix_full(&mut self, full_text: &str) {
-        let tail_blocks = ast::parse_tail(full_text);
+        let tail_blocks = ast::parse_tail(full_text, 0);
         let mut frozen_end = 0;
         let mut frozen_count = 0;
 

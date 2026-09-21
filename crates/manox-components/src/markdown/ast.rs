@@ -100,6 +100,15 @@ pub enum Block {
     Table {
         rows: Vec<Vec<InlineRuns>>,
         align: Vec<TableAlign>,
+        /// The table node's own source bytes — absolute offsets into the
+        /// document the block was parsed from (tail parses shift them by the
+        /// tail's base, so the range is valid against the full document at
+        /// every freeze state). This slice — not a re-serialization of `rows`
+        /// — is what the table's copy control hands to the clipboard: the
+        /// runs' text drops emphasis markers, link targets, and image sources,
+        /// so re-serializing it would silently lose them, while the source
+        /// slice re-parses to the identical table.
+        range: Range<usize>,
     },
     ThematicBreak,
 }
@@ -141,21 +150,28 @@ fn fallback_paragraph(src: &str) -> Vec<Block> {
 pub fn parse(src: &str) -> Vec<Block> {
     let opts = ParseOptions::gfm();
     match to_mdast_fenced(src, &opts) {
-        Some(Node::Root(root)) => root.children.iter().filter_map(block_of).collect(),
+        Some(Node::Root(root)) => root
+            .children
+            .iter()
+            .filter_map(|node| block_of(node, 0))
+            .collect(),
         _ => fallback_paragraph(src),
     }
 }
 
-/// Parse a *tail* slice of a streaming document independently. The offsets are
-/// relative to the tail (start at 0), not the full document — the incremental
-/// parser stitches frozen prefix blocks + tail blocks together. Returns each
-/// block alongside the mdast `position` start and end byte offsets of its
-/// top-level node, so the incrementer can locate the `\n\n` separator *between*
-/// blocks to advance the frozen boundary. Positions are populated by default in
-/// markdown-rs; note that mdast `position` does not include trailing inter-block
+/// Parse a *tail* slice of a streaming document independently. Offsets are
+/// shifted by `base` (the tail's start in the full document), so the returned
+/// positions are absolute in the full document — the incremental parser
+/// stitches frozen prefix blocks + tail blocks together without rewriting
+/// them, and block-carried source ranges (table copy) stay valid against the
+/// full text at every freeze state. Returns each block alongside the mdast
+/// `position` start and end byte offsets of its top-level node, so the
+/// incrementer can locate the `\n\n` separator *between* blocks to advance
+/// the frozen boundary. Positions are populated by default in markdown-rs;
+/// note that mdast `position` does not include trailing inter-block
 /// whitespace, so the `\n\n` separator lives in the gap between one block's
 /// `end` and the next block's `start`.
-pub(crate) fn parse_tail(src: &str) -> Vec<(Block, usize, usize)> {
+pub(crate) fn parse_tail(src: &str, base: usize) -> Vec<(Block, usize, usize)> {
     let opts = ParseOptions::gfm();
     match to_mdast_fenced(src, &opts) {
         Some(Node::Root(root)) => root
@@ -163,17 +179,16 @@ pub(crate) fn parse_tail(src: &str) -> Vec<(Block, usize, usize)> {
             .iter()
             .filter_map(|node| {
                 let pos = node.position();
-                let start = pos.map(|p| p.start.offset).unwrap_or(0);
-                let end = pos.map(|p| p.end.offset).unwrap_or(src.len());
-                block_of(node).map(|b| (b, start, end))
+                let start = base + pos.map(|p| p.start.offset).unwrap_or(0);
+                let end = base + pos.map(|p| p.end.offset).unwrap_or(src.len());
+                block_of(node, base).map(|b| (b, start, end))
             })
             .collect(),
         // Same fence as `parse`: the degraded tail is one paragraph block
-        // spanning the whole tail (positions relative to the tail, per the
-        // contract above).
+        // spanning the whole tail (positions absolute per the contract above).
         _ => fallback_paragraph(src)
             .into_iter()
-            .map(|b| (b, 0, src.len()))
+            .map(|b| (b, base, base + src.len()))
             .collect(),
     }
 }
@@ -187,7 +202,12 @@ pub(crate) fn is_list_block(b: &Block) -> bool {
     matches!(b, Block::List { .. })
 }
 
-pub(crate) fn block_of(node: &Node) -> Option<Block> {
+/// Build a manox block from an mdast node. `base` is the node's source offset
+/// within the document the block will live in — mdast positions are relative
+/// to the `src` handed to the parser, so a tail parse passes the tail's start
+/// and every block-carried source range (table copy) comes out absolute in
+/// the full document.
+pub(crate) fn block_of(node: &Node, base: usize) -> Option<Block> {
     match node {
         Node::Paragraph(p) => Some(Block::Paragraph(inline_of(&p.children))),
         Node::Heading(h) => Some(Block::Heading {
@@ -211,7 +231,10 @@ pub(crate) fn block_of(node: &Node) -> Option<Block> {
             }
         }
         Node::Blockquote(b) => Some(Block::Blockquote(
-            b.children.iter().filter_map(block_of).collect(),
+            b.children
+                .iter()
+                .filter_map(|n| block_of(n, base))
+                .collect(),
         )),
         Node::List(l) => {
             let items = l
@@ -220,7 +243,11 @@ pub(crate) fn block_of(node: &Node) -> Option<Block> {
                 .filter_map(|n| match n {
                     Node::ListItem(li) => Some(ListItem {
                         checked: li.checked,
-                        blocks: li.children.iter().filter_map(block_of).collect(),
+                        blocks: li
+                            .children
+                            .iter()
+                            .filter_map(|n| block_of(n, base))
+                            .collect(),
                     }),
                     _ => None,
                 })
@@ -248,9 +275,17 @@ pub(crate) fn block_of(node: &Node) -> Option<Block> {
                     _ => None,
                 })
                 .collect();
+            // Positions are populated by default in markdown-rs; a missing
+            // position (never observed) degrades to an empty copy rather than
+            // a wrong-slice copy.
+            let range = match node.position() {
+                Some(p) => base + p.start.offset..base + p.end.offset,
+                None => 0..0,
+            };
             Some(Block::Table {
                 rows,
                 align: t.align.iter().map(map_align).collect(),
+                range,
             })
         }
         // Tables, HTML, math, and MDX nodes arrive in later steps.
@@ -457,7 +492,7 @@ mod tests {
                 ),
                 other => panic!("parse({src:?}) must degrade to one paragraph, got {other:?}"),
             }
-            let tail = parse_tail(src);
+            let tail = parse_tail(src, 0);
             match tail.as_slice() {
                 [(Block::Paragraph(runs), 0, end)] => {
                     assert_eq!(runs.text, src);
@@ -595,6 +630,50 @@ mod tests {
             // children are header + one body row.
             Some(Block::Table { rows, .. }) => assert_eq!(rows.len(), 2),
             _ => panic!("expected table"),
+        }
+    }
+
+    #[test]
+    fn table_source_range_slices_verbatim_markdown() {
+        // The copy control hands out this slice, so it must be the table's own
+        // source bytes — emphasis markers, link targets, and escaped pipes
+        // exactly as written — not a re-serialization of the parsed cell text
+        // (the runs' text has already dropped all of those).
+        let src = "before\n\n| Name | [docs](https://e.com/a) |\n| --- | ---: |\n| **核心** | a \\| b |\n\nafter";
+        match &parse(src)[1] {
+            Block::Table { range, .. } => assert_eq!(
+                &src[range.clone()],
+                "| Name | [docs](https://e.com/a) |\n| --- | ---: |\n| **核心** | a \\| b |"
+            ),
+            other => panic!("expected table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tail_shifts_table_ranges_to_absolute_offsets() {
+        // Tail parses must shift positions by the tail's base so a block's
+        // source range stays valid against the full document at every freeze
+        // state — the incremental parser never rewrites frozen blocks.
+        let head = "intro\n\n";
+        let tail = "| a | b |\n| --- | --- |\n| 1 | 2 |";
+        let full = format!("{head}{tail}");
+        match &parse_tail(tail, head.len())[0].0 {
+            Block::Table { range, .. } => assert_eq!(&full[range.clone()], tail),
+            other => panic!("expected table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_source_range_excludes_surrounding_rows_and_trailing_newline() {
+        // mdast positions stop at the table's last character: the range must
+        // not swallow the next block or the trailing inter-block newline.
+        let src = "| a |\n| --- |\n| 1 |\n\nafter";
+        match &parse(src)[0] {
+            Block::Table { range, .. } => {
+                assert_eq!(&src[range.clone()], "| a |\n| --- |\n| 1 |");
+                assert!(src[range.end..].starts_with("\n\n"));
+            }
+            other => panic!("expected table, got {other:?}"),
         }
     }
 
