@@ -1100,3 +1100,34 @@ plugins-notice-plugin-enabled = 插件已启用。重启 manox 后会加载其�
 
 plugins-notice-plugin-disabled = 插件已禁用。重启 manox 后会卸载启动时加载的运行时注册表。
 
+
+## manox-agent-chrome-ui（应用壳：侧栏/标题栏/页签/底部面板）
+
+chrome-sessions-title = 会话
+chrome-new = 新建
+chrome-no-chats = 暂无会话
+chrome-customizations = 自定义
+chrome-row-pinned = 已置顶
+chrome-row-unread = 未读
+chrome-row-copy-id = 复制 Thread ID
+chrome-row-pin = 置顶
+chrome-row-unpin = 取消置顶
+chrome-row-archive = 归档
+chrome-picker-search = 搜索 session
+chrome-picker-empty = 无匹配 session
+chrome-tab-new-tab = 新标签页
+chrome-tab-retry = 重试
+chrome-titlebar-sync = Sync Changes
+chrome-panel-empty = 面板内容已关闭
+chrome-sidebar-automations = 自动化
+chrome-sidebar-chats = 对话
+chrome-sidebar-overview = 概览
+chrome-sidebar-plugins = 插件
+chrome-sidebar-mcp = MCP 服务器
+chrome-sidebar-skills = 技能
+chrome-tab-terminal = 终端
+chrome-tab-browser = 浏览器
+chrome-quick-terminal = 打开集成终端
+chrome-quick-browser = 打开集成浏览器
+chrome-quick-agent = 打开 { $agent }
+chrome-spawn-failed = 无法启动 { $prog }：{ $err }

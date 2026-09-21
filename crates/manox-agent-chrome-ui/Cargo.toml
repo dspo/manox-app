@@ -1,0 +1,42 @@
+[package]
+name = "manox-agent-chrome-ui"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "manox_agent_chrome_ui"
+path = "src/lib.rs"
+
+# Visual acceptance (harness=false so it runs on the main thread; MacPlatform
+# requires it for offscreen rendering).
+[[test]]
+name = "visual"
+harness = false
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+# Chrome text is app chrome by definition, so the crate resolves its own
+# labels through the shared bundles (zh-CN primary, en fallback).
+manox-i18n.workspace = true
+
+[dev-dependencies]
+# Example + visual harness wire real content: the manox thread store for the
+# sidebar, a PTY terminal and a native webview as tool tabs. None of these
+# leak into the library's dependency surface — the lib stays data-free.
+manox-agent.workspace = true
+manox-terminal.workspace = true
+terminal-ui.workspace = true
+manox-webview.workspace = true
+rust-embed.workspace = true
+anyhow.workspace = true
+image.workspace = true
+gpui_platform.workspace = true
+# test-support must also reach the macOS platform layer: render_to_image's
+# implementation is cfg-gated there.
+gpui = { workspace = true, features = ["test-support"] }
+gpui-pre-macos = { version = "=0.3.4", features = ["test-support"] }
+
+[lints.clippy]
+dbg_macro = "deny"
