@@ -35,7 +35,7 @@ pub(super) enum QueueDragEdge {
 /// carries the insertion line, and which edge that is (the sidebar's
 /// `RowDrag` shape, index-keyed).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct QueueRowDrag {
+pub(crate) struct QueueRowDrag {
     pub(super) dragged: usize,
     pub(super) line_on: usize,
     pub(super) edge: QueueDragEdge,
@@ -91,22 +91,23 @@ impl Workspace {
     ) -> AnyElement {
         // Flip the composer placeholder only on mode transitions, so render
         // doesn't churn the InputState every frame.
-        let followup_mode = running && self.pending_ask.is_none() && self.pending_auth.is_none();
-        let placeholder_mode = if self.pending_ask.is_some() {
+        let followup_mode =
+            running && self.chat.pending_ask.is_none() && self.chat.pending_auth.is_none();
+        let placeholder_mode = if self.chat.pending_ask.is_some() {
             ComposerPlaceholderMode::Ask
         } else if followup_mode {
             ComposerPlaceholderMode::FollowUp
         } else {
             ComposerPlaceholderMode::Normal
         };
-        if placeholder_mode != self.composer_placeholder_mode {
-            self.composer_placeholder_mode = placeholder_mode;
+        if placeholder_mode != self.chat.composer_placeholder_mode {
+            self.chat.composer_placeholder_mode = placeholder_mode;
             let key = match placeholder_mode {
                 ComposerPlaceholderMode::Normal => "workspace-input-placeholder",
                 ComposerPlaceholderMode::FollowUp => "composer-placeholder-followup",
                 ComposerPlaceholderMode::Ask => "workspace-ask-supplement-placeholder",
             };
-            self.input_state.update(cx, |state, cx| {
+            self.chat.input_state.update(cx, |state, cx| {
                 state.set_placeholder(i18n::t(key), window, cx);
             });
         }
@@ -160,13 +161,14 @@ impl Workspace {
                 } else {
                     let text = clipboard.text().unwrap_or_default();
                     if !text.is_empty() {
-                        this.input_state
+                        this.chat
+                            .input_state
                             .update(cx, |state, cx| state.replace(text, window, cx));
                         this.sync_completion(window, cx);
                     }
                 }
             }))
-            .when(self.pending_ask.is_some(), |this| {
+            .when(self.chat.pending_ask.is_some(), |this| {
                 this.child(
                     gpui::div()
                         .text_xs()
@@ -195,9 +197,9 @@ impl Workspace {
                         // (`composer > Input` on alt-up / alt-down) hang off.
                         // The bare arrows stay with the Input's native
                         // MoveUp/MoveDown in every composer state.
-                        .key_context(composer_key_context(self.completion.is_some()));
+                        .key_context(composer_key_context(self.chat.completion.is_some()));
                     wrap.child(
-                        Textarea::new(&self.input_state)
+                        Textarea::new(&self.chat.input_state)
                             .appearance(false)
                             .text_size(crate::views::message::MESSAGE_BODY_SIZE),
                     )
@@ -255,8 +257,8 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let mut rows = Vec::with_capacity(self.queued_follow_ups.len());
-        for (idx, item) in self.queued_follow_ups.iter().enumerate() {
+        let mut rows = Vec::with_capacity(self.chat.queued_follow_ups.len());
+        for (idx, item) in self.chat.queued_follow_ups.iter().enumerate() {
             let line = queue_row_line(&item.turn.text);
             let is_pending = matches!(item.state, FollowUpState::SteerPending { .. });
             let danger = matches!(item.state, FollowUpState::Failed);
@@ -398,9 +400,10 @@ impl Workspace {
                 .border_b_1()
                 .border_color(theme.border.opacity(0.6))
                 .when(danger, |row| row.bg(theme.danger.opacity(0.08)))
-                .when(self.queue_drag.is_some_and(|d| d.dragged == idx), |row| {
-                    row.opacity(0.4)
-                })
+                .when(
+                    self.chat.queue_drag.is_some_and(|d| d.dragged == idx),
+                    |row| row.opacity(0.4),
+                )
                 .on_drag_move::<DraggedQueueRow>(cx.listener(
                     move |this, e: &gpui::DragMoveEvent<DraggedQueueRow>, _, cx| {
                         let Some(edge) = queue_drag_boundary(
@@ -415,8 +418,8 @@ impl Workspace {
                             line_on: idx,
                             edge,
                         };
-                        if this.queue_drag != Some(marker) {
-                            this.queue_drag = Some(marker);
+                        if this.chat.queue_drag != Some(marker) {
+                            this.chat.queue_drag = Some(marker);
                             cx.notify();
                         }
                     },
@@ -435,7 +438,7 @@ impl Workspace {
         }
         // Insertion marker: accent hairline between rows while dragging.
         let mut with_marker = Vec::with_capacity(rows.len());
-        if let Some(drag) = self.queue_drag {
+        if let Some(drag) = self.chat.queue_drag {
             for (i, row) in rows.into_iter().enumerate() {
                 if drag.line_on == i {
                     if matches!(drag.edge, QueueDragEdge::Top) {
@@ -474,6 +477,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let (active, pending) = self
+            .chat
             .store
             .as_ref()
             .map(|s| {
@@ -571,7 +575,7 @@ impl Workspace {
     /// pinned model/send controls. Copy is keyed per reason via
     /// `indicator_key()`.
     fn render_follow_stop_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let stop = self.store.as_ref()?.read(cx).follow_stop()?;
+        let stop = self.chat.store.as_ref()?.read(cx).follow_stop()?;
         Some(
             h_flex()
                 .id("follow-stop-projection")
@@ -589,7 +593,7 @@ impl Workspace {
                     Tooltip::new(i18n::t("follow-stop-indicator-retry")).build(window, cx)
                 })
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    let Some(store) = this.store.clone() else {
+                    let Some(store) = this.chat.store.clone() else {
                         return;
                     };
                     store.update(cx, |handle, cx| handle.retry_follow(cx));
@@ -629,11 +633,12 @@ impl Workspace {
         // permission mode through `ClientStore::with` instead of reaching the
         // field directly.
         let mode = self
+            .chat
             .store
             .as_ref()
             .map(|s| s.read(cx).store.with(|st| st.permission_mode))
             .expect("foreground store present");
-        let open = self.access_open;
+        let open = self.chat.access_open;
         // Pre-extract chip visuals so the click handler closure doesn't
         // capture `theme` (which only lives for the method body) — closures
         // passed to `cx.listener` must be `'static`.
@@ -668,10 +673,10 @@ impl Workspace {
                 .text_color(theme.muted_foreground),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                if this.access_open {
+                if this.chat.access_open {
                     this.close_access_menu();
                 } else {
-                    this.access_open = true;
+                    this.chat.access_open = true;
                 }
                 cx.notify();
             }));
@@ -726,7 +731,7 @@ impl Workspace {
             .icon(IconName::Plus)
             .tooltip(i18n::t("composer-add-label"))
             .on_click(cx.listener(|this, _, window, cx| {
-                if this.plus_open {
+                if this.chat.plus_open {
                     this.close_plus_menu();
                 } else {
                     this.open_plus_menu(window, cx);
@@ -734,10 +739,10 @@ impl Workspace {
                 cx.notify();
             }));
 
-        if !self.plus_open {
+        if !self.chat.plus_open {
             return trigger.into_any_element();
         }
-        let Some(menu) = self.plus_menu.clone() else {
+        let Some(menu) = self.chat.plus_menu.clone() else {
             return trigger.into_any_element();
         };
         gpui::div()
@@ -782,7 +787,7 @@ impl Workspace {
                 move |window, cx| {
                     let _ = ws_goal.update(cx, |this, cx| {
                         this.close_plus_menu();
-                        this.input_state.update(cx, |state, cx| {
+                        this.chat.input_state.update(cx, |state, cx| {
                             state.set_value("/goal ".to_string(), window, cx);
                         });
                         cx.notify();
@@ -812,9 +817,9 @@ impl Workspace {
             this.close_plus_menu();
             cx.notify();
         });
-        self.plus_open = true;
-        self.plus_menu = Some(menu);
-        self.plus_menu_sub = Some(sub);
+        self.chat.plus_open = true;
+        self.chat.plus_menu = Some(menu);
+        self.chat.plus_menu_sub = Some(sub);
     }
 
     /// Activate a browser tool suite on the bound thread. The chip is
@@ -839,7 +844,9 @@ impl Workspace {
             // Landing thread (no session yet): park the toggle in the
             // facade mirror — `ensure_engine` replays it on materialization
             // (the designed landing-park path, not a dual-source write).
-            self.thread.with_mut(|t| t.set_browser_suite(suite, true));
+            self.chat
+                .thread
+                .with_mut(|t| t.set_browser_suite(suite, true));
         }
     }
 
@@ -857,7 +864,9 @@ impl Workspace {
             suite: suite.wire().to_string(),
             enable: false,
         }) {
-            self.thread.with_mut(|t| t.set_browser_suite(suite, false));
+            self.chat
+                .thread
+                .with_mut(|t| t.set_browser_suite(suite, false));
         }
     }
 
@@ -876,7 +885,9 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 if let Ok(Ok(Some(paths))) = result {
                     for path in paths {
-                        this.pending_attachments.push(PendingAttachment::new(path));
+                        this.chat
+                            .pending_attachments
+                            .push(PendingAttachment::new(path));
                     }
                     cx.notify();
                 }
@@ -887,9 +898,9 @@ impl Workspace {
     }
 
     pub(super) fn close_plus_menu(&mut self) {
-        self.plus_open = false;
-        self.plus_menu = None;
-        self.plus_menu_sub = None;
+        self.chat.plus_open = false;
+        self.chat.plus_menu = None;
+        self.chat.plus_menu_sub = None;
     }
 
     /// The send/stop control's single click dispatch. The running edge is
@@ -900,7 +911,7 @@ impl Workspace {
     pub(crate) fn send_button_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A click with no foreground store is the teardown window: leave a
         // trace and drop the note, never a panic on the click path.
-        let Some(running) = self.store.as_ref().map(|s| s.read(cx).store.running) else {
+        let Some(running) = self.chat.store.as_ref().map(|s| s.read(cx).store.running) else {
             tracing::warn!("send/stop dropped: no foreground store bound");
             return;
         };
@@ -979,7 +990,7 @@ impl Workspace {
     /// position correctly and gets clipped by the body wrapper's `overflow_hidden`.
     /// A click on a row confirms it.
     pub(super) fn render_completion_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let state = self.completion.as_ref()?;
+        let state = self.chat.completion.as_ref()?;
         let theme = cx.theme().clone();
         let on_select = cx.listener(|this, ix: &usize, window, cx| {
             this.completion_confirm(*ix, window, cx);
@@ -1010,31 +1021,31 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.pending_attachments.is_empty() && self.active_browser_suites.is_empty() {
+        if self.chat.pending_attachments.is_empty() && self.chat.active_browser_suites.is_empty() {
             return None;
         }
         let mut col = v_flex().w_full().gap_1();
-        if !self.pending_attachments.is_empty() {
+        if !self.chat.pending_attachments.is_empty() {
             let on_remove = cx.listener(|this, ix: &usize, _window, cx| {
-                if *ix < this.pending_attachments.len() {
-                    this.pending_attachments.remove(*ix);
+                if *ix < this.chat.pending_attachments.len() {
+                    this.chat.pending_attachments.remove(*ix);
                     cx.notify();
                 }
             });
             col = col.child(centered(render_attachment_chips(
-                &self.pending_attachments,
+                &self.chat.pending_attachments,
                 theme,
                 move |ix, window, cx| on_remove(&ix, window, cx),
             )));
         }
-        if !self.active_browser_suites.is_empty() {
+        if !self.chat.active_browser_suites.is_empty() {
             let on_remove_suite = cx.listener(|this, ix: &usize, _window, cx| {
-                if let Some(suite) = this.active_browser_suites.get(*ix).copied() {
+                if let Some(suite) = this.chat.active_browser_suites.get(*ix).copied() {
                     this.deactivate_browser_tool_suite(suite, cx);
                 }
             });
             col = col.child(centered(render_browser_chips(
-                &self.active_browser_suites,
+                &self.chat.active_browser_suites,
                 theme,
                 move |ix, window, cx| on_remove_suite(&ix, window, cx),
             )));
@@ -1052,20 +1063,20 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let project = self.store.as_ref().and_then(|s| {
+        let project = self.chat.store.as_ref().and_then(|s| {
             s.read(cx)
                 .store
                 .project
                 .clone()
                 .map(std::path::PathBuf::from)
         });
-        let open = self.project_chip_open;
+        let open = self.chat.project_chip_open;
         let workspace = cx.entity().downgrade();
 
         // The directory identity is the workspace row accounting this
         // session (dsh parity); the session's own project mirror is the
         // fallback for sessions no row accounts (loose).
-        let row = self.store.as_ref().and_then(|s| {
+        let row = self.chat.store.as_ref().and_then(|s| {
             let session_id = s.read(cx).session_id().to_string();
             self.multiplexer
                 .read(cx)
@@ -1116,13 +1127,14 @@ impl Workspace {
                 .text_color(theme.muted_foreground),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                if this.project_chip_open {
+                if this.chat.project_chip_open {
                     this.close_project_chip_menu();
                     cx.notify();
                     return;
                 }
                 // Only allow project selection on empty threads.
                 let can_set = this
+                    .chat
                     .store
                     .as_ref()
                     .map(|s| s.read(cx).store.derived_messages().is_empty())
@@ -1130,7 +1142,7 @@ impl Workspace {
                 if !can_set {
                     return;
                 }
-                this.project_chip_open = true;
+                this.chat.project_chip_open = true;
 
                 let ws = workspace.clone();
                 let theme = cx.theme().clone();
@@ -1274,8 +1286,8 @@ impl Workspace {
                         cx.notify();
                     },
                 );
-                this.project_chip_menu = Some(menu);
-                this.project_chip_menu_sub = Some(sub);
+                this.chat.project_chip_menu = Some(menu);
+                this.chat.project_chip_menu_sub = Some(sub);
                 cx.notify();
             }));
 
@@ -1284,6 +1296,7 @@ impl Workspace {
         }
 
         let menu = self
+            .chat
             .project_chip_menu
             .clone()
             .expect("project_chip_menu exists when open");
@@ -1315,10 +1328,10 @@ impl Workspace {
 
     /// Open the blank-project flow: pick a parent directory, then prompt for name.
     pub(super) fn open_blank_project(&mut self, cx: &mut Context<Self>) {
-        if self.project_picker_pending {
+        if self.chat.project_picker_pending {
             return;
         }
-        self.project_picker_pending = true;
+        self.chat.project_picker_pending = true;
         let dir = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
@@ -1328,12 +1341,12 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = dir.await;
             this.update(cx, |this, cx| {
-                this.project_picker_pending = false;
+                this.chat.project_picker_pending = false;
                 if let Ok(Ok(Some(paths))) = result
                     && let Some(parent) = paths.into_iter().next()
                 {
-                    this.blank_project_parent = Some(parent);
-                    this.blank_project_name_input = None;
+                    this.chat.blank_project_parent = Some(parent);
+                    this.chat.blank_project_name_input = None;
                     cx.notify();
                 }
             })
@@ -1348,27 +1361,28 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.blank_project_parent.is_none() {
+        if self.chat.blank_project_parent.is_none() {
             return;
         }
-        if self.blank_project_name_input.is_some() {
+        if self.chat.blank_project_name_input.is_some() {
             return;
         }
-        self.blank_project_name_input = Some(cx.new(|cx| InputState::new(window, cx)));
+        self.chat.blank_project_name_input = Some(cx.new(|cx| InputState::new(window, cx)));
     }
 
     /// Submit the blank project: create the directory and bind it.
     pub(super) fn confirm_blank_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(parent) = self.blank_project_parent.take() else {
+        let Some(parent) = self.chat.blank_project_parent.take() else {
             return;
         };
         let name = self
+            .chat
             .blank_project_name_input
             .as_ref()
             .map(|s| s.read(cx).value().trim().to_string())
             .unwrap_or_default();
         if name.is_empty() {
-            self.blank_project_parent = Some(parent);
+            self.chat.blank_project_parent = Some(parent);
             return;
         }
         let new_path = parent.join(&name);
@@ -1382,23 +1396,23 @@ impl Workspace {
             cwd: new_path.to_str().unwrap_or_default().into(),
         });
         Self::register_project_in_store(&new_path, cx);
-        self.blank_project_name_input = None;
+        self.chat.blank_project_name_input = None;
         cx.notify();
     }
 
     /// Cancel the blank project overlay.
     pub(super) fn cancel_blank_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.blank_project_parent = None;
-        self.blank_project_name_input = None;
+        self.chat.blank_project_parent = None;
+        self.chat.blank_project_name_input = None;
         cx.notify();
     }
 
     /// Shared inner logic for "Select folder" (directory picker → bind project).
     pub(super) fn choose_project_inner(&mut self, cx: &mut Context<Self>) {
-        if self.project_picker_pending {
+        if self.chat.project_picker_pending {
             return;
         }
-        self.project_picker_pending = true;
+        self.chat.project_picker_pending = true;
         let dir = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
@@ -1409,7 +1423,7 @@ impl Workspace {
             let result = dir.await;
             this.update(cx, |this, cx| {
                 tracing::info!(?result, "project picker completed");
-                this.project_picker_pending = false;
+                this.chat.project_picker_pending = false;
                 if let Ok(Ok(Some(paths))) = result
                     && let Some(path) = paths.into_iter().next()
                 {
@@ -1438,7 +1452,7 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let auth = self.pending_auth.as_ref()?;
+        let auth = self.chat.pending_auth.as_ref()?;
         let detail = if auth.summary.trim().is_empty() {
             format!("{} · {}", auth.tool_name, i18n::t("pending-auth-waiting"))
         } else {
@@ -1519,12 +1533,13 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.pending_ask.is_some() || self.pending_auth.is_some() {
+        if self.chat.pending_ask.is_some() || self.chat.pending_auth.is_some() {
             return None;
         }
-        self.blank_project_parent.as_ref()?;
-        let input = self.blank_project_name_input.as_ref()?;
+        self.chat.blank_project_parent.as_ref()?;
+        let input = self.chat.blank_project_name_input.as_ref()?;
         let parent_name = self
+            .chat
             .blank_project_parent
             .as_ref()
             .and_then(|p| p.file_name())

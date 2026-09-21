@@ -14,7 +14,8 @@ use super::*;
 impl Workspace {
     /// Plan mode active on the current thread (drives the composer chip).
     pub(crate) fn thread_plan_mode(&self, cx: &mut Context<Self>) -> bool {
-        self.store
+        self.chat
+            .store
             .as_ref()
             .map(|s| s.read(cx).store.plan_mode)
             .expect("foreground store present")
