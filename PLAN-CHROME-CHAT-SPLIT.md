@@ -1,11 +1,18 @@
 # 拆分计划：manox-agent-chrome-ui + manox-agent-chat-ui
 
-> 状态：**Phase 3 主体已落地**（2026-09-21，`manox-agent-chrome-ui` crate + example
-> shell + 离屏视觉验收，PR `feat/chrome-crate`；实施顺序相对 D4 提前——本阶段
-> 要求可见 UI 闭环，Phase 1/2 的 chat 拆分仍按原计划后行）。其余阶段未开工。
+> 状态：**Phase 3 与 Phase 1 均已落地**（2026-09-21：Phase 3 = PR #58
+> `feat/chrome-crate`，chrome crate + example + 离屏验收，顺序相对 D4 提前；
+> Phase 1 = PR #59 `feat/chat-column-split`，ChatColumn 56 字段结构体拆分，
+> 零视觉变化——实体化与 ChatHost 端口随 Phase 2 落地）。Phase 2/4 未开工。
 > 开工前如与现状冲突，以代码为准并回改本文。
 > 壳子来源仓：`~/projects/dspo/agents-window-gpui`（gpui 像素级复刻 VS Code 1.139
 > Agents Window；commit 见该仓 git log，搬运时以其 HEAD 为准再核对一遍差异）。
+
+> Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
+> 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
+> 推迟至 Phase 2（嵌入结构体阶段无跨实体调用面，先立必为死代码）；顺带发现
+> main 预存 test-support 套件失败（ask_card_synthesized…，非确定性断言，基线
+> 同样失败，默认门禁看不见——#52/#56 同类坑）。
 
 > Phase 3 落地差异记录（相对 §5 原案）：chrome lib 依赖面比原案更紧——
 > **不含** terminal-ui / manox-webview（ToolTab 实现归装配层，经 dev-deps 供
