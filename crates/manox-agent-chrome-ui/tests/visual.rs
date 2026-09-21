@@ -50,7 +50,7 @@ fn main() {
 
     let handle = cx
         .open_offscreen_window(size(px(1280.), px(820.)), |window, cx| {
-            let main: AnyView = cx.new(|cx| ChatPreviewStub::new(cx)).into();
+            let main: AnyView = cx.new(ChatPreviewStub::new).into();
             let shell = cx.new(|cx| Shell::new(shell_config(main), window, cx));
             shell.update(cx, |shell, _cx| {
                 shell.set_sessions(snapshot_rows());

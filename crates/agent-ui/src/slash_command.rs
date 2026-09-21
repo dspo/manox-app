@@ -449,7 +449,7 @@ impl SlashCommand for CompactCommand {
         } else {
             Some(trimmed.to_string())
         };
-        let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Compact {
+        let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Compact {
             session_id: sid.into(),
             instructions,
         });
@@ -488,12 +488,13 @@ impl SlashCommand for GoalCommand {
         // `edit_goal` overwrites objective/budget/rounds in place.
         let current_goal: Option<manox_agent::goal::ThreadGoal> = workspace
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.goal.as_ref())
             .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v.clone()).ok());
         if let Some(objective) = trimmed.strip_prefix("replace ").map(str::trim) {
-            let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Goal {
+            let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
                 session_id: sid.into(),
                 action: "replace".into(),
                 objective: Some(objective.to_string()),
@@ -507,7 +508,7 @@ impl SlashCommand for GoalCommand {
                 .as_ref()
                 .map(|g| (g.token_budget, g.max_rounds))
                 .unwrap_or((None, None));
-            let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Goal {
+            let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
                 session_id: sid.into(),
                 action: "edit".into(),
                 objective: Some(objective.to_string()),
@@ -524,7 +525,7 @@ impl SlashCommand for GoalCommand {
             };
             let objective = current_goal.as_ref().map(|g| g.objective.clone());
             let max_rounds = current_goal.as_ref().and_then(|g| g.max_rounds);
-            let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Goal {
+            let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
                 session_id: sid.into(),
                 action: "edit".into(),
                 objective,
@@ -541,7 +542,7 @@ impl SlashCommand for GoalCommand {
             };
             let objective = current_goal.as_ref().map(|g| g.objective.clone());
             let budget = current_goal.as_ref().and_then(|g| g.token_budget);
-            let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Goal {
+            let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
                 session_id: sid.into(),
                 action: "edit".into(),
                 objective,
@@ -560,7 +561,7 @@ impl SlashCommand for GoalCommand {
                 SlashResult::Handled
             }
             "clear" => {
-                let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Goal {
+                let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
                     session_id: sid.into(),
                     action: "clear".into(),
                     objective: None,
@@ -571,7 +572,7 @@ impl SlashCommand for GoalCommand {
                 SlashResult::Handled
             }
             "pause" | "stop" => {
-                let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Goal {
+                let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
                     session_id: sid.into(),
                     action: "pause".into(),
                     objective: None,
@@ -581,7 +582,7 @@ impl SlashCommand for GoalCommand {
                 SlashResult::Handled
             }
             "resume" => {
-                let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Goal {
+                let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
                     session_id: sid.into(),
                     action: "resume".into(),
                     objective: None,
@@ -607,7 +608,7 @@ impl SlashCommand for GoalCommand {
                     workspace.begin_goal_replace_with_objective(trimmed, window, cx);
                     return SlashResult::Handled;
                 }
-                let _ = workspace.send_note(|sid| manox_protocol::ClientNote::Goal {
+                let _ = workspace.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
                     session_id: sid.into(),
                     action: "create".into(),
                     objective: Some(trimmed.to_string()),

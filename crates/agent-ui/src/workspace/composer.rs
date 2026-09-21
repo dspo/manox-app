@@ -46,24 +46,32 @@ impl Workspace {
     /// parked thread has no optimistic bubble, so no echo is pushed — the
     /// origin_rpc still rides the Submit for the entry correlation.
     /// `SteerPending`/`Failed` cards stay parked for the user.
-    pub(super) fn flush_parked_follow_ups(&mut self, thread_id: &str, _cx: &mut Context<Self>) {
-        let Some(queue) = self.chat.queued_follow_ups_by_thread.get_mut(thread_id) else {
+    pub(super) fn flush_parked_follow_ups(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        let Some(mut queue) = self.chat.update(cx, |chat, cc| {
+            let v = chat.queued_follow_ups_by_thread.remove(thread_id);
+            cc.notify();
+            v
+        }) else {
             return;
         };
-        let mut retain: std::collections::VecDeque<QueuedFollowUp> =
-            std::collections::VecDeque::new();
         let mut drained: Vec<DeferredUserTurn> = Vec::new();
-        while let Some(item) = queue.pop_front() {
-            if matches!(&item.state, FollowUpState::Queued) {
-                drained.push(item.turn);
-            } else {
-                retain.push_back(item);
+        // Rotate exactly the seeded length once: draining cards leave, parked
+        // cards (Failed / SteerPending) ride around back to their order.
+        for _ in 0..queue.len() {
+            if let Some(item) = queue.pop_front() {
+                if matches!(&item.state, FollowUpState::Queued) {
+                    drained.push(item.turn);
+                } else {
+                    queue.push_back(item);
+                }
             }
         }
-        if retain.is_empty() {
-            self.chat.queued_follow_ups_by_thread.remove(thread_id);
-        } else {
-            *queue = retain;
+        if !queue.is_empty() {
+            self.chat.update(cx, |chat, cc| {
+                chat.queued_follow_ups_by_thread
+                    .insert(thread_id.to_string(), queue);
+                cc.notify();
+            });
         }
         if drained.is_empty() {
             return;
@@ -103,31 +111,40 @@ impl Workspace {
         // and HEAD already carried an unwritten (default `Ready`) phase.
         // Successor gate (when §K.5 lands): a "no snapshot yet" flag on the
         // v2 fold.
-        let text = self.chat.input_state.read(cx).value().to_string();
-        let attachments = std::mem::take(&mut self.chat.pending_attachments);
-        if self.chat.pending_ask.is_some() {
-            self.chat.pending_attachments = attachments;
+        let text = self.chat_input(cx).read(cx).value().to_string();
+        let attachments = self.chat.update(cx, |chat, cc| {
+            let v = std::mem::take(&mut chat.pending_attachments);
+            cc.notify();
+            v
+        });
+        if self.chat.read(cx).pending_ask.is_some() {
+            self.chat.update(cx, |chat, cx| {
+                chat.pending_attachments = attachments;
+                cx.notify();
+            });
             // A send/Enter while an ask card is up submits the card, not a
             // message: the tri-state answers are collected from the card's own
             // per-question selections + custom inputs (there is no card-level
             // composer override any more — B2-PR-1 retired the whole-card
             // `response` free text). The composer text is a supplement the user
             // may type but it no longer rides the answer.
-            if !text.trim().is_empty() || self.pending_ask_has_selection() {
+            if !text.trim().is_empty() || self.pending_ask_has_selection(cx) {
                 // Completeness gate (dsh `submitDrafts` parity): a question
                 // that was never touched must not silently fold to a skip.
                 // The walk jumps to the first incomplete question — the blank
                 // card IS the feedback — and the composer text survives.
-                if let Some(missing) = self.first_incomplete_ask_question() {
-                    self.chat.ask_step = missing;
+                if let Some(missing) = self.first_incomplete_ask_question(cx) {
+                    self.chat.update(cx, |chat, cx| {
+                        chat.ask_step = missing;
+                        cx.notify();
+                    });
                     cx.notify();
                     return;
                 }
-                self.chat
-                    .input_state
+                self.chat_input(cx)
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 // Submitting ends the walk: nothing is left to return to.
-                self.end_recall_walk();
+                self.end_recall_walk(cx);
                 self.close_completion(cx);
                 self.resolve_ask(cx);
             }
@@ -139,19 +156,23 @@ impl Workspace {
         // dropped. A message submitted while a turn is running is *not* dropped
         // here — it is routed through `send_user_turn`, which enqueues it as a
         // follow-up instead of interrupting the running turn.
-        if (text.trim().is_empty() && attachments.is_empty()) || self.chat.project_picker_pending {
+        if (text.trim().is_empty() && attachments.is_empty())
+            || self.chat.read(cx).project_picker_pending
+        {
             tracing::info!(
-                pending_picker = self.chat.project_picker_pending,
+                pending_picker = self.chat.read(cx).project_picker_pending,
                 "submit swallowed by composer guard"
             );
-            self.chat.pending_attachments = attachments;
+            self.chat.update(cx, |chat, cx| {
+                chat.pending_attachments = attachments;
+                cx.notify();
+            });
             return;
         }
-        self.chat
-            .input_state
+        self.chat_input(cx)
             .update(cx, |state, cx| state.set_value("", window, cx));
         // Submitting ends the walk: nothing is left to return to.
-        self.end_recall_walk();
+        self.end_recall_walk(cx);
         self.close_completion(cx);
 
         // Slash commands (line-initial `/name [args]`) are intercepted before
@@ -169,6 +190,7 @@ impl Workspace {
         // end.
         let running = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
@@ -267,10 +289,11 @@ impl Workspace {
     /// Stage a clipboard image as a pending attachment chip. Resize happens
     /// off-thread on submit; here we only record the image and re-render.
     pub(super) fn handle_pasted_image(&mut self, image: gpui::Image, cx: &mut Context<Self>) {
-        self.chat
-            .pending_attachments
-            .push(PendingAttachment::ClipboardImage(image));
-        cx.notify();
+        self.chat.update(cx, |chat, cc| {
+            chat.pending_attachments
+                .push(PendingAttachment::ClipboardImage(image));
+            cc.notify();
+        });
     }
 
     /// Run a markdown prompt-macro slash turn (`/gitwork:deliver args`).
@@ -308,12 +331,18 @@ impl Workspace {
         // showing the compact `/key args` invocation after a reload — the same
         // form the live view shows at send time.
         let _weak = cx.weak_entity();
-        self.chat.conversation.update(cx, |c, cx| {
-            c.push_user(display_text, Vec::new(), meta, self.chat.host.clone(), cx)
+        self.chat_conversation(cx).update(cx, |c, cx| {
+            c.push_user(
+                display_text,
+                Vec::new(),
+                meta,
+                self.chat.read(cx).host.clone(),
+                cx,
+            )
         });
         self.sync_list_count(cx);
         // Re-engage tail-follow so the streaming reply stays in view.
-        self.follow_message_tail();
+        self.follow_message_tail(cx);
         // U2: the registry hit check reads the gateway's command snapshot —
         // the server projects the same command/skill registries the macro
         // and skill adapters dispatch against, so a remote server's
@@ -360,15 +389,22 @@ impl Workspace {
         // follow-up. Steering is an explicit per-item action.
         if self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
             .expect("foreground store present")
         {
-            self.chat.queue_drag = None;
-            self.chat.queued_follow_ups.push_back(QueuedFollowUp {
-                turn,
-                state: FollowUpState::Queued,
+            self.chat.update(cx, |chat, cx| {
+                chat.queue_drag = None;
+                cx.notify();
+            });
+            self.chat.update(cx, |chat, cc| {
+                chat.queued_follow_ups.push_back(QueuedFollowUp {
+                    turn,
+                    state: FollowUpState::Queued,
+                });
+                cc.notify();
             });
             cx.notify();
             return;
@@ -394,14 +430,18 @@ impl Workspace {
     /// inserted a local id and never reached the server — a dead end.
     /// Returns the minted `message_id`: the server threads it through as the
     /// injected row's durable identity, so the card retires by id.
-    pub(super) fn enqueue_steer_pending(&mut self, turn: &DeferredUserTurn) -> Option<String> {
+    pub(super) fn enqueue_steer_pending(
+        &mut self,
+        turn: &DeferredUserTurn,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         let message_id = uuid::Uuid::new_v4().to_string();
         let attachments: Vec<manox_protocol::ImageAttachment> = turn
             .images
             .iter()
             .filter_map(wire_image_attachment)
             .collect();
-        self.send_steer_v2(message_id.clone(), turn.text.clone(), attachments)
+        self.send_steer_v2(cx, message_id.clone(), turn.text.clone(), attachments)
             .then_some(message_id)
     }
 
@@ -432,6 +472,7 @@ impl Workspace {
     pub(super) fn promote_settled_steers(&mut self, cx: &mut Context<Self>) {
         if !self
             .chat
+            .read(cx)
             .queued_follow_ups
             .iter()
             .any(|item| matches!(item.state, FollowUpState::SteerPending { .. }))
@@ -439,22 +480,27 @@ impl Workspace {
             return;
         }
         let _weak = cx.weak_entity();
-        let follow_tail = self.chat.list_state.is_following_tail();
+        let follow_tail = self.chat.read(cx).list_state.is_following_tail();
         let mut promoted = false;
         let mut retain: Vec<QueuedFollowUp> = Vec::new();
-        while let Some(item) = self.chat.queued_follow_ups.pop_front() {
+        let mut queue = self.chat.update(cx, |chat, cc| {
+            let v = std::mem::take(&mut chat.queued_follow_ups);
+            cc.notify();
+            v
+        });
+        while let Some(item) = queue.pop_front() {
             match item.state {
                 FollowUpState::SteerPending { .. } => {
                     let mut meta = item.turn.meta.clone();
                     // The 「已引导」 badge rides `meta.steered` (rendered in
                     // `render_user`), now that the pending bubble is gone.
                     meta.steered = true;
-                    self.chat.conversation.update(cx, |c, cx| {
+                    self.chat_conversation(cx).update(cx, |c, cx| {
                         c.push_user(
                             item.turn.text.clone(),
                             item.turn.user_images.clone(),
                             meta,
-                            self.chat.host.clone(),
+                            self.chat.read(cx).host.clone(),
                             cx,
                         )
                     });
@@ -463,16 +509,25 @@ impl Workspace {
                 _ => retain.push(item),
             }
         }
-        self.chat.queued_follow_ups.extend(retain);
+        self.chat.update(cx, |chat, cx| {
+            chat.queued_follow_ups.extend(retain);
+            cx.notify();
+        });
         if !promoted {
             return;
         }
-        self.chat.queue_drag = None;
+        self.chat.update(cx, |chat, cx| {
+            chat.queue_drag = None;
+            cx.notify();
+        });
         self.sync_list_count(cx);
         if follow_tail {
-            self.follow_message_tail();
+            self.follow_message_tail(cx);
         }
-        self.chat.list_state.remeasure();
+        self.chat.update(cx, |chat, cx| {
+            chat.list_state.remeasure();
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -486,6 +541,7 @@ impl Workspace {
     pub(super) fn retire_injected_steer(&mut self, message_id: &str, cx: &mut Context<Self>) {
         let Some(pos) = self
             .chat
+            .read(cx)
             .queued_follow_ups
             .iter()
             .position(|item| match &item.state {
@@ -495,29 +551,39 @@ impl Workspace {
         else {
             return;
         };
-        let Some(item) = self.chat.queued_follow_ups.remove(pos) else {
+        let Some(item) = self.chat.update(cx, |chat, cc| {
+            let v = chat.queued_follow_ups.remove(pos);
+            cc.notify();
+            v
+        }) else {
             return;
         };
-        self.chat.queue_drag = None;
+        self.chat.update(cx, |chat, cx| {
+            chat.queue_drag = None;
+            cx.notify();
+        });
         let _weak = cx.weak_entity();
-        let follow_tail = self.chat.list_state.is_following_tail();
+        let follow_tail = self.chat.read(cx).list_state.is_following_tail();
         let mut meta = item.turn.meta.clone();
         // The 「已引导」 badge rides `meta.steered` (rendered in `render_user`).
         meta.steered = true;
-        self.chat.conversation.update(cx, |c, cx| {
+        self.chat_conversation(cx).update(cx, |c, cx| {
             c.push_user(
                 item.turn.text.clone(),
                 item.turn.user_images.clone(),
                 meta,
-                self.chat.host.clone(),
+                self.chat.read(cx).host.clone(),
                 cx,
             )
         });
         self.sync_list_count(cx);
         if follow_tail {
-            self.follow_message_tail();
+            self.follow_message_tail(cx);
         }
-        self.chat.list_state.remeasure();
+        self.chat.update(cx, |chat, cx| {
+            chat.list_state.remeasure();
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -528,17 +594,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // UI state tracking (always) — conversation bubble + list housekeeping.
-        self.chat.conversation.update(cx, |c, cx| {
+        self.chat_conversation(cx).update(cx, |c, cx| {
             c.push_user(
                 turn.text.clone(),
                 turn.user_images.clone(),
                 turn.meta.clone(),
-                self.chat.host.clone(),
+                self.chat.read(cx).host.clone(),
                 cx,
             )
         });
         self.sync_list_count(cx);
-        self.follow_message_tail();
+        self.follow_message_tail(cx);
         // Dual-path: protocol Submit (kernel inserts + runs) vs direct insert + run.
         let attachments: Vec<manox_protocol::ImageAttachment> = turn
             .images
@@ -557,42 +623,53 @@ impl Workspace {
     /// ([`Self::mark_stranded_steers_failed`]) — before this runs, so none
     /// reach here.
     pub(super) fn flush_queued_follow_ups(&mut self, cx: &mut Context<Self>) {
-        if self.chat.queued_follow_ups.is_empty() {
+        if self.chat.read(cx).queued_follow_ups.is_empty() {
             return;
         }
         let _weak = cx.weak_entity();
-        let follow_tail = self.chat.list_state.is_following_tail();
+        let follow_tail = self.chat.read(cx).list_state.is_following_tail();
         let mut retain: Vec<QueuedFollowUp> = Vec::new();
+        let mut queue = self.chat.update(cx, |chat, cc| {
+            let v = std::mem::take(&mut chat.queued_follow_ups);
+            cc.notify();
+            v
+        });
         let mut drained_turns: Vec<DeferredUserTurn> = Vec::new();
-        while let Some(item) = self.chat.queued_follow_ups.pop_front() {
+        while let Some(item) = queue.pop_front() {
             match item.state {
                 FollowUpState::Queued => {
-                    self.chat.conversation.update(cx, |c, cx| {
+                    self.chat_conversation(cx).update(cx, |c, cx| {
                         c.push_user(
                             item.turn.text.clone(),
                             item.turn.user_images.clone(),
                             item.turn.meta.clone(),
-                            self.chat.host.clone(),
+                            self.chat.read(cx).host.clone(),
                             cx,
                         )
                     });
                     self.sync_list_count(cx);
                     if follow_tail {
-                        self.follow_message_tail();
+                        self.follow_message_tail(cx);
                     }
                     drained_turns.push(item.turn);
                 }
                 _ => retain.push(item),
             }
         }
-        self.chat.queued_follow_ups.extend(retain);
+        self.chat.update(cx, |chat, cx| {
+            chat.queued_follow_ups.extend(retain);
+            cx.notify();
+        });
         if drained_turns.is_empty() {
             cx.notify();
             return;
         }
         // The `Queued` group just shifted: any in-flight drag's indices are
         // stale — void the gesture rather than move the wrong row.
-        self.chat.queue_drag = None;
+        self.chat.update(cx, |chat, cx| {
+            chat.queue_drag = None;
+            cx.notify();
+        });
         let n = drained_turns.len();
         for (i, turn) in drained_turns.into_iter().enumerate() {
             let attachments: Vec<manox_protocol::ImageAttachment> = turn
@@ -602,7 +679,7 @@ impl Workspace {
                 .collect();
             if i + 1 < n {
                 // All but the last: insert without running.
-                let _ = self.send_note(|sid| manox_protocol::ClientNote::AppendUserMessage {
+                let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::AppendUserMessage {
                     session_id: sid.into(),
                     text: turn.text.clone(),
                     images: attachments,
@@ -628,9 +705,13 @@ impl Workspace {
     /// the whole group. The drag marker is dropped: the group just moved.
     pub(super) fn settle_steer_group(&mut self, stranded: usize, cx: &mut Context<Self>) {
         if stranded > 0 {
-            self.chat.queue_drag = None;
+            self.chat.update(cx, |chat, cx| {
+                chat.queue_drag = None;
+                cx.notify();
+            });
             let positions: Vec<usize> = self
                 .chat
+                .read(cx)
                 .queued_follow_ups
                 .iter()
                 .enumerate()
@@ -640,7 +721,10 @@ impl Workspace {
             let n = positions.len();
             let to_fail = stranded.min(n);
             for &ix in &positions[n - to_fail..] {
-                self.chat.queued_follow_ups[ix].state = FollowUpState::Failed;
+                self.chat.update(cx, |chat, cc| {
+                    chat.queued_follow_ups[ix].state = FollowUpState::Failed;
+                    cc.notify();
+                });
             }
         }
         self.promote_settled_steers(cx);
@@ -650,29 +734,37 @@ impl Workspace {
     /// retracted tail turns `Failed`, every other card drops (a parked thread
     /// has no live list; the injected ones surface through the transcript on
     /// switch-back).
-    pub(super) fn settle_parked_steer_group(&mut self, thread_id: &str, stranded: usize) {
-        let Some(queue) = self.chat.queued_follow_ups_by_thread.get_mut(thread_id) else {
-            return;
-        };
-        let positions: Vec<usize> = queue
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| matches!(item.state, FollowUpState::SteerPending { .. }))
-            .map(|(ix, _)| ix)
-            .collect();
-        let n = positions.len();
-        let to_fail = stranded.min(n);
-        for &ix in &positions[n - to_fail..] {
-            queue[ix].state = FollowUpState::Failed;
-        }
-        let mut drop_ixs: Vec<usize> = positions[..n - to_fail].to_vec();
-        drop_ixs.sort_unstable_by(|a, b| b.cmp(a));
-        for ix in drop_ixs {
-            queue.remove(ix);
-        }
-        if queue.is_empty() {
-            self.chat.queued_follow_ups_by_thread.remove(thread_id);
-        }
+    pub(super) fn settle_parked_steer_group(
+        &mut self,
+        thread_id: &str,
+        stranded: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat.update(cx, |chat, cc| {
+            let Some(queue) = chat.queued_follow_ups_by_thread.get_mut(thread_id) else {
+                return;
+            };
+            let positions: Vec<usize> = queue
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| matches!(item.state, FollowUpState::SteerPending { .. }))
+                .map(|(ix, _)| ix)
+                .collect();
+            let n = positions.len();
+            let to_fail = stranded.min(n);
+            for &ix in &positions[n - to_fail..] {
+                queue[ix].state = FollowUpState::Failed;
+            }
+            let mut drop_ixs: Vec<usize> = positions[..n - to_fail].to_vec();
+            drop_ixs.sort_unstable_by(|a, b| b.cmp(a));
+            for ix in drop_ixs {
+                queue.remove(ix);
+            }
+            if queue.is_empty() {
+                chat.queued_follow_ups_by_thread.remove(thread_id);
+            }
+            cc.notify();
+        })
     }
 
     /// Promote a parked follow-up to a steer. While running, hand it to the
@@ -684,11 +776,16 @@ impl Workspace {
     pub(super) fn steer_follow_up(&mut self, idx: usize, cx: &mut Context<Self>) {
         let running = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
             .expect("foreground store present");
-        let Some(mut item) = self.chat.queued_follow_ups.remove(idx) else {
+        let Some(mut item) = self.chat.update(cx, |chat, cc| {
+            let v = chat.queued_follow_ups.remove(idx);
+            cc.notify();
+            v
+        }) else {
             return;
         };
         match item.state {
@@ -700,14 +797,21 @@ impl Workspace {
                     // dropped send (no session bound) must NOT fake
                     // `SteerPending` — the untouched card simply rejoins the
                     // queue and flushes normally later.
-                    if let Some(message_id) = self.enqueue_steer_pending(&item.turn) {
+                    if let Some(message_id) = self.enqueue_steer_pending(&item.turn, cx) {
                         item.state = FollowUpState::SteerPending { message_id };
                     }
                     // The group just changed: any in-flight drag's indices are
                     // stale (undo is a keyboard action and can land mid-drag).
-                    self.chat.queue_drag = None;
-                    let insert_at = Self::steer_group_insert_index(&self.chat.queued_follow_ups);
-                    self.chat.queued_follow_ups.insert(insert_at, item);
+                    self.chat.update(cx, |chat, cx| {
+                        chat.queue_drag = None;
+                        cx.notify();
+                    });
+                    let insert_at =
+                        Self::steer_group_insert_index(&self.chat.read(cx).queued_follow_ups);
+                    self.chat.update(cx, |chat, cx| {
+                        chat.queued_follow_ups.insert(insert_at, item);
+                        cx.notify();
+                    });
                     cx.notify();
                 } else {
                     let weak = cx.weak_entity();
@@ -717,8 +821,12 @@ impl Workspace {
             FollowUpState::SteerPending { .. } => {
                 // Already handed to the server steer queue; restore untouched
                 // (wherever the last settle left it).
-                let insert_at = Self::steer_group_insert_index(&self.chat.queued_follow_ups);
-                self.chat.queued_follow_ups.insert(insert_at, item);
+                let insert_at =
+                    Self::steer_group_insert_index(&self.chat.read(cx).queued_follow_ups);
+                self.chat.update(cx, |chat, cx| {
+                    chat.queued_follow_ups.insert(insert_at, item);
+                    cx.notify();
+                });
             }
         }
     }
@@ -763,15 +871,28 @@ impl Workspace {
     /// is session UI state only — the flush order the model eventually sees is
     /// the queue's own order, so no server round-trip is involved.
     pub(super) fn commit_queue_drag(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.chat.queue_drag.take() else {
+        let Some(drag) = self.chat.update(cx, |chat, cc| {
+            let v = chat.queue_drag.take();
+            cc.notify();
+            v
+        }) else {
             cx.notify();
             return;
         };
-        if let Some(insert) = Self::queue_move_index(&self.chat.queued_follow_ups, drag)
-            && let Some(item) = self.chat.queued_follow_ups.remove(drag.dragged)
+        let mut queue = self.chat.update(cx, |chat, cc| {
+            let v = std::mem::take(&mut chat.queued_follow_ups);
+            cc.notify();
+            v
+        });
+        if let Some(insert) = Self::queue_move_index(&queue, drag)
+            && let Some(item) = queue.remove(drag.dragged)
         {
-            self.chat.queued_follow_ups.insert(insert, item);
+            queue.insert(insert, item);
         }
+        self.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups = queue;
+            cc.notify();
+        });
         cx.notify();
     }
 
@@ -785,28 +906,40 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(item) = self.chat.queued_follow_ups.remove(idx) else {
+        let Some(item) = self.chat.update(cx, |chat, cc| {
+            let v = chat.queued_follow_ups.remove(idx);
+            cc.notify();
+            v
+        }) else {
             return;
         };
         if matches!(item.state, FollowUpState::SteerPending { .. }) {
-            self.chat.queued_follow_ups.insert(idx, item);
+            self.chat.update(cx, |chat, cx| {
+                chat.queued_follow_ups.insert(idx, item);
+                cx.notify();
+            });
             return;
         }
-        self.chat.queue_drag = None;
-        let current = self.chat.input_state.read(cx).value();
+        self.chat.update(cx, |chat, cx| {
+            chat.queue_drag = None;
+            cx.notify();
+        });
+        let current = self.chat_input(cx).read(cx).value();
         let merged = if current.trim().is_empty() {
             item.turn.text.clone()
         } else {
             format!("{current}\n{}", item.turn.text)
         };
-        self.chat.input_state.update(cx, |state, cx| {
+        self.chat_input(cx).update(cx, |state, cx| {
             state.set_value(merged, window, cx);
             state.focus(window, cx);
         });
         for image in item.turn.user_images {
-            self.chat
-                .pending_attachments
-                .push(PendingAttachment::ClipboardImage((*image.0).clone()));
+            self.chat.update(cx, |chat, cc| {
+                chat.pending_attachments
+                    .push(PendingAttachment::ClipboardImage((*image.0).clone()));
+                cc.notify();
+            });
         }
         cx.notify();
     }
@@ -816,14 +949,20 @@ impl Workspace {
         // the server and the protocol has no steer-withdrawal channel, so
         // deleting the card would let it inject invisibly (see the composer
         // render's disabled delete). `Queued` and `Failed` cards drop freely.
-        let Some(item) = self.chat.queued_follow_ups.get(idx) else {
+        let Some(item) = self.chat.read(cx).queued_follow_ups.get(idx) else {
             return;
         };
         if matches!(item.state, FollowUpState::SteerPending { .. }) {
             return;
         }
-        self.chat.queued_follow_ups.remove(idx);
-        self.chat.queue_drag = None;
+        self.chat.update(cx, |chat, cx| {
+            chat.queued_follow_ups.remove(idx);
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.queue_drag = None;
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -832,14 +971,20 @@ impl Workspace {
         // `SteerPending` cards sitting at the tail — an online steer can't be
         // withdrawn, so it isn't undoable — and leave `Failed` cards for the
         // explicit retry/remove path.
-        let Some(item) = self.chat.queued_follow_ups.back() else {
+        let Some(item) = self.chat.read(cx).queued_follow_ups.back() else {
             return;
         };
         if matches!(item.state, FollowUpState::Queued) {
-            self.chat.queued_follow_ups.pop_back();
+            self.chat.update(cx, |chat, cc| {
+                chat.queued_follow_ups.pop_back();
+                cc.notify();
+            });
             // A keyboard action can land mid-drag: void the stale marker so a
             // release can never move the wrong row.
-            self.chat.queue_drag = None;
+            self.chat.update(cx, |chat, cx| {
+                chat.queue_drag = None;
+                cx.notify();
+            });
             cx.notify();
         }
     }
@@ -932,16 +1077,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let turns = self.recall_turns(cx);
-        let value = self.chat.input_state.read(cx).value().to_string();
+        let value = self.chat_input(cx).read(cx).value().to_string();
         let (index, draft, step) = Self::recall_step(
             direction,
             &value,
-            self.chat.recall_index,
-            self.chat.recall_draft.as_deref(),
+            self.chat.read(cx).recall_index,
+            self.chat.read(cx).recall_draft.as_deref(),
             &turns,
         );
-        self.chat.recall_index = index;
-        self.chat.recall_draft = draft;
+        self.chat.update(cx, |chat, cx| {
+            chat.recall_index = index;
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.recall_draft = draft;
+            cx.notify();
+        });
         match step {
             RecallStep::None => {}
             RecallStep::Recall(text) => {
@@ -964,7 +1115,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.chat.input_state.update(cx, |state, cx| {
+        self.chat_input(cx).update(cx, |state, cx| {
             state.set_value(text.into(), window, cx);
             let end = RopeExt::offset_to_position(state.text(), state.text().len());
             state.set_cursor_position(end, window, cx);
@@ -973,9 +1124,15 @@ impl Workspace {
     }
 
     /// End a running recall walk and drop its working line.
-    pub(super) fn end_recall_walk(&mut self) {
-        self.chat.recall_index = -1;
-        self.chat.recall_draft = None;
+    pub(super) fn end_recall_walk(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| {
+            chat.recall_index = -1;
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.recall_draft = None;
+            cx.notify();
+        });
     }
 
     /// Refill the composer with a past turn picked in the turn navigator
@@ -997,19 +1154,24 @@ impl Workspace {
             .position(|turn| *turn == text)
             .map(|ix| ix as i64);
         if let Some(index) = landed {
-            let displaced = self.chat.input_state.read(cx).value().to_string();
-            if self.chat.recall_index < 0 {
-                self.chat.recall_draft =
-                    (!displaced.is_empty() && displaced != text).then(|| displaced.clone());
-            }
-            self.chat.recall_index = index;
+            let displaced = self.chat_input(cx).read(cx).value().to_string();
+            self.chat.update(cx, |chat, cc| {
+                if chat.recall_index < 0 {
+                    chat.recall_draft =
+                        (!displaced.is_empty() && displaced != text).then(|| displaced.clone());
+                }
+                cc.notify();
+            });
+            self.chat.update(cx, |chat, cx| {
+                chat.recall_index = index;
+                cx.notify();
+            });
         } else {
-            self.end_recall_walk();
+            self.end_recall_walk(cx);
         }
         self.close_completion(cx);
         self.set_composer_text(text, window, cx);
-        self.chat
-            .input_state
+        self.chat_input(cx)
             .update(cx, |state, cx| state.focus(window, cx));
     }
 
@@ -1018,6 +1180,7 @@ impl Workspace {
     pub(super) fn recall_turns(&self, cx: &App) -> Vec<String> {
         collect_user_turns(
             self.chat
+                .read(cx)
                 .conversation
                 .read(cx)
                 .items()

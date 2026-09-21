@@ -27,39 +27,68 @@ impl Workspace {
     pub(crate) fn reconcile_pending_with_projections(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self
             .chat
+            .read(cx)
             .pending_ask
             .as_ref()
             .map(|a| a.id.clone())
-            .or_else(|| self.chat.pending_auth.as_ref().map(|a| a.id.clone()))
+            .or_else(|| {
+                self.chat
+                    .read(cx)
+                    .pending_auth
+                    .as_ref()
+                    .map(|a| a.id.clone())
+            })
         else {
-            self.chat.pending_projection_confirmed = false;
+            self.chat.update(cx, |chat, cx| {
+                chat.pending_projection_confirmed = false;
+                cx.notify();
+            });
             return;
         };
         // No leaf yet (attach in flight): nothing to reconcile against.
-        if self.chat.store.is_none() {
+        if self.chat.read(cx).store.is_none() {
             return;
         }
         let live = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .is_some_and(|s| s.read(cx).store.pending_auth_set.contains(&id));
         if live {
-            self.chat.pending_projection_confirmed = true;
+            self.chat.update(cx, |chat, cx| {
+                chat.pending_projection_confirmed = true;
+                cx.notify();
+            });
             return;
         }
-        if !self.chat.pending_projection_confirmed {
+        if !self.chat.read(cx).pending_projection_confirmed {
             return;
         }
-        self.chat.pending_ask = None;
-        self.chat.pending_auth = None;
-        self.chat.pending_projection_confirmed = false;
-        self.chat.ask_step = 0;
-        self.chat.ask_transition_gen = self.chat.ask_transition_gen.wrapping_add(1);
-        self.reset_ask_custom();
+        self.chat.update(cx, |chat, cx| {
+            chat.pending_ask = None;
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.pending_auth = None;
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.pending_projection_confirmed = false;
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.ask_step = 0;
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+            cx.notify();
+        });
+        self.reset_ask_custom(cx);
         // The settled call's MsgId has no live waiter left; dropping the
         // mapping keeps a stale card click from replying to a dead call.
-        if let Some(store) = &self.chat.store {
+        if let Some(store) = self.chat.read(cx).store.clone() {
             store.update(cx, |h, cx| {
                 h.store.pending_auth.remove(&id);
                 cx.notify();
@@ -76,10 +105,8 @@ impl Workspace {
     /// [`Self::reconcile_pending_with_projections`] (the leaf dropped the id
     /// from the projection set).
     pub(crate) fn notice_settled_elsewhere(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let drained = self
-            .chat
-            .store
-            .as_ref()
+        let settled_store = self.chat.read(cx).store.clone();
+        let drained = settled_store
             .map(|store| {
                 store.update(cx, |h, _| {
                     let ids: Vec<String> = h.store.settled_elsewhere.drain().collect();
@@ -107,7 +134,12 @@ impl Workspace {
         input: serde_json::Value,
         cx: &mut Context<Self>,
     ) {
-        if self.chat.conversation.read(cx).find_tool(id, cx).is_some() {
+        if self
+            .chat_conversation(cx)
+            .read(cx)
+            .find_tool(id, cx)
+            .is_some()
+        {
             return;
         }
         // The runtime always supplies a non-empty English summary for its own
@@ -119,7 +151,7 @@ impl Workspace {
         let title = summary.to_string();
         let role = self.model_label(cx);
         let _weak = cx.weak_entity();
-        self.chat.conversation.update(cx, |conversation, cx| {
+        self.chat_conversation(cx).update(cx, |conversation, cx| {
             conversation.push_tool_call(
                 crate::conversation::ToolCallItem {
                     id: id.to_string(),
@@ -135,12 +167,15 @@ impl Workspace {
                     panel: None,
                 },
                 role,
-                self.chat.host.clone(),
+                self.chat.read(cx).host.clone(),
                 cx,
             );
         });
         self.sync_list_count(cx);
-        self.chat.list_state.set_follow_mode(FollowMode::Tail);
+        self.chat
+            .read(cx)
+            .list_state
+            .set_follow_mode(FollowMode::Tail);
     }
 
     pub(crate) fn resolve_auth(&mut self, decision: PermissionDecision, cx: &mut Context<Self>) {
@@ -148,13 +183,18 @@ impl Workspace {
         // close is NOT this path — it is `dismiss_ask` (B2-PR-3): a close is
         // "the user left to speak", never a rejection, and the two must not
         // share an exit (they used to both render `WrapperToolDenied`).
-        let Some(auth) = self.chat.pending_auth.take() else {
+        let Some(auth) = self.chat.update(cx, |chat, cc| {
+            let v = chat.pending_auth.take();
+            cc.notify();
+            v
+        }) else {
             return;
         };
         let id = auth.id;
         let allow = matches!(decision, PermissionDecision::AllowOnce);
         if let Some(msg_id) = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.pending_auth.get(&id).cloned())
@@ -164,7 +204,7 @@ impl Workspace {
             self.retire_wire_auth(&id, cx);
             return;
         }
-        self.chat.thread.with_mut(|thread| {
+        self.chat.read(cx).thread.with_mut(|thread| {
             thread.respond_authorization(
                 &id,
                 manox_agent::ToolAuthorizationResponse::Decision(decision),
@@ -177,7 +217,7 @@ impl Workspace {
     /// `DeliveryCancelled` for the same delivery cannot mis-fire the "handled
     /// elsewhere" notice.
     fn retire_wire_auth(&mut self, auth_id: &str, cx: &mut Context<Self>) {
-        if let Some(store) = &self.chat.store {
+        if let Some(store) = self.chat.read(cx).store.clone() {
             store.update(cx, |h, _| h.store.retire_auth(auth_id));
         }
     }
@@ -189,15 +229,20 @@ impl Workspace {
     /// — neither a denial nor an empty answer. The generic approval card's
     /// allow/deny leg stays in `resolve_auth`; the two exits must not merge.
     pub(crate) fn dismiss_ask(&mut self, cx: &mut Context<Self>) {
-        let ask = match self.chat.pending_ask.take() {
+        let ask = match self.chat.update(cx, |chat, cc| {
+            let v = chat.pending_ask.take();
+            chat.ask_step = 0;
+            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+            cc.notify();
+            v
+        }) {
             Some(a) => a,
             None => return,
         };
-        self.chat.ask_step = 0;
-        self.chat.ask_transition_gen = self.chat.ask_transition_gen.wrapping_add(1);
-        self.reset_ask_custom();
+        self.reset_ask_custom(cx);
         if let Some(msg_id) = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.pending_auth.get(&ask.id).cloned())
@@ -208,7 +253,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.chat.thread.with_mut(|thread| {
+        self.chat.read(cx).thread.with_mut(|thread| {
             thread.respond_authorization(
                 &ask.id,
                 manox_agent::ToolAuthorizationResponse::AskUserQuestionDismissed,
@@ -219,15 +264,16 @@ impl Workspace {
 
     /// Toggle an option in the pending ask card. Single-select questions reset
     /// siblings; multi-select toggles in place.
-    pub(crate) fn ask_card_snapshot(&self, id: &str, _cx: &App) -> Option<AskCardSnapshot> {
-        let ask = self.chat.pending_ask.as_ref()?;
+    pub(crate) fn ask_card_snapshot(&self, id: &str, cx: &App) -> Option<AskCardSnapshot> {
+        let ask = self.chat.read(cx).pending_ask.as_ref()?;
         if ask.id != id || ask.questions.is_empty() {
             return None;
         }
-        let step = self.chat.ask_step.min(ask.questions.len() - 1);
+        let step = self.chat.read(cx).ask_step.min(ask.questions.len() - 1);
         let q = ask.questions.get(step)?;
         let custom = self
             .chat
+            .read(cx)
             .ask_custom_text
             .get(step)
             .cloned()
@@ -236,7 +282,7 @@ impl Workspace {
             id: ask.id.clone(),
             step,
             total: ask.questions.len(),
-            transition_gen: self.chat.ask_transition_gen,
+            transition_gen: self.chat.read(cx).ask_transition_gen,
             question: AskCardQuestion {
                 question: q.question.clone(),
                 header: q.header.clone(),
@@ -272,7 +318,7 @@ impl Workspace {
         ix: usize,
         cx: &mut App,
     ) -> Option<gpui::AnyElement> {
-        let id = self.chat.pending_ask.as_ref()?.id.clone();
+        let id = self.chat.read(cx).pending_ask.as_ref()?.id.clone();
         let snapshot = self.ask_card_snapshot(&id, cx)?;
         let item = crate::conversation::ToolCallItem {
             id,
@@ -308,17 +354,20 @@ impl Workspace {
     /// same entity tree whose height GPUI is currently caching, which can make
     /// the cached row and the painted subtree describe different layouts.
     pub(super) fn sync_ask_card_snapshots(&mut self, cx: &mut App) {
-        let next = self.chat.pending_ask.as_ref().and_then(|ask| {
+        let next = self.chat.read(cx).pending_ask.as_ref().and_then(|ask| {
             let snapshot = self.ask_card_snapshot(&ask.id, cx)?;
-            let ix = self.chat.conversation.read(cx).find_tool(&ask.id, cx)?;
-            let item = self.chat.conversation.read(cx).items().get(ix)?.clone();
+            let ix = self.chat_conversation(cx).read(cx).find_tool(&ask.id, cx)?;
+            let item = self.chat_conversation(cx).read(cx).items().get(ix)?.clone();
             Some((item, snapshot))
         });
 
-        if let Some(previous) = self.chat.ask_snapshot_item.take()
-            && next
-                .as_ref()
-                .is_none_or(|(current, _)| current != &previous)
+        if let Some(previous) = self.chat.update(cx, |chat, cc| {
+            let v = chat.ask_snapshot_item.take();
+            cc.notify();
+            v
+        }) && next
+            .as_ref()
+            .is_none_or(|(current, _)| current != &previous)
             && previous.read(cx).ask_snapshot.is_some()
         {
             previous.update(cx, |item, cx| {
@@ -334,15 +383,18 @@ impl Workspace {
                     cx.notify();
                 });
             }
-            self.chat.ask_snapshot_item = Some(item);
+            self.chat.update(cx, |chat, cx| {
+                chat.ask_snapshot_item = Some(item);
+                cx.notify();
+            });
         }
     }
 
-    pub(super) fn pending_ask_has_selection(&self) -> bool {
-        self.chat.pending_ask.as_ref().is_some_and(|ask| {
+    pub(super) fn pending_ask_has_selection(&self, cx: &App) -> bool {
+        let chat = self.chat.read(cx);
+        chat.pending_ask.as_ref().is_some_and(|ask| {
             ask.selections.iter().flatten().any(|selected| *selected)
-                || self
-                    .chat
+                || chat
                     .ask_custom_text
                     .iter()
                     .any(|custom| !custom.trim().is_empty())
@@ -353,19 +405,19 @@ impl Workspace {
     /// the completeness gate's jump target (dsh `submitDrafts`'s
     /// `findIndex(!completed)` parity). An untouched question must never
     /// silently fold to a skip at the settle boundary.
-    pub(crate) fn first_incomplete_ask_question(&self) -> Option<usize> {
-        let ask = self.chat.pending_ask.as_ref()?;
+    pub(crate) fn first_incomplete_ask_question(&self, cx: &App) -> Option<usize> {
+        let chat = self.chat.read(cx);
+        let ask = chat.pending_ask.as_ref()?;
         (0..ask.questions.len()).find(|&qi| {
             let answered = ask
                 .selections
                 .get(qi)
                 .is_some_and(|sel| sel.iter().any(|s| *s))
-                || self
-                    .chat
+                || chat
                     .ask_custom_text
                     .get(qi)
                     .is_some_and(|custom| !custom.trim().is_empty());
-            let skipped = self.chat.ask_skipped.get(qi).copied().unwrap_or(false);
+            let skipped = chat.ask_skipped.get(qi).copied().unwrap_or(false);
             !answered && !skipped
         })
     }
@@ -377,38 +429,40 @@ impl Workspace {
         if running {
             return true;
         }
-        let input_empty = self.chat.input_state.read(cx).value().trim().is_empty();
-        if self.chat.pending_ask.is_some() {
-            !input_empty || self.pending_ask_has_selection()
+        let input_empty = self.chat_input(cx).read(cx).value().trim().is_empty();
+        if self.chat.read(cx).pending_ask.is_some() {
+            !input_empty || self.pending_ask_has_selection(cx)
         } else {
-            !input_empty || !self.chat.pending_attachments.is_empty()
+            !input_empty || !self.chat.read(cx).pending_attachments.is_empty()
         }
     }
 
     pub(crate) fn toggle_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
-        if let Some(ask) = self.chat.pending_ask.as_mut()
-            && let Some(sel) = ask.selections.get_mut(qi)
-        {
-            let multi = ask
-                .questions
-                .get(qi)
-                .map(|q| q.multi_select)
-                .unwrap_or(false);
-            let prev = sel.get(oi).copied().unwrap_or(false);
-            if multi {
-                if let Some(slot) = sel.get_mut(oi) {
-                    *slot = !*slot;
-                }
-            } else {
-                for s in sel.iter_mut() {
-                    *s = false;
-                }
-                if let Some(slot) = sel.get_mut(oi) {
-                    *slot = !prev;
+        self.chat.update(cx, |chat, cc| {
+            if let Some(ask) = chat.pending_ask.as_mut()
+                && let Some(sel) = ask.selections.get_mut(qi)
+            {
+                let multi = ask
+                    .questions
+                    .get(qi)
+                    .map(|q| q.multi_select)
+                    .unwrap_or(false);
+                let prev = sel.get(oi).copied().unwrap_or(false);
+                if multi {
+                    if let Some(slot) = sel.get_mut(oi) {
+                        *slot = !*slot;
+                    }
+                } else {
+                    for s in sel.iter_mut() {
+                        *s = false;
+                    }
+                    if let Some(slot) = sel.get_mut(oi) {
+                        *slot = !prev;
+                    }
                 }
             }
-        }
-        cx.notify();
+            cc.notify();
+        });
     }
 
     /// One-click plan-review decision: fold option `oi` of question `qi` in
@@ -420,33 +474,40 @@ impl Workspace {
     /// `multiSelect:false`, and a one-click verdict has no meaning on a
     /// multi-select question — the decision presentation only routes those.
     pub(crate) fn decide_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
-        if let Some(ask) = self.chat.pending_ask.as_mut()
-            && let Some(sel) = ask.selections.get_mut(qi)
-        {
-            for s in sel.iter_mut() {
-                *s = false;
+        self.chat.update(cx, |chat, cc| {
+            if let Some(ask) = chat.pending_ask.as_mut()
+                && let Some(sel) = ask.selections.get_mut(qi)
+            {
+                for s in sel.iter_mut() {
+                    *s = false;
+                }
+                if let Some(slot) = sel.get_mut(oi) {
+                    *slot = true;
+                }
             }
-            if let Some(slot) = sel.get_mut(oi) {
-                *slot = true;
-            }
-        }
+            cc.notify();
+        });
         self.resolve_ask(cx);
     }
 
     pub(crate) fn ask_prev(&mut self, cx: &mut Context<Self>) {
-        if self.chat.ask_step > 0 {
-            self.chat.ask_step -= 1;
-            cx.notify();
-        }
+        self.chat.update(cx, |chat, cc| {
+            if chat.ask_step > 0 {
+                chat.ask_step -= 1;
+                cc.notify();
+            }
+        });
     }
 
     pub(crate) fn ask_next(&mut self, cx: &mut Context<Self>) {
-        if let Some(ask) = self.chat.pending_ask.as_ref()
-            && self.chat.ask_step < ask.questions.len() - 1
-        {
-            self.chat.ask_step += 1;
-            cx.notify();
-        }
+        self.chat.update(cx, |chat, cc| {
+            if let Some(ask) = chat.pending_ask.as_ref()
+                && chat.ask_step < ask.questions.len() - 1
+            {
+                chat.ask_step += 1;
+                cc.notify();
+            }
+        });
     }
 
     /// Submit the ask drawer: fold each question's tri-state (its selected
@@ -457,9 +518,16 @@ impl Workspace {
     /// free-text override: a card close is `dismiss_ask`, and per-question free
     /// text rides the answer's `custom`.
     pub(crate) fn resolve_ask(&mut self, cx: &mut Context<Self>) {
-        let ask = match self.chat.pending_ask.take() {
-            Some(a) => a,
-            None => return,
+        let (ask, custom_texts) = match self.chat.update(cx, |chat, cc| {
+            let ask = chat.pending_ask.take();
+            let texts = chat.ask_custom_text.clone();
+            chat.ask_step = 0;
+            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+            cc.notify();
+            (ask, texts)
+        }) {
+            (Some(a), t) => (a, t),
+            (None, _) => return,
         };
         let mut canonical: Vec<manox_agent::AskAnswer> = Vec::with_capacity(ask.questions.len());
         let mut wire: Vec<serde_json::Value> = Vec::with_capacity(ask.questions.len());
@@ -471,9 +539,7 @@ impl Workspace {
                 .zip(sel.iter())
                 .filter_map(|(o, &s)| s.then_some(o.label.clone()))
                 .collect();
-            let custom = self
-                .chat
-                .ask_custom_text
+            let custom = custom_texts
                 .get(i)
                 .filter(|s| !s.trim().is_empty())
                 .cloned();
@@ -491,12 +557,14 @@ impl Workspace {
             canonical.push(answer);
         }
         let id = ask.id.clone();
-        self.chat.pending_ask = None;
-        self.chat.ask_step = 0;
-        self.chat.ask_transition_gen = self.chat.ask_transition_gen.wrapping_add(1);
-        self.reset_ask_custom();
+        self.chat.update(cx, |chat, cx| {
+            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+            cx.notify();
+        });
+        self.reset_ask_custom(cx);
         if let Some(msg_id) = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.pending_auth.get(&id).cloned())
@@ -513,7 +581,7 @@ impl Workspace {
         }
         // In-process fallback (no wire MsgId): the canonical rows built above
         // ride the direct kernel path.
-        self.chat.thread.with_mut(|thread| {
+        self.chat.read(cx).thread.with_mut(|thread| {
             thread.respond_authorization(
                 &id,
                 manox_agent::ToolAuthorizationResponse::AskUserQuestion { answers: canonical },
@@ -526,11 +594,23 @@ impl Workspace {
     /// seeded, resolved, dismissed, or reconciled away so a stale custom never
     /// leaks into the next card or a re-surfaced walk. The explicit-skip
     /// markers ride the same lifecycle.
-    pub(super) fn reset_ask_custom(&mut self) {
-        self.chat.ask_custom_inputs.clear();
-        self.chat.ask_custom_subs.clear();
-        self.chat.ask_custom_text.clear();
-        self.chat.ask_skipped.clear();
+    pub(super) fn reset_ask_custom(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| {
+            chat.ask_custom_inputs.clear();
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.ask_custom_subs.clear();
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.ask_custom_text.clear();
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.ask_skipped.clear();
+            cx.notify();
+        });
     }
 
     /// Align the per-question custom-answer scratch with the current ask:
@@ -542,28 +622,39 @@ impl Workspace {
     pub(crate) fn ensure_ask_custom_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let count = self
             .chat
+            .read(cx)
             .pending_ask
             .as_ref()
             .map_or(0, |ask| ask.questions.len());
-        if self.chat.pending_ask.is_none() {
-            if !self.chat.ask_custom_inputs.is_empty() {
-                self.reset_ask_custom();
+        if self.chat.read(cx).pending_ask.is_none() {
+            if !self.chat.read(cx).ask_custom_inputs.is_empty() {
+                self.reset_ask_custom(cx);
             }
             return;
         }
-        if self.chat.ask_custom_text.len() != count
-            || self.chat.ask_custom_inputs.len() != count
-            || self.chat.ask_skipped.len() != count
+        if self.chat.read(cx).ask_custom_text.len() != count
+            || self.chat.read(cx).ask_custom_inputs.len() != count
+            || self.chat.read(cx).ask_skipped.len() != count
         {
-            self.reset_ask_custom();
-            self.chat.ask_custom_text = vec![String::new(); count];
-            self.chat.ask_skipped = vec![false; count];
-            self.chat.ask_custom_inputs = vec![None; count];
+            self.reset_ask_custom(cx);
+            self.chat.update(cx, |chat, cx| {
+                chat.ask_custom_text = vec![String::new(); count];
+                cx.notify();
+            });
+            self.chat.update(cx, |chat, cx| {
+                chat.ask_skipped = vec![false; count];
+                cx.notify();
+            });
+            self.chat.update(cx, |chat, cx| {
+                chat.ask_custom_inputs = vec![None; count];
+                cx.notify();
+            });
         }
         for qi in 0..count {
-            if self.chat.ask_custom_inputs[qi].is_none() {
+            if self.chat.read(cx).ask_custom_inputs[qi].is_none() {
                 let initial = self
                     .chat
+                    .read(cx)
                     .ask_custom_text
                     .get(qi)
                     .cloned()
@@ -578,14 +669,21 @@ impl Workspace {
                 });
                 let sub = cx.subscribe(&state, move |this, state, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
-                        if let Some(slot) = this.chat.ask_custom_text.get_mut(qi) {
-                            *slot = state.read(cx).value().to_string();
-                        }
+                        let val = state.read(cx).value().to_string();
+                        this.chat.update(cx, |chat, cc| {
+                            if let Some(slot) = chat.ask_custom_text.get_mut(qi) {
+                                *slot = val;
+                            }
+                            cc.notify();
+                        });
                         cx.notify();
                     }
                 });
-                self.chat.ask_custom_inputs[qi] = Some(state);
-                self.chat.ask_custom_subs.push(sub);
+                self.chat.update(cx, |chat, cc| {
+                    chat.ask_custom_inputs[qi] = Some(state);
+                    chat.ask_custom_subs.push(sub);
+                    cc.notify();
+                });
             }
         }
     }
@@ -604,21 +702,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ask) = self.chat.pending_ask.as_mut()
-            && let Some(sel) = ask.selections.get_mut(qi)
-        {
-            for s in sel.iter_mut() {
-                *s = false;
+        self.chat.update(cx, |chat, cc| {
+            if let Some(ask) = chat.pending_ask.as_mut()
+                && let Some(sel) = ask.selections.get_mut(qi)
+            {
+                for s in sel.iter_mut() {
+                    *s = false;
+                }
             }
-        }
-        if let Some(slot) = self.chat.ask_custom_text.get_mut(qi) {
-            slot.clear();
-        }
-        if let Some(slot) = self.chat.ask_skipped.get_mut(qi) {
-            *slot = true;
-        }
+            if let Some(slot) = chat.ask_custom_text.get_mut(qi) {
+                slot.clear();
+            }
+            if let Some(slot) = chat.ask_skipped.get_mut(qi) {
+                *slot = true;
+            }
+            cc.notify();
+        });
         if let Some(state) = self
             .chat
+            .read(cx)
             .ask_custom_inputs
             .get(qi)
             .and_then(|slot| slot.clone())
@@ -627,14 +729,21 @@ impl Workspace {
         }
         let has_next = self
             .chat
+            .read(cx)
             .pending_ask
             .as_ref()
             .is_some_and(|ask| qi + 1 < ask.questions.len());
         if has_next {
-            self.chat.ask_step = qi + 1;
+            self.chat.update(cx, |chat, cx| {
+                chat.ask_step = qi + 1;
+                cx.notify();
+            });
             cx.notify();
-        } else if let Some(missing) = self.first_incomplete_ask_question() {
-            self.chat.ask_step = missing;
+        } else if let Some(missing) = self.first_incomplete_ask_question(cx) {
+            self.chat.update(cx, |chat, cx| {
+                chat.ask_step = missing;
+                cx.notify();
+            });
             cx.notify();
         } else {
             self.resolve_ask(cx);
@@ -665,7 +774,7 @@ impl Workspace {
     /// iteration) always failed on the missing display fields, so the chip
     /// rendered "no model" no matter what the journal said.
     pub(crate) fn foreground_model_identity(&self, cx: &App) -> Option<(String, String)> {
-        self.chat.store.as_ref().and_then(|s| {
+        self.chat.read(cx).store.as_ref().and_then(|s| {
             s.read(cx).store.with(|st| {
                 let v = st.model.clone()?;
                 let provider = v.get("provider")?.as_str()?.to_string();
@@ -743,13 +852,14 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.chat.model_open;
+        let open = self.chat.read(cx).model_open;
         let model_identity = self.foreground_model_identity(cx);
         let model = model_identity
             .as_ref()
             .and_then(|(provider, id)| self.resolve_model_display(provider, id, cx));
         let effort = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.reasoning_effort)
@@ -846,14 +956,27 @@ impl Workspace {
                 .text_color(theme.muted_foreground),
             )
             .on_click(cx.listener(|this, _, window, cx| {
-                if this.chat.model_open {
-                    this.chat.model_open = false;
-                    this.chat.model_menu = None;
-                    this.chat.model_menu_sub = None;
+                if this.chat.read(cx).model_open {
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_open = false;
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_menu = None;
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_menu_sub = None;
+                        cx.notify();
+                    });
                 } else {
-                    this.chat.model_open = true;
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_open = true;
+                        cx.notify();
+                    });
                     let current_effort = this
                         .chat
+                        .read(cx)
                         .store
                         .as_ref()
                         .map(|s| s.read(cx).store.reasoning_effort)
@@ -883,14 +1006,29 @@ impl Workspace {
                          _menu: Entity<PopupMenu>,
                          _: &DismissEvent,
                          cx: &mut Context<Workspace>| {
-                            this.chat.model_open = false;
-                            this.chat.model_menu = None;
-                            this.chat.model_menu_sub = None;
+                            this.chat.update(cx, |chat, cx| {
+                                chat.model_open = false;
+                                cx.notify();
+                            });
+                            this.chat.update(cx, |chat, cx| {
+                                chat.model_menu = None;
+                                cx.notify();
+                            });
+                            this.chat.update(cx, |chat, cx| {
+                                chat.model_menu_sub = None;
+                                cx.notify();
+                            });
                             cx.notify();
                         },
                     );
-                    this.chat.model_menu = Some(menu);
-                    this.chat.model_menu_sub = Some(sub);
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_menu = Some(menu);
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_menu_sub = Some(sub);
+                        cx.notify();
+                    });
                 }
                 cx.notify();
             }));
@@ -901,6 +1039,7 @@ impl Workspace {
 
         let menu = self
             .chat
+            .read(cx)
             .model_menu
             .clone()
             .expect("model_menu exists when open");
@@ -989,16 +1128,17 @@ impl Workspace {
                         })
                         .on_click(move |_, _, cx: &mut gpui::App| {
                             let model = model.clone();
-                            let _ = ws.update(cx, |this, _cx| {
+                            let _ = ws.update(cx, |this, cx| {
                                 // L8 wire identity: the registration-qualified
                                 // `{provider}/{model}` ref, so a pick pins the
                                 // exact endpoint (wire variants of one model
                                 // share the bare id).
-                                let _ =
-                                    this.send_note(|sid| manox_protocol::ClientNote::SetModel {
+                                let _ = this.send_note(cx, |sid| {
+                                    manox_protocol::ClientNote::SetModel {
                                         session_id: sid.into(),
                                         id: format!("{}/{}", model.provider, model.id),
-                                    });
+                                    }
+                                });
                             });
                         }),
                     );
@@ -1041,16 +1181,17 @@ impl Workspace {
                         })
                 })
                 .on_click(move |_, _, cx: &mut gpui::App| {
-                    let _ = ws.update(cx, |this, _cx| {
+                    let _ = ws.update(cx, |this, cx| {
                         let effort_str = match effort {
                             manox_agent::language_model::ReasoningEffort::High => "high",
                             manox_agent::language_model::ReasoningEffort::Max => "max",
                         };
-                        let _ =
-                            this.send_note(|sid| manox_protocol::ClientNote::SetReasoningEffort {
+                        let _ = this.send_note(cx, |sid| {
+                            manox_protocol::ClientNote::SetReasoningEffort {
                                 session_id: sid.into(),
                                 effort: effort_str.into(),
-                            });
+                            }
+                        });
                     });
                 }),
             );
@@ -1060,7 +1201,10 @@ impl Workspace {
 
     /// Open the goal status popover (from the bare `/goal` command).
     pub fn open_goal_popover(&mut self, cx: &mut Context<Self>) {
-        self.chat.goal_popover_open = true;
+        self.chat.update(cx, |chat, cx| {
+            chat.goal_popover_open = true;
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -1069,17 +1213,21 @@ impl Workspace {
     pub fn begin_goal_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(objective) = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.goal.clone())
             .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())
             .map(|goal| goal.objective.clone())
         else {
-            self.chat.goal_popover_open = true;
+            self.chat.update(cx, |chat, cx| {
+                chat.goal_popover_open = true;
+                cx.notify();
+            });
             cx.notify();
             return;
         };
-        self.chat.input_state.update(cx, |state, cx| {
+        self.chat_input(cx).update(cx, |state, cx| {
             state.set_value(format!("/goal edit {objective}"), window, cx);
         });
         cx.notify();
@@ -1088,6 +1236,7 @@ impl Workspace {
     pub fn begin_goal_budget_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.goal.clone())
@@ -1095,7 +1244,7 @@ impl Workspace {
             .and_then(|goal| goal.token_budget)
             .map(|budget| budget.to_string())
             .unwrap_or_else(|| "none".into());
-        self.chat.input_state.update(cx, |state, cx| {
+        self.chat_input(cx).update(cx, |state, cx| {
             state.set_value(format!("/goal budget {value}"), window, cx);
         });
         cx.notify();
@@ -1104,6 +1253,7 @@ impl Workspace {
     pub fn begin_goal_rounds_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.goal.clone())
@@ -1111,7 +1261,7 @@ impl Workspace {
             .and_then(|goal| goal.max_rounds)
             .map(|max| max.to_string())
             .unwrap_or_else(|| "none".into());
-        self.chat.input_state.update(cx, |state, cx| {
+        self.chat_input(cx).update(cx, |state, cx| {
             state.set_value(format!("/goal rounds {value}"), window, cx);
         });
         cx.notify();
@@ -1129,14 +1279,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.chat.input_state.update(cx, |state, cx| {
+        self.chat_input(cx).update(cx, |state, cx| {
             state.set_value(format!("/goal replace {objective}"), window, cx);
         });
         cx.notify();
     }
 
     pub fn begin_goal_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.chat.input_state.update(cx, |state, cx| {
+        self.chat_input(cx).update(cx, |state, cx| {
             state.set_value("/goal ".to_string(), window, cx);
         });
         cx.notify();
@@ -1149,6 +1299,7 @@ impl Workspace {
     ) -> Option<AnyElement> {
         let g = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.goal.clone())
@@ -1165,12 +1316,13 @@ impl Workspace {
         };
         let elapsed = format_elapsed(std::time::Duration::from_secs(
             self.chat
+                .read(cx)
                 .thread
                 .read(|t| t.goal_elapsed_seconds())
                 .unwrap_or_default(),
         ));
         let label: SharedString = format!("◎ {} · {}", i18n::t(status_key), elapsed).into();
-        let open = self.chat.goal_popover_open;
+        let open = self.chat.read(cx).goal_popover_open;
 
         let trigger = h_flex()
             .id("goal-chip")
@@ -1199,7 +1351,10 @@ impl Workspace {
                 .text_color(muted),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                this.chat.goal_popover_open = !this.chat.goal_popover_open;
+                this.chat.update(cx, |chat, cx| {
+                    chat.goal_popover_open = !chat.goal_popover_open;
+                    cx.notify();
+                });
                 cx.notify();
             }));
 
@@ -1277,8 +1432,8 @@ impl Workspace {
                                 Button::new("goal-pause")
                                     .small()
                                     .label(pause_label)
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, _cx| {
-                                        let _ = this.send_note(|sid| {
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        let _ = this.send_note(cx, |sid| {
                                             manox_protocol::ClientNote::Goal {
                                                 session_id: sid.into(),
                                                 action: "pause".into(),
@@ -1302,8 +1457,8 @@ impl Workspace {
                                 Button::new("goal-resume")
                                     .small()
                                     .label(resume_label)
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, _cx| {
-                                        let _ = this.send_note(|sid| {
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        let _ = this.send_note(cx, |sid| {
                                             manox_protocol::ClientNote::Goal {
                                                 session_id: sid.into(),
                                                 action: "resume".into(),
@@ -1326,7 +1481,10 @@ impl Workspace {
                         |row| {
                             row.child(Button::new("goal-edit").small().label(edit_label).on_click(
                                 cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.chat.goal_popover_open = false;
+                                    this.chat.update(cx, |chat, cx| {
+                                        chat.goal_popover_open = false;
+                                        cx.notify();
+                                    });
                                     this.begin_goal_edit(window, cx);
                                 }),
                             ))
@@ -1346,7 +1504,10 @@ impl Workspace {
                                     .label(edit_rounds_label)
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, window, cx| {
-                                            this.chat.goal_popover_open = false;
+                                            this.chat.update(cx, |chat, cx| {
+                                                chat.goal_popover_open = false;
+                                                cx.notify();
+                                            });
                                             this.begin_goal_rounds_edit(window, cx);
                                         },
                                     )),
@@ -1362,7 +1523,10 @@ impl Workspace {
                                     .label(edit_budget_label)
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, window, cx| {
-                                            this.chat.goal_popover_open = false;
+                                            this.chat.update(cx, |chat, cx| {
+                                                chat.goal_popover_open = false;
+                                                cx.notify();
+                                            });
                                             this.begin_goal_budget_edit(window, cx);
                                         },
                                     )),
@@ -1383,7 +1547,10 @@ impl Workspace {
                                     .label(replace_label)
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, window, cx| {
-                                            this.chat.goal_popover_open = false;
+                                            this.chat.update(cx, |chat, cx| {
+                                                chat.goal_popover_open = false;
+                                                cx.notify();
+                                            });
                                             this.begin_goal_replace(window, cx);
                                         },
                                     )),
@@ -1395,7 +1562,10 @@ impl Workspace {
                         |row| {
                             row.child(Button::new("goal-new").small().label(new_label).on_click(
                                 cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.chat.goal_popover_open = false;
+                                    this.chat.update(cx, |chat, cx| {
+                                        chat.goal_popover_open = false;
+                                        cx.notify();
+                                    });
                                     this.begin_goal_new(window, cx);
                                 }),
                             ))
@@ -1406,14 +1576,18 @@ impl Workspace {
                             .small()
                             .label(clear_label)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                let _ = this.send_note(|sid| manox_protocol::ClientNote::Goal {
-                                    session_id: sid.into(),
-                                    action: "clear".into(),
-                                    objective: None,
-                                    budget: None,
-                                    max_rounds: None,
+                                let _ =
+                                    this.send_note(cx, |sid| manox_protocol::ClientNote::Goal {
+                                        session_id: sid.into(),
+                                        action: "clear".into(),
+                                        objective: None,
+                                        budget: None,
+                                        max_rounds: None,
+                                    });
+                                this.chat.update(cx, |chat, cx| {
+                                    chat.goal_popover_open = false;
+                                    cx.notify();
                                 });
-                                this.chat.goal_popover_open = false;
                                 cx.notify();
                             })),
                     ),
@@ -1435,7 +1609,10 @@ impl Workspace {
                             .popover_style(cx)
                             .child(popover)
                             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                this.chat.goal_popover_open = false;
+                                this.chat.update(cx, |chat, cx| {
+                                    chat.goal_popover_open = false;
+                                    cx.notify();
+                                });
                                 cx.notify();
                             })),
                     )

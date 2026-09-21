@@ -590,7 +590,7 @@ pub struct Workspace {
     /// The chat column's state (thread face, conversation, composer, ask
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
-    pub(crate) chat: ChatColumn,
+    pub(crate) chat: Entity<ChatColumn>,
     /// T-D: the shared single-connection multiplexer. One app-level
     /// `AgentClient` (client_id "desktop") carries every session; the
     /// per-session handles are leaves fed by its demux pump.
@@ -914,6 +914,28 @@ pub(crate) struct ExternalSpawn {
 }
 
 impl Workspace {
+    // Entity-handle accessors for ChatColumn fields: each returns a cloned
+    // handle so callers can `.update(cx, …)` without holding the chat
+    // entity's read guard across a mutable borrow of `cx`.
+    pub(crate) fn chat_thread(&self, cx: &App) -> manox_agent::thread::ThreadHandle {
+        self.chat.read(cx).thread.clone()
+    }
+    pub(crate) fn chat_store(&self, cx: &App) -> Option<Entity<ClientStoreHandle>> {
+        self.chat.read(cx).store.clone()
+    }
+    pub(crate) fn chat_conversation(&self, cx: &App) -> Entity<ConversationState> {
+        self.chat.read(cx).conversation.clone()
+    }
+    pub(crate) fn chat_input(&self, cx: &App) -> Entity<TextareaState> {
+        self.chat.read(cx).input_state.clone()
+    }
+    pub(crate) fn chat_list_state(&self, cx: &App) -> ListState {
+        self.chat.read(cx).list_state.clone()
+    }
+    pub(crate) fn chat_rail(&self, cx: &App) -> Entity<crate::views::context_rail::ContextRail> {
+        self.chat.read(cx).context_rail.clone()
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         // An unbound conversation must not inherit the launch terminal's
@@ -1039,7 +1061,7 @@ impl Workspace {
             resuming_external: std::collections::HashSet::new(),
             cli_session_claims: std::collections::HashMap::new(),
             active_external: None,
-            chat: ChatColumn {
+            chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
                 store: Some(store),
@@ -1097,20 +1119,30 @@ impl Workspace {
                 turn_active: false,
                 thinking_ticker_gen: 0,
                 context_rail,
-            },
+            }),
         };
         let (thread_events, store_changes) = ws.subscribe_thread(cx);
-        ws.chat.thread_sub = Some(thread_events);
-        ws.chat.store_observe = Some(store_changes);
+        ws.chat.update(cx, |chat, cx| {
+            chat.thread_sub = Some(thread_events);
+            cx.notify();
+        });
+        ws.chat.update(cx, |chat, cx| {
+            chat.store_observe = Some(store_changes);
+            cx.notify();
+        });
         ws.sidebar_sub = Some(ws.subscribe_sidebar(window, cx));
-        ws.chat.input_sub = Some(ws.subscribe_input(window, cx));
+        let input_sub = ws.subscribe_input(window, cx);
+        ws.chat.update(cx, |chat, cc| {
+            chat.input_sub = Some(input_sub);
+            cc.notify();
+        });
         ws.editor_sub = Some(ws.subscribe_editor(window, cx));
         ws.observe_conversation(cx);
         // The sidebar lists the restored resumable rows from the first frame;
         // nothing is resumed until the user clicks one.
         ws.sync_sidebar_external(cx);
         // Focus the composer so typing works immediately on the hero screen.
-        ws.chat.input_state.update(cx, |s, cx| s.focus(window, cx));
+        ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
         ws
     }
 
@@ -1123,18 +1155,21 @@ impl Workspace {
         conversation: Entity<ConversationState>,
         cx: &mut Context<Self>,
     ) {
-        self.chat.conversation = conversation;
+        self.chat.update(cx, |chat, cx| {
+            chat.conversation = conversation;
+            let count = chat.conversation.read(cx).items().len();
+            chat.list_state.reset(count);
+            chat.list_count = count;
+            chat.list_state.set_follow_mode(FollowMode::Tail);
+            cx.notify();
+        });
         self.observe_conversation(cx);
-        let count = self.chat.conversation.read(cx).items().len();
-        self.chat.list_state.reset(count);
-        self.chat.list_count = count;
-        self.chat.list_state.set_follow_mode(FollowMode::Tail);
         cx.notify();
     }
 
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_list_state(&self) -> ListState {
-        self.chat.list_state.clone()
+    pub fn diagnostic_list_state(&self, cx: &App) -> ListState {
+        self.chat.read(cx).list_state.clone()
     }
 
     /// Attach a thread through the production switch path. Diagnostic-only
@@ -1160,8 +1195,14 @@ impl Workspace {
         event: ThreadEvent,
         cx: &mut Context<Self>,
     ) {
-        let store = if self.chat.thread.read(|t| t.id.0.as_str() == thread_id) {
-            self.chat.store.as_ref()
+        let fg = self.chat.read(cx).store.clone();
+        let store = if self
+            .chat
+            .read(cx)
+            .thread
+            .read(|t| t.id.0.as_str() == thread_id)
+        {
+            fg.as_ref()
         } else {
             self.background_threads
                 .iter()
@@ -1183,19 +1224,22 @@ impl Workspace {
         input: serde_json::Value,
         cx: &mut Context<Self>,
     ) {
-        self.chat.pending_ask = parse_pending_ask(id.to_string(), input);
-        // Only AskUserQuestion payloads reach this seeder (the live event
-        // path is `ToolCallAuthorization`, which carries the real tool
-        // name); the fallback exists solely for a malformed ask payload, so
-        // the constant names the tool that actually fired.
-        self.chat.pending_auth = self.chat.pending_ask.is_none().then(|| PendingAuth {
-            id: id.to_string(),
-            tool_name: "AskUserQuestion".to_string(),
-            summary: String::new(),
+        self.chat.update(cx, |chat, cc| {
+            chat.pending_ask = parse_pending_ask(id.to_string(), input);
+            // Only AskUserQuestion payloads reach this seeder (the live event
+            // path is `ToolCallAuthorization`, which carries the real tool
+            // name); the fallback exists solely for a malformed ask payload,
+            // so the constant names the tool that actually fired.
+            chat.pending_auth = chat.pending_ask.is_none().then(|| PendingAuth {
+                id: id.to_string(),
+                tool_name: "AskUserQuestion".to_string(),
+                summary: String::new(),
+            });
+            chat.ask_step = 0;
+            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+            cc.notify();
         });
-        self.chat.ask_step = 0;
-        self.chat.ask_transition_gen = self.chat.ask_transition_gen.wrapping_add(1);
-        self.reset_ask_custom();
+        self.reset_ask_custom(cx);
         cx.notify();
     }
 
@@ -1204,20 +1248,23 @@ impl Workspace {
     /// onto this, but the tri-state fold reads `ask_custom_text` directly).
     /// Diagnostic-only: drives the answer-leg wire tests.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_set_ask_custom(&mut self, qi: usize, text: &str) {
-        if qi >= self.chat.ask_custom_text.len() {
-            self.chat.ask_custom_text.resize(qi + 1, String::new());
-        }
-        if let Some(slot) = self.chat.ask_custom_text.get_mut(qi) {
-            *slot = text.to_string();
-        }
+    pub fn diagnostic_set_ask_custom(&mut self, qi: usize, text: &str, cx: &mut App) {
+        self.chat.update(cx, |chat, cc| {
+            if qi >= chat.ask_custom_text.len() {
+                chat.ask_custom_text.resize(qi + 1, String::new());
+            }
+            if let Some(slot) = chat.ask_custom_text.get_mut(qi) {
+                *slot = text.to_string();
+            }
+            cc.notify();
+        });
     }
 
     /// The pending ask's per-question `custom` texts (diagnostic-only; used to
     /// confirm a skip/re-seed cleared the scratch).
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_ask_custom_texts(&self) -> Vec<String> {
-        self.chat.ask_custom_text.clone()
+    pub fn diagnostic_ask_custom_texts(&self, cx: &App) -> Vec<String> {
+        self.chat.read(cx).ask_custom_text.clone()
     }
 
     /// Seed a non-question authorization (a sandbox escalation, or an ask
@@ -1230,21 +1277,25 @@ impl Workspace {
         summary: &str,
         cx: &mut Context<Self>,
     ) {
-        self.chat.pending_ask = None;
-        self.chat.pending_auth = Some(PendingAuth {
-            id: id.to_string(),
-            tool_name: tool_name.to_string(),
-            summary: summary.to_string(),
+        self.chat.update(cx, |chat, cc| {
+            chat.pending_ask = None;
+            chat.pending_auth = Some(PendingAuth {
+                id: id.to_string(),
+                tool_name: tool_name.to_string(),
+                summary: summary.to_string(),
+            });
+            chat.ask_step = 0;
+            cc.notify();
         });
-        self.chat.ask_step = 0;
-        self.reset_ask_custom();
+        self.reset_ask_custom(cx);
         cx.notify();
     }
 
     /// The pending generic-approval card as (id, tool_name, summary).
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_pending_auth(&self) -> Option<(String, String, String)> {
+    pub fn diagnostic_pending_auth(&self, cx: &App) -> Option<(String, String, String)> {
         self.chat
+            .read(cx)
             .pending_auth
             .as_ref()
             .map(|a| (a.id.clone(), a.tool_name.clone(), a.summary.clone()))
@@ -1253,8 +1304,8 @@ impl Workspace {
     /// Whether any blocking overlay (plan review, ask, generic approval,
     /// blank project) is up.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_blocking_overlay_active(&self) -> bool {
-        self.blocking_overlay_active()
+    pub fn diagnostic_blocking_overlay_active(&self, cx: &App) -> bool {
+        self.blocking_overlay_active(cx)
     }
 
     /// Resolve the pending generic-approval card. Diagnostic-only wrapper
@@ -1287,10 +1338,10 @@ impl Workspace {
     /// top-level `ToolCall` item carrying the Workspace-derived snapshot.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_ask_card_interactive(&self, id: &str, cx: &App) -> bool {
-        let Some(ix) = self.chat.conversation.read(cx).find_tool(id, cx) else {
+        let Some(ix) = self.chat_conversation(cx).read(cx).find_tool(id, cx) else {
             return false;
         };
-        self.chat.conversation.read(cx).items()[ix]
+        self.chat_conversation(cx).read(cx).items()[ix]
             .read(cx)
             .ask_snapshot
             .is_some()
@@ -1300,6 +1351,7 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_tool_call_count(&self, id: &str, cx: &App) -> usize {
         self.chat
+            .read(cx)
             .conversation
             .read(cx)
             .items()
@@ -1310,22 +1362,27 @@ impl Workspace {
 
     /// The pending question card's id, if one is surfaced. Diagnostic-only.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_pending_ask_id(&self) -> Option<String> {
-        self.chat.pending_ask.as_ref().map(|a| a.id.clone())
+    pub fn diagnostic_pending_ask_id(&self, cx: &App) -> Option<String> {
+        self.chat
+            .read(cx)
+            .pending_ask
+            .as_ref()
+            .map(|a| a.id.clone())
     }
 
     /// The ask walk's churn counter. Diagnostic-only: a re-delivery of the
     /// same pending id must not advance it — the walk state belongs to the
     /// user, not to the wire.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_ask_transition_gen(&self) -> u64 {
-        self.chat.ask_transition_gen
+    pub fn diagnostic_ask_transition_gen(&self, cx: &App) -> u64 {
+        self.chat.read(cx).ask_transition_gen
     }
 
     /// The leaf store's pending-auth MsgId keys. Diagnostic-only.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_store_pending_auth_ids(&self, cx: &App) -> Vec<String> {
         self.chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.pending_auth.keys().cloned().collect())
@@ -1342,7 +1399,7 @@ impl Workspace {
         msg_id: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(store) = &self.chat.store {
+        if let Some(store) = self.chat.read(cx).store.clone() {
             store.update(cx, |h, cx| {
                 h.store
                     .pending_auth
@@ -1362,7 +1419,7 @@ impl Workspace {
         seq: u64,
         cx: &mut Context<Self>,
     ) {
-        if let Some(store) = &self.chat.store {
+        if let Some(store) = self.chat.read(cx).store.clone() {
             store.update(cx, |h, cx| {
                 h.store.merge_projection(key, value, seq);
                 cx.notify();
@@ -1384,13 +1441,15 @@ impl Workspace {
     /// after any `self.chat.conversation = ...` reassignment so the subscription
     /// tracks the live entity.
     fn observe_conversation(&mut self, cx: &mut Context<Self>) {
-        let list_state = self.chat.list_state.clone();
-        self.chat.conversation_sub = Some(cx.observe(
-            &self.chat.conversation,
-            move |_this, _conv, _cx| {
-                list_state.remeasure_items(0..list_state.item_count());
-            },
-        ));
+        let list_state = self.chat_list_state(cx);
+        let conversation = self.chat_conversation(cx);
+        let sub = cx.observe(&conversation, move |_this, _conv, _cx| {
+            list_state.remeasure_items(0..list_state.item_count());
+        });
+        self.chat.update(cx, |chat, cc| {
+            chat.conversation_sub = Some(sub);
+            cc.notify();
+        });
     }
 
     /// Rebuild the conversation view from the thread's v2 display fold. The
@@ -1400,6 +1459,7 @@ impl Workspace {
     pub(crate) fn rebuild_conversation_from_thread(&mut self, cx: &mut Context<Self>) {
         let display: Vec<manox_agent::db::HistoryEntry> = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.display.clone())
@@ -1407,6 +1467,7 @@ impl Workspace {
         let subagent_rows = manox_agent::subagent_restore::rebuild_from_messages(
             &self
                 .chat
+                .read(cx)
                 .store
                 .as_ref()
                 .map(|s| s.read(cx).store.derived_messages())
@@ -1414,6 +1475,7 @@ impl Workspace {
         );
         let usage = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| {
@@ -1436,15 +1498,16 @@ impl Workspace {
             })
             .expect("foreground store present");
         let role = self.model_label(cx);
-        let recipient = self.recipient_author();
+        let recipient = self.recipient_author(cx);
         let _weak = cx.weak_entity();
         let running = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
             .expect("foreground store present");
-        let cwd = thread_cwd(&self.chat.thread, &self.chat.store, cx);
+        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
         // A rebuild from the thread is that session's journal replayed, so its
         // rows may anchor forks.
         let fork_source = self.fork_source_session(cx);
@@ -1456,21 +1519,33 @@ impl Workspace {
                 recipient,
                 running,
                 crate::conversation::ApplyCtx {
-                    host: self.chat.host.clone(),
+                    host: self.chat.read(cx).host.clone(),
                     cwd,
                     fork_source,
                 },
                 cx,
             )
         });
-        self.chat.conversation = new_conv;
+        self.chat.update(cx, |chat, cx| {
+            chat.conversation = new_conv;
+            cx.notify();
+        });
         self.observe_conversation(cx);
-        let count = self.chat.conversation.read(cx).items().len();
-        self.chat.list_state.reset(count);
-        self.chat.list_count = count;
+        let count = self.chat_conversation(cx).read(cx).items().len();
+        self.chat.update(cx, |chat, cx| {
+            chat.list_state.reset(count);
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.list_count = count;
+            cx.notify();
+        });
         // `Tail` natively pins to the end and keeps following; an upward user
         // scroll disengages it and landing back at the bottom re-arms it.
-        self.chat.list_state.set_follow_mode(FollowMode::Tail);
+        self.chat
+            .read(cx)
+            .list_state
+            .set_follow_mode(FollowMode::Tail);
         // Recover the settled sub-agent observation rows alongside the
         // conversation: a restored transcript is the only record of runs that
         // finished (or were killed) before the restart / switch.
@@ -1485,6 +1560,7 @@ impl Workspace {
     fn subscribe_thread(&self, cx: &mut Context<Self>) -> (Subscription, Subscription) {
         let store = self
             .chat
+            .read(cx)
             .store
             .clone()
             .expect("subscribe_thread requires the foreground store");
@@ -1495,6 +1571,7 @@ impl Workspace {
             if let Some(next) = store.read(cx).store.replaced_by.clone()
                 && this
                     .chat
+                    .read(cx)
                     .store
                     .as_ref()
                     .is_none_or(|s| s.read(cx).session_id() != next)
@@ -1503,7 +1580,10 @@ impl Workspace {
                 // predecessor later cannot bounce the user back (review #39
                 // [sugg] 4).
                 store.update(cx, |handle, _| handle.store.replaced_by = None);
-                this.chat.pending_successor = Some(next);
+                this.chat.update(cx, |chat, cx| {
+                    chat.pending_successor = Some(next);
+                    cx.notify();
+                });
             }
             cx.notify();
         });
@@ -1526,39 +1606,64 @@ impl Workspace {
                     // the card state here would wipe the walk a user is
                     // mid-way through. Only the card row is re-adoption-safe
                     // to (re-)ensure.
-                    if this.chat.pending_ask.as_ref().is_some_and(|a| &a.id == id)
-                        || this.chat.pending_auth.as_ref().is_some_and(|a| &a.id == id)
+                    if this
+                        .chat
+                        .read(cx)
+                        .pending_ask
+                        .as_ref()
+                        .is_some_and(|a| &a.id == id)
+                        || this
+                            .chat
+                            .read(cx)
+                            .pending_auth
+                            .as_ref()
+                            .is_some_and(|a| &a.id == id)
                     {
-                        if this.chat.pending_ask.is_some() {
+                        if this.chat.read(cx).pending_ask.is_some() {
                             this.ensure_ask_tool_item(id, summary, input.clone(), cx);
                         }
                         return;
                     }
-                    this.chat.pending_ask = parse_pending_ask(id.clone(), input.clone());
-                    this.chat.pending_auth = this.chat.pending_ask.is_none().then(|| PendingAuth {
-                        id: id.clone(),
-                        tool_name: tool_name.clone(),
-                        summary: summary.clone(),
+                    this.chat.update(cx, |chat, cx| {
+                        chat.pending_ask = parse_pending_ask(id.clone(), input.clone());
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cc| {
+                        chat.pending_auth = chat.pending_ask.is_none().then(|| PendingAuth {
+                            id: id.clone(),
+                            tool_name: tool_name.clone(),
+                            summary: summary.clone(),
+                        });
+                        cc.notify();
                     });
                     // Arming is per-card: a fresh adjudication has never been
                     // confirmed in the leaf's `pending_auth` projection, so it
                     // must not inherit the previous card's armed flag — mere
                     // absence right after a Request frame is exactly the race
                     // the arming guard exists for.
-                    this.chat.pending_projection_confirmed = false;
-                    this.chat.ask_step = 0;
-                    this.chat.ask_transition_gen = this.chat.ask_transition_gen.wrapping_add(1);
-                    this.reset_ask_custom();
+                    this.chat.update(cx, |chat, cx| {
+                        chat.pending_projection_confirmed = false;
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cx| {
+                        chat.ask_step = 0;
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cc| {
+                        chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+                        cc.notify();
+                    });
+                    this.reset_ask_custom(cx);
                     // Live synthesis: the question card appears in the
                     // transcript on the same edge as the pending state —
                     // never waiting on the journal's `tool_use` fold to
                     // arrive through the stream (when it lagged or lost the
                     // race against a thread switch, the ask was unrenderable
                     // and the turn deadlocked).
-                    if this.chat.pending_ask.is_some() {
+                    if this.chat.read(cx).pending_ask.is_some() {
                         this.ensure_ask_tool_item(id, summary, input.clone(), cx);
                     }
-                    this.chat.context_rail.update(cx, |r, cx| {
+                    this.chat_rail(cx).update(cx, |r, cx| {
                         r.cockpit_phase = CockpitPhase::AwaitingApproval;
                         cx.notify();
                     });
@@ -1577,8 +1682,7 @@ impl Workspace {
                     // Live plan progress: mirror onto the rail as the model
                     // publishes it (an empty snapshot clears the section).
                     let snapshot = snapshot.clone();
-                    this.chat
-                        .context_rail
+                    this.chat_rail(cx)
                         .update(cx, |r, cx| r.set_plan(snapshot, cx));
                 }
                 ThreadEvent::PermissionModeChanged { .. } => {
@@ -1588,7 +1692,10 @@ impl Workspace {
                 ThreadEvent::BrowserSuitesChanged { suites } => {
                     // The composer chips are derived state of the thread's
                     // suite mirror (survives thread switches and restores).
-                    this.chat.active_browser_suites = suites.clone();
+                    this.chat.update(cx, |chat, cx| {
+                        chat.active_browser_suites = suites.clone();
+                        cx.notify();
+                    });
                     cx.notify();
                 }
                 // v2 (T10c, §D.1): the follow stream's authoritative history
@@ -1608,6 +1715,7 @@ impl Workspace {
                     // otherwise wait for a manual thread switch.
                     let messages = this
                         .chat
+                        .read(cx)
                         .store
                         .as_ref()
                         .map(|s| s.read(cx).store.derived_messages())
@@ -1615,6 +1723,7 @@ impl Workspace {
                     if let Some(snapshot) = manox_agent::plan::rebuild_from_messages(&messages)
                         .or_else(|| {
                             this.chat
+                                .read(cx)
                                 .store
                                 .as_ref()
                                 .and_then(|s| s.read(cx).store.persisted_plan.as_ref())
@@ -1626,8 +1735,7 @@ impl Workspace {
                                 })
                         })
                     {
-                        this.chat
-                            .context_rail
+                        this.chat_rail(cx)
                             .update(cx, |r, cx| r.set_plan(snapshot, cx));
                     }
                 }
@@ -1652,7 +1760,10 @@ impl Workspace {
                     // Drive the Thinking status row's per-second "for Xs"
                     // counter while this turn is live. The ticker polls
                     // `turn_active` and self-terminates on the terminal stop.
-                    this.chat.turn_active = true;
+                    this.chat.update(cx, |chat, cx| {
+                        chat.turn_active = true;
+                        cx.notify();
+                    });
                     this.spawn_thinking_ticker(cx);
                 }
                 ThreadEvent::UserRowLanded { message_id } => {
@@ -1680,14 +1791,14 @@ impl Workspace {
                     // a segment above the new user bubble.
                     let _weak = cx.weak_entity();
                     let role = this.model_label(cx);
-                    let cwd = thread_cwd(&this.chat.thread, &this.chat.store, cx);
-                    let outcome = this.chat.conversation.update(cx, |c, cx| {
+                    let cwd = thread_cwd(&this.chat_thread(cx), &this.chat_store(cx), cx);
+                    let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
                         c.apply(
                             ev,
                             &role,
                             None,
                             crate::conversation::ApplyCtx {
-                                host: this.chat.host.clone(),
+                                host: this.chat.read(cx).host.clone(),
                                 cwd,
                                 fork_source: this.fork_source_session(cx),
                             },
@@ -1710,6 +1821,7 @@ impl Workspace {
                     this.settle_steer_group(stranded, cx);
                     let thread_id = this
                         .chat
+                        .read(cx)
                         .store
                         .as_ref()
                         .map(|s| s.read(cx).store.id.0.clone())
@@ -1723,7 +1835,10 @@ impl Workspace {
                     // race with this former mirror. The pump clears
                     // pending-plan unconditionally at settle; the review
                     // card's own demote below is UI state, not a store flag.
-                    this.chat.turn_active = false;
+                    this.chat.update(cx, |chat, cx| {
+                        chat.turn_active = false;
+                        cx.notify();
+                    });
                     this.background_threads.retain(|b| b.id != thread_id);
                     this.spawn_git_status_refresh(cx);
                     // Dispatch last: `run_turn` emits `TurnStarted`
@@ -1737,7 +1852,7 @@ impl Workspace {
                 ThreadEvent::Stop(reason) => {
                     let _weak = cx.weak_entity();
                     let role = this.model_label(cx);
-                    let usage = this.chat.store.as_ref().and_then(|s| {
+                    let usage = this.chat.read(cx).store.as_ref().and_then(|s| {
                         s.read(cx).store.last_token_usage.as_ref().map(|u| {
                             manox_agent::TokenUsage {
                                 input_tokens: u.input,
@@ -1747,14 +1862,14 @@ impl Workspace {
                             }
                         })
                     });
-                    let cwd = thread_cwd(&this.chat.thread, &this.chat.store, cx);
-                    let outcome = this.chat.conversation.update(cx, |c, cx| {
+                    let cwd = thread_cwd(&this.chat_thread(cx), &this.chat_store(cx), cx);
+                    let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
                         c.apply(
                             ev,
                             &role,
                             usage,
                             crate::conversation::ApplyCtx {
-                                host: this.chat.host.clone(),
+                                host: this.chat.read(cx).host.clone(),
                                 cwd,
                                 fork_source: this.fork_source_session(cx),
                             },
@@ -1788,19 +1903,24 @@ impl Workspace {
                         .as_ref()
                         .map(|g| !g.status.is_terminal())
                         .unwrap_or(false);
-                    this.chat.goal_ticker_gen = this.chat.goal_ticker_gen.wrapping_add(1);
+                    this.chat.update(cx, |chat, cc| {
+                        chat.goal_ticker_gen = chat.goal_ticker_gen.wrapping_add(1);
+                        cc.notify();
+                        chat.goal_ticker_gen
+                    });
                     if active {
                         let entity = cx.entity().clone();
-                        let ticker_gen = this.chat.goal_ticker_gen;
+                        let ticker_gen = this.chat.read(cx).goal_ticker_gen;
                         cx.spawn(async move |_this, cx| {
                             loop {
                                 cx.background_executor()
                                     .timer(std::time::Duration::from_secs(1))
                                     .await;
                                 let still = entity.read_with(cx, |this, cx| {
-                                    this.chat.goal_ticker_gen == ticker_gen
+                                    this.chat.read(cx).goal_ticker_gen == ticker_gen
                                         && this
                                             .chat
+                                            .read(cx)
                                             .store
                                             .as_ref()
                                             .and_then(|s| s.read(cx).store.goal.clone())
@@ -1848,6 +1968,7 @@ impl Workspace {
                     if let ThreadEvent::Error(e) = ev {
                         let thread_id = this
                             .chat
+                            .read(cx)
                             .store
                             .as_ref()
                             .map(|s| s.read(cx).store.id.0.clone())
@@ -1859,7 +1980,10 @@ impl Workspace {
                         // for the FOREGROUND error — the user is watching
                         // it; the errored triangle is the signal
                         // (client-owned unread, §F.2).
-                        this.chat.turn_active = false;
+                        this.chat.update(cx, |chat, cx| {
+                            chat.turn_active = false;
+                            cx.notify();
+                        });
                         this.background_threads.retain(|b| b.id != thread_id);
                         // Persist the error card so a reloaded thread reproduces
                         // what went wrong at the failed turn's position. The
@@ -1882,8 +2006,7 @@ impl Workspace {
                     // flips back to Streaming; a `Running` tool call caches its
                     // title and flips RunningTool; other tool statuses return to
                     // Streaming; text/thinking deltas mark Thinking/Streaming.
-                    this.chat
-                        .context_rail
+                    this.chat_rail(cx)
                         .update(cx, |r, cx| r.update_cockpit_phase(ev, cx));
                     // Sub-agent observation: the pi harness observes its
                     // ephemeral nested sessions through progress events on
@@ -1902,7 +2025,7 @@ impl Workspace {
                         let subagent_type = subagent_type.clone();
                         let latest_activity = latest_activity.clone();
                         let health = health.clone();
-                        this.chat.context_rail.update(cx, |r, cx| {
+                        this.chat_rail(cx).update(cx, |r, cx| {
                             r.apply_subagent_progress(
                                 &id,
                                 &subagent_type,
@@ -1964,7 +2087,7 @@ impl Workspace {
                     }
                     let _weak = cx.weak_entity();
                     let role = this.model_label(cx);
-                    let usage = this.chat.store.as_ref().and_then(|s| {
+                    let usage = this.chat.read(cx).store.as_ref().and_then(|s| {
                         s.read(cx).store.last_token_usage.as_ref().map(|u| {
                             manox_agent::TokenUsage {
                                 input_tokens: u.input,
@@ -1974,14 +2097,14 @@ impl Workspace {
                             }
                         })
                     });
-                    let cwd = thread_cwd(&this.chat.thread, &this.chat.store, cx);
-                    let outcome = this.chat.conversation.update(cx, |c, cx| {
+                    let cwd = thread_cwd(&this.chat_thread(cx), &this.chat_store(cx), cx);
+                    let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
                         c.apply(
                             ev,
                             &role,
                             usage,
                             crate::conversation::ApplyCtx {
-                                host: this.chat.host.clone(),
+                                host: this.chat.read(cx).host.clone(),
                                 cwd,
                                 fork_source: this.fork_source_session(cx),
                             },
@@ -2048,6 +2171,7 @@ impl Workspace {
                 SidebarEvent::ArchiveThread(id, archived) => {
                     let is_current = this
                         .chat
+                        .read(cx)
                         .store
                         .as_ref()
                         .map(|s| s.read(cx).store.id.0 == *id)
@@ -2057,10 +2181,11 @@ impl Workspace {
                     // Sync the in-memory flag so the title-bar menu label stays
                     // fresh when the sidebar archives the currently active thread.
                     if is_current {
-                        let _ = this.send_note(|sid| manox_protocol::ClientNote::ArchiveThread {
-                            session_id: sid.into(),
-                            archived: *archived,
-                        });
+                        let _ =
+                            this.send_note(cx, |sid| manox_protocol::ClientNote::ArchiveThread {
+                                session_id: sid.into(),
+                                archived: *archived,
+                            });
                     }
                     // Archiving the active thread navigates away to a fresh
                     // empty thread (Hero view) so the user doesn't stare at a
@@ -2183,7 +2308,7 @@ impl Workspace {
     }
 
     fn subscribe_input(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        let input = self.chat.input_state.clone();
+        let input = self.chat.read(cx).input_state.clone();
         cx.subscribe_in(
             &input,
             window,
@@ -2221,7 +2346,7 @@ impl Workspace {
     /// `InputState` keeps typing and the filter updates every keystroke.
     fn sync_completion(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let (value, cursor) = {
-            let s = self.chat.input_state.read(cx);
+            let s = self.chat_input(cx).read(cx);
             (s.value().to_string(), s.selected_range().end)
         };
         let new = match detect(&value, cursor) {
@@ -2242,6 +2367,7 @@ impl Workspace {
                     // the highlight back to the top.
                     let selected = self
                         .chat
+                        .read(cx)
                         .completion
                         .as_ref()
                         .filter(|s| s.trigger == det.trigger)
@@ -2257,14 +2383,17 @@ impl Workspace {
                 }
             }
         };
-        let changed = match (&self.chat.completion, &new) {
+        let changed = match (&self.chat.read(cx).completion, &new) {
             (None, None) => false,
             (Some(_), None) | (None, Some(_)) => true,
             (Some(a), Some(b)) => {
                 !a.items.eq(&b.items) || a.trigger != b.trigger || a.selected != b.selected
             }
         };
-        self.chat.completion = new;
+        self.chat.update(cx, |chat, cx| {
+            chat.completion = new;
+            cx.notify();
+        });
         if changed {
             cx.notify();
         }
@@ -2272,33 +2401,42 @@ impl Workspace {
 
     /// Drop the popover without touching the input.
     fn close_completion(&mut self, cx: &mut Context<Self>) {
-        if self.chat.completion.take().is_some() {
-            cx.notify();
-        }
+        self.chat.update(cx, |chat, cc| {
+            if chat.completion.take().is_some() {
+                cc.notify();
+            }
+        });
     }
 
     /// Confirm the selected (or clicked) completion item: replace the trigger
     /// token with `trigger + name + " "` and place the caret after the space.
     fn completion_confirm(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(state) = self.chat.completion.take() else {
+        let Some(state) = self.chat.update(cx, |chat, cc| {
+            let v = chat.completion.take();
+            cc.notify();
+            v
+        }) else {
             return;
         };
         let Some(item) = state.items.get(ix) else {
-            self.chat.completion = Some(state);
+            self.chat.update(cx, |chat, cx| {
+                chat.completion = Some(state);
+                cx.notify();
+            });
             return;
         };
         let name = item.name.to_string();
         let trigger = state.trigger;
         let token_start = state.token_start;
         let (value, cursor) = {
-            let s = self.chat.input_state.read(cx);
+            let s = self.chat_input(cx).read(cx);
             (s.value().to_string(), s.selected_range().end)
         };
         if cursor > value.len() || token_start > cursor {
             return;
         }
         let (new_value, caret) = build_replacement(trigger, &name, &value, token_start, cursor);
-        self.chat.input_state.update(cx, |s, cx| {
+        self.chat_input(cx).update(cx, |s, cx| {
             s.set_value(new_value, window, cx);
             let pos = RopeExt::offset_to_position(s.text(), caret.min(s.text().len()));
             s.set_cursor_position(pos, window, cx);
@@ -2307,22 +2445,27 @@ impl Workspace {
     }
 
     fn completion_up(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = self.chat.completion.as_mut() {
-            state.move_selection(-1);
-            cx.notify();
-        }
+        self.chat.update(cx, |chat, cc| {
+            if let Some(state) = chat.completion.as_mut() {
+                state.move_selection(-1);
+                cc.notify();
+            }
+        });
     }
 
     fn completion_down(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = self.chat.completion.as_mut() {
-            state.move_selection(1);
-            cx.notify();
-        }
+        self.chat.update(cx, |chat, cc| {
+            if let Some(state) = chat.completion.as_mut() {
+                state.move_selection(1);
+                cc.notify();
+            }
+        });
     }
 
     fn completion_confirm_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ix = self
             .chat
+            .read(cx)
             .completion
             .as_ref()
             .map(|s| s.selected)
@@ -2331,34 +2474,48 @@ impl Workspace {
     }
 
     /// Close the access-chip dropdown, dropping the menu entity + subscription.
-    fn close_access_menu(&mut self) {
-        self.chat.access_open = false;
+    fn close_access_menu(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| {
+            chat.access_open = false;
+            cx.notify();
+        });
     }
 
     /// Close the project-chip dropdown.
-    fn close_project_chip_menu(&mut self) {
-        self.chat.project_chip_open = false;
-        self.chat.project_chip_menu = None;
-        self.chat.project_chip_menu_sub = None;
+    fn close_project_chip_menu(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| {
+            chat.project_chip_open = false;
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.project_chip_menu = None;
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.project_chip_menu_sub = None;
+            cx.notify();
+        });
     }
 
-    fn blocking_overlay_active(&self) -> bool {
-        self.chat.pending_ask.is_some()
-            || self.chat.pending_auth.is_some()
-            || self.chat.blank_project_parent.is_some()
+    fn blocking_overlay_active(&self, cx: &App) -> bool {
+        let chat = self.chat.read(cx);
+        chat.pending_ask.is_some()
+            || chat.pending_auth.is_some()
+            || chat.blank_project_parent.is_some()
     }
 
     fn toggle_turn_navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chat.turn_navigator.is_some() {
+        if self.chat.read(cx).turn_navigator.is_some() {
             self.close_turn_navigator(window, cx);
             return;
         }
-        if !matches!(self.view_mode, ViewMode::Workspace) || self.blocking_overlay_active() {
+        if !matches!(self.view_mode, ViewMode::Workspace) || self.blocking_overlay_active(cx) {
             return;
         }
 
         let turns = collect_user_turns(
             self.chat
+                .read(cx)
                 .conversation
                 .read(cx)
                 .items()
@@ -2385,9 +2542,18 @@ impl Workspace {
                 TurnNavigatorEvent::Dismiss => this.close_turn_navigator(window, cx),
             },
         );
-        self.chat.turn_navigator = Some(navigator.clone());
-        self.chat.turn_navigator_sub = Some(sub);
-        self.chat.turn_navigator_previous_focus = previous_focus;
+        self.chat.update(cx, |chat, cx| {
+            chat.turn_navigator = Some(navigator.clone());
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.turn_navigator_sub = Some(sub);
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.turn_navigator_previous_focus = previous_focus;
+            cx.notify();
+        });
         navigator.update(cx, |navigator, cx| navigator.focus(window, cx));
         cx.notify();
     }
@@ -2399,22 +2565,25 @@ impl Workspace {
     /// dangling slot out. Call after any direct conversation mutation that the
     /// `ApplyOutcome` path does not already cover (e.g. `push_user`/`push_notice`,
     /// which bypass `apply`).
-    fn sync_list_count(&mut self, cx: &App) -> bool {
-        let new_count = self.chat.conversation.read(cx).items().len();
-        if new_count == self.chat.list_count {
+    fn sync_list_count(&mut self, cx: &mut App) -> bool {
+        let new_count = self.chat_conversation(cx).read(cx).items().len();
+        if new_count == self.chat.read(cx).list_count {
             return false;
         }
-        if new_count > self.chat.list_count {
-            self.chat.list_state.splice(
-                self.chat.list_count..self.chat.list_count,
-                new_count - self.chat.list_count,
-            );
+        let (current, list_state) = {
+            let chat = self.chat.read(cx);
+            (chat.list_count, chat.list_state.clone())
+        };
+        let (start, end, extra) = if new_count > current {
+            (current, current, new_count - current)
         } else {
-            self.chat
-                .list_state
-                .splice(new_count..self.chat.list_count, 0);
-        }
-        self.chat.list_count = new_count;
+            (new_count, current, 0)
+        };
+        list_state.splice(start..end, extra);
+        self.chat.update(cx, |chat, cc| {
+            chat.list_count = new_count;
+            cc.notify();
+        });
         true
     }
 
@@ -2422,11 +2591,13 @@ impl Workspace {
     /// count (append/remove) and remeasure the affected index/indices. Call
     /// after any `ConversationState::apply` (the outcome tells which path) so
     /// the virtualized list's per-item height cache never goes stale.
-    fn apply_list_outcome(&mut self, outcome: ApplyOutcome, cx: &App) {
+    fn apply_list_outcome(&mut self, outcome: ApplyOutcome, cx: &mut App) {
         let count_changed = self.sync_list_count(cx);
         match outcome {
-            ApplyOutcome::Remeasure(ix) => self.chat.list_state.remeasure_items(ix..ix + 1),
-            ApplyOutcome::RemeasureAll => self.chat.list_state.remeasure(),
+            ApplyOutcome::Remeasure(ix) => {
+                self.chat.read(cx).list_state.remeasure_items(ix..ix + 1)
+            }
+            ApplyOutcome::RemeasureAll => self.chat.read(cx).list_state.remeasure(),
             // Remeasure the just-mutated segment (e.g. an activity segment
             // closed for an incoming reply) in addition to the append splice
             // `sync_list_count` already performed. When the append was net-
@@ -2440,11 +2611,15 @@ impl Workspace {
             // dead.)
             ApplyOutcome::RemeasureAndAppend { remeasure_ix } => {
                 self.chat
+                    .read(cx)
                     .list_state
                     .remeasure_items(remeasure_ix..remeasure_ix + 1);
                 if !count_changed {
-                    let tail = self.chat.list_count.saturating_sub(1);
-                    self.chat.list_state.remeasure_items(tail..tail + 1);
+                    let tail = self.chat.read(cx).list_count.saturating_sub(1);
+                    self.chat
+                        .read(cx)
+                        .list_state
+                        .remeasure_items(tail..tail + 1);
                 }
             }
             // `Unchanged` touched no item; `Appended`/`RemovedTail` only changed
@@ -2458,9 +2633,12 @@ impl Workspace {
     /// tail-diff in `sync_list_count`, so this splices at the exact position
     /// and bumps `list_count` to keep the two reconciliations consistent (a
     /// later `sync_list_count` sees an equal count and is a no-op).
-    fn apply_list_insert(&mut self, ix: usize) {
-        self.chat.list_state.splice(ix..ix, 1);
-        self.chat.list_count += 1;
+    fn apply_list_insert(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cc| {
+            chat.list_state.splice(ix..ix, 1);
+            chat.list_count += 1;
+            cc.notify();
+        });
     }
 
     /// Re-engage tail-follow. `FollowMode::Tail` pins to the end natively and
@@ -2468,16 +2646,22 @@ impl Workspace {
     /// at the bottom re-arms it. This is the user-initiated "jump to live
     /// tail" path (submit, slash command, thread open) — it always re-arms
     /// follow, even if the user had scrolled up to read back.
-    fn follow_message_tail(&mut self) {
-        self.chat.list_state.set_follow_mode(FollowMode::Tail);
+    fn follow_message_tail(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cc| {
+            chat.list_state.set_follow_mode(FollowMode::Tail);
+            cc.notify();
+        });
     }
 
     /// Jump the viewport so the given conversation item is at the top. Native
     /// `scroll_to` is a single atomic state change, so no frame protection is
     /// needed against a stale tail re-pin.
     fn reveal_message(&mut self, item_ix: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        self.chat.list_state.set_follow_mode(FollowMode::Normal);
-        self.chat.list_state.scroll_to(ListOffset {
+        self.chat
+            .read(cx)
+            .list_state
+            .set_follow_mode(FollowMode::Normal);
+        self.chat.read(cx).list_state.scroll_to(ListOffset {
             item_ix,
             offset_in_item: px(0.),
         });
@@ -2485,20 +2669,49 @@ impl Workspace {
     }
 
     fn close_turn_navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chat.turn_navigator.take().is_none() {
+        if self
+            .chat
+            .update(cx, |chat, cc| {
+                let v = chat.turn_navigator.take();
+                cc.notify();
+                v
+            })
+            .is_none()
+        {
             return;
         }
-        self.chat.turn_navigator_sub = None;
-        if let Some(previous) = self.chat.turn_navigator_previous_focus.take() {
+        self.chat.update(cx, |chat, cx| {
+            chat.turn_navigator_sub = None;
+            cx.notify();
+        });
+        if let Some(previous) = self.chat.update(cx, |chat, cc| {
+            let v = chat.turn_navigator_previous_focus.take();
+            cc.notify();
+            v
+        }) {
             window.focus(&previous, cx);
         }
         cx.notify();
     }
 
     fn drop_turn_navigator(&mut self, cx: &mut Context<Self>) {
-        if self.chat.turn_navigator.take().is_some() {
-            self.chat.turn_navigator_sub = None;
-            self.chat.turn_navigator_previous_focus = None;
+        if self
+            .chat
+            .update(cx, |chat, cc| {
+                let v = chat.turn_navigator.take();
+                cc.notify();
+                v
+            })
+            .is_some()
+        {
+            self.chat.update(cx, |chat, cx| {
+                chat.turn_navigator_sub = None;
+                cx.notify();
+            });
+            self.chat.update(cx, |chat, cx| {
+                chat.turn_navigator_previous_focus = None;
+                cx.notify();
+            });
             cx.notify();
         }
     }
@@ -2511,7 +2724,7 @@ impl Workspace {
         show_context_rail: bool,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let navigator = self.chat.turn_navigator.clone()?;
+        let navigator = self.chat.read(cx).turn_navigator.clone()?;
         let layout = turn_navigator_layout(
             window.bounds().size.width,
             self.effective_sidebar_width(),
@@ -2565,16 +2778,20 @@ impl Workspace {
     /// no longer matches, so a new turn or thread switch replaces the old task
     /// instead of stacking a second one.
     fn spawn_thinking_ticker(&mut self, cx: &mut Context<Self>) {
-        self.chat.thinking_ticker_gen = self.chat.thinking_ticker_gen.wrapping_add(1);
+        self.chat.update(cx, |chat, cx| {
+            chat.thinking_ticker_gen = chat.thinking_ticker_gen.wrapping_add(1);
+            cx.notify();
+        });
         let entity = cx.entity().clone();
-        let ticker_gen = self.chat.thinking_ticker_gen;
+        let ticker_gen = self.chat.read(cx).thinking_ticker_gen;
         cx.spawn(async move |_this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(1))
                     .await;
-                let still = entity.read_with(cx, |this, _cx| {
-                    this.chat.thinking_ticker_gen == ticker_gen && this.chat.turn_active
+                let still = entity.read_with(cx, |this, cx| {
+                    let chat = this.chat.read(cx);
+                    chat.thinking_ticker_gen == ticker_gen && chat.turn_active
                 });
                 if !still {
                     break;
@@ -2596,18 +2813,23 @@ impl Workspace {
     /// Uses `cx.background_executor().timer()` — never `tokio::time` on the
     /// gpui foreground (that panics: no current tokio runtime).
     fn spawn_git_status_refresh(&mut self, cx: &mut Context<Self>) {
-        self.chat.git_status_gen = self.chat.git_status_gen.wrapping_add(1);
+        self.chat.update(cx, |chat, cc| {
+            chat.git_status_gen = chat.git_status_gen.wrapping_add(1);
+            cc.notify();
+        });
         let entity = cx.entity().clone();
-        let refresh_gen = self.chat.git_status_gen;
-        let rail = self.chat.context_rail.clone();
+        let refresh_gen = self.chat.read(cx).git_status_gen;
+        let rail = self.chat.read(cx).context_rail.clone();
         let cwd = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))
             .expect("foreground store present");
         let worktree_branch = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .and_then(|s| s.read(cx).store.with(|st| st.branch.clone()));
@@ -2618,15 +2840,18 @@ impl Workspace {
                 .timer(std::time::Duration::from_millis(400))
                 .await;
             // Superseded by a newer trigger — let the newer refresh win.
-            let stale = entity.read_with(cx, |this, _| this.chat.git_status_gen != refresh_gen);
+            let stale = entity.read_with(cx, |this, cx| {
+                this.chat.read(cx).git_status_gen != refresh_gen
+            });
             if stale {
                 return;
             }
             let result = crate::git_status::gather_bridged(cwd, worktree_branch).await;
             // The refresh may have been superseded while the git call was in
             // flight; drop the result if so.
-            let still_current =
-                entity.read_with(cx, |this, _| this.chat.git_status_gen == refresh_gen);
+            let still_current = entity.read_with(cx, |this, cx| {
+                this.chat.read(cx).git_status_gen == refresh_gen
+            });
             if !still_current {
                 return;
             }
@@ -2642,8 +2867,8 @@ impl Workspace {
     /// The agent whose conversation this workspace renders — every user
     /// bubble's header `to`. `lead`-labeled threads show the localized Captain
     /// label; a team member thread shows its own member name.
-    fn recipient_author(&self) -> manox_agent::MessageAuthor {
-        self.chat.thread.read(|t| t.self_author())
+    fn recipient_author(&self, cx: &App) -> manox_agent::MessageAuthor {
+        self.chat.read(cx).thread.read(|t| t.self_author())
     }
 
     /// The session the transcript's rows belong to: the single source for
@@ -2653,6 +2878,7 @@ impl Workspace {
     /// must read one id.
     pub(crate) fn fork_source_session(&self, cx: &App) -> Option<String> {
         self.chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).session_id().to_string())
@@ -2661,6 +2887,7 @@ impl Workspace {
     fn user_turn_meta(&self, cx: &mut Context<Self>) -> UserTurnMeta {
         let permission_mode = self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.permission_mode)
@@ -2681,11 +2908,13 @@ impl Workspace {
             // notes) is gone — the `model` projection carries the canonical
             // wire identity only; display names resolve via the provider glue.
             self.chat
+                .read(cx)
                 .store
                 .as_ref()
                 .and_then(|s| s.read(cx).store.with(|st| st.model_id.clone()))
                 .unwrap_or_else(|| {
                     self.chat
+                        .read(cx)
                         .thread
                         .read(|t| t.model().cloned())
                         .map(|model| manox_agent::provider_glue::display_name(&model))
@@ -2714,10 +2943,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let _weak = cx.weak_entity();
-        let ix = self.chat.conversation.update(cx, |c, cx| {
-            c.push_notice(text.clone(), anchor, self.chat.host.clone(), cx)
+        let ix = self.chat_conversation(cx).update(cx, |c, cx| {
+            c.push_notice(text.clone(), anchor, self.chat.read(cx).host.clone(), cx)
         });
-        self.apply_list_insert(ix);
+        self.apply_list_insert(ix, cx);
         self.append_ui_note(manox_agent::db::UiNoteKind::Notice, text, tool_call_id, cx);
         // Tail-follow keeps the viewport pinned to the live end, so a
         // `TurnEnd`-anchored notice is revealed by the follow; an `After`
@@ -2737,7 +2966,7 @@ impl Workspace {
         kind: manox_agent::db::UiNoteKind,
         text: String,
         tool_call_id: Option<&str>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let mut data = serde_json::json!({ "text": text });
         // A tool-anchored notice carries the tool call id so the rebuild can
@@ -2751,7 +2980,7 @@ impl Workspace {
             manox_agent::db::UiNoteKind::Notice => "notice",
             manox_agent::db::UiNoteKind::PlanReview => "plan_review",
         };
-        let _ = self.send_note(|sid| manox_protocol::ClientNote::AppendUiNote {
+        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::AppendUiNote {
             session_id: sid.into(),
             kind: kind_str.into(),
             data: data.clone(),
@@ -2764,13 +2993,13 @@ impl Workspace {
         // the same `{"dismissed": true}` marker the close leg sends — so the
         // server's waterfall converges on it immediately instead of stalling
         // the session pump until the turn-cancel or a disconnect settles it.
-        if self.chat.pending_ask.is_some() {
+        if self.chat.read(cx).pending_ask.is_some() {
             self.dismiss_ask(cx);
         }
         // A dropped cancel is the silent-death shape this file's regressions
         // keep producing: leaving no trace made the composer-locked repro
         // undebuggable.
-        if !self.send_note(|sid| manox_protocol::ClientNote::CancelTurn {
+        if !self.send_note(cx, |sid| manox_protocol::ClientNote::CancelTurn {
             session_id: sid.into(),
         }) {
             tracing::warn!("CancelTurn dropped: the active leaf has no bound session");
@@ -2783,9 +3012,10 @@ impl Workspace {
     /// note was sent; the caller falls back to `self.chat.thread.update` when `false`.
     pub(crate) fn send_note(
         &self,
+        cx: &App,
         note_fn: impl FnOnce(&str) -> manox_protocol::ClientNote,
     ) -> bool {
-        if let Some(sid) = &self.chat.session_id {
+        if let Some(sid) = &self.chat.read(cx).session_id {
             self.client.send_note(note_fn(sid));
             true
         } else {
@@ -2808,13 +3038,13 @@ impl Workspace {
         images: Vec<manox_protocol::ImageAttachment>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(sid) = self.chat.session_id.clone() else {
+        let Some(sid) = self.chat.read(cx).session_id.clone() else {
             tracing::warn!("submit dropped: no session bound to the workspace");
             return false;
         };
         tracing::info!(session_id = %sid, "submit v2 sent");
         let origin_rpc = uuid::Uuid::new_v4().to_string();
-        if let Some(store) = self.chat.store.as_ref() {
+        if let Some(store) = self.chat_store(cx) {
             store.update(cx, |h, _| {
                 h.store.push_echo(&origin_rpc, text.clone());
             });
@@ -2841,11 +3071,12 @@ impl Workspace {
     /// composer card correlates by.
     pub(crate) fn send_steer_v2(
         &mut self,
+        cx: &App,
         message_id: String,
         text: String,
         images: Vec<manox_protocol::ImageAttachment>,
     ) -> bool {
-        let Some(sid) = self.chat.session_id.clone() else {
+        let Some(sid) = self.chat.read(cx).session_id.clone() else {
             tracing::warn!("steer dropped: no session bound to the workspace");
             return false;
         };
@@ -2869,6 +3100,7 @@ impl Workspace {
     pub(crate) fn cycle_mode(&mut self, cx: &mut Context<Self>) {
         let next = match self
             .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.permission_mode)
@@ -2912,13 +3144,13 @@ impl Workspace {
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
-        let _ = self.send_note(|sid| manox_protocol::ClientNote::SetApprovalMode {
+        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::SetApprovalMode {
             session_id: sid.into(),
             mode: mode_wire,
         });
         // Optimistic mirror: the chip reflects the click now; the journal
         // echo lands later (turn end at the latest) and confirms it.
-        if let Some(store) = &self.chat.store {
+        if let Some(store) = self.chat.read(cx).store.clone() {
             store.update(cx, |leaf, _| leaf.set_permission_mode_optimistic(mode));
         }
         self.add_info_message(
@@ -2927,7 +3159,7 @@ impl Workspace {
             None,
             cx,
         );
-        self.close_access_menu();
+        self.close_access_menu(cx);
         cx.notify();
     }
 }
