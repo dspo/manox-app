@@ -5,22 +5,24 @@
 //! gpui-free `manox_agent::ThreadHandle`) and subscribes to
 //! `ThreadEvent` for incremental rendering.
 pub mod assets;
+// The chat foundation now lives in manox-agent-chat-ui (Phase 2); these
+// re-exports keep every `crate::…` path inside agent-ui (and the tests)
+// resolving unchanged.
+pub use manox_agent_chat_ui::{
+    client_store, client_store_handle, cockpit, git_status, journal_fold, journal_translate,
+    server_note_translate,
+};
 pub mod browser_host;
 pub mod chatgpt_app;
-pub mod client_store;
-pub mod client_store_handle;
-pub mod cockpit;
+#[cfg(test)]
+mod client_store_handle_tests;
 pub mod conversation;
 pub mod dispatch;
 pub mod external_session;
-pub mod git_status;
 pub mod i18n;
-pub mod journal_fold;
-pub mod journal_translate;
 pub mod menu;
 pub mod multiplexer;
 pub(crate) mod overlap_diag;
-pub mod server_note_translate;
 pub mod sidebar_view;
 pub mod slash_command;
 pub(crate) mod source_gates;
