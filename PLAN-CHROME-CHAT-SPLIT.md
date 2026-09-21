@@ -1,14 +1,12 @@
 # 拆分计划：manox-agent-chrome-ui + manox-agent-chat-ui
 
-> 状态：**Phase 3、Phase 1、Phase 2（首期+二期）均已落地**（2026-09-21：Phase 3
-> = PR #58 chrome crate；Phase 1 = PR #59 ChatColumn 字段拆分；Phase 2 首期
-> = PR #60 chat crate 数据地基；Phase 2 二期 = PR #61 `feat/chat-crate-2`
-> （叠 #60）——ChatHost 端口落地（12 方法 + NoopHost 测试替身 +
-> WorkspaceChatHost 实现），conversation/六个视图模块/AskCard 类型/chunk
-> 动作族/overlap_diag 迁入，~30 处 weak 调用点转 host 调用）。剩余：Phase 2
-> 尾（ChatColumn 实体化 + composer/chips/plan_review 族迁移）与 Phase 4
-> 装配换壳。中途 ask-card 几何探针抓到一次真回归（diagnostic 挂载点误用活
-> host），已修——探针价值实证。
+> 状态：**Phase 3、Phase 1、Phase 2（首期+二期）、Phase 4 前哨均已落地**（2026-09-22：
+> Phase 3 = PR #58；Phase 1 = PR #59；Phase 2 = PR #60+#61（ChatHost+全部视图迁入）；
+> Phase 4 前哨 = PR #62 `feat/app-preview`（叠 #61 并 merge #58 线）——chrome example
+> 主面升级为真消息管线（MessageItem 实体 + gpui::list 虚拟化），侧栏选中真实线程
+> → 以线程标题重播种 + 工具栏触发器跟随；离屏 harness 同步播种出图。剩余：Phase 2
+> 尾（composer/chips/plan_review 族 + ChatColumn 实体化）与 Phase 4 正式装配
+> （D2 五态 props 扩展、ToolTab 注册表接线、换壳）。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
