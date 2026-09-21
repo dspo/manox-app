@@ -69,6 +69,12 @@ jobs:
       - name: GPUI track guard
         run: ./script/check-no-zed-git.sh
 
+      # Chrome/chat split invariant: the chat crate never depends on
+      # terminals, webviews, or external-agent wiring (PLAN-CHROME-CHAT-SPLIT
+      # §1 — the executable definition of the decoupling).
+      - name: Chat-crate dependency guard
+        run: ./script/check-chat-crate-deps.sh
+
       - name: Fmt check
         run: cargo fmt --all -- --check
 
