@@ -11,14 +11,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui::{App, AppContext as _, Entity, SharedString, WeakEntity};
+use gpui::{App, AppContext as _, Entity, SharedString};
 use manox_agent::ThreadEvent;
 use manox_agent::db::{HistoryEntry, UiNoteKind, UiNoteRecord};
 use manox_agent::language_model::StopReason;
 use manox_agent::thread::PermissionMode;
 use manox_agent::{Message, TokenUsage, ToolCallStatus};
 
-use crate::Workspace;
+use crate::host::ChatHostHandle;
 use crate::views::message::{AutoCollapseTarget, ItemBuilder, MessageItem, schedule_auto_collapse};
 
 /// A decoded image attached to a user message, kept only for UI preview. The
@@ -64,10 +64,7 @@ impl UserTurnMeta {
         }
     }
 
-    pub(crate) fn from_message(
-        message: &Message,
-        recipient: Option<manox_agent::MessageAuthor>,
-    ) -> Self {
+    pub fn from_message(message: &Message, recipient: Option<manox_agent::MessageAuthor>) -> Self {
         let ui = message.ui.as_ref();
         Self {
             timestamp: message.timestamp,
@@ -503,7 +500,7 @@ pub struct AgentTaskItem {
 /// flattened and capped at 60 chars with an ellipsis. Local presentation
 /// rule (the runtime helper of the same shape was removed with the retired
 /// harness).
-pub(crate) fn subagent_topic(prompt: &str) -> String {
+pub fn subagent_topic(prompt: &str) -> String {
     let flat: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = flat.chars();
     let head: String = chars.by_ref().take(60).collect();
@@ -517,7 +514,7 @@ pub(crate) fn subagent_topic(prompt: &str) -> String {
 /// The first non-empty line of a prompt, for the background-task card title
 /// and the restored sub-agent rail rows (local presentation rule, same as
 /// `subagent_topic`).
-pub(crate) fn first_line(prompt: &str) -> Option<String> {
+pub fn first_line(prompt: &str) -> Option<String> {
     prompt
         .lines()
         .map(str::trim)
@@ -530,7 +527,7 @@ pub(crate) fn first_line(prompt: &str) -> Option<String> {
 /// `description` + `prompt`, with none of the retired Steer envelope keys —
 /// the same shape `manox_agent::subagent_restore` folds when it rebuilds the
 /// rail rows, so the card predicate and the restore agree by construction.
-pub(crate) fn is_agent_task_call(input: Option<&serde_json::Value>) -> bool {
+pub fn is_agent_task_call(input: Option<&serde_json::Value>) -> bool {
     input.is_some_and(|value| {
         value.get("description").is_some()
             && value.get("prompt").is_some()
@@ -543,7 +540,7 @@ pub(crate) fn is_agent_task_call(input: Option<&serde_json::Value>) -> bool {
 /// (per-agent-definition), the description prefers the call's own
 /// `description` and falls back to the shared prompt-topic derivation the
 /// rail uses — both surfaces show the same title.
-pub(crate) fn agent_task_labels(name: &str, input: &serde_json::Value) -> (String, String) {
+pub fn agent_task_labels(name: &str, input: &serde_json::Value) -> (String, String) {
     let description = input
         .get("description")
         .and_then(serde_json::Value::as_str)
@@ -636,14 +633,14 @@ pub enum ApplyOutcome {
 }
 
 /// Workspace context threaded through `apply` / `rebuild_from_display`: the
-/// weak handle (for item toggle callbacks) plus the thread cwd snapshot (for
+/// host handle (for item toggle callbacks) plus the thread cwd snapshot (for
 /// the `TerminalPanel` prompt line). Bundled so the signatures stay under
 /// clippy's argument-count limit. The cwd is a per-call snapshot taken by the
 /// caller from the `Thread` entity — reading the `Workspace` itself would
 /// double-lease inside a `Workspace::update`.
 #[derive(Clone)]
 pub struct ApplyCtx {
-    pub weak: WeakEntity<Workspace>,
+    pub host: ChatHostHandle,
     pub cwd: Option<SharedString>,
     /// The session whose journal these rows came from, when the rows are a
     /// faithful replay of it. `Some` only for the main conversation: rows
@@ -697,7 +694,7 @@ impl ConversationState {
         text: String,
         images: Vec<UserImage>,
         meta: UserTurnMeta,
-        weak: WeakEntity<Workspace>,
+        host: ChatHostHandle,
         cx: &mut App,
     ) {
         let mut meta = meta;
@@ -715,7 +712,7 @@ impl ConversationState {
                 },
                 role,
                 id,
-                weak,
+                host,
             )
         }));
     }
@@ -742,7 +739,7 @@ impl ConversationState {
         &mut self,
         text: String,
         anchor: NoticeAnchor,
-        weak: WeakEntity<Workspace>,
+        host: ChatHostHandle,
         cx: &mut App,
     ) -> usize {
         let ix = match anchor {
@@ -752,7 +749,7 @@ impl ConversationState {
         let id = self.alloc_id();
         self.items.insert(
             ix,
-            cx.new(|_| MessageItem::new(ConvItem::Notice(text), String::new(), id, weak)),
+            cx.new(|_| MessageItem::new(ConvItem::Notice(text), String::new(), id, host)),
         );
         ix
     }
@@ -769,12 +766,12 @@ impl ConversationState {
         &mut self,
         item: ToolCallItem,
         role: String,
-        weak: WeakEntity<Workspace>,
+        host: ChatHostHandle,
         cx: &mut App,
     ) {
         let item_id = self.alloc_id();
         self.items
-            .push(cx.new(|_| MessageItem::new(ConvItem::ToolCall(item), role, item_id, weak)));
+            .push(cx.new(|_| MessageItem::new(ConvItem::ToolCall(item), role, item_id, host)));
     }
 
     pub fn find_tool(&self, id: &str, cx: &App) -> Option<usize> {
@@ -847,7 +844,7 @@ impl ConversationState {
         // `fork_source` is unused here: this folds live events, and a live
         // stream has no durable row to anchor a fork on.
         let ApplyCtx {
-            weak,
+            host,
             cwd,
             fork_source: _,
         } = ctx;
@@ -888,7 +885,7 @@ impl ConversationState {
                         },
                         role.to_string(),
                         id,
-                        weak,
+                        host,
                     )
                 }));
                 ApplyOutcome::Appended
@@ -908,7 +905,7 @@ impl ConversationState {
                         },
                         String::new(),
                         id,
-                        weak,
+                        host,
                     )
                 }));
                 ApplyOutcome::Appended
@@ -1035,7 +1032,7 @@ impl ConversationState {
                             },
                             role.to_string(),
                             id,
-                            weak,
+                            host,
                         );
                         item.update_text(delta, cx);
                         item
@@ -1084,7 +1081,7 @@ impl ConversationState {
                                 ConvItem::Thinking(container),
                                 role.to_string(),
                                 id,
-                                weak.clone(),
+                                host.clone(),
                             )
                         }));
                         (i, true)
@@ -1172,7 +1169,7 @@ impl ConversationState {
                                 }),
                                 role.to_string(),
                                 item_id,
-                                weak,
+                                host,
                             )
                         }));
                         ApplyOutcome::Appended
@@ -1216,7 +1213,7 @@ impl ConversationState {
                                 }),
                                 role.to_string(),
                                 item_id,
-                                weak,
+                                host,
                             )
                         }));
                         ApplyOutcome::Appended
@@ -1271,7 +1268,7 @@ impl ConversationState {
                                         ConvItem::Thinking(container),
                                         role.to_string(),
                                         id,
-                                        weak,
+                                        host,
                                     )
                                 }));
                                 (i, true)
@@ -1458,7 +1455,7 @@ impl ConversationState {
                     container.collapsed = false;
                     container.entries.push(ActivityEntry::Tool(entry));
                     self.items.push(cx.new(|_| {
-                        MessageItem::new(ConvItem::Thinking(container), role.to_string(), item_id, weak.clone())
+                        MessageItem::new(ConvItem::Thinking(container), role.to_string(), item_id, host.clone())
                     }));
                     // Mount the orphan entry's persistent panel after push — the
                     // panel needs an `&mut Context<MessageItem>` to create the
@@ -1514,7 +1511,7 @@ impl ConversationState {
             ThreadEvent::Error(e) => {
                 let id = self.alloc_id();
                 self.items.push(cx.new(|_| {
-                    MessageItem::new(ConvItem::Error(e.to_string()), role.to_string(), id, weak)
+                    MessageItem::new(ConvItem::Error(e.to_string()), role.to_string(), id, host)
                 }));
                 ApplyOutcome::Appended
             }
@@ -1541,7 +1538,7 @@ impl ConversationState {
                         },
                         role.to_string(),
                         id,
-                        weak,
+                        host,
                     )
                 }));
                 ApplyOutcome::Appended
@@ -1614,7 +1611,7 @@ impl ConversationState {
                         },
                         String::new(),
                         id,
-                        weak.clone(),
+                        host.clone(),
                     )
                 }));
                 ApplyOutcome::Appended
@@ -1696,7 +1693,7 @@ impl ConversationState {
                             }),
                             role.to_string(),
                             id,
-                            weak,
+                            host,
                         )
                     });
                     self.items.push(entity);
@@ -1805,7 +1802,7 @@ impl ConversationState {
         cx: &mut App,
     ) -> Self {
         let ApplyCtx {
-            weak,
+            host,
             cwd,
             fork_source,
         } = ctx;
@@ -1861,7 +1858,7 @@ impl ConversationState {
         let items = kinds
             .into_iter()
             .enumerate()
-            .map(|(id, kind)| new_history_item(kind, id, role, weak.clone(), cwd.clone(), cx))
+            .map(|(id, kind)| new_history_item(kind, id, role, host.clone(), cwd.clone(), cx))
             .collect::<Vec<_>>();
         // A fresh conversation: ids start at 0 and the enumerate above already
         // assigned them in item order, so the counter continues from the item
@@ -1896,7 +1893,7 @@ impl ConversationState {
         // `fork_source` is unused here: this appends streaming history, whose
         // rows have no durable id yet.
         let ApplyCtx {
-            weak,
+            host,
             cwd,
             fork_source: _,
         } = ctx;
@@ -1912,7 +1909,7 @@ impl ConversationState {
                 kind,
                 id,
                 role,
-                weak.clone(),
+                host.clone(),
                 cwd.clone(),
                 cx,
             ));
@@ -1927,7 +1924,7 @@ impl ConversationState {
         &mut self,
         snapshots: &[manox_agent::background_task::TaskSnapshot],
         role: &str,
-        weak: WeakEntity<Workspace>,
+        host: ChatHostHandle,
         cx: &mut App,
     ) {
         for snapshot in snapshots {
@@ -1948,7 +1945,7 @@ impl ConversationState {
                     }),
                     role.to_string(),
                     id,
-                    weak.clone(),
+                    host.clone(),
                 )
             }));
         }
@@ -1963,7 +1960,7 @@ fn new_history_item(
     kind: ConvItem,
     id: usize,
     role: &str,
-    weak: WeakEntity<Workspace>,
+    host: ChatHostHandle,
     cwd: Option<SharedString>,
     cx: &mut App,
 ) -> Entity<MessageItem> {
@@ -1972,7 +1969,7 @@ fn new_history_item(
             ConvItem::Assistant { text, .. } => Some(text.clone()),
             _ => None,
         };
-        let mut item = MessageItem::new(kind, role.to_string(), id, weak);
+        let mut item = MessageItem::new(kind, role.to_string(), id, host);
         // For rebuilt (non-streaming) text items, do a full parse + finalize
         // so blocks are populated and the frozen prefix is the entire
         // document (no further updates expected).
@@ -2070,9 +2067,9 @@ mod tests {
         cx.update(gpui_component::init);
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         let ctx = ApplyCtx {
-            weak: weak.clone(),
+            host: host.clone(),
             cwd: None,
             fork_source: None,
         };
@@ -2133,7 +2130,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: Some("session-1".into()),
         };
@@ -2183,9 +2180,9 @@ mod tests {
         cx.update(gpui_component::init);
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         let ctx = ApplyCtx {
-            weak,
+            host,
             cwd: None,
             fork_source: None,
         };
@@ -2213,7 +2210,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -2246,7 +2243,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -2357,7 +2354,7 @@ mod tests {
             HistoryEntry::Message(msg_with_id("a2", Role::Assistant, "yo")),
         ];
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -2416,7 +2413,7 @@ mod tests {
             HistoryEntry::Note(note_with_tool(UiNoteKind::Notice, "lost", "ghost")),
         ];
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -2479,7 +2476,7 @@ mod tests {
             HistoryEntry::Message(msg_with_id("u2", Role::User, "next")),
         ];
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -3039,9 +3036,9 @@ mod tests {
         cx.update(gpui_component::init);
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         let ctx = ApplyCtx {
-            weak: weak.clone(),
+            host: host.clone(),
             cwd: None,
             fork_source: None,
         };
@@ -3051,7 +3048,7 @@ mod tests {
                     "first".into(),
                     Vec::new(),
                     UserTurnMeta::new(1, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
                 // A turn whose segment was left accepting entries because it
@@ -3080,14 +3077,14 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (conversation, ctx) = stale_segment_conv(cx);
-        let weak = ctx.weak.clone();
+        let host = ctx.host.clone();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 c.push_user(
                     "second".into(),
                     Vec::new(),
                     UserTurnMeta::new(2, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
                 let _ = c.apply(
@@ -3131,12 +3128,12 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (conversation, ctx) = stale_segment_conv(cx);
-        let weak = ctx.weak.clone();
+        let host = ctx.host.clone();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 let mut meta = UserTurnMeta::new(2, "model".into(), None);
                 meta.steered = true;
-                c.push_user("adjust".into(), Vec::new(), meta, weak.clone(), cx);
+                c.push_user("adjust".into(), Vec::new(), meta, host.clone(), cx);
                 let _ = c.apply(
                     &ThreadEvent::AgentThinking("b".into()),
                     "model",
@@ -3177,14 +3174,14 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (conversation, ctx) = stale_segment_conv(cx);
-        let weak = ctx.weak.clone();
+        let host = ctx.host.clone();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 c.push_user(
                     "second".into(),
                     Vec::new(),
                     UserTurnMeta::new(2, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
                 let _ = c.apply(
@@ -3313,7 +3310,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -3361,7 +3358,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -3422,7 +3419,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -3466,7 +3463,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -3539,12 +3536,12 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
         let canonical = r#"{"answers":[{"id":"a1","selected":["Blue"]}]}"#;
-        let weak = ctx.weak.clone();
+        let host = ctx.host.clone();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 c.push_tool_call(
@@ -3562,7 +3559,7 @@ mod tests {
                         panel: None,
                     },
                     "model".into(),
-                    weak,
+                    host,
                     cx,
                 );
                 let _ = c.apply(
@@ -3600,7 +3597,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -3669,7 +3666,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -3735,7 +3732,7 @@ mod tests {
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
         let ctx = ApplyCtx {
-            weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+            host: crate::host::noop_host(),
             cwd: None,
             fork_source: None,
         };
@@ -3823,17 +3820,17 @@ mod tests {
         let cx = gpui::TestAppContext::single();
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 c.push_user(
                     "hello".into(),
                     Vec::new(),
                     UserTurnMeta::new(1, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
-                let ix = c.push_notice("ack".into(), NoticeAnchor::TurnEnd, weak.clone(), cx);
+                let ix = c.push_notice("ack".into(), NoticeAnchor::TurnEnd, host.clone(), cx);
                 assert_eq!(ix, 1, "TurnEnd appends after the user bubble");
                 assert_eq!(c.items().len(), 2);
                 assert!(
@@ -3845,7 +3842,7 @@ mod tests {
                     "again".into(),
                     Vec::new(),
                     UserTurnMeta::new(2, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
                 assert_eq!(c.items().len(), 3);
@@ -3860,26 +3857,26 @@ mod tests {
         let cx = gpui::TestAppContext::single();
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 c.push_user(
                     "u1".into(),
                     Vec::new(),
                     UserTurnMeta::new(1, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
                 c.push_user(
                     "u2".into(),
                     Vec::new(),
                     UserTurnMeta::new(2, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
                 // Anchor after the first user bubble: the notice lands between
                 // u1 and u2.
-                let ix = c.push_notice("mid".into(), NoticeAnchor::After(0), weak.clone(), cx);
+                let ix = c.push_notice("mid".into(), NoticeAnchor::After(0), host.clone(), cx);
                 assert_eq!(ix, 1);
                 let kinds: Vec<&str> = c
                     .items()
@@ -3896,7 +3893,7 @@ mod tests {
                     .collect();
                 assert_eq!(kinds, vec!["u1", "notice", "u2"]);
                 // A post-insert append still works and ids stay unique.
-                let tail = c.push_notice("tail".into(), NoticeAnchor::TurnEnd, weak.clone(), cx);
+                let tail = c.push_notice("tail".into(), NoticeAnchor::TurnEnd, host.clone(), cx);
                 assert_eq!(tail, 3);
                 assert_eq!(c.items().len(), 4);
             });
@@ -3910,10 +3907,10 @@ mod tests {
         let cx = gpui::TestAppContext::single();
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
-                let ix = c.push_notice("solo".into(), NoticeAnchor::After(99), weak, cx);
+                let ix = c.push_notice("solo".into(), NoticeAnchor::After(99), host, cx);
                 assert_eq!(ix, 0, "empty list clamps to the tail");
                 assert_eq!(c.items().len(), 1);
             });
@@ -3929,9 +3926,9 @@ mod tests {
         cx.update(gpui_component::init);
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         let ctx = ApplyCtx {
-            weak: weak.clone(),
+            host: host.clone(),
             cwd: None,
             fork_source: None,
         };
@@ -3941,7 +3938,7 @@ mod tests {
                     "do it".into(),
                     Vec::new(),
                     UserTurnMeta::new(1, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
                 // Ordinary tool folds into an activity segment.
@@ -4001,9 +3998,9 @@ mod tests {
         cx.update(gpui_component::init);
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         let ctx = ApplyCtx {
-            weak: weak.clone(),
+            host: host.clone(),
             cwd: None,
             fork_source: None,
         };
@@ -4013,7 +4010,7 @@ mod tests {
                     "ship it".into(),
                     Vec::new(),
                     UserTurnMeta::new(1, "model".into(), None),
-                    weak.clone(),
+                    host.clone(),
                     cx,
                 );
                 let _ = c.apply(
@@ -4032,7 +4029,7 @@ mod tests {
                 // The notice is anchored next to the tool's container (item 1)
                 // and inserted right after it.
                 let anchor = c.notice_anchor_for_tool("tu_1", cx);
-                let ix = c.push_notice("allowed".into(), anchor, weak, cx);
+                let ix = c.push_notice("allowed".into(), anchor, host, cx);
                 assert_eq!(ix, 2);
                 let kinds: Vec<&str> = c
                     .items()
@@ -4058,9 +4055,9 @@ mod tests {
         cx.update(gpui_component::init);
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+        let host = crate::host::noop_host();
         let ctx = ApplyCtx {
-            weak,
+            host,
             cwd: None,
             fork_source: None,
         };

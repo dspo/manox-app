@@ -43,7 +43,7 @@ async fn ask_card_synthesized_when_rebuild_misses_the_tool_item(cx: &mut TestApp
             manox_agent::MessageAuthor::Lead,
             true,
             ApplyCtx {
-                weak,
+                host: manox_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },

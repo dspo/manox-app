@@ -10,6 +10,10 @@
 use super::*;
 
 pub(crate) struct ChatColumn {
+    /// The port the moved chat views call through (see `host.rs` in
+    /// manox-agent-chat-ui and agent-ui's `WorkspaceChatHost`).
+    pub(crate) host: manox_agent_chat_ui::host::ChatHostHandle,
+
     pub(crate) thread: manox_agent::thread::ThreadHandle,
     /// The `AgentServer`-backed `ClientStoreHandle` — the v2 `SessionStore`
     /// (journal window + projection face + echo map) fed by the multiplexer's

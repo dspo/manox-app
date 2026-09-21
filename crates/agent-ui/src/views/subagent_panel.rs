@@ -17,16 +17,13 @@ use std::collections::HashMap;
 
 use crate::i18n;
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Context, Entity, Pixels, Render, ScrollHandle, WeakEntity, Window, px,
-};
+use gpui::{AnyElement, App, Context, Entity, Pixels, Render, ScrollHandle, Window, px};
 use gpui_component::{ActiveTheme as _, ElementExt as _, h_flex, v_flex};
 use manox_agent::Message;
 use manox_agent::ToolCallStatus;
 use manox_agent::language_model::{MessageContent, TokenUsage};
 use manox_agent::thread::{SubagentChildEvent, ThreadEvent};
 
-use crate::Workspace;
 use crate::conversation::{ApplyCtx, ConversationState};
 use crate::views::subagents::status_indicator;
 
@@ -95,7 +92,7 @@ pub(crate) struct SubagentPanel {
     /// activity rows' model name. The recipient (the sub-agent definition)
     /// lives with the conversation, which owns the turn headers.
     role: String,
-    weak_workspace: WeakEntity<Workspace>,
+    host: manox_agent_chat_ui::host::ChatHostHandle,
     scroll_handle: ScrollHandle,
     stick_to_bottom: bool,
 }
@@ -110,11 +107,11 @@ impl SubagentPanel {
         backfill: &[SubagentChildEvent],
         prompt: Option<(String, i64)>,
         final_text: Option<String>,
-        weak_workspace: WeakEntity<Workspace>,
+        host: manox_agent_chat_ui::host::ChatHostHandle,
         cx: &mut App,
     ) -> Entity<Self> {
         let ctx = ApplyCtx {
-            weak: weak_workspace.clone(),
+            host: host.clone(),
             cwd: None,
             // The panel's rows are a child session's display, and its answer
             // backfill is locally minted — no row here is a forkable anchor.
@@ -169,7 +166,7 @@ impl SubagentPanel {
             conversation,
             final_note,
             role,
-            weak_workspace,
+            host,
             scroll_handle: ScrollHandle::new(),
             stick_to_bottom: true,
         })
@@ -188,7 +185,7 @@ impl SubagentPanel {
         };
         let role = self.role.clone();
         let ctx = ApplyCtx {
-            weak: self.weak_workspace.clone(),
+            host: self.host.clone(),
             cwd: None,
             // The panel's rows are a child session's display, and its answer
             // backfill is locally minted — no row here is a forkable anchor.

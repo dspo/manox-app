@@ -36,10 +36,11 @@ struct AskCardProbe {
 
 impl gpui::Render for AskCardProbe {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let invalid = gpui::WeakEntity::<Workspace>::new_invalid();
-        let card = self
-            .ws
-            .update(cx, |ws, cx| ws.diagnostic_ask_card_element(invalid, 0, cx));
+        // A geometry probe needs no live host: the noop host mirrors the
+        // old invalid-weak trick (no custom row, controls render inert).
+        let card = self.ws.update(cx, |ws, cx| {
+            ws.diagnostic_ask_card_element(manox_agent_chat_ui::host::noop_host(), 0, cx)
+        });
         card.unwrap_or_else(|| gpui::div().into_any_element())
     }
 }

@@ -10,6 +10,7 @@ use super::{
 };
 use gpui::InteractiveElement as _;
 use gpui::prelude::*;
+use manox_agent_chat_ui::host::noop_host;
 
 /// Drives the pure recall step. `applied` is the text the composer holds
 /// afterwards — `None` means the step left it untouched, `Some("")` means
@@ -652,10 +653,11 @@ async fn navigator_fill_lands_the_walk_and_hands_the_draft_back(cx: &mut gpui::T
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| {
             let weak = cx.entity().downgrade();
+            let _ = weak;
             let meta = || crate::conversation::UserTurnMeta::new(0, String::new(), None);
             ws.chat.conversation.update(cx, |conv, cx| {
-                conv.push_user("older turn".into(), vec![], meta(), weak.clone(), cx);
-                conv.push_user("newest turn".into(), vec![], meta(), weak, cx);
+                conv.push_user("older turn".into(), vec![], meta(), noop_host(), cx);
+                conv.push_user("newest turn".into(), vec![], meta(), noop_host(), cx);
             });
             ws.chat.input_state.update(cx, |s, cx| {
                 s.set_value("half a sentence", window, cx);

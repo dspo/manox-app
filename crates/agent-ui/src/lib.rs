@@ -5,24 +5,24 @@
 //! gpui-free `manox_agent::ThreadHandle`) and subscribes to
 //! `ThreadEvent` for incremental rendering.
 pub mod assets;
+pub(crate) mod chat_host;
+pub use chat_host::WorkspaceChatHost;
 // The chat foundation now lives in manox-agent-chat-ui (Phase 2); these
 // re-exports keep every `crate::…` path inside agent-ui (and the tests)
 // resolving unchanged.
 pub use manox_agent_chat_ui::{
-    client_store, client_store_handle, cockpit, git_status, journal_fold, journal_translate,
-    server_note_translate,
+    client_store, client_store_handle, cockpit, conversation, git_status, journal_fold,
+    journal_translate, overlap_diag, server_note_translate,
 };
 pub mod browser_host;
 pub mod chatgpt_app;
 #[cfg(test)]
 mod client_store_handle_tests;
-pub mod conversation;
 pub mod dispatch;
 pub mod external_session;
 pub mod i18n;
 pub mod menu;
 pub mod multiplexer;
-pub(crate) mod overlap_diag;
 pub mod sidebar_view;
 pub mod slash_command;
 pub(crate) mod source_gates;
@@ -40,6 +40,13 @@ pub use vscode_app::LaunchVSCode;
 // action that flips the Workspace into the Settings overlay. AskPrev/AskNext
 // navigate between questions in the ask drawer (bound to arrow keys within the
 // drawer's focus context).
+pub use manox_agent_chat_ui::turn_navigator_key_bindings;
+pub use manox_agent_chat_ui::{
+    AskCancel, AskNext, AskPrev, CompletionConfirm, CompletionDismiss, CompletionDown,
+    CompletionUp, ComposerRecallDown, ComposerRecallUp, CopySelectedTurn, FillComposerTurn,
+    ToggleCockpitTasks, ToggleTurnNavigator, UndoLastQueued,
+};
+
 gpui::actions!(
     agent_ui,
     [
@@ -47,27 +54,13 @@ gpui::actions!(
         ToggleEditorPreview,
         CloseEditor,
         OpenSettings,
-        AskPrev,
-        AskNext,
-        AskCancel,
         NewTerminalTab,
         CloseTerminalTab,
         FocusTerminal,
         FocusConversation,
         OpenBrowserTab,
         CloseBrowserTab,
-        CompletionUp,
-        CompletionDown,
-        CompletionConfirm,
-        CompletionDismiss,
-        ComposerRecallUp,
-        ComposerRecallDown,
-        UndoLastQueued,
-        ToggleCockpitTasks,
         BackgroundCurrentThread,
-        ToggleTurnNavigator,
-        CopySelectedTurn,
-        FillComposerTurn,
         ArchiveCurrentThread
     ]
 );
@@ -89,42 +82,10 @@ pub fn composer_recall_key_bindings() -> Vec<gpui::KeyBinding> {
     ]
 }
 
-/// Keybindings owned by the user-turn navigator.
-///
-/// Keeping these beside the actions lets the application and GPUI interaction
-/// tests install the exact same bindings. The descendant context is more
-/// specific than the input's own bindings, so navigation keys are intercepted
-/// only while the navigator search field is focused.
-pub fn turn_navigator_key_bindings() -> Vec<gpui::KeyBinding> {
-    vec![
-        #[cfg(target_os = "macos")]
-        gpui::KeyBinding::new("cmd-m", ToggleTurnNavigator, None),
-        #[cfg(not(target_os = "macos"))]
-        gpui::KeyBinding::new("ctrl-m", ToggleTurnNavigator, None),
-        #[cfg(target_os = "macos")]
-        gpui::KeyBinding::new("cmd-c", CopySelectedTurn, Some("TurnNavigator > Input")),
-        #[cfg(not(target_os = "macos"))]
-        gpui::KeyBinding::new("ctrl-c", CopySelectedTurn, Some("TurnNavigator > Input")),
-        // Enter jumps to the selected turn; the secondary modifier refills the
-        // composer with it instead (reuse-and-edit, not locate).
-        #[cfg(target_os = "macos")]
-        gpui::KeyBinding::new("cmd-enter", FillComposerTurn, Some("TurnNavigator > Input")),
-        #[cfg(not(target_os = "macos"))]
-        gpui::KeyBinding::new(
-            "ctrl-enter",
-            FillComposerTurn,
-            Some("TurnNavigator > Input"),
-        ),
-        gpui::KeyBinding::new("up", CompletionUp, Some("TurnNavigator > Input")),
-        gpui::KeyBinding::new("down", CompletionDown, Some("TurnNavigator > Input")),
-        gpui::KeyBinding::new("enter", CompletionConfirm, Some("TurnNavigator > Input")),
-        gpui::KeyBinding::new("escape", CompletionDismiss, Some("TurnNavigator > Input")),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{composer_recall_key_bindings, turn_navigator_key_bindings};
+    use super::composer_recall_key_bindings;
+    use manox_agent_chat_ui::turn_navigator_key_bindings;
 
     /// `KeyBinding::new` panics on an unparseable context predicate, so
     /// constructing every binding set is a startup crash regression test.
