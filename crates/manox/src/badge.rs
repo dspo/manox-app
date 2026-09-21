@@ -63,6 +63,11 @@ pub fn set_count(count: usize) {
 
 /// The badge string for `count`: `None` clears the badge; above 99 the
 /// standard "99+" ceiling keeps the glyph inside the icon's corner.
+///
+/// Only the macOS backend paints the badge, and the unit test below is the
+/// other consumer; a non-macOS non-test build sees neither, so the function
+/// must not compile there or `-D warnings` reads it as dead code.
+#[cfg(any(target_os = "macos", test))]
 fn badge_label(count: usize) -> Option<String> {
     match count {
         0 => None,
