@@ -1,0 +1,18 @@
+{
+  "name": "dev-manox-app-177aee6f",
+  "plugins": [
+    {
+      "name": "manox-bundle-install",
+      "source": "./manox-bundle-install",
+      "version": "0.1.0",
+      "description": "Bundle the latest manox-app main as Manox.app with the nested cx CLI and install both on macOS",
+      "displayName": "Manox Bundle & Install",
+      "displayName_i18n": {
+        "zh-CN": "Manox 打包安装"
+      },
+      "description_i18n": {
+        "zh-CN": "把 manox-app main 最新代码打包为 Manox.app 并连同 cx CLI 一键安装到本机（macOS）"
+      }
+    }
+  ]
+}
