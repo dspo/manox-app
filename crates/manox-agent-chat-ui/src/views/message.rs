@@ -1439,23 +1439,21 @@ pub fn render_recap(
         let Some(conv) = host.conversation(_cx) else {
             return;
         };
-        conv.update(_cx, |_cs, cx| {
-            conv.update(cx, |c, cx| {
-                if let Some(item) = c.items().get(ix_click) {
-                    item.update(cx, |item, cx| {
-                        if let ConvItem::Recap {
-                            collapsed,
-                            user_toggled,
-                            ..
-                        } = item.kind_mut()
-                        {
-                            *collapsed = !*collapsed;
-                            *user_toggled = true;
-                        }
-                        cx.notify();
-                    });
-                }
-            });
+        conv.update(_cx, |c, cx| {
+            if let Some(item) = c.items().get(ix_click) {
+                item.update(cx, |item, cx| {
+                    if let ConvItem::Recap {
+                        collapsed,
+                        user_toggled,
+                        ..
+                    } = item.kind_mut()
+                    {
+                        *collapsed = !*collapsed;
+                        *user_toggled = true;
+                    }
+                    cx.notify();
+                });
+            }
             cx.notify();
         });
     }) as Box<dyn Fn(&mut App) + 'static>;
@@ -1518,23 +1516,21 @@ pub fn render_retry(
         let Some(conv) = host.conversation(_cx) else {
             return;
         };
-        conv.update(_cx, |_cs, cx| {
-            conv.update(cx, |c, cx| {
-                if let Some(item) = c.items().get(ix) {
-                    item.update(cx, |item, cx| {
-                        if let ConvItem::Retry {
-                            collapsed,
-                            user_toggled,
-                            ..
-                        } = item.kind_mut()
-                        {
-                            *collapsed = !*collapsed;
-                            *user_toggled = true;
-                        }
-                        cx.notify();
-                    });
-                }
-            });
+        conv.update(_cx, |c, cx| {
+            if let Some(item) = c.items().get(ix) {
+                item.update(cx, |item, cx| {
+                    if let ConvItem::Retry {
+                        collapsed,
+                        user_toggled,
+                        ..
+                    } = item.kind_mut()
+                    {
+                        *collapsed = !*collapsed;
+                        *user_toggled = true;
+                    }
+                    cx.notify();
+                });
+            }
             cx.notify();
         });
     }) as Box<dyn Fn(&mut App) + 'static>;
@@ -1798,18 +1794,16 @@ pub fn render_thinking(
             let Some(conv) = host.conversation(cx) else {
                 return;
             };
-            conv.update(cx, |_cs, cx| {
-                conv.update(cx, |c, cx| {
-                    if let Some(item) = c.items().get(ix) {
-                        item.update(cx, |item, cx| {
-                            if let ConvItem::Thinking(t) = item.kind_mut() {
-                                t.collapsed = !t.collapsed;
-                                t.user_toggled = true;
-                            }
-                            cx.notify();
-                        });
-                    }
-                });
+            conv.update(cx, |c, cx| {
+                if let Some(item) = c.items().get(ix) {
+                    item.update(cx, |item, cx| {
+                        if let ConvItem::Thinking(t) = item.kind_mut() {
+                            t.collapsed = !t.collapsed;
+                            t.user_toggled = true;
+                        }
+                        cx.notify();
+                    });
+                }
                 cx.notify();
             });
         });
@@ -1908,32 +1902,30 @@ fn reasoning_step(
             let Some(conv) = host.conversation(cx) else {
                 return;
             };
-            conv.update(cx, |_cs, cx| {
+            conv.update(cx, |c, cx| {
                 let id = toggle_id.clone();
-                conv.update(cx, |c, cx| {
-                    // Address the round by its stable id, exactly like the
-                    // tool step: the (container, entry) indices captured at
-                    // render time can point at the wrong container by the
-                    // time the click fires (a notice inserts above the
-                    // segment; the toggle must never land on a stranger).
-                    if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
-                        && let Some(item) = c.items().get(cix)
-                    {
-                        item.update(cx, |item, cx| {
-                            if let ConvItem::Thinking(t) = item.kind_mut()
-                                && let Some(ActivityEntry::Reasoning {
-                                    collapsed,
-                                    user_toggled,
-                                    ..
-                                }) = t.entries.get_mut(eix)
-                            {
-                                *collapsed = !*collapsed;
-                                *user_toggled = true;
-                            }
-                            cx.notify();
-                        });
-                    }
-                });
+                // Address the round by its stable id, exactly like the
+                // tool step: the (container, entry) indices captured at
+                // render time can point at the wrong container by the
+                // time the click fires (a notice inserts above the
+                // segment; the toggle must never land on a stranger).
+                if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
+                    && let Some(item) = c.items().get(cix)
+                {
+                    item.update(cx, |item, cx| {
+                        if let ConvItem::Thinking(t) = item.kind_mut()
+                            && let Some(ActivityEntry::Reasoning {
+                                collapsed,
+                                user_toggled,
+                                ..
+                            }) = t.entries.get_mut(eix)
+                        {
+                            *collapsed = !*collapsed;
+                            *user_toggled = true;
+                        }
+                        cx.notify();
+                    });
+                }
                 cx.notify();
             });
         });
@@ -2023,23 +2015,21 @@ fn tool_step(
             let Some(conv) = host.conversation(cx) else {
                 return;
             };
-            conv.update(cx, |_cs, cx| {
+            conv.update(cx, |c, cx| {
                 let id = id_for_toggle.clone();
-                conv.update(cx, |c, cx| {
-                    if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
-                        && let Some(item) = c.items().get(cix)
-                    {
-                        item.update(cx, |item, cx| {
-                            if let ConvItem::Thinking(t) = item.kind_mut()
-                                && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(eix)
-                            {
-                                entry.collapsed = !entry.collapsed;
-                                entry.user_toggled = true;
-                            }
-                            cx.notify();
-                        });
-                    }
-                });
+                if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
+                    && let Some(item) = c.items().get(cix)
+                {
+                    item.update(cx, |item, cx| {
+                        if let ConvItem::Thinking(t) = item.kind_mut()
+                            && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(eix)
+                        {
+                            entry.collapsed = !entry.collapsed;
+                            entry.user_toggled = true;
+                        }
+                        cx.notify();
+                    });
+                }
                 cx.notify();
             });
         });
@@ -2727,21 +2717,19 @@ pub fn render_tool_call(
                     let Some(conv) = host.conversation(cx) else {
                         return;
                     };
-                    conv.update(cx, |_cs, cx| {
+                    conv.update(cx, |c, cx| {
                         let id = id_for_toggle.clone();
-                        conv.update(cx, |c, cx| {
-                            if let Some(ix) = c.find_tool(&id, &*cx)
-                                && let Some(item) = c.items().get(ix)
-                            {
-                                item.update(cx, |item, cx| {
-                                    if let ConvItem::ToolCall(t) = item.kind_mut() {
-                                        t.collapsed = !t.collapsed;
-                                        t.user_toggled = true;
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        });
+                        if let Some(ix) = c.find_tool(&id, &*cx)
+                            && let Some(item) = c.items().get(ix)
+                        {
+                            item.update(cx, |item, cx| {
+                                if let ConvItem::ToolCall(t) = item.kind_mut() {
+                                    t.collapsed = !t.collapsed;
+                                    t.user_toggled = true;
+                                }
+                                cx.notify();
+                            });
+                        }
                         cx.notify();
                     });
                 })

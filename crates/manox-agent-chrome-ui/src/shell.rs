@@ -483,6 +483,26 @@ impl Shell {
         }
     }
 
+    /// Detach the right pane's whole session (per-thread stashing — see
+    /// [`crate::right_pane::RightPaneSession`]).
+    pub fn stash_right_session(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::right_pane::RightPaneSession> {
+        Some(self.right.update(cx, |pane, cx| pane.stash_session(cx)))
+    }
+
+    /// Resume a stashed right-pane session.
+    pub fn restore_right_session(
+        &mut self,
+        session: crate::right_pane::RightPaneSession,
+        cx: &mut Context<Self>,
+    ) {
+        self.right
+            .update(cx, |pane, cx| pane.restore_session(session, cx));
+        cx.notify();
+    }
+
     /// Open (or focus) a right-pane tool kind.
     pub fn open_right(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.right
