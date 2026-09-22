@@ -47,13 +47,27 @@ pub struct SessionRowData {
     pub status: SessionStatus,
     pub pinned: bool,
     pub unread: bool,
+    /// The user tag chip beside the title (D2: the persisted sidecar tag).
+    pub tag: Option<String>,
+    /// Team-nesting depth (`depth * 14px` indent + a 1px guide rail);
+    /// 0 = top-level row.
+    pub indent: u8,
+    /// A team leader renders its collapse chevron before the status glyph.
+    pub team_leader: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+/// The row's five-state machine (D2 parity with the agent-ui sidebar):
+/// `Errored` paints the danger triangle, `PendingAuth`/`PendingPlan` the
+/// pulsing attention dot (info/accent), `Running` the falling blocks,
+/// `Unread` the static filled dot, `Idle` the empty slot.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SessionStatus {
+    Idle,
     Running,
-    Completed,
-    NeedsInput,
+    Unread,
+    PendingAuth,
+    PendingPlan,
+    Errored,
 }
 
 /// One workspace group.
@@ -416,11 +430,12 @@ fn group(list: &SessionList, g: &SessionGroup) -> impl IntoElement {
 fn session_row(list: &SessionList, data: &SessionRowData) -> Stateful<gpui::Div> {
     let selected = list.selected.as_deref() == Some(data.id.as_str());
 
-    // Line-1 leading status glyph: running = falling blocks;
-    // needs-input/errored = red warning triangle; completed = empty slot.
+    // Line-1 leading glyphs, one per five-state (see `SessionStatus`).
+    let leader_chevron = data
+        .team_leader
+        .then(|| icon(icons::CHEVRON_DOWN, 11.).into_any_element());
     let leading: gpui::AnyElement = match data.status {
-        SessionStatus::Running => running_blocks(&data.id).into_any_element(),
-        SessionStatus::NeedsInput => div()
+        SessionStatus::Errored => div()
             .size(px(16.))
             .flex()
             .flex_shrink_0()
@@ -429,7 +444,19 @@ fn session_row(list: &SessionList, data: &SessionRowData) -> Stateful<gpui::Div>
             .text_color(ERR_RED)
             .child(icon(icons::WARNING, 11.))
             .into_any_element(),
-        SessionStatus::Completed => div().size(px(16.)).flex_shrink_0().into_any_element(),
+        SessionStatus::PendingAuth | SessionStatus::PendingPlan => {
+            attention_pulse(&data.id).into_any_element()
+        }
+        SessionStatus::Running => running_blocks(&data.id).into_any_element(),
+        SessionStatus::Unread => div()
+            .size(px(16.))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(7.)).rounded_full().bg(BADGE_BLUE_BG))
+            .into_any_element(),
+        SessionStatus::Idle => div().size(px(16.)).flex_shrink_0().into_any_element(),
     };
 
     let mut meta = data.time.clone();
@@ -549,6 +576,7 @@ fn session_row(list: &SessionList, data: &SessionRowData) -> Stateful<gpui::Div>
                 .flex()
                 .items_center()
                 .gap(px(4.))
+                .children(leader_chevron)
                 .child(leading)
                 .child(
                     div()
@@ -559,6 +587,21 @@ fn session_row(list: &SessionList, data: &SessionRowData) -> Stateful<gpui::Div>
                         .text_color(if selected { FG_STRONG } else { FG })
                         .child(data.title.clone()),
                 )
+                .children(data.tag.clone().map(|t| {
+                    // The persisted user tag: an outlined mini-chip beside the
+                    // title (single line, truncated).
+                    div()
+                        .px(px(4.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(BORDER)
+                        .text_size(px(10.))
+                        .text_color(FG_FAINT)
+                        .flex_shrink_0()
+                        .max_w(px(90.))
+                        .truncate()
+                        .child(t)
+                }))
                 .children(actions),
         )
         // Line 2: meta (time · pinned) + flexible gap + unread dot + short-id
@@ -592,6 +635,15 @@ fn session_row(list: &SessionList, data: &SessionRowData) -> Stateful<gpui::Div>
                 .child(id_tag(&data.id)),
         );
 
+    // Team indent: the whole card shifts right with a 1px guide rail on
+    // its left edge, tying member rows to their leader.
+    let row = if data.indent > 0 {
+        row.ml(px(f32::from(data.indent) * 14.))
+            .border_l_1()
+            .border_color(LIST_HOVER)
+    } else {
+        row
+    };
     // Row background (selected card / hover / rest) + a 1px stroke kept
     // transparent in the unselected states so all three share one height.
     if selected {
@@ -622,6 +674,27 @@ fn id_tag(id: &str) -> impl IntoElement {
         .text_color(FG_FAINT)
         .flex_shrink_0()
         .child(short)
+}
+
+/// The pulsing attention dot for a parked ask / plan verdict: a small
+/// accent dot breathing on a 1s loop — the chrome counterpart of the
+/// agent-ui sidebar's pending spinner.
+fn attention_pulse(id: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_shrink_0()
+        .size(px(16.))
+        .items_center()
+        .justify_center()
+        .child(div().size(px(7.)).rounded_full().bg(ACCENT).with_animation(
+            SharedString::from(format!("pulse-{id}")),
+            gpui::Animation::new(Duration::from_millis(1000)).repeat(),
+            |el, t| {
+                let mut c: Hsla = ACCENT.into();
+                c.a = 0.35 + 0.65 * (1.0 - t);
+                el.bg(c)
+            },
+        ))
 }
 
 /// The "falling blocks" indicator for a running thread: three small squares

@@ -156,12 +156,17 @@ fn snapshot_rows() -> Vec<SessionRow> {
                 .to_string(),
             time: "now".into(),
             status: if t.errored {
-                SessionStatus::NeedsInput
+                SessionStatus::Errored
             } else if running {
                 SessionStatus::Running
+            } else if t.has_unread {
+                SessionStatus::Unread
             } else {
-                SessionStatus::Completed
+                SessionStatus::Idle
             },
+            tag: None,
+            indent: t.depth.min(3) as u8,
+            team_leader: false,
             updated_at: t.updated_at,
             pinned: t.pinned,
             unread: t.has_unread,

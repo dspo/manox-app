@@ -214,6 +214,20 @@ fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
     .detach();
 }
 
+/// The thread-store five-state mapping (the two multiplexer-owned pending
+/// states surface with the real projection at assembly time).
+fn five_state(errored: bool, running: bool, unread: bool) -> SessionStatus {
+    if errored {
+        SessionStatus::Errored
+    } else if running {
+        SessionStatus::Running
+    } else if unread {
+        SessionStatus::Unread
+    } else {
+        SessionStatus::Idle
+    }
+}
+
 /// ThreadStore summaries → chrome session rows.
 fn load_rows() -> Vec<SessionRow> {
     let store = manox_agent::thread_store::global();
@@ -235,13 +249,10 @@ fn load_rows() -> Vec<SessionRow> {
                 .unwrap_or_else(|| t.summary.clone()),
             workspace: project_label(&t.project),
             time: relative_time(t.updated_at),
-            status: if t.errored {
-                SessionStatus::NeedsInput
-            } else if running {
-                SessionStatus::Running
-            } else {
-                SessionStatus::Completed
-            },
+            status: five_state(t.errored, running, t.has_unread),
+            tag: None,
+            indent: t.depth.min(3) as u8,
+            team_leader: false,
             updated_at: t.updated_at,
             pinned: t.pinned,
             unread: t.has_unread,

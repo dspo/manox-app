@@ -23,6 +23,7 @@ pub mod external_session;
 pub mod i18n;
 pub mod menu;
 pub mod multiplexer;
+pub mod sidebar_projection;
 pub mod sidebar_view;
 pub mod slash_command;
 pub(crate) mod source_gates;
