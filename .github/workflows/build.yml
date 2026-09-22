@@ -81,6 +81,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Dual-shell ruling (2026-09-22): the chrome-shell feature config is a
+      # first-class build — gate it beside the default one.
+      - name: Clippy (chrome-shell feature)
+        run: cargo clippy -p manox --features chrome-shell --all-targets -- -D warnings
+
       - name: Test
         run: cargo test --workspace --all-targets --no-fail-fast
 

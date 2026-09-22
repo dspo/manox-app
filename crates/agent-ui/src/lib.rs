@@ -16,6 +16,7 @@ pub use manox_agent_chat_ui::{
 };
 pub mod browser_host;
 pub mod chatgpt_app;
+pub mod chrome_assembly;
 #[cfg(test)]
 mod client_store_handle_tests;
 pub mod dispatch;
@@ -27,6 +28,7 @@ pub mod sidebar_projection;
 pub mod sidebar_view;
 pub mod slash_command;
 pub(crate) mod source_gates;
+pub mod tool_tabs;
 pub mod views;
 pub mod vscode_app;
 pub mod workspace;

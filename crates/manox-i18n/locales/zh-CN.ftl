@@ -1131,3 +1131,7 @@ chrome-quick-terminal = 打开集成终端
 chrome-quick-browser = 打开集成浏览器
 chrome-quick-agent = 打开 { $agent }
 chrome-spawn-failed = 无法启动 { $prog }：{ $err }
+
+## manox-agent-chrome-ui assembly（chrome-shell 构建的占位主面）
+
+chrome-main-pending = 聊天主栏装配中（下一批接入）

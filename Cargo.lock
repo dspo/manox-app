@@ -5631,6 +5631,7 @@ dependencies = [
  "image",
  "ksni",
  "manox-agent",
+ "manox-agent-chrome-ui",
  "manox-ext-agents",
  "manox-i18n",
  "manox-terminal",
