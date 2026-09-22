@@ -1157,3 +1157,7 @@ chrome-spawn-failed = Failed to start { $prog }: { $err }
 chrome-main-pending = The chat column mounts here (next tranche)
 
 workspace-hero-heading = Start a conversation
+
+chrome-tab-editor = Editor
+chrome-quick-editor = Open the editor
+chrome-editor-placeholder = Write markdown here…

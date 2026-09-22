@@ -1137,3 +1137,7 @@ chrome-spawn-failed = 无法启动 { $prog }：{ $err }
 chrome-main-pending = 聊天主栏装配中（下一批接入）
 
 workspace-hero-heading = 开始你的对话
+
+chrome-tab-editor = 编辑器
+chrome-quick-editor = 打开编辑器
+chrome-editor-placeholder = 在此书写 markdown…
