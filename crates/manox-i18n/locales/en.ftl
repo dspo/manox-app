@@ -1151,3 +1151,7 @@ chrome-quick-terminal = Open integrated terminal
 chrome-quick-browser = Open integrated browser
 chrome-quick-agent = Open { $agent }
 chrome-spawn-failed = Failed to start { $prog }: { $err }
+
+## manox-agent-chrome-ui assembly (chrome-shell build placeholder main surface)
+
+chrome-main-pending = The chat column mounts here (next tranche)

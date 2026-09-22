@@ -48,6 +48,30 @@ pub struct SessionRow {
 }
 
 impl SessionRow {
+    /// Lift one projected group (see agent-ui's `sidebar_projection`) into
+    /// the shell's row carrier, deriving each row's sort stamp from its
+    /// position (the projection emits recency order already).
+    pub fn from_group(group: crate::session_list::SessionGroup) -> Vec<SessionRow> {
+        group
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(ix, r)| SessionRow {
+                id: r.id,
+                title: r.title,
+                workspace: group.name.clone(),
+                time: r.time,
+                status: r.status,
+                updated_at: -(ix as i64),
+                pinned: r.pinned,
+                unread: r.unread,
+                tag: r.tag,
+                indent: r.indent,
+                team_leader: r.team_leader,
+            })
+            .collect()
+    }
+
     fn row_data(&self) -> SessionRowData {
         SessionRowData {
             id: self.id.clone(),

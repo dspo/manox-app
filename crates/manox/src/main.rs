@@ -3,7 +3,9 @@
 //! Only handles window, theme, and tracing init, and mounts `agent_ui::Workspace` in the window.
 //! Agent logic lives in the `agent` crate; UI lives in the `agent-ui` crate.
 
-use gpui::{App, AppContext as _, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
+#[cfg(not(feature = "chrome-shell"))]
+use gpui::AppContext as _;
+use gpui::{App, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
 use gpui::{WindowBounds, WindowOptions};
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use std::borrow::Cow;
@@ -480,15 +482,34 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             window.set_window_title("Manox Pi");
             Theme::change(ThemeMode::Light, Some(window), cx);
 
-            let view = match agent_ui::dispatch::workspace_global() {
-                Some(view) => view,
-                None => {
-                    let view = cx.new(|cx| agent_ui::Workspace::new(window, cx));
-                    agent_ui::dispatch::set_workspace(view.clone());
-                    view
-                }
+            #[cfg(feature = "chrome-shell")]
+            let root = {
+                // Dual-shell build (chrome): the chrome assembly replaces
+                // the workspace root — its own multiplexer, projected
+                // sidebar, tool tabs, and dock. Workspace-scoped extras
+                // (dispatch registry, dock badge, focus restore) are
+                // legacy-only below.
+                let shell = agent_ui::chrome_assembly::mount(window, cx);
+                cx.bind_keys([gpui::KeyBinding::new(
+                    "cmd-n",
+                    manox_agent_chrome_ui::shell::NewSession,
+                    None,
+                )]);
+                agent_ui::chrome_assembly::root(shell, window, cx)
             };
-            cx.new(|cx| Root::new(view, window, cx))
+            #[cfg(not(feature = "chrome-shell"))]
+            let root = {
+                let view = match agent_ui::dispatch::workspace_global() {
+                    Some(view) => view,
+                    None => {
+                        let view = cx.new(|cx| agent_ui::Workspace::new(window, cx));
+                        agent_ui::dispatch::set_workspace(view.clone());
+                        view
+                    }
+                };
+                cx.new(|cx| Root::new(view, window, cx))
+            };
+            root
         })
         .map_err(|e| anyhow::anyhow!("failed to open the main window: {e}"))?;
     agent_ui::dispatch::set_window(handle);
