@@ -4,8 +4,8 @@
 //! Kinds shipped here:
 //! - integrated terminal ($SHELL, standalone PTY);
 //! - CLI agent terminals (claude / codex / copilot via the cx
-//!   `AgentBuilder` — the same launch path the legacy shell's `+` menu
-//!   uses, provider/model resolved from the agent registry);
+//!   `AgentBuilder`): the tab opens on a MODEL PICKER (the legacy `+`
+//!   menu's provider→model cascade reborn) and hands over to the TUI;
 //! - the editor (markdown write/preview, a `gpui_component` editor).
 //!
 //! The browser tab awaits its host's decoupling
@@ -19,7 +19,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gpui::{AnyElement, App, AppContext as _, Entity, IntoElement, SharedString, Window};
+use gpui::{
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, SharedString, Window, px,
+};
 use manox_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
 use manox_agent_chrome_ui::theme::{Icon, icon, icons};
 use manox_ext_agents::cx_session::CxSessionSource;
@@ -30,6 +32,9 @@ fn next_instance_id(kind: &str) -> String {
     format!("{kind}-{}", INSTANCE.fetch_add(1, Ordering::Relaxed))
 }
 
+/// The foreground thread's working directory (its project path — the wire
+/// row's `project` column, the same source the sidebar groups by), falling
+/// back to the store's cwd, then home.
 fn thread_cwd_or_home() -> std::path::PathBuf {
     crate::chrome_assembly::foreground_cwd().unwrap_or_else(|| {
         std::env::var("HOME")
@@ -111,9 +116,8 @@ impl ToolTab for TerminalTab {
 
 // ── CLI agent terminals ────────────────────────────────────────────────────
 
-/// The factory carries the multiplexer (the wire model rows — the
-/// provider/model resolution source) so created tabs can resolve their
-/// launch config at open time.
+/// The factory carries the multiplexer (the wire model rows — the picker's
+/// source) so created tabs can list launch configs at open time.
 pub struct AgentTool {
     agent_id: &'static str,
     display: &'static str,
@@ -157,7 +161,7 @@ impl ToolTabFactory for AgentTool {
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
-        brand_icon(self.svg, icons::TERMINAL)
+        brand_icon(self.svg)
     }
 }
 
@@ -183,47 +187,48 @@ impl ToolTab for AgentTab {
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
-        brand_icon(self.svg, icons::TERMINAL)
+        brand_icon(self.svg)
     }
 
     fn open(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
-        match spawn_agent_terminal(self.agent_id, &thread_cwd_or_home(), &self.mux, cx) {
-            Ok(view) => store.put(&self.id, view),
-            Err(e) => store.set_error(
-                &self.id,
-                manox_i18n::t_str(
-                    "chrome-spawn-failed",
-                    &[("prog", self.display), ("err", &e)],
-                ),
-            ),
-        }
+        // The tab opens on the MODEL PICKER (the legacy `+` menu's cascade
+        // reborn); picking one spawns the agent under that endpoint and the
+        // picker renders the TUI from then on — one entity for the tab's
+        // whole lifetime, so close-tab teardown stays a single drop.
+        let picker = cx.new(|_| AgentPicker {
+            agent_id: self.agent_id,
+            display: self.display,
+            mux: self.mux.clone(),
+            launched: None,
+            error: None,
+        });
+        store.put(&self.id, picker);
     }
 
     fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
-        use gpui::{ParentElement, Styled, div, px};
-        match store.get::<terminal_ui::TerminalView>(&self.id) {
-            Some(view) => div()
-                .w_full()
-                .h_full()
-                .flex()
-                .p(px(4.))
-                .child(view)
-                .into_any_element(),
-            None => div().w_full().h_full().into_any_element(),
+        match store.get::<AgentPicker>(&self.id) {
+            Some(picker) => picker.into_any_element(),
+            None => div_missing().into_any_element(),
         }
     }
 }
 
-/// The full cx launch path (the legacy `+` menu's cascade, one agent kind
-/// pinned): registry-resolved agent config → `AgentBuilder` (PTY relay) →
-/// `Terminal` → `TerminalView`. Dropping the view tears the child tree down.
+fn div_missing() -> gpui::Div {
+    use gpui::Styled as _;
+    gpui::div().w_full().h_full()
+}
+
+/// The full cx launch path: registry-pinned agent + the picked endpoint →
+/// `AgentBuilder` (PTY relay) → `Terminal` → `TerminalView`. Dropping the
+/// view tears the child tree down.
 fn spawn_agent_terminal(
     agent_id: &str,
     cwd: &std::path::Path,
-    mux: &Entity<crate::multiplexer::SessionMultiplexer>,
+    provider: &str,
+    model: &str,
+    wire: Option<String>,
     cx: &mut App,
 ) -> Result<Entity<terminal_ui::TerminalView>, String> {
-    use gpui::AppContext as _;
     let agent = match agent_id {
         "claude" => manox_ext_agents::Agent::Claude,
         "codex" => manox_ext_agents::Agent::Codex,
@@ -233,12 +238,11 @@ fn spawn_agent_terminal(
     let mut builder = manox_ext_agents::AgentBuilder::new()
         .agent(agent)
         .pty(true)
+        .provider(provider.to_string())
+        .model(model.to_string())
         .cwd(cwd.to_path_buf());
-    // Provider/model: the registry's launch configuration for this agent
-    // (the same resolution the sidebar cascade performs); absent config
-    // falls back to the agent's built-in defaults.
-    if let Some((provider, model)) = registry_agent_model(mux, cx, agent_id) {
-        builder = builder.provider(provider).model(model);
+    if let Some(w) = wire {
+        builder = builder.wire_api(w);
     }
     let handle = Arc::new(builder.spawn().map_err(|e| e.to_string())?);
     let id = format!("chrome-assembly:{agent_id}:{}", next_instance_id("agent"));
@@ -249,32 +253,162 @@ fn spawn_agent_terminal(
     Ok(terminal_ui::TerminalView::new(proxy, cx))
 }
 
-/// The provider/model pair for one agent id, resolved from the
-/// multiplexer's wire model rows (the cascade's source): the first model
-/// whose effective agent list contains the id — the sidebar cascade's
-/// default pick.
-fn registry_agent_model(
-    mux: &Entity<crate::multiplexer::SessionMultiplexer>,
-    cx: &App,
-    agent_id: &str,
-) -> Option<(String, String)> {
-    let models = mux.read(cx).models().to_vec();
-    models
-        .iter()
-        .find(|m| {
-            m.agents
-                .as_ref()
-                .map(|list| list.iter().any(|a| a == agent_id))
-                .unwrap_or(true)
-        })
-        .map(|m| {
-            (
-                m.provider_name
-                    .clone()
-                    .unwrap_or_else(|| m.provider.clone()),
-                m.config_id.clone().unwrap_or_else(|| m.id.clone()),
+// ── the agent model picker ────────────────────────────────────────────────
+
+/// One pickable endpoint, straight from the shared cascade projection
+/// (`cascade_provider_groups` — the sidebar `+` menu's own rule).
+struct PickRow {
+    provider: String,
+    config_id: String,
+    display: String,
+    wire: Option<String>,
+}
+
+use crate::views::model_cascade::{CascadeEntry, cascade_provider_groups};
+
+impl From<(String, CascadeEntry)> for PickRow {
+    fn from((provider, entry): (String, CascadeEntry)) -> Self {
+        Self {
+            provider,
+            config_id: entry.config_id,
+            display: entry.display,
+            wire: entry.wire,
+        }
+    }
+}
+
+/// The model-picker body an agent tab opens on: the multiplexer's wire
+/// model rows this agent may use, grouped provider→model (the sidebar
+/// cascade's rule — a missing `agents` column means non-cx registration and
+/// stays visible). Picking one spawns the agent under that endpoint and
+/// this entity renders the terminal from then on; a spawn failure stays on
+/// the picker with the error surfaced.
+struct AgentPicker {
+    agent_id: &'static str,
+    display: &'static str,
+    mux: Entity<crate::multiplexer::SessionMultiplexer>,
+    launched: Option<Entity<terminal_ui::TerminalView>>,
+    error: Option<String>,
+}
+
+impl AgentPicker {
+    fn groups(&self, cx: &App) -> Vec<(String, Vec<PickRow>)> {
+        let models = self.mux.read(cx).models().to_vec();
+        cascade_provider_groups(self.agent_id, &models)
+            .into_iter()
+            .map(|(provider, entries)| {
+                (
+                    provider.clone(),
+                    entries
+                        .into_iter()
+                        .map(|e| PickRow::from((provider.clone(), e)))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+}
+
+impl gpui::Render for AgentPicker {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui::{InteractiveElement, ParentElement, StatefulInteractiveElement, Styled, div};
+        use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+        let theme = cx.theme().clone();
+
+        // Launched: the terminal IS the tab body from here on.
+        if let Some(view) = self.launched.clone() {
+            return v_flex()
+                .size_full()
+                .p(px(4.))
+                .child(view)
+                .into_any_element();
+        }
+
+        let heading = manox_i18n::t_str("chrome-agent-pick-model", &[("agent", self.display)]);
+        let groups = self.groups(cx);
+        let mut list = v_flex().w_full().flex_1().min_h_0().gap_1();
+        if let Some(err) = self.error.clone() {
+            list = list.child(
+                div()
+                    .py_2()
+                    .text_color(theme.danger)
+                    .child(manox_i18n::t_str(
+                        "chrome-spawn-failed",
+                        &[("prog", self.display), ("err", &err)],
+                    )),
+            );
+        }
+        if groups.is_empty() {
+            list = list.child(
+                div()
+                    .py_4()
+                    .text_color(theme.muted_foreground)
+                    .child(manox_i18n::t("external-wizard-no-model")),
+            );
+        }
+        for (provider, rows) in groups {
+            let mut group = v_flex().gap_1();
+            group = group.child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.muted_foreground)
+                    .child(provider.clone()),
+            );
+            for row in rows {
+                let agent_id = self.agent_id;
+                let wire = row.wire.clone();
+                let display_name = row.display.clone();
+                let elem_id =
+                    SharedString::from(format!("pick-{}-{}", row.provider, row.config_id));
+                let on_pick = cx.listener(
+                    move |this: &mut AgentPicker,
+                          _: &gpui::ClickEvent,
+                          _w: &mut Window,
+                          cx: &mut Context<AgentPicker>| {
+                        let cwd = thread_cwd_or_home();
+                        match spawn_agent_terminal(
+                            agent_id,
+                            &cwd,
+                            &row.provider,
+                            &row.config_id,
+                            wire.clone(),
+                            cx,
+                        ) {
+                            Ok(view) => this.launched = Some(view),
+                            Err(e) => this.error = Some(e),
+                        }
+                        let _ = display_name;
+                        cx.notify();
+                    },
+                );
+                group = group.child(
+                    div()
+                        .id(elem_id)
+                        .on_click(move |e, w, cx| on_pick(e, w, cx))
+                        .py(px(4.))
+                        .px(px(8.))
+                        .rounded(px(4.))
+                        .hover(|s| s.bg(theme.list_hover))
+                        .child(h_flex().items_center().child(row.display.clone())),
+                );
+            }
+            list = list.child(group);
+        }
+        v_flex()
+            .id("agent-picker")
+            .size_full()
+            .p(px(8.))
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(heading),
             )
-        })
+            .child(list)
+            .into_any_element()
+    }
 }
 
 // ── editor ────────────────────────────────────────────────────────────────
@@ -363,7 +497,6 @@ pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
     cx: &mut App,
 ) -> Result<Entity<terminal_ui::TerminalView>, String> {
-    use gpui::AppContext as _;
     let source: Box<dyn manox_terminal::pty_source::PtySource> =
         manox_terminal::pty::default_source(cwd, 80, 24).map_err(|e| e.to_string())?;
     let id = format!("chrome-assembly:$SHELL:{}", next_instance_id("pty"));
@@ -373,14 +506,15 @@ pub(crate) fn spawn_standalone_terminal(
     Ok(terminal_ui::TerminalView::new(proxy, cx))
 }
 
-/// Brand glyph: the SVG asset rides the app's asset source; the codicon
-/// fallback renders when the asset is unavailable.
-fn brand_icon(svg_path: &'static str, _fallback: Icon) -> AnyElement {
-    use gpui::Styled as _;
-    gpui::svg()
+/// Brand glyph: the SVG asset rides the app's asset source
+/// (`ExtrasAssetSource`), rendered the same way the legacy sidebar renders
+/// its brand marks — a gpui-component `Icon` with the custom path, sized
+/// `.small()`, colored by the surrounding text color.
+fn brand_icon(svg_path: &'static str) -> AnyElement {
+    use gpui_component::Sizable as _;
+    gpui_component::Icon::default()
         .path(svg_path)
-        .size(gpui::px(15.))
-        .flex_shrink_0()
+        .small()
         .into_any_element()
 }
 

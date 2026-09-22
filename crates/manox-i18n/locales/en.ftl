@@ -1161,3 +1161,5 @@ workspace-hero-heading = Start a conversation
 chrome-tab-editor = Editor
 chrome-quick-editor = Open the editor
 chrome-editor-placeholder = Write markdown here…
+
+chrome-agent-pick-model = Choose a model for { $agent }
