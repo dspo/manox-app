@@ -1,12 +1,13 @@
 # 拆分计划：manox-agent-chrome-ui + manox-agent-chat-ui
 
-> 状态：**Phase 3、1、2（全部）、4 前哨已落地**（截至 2026-09-22：Phase 3 = #58；Phase 1
-> = #59；Phase 2 = #60+#61+#63+#64（尾下半 = PR #64 `feat/chat-column-native`，叠 #63：
-> ChatColumn 结构体+卫星类型（PendingAsk/队列族/拖拽标记/Attachment）+ parse_pending_ask
-> 迁入 chat crate column.rs；ask/queue/recall 状态机下沉为 ChatColumn 固有方法（拖拽规则
-> 成为纯关联函数，单测直连并抓到一次规则重建丢守卫、按基线原文恢复）；plan_review 判定
-> 留守——32 行纯 wire 编排无状态机）；4 前哨 = #62。**Phase 2 就此完成**。剩余：Phase 4
-> 正式装配（D2 五态 props、ToolTab 注册表、chat 列视图接管渲染半边、真 app 换壳）。
+> 状态：**Phase 1/2/3 全部落地，4 前哨 + 4 批1 已开**（截至 2026-09-22：Phase 3 = #58；Phase 1
+> = #59；Phase 2 = #60+#61+#63+#64；4 前哨 = #62；**Phase 4 批 1 = PR #65**
+> `feat/phase4-sidebar-projection`（叠 #64）——D2 五态 props（Errored/PendingAuth/
+> PendingPlan/Running/Unread/Idle + tag chip + team 缩进导轨/leader chevron）落进 chrome
+> SessionList；agent-ui 新增 sidebar_projection.rs 纯投影（wire 行五态优先级 + GW5 叶子
+> unread 覆盖 + team 森林 + 项目分组，wire 形状夹具单测）；agent-ui 首次依赖 chrome crate
+> （装配层拥有投影）。剩余：Phase 4 批 2（ToolTab 装配适配器）→ 批 3（chat 列视图接管渲染
+> 半边 + manox bin 换壳 + 退役 + UI-MAP 重写）。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost

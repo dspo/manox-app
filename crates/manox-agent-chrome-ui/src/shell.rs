@@ -41,6 +41,10 @@ pub struct SessionRow {
     pub updated_at: i64,
     pub pinned: bool,
     pub unread: bool,
+    /// D2 columns: the user tag chip, team-nesting depth, leader mark.
+    pub tag: Option<String>,
+    pub indent: u8,
+    pub team_leader: bool,
 }
 
 impl SessionRow {
@@ -52,6 +56,9 @@ impl SessionRow {
             status: self.status,
             pinned: self.pinned,
             unread: self.unread,
+            tag: self.tag.clone(),
+            indent: self.indent,
+            team_leader: self.team_leader,
         }
     }
 }
