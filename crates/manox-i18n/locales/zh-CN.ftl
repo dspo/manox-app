@@ -1141,3 +1141,5 @@ workspace-hero-heading = 开始你的对话
 chrome-tab-editor = 编辑器
 chrome-quick-editor = 打开编辑器
 chrome-editor-placeholder = 在此书写 markdown…
+
+chrome-agent-pick-model = 为 { $agent } 选择模型

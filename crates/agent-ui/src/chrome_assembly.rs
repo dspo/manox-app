@@ -65,7 +65,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             shell.set_sessions(sessions);
             cx.notify();
         });
-        refresh_foreground_cwd(&ws, cx);
+        refresh_foreground_cwd(&ws, &rows, cx);
         // The foreground thread id: dock follows it. On a switch, detach the
         // outgoing view into the stash and restore/spawn the incoming one.
         let fg = ws
@@ -225,15 +225,33 @@ pub fn foreground_cwd() -> Option<std::path::PathBuf> {
     FOREGROUND_CWD.lock().expect("foreground cwd lock").clone()
 }
 
-fn refresh_foreground_cwd(ws: &Entity<Workspace>, cx: &App) {
-    let cwd = ws
+fn refresh_foreground_cwd(
+    ws: &Entity<Workspace>,
+    rows: &[manox_protocol::ThreadListItem],
+    cx: &App,
+) {
+    // The thread's working directory is its PROJECT path — the wire row's
+    // `project` column, the same source the sidebar groups by. The store's
+    // own cwd records the workspace cwd (home for the embedded build), so
+    // it is only the fallback; a missing row/project lands on home.
+    let fg = ws
         .read(cx)
         .chat
         .read(cx)
         .store
         .as_ref()
-        .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()));
-    *FOREGROUND_CWD.lock().expect("foreground cwd lock") = cwd;
+        .map(|s| s.read(cx).store.id.0.clone());
+    let project = fg
+        .as_ref()
+        .and_then(|id| rows.iter().find(|r| &r.id == id))
+        .and_then(|r| r.project.clone())
+        .filter(|p| !p.is_empty());
+    let cwd = project.map(std::path::PathBuf::from).unwrap_or_else(|| {
+        std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| ".".into())
+    });
+    *FOREGROUND_CWD.lock().expect("foreground cwd lock") = Some(cwd);
 }
 
 /// Wrap a chrome Shell into the window's Root view (the bin mounts this).
