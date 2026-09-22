@@ -652,6 +652,19 @@ impl ChatColumn {
         }
     }
 
+    /// Land one recall step's state (the walk index and the displaced
+    /// working line).
+    pub fn set_recall(&mut self, index: i64, draft: Option<String>) {
+        self.recall_index = index;
+        self.recall_draft = draft;
+    }
+
+    /// End a running recall walk and drop its working line.
+    pub fn end_recall_walk(&mut self) {
+        self.recall_index = -1;
+        self.recall_draft = None;
+    }
+
     /// Take the pending ask (the settle path) and reset the walk counters in
     /// the same move.
     pub fn take_pending_ask(&mut self) -> Option<PendingAsk> {

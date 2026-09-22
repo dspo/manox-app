@@ -986,13 +986,9 @@ impl Workspace {
             self.chat.read(cx).recall_draft.as_deref(),
             &turns,
         );
-        self.chat.update(cx, |chat, cx| {
-            chat.recall_index = index;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.recall_draft = draft;
-            cx.notify();
+        self.chat.update(cx, |chat, cc| {
+            chat.set_recall(index, draft);
+            cc.notify();
         });
         match step {
             RecallStep::None => {}
@@ -1026,13 +1022,9 @@ impl Workspace {
 
     /// End a running recall walk and drop its working line.
     pub(super) fn end_recall_walk(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cx| {
-            chat.recall_index = -1;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.recall_draft = None;
-            cx.notify();
+        self.chat.update(cx, |chat, cc| {
+            chat.end_recall_walk();
+            cc.notify();
         });
     }
 
