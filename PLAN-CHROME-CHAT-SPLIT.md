@@ -10,7 +10,10 @@
 > 生产 open_thread 全切换路径，⌘N 走 start_new_thread，标题栏跟随前台线程标题；
 > #66 的占位主面退役；抽出的 hero 引用带出一个此前未扫到的 i18n 键
 > workspace-hero-heading（双语补齐，key-scan 门禁继续执法）。剩余：批 4（浏览器/CLI
-> 页签随宿主解耦 + per-session 页签集）→ 收敛期。
+> 页签随宿主解耦 + per-session 页签集）→ 收敛；**修复批 = PR #68**：tranche-3 真机报告两项——侧栏选中死（装配 on_select/on_new_session 钩子
+> 因替换失误以 None 提交，现接生产 open_thread/start_new_thread）+ 底部终端随线程走
+> （Shell take/set_panel_view 无拆分离槽 + 装配按线程 id stash/restore——旧右栏同语义，
+> 仅显式收起拆进程；新拉起 cwd=前台线程 cwd）。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
