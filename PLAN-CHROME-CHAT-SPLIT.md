@@ -13,7 +13,13 @@
 > 页签随宿主解耦 + per-session 页签集）→ 收敛；**修复批 = PR #68**：tranche-3 真机报告两项——侧栏选中死（装配 on_select/on_new_session 钩子
 > 因替换失误以 None 提交，现接生产 open_thread/start_new_thread）+ 底部终端随线程走
 > （Shell take/set_panel_view 无拆分离槽 + 装配按线程 id stash/restore——旧右栏同语义，
-> 仅显式收起拆进程；新拉起 cwd=前台线程 cwd）。
+> 仅显式收起拆进程；新拉起 cwd=前台线程 cwd；**修复批 2 = PR #69**：①chrome 构建补注册 codicon（豆腐块根因——example 注册了、
+> bin 的 chrome 分支没注册）；②message.rs 四处 conv.update 嵌套双重租约（点 thinking/工具
+> 折叠即 abort，日志实证）全部展平、grep 清零；③右栏 per-thread 会话集
+> （RightPaneSession stash/restore——打开集/内容仓/激活页签/可见性整体迁移，on_active
+> 生命周期驱动：浏览器子视图隐藏、终端保活，仅显式关页签才拆；装配切线程泵 stash 旧
+> 恢复新，无 stash 落新标签页空态；内容渲染归页签实例、壳只管 chrome 与生命周期——
+> 即用户裁定的右栏分工）。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost

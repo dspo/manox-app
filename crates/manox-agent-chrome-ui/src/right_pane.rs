@@ -117,6 +117,18 @@ pub trait ToolTabFactory: 'static {
     fn icon(&self, cx: &App) -> AnyElement;
 }
 
+/// A detached right-pane session: the open tabs, their content store, the
+/// active tab, and the pane's visibility — everything needed to suspend one
+/// thread's pane and resume it later. Stashed tabs keep their entities (a
+/// browser's OS subview is hidden via `on_active(false)`; a terminal keeps
+/// running); only an explicit `close_tab` tears content down.
+pub struct RightPaneSession {
+    pub open: Vec<Arc<dyn ToolTab>>,
+    pub store: TabStore,
+    pub active_id: Option<String>,
+    pub visible: bool,
+}
+
 /// The right pane view: a registry-driven shell.
 pub struct RightPane {
     registry: Vec<Arc<dyn ToolTabFactory>>,
@@ -223,6 +235,42 @@ impl RightPane {
             prev.on_active(false, cx, &self.store);
         }
         self.visible = true;
+        cx.notify();
+    }
+
+    /// Detach the whole session (per-thread stashing): the active tab gets
+    /// `on_active(false)` (a browser subview hides), the open set / store /
+    /// visibility move out, and the pane resets to a fresh empty state.
+    pub fn stash_session(&mut self, cx: &mut Context<Self>) -> RightPaneSession {
+        if let Some(active) = &self.active {
+            active.on_active(false, cx, &self.store);
+        }
+        let session = RightPaneSession {
+            open: std::mem::take(&mut self.open),
+            store: std::mem::take(&mut self.store),
+            active_id: self.active.as_ref().map(|t| t.id().to_string()),
+            visible: self.visible,
+        };
+        self.active = None;
+        self.visible = false;
+        cx.notify();
+        session
+    }
+
+    /// Resume a stashed session: the open set, store, active tab, and
+    /// visibility return as one unit; the active tab is re-armed
+    /// (`on_active(visible)`).
+    pub fn restore_session(&mut self, session: RightPaneSession, cx: &mut Context<Self>) {
+        self.open = session.open;
+        self.store = session.store;
+        self.active = session
+            .active_id
+            .as_ref()
+            .and_then(|id| self.open.iter().find(|t| t.id() == id).cloned());
+        self.visible = session.visible;
+        if let Some(tab) = &self.active {
+            tab.on_active(self.visible, cx, &self.store);
+        }
         cx.notify();
     }
 

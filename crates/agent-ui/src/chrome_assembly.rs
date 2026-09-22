@@ -42,6 +42,12 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     // LIVE dock tears one down).
     let mut dock_stash: HashMap<String, gpui::AnyView> = HashMap::new();
     let mut dock_thread: Option<String> = None;
+    // Per-thread right-pane sessions: the open tab set + content store +
+    // active tab + visibility move with the foreground thread (stash on
+    // switch-out, restore on switch-in; a thread with no stash starts on
+    // the fresh new-tab page).
+    let mut right_stash: HashMap<String, manox_agent_chrome_ui::right_pane::RightPaneSession> =
+        HashMap::new();
     cx.observe(&ws, move |ws, cx| {
         let Some(shell) = shell_weak.upgrade() else {
             return;
@@ -80,6 +86,22 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                 }
                 // No stashed terminal: the slot stays empty — the next
                 // expand spawns at the NEW thread's cwd via the surface.
+                // Right pane rides the same switch: stash the outgoing
+                // thread's whole tab session, restore the incoming one
+                // (None → the fresh new-tab page).
+                if let Some(old_id) = &old_id
+                    && let Some(session) = shell.stash_right_session(cx)
+                {
+                    right_stash.insert(old_id.clone(), session);
+                }
+                match fg.as_ref().and_then(|id| right_stash.remove(id)) {
+                    Some(session) => shell.restore_right_session(session, cx),
+                    None => {
+                        // Fresh thread: drop any lingering pane state to the
+                        // empty page without touching the stash.
+                        shell.right.update(cx, |pane, cx| pane.new_tab_page(cx));
+                    }
+                }
             });
             dock_thread = fg;
         }
