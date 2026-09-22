@@ -1120,3 +1120,34 @@ plugins-notice-plugin-enabled = Plugin enabled. Restart manox to load its tools,
 
 plugins-notice-plugin-disabled = Plugin disabled. Restart manox to unload runtime registries loaded at startup.
 
+
+## manox-agent-chrome-ui (app shell: sidebar / toolbar / tabs / bottom dock)
+
+chrome-sessions-title = Sessions
+chrome-new = New
+chrome-no-chats = No chats
+chrome-customizations = Customizations
+chrome-row-pinned = Pinned
+chrome-row-unread = Unread
+chrome-row-copy-id = Copy Thread ID
+chrome-row-pin = Pin
+chrome-row-unpin = Unpin
+chrome-row-archive = Archive
+chrome-picker-search = Search sessions
+chrome-picker-empty = No matching session
+chrome-tab-new-tab = New Tab
+chrome-tab-retry = Retry
+chrome-titlebar-sync = Sync Changes
+chrome-panel-empty = Panel content closed
+chrome-sidebar-automations = Automations
+chrome-sidebar-chats = Chats
+chrome-sidebar-overview = Overview
+chrome-sidebar-plugins = Plugins
+chrome-sidebar-mcp = MCP Servers
+chrome-sidebar-skills = Skills
+chrome-tab-terminal = Terminal
+chrome-tab-browser = Browser
+chrome-quick-terminal = Open integrated terminal
+chrome-quick-browser = Open integrated browser
+chrome-quick-agent = Open { $agent }
+chrome-spawn-failed = Failed to start { $prog }: { $err }
