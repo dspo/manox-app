@@ -18,10 +18,9 @@ use crate::i18n;
 use crate::views::launcher::LauncherPick;
 use gpui::DismissEvent;
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Context, Entity, FocusHandle,
-    FollowMode, ListAlignment, ListOffset, ListState, MouseButton, Pixels, Render, ScrollHandle,
-    SharedString, Subscription, WeakEntity, Window, anchored, deferred, ease_out_quint, prelude::*,
-    px,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Context, Entity, FollowMode,
+    ListAlignment, ListOffset, ListState, MouseButton, Pixels, Render, ScrollHandle, SharedString,
+    Subscription, WeakEntity, Window, anchored, deferred, ease_out_quint, prelude::*, px,
 };
 use gpui::{ClickEvent, CursorStyle, DragMoveEvent, MouseUpEvent};
 /// Shared across both harnesses: workspace struct fields hold
@@ -76,7 +75,6 @@ use crate::views::composer_menu::{
     PendingAttachment, build_plus_menu, load_attachment, render_attachment_chips,
     render_browser_chips,
 };
-use crate::views::message::MessageItem;
 use crate::views::popup_menu;
 use crate::views::settings::{SettingsEvent, SettingsView};
 use crate::views::sidebar::{Sidebar, SidebarEvent};
@@ -93,9 +91,7 @@ use terminal_ui::terminal_proxy::TerminalProxy;
 mod attach;
 mod chat_column;
 use chat_column::ChatColumn;
-use manox_agent_chat_ui::ask_card::{
-    AskCardIntent, AskCardOption, AskCardQuestion, AskCardSnapshot,
-};
+use manox_agent_chat_ui::ask_card::AskCardSnapshot;
 mod chips;
 mod composer_render;
 mod render;
@@ -140,126 +136,6 @@ fn thread_cwd(
     } else {
         Some(SharedString::from(cwd.to_string_lossy().to_string()))
     }
-}
-
-/// Parse an `AskUserQuestion` tool input into a `PendingAsk`. The per-question
-/// `InputState` entities are allocated lazily on first render (they need a
-/// `Window`, which the event handler lacks). Returns `None` when the input is
-/// malformed (the generic question overlay then takes over as a fallback).
-fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk> {
-    let questions = input.get("questions")?.as_array()?;
-    // B2-PR-1 removed the 1..=3 question cap (and the 2..=3 option cap) from
-    // the tool contract; the card steps through any count. Empty stays
-    // malformed.
-    if questions.is_empty() {
-        return None;
-    }
-    let mut parsed: Vec<AskQuestion> = Vec::with_capacity(questions.len());
-    let mut selections: Vec<Vec<bool>> = Vec::with_capacity(questions.len());
-    for (i, q) in questions.iter().enumerate() {
-        let question = q.get("question")?.as_str()?.to_string();
-        // The server mints a stable id onto each parked question; answers are
-        // id-routed and unknown ids are dropped at the settle boundary.
-        // Inputs predating the mint (fixtures, older servers) fall back to a
-        // positional id, mirroring how the card keys its per-step state. The
-        // positional fallback is index-derived (`q{i}`) — a fixed small set of
-        // names collided past 3 questions once the count cap was lifted, which
-        // made two answers share an id and mis-route at the settle boundary.
-        let id = match q
-            .get("id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            Some(explicit) => explicit.to_string(),
-            None => format!("q{i}"),
-        };
-        // B2-PR-1 L1 vocabulary: `detail` is optional markdown support text
-        // rendered beneath the question; `intent` names a specialised surface
-        // (`kind`, e.g. "plan-review") with the option label that carries the
-        // affirmative verdict (`approve`). Both ride the snapshot so the card
-        // renders them; later PRs branch on `intent`.
-        let detail = q
-            .get("detail")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let intent = q.get("intent").and_then(|v| v.as_object()).map(|obj| {
-            let read = |k: &str| {
-                obj.get(k)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
-            };
-            AskIntent {
-                kind: read("kind"),
-                approve: read("approve"),
-            }
-        });
-        let header = q
-            .get("header")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let multi_select = q
-            .get("multiSelect")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let mut opts: Vec<AskOption> = Vec::new();
-        if let Some(arr) = q.get("options").and_then(|v| v.as_array()) {
-            for o in arr {
-                let raw_label = o
-                    .get("label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let description = o
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let explicit_recommended = o
-                    .get("recommended")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let (label, suffix_recommended) = strip_recommended_suffix(raw_label);
-                opts.push(AskOption {
-                    label,
-                    description,
-                    recommended: explicit_recommended || suffix_recommended,
-                });
-            }
-        }
-        // B2-PR-1: options are optional and unbounded (a detail/intent-only
-        // question is legal) — the old 2..=3 cap is gone server-side, so the
-        // card must not degrade on counts it now receives.
-        selections.push(vec![false; opts.len()]);
-        parsed.push(AskQuestion {
-            id,
-            question,
-            header,
-            detail,
-            intent,
-            multi_select,
-            options: opts,
-        });
-    }
-    Some(PendingAsk {
-        id,
-        questions: parsed,
-        selections,
-    })
-}
-
-fn strip_recommended_suffix(label: String) -> (String, bool) {
-    let lower = label.to_lowercase();
-    for suffix in [" (Recommended)", "（推荐）", " (推荐)", "（Recommended）"] {
-        let suffix_lower = suffix.to_lowercase();
-        if lower.ends_with(&suffix_lower) {
-            let stripped = &label[..label.len() - suffix.len()];
-            return (stripped.trim().to_string(), true);
-        }
-    }
-    (label, false)
 }
 
 /// Map a `PermissionMode` to the chip's (label, accent color, icon) triple.
@@ -419,57 +295,6 @@ struct RightPaneSnapshot {
     visible: bool,
 }
 
-/// A non-question authorization parked on the user's decision — a
-/// `sandbox_permissions` escalation from Edit/Write/Bash, or an
-/// `AskUserQuestion` whose payload failed to parse. The ask card only
-/// renders question payloads, so without this surface the pending call
-/// blocks invisibly until the turn is cancelled.
-pub(crate) struct PendingAuth {
-    pub id: String,
-    pub tool_name: String,
-    pub summary: String,
-}
-
-/// A parsed `AskUserQuestion` prompt awaiting the user's selections.
-pub(crate) struct PendingAsk {
-    id: String,
-    questions: Vec<AskQuestion>,
-    /// Per-question toggled option flags, aligned with `questions[i].options`.
-    selections: Vec<Vec<bool>>,
-}
-
-struct AskQuestion {
-    /// Stable question id (server-minted) used to route the canonical
-    /// `AskAnswer` back through the settle boundary.
-    id: String,
-    question: String,
-    header: String,
-    detail: String,
-    intent: Option<AskIntent>,
-    multi_select: bool,
-    options: Vec<AskOption>,
-}
-
-/// Parsed form of a question's `intent` object: the specialised-surface kind
-/// (e.g. "plan-review") and the option label carrying the affirmative verdict.
-struct AskIntent {
-    kind: String,
-    approve: String,
-}
-
-struct AskOption {
-    label: String,
-    description: String,
-    recommended: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ComposerPlaceholderMode {
-    Normal,
-    FollowUp,
-    Ask,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerPlacement {
     Hidden,
@@ -509,13 +334,6 @@ fn composer_key_context(completion_open: bool) -> &'static str {
     }
 }
 
-struct DeferredUserTurn {
-    text: String,
-    images: Vec<manox_agent::language_model::MessageContent>,
-    meta: UserTurnMeta,
-    user_images: Vec<UserImage>,
-}
-
 /// The Captain's dispatch prompt for one sub-agent address, with the Unix
 /// second it was sent: a sub-agent panel's opening bubble shows the send time,
 /// never the time its tab was opened.
@@ -541,42 +359,6 @@ struct BackgroundThread {
     _sub: Subscription,
 }
 
-/// Lifecycle of a follow-up submitted while a turn is running. A queued item
-/// renders above the composer; clicking Steer promotes it to `SteerPending`,
-/// which is handed to the server's steer queue for the running turn and STAYS
-/// parked in the composer queue (at the head of the steer group) until the
-/// model actually consumes it. Consumption is observed at the earliest point
-/// the wire offers: the injected `user` journal row landing
-/// (`ThreadEvent::UserRowLanded`, id == the client-minted `message_id` thanks
-/// to the server's stable-id threading) retires the card immediately; the
-/// turn-boundary `TurnFinished` (now journal-delivered) is the fallback for a
-/// row that raced the settle, and the strand path for a cancelled turn.
-enum FollowUpState {
-    /// Parked, waiting to flush as the next user turn at the turn boundary (or
-    /// to be promoted to a steer via the Steer action).
-    Queued,
-    /// Promoted to the server steer queue for the running turn. Carries the
-    /// client-minted id sent with [`manox_protocol::ClientCall::Steer`]: the
-    /// injected row's durable identity (the retire-on-injection key) and the
-    /// stranded-verdict key at settle. Not removable (no steer-withdrawal
-    /// channel in the protocol). A normal settle the injection row missed
-    /// promotes it into the message list; a cancelled/failed turn strands it
-    /// into [`FollowUpState::Failed`].
-    SteerPending { message_id: String },
-    /// The running turn exited abnormally (Abort/Error) before injecting the
-    /// steer. Stays parked, marked red, retryable via the Steer action (which
-    /// re-sends a fresh online steer under a fresh id). Removable. Carries no
-    /// id: the retry never reuses the retracted one.
-    Failed,
-}
-
-/// A follow-up submitted while a turn is running. Every new item starts queued;
-/// only an explicit Steer action promotes it to `SteerPending`.
-pub(crate) struct QueuedFollowUp {
-    turn: DeferredUserTurn,
-    state: FollowUpState,
-}
-
 /// Which shared registry backs a registry slash turn — a markdown
 /// prompt-macro (`manox_agent::command`) or a skill (`manox_agent::skill`).
 #[derive(Clone, Copy)]
@@ -584,6 +366,15 @@ enum RegistryTurnKind {
     Command,
     Skill,
 }
+
+// The chat-column state types moved to manox-agent-chat-ui's `column`
+// module (Phase 2 tail); these re-exports keep every bare/`super::` name in
+// the workspace family resolving unchanged.
+pub(crate) use manox_agent_chat_ui::column::parse_pending_ask;
+pub use manox_agent_chat_ui::column::{
+    AskIntent, AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState,
+    PendingAsk, PendingAuth, QueuedFollowUp,
+};
 
 pub struct Workspace {
     pub(crate) cwd: PathBuf,

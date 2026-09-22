@@ -21,6 +21,7 @@ pub mod ask_card;
 pub mod client_store;
 pub mod client_store_handle;
 pub mod cockpit;
+pub mod column;
 pub mod conversation;
 pub mod git_status;
 pub mod host;

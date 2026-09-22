@@ -228,11 +228,59 @@ impl Workspace {
     /// converges immediately and the model reads "the user left to speak"
     /// — neither a denial nor an empty answer. The generic approval card's
     /// allow/deny leg stays in `resolve_auth`; the two exits must not merge.
+    // ── ask-family thin wrappers (state lives on ChatColumn; wire/orchestration
+    // halves stay below) ────────────────────────────────────────────────
+    pub(crate) fn ask_card_snapshot(&self, id: &str, cx: &App) -> Option<AskCardSnapshot> {
+        self.chat.read(cx).ask_card_snapshot(id)
+    }
+
+    pub(super) fn pending_ask_has_selection(&self, cx: &App) -> bool {
+        self.chat.read(cx).pending_ask_has_selection()
+    }
+
+    pub(crate) fn first_incomplete_ask_question(&self, cx: &App) -> Option<usize> {
+        self.chat.read(cx).first_incomplete_ask_question()
+    }
+
+    pub(crate) fn toggle_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cc| {
+            chat.toggle_ask_option(qi, oi);
+            cc.notify();
+        });
+    }
+
+    pub(crate) fn decide_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cc| {
+            chat.decide_ask_option(qi, oi);
+            cc.notify();
+        });
+        self.resolve_ask(cx);
+    }
+
+    pub(crate) fn ask_prev(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cc| {
+            chat.ask_prev();
+            cc.notify();
+        });
+    }
+
+    pub(crate) fn ask_next(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cc| {
+            chat.ask_next();
+            cc.notify();
+        });
+    }
+
+    pub(super) fn reset_ask_custom(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cc| {
+            chat.reset_ask_custom();
+            cc.notify();
+        });
+    }
+
     pub(crate) fn dismiss_ask(&mut self, cx: &mut Context<Self>) {
         let ask = match self.chat.update(cx, |chat, cc| {
-            let v = chat.pending_ask.take();
-            chat.ask_step = 0;
-            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+            let v = chat.take_pending_ask();
             cc.notify();
             v
         }) {
@@ -260,51 +308,6 @@ impl Workspace {
             );
         });
         cx.notify();
-    }
-
-    /// Toggle an option in the pending ask card. Single-select questions reset
-    /// siblings; multi-select toggles in place.
-    pub(crate) fn ask_card_snapshot(&self, id: &str, cx: &App) -> Option<AskCardSnapshot> {
-        let ask = self.chat.read(cx).pending_ask.as_ref()?;
-        if ask.id != id || ask.questions.is_empty() {
-            return None;
-        }
-        let step = self.chat.read(cx).ask_step.min(ask.questions.len() - 1);
-        let q = ask.questions.get(step)?;
-        let custom = self
-            .chat
-            .read(cx)
-            .ask_custom_text
-            .get(step)
-            .cloned()
-            .unwrap_or_default();
-        Some(AskCardSnapshot {
-            id: ask.id.clone(),
-            step,
-            total: ask.questions.len(),
-            transition_gen: self.chat.read(cx).ask_transition_gen,
-            question: AskCardQuestion {
-                question: q.question.clone(),
-                header: q.header.clone(),
-                detail: q.detail.clone(),
-                intent: q.intent.as_ref().map(|i| AskCardIntent {
-                    kind: i.kind.clone(),
-                    approve: i.approve.clone(),
-                }),
-                multi_select: q.multi_select,
-                options: q
-                    .options
-                    .iter()
-                    .map(|o| AskCardOption {
-                        label: o.label.clone(),
-                        description: o.description.clone(),
-                        recommended: o.recommended,
-                    })
-                    .collect(),
-            },
-            selections: ask.selections.get(step).cloned().unwrap_or_default(),
-            custom,
-        })
     }
 
     /// Diagnostic-only: the interactive ask card element for the CURRENT
@@ -390,38 +393,6 @@ impl Workspace {
         }
     }
 
-    pub(super) fn pending_ask_has_selection(&self, cx: &App) -> bool {
-        let chat = self.chat.read(cx);
-        chat.pending_ask.as_ref().is_some_and(|ask| {
-            ask.selections.iter().flatten().any(|selected| *selected)
-                || chat
-                    .ask_custom_text
-                    .iter()
-                    .any(|custom| !custom.trim().is_empty())
-        })
-    }
-
-    /// The first question that is neither answered nor explicitly skipped —
-    /// the completeness gate's jump target (dsh `submitDrafts`'s
-    /// `findIndex(!completed)` parity). An untouched question must never
-    /// silently fold to a skip at the settle boundary.
-    pub(crate) fn first_incomplete_ask_question(&self, cx: &App) -> Option<usize> {
-        let chat = self.chat.read(cx);
-        let ask = chat.pending_ask.as_ref()?;
-        (0..ask.questions.len()).find(|&qi| {
-            let answered = ask
-                .selections
-                .get(qi)
-                .is_some_and(|sel| sel.iter().any(|s| *s))
-                || chat
-                    .ask_custom_text
-                    .get(qi)
-                    .is_some_and(|custom| !custom.trim().is_empty());
-            let skipped = chat.ask_skipped.get(qi).copied().unwrap_or(false);
-            !answered && !skipped
-        })
-    }
-
     pub(super) fn composer_can_submit(&self, running: bool, cx: &App) -> bool {
         // T10c: the v1 `history_phase` loading gate retired with the fold
         // (the restore boundary is now the §D.1 snapshot; a pending-snapshot
@@ -437,79 +408,6 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn toggle_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            if let Some(ask) = chat.pending_ask.as_mut()
-                && let Some(sel) = ask.selections.get_mut(qi)
-            {
-                let multi = ask
-                    .questions
-                    .get(qi)
-                    .map(|q| q.multi_select)
-                    .unwrap_or(false);
-                let prev = sel.get(oi).copied().unwrap_or(false);
-                if multi {
-                    if let Some(slot) = sel.get_mut(oi) {
-                        *slot = !*slot;
-                    }
-                } else {
-                    for s in sel.iter_mut() {
-                        *s = false;
-                    }
-                    if let Some(slot) = sel.get_mut(oi) {
-                        *slot = !prev;
-                    }
-                }
-            }
-            cc.notify();
-        });
-    }
-
-    /// One-click plan-review decision: fold option `oi` of question `qi` in
-    /// as that question's single selection and settle the card in the same
-    /// activation. The decision card's buttons ARE the options, so there is
-    /// no separate confirm step — the reply carries exactly the clicked
-    /// option (the in-process fallback rides `resolve_ask`'s wire path).
-    /// Single-select by construction: the server mints plan-review cards
-    /// `multiSelect:false`, and a one-click verdict has no meaning on a
-    /// multi-select question — the decision presentation only routes those.
-    pub(crate) fn decide_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            if let Some(ask) = chat.pending_ask.as_mut()
-                && let Some(sel) = ask.selections.get_mut(qi)
-            {
-                for s in sel.iter_mut() {
-                    *s = false;
-                }
-                if let Some(slot) = sel.get_mut(oi) {
-                    *slot = true;
-                }
-            }
-            cc.notify();
-        });
-        self.resolve_ask(cx);
-    }
-
-    pub(crate) fn ask_prev(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            if chat.ask_step > 0 {
-                chat.ask_step -= 1;
-                cc.notify();
-            }
-        });
-    }
-
-    pub(crate) fn ask_next(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            if let Some(ask) = chat.pending_ask.as_ref()
-                && chat.ask_step < ask.questions.len() - 1
-            {
-                chat.ask_step += 1;
-                cc.notify();
-            }
-        });
-    }
-
     /// Submit the ask drawer: fold each question's tri-state (its selected
     /// labels plus its own free-text `custom`) into canonical `AskAnswer` rows.
     /// A blank custom is `None`; a question with nothing selected and no custom
@@ -519,10 +417,8 @@ impl Workspace {
     /// text rides the answer's `custom`.
     pub(crate) fn resolve_ask(&mut self, cx: &mut Context<Self>) {
         let (ask, custom_texts) = match self.chat.update(cx, |chat, cc| {
-            let ask = chat.pending_ask.take();
+            let ask = chat.take_pending_ask();
             let texts = chat.ask_custom_text.clone();
-            chat.ask_step = 0;
-            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
             cc.notify();
             (ask, texts)
         }) {
@@ -588,29 +484,6 @@ impl Workspace {
             );
         });
         cx.notify();
-    }
-
-    /// Drop the ask custom-answer state — call whenever the pending ask is
-    /// seeded, resolved, dismissed, or reconciled away so a stale custom never
-    /// leaks into the next card or a re-surfaced walk. The explicit-skip
-    /// markers ride the same lifecycle.
-    pub(super) fn reset_ask_custom(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cx| {
-            chat.ask_custom_inputs.clear();
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.ask_custom_subs.clear();
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.ask_custom_text.clear();
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.ask_skipped.clear();
-            cx.notify();
-        });
     }
 
     /// Align the per-question custom-answer scratch with the current ask:
@@ -702,21 +575,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.chat.update(cx, |chat, cc| {
-            if let Some(ask) = chat.pending_ask.as_mut()
-                && let Some(sel) = ask.selections.get_mut(qi)
-            {
-                for s in sel.iter_mut() {
-                    *s = false;
-                }
-            }
-            if let Some(slot) = chat.ask_custom_text.get_mut(qi) {
-                slot.clear();
-            }
-            if let Some(slot) = chat.ask_skipped.get_mut(qi) {
-                *slot = true;
-            }
+        let walk = self.chat.update(cx, |chat, cc| {
+            let v = chat.skip_ask_question_state(qi);
             cc.notify();
+            v
         });
         if let Some(state) = self
             .chat
@@ -727,26 +589,16 @@ impl Workspace {
         {
             state.update(cx, |st, cx| st.set_value("", window, cx));
         }
-        let has_next = self
-            .chat
-            .read(cx)
-            .pending_ask
-            .as_ref()
-            .is_some_and(|ask| qi + 1 < ask.questions.len());
-        if has_next {
-            self.chat.update(cx, |chat, cx| {
-                chat.ask_step = qi + 1;
+        // `walk` is Some(target) to advance to, None to settle the card.
+        match walk {
+            Some(target) => {
+                self.chat.update(cx, |chat, cc| {
+                    chat.ask_step = target;
+                    cc.notify();
+                });
                 cx.notify();
-            });
-            cx.notify();
-        } else if let Some(missing) = self.first_incomplete_ask_question(cx) {
-            self.chat.update(cx, |chat, cx| {
-                chat.ask_step = missing;
-                cx.notify();
-            });
-            cx.notify();
-        } else {
-            self.resolve_ask(cx);
+            }
+            None => self.resolve_ask(cx),
         }
     }
 

@@ -45,34 +45,12 @@ impl Workspace {
     /// accept-time persistence (K5) and the server's queue/drain merge; the
     /// parked thread has no optimistic bubble, so no echo is pushed — the
     /// origin_rpc still rides the Submit for the entry correlation.
-    /// `SteerPending`/`Failed` cards stay parked for the user.
     pub(super) fn flush_parked_follow_ups(&mut self, thread_id: &str, cx: &mut Context<Self>) {
-        let Some(mut queue) = self.chat.update(cx, |chat, cc| {
-            let v = chat.queued_follow_ups_by_thread.remove(thread_id);
+        let drained = self.chat.update(cx, |chat, cc| {
+            let v = chat.drain_parked_queue(thread_id);
             cc.notify();
             v
-        }) else {
-            return;
-        };
-        let mut drained: Vec<DeferredUserTurn> = Vec::new();
-        // Rotate exactly the seeded length once: draining cards leave, parked
-        // cards (Failed / SteerPending) ride around back to their order.
-        for _ in 0..queue.len() {
-            if let Some(item) = queue.pop_front() {
-                if matches!(&item.state, FollowUpState::Queued) {
-                    drained.push(item.turn);
-                } else {
-                    queue.push_back(item);
-                }
-            }
-        }
-        if !queue.is_empty() {
-            self.chat.update(cx, |chat, cc| {
-                chat.queued_follow_ups_by_thread
-                    .insert(thread_id.to_string(), queue);
-                cc.notify();
-            });
-        }
+        });
         if drained.is_empty() {
             return;
         }
@@ -733,7 +711,6 @@ impl Workspace {
     /// Settle a parked thread's steer group by the same per-id rule: the
     /// retracted tail turns `Failed`, every other card drops (a parked thread
     /// has no live list; the injected ones surface through the transcript on
-    /// switch-back).
     pub(super) fn settle_parked_steer_group(
         &mut self,
         thread_id: &str,
@@ -741,30 +718,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.chat.update(cx, |chat, cc| {
-            let Some(queue) = chat.queued_follow_ups_by_thread.get_mut(thread_id) else {
-                return;
-            };
-            let positions: Vec<usize> = queue
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| matches!(item.state, FollowUpState::SteerPending { .. }))
-                .map(|(ix, _)| ix)
-                .collect();
-            let n = positions.len();
-            let to_fail = stranded.min(n);
-            for &ix in &positions[n - to_fail..] {
-                queue[ix].state = FollowUpState::Failed;
-            }
-            let mut drop_ixs: Vec<usize> = positions[..n - to_fail].to_vec();
-            drop_ixs.sort_unstable_by(|a, b| b.cmp(a));
-            for ix in drop_ixs {
-                queue.remove(ix);
-            }
-            if queue.is_empty() {
-                chat.queued_follow_ups_by_thread.remove(thread_id);
-            }
+            chat.settle_parked_group(thread_id, stranded);
             cc.notify();
-        })
+        });
     }
 
     /// Promote a parked follow-up to a steer. While running, hand it to the
@@ -831,66 +787,11 @@ impl Workspace {
         }
     }
 
-    /// Resolve a live queue-row drag to the index the dragged item lands at,
-    /// or `None` when the gesture must no-op: no marker, the row dropped on
-    /// itself, a committed (non-`Queued`) drag source, or a landing spot
-    /// outside the contiguous `Queued` tail — the
-    /// `[SteerPending|Failed …] ++ [Queued …]` group invariant survives even
-    /// if the pointer hovers the status rows mid-drag.
-    pub(super) fn queue_move_index(
-        queue: &std::collections::VecDeque<QueuedFollowUp>,
-        drag: composer_render::QueueRowDrag,
-    ) -> Option<usize> {
-        let from = drag.dragged;
-        if from == drag.line_on {
-            return None;
-        }
-        if !matches!(queue.get(from)?.state, FollowUpState::Queued) {
-            return None;
-        }
-        let target = match drag.edge {
-            composer_render::QueueDragEdge::Top => drag.line_on,
-            composer_render::QueueDragEdge::Bottom => drag.line_on + 1,
-        }
-        .min(queue.len());
-        let insert = if target > from { target - 1 } else { target };
-        // The `Queued` group is the queue's contiguous tail (invariant):
-        // anything below the first `Queued` row belongs to the committed
-        // group and is not a legal destination.
-        let head = queue
-            .iter()
-            .position(|item| matches!(item.state, FollowUpState::Queued))
-            .unwrap_or(queue.len());
-        if insert < head || insert > queue.len() - 1 {
-            return None;
-        }
-        (insert != from).then_some(insert)
-    }
-
     /// Commit a queue-row drag: reorder the parked `Queued` tail locally. This
     /// is session UI state only — the flush order the model eventually sees is
-    /// the queue's own order, so no server round-trip is involved.
     pub(super) fn commit_queue_drag(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.chat.update(cx, |chat, cc| {
-            let v = chat.queue_drag.take();
-            cc.notify();
-            v
-        }) else {
-            cx.notify();
-            return;
-        };
-        let mut queue = self.chat.update(cx, |chat, cc| {
-            let v = std::mem::take(&mut chat.queued_follow_ups);
-            cc.notify();
-            v
-        });
-        if let Some(insert) = Self::queue_move_index(&queue, drag)
-            && let Some(item) = queue.remove(drag.dragged)
-        {
-            queue.insert(insert, item);
-        }
         self.chat.update(cx, |chat, cc| {
-            chat.queued_follow_ups = queue;
+            chat.commit_queue_drag();
             cc.notify();
         });
         cx.notify();
@@ -1085,13 +986,9 @@ impl Workspace {
             self.chat.read(cx).recall_draft.as_deref(),
             &turns,
         );
-        self.chat.update(cx, |chat, cx| {
-            chat.recall_index = index;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.recall_draft = draft;
-            cx.notify();
+        self.chat.update(cx, |chat, cc| {
+            chat.set_recall(index, draft);
+            cc.notify();
         });
         match step {
             RecallStep::None => {}
@@ -1125,13 +1022,9 @@ impl Workspace {
 
     /// End a running recall walk and drop its working line.
     pub(super) fn end_recall_walk(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cx| {
-            chat.recall_index = -1;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.recall_draft = None;
-            cx.notify();
+        self.chat.update(cx, |chat, cc| {
+            chat.end_recall_walk();
+            cc.notify();
         });
     }
 
