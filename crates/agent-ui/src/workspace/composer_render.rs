@@ -8,6 +8,7 @@
 //! parent's render face and the `tests` child.
 
 use super::*;
+pub use manox_agent_chat_ui::column::{QueueDragEdge, QueueRowDrag};
 
 /// Drag payload for a queued follow-up row. The index is all the gesture
 /// needs: rows are transient session state, so the live queue position is
@@ -23,22 +24,6 @@ impl Render for DraggedQueueRow {
         // No visible ghost: the row itself is the thing being moved.
         gpui::div()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum QueueDragEdge {
-    Top,
-    Bottom,
-}
-
-/// In-flight queue-row drag: the row being dragged, the row whose edge
-/// carries the insertion line, and which edge that is (the sidebar's
-/// `RowDrag` shape, index-keyed).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct QueueRowDrag {
-    pub(super) dragged: usize,
-    pub(super) line_on: usize,
-    pub(super) edge: QueueDragEdge,
 }
 
 /// Resolve the pointer's boundary on one row: the insertion line hugs the

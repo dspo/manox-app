@@ -9,7 +9,7 @@
 //! turns each into message content: images become base64 [`MessageContent::Image`] blocks, text
 //! files are inlined into the message text wrapped in `<file>` tags.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::i18n;
 use base64::Engine as _;
@@ -20,6 +20,7 @@ use gpui_component::{
     v_flex,
 };
 use manox_agent::language_model::MessageContent;
+pub use manox_agent_chat_ui::column::PendingAttachment;
 
 /// Static row for the `+` menu: an icon, a name, and a description.
 /// `name`/`desc` are fluent message ids for localized rows, or literal English
@@ -200,54 +201,6 @@ pub fn build_plus_menu(
         menu = menu.item(menu_row_item(row, theme));
     }
     menu
-}
-
-/// An attachment staged in the composer but not yet submitted. Either a file
-/// picked from the `+` menu or an image pasted straight from the clipboard
-/// (resized off-thread on submit). Browser tool-suite chips are tracked
-/// separately by the workspace (they persist across submits).
-#[derive(Debug, Clone)]
-pub enum PendingAttachment {
-    File { path: PathBuf, is_image: bool },
-    ClipboardImage(gpui::Image),
-}
-
-impl PendingAttachment {
-    pub fn new(path: PathBuf) -> Self {
-        Self::File {
-            is_image: is_image_path(&path),
-            path,
-        }
-    }
-
-    pub fn is_image(&self) -> bool {
-        matches!(
-            self,
-            Self::ClipboardImage(_) | Self::File { is_image: true, .. }
-        )
-    }
-
-    pub fn file_name(&self) -> String {
-        match self {
-            Self::File { path, .. } => path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("file")
-                .to_string(),
-            // No filename on the clipboard; surface a localized label instead.
-            Self::ClipboardImage(_) => i18n::t("composer-pasted-image").to_string(),
-        }
-    }
-}
-
-fn is_image_path(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
-    )
 }
 
 fn mime_for(path: &Path) -> &'static str {
