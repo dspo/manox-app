@@ -73,13 +73,13 @@ mod tests {
             // U6b⑤: the park-seed store writes retired (mark_running/
             // mark_background_work — the U3b server pump is the single
             // flag writer; its deltas already fed every mirror).
-            ("chrome_assembly.rs", "store mirror writes (U3)", STORE_WRITE, 0),
             (
                 "chrome_assembly.rs",
-                "store reads (U2)",
-                STORE_GLOBAL,
-                2,
+                "store mirror writes (U3)",
+                STORE_WRITE,
+                0,
             ),
+            ("chrome_assembly.rs", "store reads (U2)", STORE_GLOBAL, 2),
             ("chrome_assembly.rs", "wire sends", SENDS, 0),
             ("workspace.rs", "store mirror writes (U3)", STORE_WRITE, 3),
             (

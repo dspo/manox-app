@@ -92,7 +92,7 @@ impl Workspace {
     /// when the server's `{session_id}` receipt lands, binds a detached
     /// rendering mirror to that server-minted id and opens the follow stream.
     /// Creation happens exactly once — on the server.
-    pub(super) fn start_new_thread(
+    pub fn start_new_thread(
         &mut self,
         project: Option<PathBuf>,
         window: &mut Window,
@@ -850,7 +850,7 @@ impl Workspace {
         self.start_new_thread(project, window, cx);
     }
 
-    pub(super) fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         // If the thread is already running in the background, reclaim it
         // instead of loading a stale snapshot from the db.
         // U6b⑤: the reclaim re-attaches a fresh landing mirror for the

@@ -378,6 +378,12 @@ pub use manox_agent_chat_ui::column::{
 
 pub struct Workspace {
     pub(crate) cwd: PathBuf,
+    /// Dual-shell embed (PLAN Phase 4 tranche 3): true when this workspace
+    /// is mounted as the chrome shell's main surface — render then produces
+    /// ONLY the conversation column (the chrome shell owns gutter, sidebar,
+    /// card chrome, and right pane). Fixed at construction; the legacy
+    /// full-shell path is the default.
+    pub(crate) embedded: bool,
     /// The chat column's state (thread face, conversation, composer, ask
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
@@ -727,6 +733,15 @@ impl Workspace {
         self.chat.read(cx).context_rail.clone()
     }
 
+    /// The chrome-embed constructor: identical state machine and
+    /// subscriptions, flagged to render column-only inside the chrome
+    /// shell's main surface. [`Self::new`] stays the legacy full shell.
+    pub fn new_embedded(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut ws = Self::new(window, cx);
+        ws.embedded = true;
+        ws
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         // An unbound conversation must not inherit the launch terminal's
@@ -810,6 +825,7 @@ impl Workspace {
         context_rail.update(cx, |r, _| r.set_host(chat_host.clone()));
 
         let mut ws = Self {
+            embedded: false,
             cwd,
             multiplexer,
             client,
