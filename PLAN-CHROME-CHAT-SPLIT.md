@@ -19,7 +19,10 @@
 > （RightPaneSession stash/restore——打开集/内容仓/激活页签/可见性整体迁移，on_active
 > 生命周期驱动：浏览器子视图隐藏、终端保活，仅显式关页签才拆；装配切线程泵 stash 旧
 > 恢复新，无 stash 落新标签页空态；内容渲染归页签实例、壳只管 chrome 与生命周期——
-> 即用户裁定的右栏分工）。
+> 即用户裁定的右栏分工；**批 4 = PR #70**：右栏注册表补全——AgentTool（claude/codex/copilot 全 cx 启动：mux wire
+> 模型行解析 provider/model + AgentBuilder PTY relay + CxSessionSource TUI，cwd=前台线程）+
+> EditorTool（markdown 写作面）；工厂 mux 携带、开时实时解析；新 kind 免费继承 #69 的
+> per-thread 会话集。浏览器页签为唯一未迁项（宿主绑 Workspace）。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
