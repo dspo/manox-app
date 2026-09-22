@@ -22,7 +22,12 @@
 > 即用户裁定的右栏分工；**批 4 = PR #70**：右栏注册表补全——AgentTool（claude/codex/copilot 全 cx 启动：mux wire
 > 模型行解析 provider/model + AgentBuilder PTY relay + CxSessionSource TUI，cwd=前台线程）+
 > EditorTool（markdown 写作面）；工厂 mux 携带、开时实时解析；新 kind 免费继承 #69 的
-> per-thread 会话集。浏览器页签为唯一未迁项（宿主绑 Workspace）。
+> per-thread 会话集。浏览器页签为唯一未迁项（宿主绑 Workspace；**修复批 3 = PR #71**：①页签品牌图标（gpui-component Icon 自定义 path——旧壳侧栏同款，
+> 裸 gpui::svg 样式错）；②agent 模型菜单回归——页签体=模型选择器（共享级联投影
+> cascade_provider_groups：agents 可见性过滤/去重/显示名分组/wire 键；点选即以该端点启动，
+> picker 实体自渲染 TUI——页签生命周期单实体，错误留守选择器）；③cwd 继承——前台 cwd 改由
+> 活动线程 wire 行 project 列驱动（store.cwd 记录的是 workspace cwd=home，此前全部落在 ~）；
+> 终端/CLI/底部 dock 全部以线程项目目录为根。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
