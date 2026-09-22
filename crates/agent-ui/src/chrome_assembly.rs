@@ -25,7 +25,7 @@ use manox_agent_chrome_ui::{
 };
 
 use crate::Workspace;
-use crate::tool_tabs::{TerminalTool, ThreadTerminalPanelSurface};
+use crate::tool_tabs::{ThreadTerminalPanelSurface, registry};
 
 /// Build the whole chrome window root: multiplexer + shell + the projection
 /// pump. Called from the manox bin under `--features chrome-shell`.
@@ -34,7 +34,8 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     // its multiplexer feeds both the sidebar projection and the
     // conversation column mounted as the chrome shell's main surface.
     let ws = cx.new(|cx| Workspace::new_embedded(window, cx));
-    let shell = cx.new(|cx| Shell::new(shell_config(ws.clone(), cx), window, cx));
+    let mux = ws.read(cx).multiplexer.clone();
+    let shell = cx.new(|cx| Shell::new(shell_config(ws.clone(), &mux, cx), window, cx));
     let shell_weak = shell.downgrade();
     // Per-thread dock state: each visited thread keeps its live panel
     // terminal across switches (the legacy right-pane stash semantic — a
@@ -110,14 +111,19 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     shell
 }
 
-fn shell_config(ws: Entity<Workspace>, _cx: &mut Context<Shell>) -> ShellConfig {
+fn shell_config(
+    ws: Entity<Workspace>,
+    mux: &Entity<crate::multiplexer::SessionMultiplexer>,
+    _cx: &mut Context<Shell>,
+) -> ShellConfig {
     let placeholder: gpui::AnyView = ws.clone().into();
     ShellConfig {
+        tool_kinds: registry(mux),
         main: Arc::new(PendingMain {
             view: placeholder,
             ws: ws.clone(),
         }),
-        tool_kinds: vec![Arc::new(TerminalTool)],
+
         panel_surface: Some(Arc::new(ThreadTerminalPanelSurface)),
         fixed_rows: vec![
             FixedRow {
