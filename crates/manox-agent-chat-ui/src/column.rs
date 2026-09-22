@@ -484,3 +484,288 @@ pub struct ChatColumn {
     /// it renders against. Writes flow through `self.context_rail.update`.
     pub context_rail: Entity<crate::views::context_rail::ContextRail>,
 }
+
+// ── ask-family state operations (Phase 2 tail) ─────────────────────────────
+// The wire halves (replies, thread responds, subscriptions) stay on the
+// workspace; these are the pure state machines the card renders against.
+
+impl ChatColumn {
+    /// The snapshot for the pending ask card at its current step.
+    pub fn ask_card_snapshot(&self, id: &str) -> Option<crate::ask_card::AskCardSnapshot> {
+        let ask = self.pending_ask.as_ref()?;
+        if ask.id != id || ask.questions.is_empty() {
+            return None;
+        }
+        let step = self.ask_step.min(ask.questions.len() - 1);
+        let q = ask.questions.get(step)?;
+        let custom = self.ask_custom_text.get(step).cloned().unwrap_or_default();
+        Some(crate::ask_card::AskCardSnapshot {
+            id: ask.id.clone(),
+            step,
+            total: ask.questions.len(),
+            transition_gen: self.ask_transition_gen,
+            question: crate::ask_card::AskCardQuestion {
+                question: q.question.clone(),
+                header: q.header.clone(),
+                detail: q.detail.clone(),
+                intent: q.intent.as_ref().map(|i| crate::ask_card::AskCardIntent {
+                    kind: i.kind.clone(),
+                    approve: i.approve.clone(),
+                }),
+                multi_select: q.multi_select,
+                options: q
+                    .options
+                    .iter()
+                    .map(|o| crate::ask_card::AskCardOption {
+                        label: o.label.clone(),
+                        description: o.description.clone(),
+                        recommended: o.recommended,
+                    })
+                    .collect(),
+            },
+            selections: ask.selections.get(step).cloned().unwrap_or_default(),
+            custom,
+        })
+    }
+
+    /// Whether the pending card carries any user intent (a toggled option or
+    /// non-blank custom text) — the submit gate.
+    pub fn pending_ask_has_selection(&self) -> bool {
+        self.pending_ask.as_ref().is_some_and(|ask| {
+            ask.selections.iter().flatten().any(|s| *s)
+                || self.ask_custom_text.iter().any(|c| !c.trim().is_empty())
+        })
+    }
+
+    /// The first question that is neither answered nor explicitly skipped —
+    /// the completeness gate's jump target. An untouched question must never
+    /// silently fold to a skip at the settle boundary.
+    pub fn first_incomplete_ask_question(&self) -> Option<usize> {
+        let ask = self.pending_ask.as_ref()?;
+        (0..ask.questions.len()).find(|&qi| {
+            let answered = ask
+                .selections
+                .get(qi)
+                .is_some_and(|sel| sel.iter().any(|s| *s))
+                || self
+                    .ask_custom_text
+                    .get(qi)
+                    .is_some_and(|c| !c.trim().is_empty());
+            let skipped = self.ask_skipped.get(qi).copied().unwrap_or(false);
+            !answered && !skipped
+        })
+    }
+
+    /// Toggle an option in the pending card. Single-select questions reset
+    /// siblings; multi-select toggles in place.
+    pub fn toggle_ask_option(&mut self, qi: usize, oi: usize) {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            let multi = ask
+                .questions
+                .get(qi)
+                .map(|q| q.multi_select)
+                .unwrap_or(false);
+            let prev = sel.get(oi).copied().unwrap_or(false);
+            if multi {
+                if let Some(slot) = sel.get_mut(oi) {
+                    *slot = !*slot;
+                }
+            } else {
+                for s in sel.iter_mut() {
+                    *s = false;
+                }
+                if let Some(slot) = sel.get_mut(oi) {
+                    *slot = !prev;
+                }
+            }
+        }
+    }
+
+    /// One-click verdict: fold option `oi` of question `qi` in as that
+    /// question's single selection (plan-review cards are single-select by
+    /// construction). The caller settles the card afterwards.
+    pub fn decide_ask_option(&mut self, qi: usize, oi: usize) {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            for s in sel.iter_mut() {
+                *s = false;
+            }
+            if let Some(slot) = sel.get_mut(oi) {
+                *slot = true;
+            }
+        }
+    }
+
+    pub fn ask_prev(&mut self) {
+        if self.ask_step > 0 {
+            self.ask_step -= 1;
+        }
+    }
+
+    pub fn ask_next(&mut self) {
+        if let Some(ask) = self.pending_ask.as_ref()
+            && self.ask_step < ask.questions.len() - 1
+        {
+            self.ask_step += 1;
+        }
+    }
+
+    /// Drop the custom-answer state — call whenever the pending ask is
+    /// seeded, resolved, dismissed, or reconciled away so a stale custom
+    /// never leaks into the next card. The explicit-skip markers ride the
+    /// same lifecycle.
+    pub fn reset_ask_custom(&mut self) {
+        self.ask_custom_inputs.clear();
+        self.ask_custom_subs.clear();
+        self.ask_custom_text.clear();
+        self.ask_skipped.clear();
+    }
+
+    /// Skip question `qi` (clear its selection + custom, mark it explicitly
+    /// skipped) and report the walk target: `Some(step)` to advance to,
+    /// `None` when the card should settle now.
+    pub fn skip_ask_question_state(&mut self, qi: usize) -> Option<usize> {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            for s in sel.iter_mut() {
+                *s = false;
+            }
+        }
+        if let Some(slot) = self.ask_custom_text.get_mut(qi) {
+            slot.clear();
+        }
+        if let Some(slot) = self.ask_skipped.get_mut(qi) {
+            *slot = true;
+        }
+        let has_next = self
+            .pending_ask
+            .as_ref()
+            .is_some_and(|ask| qi + 1 < ask.questions.len());
+        if has_next {
+            Some(qi + 1)
+        } else {
+            self.first_incomplete_ask_question()
+        }
+    }
+
+    /// Take the pending ask (the settle path) and reset the walk counters in
+    /// the same move.
+    pub fn take_pending_ask(&mut self) -> Option<PendingAsk> {
+        let v = self.pending_ask.take();
+        self.ask_step = 0;
+        self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        v
+    }
+}
+
+// ── follow-up queue state operations (Phase 2 tail) ────────────────────────
+
+impl ChatColumn {
+    /// The insertion index for a queue-row drag (the sidebar's drag rule,
+    /// index-keyed): `None` when the move is a no-op or the source row is
+    /// not a queued card.
+    pub fn queue_move_index(&self, drag: QueueRowDrag) -> Option<usize> {
+        Self::queue_move_index_in(&self.queued_follow_ups, drag)
+    }
+
+    /// The pure drag rule over any queue (the unit-tested form).
+    pub fn queue_move_index_in(
+        queue: &std::collections::VecDeque<QueuedFollowUp>,
+        drag: QueueRowDrag,
+    ) -> Option<usize> {
+        let from = drag.dragged;
+        if from == drag.line_on {
+            return None;
+        }
+        if !matches!(queue.get(from)?.state, FollowUpState::Queued) {
+            return None;
+        }
+        let target = match drag.edge {
+            QueueDragEdge::Top => drag.line_on,
+            QueueDragEdge::Bottom => drag.line_on + 1,
+        }
+        .min(queue.len());
+        let insert = if target > from { target - 1 } else { target };
+        // The `Queued` group is the queue's contiguous tail (invariant):
+        // anything below the first `Queued` row belongs to the committed
+        // group and is not a legal destination.
+        let head = queue
+            .iter()
+            .position(|item| matches!(item.state, FollowUpState::Queued))
+            .unwrap_or(queue.len());
+        if insert < head || insert > queue.len() - 1 {
+            return None;
+        }
+        (insert != from).then_some(insert)
+    }
+
+    /// Commit a queue-row drag: consume the marker and move the dragged row
+    /// to its insertion index.
+    pub fn commit_queue_drag(&mut self) {
+        let Some(drag) = self.queue_drag.take() else {
+            return;
+        };
+        if let Some(insert) = self.queue_move_index(drag)
+            && let Some(item) = self.queued_follow_ups.remove(drag.dragged)
+        {
+            self.queued_follow_ups.insert(insert, item);
+        }
+    }
+
+    /// Drain a parked thread's queue for flushing: every `Queued` card's
+    /// turn is returned, every parked card (Failed / SteerPending) rides
+    /// back into the stash. A fixed-length rotation — a pop/push loop would
+    /// cycle forever on an all-parked queue.
+    pub fn drain_parked_queue(&mut self, thread_id: &str) -> Vec<DeferredUserTurn> {
+        let Some(mut queue) = self.queued_follow_ups_by_thread.remove(thread_id) else {
+            return Vec::new();
+        };
+        let mut drained = Vec::new();
+        for _ in 0..queue.len() {
+            if let Some(item) = queue.pop_front() {
+                if matches!(item.state, FollowUpState::Queued) {
+                    drained.push(item.turn);
+                } else {
+                    queue.push_back(item);
+                }
+            }
+        }
+        if !queue.is_empty() {
+            self.queued_follow_ups_by_thread
+                .insert(thread_id.to_string(), queue);
+        }
+        drained
+    }
+
+    /// Settle a parked steer group with the server's stranded verdict: the
+    /// first `n - stranded` SteerPending cards were injected (promoted into
+    /// the visible queue), the last `stranded` retract to Failed.
+    pub fn settle_parked_group(&mut self, thread_id: &str, stranded: usize) {
+        let Some(queue) = self.queued_follow_ups_by_thread.get_mut(thread_id) else {
+            return;
+        };
+        let positions: Vec<usize> = queue
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| matches!(item.state, FollowUpState::SteerPending { .. }))
+            .map(|(ix, _)| ix)
+            .collect();
+        let n = positions.len();
+        let to_fail = stranded.min(n);
+        for &ix in &positions[n - to_fail..] {
+            queue[ix].state = FollowUpState::Failed;
+        }
+        let mut drop_ixs: Vec<usize> = positions[..n - to_fail].to_vec();
+        drop_ixs.sort_unstable_by(|a, b| b.cmp(a));
+        for ix in drop_ixs {
+            queue.remove(ix);
+        }
+        if queue.is_empty() {
+            self.queued_follow_ups_by_thread.remove(thread_id);
+        }
+    }
+}

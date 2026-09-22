@@ -1027,7 +1027,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
 
     // Forward move: row 1 dropped below row 3 → lands at the tail.
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 1,
@@ -1039,7 +1039,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     );
     // Backward move: row 3 dropped above row 1 → lands at 1.
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 3,
@@ -1051,7 +1051,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     );
     // Self drops no-op (own row, and the adjacent slot that re-inserts in place).
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 2,
@@ -1062,7 +1062,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
         None
     );
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 2,
@@ -1074,7 +1074,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     );
     // Landing inside the committed head is rejected.
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 3,
@@ -1086,7 +1086,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     );
     // A committed source never moves: SteerPending and Failed alike.
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 0,
@@ -1100,7 +1100,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
         .into_iter()
         .collect();
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &with_failed,
             D {
                 dragged: 0,
@@ -1114,7 +1114,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     let all_queued: std::collections::VecDeque<_> =
         [q(S::Queued), q(S::Queued)].into_iter().collect();
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &all_queued,
             D {
                 dragged: 0,

@@ -91,9 +91,7 @@ use terminal_ui::terminal_proxy::TerminalProxy;
 mod attach;
 mod chat_column;
 use chat_column::ChatColumn;
-use manox_agent_chat_ui::ask_card::{
-    AskCardIntent, AskCardOption, AskCardQuestion, AskCardSnapshot,
-};
+use manox_agent_chat_ui::ask_card::AskCardSnapshot;
 mod chips;
 mod composer_render;
 mod render;
