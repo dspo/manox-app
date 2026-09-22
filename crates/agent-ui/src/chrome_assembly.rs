@@ -17,67 +17,51 @@
 
 use std::sync::Arc;
 
-use gpui::{
-    App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window,
-};
+use gpui::{App, AppContext as _, Context, Entity, Window};
 use gpui_component::Root;
-use manox_agent_chrome_ui::theme;
 use manox_agent_chrome_ui::{
     CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, icons,
 };
-use manox_session_core::agent_client::AgentClient;
 
-use crate::multiplexer::SessionMultiplexer;
-use crate::sidebar_projection::{self, UnreadMirrors};
+use crate::Workspace;
 use crate::tool_tabs::{TerminalPanelSurface, TerminalTool};
 
 /// Build the whole chrome window root: multiplexer + shell + the projection
 /// pump. Called from the manox bin under `--features chrome-shell`.
 pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
-    // The same embedding path Workspace::new uses: one process-global
-    // AgentServer, one "desktop" client, one multiplexer over it.
-    let cwd = manox_agent::paths::home_dir().unwrap_or_else(|| ".".into());
-    let agent_server = manox_session_core::agent_server::global(cwd.clone());
-    let client = Arc::new(AgentClient::connect(
-        &agent_server,
-        "desktop",
-        vec![
-            manox_protocol::AnswerKind::Approve,
-            manox_protocol::AnswerKind::AskUserQuestion,
-        ],
-        vec![],
-    ));
-    let mux = cx.new(|cx| SessionMultiplexer::with_client(client.clone(), cx));
-
-    let shell = cx.new(|cx| Shell::new(shell_config(mux.clone(), cx), window, cx));
-
-    // The list pump: every multiplexer notify (wire list / leaf mirrors
-    // changed) re-projects the rows into the shell's sidebar.
-    let pump_shell = shell.clone();
-    let pump_mux = mux.clone();
-    cx.observe(&mux, move |_, cx| {
-        let rows = pump_mux.read(cx).thread_list().to_vec();
-        let unread: UnreadMirrors = pump_mux.read(cx).unread_map(cx);
+    // ONE workspace (embedded render mode) carries the whole data face —
+    // its multiplexer feeds both the sidebar projection and the
+    // conversation column mounted as the chrome shell's main surface.
+    let ws = cx.new(|cx| Workspace::new_embedded(window, cx));
+    let shell = cx.new(|cx| Shell::new(shell_config(ws.clone(), cx), window, cx));
+    let shell_weak = shell.downgrade();
+    cx.observe(&ws, move |ws, cx| {
+        let Some(shell) = shell_weak.upgrade() else {
+            return;
+        };
+        let rows = ws.read(cx).multiplexer.read(cx).thread_list().to_vec();
+        let unread = ws.read(cx).multiplexer.read(cx).unread_map(cx);
         let sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
-            sidebar_projection::project_groups(&rows, &unread)
+            crate::sidebar_projection::project_groups(&rows, &unread)
                 .into_iter()
                 .flat_map(manox_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
-        pump_shell.update(cx, |shell, cx| {
+        shell.update(cx, |shell, cx| {
             shell.set_sessions(sessions);
             cx.notify();
         });
     })
     .detach();
-
     shell
 }
 
-fn shell_config(mux: Entity<SessionMultiplexer>, cx: &mut Context<Shell>) -> ShellConfig {
-    let _ = mux;
-    let placeholder: gpui::AnyView = cx.new(|_| ChatPending).into();
+fn shell_config(ws: Entity<Workspace>, _cx: &mut Context<Shell>) -> ShellConfig {
+    let placeholder: gpui::AnyView = ws.clone().into();
     ShellConfig {
-        main: Arc::new(PendingMain { view: placeholder }),
+        main: Arc::new(PendingMain {
+            view: placeholder,
+            ws: ws.clone(),
+        }),
         tool_kinds: vec![Arc::new(TerminalTool)],
         panel_surface: Some(Arc::new(TerminalPanelSurface)),
         fixed_rows: vec![
@@ -123,24 +107,9 @@ fn shell_config(mux: Entity<SessionMultiplexer>, cx: &mut Context<Shell>) -> She
     }
 }
 
-/// The chat column's seat until its view tranche lands.
-struct ChatPending;
-
-impl Render for ChatPending {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        gpui::div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(theme::FG_FAINT)
-            .text_size(gpui::px(13.))
-            .child(manox_i18n::t("chrome-main-pending"))
-    }
-}
-
 struct PendingMain {
     view: gpui::AnyView,
+    ws: Entity<Workspace>,
 }
 
 impl MainSurface for PendingMain {
@@ -148,8 +117,20 @@ impl MainSurface for PendingMain {
         self.view.clone()
     }
 
-    fn title(&self, _cx: &App) -> gpui::SharedString {
-        "Manox".into()
+    fn title(&self, cx: &App) -> gpui::SharedString {
+        // The active thread's display title from the foreground store (the
+        // same face the legacy title bar reads); "manox" before any
+        // interaction.
+        self.ws
+            .read(cx)
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|s| s.read(cx).store.with(|st| st.display_title.clone()))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Manox".to_string())
+            .into()
     }
 }
 

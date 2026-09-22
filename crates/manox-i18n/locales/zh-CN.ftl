@@ -1135,3 +1135,5 @@ chrome-spawn-failed = 无法启动 { $prog }：{ $err }
 ## manox-agent-chrome-ui assembly（chrome-shell 构建的占位主面）
 
 chrome-main-pending = 聊天主栏装配中（下一批接入）
+
+workspace-hero-heading = 开始你的对话
