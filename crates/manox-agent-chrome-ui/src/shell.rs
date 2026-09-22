@@ -460,6 +460,29 @@ impl Shell {
         self.sidebar_width = px(width.clamp(divider::SIDEBAR_MIN, divider::SIDEBAR_MAX));
     }
 
+    /// Detach the live panel view WITHOUT teardown — the host takes
+    /// ownership (per-thread dock stashing: the view keeps running and is
+    /// re-installed on switch-back). `None` when the slot is empty/errored.
+    pub fn take_panel_view(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyView> {
+        let slot = self.panel.as_mut()?;
+        let view = slot.view.take();
+        if view.is_some() {
+            cx.notify();
+        }
+        view
+    }
+
+    /// Install a view into the panel slot (the per-thread restore half of
+    /// [`Self::take_panel_view`]); clears any error state. Does not change
+    /// visibility — a collapsed dock stays collapsed.
+    pub fn set_panel_view(&mut self, view: gpui::AnyView, cx: &mut Context<Self>) {
+        if let Some(slot) = self.panel.as_mut() {
+            slot.error = None;
+            slot.view = Some(view);
+            cx.notify();
+        }
+    }
+
     /// Open (or focus) a right-pane tool kind.
     pub fn open_right(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.right

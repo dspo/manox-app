@@ -106,10 +106,12 @@ fn spawn_standalone_terminal(
     Ok(terminal_ui::TerminalView::new(proxy, cx))
 }
 
-/// The bottom dock's terminal surface for the chrome assembly.
-pub struct TerminalPanelSurface;
+/// The bottom dock's terminal surface for the chrome assembly: each spawn
+/// roots at the FOREGROUND thread's cwd (the store's working directory),
+/// so the dock follows the conversation.
+pub struct ThreadTerminalPanelSurface;
 
-impl manox_agent_chrome_ui::PanelSurface for TerminalPanelSurface {
+impl manox_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
     fn title(&self) -> SharedString {
         manox_i18n::t("chrome-tab-terminal").into()
     }
@@ -119,7 +121,12 @@ impl manox_agent_chrome_ui::PanelSurface for TerminalPanelSurface {
     }
 
     fn open(&self, _window: &mut Window, cx: &mut App) -> Result<gpui::AnyView, String> {
-        let view = spawn_standalone_terminal(&std::env::temp_dir(), cx)?;
+        let cwd = crate::chrome_assembly::foreground_cwd().unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| ".".into())
+        });
+        let view = spawn_standalone_terminal(&cwd, cx)?;
         Ok(gpui::AnyView::from(view))
     }
 }
