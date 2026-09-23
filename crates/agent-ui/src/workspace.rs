@@ -1533,6 +1533,22 @@ impl Workspace {
         }
     }
 
+    /// The attempt numbers of the retry notices the transcript shows, in order.
+    /// Diagnostic-only: this is how the attach catch-up's turn gate on the
+    /// replayed `Retry` row is observed.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_retry_attempts(&self, cx: &App) -> Vec<u32> {
+        self.conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter_map(|item| match item.read(cx).kind() {
+                ConvItem::Retry { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The pending question card's id, if one is surfaced. Diagnostic-only.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_pending_ask_id(&self) -> Option<String> {

@@ -2851,6 +2851,150 @@ fn attach_replays_live_only_window_state(cx: &mut gpui::TestAppContext) {
     let _ = std::fs::remove_file(&f.db_path);
 }
 
+/// Hand the parked thread a journal window built from `records` (dense seq in
+/// the given order), the way the follow stream's snapshot would.
+#[cfg(feature = "test-support")]
+fn deliver_parked_records(
+    f: &mut ParkedFix,
+    records: Vec<manox_protocol::journal::JournalWireEvent>,
+) {
+    use manox_protocol::journal::{JournalWireEntry, ThreadHeader};
+    let a_id = f.a_id.clone();
+    let entries: Vec<JournalWireEntry> = records
+        .into_iter()
+        .enumerate()
+        .map(|(seq, event)| JournalWireEntry {
+            seq: seq as u64,
+            id: format!("e{seq}"),
+            parent_id: None,
+            timestamp: "2026-09-05T00:00:00Z".into(),
+            event,
+        })
+        .collect();
+    let snapshot = manox_protocol::StreamFrame::Snapshot(manox_protocol::stream::SessionSnapshot {
+        session_id: a_id.clone(),
+        header: ThreadHeader {
+            id: a_id,
+            cwd: "/w".into(),
+            parent_session: None,
+            metadata: None,
+            created_at: "2026-09-05T00:00:00Z".into(),
+        },
+        // The opening page must END at its cursor (the fold's page contract).
+        cursor: entries.last().map_or(0, |entry| entry.seq),
+        records: entries,
+        has_more: false,
+        projections: Default::default(),
+        projections_as_of_seq: 0,
+    });
+    f.deliver_parked(manox_protocol::FromServer::StreamItem {
+        stream_id: manox_protocol::StreamId::new("s-parked"),
+        frame: snapshot,
+    });
+}
+
+#[cfg(feature = "test-support")]
+fn parked_retry_row(attempt: u32) -> manox_protocol::journal::JournalWireEvent {
+    manox_protocol::journal::JournalWireEvent::Retry {
+        attempt,
+        max_attempts: 3,
+        delay_secs: 1,
+        reason: "503".into(),
+    }
+}
+
+/// A retry the window has moved past must not re-surface. Turn 1 ran, retried
+/// and settled; turn 2 is the live one and has not retried. The live `Retry`
+/// arm pushes a fresh tail item whenever the content does not already end on
+/// one, so replaying turn 1's notice would show a badge its settle had already
+/// retired — the badge is live state only while nothing follows it.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn attach_skips_a_retry_the_turn_boundary_retired(cx: &mut gpui::TestAppContext) {
+    use manox_protocol::journal::JournalWireEvent;
+    let mut f = parked_fix(cx);
+    deliver_parked_records(
+        &mut f,
+        vec![
+            JournalWireEvent::TurnStart,
+            parked_retry_row(1),
+            JournalWireEvent::TurnFinish {
+                cancelled: false,
+                failed: false,
+                stranded_steer_ids: Vec::new(),
+            },
+            JournalWireEvent::TurnStart,
+        ],
+    );
+    assert!(
+        f.parked_leaf().read_with(&f.visual, |h, _| h.store.running),
+        "the parked thread is mid-turn, so the replay gate itself is open"
+    );
+    let a_id = f.a_id.clone();
+    f.switch_to(&a_id);
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, cx| this.diagnostic_retry_attempts(cx)),
+        Vec::<u32>::new(),
+        "a retired turn's retry notice must not re-surface under the live turn"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// The other half of "moved past": content supersedes the notice in place, and
+/// only a retry that follows the content is still live state. This is the
+/// shape a real attempt loop leaves — retry, stream, retry again.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn attach_replays_only_the_retry_the_window_has_not_moved_past(cx: &mut gpui::TestAppContext) {
+    use manox_protocol::journal::JournalWireEvent;
+    let mut f = parked_fix(cx);
+    deliver_parked_records(
+        &mut f,
+        vec![
+            JournalWireEvent::TurnStart,
+            parked_retry_row(1),
+            JournalWireEvent::AgentTextDelta {
+                s: "recovered so far".into(),
+            },
+            parked_retry_row(2),
+        ],
+    );
+    let a_id = f.a_id.clone();
+    f.switch_to(&a_id);
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, cx| this.diagnostic_retry_attempts(cx)),
+        vec![2],
+        "the retry the streamed text superseded is not replayed"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// The live turn's own retry notice still comes back — and the last attempt is
+/// the one that describes it.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn attach_replays_the_live_turns_retry_notice(cx: &mut gpui::TestAppContext) {
+    use manox_protocol::journal::JournalWireEvent;
+    let mut f = parked_fix(cx);
+    deliver_parked_records(
+        &mut f,
+        vec![
+            JournalWireEvent::TurnStart,
+            parked_retry_row(1),
+            parked_retry_row(2),
+            parked_retry_row(3),
+        ],
+    );
+    let a_id = f.a_id.clone();
+    f.switch_to(&a_id);
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, cx| this.diagnostic_retry_attempts(cx)),
+        vec![3],
+        "the live turn's final retry attempt is replayed"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
 /// A turn that fails while its thread is parked must still persist its error
 /// card. The `Error` event never reaches the foreground handler, and the wire's
 /// own `Error` row has no display projection — without the annotation the
@@ -2905,7 +3049,7 @@ fn attach_rearms_the_goal_ticker_from_the_projection(cx: &mut gpui::TestAppConte
         "the attach re-arms the ticker generation"
     );
     assert!(
-        f.ws.read_with(&f.visual, |this, cx| this.goal_can_advance(cx)),
+        f.ws.read_with(&f.visual, |this, cx| this.goal_elapsed_is_live(cx)),
         "the incoming thread's active goal keeps the ticker alive"
     );
     let _ = std::fs::remove_file(&f.db_path);

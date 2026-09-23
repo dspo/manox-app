@@ -10,8 +10,14 @@
 //!
 //! The leaf's journal window still holds every one of them: the follow stream
 //! delivered the rows regardless of which thread the user was watching. This
-//! module replays the window's live-only tail onto the freshly attached thread
-//! so a switch back does not lose the part of the run the user did not watch.
+//! module replays the live-only rows that window holds onto the freshly
+//! attached thread, so a switch back does not lose the part of the run the user
+//! did not watch. The scan is whole-window, not a positional tail: the
+//! sub-agent observation state it restores was dropped wholesale by the switch
+//! (`clear_subagent_observation`), so a completed run's rows have to come back
+//! whole. Each shape is still bounded on its own terms — streamed output stops
+//! at the call's settle row, the retry notice as soon as the window moves past
+//! it.
 //!
 //! Split from `workspace.rs` — `super` is the workspace module, so the parent's
 //! imports and `Workspace`'s private fields resolve unchanged; the event
@@ -22,7 +28,7 @@ use manox_agent::thread::SubagentChildEvent;
 use manox_protocol::journal::JournalWireEvent;
 
 impl Workspace {
-    /// Replay the incoming thread's live-only window tail. Called from the
+    /// Replay the incoming thread's live-only window rows. Called from the
     /// attach path after the conversation rebuild and the settled sub-agent
     /// rows, so the replayed observation state lands on top of the restored
     /// baseline (a rail row upserts by address, a panel backfill is ordered by
@@ -30,10 +36,9 @@ impl Workspace {
     ///
     /// Only three shapes are replayed, each because nothing else can restore
     /// it: streamed tool output for a call that has not settled, sub-agent
-    /// child/progress rows, and the last retry notice while the turn is still
-    /// live. Replaying a settled call's chunks would duplicate the output the
-    /// display fold already carries, so the call's `ToolResult` row in the
-    /// window is the gate.
+    /// child/progress rows, and the trailing retry notice. Replaying a settled
+    /// call's chunks would duplicate the output the display fold already
+    /// carries, so the call's `ToolResult` row in the window is the gate.
     pub(super) fn catch_up_live_only_state(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.store.clone() else {
             return;
@@ -60,10 +65,21 @@ impl Workspace {
                     | JournalWireEvent::SubagentProgress { .. } => {
                         out.push(crate::journal_translate::thread_event_of(entry));
                     }
-                    // Only the window's final retry can still describe the
-                    // live turn; a superseded one would re-surface a notice the
-                    // live path had already popped.
+                    // A trailing retry badge is live state only while the
+                    // window has not moved past it: the live fold pops it on
+                    // the first real content or terminal error
+                    // (`ConversationState::apply`'s popper set), and a turn
+                    // boundary retires it with the turn that scheduled it.
+                    // Replaying past either would re-surface a badge the live
+                    // path had already popped.
                     JournalWireEvent::Retry { .. } => last_retry = Some(entry),
+                    JournalWireEvent::AgentTextDelta { .. }
+                    | JournalWireEvent::AgentThinkingDelta { .. }
+                    | JournalWireEvent::ToolCall { .. }
+                    | JournalWireEvent::Error { .. }
+                    | JournalWireEvent::Compaction { .. }
+                    | JournalWireEvent::TurnStart
+                    | JournalWireEvent::TurnFinish { .. } => last_retry = None,
                     _ => {}
                 }
             }

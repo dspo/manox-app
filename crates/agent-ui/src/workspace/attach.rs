@@ -540,7 +540,8 @@ impl Workspace {
         // background.
         if reclaimed {
             self.multiplexer.update(cx, |m, _| m.reown(&new_id));
-        } // The thinking ticker belongs to the outgoing thread: bump its
+        }
+        // The thinking ticker belongs to the outgoing thread: bump its
         // generation so the old ticker self-terminates, then mirror the incoming
         // thread's running state. A parked thread resumed mid-turn keeps the
         // "for Xs" counter live; a completed history thread is idle.
@@ -552,8 +553,8 @@ impl Workspace {
         // ticker it has no `running` mirror to read: re-arm it from the
         // incoming thread's goal projection, because a parked thread's
         // `GoalChanged` never reached the foreground handler.
-        let goal_active = self.goal_can_advance(cx);
-        self.rearm_goal_ticker(goal_active, cx);
+        let goal_elapsed_live = self.goal_elapsed_is_live(cx);
+        self.rearm_goal_ticker(goal_elapsed_live, cx);
         // Cockpit state is per-thread: the outgoing thread's plan,
         // running-tool title, and per-model counter state do not apply to the
         // incoming one. The execution plan, unlike the proposed-plan review,

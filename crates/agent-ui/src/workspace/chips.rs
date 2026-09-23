@@ -1049,11 +1049,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Whether the foreground thread's goal can still advance — the elapsed
-    /// ticker's condition. Reads the projection mirror rather than an event,
-    /// so an attach can re-arm the ticker for a thread whose `GoalChanged`
-    /// arrived while it was parked.
-    pub(super) fn goal_can_advance(&self, cx: &App) -> bool {
+    /// Whether the foreground thread's goal chip shows a live elapsed value —
+    /// the elapsed ticker's condition. The chip's elapsed is wall-clock
+    /// anchored while the goal is non-terminal and frozen at created→updated
+    /// once it settles (`Thread::goal_elapsed_seconds`), so only a
+    /// non-terminal goal needs the once-a-second repaint. Reads the projection
+    /// mirror rather than an event, so an attach can re-arm the ticker for a
+    /// thread whose `GoalChanged` arrived while it was parked.
+    pub(super) fn goal_elapsed_is_live(&self, cx: &App) -> bool {
         self.store
             .as_ref()
             .and_then(|s| s.read(cx).store.goal.clone())
@@ -1063,10 +1066,11 @@ impl Workspace {
 
     /// (Re)arm the goal elapsed ticker for the foreground thread: bump the
     /// generation so any prior ticker self-terminates, then start a fresh one
-    /// only while the goal can advance. The live `GoalChanged` arm passes the
-    /// event's own verdict; an attach passes [`Self::goal_can_advance`],
-    /// because the goal chip is projection-backed and the event that would
-    /// have armed it was dropped while the thread was parked.
+    /// only while the elapsed value is live. The live `GoalChanged` arm passes
+    /// the event's own verdict; an attach passes
+    /// [`Self::goal_elapsed_is_live`], because the goal chip is
+    /// projection-backed and the event that would have armed it was dropped
+    /// while the thread was parked.
     pub(super) fn rearm_goal_ticker(&mut self, active: bool, cx: &mut Context<Self>) {
         self.goal_ticker_gen = self.goal_ticker_gen.wrapping_add(1);
         if !active {
@@ -1080,7 +1084,7 @@ impl Workspace {
                     .timer(std::time::Duration::from_secs(1))
                     .await;
                 let still = entity.read_with(cx, |this, cx| {
-                    this.goal_ticker_gen == ticker_gen && this.goal_can_advance(cx)
+                    this.goal_ticker_gen == ticker_gen && this.goal_elapsed_is_live(cx)
                 });
                 if !still {
                     break;
