@@ -521,7 +521,7 @@ Slim left-aligned divider rendered above an assistant turn whose request lost th
 
 #### RetryBadge
 
-Amber badge, `bg:warning/0.12`, braille spinner + "Retry N/M (in Xs)" text. The retry detail body, when present, is a persistent selectable `Entity<Markdown>`, re-synced when a coalesced retry rewrites the item's detail in place. The final live retry row is replayed when a thread is attached while its turn is still running (a parked thread's `Retry` never reached the foreground handler).
+Amber badge, `bg:warning/0.12`, braille spinner + "Retry N/M (in Xs)" text. The retry detail body, when present, is a persistent selectable `Entity<Markdown>`, re-synced when a coalesced retry rewrites the item's detail in place. The trailing retry row is replayed when a thread is attached while its turn is still running (a parked thread's `Retry` never reached the foreground handler), and only while nothing has moved past it: content, a terminal error, or a turn boundary retires the candidate, mirroring the live pop.
 
 > Source: `crates/agent-ui/src/views/message.rs`
 
