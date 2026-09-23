@@ -2217,7 +2217,9 @@ fn new_thread_intent_lands_projections_and_set_model_updates(cx: &mut gpui::Test
 /// a dead flag on the detached mirrors the attach path builds since
 /// U6b②. A switch away from a running turn parks the thread (its
 /// session stays attached — no `DetachSession`), and the switch back
-/// reclaims the park in place: the same leaf entity, no reopen.
+/// reclaims the park in place: the same leaf entity and follow stream, plus the
+/// `OpenSession` re-own that makes the gateway re-deliver unsettled
+/// adjudications (`parked_ask_rearms_on_switch_back` covers that half).
 #[gpui::test]
 fn park_rides_the_leaf_running_mirror_and_reclaim_skips_reopen(cx: &mut gpui::TestAppContext) {
     use gpui::AppContext as _;
@@ -2303,8 +2305,9 @@ fn park_rides_the_leaf_running_mirror_and_reclaim_skips_reopen(cx: &mut gpui::Te
             .map(|s| s.entity_id())
     });
 
-    // Switch back to A: the reclaim restores the parked leaf + session
-    // in place (no reopen — the parked session never detached).
+    // Switch back to A: the reclaim restores the parked leaf + session in
+    // place (same leaf, same follow stream — the re-own it sends is a session
+    // re-declaration, not a stream reopen).
     visual.update(|window, cx| {
         ws.update(cx, |this, cx| {
             let a2 = manox_agent::Thread::landing_with_id(
@@ -2326,9 +2329,586 @@ fn park_rides_the_leaf_running_mirror_and_reclaim_skips_reopen(cx: &mut gpui::Te
     assert_eq!(after_sid.as_deref(), Some(a_id.as_str()));
     assert_eq!(
         after_leaf, parked_leaf_id,
-        "the reclaim restores the parked leaf in place (no reopen)"
+        "the reclaim restores the parked leaf in place (same leaf, same stream)"
     );
     let _ = std::fs::remove_file(&db_path);
+}
+
+/// Scaffold for the parked-thread recovery regressions: a landing Workspace
+/// whose own client is a raw `in_process_pair` spy (so the reclaim's re-own
+/// frame and the parked error's annotation frame are observable), with thread
+/// A attached and parked mid-turn behind foreground thread B.
+#[cfg(feature = "test-support")]
+struct ParkedFix {
+    ws: gpui::Entity<Workspace>,
+    visual: gpui::VisualTestContext,
+    rx: async_channel::Receiver<manox_protocol::FromClient>,
+    a_id: String,
+    b_id: String,
+    db_path: std::path::PathBuf,
+    _globals: std::sync::MutexGuard<'static, ()>,
+    _store: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(feature = "test-support")]
+impl ParkedFix {
+    /// The parked thread's leaf — the one the foreground subscription never
+    /// reaches.
+    fn parked_leaf(&self) -> gpui::Entity<crate::client_store_handle::ClientStoreHandle> {
+        self.ws
+            .read_with(&self.visual, |this, _| {
+                this.background_threads
+                    .first()
+                    .and_then(|b| b.store.clone())
+            })
+            .expect("the parked thread keeps its leaf")
+    }
+
+    /// The foreground thread's leaf — where the gateway's §D.6 replay lands
+    /// after the reclaim re-owns the session.
+    fn foreground_leaf(&self) -> gpui::Entity<crate::client_store_handle::ClientStoreHandle> {
+        self.ws
+            .read_with(&self.visual, |this, _| this.store.clone())
+            .expect("foreground leaf")
+    }
+
+    fn deliver_parked(&mut self, msg: manox_protocol::FromServer) {
+        let leaf = self.parked_leaf();
+        leaf.update(&mut self.visual, |h, cx| h.apply_from_server(msg, cx));
+    }
+
+    fn deliver_foreground(&mut self, msg: manox_protocol::FromServer) {
+        let leaf = self.foreground_leaf();
+        leaf.update(&mut self.visual, |h, cx| h.apply_from_server(msg, cx));
+    }
+
+    /// The adjudication frame a parked session's fan-out delivers.
+    fn ask_request(&self, auth_id: &str, input: serde_json::Value) -> manox_protocol::FromServer {
+        manox_protocol::FromServer::Request {
+            id: manox_protocol::MsgId::new(auth_id),
+            call: manox_protocol::ServerCall::AskUserQuestion {
+                delivery_id: format!("dlv-{auth_id}"),
+                session_id: self.a_id.clone(),
+                auth_id: auth_id.to_string(),
+                input,
+            },
+        }
+    }
+
+    fn switch_to(&mut self, id: &str) {
+        let ws = self.ws.clone();
+        let id = id.to_string();
+        self.visual.update(|window, cx| {
+            ws.update(cx, |this, cx| {
+                let thread = manox_agent::Thread::landing_with_id(
+                    manox_agent::ThreadId(id),
+                    this.cwd.clone(),
+                );
+                this.attach_thread(thread, true, window, cx);
+            });
+        });
+        self.visual.run_until_parked();
+    }
+
+    fn drain(&self) -> Vec<manox_protocol::FromClient> {
+        let mut out = Vec::new();
+        while let Ok(frame) = self.rx.try_recv() {
+            out.push(frame);
+        }
+        out
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn parked_fix(cx: &mut gpui::TestAppContext) -> ParkedFix {
+    use gpui::AppContext as _;
+    let globals = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path = std::env::temp_dir().join(format!("manox-parked-fix-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(960.), gpui::px(640.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+    // Spy client: every frame the workspace sends directly lands here.
+    let (client_conn, server_conn) = manox_protocol::in_process_pair();
+    use manox_protocol::RpcConnection as _;
+    let rx = server_conn.client_rx();
+    ws.update(&mut visual, |ws, _| {
+        ws.client = std::sync::Arc::new(manox_session_core::agent_client::AgentClient::from_conn(
+            client_conn,
+        ));
+    });
+
+    let a_id = format!("parked-fix-a-{}", uuid_like_id());
+    let b_id = format!("parked-fix-b-{}", uuid_like_id());
+    let attach = |visual: &mut gpui::VisualTestContext, id: &str, reopen: bool| {
+        let ws = ws.clone();
+        let id = id.to_string();
+        visual.update(|window, cx| {
+            ws.update(cx, |this, cx| {
+                let thread = manox_agent::Thread::landing_with_id(
+                    manox_agent::ThreadId(id),
+                    this.cwd.clone(),
+                );
+                this.attach_thread(thread, reopen, window, cx);
+            });
+        });
+        visual.run_until_parked();
+    };
+    let mark_running = |visual: &mut gpui::VisualTestContext| {
+        ws.update(&mut *visual, |this, cx| {
+            let leaf = this.store.clone().expect("foreground store");
+            leaf.update(cx, |h, _| {
+                h.store
+                    .apply_session_status(Some(true), None, None, None, None, None);
+            });
+        });
+    };
+    // A runs and then parks behind B; B runs too, so switching back to A parks
+    // B as well and both leaves stay queryable. Both legs CREATE their session
+    // (the reclaim in `switch_to` is the `OpenSession` leg).
+    attach(&mut visual, &a_id, false);
+    mark_running(&mut visual);
+    attach(&mut visual, &b_id, false);
+    mark_running(&mut visual);
+
+    ParkedFix {
+        ws,
+        visual,
+        rx,
+        a_id,
+        b_id,
+        db_path,
+        _globals: globals,
+        _store: store,
+    }
+}
+
+/// Deliver an adjudication to the parked thread, then switch back and hand the
+/// foreground leaf the same frame: the parked subscription drops the original
+/// by design, and the reclaim's `OpenSession` is what makes the gateway
+/// re-deliver it (§D.6). A card that only ever appears when its thread was
+/// foreground is the reported bug.
+#[cfg(feature = "test-support")]
+fn parked_adjudication_round_trip(f: &mut ParkedFix, auth_id: &str, input: serde_json::Value) {
+    let request = f.ask_request(auth_id, input);
+    f.deliver_parked(request.clone());
+    assert!(
+        f.ws.read_with(&f.visual, |this, _| this.pending_ask.is_none()),
+        "the parked subscription drops the card while the thread is in the background"
+    );
+
+    let a_id = f.a_id.clone();
+    f.switch_to(&a_id);
+    // The reclaim re-owns the live session; without it the gateway never
+    // re-delivers the parked adjudication. The wire frame itself is asserted in
+    // the multiplexer's re-own test — the attach leg is observable only through
+    // the counter, because the multiplexer owns the shared connection.
+    let reowns = f.ws.read_with(&f.visual, |this, cx| {
+        this.multiplexer.read(cx).diagnostic_reowns()
+    });
+    assert!(
+        reowns >= 1,
+        "the reclaim must re-own the session so §D.6 replays the parked card"
+    );
+
+    // The replay arrives on the foreground leaf: the card re-arms on the same
+    // edge the live path uses, synthesizing its tool row when the rebuild
+    // lacked one.
+    f.deliver_foreground(request.clone());
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, _| this.diagnostic_pending_ask_id()),
+        Some(auth_id.to_string()),
+        "the replayed adjudication re-arms the card"
+    );
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, cx| this
+            .diagnostic_tool_call_count(auth_id, cx)),
+        1,
+        "the card row is synthesized exactly once"
+    );
+    assert!(
+        f.ws.read_with(&f.visual, |this, cx| this
+            .diagnostic_ask_card_interactive(auth_id, cx)),
+        "the re-armed card carries its interactive snapshot"
+    );
+    let walk_gen =
+        f.ws.read_with(&f.visual, |this, _| this.diagnostic_ask_transition_gen());
+    assert!(walk_gen > 0, "the re-armed card starts its walk");
+
+    // A duplicate delivery (the gateway may replay alongside the fan-out) must
+    // not stack a second card or churn the walk.
+    f.deliver_foreground(request);
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, cx| this
+            .diagnostic_tool_call_count(auth_id, cx)),
+        1,
+        "re-delivery must not stack a second card"
+    );
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, _| this.diagnostic_ask_transition_gen()),
+        walk_gen,
+        "re-delivery must not churn the walk"
+    );
+
+    // The answer leg settles the ORIGINAL waiter: the replay re-sent the same
+    // deterministic MsgId, so the reply correlates.
+    f.ws.update(&mut f.visual, |this, cx| this.dismiss_ask(cx));
+    let replied = f.drain().into_iter().any(
+        |frame| matches!(frame, manox_protocol::FromClient::Reply { id, .. } if id.0 == auth_id),
+    );
+    assert!(replied, "answering the re-armed card replies to its MsgId");
+}
+
+/// The reported bug: an `AskUserQuestion` that parks while its thread is in the
+/// background must re-arm its card when the thread comes back.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn parked_ask_rearms_on_switch_back(cx: &mut gpui::TestAppContext) {
+    let mut f = parked_fix(cx);
+    parked_adjudication_round_trip(
+        &mut f,
+        "ask1",
+        serde_json::json!({
+            "questions": [{ "question": "Which one?", "header": "Pick",
+                             "options": [{ "label": "A" }, { "label": "B" }] }]
+        }),
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// The plan review rides the ask channel (`intent.kind == "plan-review"`), so
+/// `ProposePlan` parked in the background recovers by the same re-own + replay.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn parked_plan_review_rearms_on_switch_back(cx: &mut gpui::TestAppContext) {
+    let mut f = parked_fix(cx);
+    parked_adjudication_round_trip(
+        &mut f,
+        "plan-review",
+        serde_json::json!({
+            "questions": [{
+                "id": "plan-review",
+                "question": "Review the proposed plan?",
+                "header": "Plan",
+                "detail": "# the plan",
+                "intent": { "kind": "plan-review", "approve": "Approve" },
+                "options": [{ "label": "Approve" }, { "label": "Request changes" }]
+            }]
+        }),
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// The client-owned focus must move with a reclaim: the thread being viewed
+/// suppresses its unread rise, the one just left lights up. A reclaim that
+/// skipped `set_focused` left the multiplexer's focus on the outgoing thread.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn reclaim_moves_the_client_focus(cx: &mut gpui::TestAppContext) {
+    /// The leaf wired to `id`, foreground or parked.
+    fn leaf_for(
+        f: &ParkedFix,
+        id: &str,
+    ) -> Option<gpui::Entity<crate::client_store_handle::ClientStoreHandle>> {
+        f.ws.read_with(&f.visual, |this, _| {
+            if this.session_id.as_deref() == Some(id) {
+                this.store.clone()
+            } else {
+                this.background_threads
+                    .iter()
+                    .find(|b| b.id == id)
+                    .and_then(|b| b.store.clone())
+            }
+        })
+    }
+
+    let mut f = parked_fix(cx);
+    let (a_id, b_id) = (f.a_id.clone(), f.b_id.clone());
+    f.switch_to(&a_id);
+    // Switching back to A parks B: both leaves stay queryable.
+    let b_leaf = leaf_for(&f, &b_id).expect("B parks behind the reclaimed A");
+    let b_unread = b_leaf.read_with(&f.visual, |h, _| h.store.unread);
+    assert!(
+        !b_unread,
+        "B starts parked without unread (the fixture never raised it)"
+    );
+
+    let raise_unread = |f: &mut ParkedFix, id: &str| {
+        let leaf = leaf_for(f, id).expect("leaf for the thread");
+        leaf.update(&mut f.visual, |h, cx| {
+            h.apply_from_server(
+                manox_protocol::FromServer::Host {
+                    host: manox_protocol::stream::HostEvent::SessionStatus {
+                        session_id: id.to_string(),
+                        running: None,
+                        errored: None,
+                        unread: Some(true),
+                        pending_auth: None,
+                        pending_plan: None,
+                        background_work: None,
+                    },
+                },
+                cx,
+            );
+        });
+        leaf.read_with(&f.visual, |h, _| h.store.unread)
+    };
+    assert!(
+        !raise_unread(&mut f, &a_id),
+        "the reclaimed thread is focused: a host unread rise is suppressed"
+    );
+    assert!(
+        raise_unread(&mut f, &b_id),
+        "the parked thread lights up (focus left it)"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// A parked thread's live-only state must be replayed on attach. The window
+/// carries sub-agent rows, an in-flight tool's streamed output, and the live
+/// retry notice; none of them has a display projection, so the rebuild alone
+/// loses them.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn attach_replays_live_only_window_state(cx: &mut gpui::TestAppContext) {
+    use manox_protocol::journal::{JournalWireEntry, JournalWireEvent};
+    let mut f = parked_fix(cx);
+    let a_id = f.a_id.clone();
+    let entry = |seq: u64, event: JournalWireEvent| JournalWireEntry {
+        seq,
+        id: format!("e{seq}"),
+        parent_id: None,
+        timestamp: "2026-09-05T00:00:00Z".into(),
+        event,
+    };
+    let tool_use = |call_id: &str, name: &str| {
+        serde_json::json!({ "type": "toolCall", "id": call_id, "name": name,
+                            "arguments": { "command": "echo hi" } })
+    };
+    let snapshot = manox_protocol::StreamFrame::Snapshot(manox_protocol::stream::SessionSnapshot {
+        session_id: a_id.clone(),
+        header: manox_protocol::journal::ThreadHeader {
+            id: a_id.clone(),
+            cwd: "/w".into(),
+            parent_session: None,
+            metadata: None,
+            created_at: "2026-09-05T00:00:00Z".into(),
+        },
+        cursor: 8,
+        records: vec![
+            entry(
+                0,
+                JournalWireEvent::Message {
+                    role: "assistant".into(),
+                    content: vec![tool_use("c1", "Bash"), tool_use("c2", "Bash")],
+                    usage: None,
+                    origin_rpc: None,
+                    display: None,
+                },
+            ),
+            // c1 streams while parked and never settles.
+            entry(
+                1,
+                JournalWireEvent::ToolCall {
+                    call_id: "c1".into(),
+                    name: "Bash".into(),
+                    title: "sleep 1".into(),
+                    status: "running".into(),
+                    input: serde_json::json!({}),
+                },
+            ),
+            entry(
+                2,
+                JournalWireEvent::ToolOutputChunk {
+                    call_id: "c1".into(),
+                    chunk: "part1".into(),
+                },
+            ),
+            entry(
+                3,
+                JournalWireEvent::ToolOutputChunk {
+                    call_id: "c1".into(),
+                    chunk: "part2".into(),
+                },
+            ),
+            // c2 settled: its chunks must NOT be replayed on top of the
+            // output the rebuild already carries.
+            entry(
+                4,
+                JournalWireEvent::ToolCall {
+                    call_id: "c2".into(),
+                    name: "Bash".into(),
+                    title: "echo hi".into(),
+                    status: "done".into(),
+                    input: serde_json::json!({}),
+                },
+            ),
+            entry(
+                5,
+                JournalWireEvent::ToolOutputChunk {
+                    call_id: "c2".into(),
+                    chunk: "STALE".into(),
+                },
+            ),
+            entry(
+                6,
+                JournalWireEvent::ToolResult {
+                    call_id: "c2".into(),
+                    output: "RESULT".into(),
+                    is_error: false,
+                },
+            ),
+            entry(
+                7,
+                JournalWireEvent::SubagentProgress {
+                    agent_id: "sailor-0".into(),
+                    agent_type: "Sailor".into(),
+                    tool_uses: 2,
+                    latest_activity: Some("final answer".into()),
+                    // The wire carries `ToolCallStatus`'s kebab-case serde
+                    // form (the desktop parses it back through serde).
+                    status: "success".into(),
+                },
+            ),
+            entry(
+                8,
+                JournalWireEvent::SubagentChild {
+                    agent_id: "sailor-0".into(),
+                    event: serde_json::json!({ "Text": "child hi" }),
+                },
+            ),
+        ],
+        has_more: false,
+        projections: Default::default(),
+        projections_as_of_seq: 0,
+    });
+    f.deliver_parked(manox_protocol::FromServer::StreamItem {
+        stream_id: manox_protocol::StreamId::new("s-parked"),
+        frame: snapshot,
+    });
+    assert!(
+        f.parked_leaf()
+            .read_with(&f.visual, |h, _| h.store.display.len())
+            > 0,
+        "the parked leaf folds the snapshot it was streamed"
+    );
+
+    f.switch_to(&a_id);
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, cx| this.diagnostic_tool_output("c1", cx))
+            .as_deref(),
+        Some("part1part2"),
+        "the in-flight call's streamed output is replayed"
+    );
+    let settled =
+        f.ws.read_with(&f.visual, |this, cx| this.diagnostic_tool_output("c2", cx));
+    assert!(
+        settled.is_some(),
+        "the settled call keeps its (display-derived) tool entry"
+    );
+    assert!(
+        !settled.unwrap_or_default().contains("STALE"),
+        "a settled call's chunks are not replayed on top of its display row"
+    );
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, _| this
+            .subagent_final_text
+            .get("sailor-0")
+            .cloned()),
+        Some("final answer".to_string()),
+        "the parked thread's sub-agent progress row is replayed"
+    );
+    assert_eq!(
+        f.ws.read_with(&f.visual, |this, _| this
+            .subagent_transcripts
+            .values()
+            .map(|v| v.len())
+            .sum::<usize>()),
+        1,
+        "the parked thread's child transcript is replayed"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// A turn that fails while its thread is parked must still persist its error
+/// card. The `Error` event never reaches the foreground handler, and the wire's
+/// own `Error` row has no display projection — without the annotation the
+/// reason text is gone for good.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn parked_error_persists_its_card_for_its_own_session(cx: &mut gpui::TestAppContext) {
+    let mut f = parked_fix(cx);
+    let a_id = f.a_id.clone();
+    f.ws.update(&mut f.visual, |this, cx| {
+        this.diagnostic_emit_event(
+            &a_id,
+            manox_agent::ThreadEvent::Error(anyhow::anyhow!("provider exploded")),
+            cx,
+        );
+    });
+    let annotated = f.drain().into_iter().any(|frame| {
+        matches!(
+            frame,
+            manox_protocol::FromClient::Notification {
+                note: manox_protocol::ClientNote::AppendUiNote { session_id, kind, data },
+            } if session_id == a_id
+                && kind == "error"
+                && data.get("text").and_then(|t| t.as_str()) == Some("provider exploded")
+        )
+    });
+    assert!(
+        annotated,
+        "the parked error is annotated against its OWN session"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
+}
+
+/// The goal elapsed ticker is armed by `GoalChanged`, which a parked thread
+/// never sees. Attaching must re-arm it from the projection mirror.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn attach_rearms_the_goal_ticker_from_the_projection(cx: &mut gpui::TestAppContext) {
+    let mut f = parked_fix(cx);
+    let goal = manox_agent::goal::ThreadGoal::new(f.a_id.clone(), "ship it".into(), None, None)
+        .expect("valid goal");
+    let leaf = f.parked_leaf();
+    let value = serde_json::to_value(&goal).expect("goal serializes");
+    leaf.update(&mut f.visual, |h, _| {
+        h.store.merge_projection("goal", value, 1);
+    });
+    let before = f.ws.read_with(&f.visual, |this, _| this.goal_ticker_gen);
+    let a_id = f.a_id.clone();
+    f.switch_to(&a_id);
+    assert!(
+        f.ws.read_with(&f.visual, |this, _| this.goal_ticker_gen) > before,
+        "the attach re-arms the ticker generation"
+    );
+    assert!(
+        f.ws.read_with(&f.visual, |this, cx| this.goal_can_advance(cx)),
+        "the incoming thread's active goal keeps the ticker alive"
+    );
+    let _ = std::fs::remove_file(&f.db_path);
 }
 
 /// Regression lock (#765 symptom 2): clicking a sidebar thread loads the

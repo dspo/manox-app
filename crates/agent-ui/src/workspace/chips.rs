@@ -1049,6 +1049,48 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Whether the foreground thread's goal can still advance — the elapsed
+    /// ticker's condition. Reads the projection mirror rather than an event,
+    /// so an attach can re-arm the ticker for a thread whose `GoalChanged`
+    /// arrived while it was parked.
+    pub(super) fn goal_can_advance(&self, cx: &App) -> bool {
+        self.store
+            .as_ref()
+            .and_then(|s| s.read(cx).store.goal.clone())
+            .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())
+            .is_some_and(|goal| !goal.status.is_terminal())
+    }
+
+    /// (Re)arm the goal elapsed ticker for the foreground thread: bump the
+    /// generation so any prior ticker self-terminates, then start a fresh one
+    /// only while the goal can advance. The live `GoalChanged` arm passes the
+    /// event's own verdict; an attach passes [`Self::goal_can_advance`],
+    /// because the goal chip is projection-backed and the event that would
+    /// have armed it was dropped while the thread was parked.
+    pub(super) fn rearm_goal_ticker(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.goal_ticker_gen = self.goal_ticker_gen.wrapping_add(1);
+        if !active {
+            return;
+        }
+        let entity = cx.entity().clone();
+        let ticker_gen = self.goal_ticker_gen;
+        cx.spawn(async move |_this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let still = entity.read_with(cx, |this, cx| {
+                    this.goal_ticker_gen == ticker_gen && this.goal_can_advance(cx)
+                });
+                if !still {
+                    break;
+                }
+                entity.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .detach();
+    }
+
     /// Prefill the composer with the durable objective so `/goal edit` is an
     /// explicit, inspectable update rather than an ephemeral popover field.
     pub fn begin_goal_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
