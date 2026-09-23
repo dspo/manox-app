@@ -130,6 +130,10 @@ pub struct SessionMultiplexer {
     /// The client-owned focus (§F.2/GW5): the attached session's leaf
     /// suppresses unread rises. Replaces the retired server-side mirror.
     focused: Option<String>,
+    /// Re-owns this multiplexer has sent. Diagnostic-only: the attach path's
+    /// §D.6 leg has no other observable client-side effect.
+    #[cfg(feature = "test-support")]
+    reowns: std::cell::Cell<u32>,
 }
 
 impl SessionMultiplexer {
@@ -198,6 +202,8 @@ impl SessionMultiplexer {
             _pump,
             _leaf_pump,
             focused: None,
+            #[cfg(feature = "test-support")]
+            reowns: std::cell::Cell::new(0),
         }
     }
 
@@ -888,6 +894,27 @@ impl SessionMultiplexer {
         handle
     }
 
+    /// §D.6: re-declare ownership of a LIVE session this client still holds.
+    /// `OpenSession` is the idempotent re-own — the server re-adds the owner
+    /// and re-delivers that session's unsettled adjudications — and it is the
+    /// only restore path for a card whose thread was parked when the
+    /// adjudication arrived (the parked subscription drops the original frame
+    /// by design). No leaf or stream work rides along: a parked session never
+    /// detached, which is why this is not `open_or_create`.
+    pub fn reown(&self, session_id: &str) {
+        self.client.send_call(ClientCall::OpenSession {
+            session_id: session_id.into(),
+        });
+        #[cfg(feature = "test-support")]
+        self.reowns.set(self.reowns.get() + 1);
+    }
+
+    /// How many re-owns this multiplexer has sent. Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_reowns(&self) -> u32 {
+        self.reowns.get()
+    }
+
     /// Register (or reuse) a leaf for `session_id`, wired to the outbound
     /// control channel. Does not open a follow stream.
     fn ensure_leaf(
@@ -1188,6 +1215,37 @@ mod tests {
             assert_eq!(m.archived_session_ids(), ["s2".to_string()]);
             let _ = cx;
         });
+    }
+
+    /// §D.6: the parked reclaim's re-own is an idempotent `OpenSession` on the
+    /// shared connection, and it must leave the follow stream alone (a parked
+    /// session never detached). It is the only trigger for the gateway replay
+    /// that re-arms a card whose thread was parked when the adjudication
+    /// arrived.
+    #[gpui::test]
+    fn reown_re_declares_the_live_session_without_touching_the_stream(cx: &mut TestAppContext) {
+        let (mux, server_conn) = test_mux(cx);
+        let streams = mux.update(cx, |m, cx| {
+            m.ensure_leaf("s1", cx);
+            m.open_follow("s1", StreamId::new("s1-stream".to_string()));
+            m.reown("s1");
+            #[cfg(feature = "test-support")]
+            assert_eq!(m.diagnostic_reowns(), 1);
+            assert!(
+                m.has_follow("s1"),
+                "the re-own leaves the live stream bound"
+            );
+            m.streams.len()
+        });
+        assert_eq!(streams, 1, "the re-own opens no second follow stream");
+        let calls = drain_calls(&server_conn);
+        assert!(
+            calls.iter().any(|(_, call)| matches!(
+                call,
+                ClientCall::OpenSession { session_id } if session_id == "s1"
+            )),
+            "the re-own is an OpenSession for the live session"
+        );
     }
 
     /// A multiplexer backed by a raw connection pair so a test can inject

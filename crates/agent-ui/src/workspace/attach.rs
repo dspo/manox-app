@@ -59,13 +59,24 @@ impl Workspace {
                     this.flush_parked_follow_ups(&id, cx);
                 }
             }
-            ThreadEvent::Error(_) => {
+            ThreadEvent::Error(e) => {
                 // U3b: the idle + full badge clear is the server Error
                 // arm's store write + the single delta carrying the whole
                 // set (the same five flags this mirror block wrote).
                 // GW5: the parked error's unread rise rides the leaf mirror
                 // (the server's Error delta carries no unread flag).
                 this.multiplexer.update(cx, |m, cx| m.note_unread(&id, cx));
+                // Persist the error card against the PARKED session, exactly
+                // as the foreground arm does against the bound one. This event
+                // is dropped here, and the wire's own `Error` row has no
+                // display projection — without the note the reason text is
+                // gone for good and only the `errored` badge survives.
+                this.append_ui_note_for(
+                    &id,
+                    manox_agent::db::UiNoteKind::Error,
+                    e.to_string(),
+                    None,
+                );
             }
             ThreadEvent::BackgroundTaskUpdated { .. } => {
                 // U3a: the background-work flag is the pump's store write +
@@ -341,11 +352,15 @@ impl Workspace {
         // If the new thread was previously parked in the background, reclaim it
         // (entity + store) so it becomes the foreground thread and is no longer
         // double-held. The parked session stayed attached to the shared
-        // connection, so no `OpenSession` is needed on reclaim.
+        // connection, so the reclaim reuses the same leaf and follow stream —
+        // but it must still re-own the session (see the §D.6 send below): the
+        // gateway only re-delivers unsettled adjudications to a joining owner.
+        let mut reclaimed = false;
         if let Some(pos) = self.background_threads.iter().position(|b| b.id == new_id) {
             let bg = self.background_threads.remove(pos);
             self.store = bg.store;
             self.session_id = bg.session_id;
+            reclaimed = true;
         }
 
         // A brand-new foreground thread gets its own session on the shared
@@ -358,16 +373,20 @@ impl Workspace {
             let cwd = thread_cwd(&new_thread, &None, cx)
                 .unwrap_or_default()
                 .to_string();
-            let store = self.multiplexer.update(cx, |m, cx| {
-                let handle = m.open_or_create(&new_sid, &cwd, reopen, cx);
-                // GW5: focus follows the attach — the new leaf goes active
-                // (clearing its unread/errored mirrors), the old one inert.
-                m.set_focused(Some(&new_sid), cx);
-                handle
-            });
+            let store = self
+                .multiplexer
+                .update(cx, |m, cx| m.open_or_create(&new_sid, &cwd, reopen, cx));
             self.store = Some(store);
             self.session_id = Some(new_sid);
         }
+        // GW5: focus follows the attach on BOTH legs — the newly attached
+        // session's leaf goes active (clearing its unread/errored mirrors) and
+        // the outgoing one inert. The reclaimed leg skips the
+        // `open_or_create` branch, so keeping this inside it stranded the
+        // multiplexer's focus on the thread just left: the thread being viewed
+        // kept raising unread while the one just left never lit up.
+        self.multiplexer
+            .update(cx, |m, cx| m.set_focused(Some(&new_id), cx));
 
         // Persist the old thread's current state before switching away. The
         // spawned-task save backstop in `run_turn` will persist again when the
@@ -510,6 +529,18 @@ impl Workspace {
         let (thread_events, store_changes) = self.subscribe_thread(cx);
         self.thread_sub = Some(thread_events);
         self.store_observe = Some(store_changes);
+        // §D.6: the reclaimed parked session never detached, so this reclaim is
+        // in place (same leaf, same follow stream) — but the gateway only
+        // re-delivers a session's unsettled adjudications to an owner that
+        // joins it (`replay_pending_adjudications`, the "thread-switch-back
+        // path"). Re-own explicitly, and only after the subscription above so
+        // the replayed frame cannot outrun it: this send is what re-arms the
+        // ask / tool-approval / plan-review card whose `ToolCallAuthorization`
+        // the parked subscription dropped while this thread was in the
+        // background.
+        if reclaimed {
+            self.multiplexer.update(cx, |m, _| m.reown(&new_id));
+        }
         // The thinking ticker belongs to the outgoing thread: bump its
         // generation so the old ticker self-terminates, then mirror the incoming
         // thread's running state. A parked thread resumed mid-turn keeps the
@@ -518,6 +549,12 @@ impl Workspace {
         if running {
             self.spawn_thinking_ticker(cx);
         }
+        // The goal elapsed ticker is per-thread too, and unlike the thinking
+        // ticker it has no `running` mirror to read: re-arm it from the
+        // incoming thread's goal projection, because a parked thread's
+        // `GoalChanged` never reached the foreground handler.
+        let goal_elapsed_live = self.goal_elapsed_is_live(cx);
+        self.rearm_goal_ticker(goal_elapsed_live, cx);
         // Cockpit state is per-thread: the outgoing thread's plan,
         // running-tool title, and per-model counter state do not apply to the
         // incoming one. The execution plan, unlike the proposed-plan review,
@@ -554,14 +591,22 @@ impl Workspace {
         // thread after the rail reset above (a restoring thread has no
         // messages yet — its rows land with the `HistoryRestored` rebuild).
         self.apply_subagent_rows(subagent_rows, cx);
+        // Replay the window's live-only tail (sub-agent child/progress rows, an
+        // in-flight tool's streamed output, a live retry notice): the parked
+        // subscription drops all of it, and none of it has a display
+        // projection, so the rebuild above cannot reproduce it.
+        self.catch_up_live_only_state(cx);
         self.sidebar
             .update(cx, |s, cx| s.set_selected(Some(id.clone()), cx));
         // The user is now viewing this thread: clear any unread red dot it
         // carried from a prior background completion, and any pending-auth
-        // badge. Re-surfacing a parked interaction needs no local lookup —
-        // the gateway replays unsettled adjudications to this joining owner
-        // over the wire (manox §D.6), which re-arms the card through the
-        // live `ToolCallAuthorization` handler.
+        // badge. Re-surfacing a parked interaction rides the re-own above: the
+        // gateway replays unsettled adjudications to the joining owner
+        // (manox §D.6), which re-arms the card through the live
+        // `ToolCallAuthorization` handler. An in-place reclaim that skipped the
+        // re-own left that card unrenderable — the parked subscription never
+        // sees it, and no rebuild path can synthesize one from the store (the
+        // leaf keeps reply ids, not the ask payload).
         let store = manox_agent::thread_store_global();
         store.with_mut(|s| {
             s.set_unread(&id, false);
@@ -746,8 +791,10 @@ impl Workspace {
         // instead of loading a stale snapshot from the db.
         // U6b⑤: the reclaim re-attaches a fresh landing mirror for the
         // parked id — `attach_thread`'s own reclaim branch finds the park
-        // by id and restores its leaf/session, so no reopen is needed
-        // (the parked session never detached).
+        // by id and restores its leaf/session. The parked session never
+        // detached, so no stream is re-opened; `attach_thread` still re-owns
+        // the session (`OpenSession`, §D.6) so a parked adjudication card
+        // re-arms on the way back in.
         if self.background_threads.iter().any(|b| b.id == id) {
             let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
             self.attach_thread(thread, true, window, cx);

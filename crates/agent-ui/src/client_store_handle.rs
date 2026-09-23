@@ -34,7 +34,11 @@ pub enum LeafRequest {
     /// failed once; automatic reopens stay pure `StreamOpen` — a bare
     /// OpenSession on an already-superseded id would insert a ghost
     /// `ServerSession` under the old id server-side (a leaked session, an
-    /// idle pump, and a second engine on the successor's journal).
+    /// idle pump, and a second engine on the successor's journal). The guard
+    /// is about a SUPERSEDED id: the attach path's own re-own (the workspace's
+    /// parked reclaim, and the `open_or_create` reopen leg) targets the live
+    /// session this client currently owns, where `OpenSession` is the
+    /// idempotent re-own that re-delivers unsettled adjudications (§D.6).
     Reopen {
         session_id: String,
         stream_id: StreamId,

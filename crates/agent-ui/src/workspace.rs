@@ -91,6 +91,7 @@ use terminal_ui::TerminalView;
 use terminal_ui::terminal_proxy::TerminalProxy;
 
 mod attach;
+mod catch_up;
 mod chips;
 mod composer_render;
 mod render;
@@ -1515,6 +1516,39 @@ impl Workspace {
             .count()
     }
 
+    /// The accumulated output of the activity-segment tool entry with the given
+    /// id, when one exists. Diagnostic-only: this is how the attach catch-up's
+    /// replay of a parked thread's streamed `ToolOutput` is observed.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_tool_output(&self, id: &str, cx: &App) -> Option<String> {
+        let conversation = self.conversation.read(cx);
+        let (cix, eix) = conversation.find_thinking_entry(id, cx)?;
+        let item = conversation.items().get(cix)?.read(cx);
+        match item.kind() {
+            ConvItem::Thinking(container) => match container.entries.get(eix) {
+                Some(crate::conversation::ActivityEntry::Tool(entry)) => Some(entry.output.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The attempt numbers of the retry notices the transcript shows, in order.
+    /// Diagnostic-only: this is how the attach catch-up's turn gate on the
+    /// replayed `Retry` row is observed.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_retry_attempts(&self, cx: &App) -> Vec<u32> {
+        self.conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter_map(|item| match item.read(cx).kind() {
+                ConvItem::Retry { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The pending question card's id, if one is surfaced. Diagnostic-only.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_pending_ask_id(&self) -> Option<String> {
@@ -1974,43 +2008,13 @@ impl Workspace {
                     cx.notify();
                 }
                 ThreadEvent::GoalChanged { goal } => {
-                    // Bump the ticker generation so any prior ticker
-                    // self-terminates; start a fresh ticker only on activation.
+                    // Start a fresh ticker only when the goal can still
+                    // advance; the generation bump retires the prior one.
                     let active = goal
                         .as_ref()
                         .map(|g| !g.status.is_terminal())
                         .unwrap_or(false);
-                    this.goal_ticker_gen = this.goal_ticker_gen.wrapping_add(1);
-                    if active {
-                        let entity = cx.entity().clone();
-                        let ticker_gen = this.goal_ticker_gen;
-                        cx.spawn(async move |_this, cx| {
-                            loop {
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_secs(1))
-                                    .await;
-                                let still = entity.read_with(cx, |this, cx| {
-                                    this.goal_ticker_gen == ticker_gen
-                                        && this
-                                            .store
-                                            .as_ref()
-                                            .and_then(|s| s.read(cx).store.goal.clone())
-                                            .and_then(|v| {
-                                                serde_json::from_value::<
-                                                    manox_agent::goal::ThreadGoal,
-                                                >(v)
-                                                .ok()
-                                            })
-                                            .is_some()
-                                });
-                                if !still {
-                                    break;
-                                }
-                                entity.update(cx, |_, cx| cx.notify());
-                            }
-                        })
-                        .detach();
-                    }
+                    this.rearm_goal_ticker(active, cx);
                     cx.notify();
                 }
                 // The v2 link never delivers `ThreadEvent::SteerInjected`: the
@@ -2077,7 +2081,8 @@ impl Workspace {
                     // Sub-agent observation: the pi harness observes its
                     // ephemeral nested sessions through progress events on
                     // the rail (the retired manox harness tracked child
-                    // threads in observation panels instead).
+                    // threads in observation panels instead). The attach
+                    // catch-up routes the same rows a parked thread missed.
                     if let ThreadEvent::SubagentProgress {
                         id,
                         subagent_type,
@@ -2091,39 +2096,17 @@ impl Workspace {
                         let subagent_type = subagent_type.clone();
                         let latest_activity = latest_activity.clone();
                         let health = health.clone();
-                        this.context_rail.update(cx, |r, cx| {
-                            r.apply_subagent_progress(
-                                &id,
-                                &subagent_type,
-                                latest_activity.as_deref(),
-                                *status,
-                                health.as_deref(),
-                                cx,
-                            );
-                        });
-                        // Record the completion text so a panel opened later
-                        // (after the Agent tool-result is gone) can show it.
-                        if matches!(
+                        this.apply_subagent_progress(
+                            &id,
+                            &subagent_type,
+                            latest_activity.as_deref(),
                             *status,
-                            manox_agent::ToolCallStatus::Success
-                                | manox_agent::ToolCallStatus::Error
-                                | manox_agent::ToolCallStatus::Denied
-                        ) && let Some(text) = &latest_activity
-                        {
-                            this.subagent_final_text.insert(id.clone(), text.clone());
-                        }
-                        if let Some(panel) = this.subagent_panels.get(&id) {
-                            panel.update(cx, |p, cx| p.set_status(*status, cx));
-                        }
+                            health.as_deref(),
+                            cx,
+                        );
                     }
                     if let ThreadEvent::SubagentChild { id, child } = ev {
-                        this.subagent_transcripts
-                            .entry(id.clone())
-                            .or_default()
-                            .push(child.clone());
-                        if let Some(panel) = this.subagent_panels.get(id) {
-                            panel.update(cx, |p, cx| p.push(child, cx));
-                        }
+                        this.apply_subagent_child(id, child, cx);
                     }
                     // Capture the Captain's dispatch prompt from the Steer
                     // tool call so the subagent panel can show the opening
@@ -2151,33 +2134,10 @@ impl Workspace {
                             );
                         }
                     }
-                    let weak = cx.weak_entity();
-                    let role = this.model_label(cx);
-                    let usage = this.store.as_ref().and_then(|s| {
-                        s.read(cx).store.last_token_usage.as_ref().map(|u| {
-                            manox_agent::TokenUsage {
-                                input_tokens: u.input,
-                                output_tokens: u.output,
-                                cache_creation_input_tokens: u.cache_creation,
-                                cache_read_input_tokens: u.cache_read,
-                            }
-                        })
-                    });
-                    let cwd = thread_cwd(&this.thread, &this.store, cx);
-                    let outcome = this.conversation.update(cx, |c, cx| {
-                        c.apply(
-                            ev,
-                            &role,
-                            usage,
-                            crate::conversation::ApplyCtx {
-                                weak,
-                                cwd,
-                                fork_source: this.fork_source_session(cx),
-                            },
-                            cx,
-                        )
-                    });
-                    this.apply_list_outcome(outcome, cx);
+                    // Everything else renders through the conversation; the
+                    // attach catch-up reuses the same routing for the live-only
+                    // events a parked thread dropped.
+                    this.apply_to_conversation(ev, cx);
                     cx.notify();
                 }
             }
@@ -2910,6 +2870,23 @@ impl Workspace {
         tool_call_id: Option<&str>,
         _cx: &mut Context<Self>,
     ) {
+        if let Some(sid) = self.session_id.clone() {
+            self.append_ui_note_for(&sid, kind, text, tool_call_id);
+        }
+    }
+
+    /// The session-addressed form of [`Self::append_ui_note`]. A parked
+    /// thread's events never reach the foreground handler, so a durable card
+    /// for one has to be writable while the thread is in the background: the
+    /// append lands on that session's journal, which is what reproduces the
+    /// card when the thread comes back into view.
+    fn append_ui_note_for(
+        &self,
+        session_id: &str,
+        kind: manox_agent::db::UiNoteKind,
+        text: String,
+        tool_call_id: Option<&str>,
+    ) {
         let mut data = serde_json::json!({ "text": text });
         // A tool-anchored notice carries the tool call id so the rebuild can
         // splice it next to the tool item, matching the live placement.
@@ -2922,11 +2899,12 @@ impl Workspace {
             manox_agent::db::UiNoteKind::Notice => "notice",
             manox_agent::db::UiNoteKind::PlanReview => "plan_review",
         };
-        let _ = self.send_note(|sid| manox_protocol::ClientNote::AppendUiNote {
-            session_id: sid.into(),
-            kind: kind_str.into(),
-            data: data.clone(),
-        });
+        self.client
+            .send_note(manox_protocol::ClientNote::AppendUiNote {
+                session_id: session_id.into(),
+                kind: kind_str.into(),
+                data,
+            });
     }
 
     /// Abort the current turn.
