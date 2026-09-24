@@ -172,22 +172,23 @@ sysinfo = "0.39"
 # Longbridge 每周从 zed main 重打包的 `gpui-pre*` 快照（bump-gpui.ts 机械改名，
 # [lib] 名保留，`use gpui::*` 照旧；每个版本自带 [package.metadata] zed-rev
 # 映射可审计）。升级 = `cargo update -p gpui-pre --precise`，用 `=` 精确 pin
-# 防周更快照漂移。gpui-pre 0.3.4 = zed@691640083，含上游 gpui#60295 的
+# 防周更快照漂移。gpui-pre 0.3.6 = zed@bcf6582，含上游 gpui#60295 的
 # element-arena 崩溃修复（ec3d887507，即旧栈上「开 About 窗口后 mouseUp
-# deref 已清空 Arena」SIGABRT 的修复）。
-gpui = { package = "gpui-pre", version = "=0.3.4" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+# deref 已清空 Arena」SIGABRT 的修复）。gpui-component/-assets 与 gpui-pre
+# 同线发布：0.6.6 精确要求 gpui-pre 0.3.6。
+gpui = { package = "gpui-pre", version = "=0.3.6" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.6", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 
 # gpui-kit（longbridge/gpui-kit，原 gpui-component 仓改名重组）组件层，
 # crates.io 发布。资产 crate 已更名 gpui-component-assets → gpui-kit-assets
 # （Rust 路径 `gpui_kit_assets`）。组件与 gpui-pre 同线版本管理，不再需要
 # 跨仓对齐 zed rev；tree-sitter-languages feature 仍在（0.6 起为 35 个
 # per-language feature 的聚合别名，底层个别语法换源如 sql→sequel）。
-gpui-component = { version = "=0.6.1", features = ["tree-sitter-languages"] }
-gpui-kit-assets = { version = "=0.6.1" }
+gpui-component = { version = "=0.6.6", features = ["tree-sitter-languages"] }
+gpui-kit-assets = { version = "=0.6.6" }
 
 # （旧栈的 `[patch.crates-io] psm = stacker` 已随 zed gpui 退出删除：gpui-pre
-# 0.3.4 依赖闭包不含 psm/stacker，kit lock 同样零命中。）
+# 0.3.6 依赖闭包不含 psm/stacker，kit lock 同样零命中。）
 
 # Full DWARF makes the largest test targets (`cx` integration tests and `cx-cli`
 # bin tests) large enough to crash `ld.lld` on GitHub-hosted Linux runners.
