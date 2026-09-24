@@ -5800,3 +5800,157 @@ fn an_untouched_question_blocks_the_submit_and_jumps_back(cx: &mut gpui::TestApp
     );
     let _ = std::fs::remove_file(&f.db_path);
 }
+
+/// A wheel over the plan-review card's body scrolls the PLAN, not the column:
+/// the body is a scrollport nested inside the message list, and gpui hands one
+/// wheel event to every scroll container under the cursor, so without the guard
+/// the column moved with the plan and the plan's tail was unreachable.
+#[gpui::test]
+#[cfg(feature = "test-support")]
+fn plan_body_wheel_scrolls_the_plan_not_the_message_column(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _store = store_test_guard();
+    cx.update(gpui_component::init);
+    let db_path = std::env::temp_dir().join(format!("manox-plan-wheel-{}.db", uuid_like_id()));
+    let db = std::sync::Arc::new(
+        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
+    );
+    cx.update(|_cx| {
+        manox_agent::runtime::init();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init_for_test(db.clone());
+    });
+    cx.background_executor.allow_parking();
+    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = captured.clone();
+    let window = cx.open_window(
+        gpui::size(gpui::px(1_120.), gpui::px(780.)),
+        move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            *slot.borrow_mut() = Some(workspace.clone());
+            gpui_component::Root::new(workspace, window, cx)
+        },
+    );
+    cx.run_until_parked();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let ws = captured.borrow().clone().expect("workspace captured");
+    let tid = ws.read_with(&visual.cx, |ws, _| ws.thread.read(|t| t.id.0.clone()));
+
+    // Earlier transcript, so the column itself can scroll toward the start —
+    // otherwise "the column did not move" would be vacuous.
+    let transcript: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    ws.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_emit_event(&tid, manox_agent::ThreadEvent::AgentText(transcript), cx);
+    });
+    // A plan past the body's 520px cap, delivered on the live edge — the only
+    // path that synthesizes the card row (`diagnostic_seed_ask` does not).
+    let plan: String = (0..60).map(|i| format!("- step {i}\n")).collect();
+    ws.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_emit_event(
+            &tid,
+            manox_agent::ThreadEvent::ToolCallAuthorization {
+                id: "plan-review".into(),
+                tool_name: "ProposePlan".into(),
+                summary: "Plan review".into(),
+                input: serde_json::json!({
+                    "questions": [{
+                        "id": "plan-review",
+                        "question": "Review the proposed plan?",
+                        "header": "Plan",
+                        "detail": plan,
+                        "intent": { "kind": "plan-review", "approve": "Approve" },
+                        "options": [
+                            { "label": "Approve", "description": "start executing" },
+                            { "label": "Approve & compact" },
+                            { "label": "Request changes" }
+                        ]
+                    }]
+                }),
+            },
+            cx,
+        );
+    });
+
+    let draw = |visual: &mut gpui::VisualTestContext| {
+        for _ in 0..2 {
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    };
+    draw(&mut visual);
+
+    // The card is the tail row; its body selector keys on the row index.
+    let body = (0..6)
+        .find_map(|ix| {
+            let sel: &'static str = Box::leak(format!("plan-review-body-{ix}").into_boxed_str());
+            visual.debug_bounds(sel)
+        })
+        .expect("the synthesized plan-review card paints its body");
+    let at = gpui::point(body.center().x, body.bottom() - gpui::px(10.));
+
+    let list_state = ws.read_with(&visual.cx, |ws, _| ws.diagnostic_list_state());
+    let plan_scroll = ws
+        .read_with(&visual.cx, |ws, _| ws.ask_body_scroll(0))
+        .expect("the live card tracks its body scroll handle");
+    assert!(
+        plan_scroll.max_offset().y > gpui::px(0.),
+        "the fixture plan must overflow the body cap, got {:?}",
+        plan_scroll.max_offset().y
+    );
+    assert_eq!(
+        plan_scroll.offset().y,
+        gpui::px(0.),
+        "a freshly armed plan opens at the top"
+    );
+
+    let column_top = || {
+        let top = list_state.logical_scroll_top();
+        (top.item_ix, top.offset_in_item)
+    };
+    let wheel = |visual: &mut gpui::VisualTestContext, dy: f32| {
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(dy))),
+            ..Default::default()
+        });
+    };
+
+    // ① At the plan's top there is no room upward: the gesture chains to the
+    // column (and parks the column off its tail, so ②/③ are non-vacuous).
+    let column_before = column_top();
+    wheel(&mut visual, 120.);
+    assert_eq!(
+        plan_scroll.offset().y,
+        gpui::px(0.),
+        "the plan stays at its top"
+    );
+    assert_ne!(
+        column_top(),
+        column_before,
+        "with no room left in the plan the wheel chains to the column"
+    );
+
+    // ② A wheel toward the plan's end is consumed by the plan alone.
+    let column_before = column_top();
+    wheel(&mut visual, -120.);
+    assert!(
+        plan_scroll.offset().y < gpui::px(-100.),
+        "the wheel scrolls the plan body, got {:?}",
+        plan_scroll.offset().y
+    );
+    assert_eq!(column_top(), column_before, "the column must not move");
+
+    // ③ And back toward the plan's start, still consumed by the plan alone.
+    let plan_before = plan_scroll.offset().y;
+    let column_before = column_top();
+    wheel(&mut visual, 60.);
+    assert!(
+        plan_scroll.offset().y > plan_before,
+        "the plan scrolls back toward its top, got {:?}",
+        plan_scroll.offset().y
+    );
+    assert_eq!(column_top(), column_before, "the column must not move");
+
+    let _ = std::fs::remove_file(&db_path);
+}
