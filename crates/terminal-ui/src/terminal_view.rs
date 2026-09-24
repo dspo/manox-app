@@ -343,18 +343,16 @@ impl TerminalView {
         #[cfg(not(target_os = "macos"))]
         let copy = k.modifiers.control && !k.modifiers.shift && !k.modifiers.alt && k.key == "c";
         if copy {
-            match self.terminal.read_with(cx, |t, _| t.selection_to_string()) {
-                Some(text) if !text.is_empty() => {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    self.terminal.update(cx, |t, _| t.clear_selection());
-                    cx.notify();
-                }
-                _ => {
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        let _ = self.terminal.update(cx, |t, _| t.input(b"\x03"));
-                    }
-                }
+            let selection = self.terminal.read_with(cx, |t, _| t.selection_to_string());
+            if let Some(text) = copyable_selection(selection) {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.terminal.update(cx, |t, _| t.clear_selection());
+                cx.notify();
+            } else {
+                // No selection: on mac a no-op, elsewhere `^C` so interrupt
+                // stays reachable.
+                #[cfg(not(target_os = "macos"))]
+                let _ = self.terminal.update(cx, |t, _| t.input(b"\x03"));
             }
             return true;
         }
@@ -929,8 +927,12 @@ impl TerminalView {
     /// Select-to-copy: mirror the in-flight selection into the clipboard on
     /// every drag move, so the text is captured even when the release happens
     /// outside the window (where no mouse-up reaches us).
+    ///
+    /// An empty selection never reaches the clipboard — see
+    /// [`copyable_selection`] for why that matters.
     fn copy_selection_live(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.terminal.read_with(cx, |t, _| t.selection_to_string()) {
+        let selection = self.terminal.read_with(cx, |t, _| t.selection_to_string());
+        if let Some(text) = copyable_selection(selection) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -977,12 +979,16 @@ impl TerminalView {
     /// (select-to-copy). Idempotent: the div's `on_mouse_up` and the
     /// window-level mouse-up listener both route here; the `selecting` flag
     /// gates the second call.
+    ///
+    /// Like `copy_selection_live`, an empty selection leaves the pasteboard
+    /// untouched rather than clobbering it with "" and dropping the selection.
     pub(crate) fn finalize_selection(&mut self, cx: &mut Context<Self>) {
         if !self.selecting {
             return;
         }
         self.selecting = false;
-        if let Some(text) = self.terminal.read_with(cx, |t, _| t.selection_to_string()) {
+        let selection = self.terminal.read_with(cx, |t, _| t.selection_to_string());
+        if let Some(text) = copyable_selection(selection) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             self.terminal.update(cx, |t, _| t.clear_selection());
         }
@@ -1155,6 +1161,19 @@ fn open_target(text: &str, kind: HoverKind, cwd: &Path) {
     let _ = cmd.spawn();
 }
 
+/// The text a selection is allowed to put on the clipboard: `Some(text)` only
+/// for a non-empty selection.
+///
+/// Every clipboard write clears the pasteboard first, so copying an empty
+/// selection would wipe whatever the user copied elsewhere (a file promise, a
+/// path, another app's text) and leave a text-less clipboard that no paste
+/// target can read. Selecting a blank grid region yields `Some("")` — alacritty
+/// trims the joined cells — so the empty case is reachable on a plain drag,
+/// not just a degenerate one.
+fn copyable_selection(selection: Option<String>) -> Option<String> {
+    selection.filter(|text| !text.is_empty())
+}
+
 /// Map a gpui `MouseButton` to an xterm button code (left=0, middle=1,
 /// right=2). Unrecognised buttons map to 0 (left) so the click is still
 /// forwarded rather than silently dropped.
@@ -1234,5 +1253,30 @@ mod tests {
         assert_eq!(selection_type_for(2), SelectionType::Semantic);
         assert_eq!(selection_type_for(3), SelectionType::Lines);
         assert_eq!(selection_type_for(4), SelectionType::Simple);
+    }
+
+    #[test]
+    fn no_selection_is_not_copyable() {
+        assert_eq!(copyable_selection(None), None);
+    }
+
+    #[test]
+    fn empty_selection_is_not_copyable() {
+        // A drag over blank grid cells: alacritty trims the joined cells and
+        // yields "", which must not clear the pasteboard.
+        assert_eq!(copyable_selection(Some(String::new())), None);
+    }
+
+    #[test]
+    fn non_empty_selection_is_copyable_verbatim() {
+        let text = "cargo test --all".to_string();
+        assert_eq!(copyable_selection(Some(text.clone())), Some(text));
+    }
+
+    #[test]
+    fn whitespace_only_selection_is_copyable() {
+        // Indentation is real content: only a truly empty string is dropped.
+        let text = "   ".to_string();
+        assert_eq!(copyable_selection(Some(text.clone())), Some(text));
     }
 }
