@@ -517,6 +517,7 @@ impl Workspace {
         self.ask_custom_subs.clear();
         self.ask_custom_text.clear();
         self.ask_skipped.clear();
+        self.ask_body_scroll.clear();
     }
 
     /// Align the per-question custom-answer scratch with the current ask:
@@ -539,11 +540,13 @@ impl Workspace {
         if self.ask_custom_text.len() != count
             || self.ask_custom_inputs.len() != count
             || self.ask_skipped.len() != count
+            || self.ask_body_scroll.len() != count
         {
             self.reset_ask_custom();
             self.ask_custom_text = vec![String::new(); count];
             self.ask_skipped = vec![false; count];
             self.ask_custom_inputs = vec![None; count];
+            self.ask_body_scroll = (0..count).map(|_| ScrollHandle::new()).collect();
         }
         for qi in 0..count {
             if self.ask_custom_inputs[qi].is_none() {
@@ -577,6 +580,14 @@ impl Workspace {
     /// The `custom` input entity for question `qi`, if the card is live.
     pub(crate) fn ask_custom_state(&self, qi: usize) -> Option<Entity<InputState>> {
         self.ask_custom_inputs.get(qi).and_then(|slot| slot.clone())
+    }
+
+    /// The ask card body's tracked scroll handle for question `qi`. `None`
+    /// before the ask scratch is allocated (the render path allocates it); the
+    /// card then keeps gpui's untracked element-state scroll and takes no wheel
+    /// guard — the pre-fix behaviour, never a broken body.
+    pub(crate) fn ask_body_scroll(&self, qi: usize) -> Option<ScrollHandle> {
+        self.ask_body_scroll.get(qi).cloned()
     }
 
     /// Skip question `qi` (deepseek `QuestionFlow.skipQuestion` semantics):

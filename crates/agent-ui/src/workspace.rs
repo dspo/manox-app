@@ -788,6 +788,15 @@ pub struct Workspace {
     /// never silently folded to a skip, but an explicitly skipped one counts
     /// as completed (dsh `QuestionDraftAnswer.skipped` parity).
     ask_skipped: Vec<bool>,
+    /// Scroll handles for the ask card's body scrollport — the plan-review
+    /// card's plan body and the generic card's capped body — one slot per
+    /// question (index-aligned with `pending_ask.questions`). The body is a
+    /// scrollport nested inside the message list, so its wheel handler needs
+    /// the live offset to tell whether the gesture is consumed there or chained
+    /// to the enclosing list (`contain_body_scroll` in `views/message.rs`), and
+    /// `track_scroll` stores the offset in the handle, so it must outlive a
+    /// frame. Rebuilt with the ask scratch, reset with it.
+    ask_body_scroll: Vec<ScrollHandle>,
     pub(crate) model_open: bool,
     /// PopupMenu entity for the open model selector; created on open, destroyed on close.
     model_menu: Option<Entity<PopupMenu>>,
@@ -1256,6 +1265,7 @@ impl Workspace {
             ask_custom_subs: Vec::new(),
             ask_custom_text: Vec::new(),
             ask_skipped: Vec::new(),
+            ask_body_scroll: Vec::new(),
             model_open: false,
             model_menu: None,
             model_menu_sub: None,

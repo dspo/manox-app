@@ -32,7 +32,7 @@ use base64::Engine as _;
 use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui::prelude::*;
 use gpui::{Animation, AnimationExt as _, CursorStyle, ease_out_quint};
-use gpui::{App, ClipboardItem, Entity, Render, SharedString, WeakEntity, px};
+use gpui::{App, ClipboardItem, Entity, Render, ScrollHandle, SharedString, WeakEntity, px};
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
@@ -2154,6 +2154,42 @@ fn plan_review_approve_index(question: &AskCardQuestion) -> Option<usize> {
         .position(|opt| opt.label == intent.approve)
 }
 
+/// Give an ask card body its wheel contract. The body is a scrollport nested
+/// inside the message list, and gpui dispatches one wheel event to EVERY
+/// scroll container whose hitbox contains the cursor, so without this guard a
+/// wheel over the card scrolls the body and the column together and the
+/// body's tail is never reachable. The body's own (gpui built-in) listener has
+/// already applied the delta when this handler runs — custom listeners
+/// register ahead of it in paint and the bubble phase runs in reverse
+/// registration order — so the room test reads the post-delta offset: while the
+/// body still has room in the gesture's direction the event stops here, and at
+/// either end it continues to the enclosing list (scroll chaining), so a body
+/// that fits its cap never traps the column.
+fn contain_body_scroll(
+    body: gpui::Stateful<gpui::Div>,
+    scroll: &ScrollHandle,
+) -> gpui::Stateful<gpui::Div> {
+    let scroll = scroll.clone();
+    body.track_scroll(&scroll).on_scroll_wheel(
+        move |ev: &gpui::ScrollWheelEvent, window: &mut gpui::Window, cx: &mut App| {
+            let dy = ev.delta.pixel_delta(window.line_height()).y;
+            // Offsets run 0 (top) → -max (bottom): a negative dy scrolls
+            // toward the bottom, a positive one toward the top.
+            let offset = scroll.offset().y;
+            let room = if dy < px(0.) {
+                offset + scroll.max_offset().y > px(0.5)
+            } else if dy > px(0.) {
+                offset < px(-0.5)
+            } else {
+                false
+            };
+            if room {
+                cx.stop_propagation();
+            }
+        },
+    )
+}
+
 /// The plan-review decision card: a tinted strip, the plan as the body that
 /// owns the scroll (so the strip and the decision row stay reachable on a
 /// long plan), and a fixed decision row at the BOTTOM — the approve option as
@@ -2215,6 +2251,16 @@ fn render_plan_review_card(
         .pb_1()
         .child(lead)
         .children(plan_body);
+    // The plan body owns the wheel while it has room: without the guard a
+    // single event scrolls the plan AND the column, so the plan's tail never
+    // reaches the top of the card.
+    let body = match weak
+        .upgrade()
+        .and_then(|ws| ws.read(cx).ask_body_scroll(snapshot.step))
+    {
+        Some(scroll) => contain_body_scroll(body, &scroll),
+        None => body,
+    };
 
     let mut footer = h_flex()
         .debug_selector(move || format!("plan-review-footer-{ix}"))
@@ -2537,6 +2583,15 @@ fn render_question_card(
         .children(detail_block)
         .child(options_block)
         .children(custom_row);
+    // The body owns the wheel while it has room — the same contract as the
+    // plan-review card's body (see `contain_body_scroll`).
+    let body = match weak
+        .upgrade()
+        .and_then(|ws| ws.read(cx).ask_body_scroll(step))
+    {
+        Some(scroll) => contain_body_scroll(body, &scroll),
+        None => body,
+    };
 
     let weak_prev = weak.clone();
     let weak_next = weak.clone();
