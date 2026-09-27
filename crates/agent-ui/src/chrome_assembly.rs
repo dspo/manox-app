@@ -35,6 +35,17 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     // conversation column mounted as the chrome shell's main surface.
     let ws = cx.new(|cx| Workspace::new_embedded(window, cx));
     let mux = ws.read(cx).multiplexer.clone();
+    // The process-lifetime registries the legacy path wires at startup:
+    // the dispatch slot (dock badge pump + reopen-focus read it) and the
+    // process-wide browser host (IPC routing + the agent's web capability).
+    crate::dispatch::set_workspace(ws.clone());
+    {
+        let ws = ws.clone();
+        cx.spawn(async move |cx| {
+            crate::browser_host::WorkspaceBrowserHost::install(ws, cx);
+        })
+        .detach();
+    }
     let shell = cx.new(|cx| Shell::new(shell_config(ws.clone(), &mux, cx), window, cx));
     let shell_weak = shell.downgrade();
     // Per-thread dock state: each visited thread keeps its live panel
@@ -54,6 +65,17 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             return;
         };
         let mux = ws.read(cx).multiplexer.clone();
+        // The process-lifetime registries the legacy path wires at startup:
+        // the dispatch slot (dock badge pump + reopen-focus read it) and the
+        // process-wide browser host (IPC routing + the agent's web capability).
+        crate::dispatch::set_workspace(ws.clone());
+        {
+            let ws = ws.clone();
+            cx.spawn(async move |cx| {
+                crate::browser_host::WorkspaceBrowserHost::install(ws, cx);
+            })
+            .detach();
+        }
         let rows = mux.read(cx).thread_list().to_vec();
         let unread = mux.read(cx).unread_map(cx);
         let sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
@@ -118,7 +140,7 @@ fn shell_config(
 ) -> ShellConfig {
     let placeholder: gpui::AnyView = ws.clone().into();
     ShellConfig {
-        tool_kinds: registry(mux),
+        tool_kinds: registry(mux, &ws),
         main: Arc::new(PendingMain {
             view: placeholder,
             ws: ws.clone(),

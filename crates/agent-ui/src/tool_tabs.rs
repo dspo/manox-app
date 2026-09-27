@@ -114,6 +114,127 @@ impl ToolTab for TerminalTab {
     }
 }
 
+// ── integrated browser ─────────────────────────────────────────────────────
+
+/// The integrated-browser kind: one untrusted wry webview per tab, driven
+/// by the process-wide `WorkspaceBrowserHost` (the same bridge the agent's
+/// web tools reach: notify/inbound routing, eval oneshots, yields). The tab
+/// body is the app's own `BrowserView` (its address bar + navigation chrome
+/// included), so the webview is a true instance of the shipping surface.
+pub struct BrowserTool {
+    ws: Entity<crate::Workspace>,
+}
+
+impl BrowserTool {
+    pub fn new(ws: Entity<crate::Workspace>) -> Self {
+        Self { ws }
+    }
+}
+
+impl ToolTabFactory for BrowserTool {
+    fn kind(&self) -> &'static str {
+        "browser"
+    }
+
+    fn create(&self) -> Arc<dyn ToolTab> {
+        Arc::new(BrowserTab {
+            id: next_instance_id("browser"),
+            ws: self.ws.clone(),
+            tab_id: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn quick_action(&self) -> Option<SharedString> {
+        Some(manox_i18n::t("chrome-quick-browser").into())
+    }
+
+    fn icon(&self, _cx: &App) -> AnyElement {
+        icon(icons::GLOBE, 15.).into_any_element()
+    }
+}
+
+struct BrowserTab {
+    id: String,
+    ws: Entity<crate::Workspace>,
+    /// The app-side browser tab id (allocated at open; the host routes by
+    /// it).
+    tab_id: std::sync::Mutex<Option<manox_agent::thread_engine::BrowserTabId>>,
+}
+
+impl ToolTab for BrowserTab {
+    fn kind(&self) -> &'static str {
+        "browser"
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn title(&self) -> SharedString {
+        manox_i18n::t("chrome-tab-browser").into()
+    }
+
+    fn icon(&self, _cx: &App) -> AnyElement {
+        icon(icons::GLOBE, 15.).into_any_element()
+    }
+
+    fn open(&self, window: &mut Window, cx: &mut App, store: &mut TabStore) {
+        // The production browser-tab path on the embedded workspace: the
+        // view registers with the browser host (IPC routing) and lives in
+        // the workspace's own `browser_views` map — the host's routing
+        // reaches it exactly as it reaches legacy tabs.
+        let url = crate::views::browser_view::DEFAULT_URL;
+        let (tab_id, view) = self.ws.update(cx, |ws, cx| {
+            let tab_id = ws.restore_browser_tab(url, window, cx);
+            let view = ws
+                .browser_views
+                .get(&tab_id)
+                .cloned()
+                .expect("restore_browser_tab inserts the view");
+            (tab_id, view)
+        });
+        *self.tab_id.lock().expect("browser tab id lock") = Some(tab_id);
+        store.put(&self.id, view);
+    }
+
+    fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
+        if let Some(tab_id) = self.tab_id.lock().expect("browser tab id lock").take() {
+            self.ws
+                .update(cx, |ws, cx| ws.close_browser_tab(tab_id, cx));
+        }
+        store.reset(&self.id);
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
+        use gpui::{ParentElement, Styled, div, px};
+        match store.get::<crate::views::browser_view::BrowserView>(&self.id) {
+            Some(view) => div()
+                .w_full()
+                .h_full()
+                .flex()
+                .p(px(4.))
+                .child(view)
+                .into_any_element(),
+            None => div().w_full().h_full().into_any_element(),
+        }
+    }
+
+    fn on_active(&self, visible: bool, cx: &mut App, store: &TabStore) {
+        // The wry subview is an OS-level child window: without a hide it
+        // floats above every other tab (and thread).
+        if let Some(view) = store.get::<crate::views::browser_view::BrowserView>(&self.id) {
+            let webview = view.read(cx).webview().clone();
+            webview.update(cx, |w, _| {
+                if visible {
+                    w.show();
+                } else {
+                    w.hide();
+                }
+            });
+        }
+    }
+}
+
 // ── CLI agent terminals ────────────────────────────────────────────────────
 
 /// The factory carries the multiplexer (the wire model rows — the picker's
@@ -542,8 +663,10 @@ impl manox_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
 /// order).
 pub fn registry(
     mux: &Entity<crate::multiplexer::SessionMultiplexer>,
+    ws: &Entity<crate::Workspace>,
 ) -> Vec<Arc<dyn ToolTabFactory>> {
     vec![
+        Arc::new(BrowserTool::new(ws.clone())),
         Arc::new(TerminalTool),
         Arc::new(AgentTool::new(
             "claude",

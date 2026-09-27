@@ -262,7 +262,7 @@ impl Workspace {
     /// Recreate a persisted browser tab's webview (app-restart path): build
     /// the view, register it in the host routing table, arm the title poll —
     /// tab-list placement is the caller's.
-    pub(super) fn restore_browser_tab(
+    pub fn restore_browser_tab(
         &mut self,
         url: &str,
         window: &mut Window,

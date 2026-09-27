@@ -496,8 +496,22 @@ mod tests {
         const NEEDLES: [&str; 2] = ["i18n::t", "manox_i18n::t"];
 
         fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
+            // A whole-workspace `cargo test` runs many binaries at once; an
+            // exhausted fd table makes `read_dir` fail transiently, which
+            // would read as "directory missing" and fire the wrong assert.
+            // Retry briefly, then surface the real io error.
+            let mut attempts = 0;
+            let entries = loop {
+                match std::fs::read_dir(dir) {
+                    Ok(entries) => break entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(e) if attempts < 20 => {
+                        attempts += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        let _ = e;
+                    }
+                    Err(e) => panic!("cannot scan {}: {e}", dir.display()),
+                }
             };
             for entry in entries.flatten() {
                 let path = entry.path();

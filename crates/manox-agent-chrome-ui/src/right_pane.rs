@@ -95,8 +95,10 @@ pub trait ToolTab: 'static {
     /// Render the tab body (reads the store only). When `open` failed the
     /// shell takes over (error bar + retry) and never calls this.
     fn render(&self, _window: &mut Window, cx: &App, store: &TabStore) -> AnyElement;
-    /// Close: default drops the store entry.
-    fn close(&self, store: &mut TabStore) {
+    /// Close: default drops the store entry (dropping the entity reclaims
+    /// resources). Hosts owning external resources override this to run
+    /// their teardown (the `window`/`cx` are for exactly that).
+    fn close(&self, _window: &mut Window, _cx: &mut App, store: &mut TabStore) {
         store.reset(self.id());
     }
     /// Tab-activation / pane-visibility notification (e.g. the browser's OS
@@ -210,11 +212,11 @@ impl RightPane {
 
     /// Close a tab: reclaim the content (entity drop); closing the last tab
     /// collapses the pane.
-    pub fn close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn close_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.open.iter().find(|t| t.id() == id).cloned() else {
             return;
         };
-        tab.close(&mut self.store);
+        tab.close(window, cx, &mut self.store);
         self.open.retain(|t| t.id() != id);
         if self.active.as_ref().is_some_and(|t| t.id() == id) {
             if let Some(last) = self.open.last().cloned() {
@@ -309,9 +311,9 @@ impl gpui::Render for RightPane {
                 };
                 let t2 = tab.clone();
                 let ent2 = entity.clone();
-                let close = move |_: &ClickEvent, _w: &mut Window, cx: &mut App| {
+                let close = move |_: &ClickEvent, w: &mut Window, cx: &mut App| {
                     let id = t2.id().to_string();
-                    ent2.update(cx, |pane, cx| pane.close_tab(&id, cx));
+                    ent2.update(cx, |pane, cx| pane.close_tab(&id, w, cx));
                 };
                 tab_pill(
                     tab,
