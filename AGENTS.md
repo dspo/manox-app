@@ -50,7 +50,8 @@ runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题
 
 ```bash
 cargo build                          # debug 下 gpui 依赖需 opt-level=3，否则渲染极慢
-cargo run                            # 桌面应用
+cargo run                            # 桌面应用（旧壳，默认）
+cargo run --features chrome-shell    # 桌面应用（chrome 壳：新侧栏/右栏/聊天列装配）
 cargo run -p cx-cli                  # cx CLI
 cargo test                           # live 测试用 MANOX_RUN_LIVE=1 env 门控，默认安全
 cargo clippy --all-targets
@@ -86,7 +87,13 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 
 ## 工作流约定
 
-- 每 PR 门禁：`cargo clippy -D warnings --all-targets` + 全量 `cargo test` + `cargo fmt`；PR 写清 Test Plan 与 Assumptions。
+- **双壳并行（2026-09-22 裁决）**：两套壳长期共存、构建时决定——默认旧壳（agent-ui 的
+  Workspace 全壳），`--features chrome-shell` 挂 `agent-ui::chrome_assembly`（chrome crate
+  的 Shell + 投影侧栏 + 右栏 ToolTab 注册表 + 聊天列嵌入渲染）。新功能两壳都要考虑；
+  计划与分工见 `PLAN-CHROME-CHAT-SPLIT.md`。CI 双配置门禁（默认 + chrome-shell）。
+- 每 PR 门禁：`cargo clippy -D warnings --all-targets`（+ chrome-shell 配置）+ 全量
+  `cargo test` + `cargo test -p agent-ui --features test-support` + `cargo fmt`；
+  PR 写清 Test Plan 与 Assumptions。
 - **合并前必须把 manox 依赖 bump 到最新兼容 commit**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下执行 `cargo update -p manox-agent`——同出 dspo/manox 一个 git source 的全部依赖（manox-agent/harness/protocol/session-core/providers/supervisor/manox-terminal/hyperlinks）在 Cargo.lock 中共用同一锁 rev，任一条目即可整体抬升——重跑全部门禁，并把 Cargo.lock 变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容 rev 再 bump，或在 PR 中显式声明滞留原因（旧 rev 停留是债务，不是默认状态）。
 - 提交信息不得携带 Co-Authored-By 尾注（CI 强制拒绝）。
 

@@ -1,33 +1,22 @@
 # 拆分计划：manox-agent-chrome-ui + manox-agent-chat-ui
 
-> 状态：**Phase 1/2/3 全部落地；Phase 4 进行中（前哨 + 批1-3 已开）**（截至 2026-09-22：
-> Phase 3 = #58；1 = #59；2 = #60+#61+#63+#64；4 前哨 = #62；批 1 = #65 五态 props+投影；
-> 批 2 = #66 双壳落地（--features chrome-shell 挂真装配）；**批 3 = PR #67
-> `feat/chat-column-view`（叠 #66）——chrome 构建能真聊天**：Workspace 增嵌入渲染模式
-> （new_embedded：只渲染会话列——hero/虚拟化列表/composer footer/overlay/rail/turn
-> navigator，动作面抽成两壳共享的 apply_chat_actions 根装饰器；旧壳路径零改动）；
-> chrome 装配改为单嵌入 Workspace——其 multiplexer 同时喂侧栏投影与会话列，侧栏选中走
-> 生产 open_thread 全切换路径，⌘N 走 start_new_thread，标题栏跟随前台线程标题；
-> #66 的占位主面退役；抽出的 hero 引用带出一个此前未扫到的 i18n 键
-> workspace-hero-heading（双语补齐，key-scan 门禁继续执法）。剩余：批 4（浏览器/CLI
-> 页签随宿主解耦 + per-session 页签集）→ 收敛；**修复批 = PR #68**：tranche-3 真机报告两项——侧栏选中死（装配 on_select/on_new_session 钩子
-> 因替换失误以 None 提交，现接生产 open_thread/start_new_thread）+ 底部终端随线程走
-> （Shell take/set_panel_view 无拆分离槽 + 装配按线程 id stash/restore——旧右栏同语义，
-> 仅显式收起拆进程；新拉起 cwd=前台线程 cwd；**修复批 2 = PR #69**：①chrome 构建补注册 codicon（豆腐块根因——example 注册了、
-> bin 的 chrome 分支没注册）；②message.rs 四处 conv.update 嵌套双重租约（点 thinking/工具
-> 折叠即 abort，日志实证）全部展平、grep 清零；③右栏 per-thread 会话集
-> （RightPaneSession stash/restore——打开集/内容仓/激活页签/可见性整体迁移，on_active
-> 生命周期驱动：浏览器子视图隐藏、终端保活，仅显式关页签才拆；装配切线程泵 stash 旧
-> 恢复新，无 stash 落新标签页空态；内容渲染归页签实例、壳只管 chrome 与生命周期——
-> 即用户裁定的右栏分工；**批 4 = PR #70**：右栏注册表补全——AgentTool（claude/codex/copilot 全 cx 启动：mux wire
-> 模型行解析 provider/model + AgentBuilder PTY relay + CxSessionSource TUI，cwd=前台线程）+
-> EditorTool（markdown 写作面）；工厂 mux 携带、开时实时解析；新 kind 免费继承 #69 的
-> per-thread 会话集。浏览器页签为唯一未迁项（宿主绑 Workspace；**修复批 3 = PR #71**：①页签品牌图标（gpui-component Icon 自定义 path——旧壳侧栏同款，
-> 裸 gpui::svg 样式错）；②agent 模型菜单回归——页签体=模型选择器（共享级联投影
-> cascade_provider_groups：agents 可见性过滤/去重/显示名分组/wire 键；点选即以该端点启动，
-> picker 实体自渲染 TUI——页签生命周期单实体，错误留守选择器）；③cwd 继承——前台 cwd 改由
-> 活动线程 wire 行 project 列驱动（store.cwd 记录的是 workspace cwd=home，此前全部落在 ~）；
-> 终端/CLI/底部 dock 全部以线程项目目录为根。
+> 状态：**Phase 1/2/3 全部落地；Phase 4 全部落地（前哨 + 批 1-4 + 三条修复批）——计划
+> 功能性收尾完成，转入收敛期。**
+> （截至 2026-09-22：Phase 3 = #58；1 = #59；2 = #60/#61/#63/#64；4 前哨 = #62；
+> 批 1 = #65 五态 props+投影；批 2 = #66 双壳构建开关 + chrome 装配落地；批 3 = #67
+> 真聊天（embedded 渲染 + 单 Workspace 装配 + 生产 open_thread）；修复批 1 = #68
+> 侧栏选中接线 + 底部终端随线程；修复批 2 = #69 codicon 注册 + 双重租约展平 + 右栏
+> per-thread 会话集；批 4 = #70 CLI agent（含模型选择器）+ 编辑器页签；修复批 3 = #71
+> 品牌图标 + 模型选择器回归 + cwd 继承（wire project 列）；**收尾批 = #77 浏览器页签
+> + 装配层进程级注册表（dispatch/browser host）+ ToolTab::close 资源回收签名 +
+> i18n 扫描韧性**。）
+>
+> **收敛期入口**：`cargo run --features chrome-shell` 即 chrome 壳全功能构建（真实会话
+> 侧栏五态/团队森林、聊天列、右栏四类页签 per-thread、底部 dock 随线程、cwd 随线程、
+> 浏览器页签接生产 IPC 宿主）。默认构建仍为旧壳；旧壳不退役（双壳裁决）。收敛期任务：
+> 日常以 chrome 构建为主用，攒真机反馈修缺陷；视稳定度再议旧壳去留与遗留打磨项
+> （页签标题镜像 ticker、右栏快照 threads.db 持久化、settings/菜单在新壳下的入口、
+> UI-MAP 重写）。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
