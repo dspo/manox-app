@@ -4127,38 +4127,52 @@ fn successor_hand_off_switches_the_foreground_and_consumes_the_signal(
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// `turn_navigator_layout` matrix: the overlay anchors to the conversation
-/// card's padding box — the card's own 1px border is the only furniture on
-/// either side (the shell's sidebar and right pane sit outside this view) —
-/// with the context rail's content inset joining the right side when the rail
-/// is shown.
+/// `turn_navigator_layout` matrix. Two contracts: the overlay anchors to the
+/// conversation card's padding box (the card's own 1px border is the only
+/// furniture on either side — the shell's sidebar and right pane sit OUTSIDE
+/// this view), and its panel is budgeted from the CARD width, never the
+/// window's. The second one is the regression this pins: a window-width
+/// budget (an 1100px window whose sidebar and right pane leave a ~360px card)
+/// hands out the 480px cap, and the card — which clips its children — cuts
+/// the panel off on both sides.
 #[test]
-fn turn_navigator_layout_anchors_to_the_card_padding_box() {
+fn turn_navigator_layout_is_budgeted_from_the_card_not_the_window() {
     use super::{CARD_BORDER, turn_navigator_layout};
     use gpui::px;
 
     let rail_inset = px(crate::views::context_rail::ENV_CONTENT_INSET);
     let half_border = px(CARD_BORDER / 2.);
+    // The panel's usable span: what the layout may fill inside the card.
+    let fits = |card: gpui::Pixels, l: super::TurnNavigatorLayout| {
+        l.panel_width + l.left_inset + l.right_inset + px(24.) <= card
+    };
 
-    // No rail: half the card border on each side; the wide leftover clamps
-    // to the 480 cap.
-    let l = turn_navigator_layout(px(1200.), false);
+    // A full-width card (sidebar collapsed, right pane closed): half the card
+    // border on each side, the leftover clamping to the 480 cap.
+    let card = px(1_090.);
+    let l = turn_navigator_layout(card, false);
     assert_eq!(l.left_inset, half_border);
     assert_eq!(l.right_inset, half_border);
     assert_eq!(l.panel_width, px(480.));
+    assert!(fits(card, l));
 
     // Context rail shown: its content inset joins the right side.
-    let l = turn_navigator_layout(px(1200.), true);
+    let l = turn_navigator_layout(card, true);
     assert_eq!(l.left_inset, half_border);
     assert_eq!(l.right_inset, half_border + rail_inset);
+    assert!(fits(card, l));
 
-    // Narrow window: the panel takes whatever fits, then floors at zero —
-    // never negative (a negative width would poison the overlay layout).
-    let l = turn_navigator_layout(px(600.), true);
-    assert_eq!(
-        l.panel_width,
-        px(600.) - l.left_inset - l.right_inset - px(24.)
-    );
+    // The frame-error case: with the sidebar AND the right pane open, the
+    // card is a fraction of the window. The panel shrinks with it instead of
+    // taking the 480 cap.
+    let card = px(360.);
+    let l = turn_navigator_layout(card, false);
+    assert_ne!(l.panel_width, px(480.), "the cap must not exceed the card");
+    assert_eq!(l.panel_width, card - l.left_inset - l.right_inset - px(24.));
+    assert!(fits(card, l));
+
+    // Narrow card: the panel floors at zero — never negative (a negative
+    // width would poison the overlay layout).
     let l = turn_navigator_layout(px(30.), true);
     assert_eq!(l.panel_width, px(0.));
 }

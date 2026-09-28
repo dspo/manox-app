@@ -398,11 +398,14 @@ struct TurnNavigatorLayout {
     panel_width: Pixels,
 }
 
-fn turn_navigator_layout(window_width: Pixels, show_context_rail: bool) -> TurnNavigatorLayout {
+fn turn_navigator_layout(card_width: Pixels, show_context_rail: bool) -> TurnNavigatorLayout {
     // The overlay anchors to the conversation card's padding box (gpui
-    // absolute positioning is CSS-style). The card is this view's whole
-    // canvas — the shell's sidebar and right pane sit outside it — so the
-    // card's own 1px border is the only furniture on either side.
+    // absolute positioning is CSS-style), and it must fit INSIDE it: the card
+    // clips its children, so a panel sized from the window would be cut off on
+    // both sides whenever the shell's sidebar or right pane claims width. The
+    // card's own 1px border is the only furniture on either side here; the
+    // shell's sidebar and right pane live OUTSIDE the card, which is exactly
+    // why the caller passes the measured card width and never the window's.
     let left_inset = px(CARD_BORDER / 2.);
     let context_inset = if show_context_rail {
         px(crate::views::context_rail::ENV_CONTENT_INSET)
@@ -410,7 +413,7 @@ fn turn_navigator_layout(window_width: Pixels, show_context_rail: bool) -> TurnN
         px(0.)
     };
     let right_inset = px(CARD_BORDER / 2.) + context_inset;
-    let available = window_width - left_inset - right_inset - px(24.);
+    let available = card_width - left_inset - right_inset - px(24.);
     let panel_width = if available <= px(0.) {
         px(0.)
     } else if available < px(480.) {
@@ -606,6 +609,7 @@ impl Workspace {
                 conversation_sub: None,
                 list_state: ListState::new(0, ListAlignment::Bottom, MSG_LIST_OVERDRAW),
                 message_list_width: crate::views::MessageListWidthInvalidator::default(),
+                card_width: crate::views::CardWidth::default(),
                 list_count: 0,
                 goal_popover_open: false,
                 goal_ticker_gen: 0,
@@ -2028,13 +2032,13 @@ impl Workspace {
 
     fn render_turn_navigator_overlay(
         &self,
-        window: &mut Window,
         theme: &Theme,
         show_context_rail: bool,
+        card_width: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let navigator = self.chat.read(cx).turn_navigator.clone()?;
-        let layout = turn_navigator_layout(window.bounds().size.width, show_context_rail);
+        let layout = turn_navigator_layout(card_width, show_context_rail);
         let panel_height = navigator.read(cx).panel_height(cx);
 
         Some(

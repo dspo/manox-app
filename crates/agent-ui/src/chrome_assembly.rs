@@ -63,6 +63,31 @@ pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {
         .is_ok()
 }
 
+/// Close every open tab of `kind` in the live pane; `false` when no shell or
+/// window is live. The workspace retires the ephemeral observation panels
+/// through this when it leaves a thread: a panel's content is the child
+/// transcript ACCUMULATED SO FAR, so one carried across a thread switch would
+/// come back stale (the transcript catches up, the panel does not). Dropping
+/// them keeps the invariant "a restored panel == the thread's transcript at
+/// open time".
+pub fn close_tool_tabs_of_kind(kind: &str, cx: &mut App) -> bool {
+    let Some(shell) = shell_handle() else {
+        return false;
+    };
+    let Some(handle) = crate::dispatch::window_global() else {
+        return false;
+    };
+    handle
+        .update(cx, |_, window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell
+                    .right
+                    .update(cx, |pane, cx| pane.close_kind(kind, window, cx));
+            });
+        })
+        .is_ok()
+}
+
 /// The open observation panel for a sub-agent address, when one is mounted in
 /// the live pane — how the workspace streams a child event into a panel the
 /// shell owns.
@@ -125,6 +150,17 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     // terminal across switches (the right-pane stash semantic — a
     // stashed view keeps its process running; only explicit collapse of the
     // LIVE dock tears one down).
+    //
+    // LIFETIME (accepted difference, 2026-09-28): these stashes belong to the
+    // SHELL, so they die with the window — a tray close + reopen leaves the
+    // dock's terminal and the right pane's terminal/CLI tabs gone (browser and
+    // editor tabs come back from `threads.db`). The legacy shell kept the same
+    // state on the (process-lifetime) workspace; the chrome shell has always
+    // scoped it to the window, and this build still keeps strictly more than
+    // the chrome build it replaces (that one also lost the workspace itself —
+    // foreground thread, drafts, parked threads — on every reopen). Moving the
+    // stashes onto the workspace is the contained follow-up that would match
+    // the legacy lifetime; it is not in this retirement's scope.
     let mut dock_stash: HashMap<String, gpui::AnyView> = HashMap::new();
     let mut dock_thread: Option<String> = None;
     // Per-thread right-pane sessions: the open tab set + content store +

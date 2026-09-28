@@ -151,8 +151,18 @@ impl Workspace {
         // The pane open runs on the event path: this call arrives inside a
         // Workspace update (the host's dispatch), and the tab's own `open`
         // reaches the workspace again.
+        let logged_url = url.to_string();
         cx.defer(move |cx| {
-            crate::chrome_assembly::open_tool_tab(tab, cx);
+            // No live pane: the call still works for the agent (the webview
+            // exists and the host routes to it), but nothing shows the tab —
+            // log it so "the agent says it opened a browser" has a trail.
+            if !crate::chrome_assembly::open_tool_tab(tab, cx) {
+                tracing::debug!(
+                    tab = ?tab_id,
+                    url = %logged_url,
+                    "browser tab opened with no live right pane"
+                );
+            }
         });
         tab_id
     }

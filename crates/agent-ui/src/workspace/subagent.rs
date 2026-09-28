@@ -96,12 +96,19 @@ impl Workspace {
             })
     }
 
-    /// Drop the per-thread sub-agent observation state. The panels themselves
-    /// are right-pane tabs: they move with the thread through the shell's own
-    /// per-thread stash, so leaving a thread only clears the data the next
-    /// entry backfills from.
-    pub(super) fn clear_subagent_observation(&mut self) {
+    /// Drop the per-thread sub-agent observation state: the accumulated child
+    /// transcripts, and every observation panel mounted in the live pane.
+    ///
+    /// The panels must go with it. A panel renders the transcript accumulated
+    /// up to its open, and the shell's per-thread stash would carry it across
+    /// the switch — it would then show the thread's history only as of the
+    /// moment it was left, while the catch-up refills `subagent_transcripts`
+    /// behind it. Retiring them here keeps "a panel shows the transcript as of
+    /// its open" true for the reopened one (the rail row reopens from the
+    /// fresh transcript).
+    pub(super) fn clear_subagent_observation(&mut self, cx: &mut Context<Self>) {
         self.subagent_transcripts.clear();
+        crate::chrome_assembly::close_tool_tabs_of_kind("subagent", cx);
     }
 
     /// Rebuild the per-thread sub-agent observation state (rail rows + panel

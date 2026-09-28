@@ -179,7 +179,13 @@ impl Workspace {
             .id("embedded-settings")
             .size_full()
             .min_w_0()
-            .child(v_flex().w(px(240.)).h_full().flex_shrink_0().child(nav))
+            .child(
+                v_flex()
+                    .w(px(SETTINGS_NAV_WIDTH))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(nav),
+            )
             .child(
                 div()
                     .w(px(1.))
@@ -209,10 +215,17 @@ impl Workspace {
             .unwrap_or(false);
         let first_screen = self.chat_conversation(cx).read(cx).is_empty(cx) && !running;
         let composer_placement = composer_placement(first_screen);
-        // The chrome card's interior width: the window minus the chrome
-        // shell's own furniture (gutter, sidebar, right-pane seam) — read
-        // from the bounds the chrome layout gives this view.
-        let main_body_w = window.bounds().size.width - px(CARD_BORDER);
+        // The card's interior width — what this view was actually laid out
+        // in. The window width is NOT a stand-in for it: the shell's sidebar
+        // and right pane are siblings of the card, so it overstates the card
+        // by however much they claim (an 1100px window with both open leaves
+        // ~360px of card). The measurement lands at prepaint, so the first
+        // frame of a fresh window falls back to the window width and the
+        // prepaint below schedules the frame that corrects it.
+        let card_width = self.chat.read(cx).card_width.clone();
+        let main_body_w = card_width
+            .get()
+            .unwrap_or_else(|| window.bounds().size.width);
         let show_rail = !first_screen
             && self
                 .chat
@@ -226,7 +239,7 @@ impl Workspace {
             .render_blank_project_overlay(window, &theme, cx)
             .or_else(|| self.render_pending_auth_overlay(&theme, cx));
         let turn_navigator_overlay =
-            self.render_turn_navigator_overlay(window, &theme, show_rail, cx);
+            self.render_turn_navigator_overlay(&theme, show_rail, main_body_w, cx);
 
         let footer = (composer_placement == ComposerPlacement::Footer).then(|| {
             v_flex()
@@ -371,7 +384,12 @@ impl Workspace {
             .size_full()
             .flex()
             .child(conversation_column)
-            .children(turn_navigator_overlay);
+            .children(turn_navigator_overlay)
+            .on_prepaint(move |bounds, window, _app| {
+                if card_width.set(bounds.size.width) {
+                    window.refresh();
+                }
+            });
         self.apply_chat_actions(root, window, cx)
     }
     /// §二.3 stop notice — the dismissible BROADCAST arm. Shown above the

@@ -51,16 +51,8 @@ pub use manox_agent_chat_ui::{
 gpui::actions!(
     agent_ui,
     [
-        ToggleEditor,
-        ToggleEditorPreview,
-        CloseEditor,
         OpenSettings,
-        NewTerminalTab,
-        CloseTerminalTab,
-        FocusTerminal,
         FocusConversation,
-        OpenBrowserTab,
-        CloseBrowserTab,
         BackgroundCurrentThread,
         ArchiveCurrentThread
     ]

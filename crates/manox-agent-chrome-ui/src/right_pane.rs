@@ -311,6 +311,24 @@ impl RightPane {
         cx.notify();
     }
 
+    /// Close every open tab of `kind`, in open order; returns how many went
+    /// away. For kinds whose content cannot outlive its thread, the host
+    /// retires them before stashing the pane instead of carrying dead content
+    /// across the switch.
+    pub fn close_kind(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let ids: Vec<String> = self
+            .open
+            .iter()
+            .filter(|t| t.kind() == kind)
+            .map(|t| t.id().to_string())
+            .collect();
+        let closed = ids.len();
+        for id in ids {
+            self.close_tab(&id, window, cx);
+        }
+        closed
+    }
+
     /// "+"/new-tab page: back to the empty page (open tabs stay).
     pub fn new_tab_page(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.active.take() {

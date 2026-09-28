@@ -255,10 +255,12 @@ impl Workspace {
         let old_id = old_thread.read(|t| t.id.0.clone());
         let new_id = new_thread.read(|t| t.id.0.clone());
 
-        // Sub-agent observation data is per-thread ephemeral state; drop the
-        // outgoing thread's transcripts before rebinding (its right-pane tabs
-        // move with the thread through the shell's own stash).
-        self.clear_subagent_observation();
+        // Sub-agent observation is per-thread ephemeral state; drop the
+        // outgoing thread's transcripts AND its live panels before rebinding
+        // (the shell has not stashed the outgoing pane yet — that happens in
+        // the assembly's observer, after this attach — so the panels closed
+        // here are exactly the outgoing thread's).
+        self.clear_subagent_observation(cx);
 
         // Save the outgoing thread's unsent composer text before switching, so
         // a draft survives a round-trip through another thread (Bug 1). A

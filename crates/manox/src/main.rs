@@ -187,9 +187,7 @@ fn main() {
             gpui::KeyBinding::new("ctrl-shift-c", agent_ui::FocusConversation, None),
             // Park the active running thread into the background and open a
             // fresh empty thread in the same project — the explicit "background
-            // this task" gesture. No-op when idle. cmd-b stays the browser key
-            // on macOS, so ctrl-b is free there; on other platforms the browser
-            // tab moved to ctrl-alt-b to free ctrl-b for this action.
+            // this task" gesture. No-op when idle.
             gpui::KeyBinding::new("ctrl-b", agent_ui::BackgroundCurrentThread, None),
             // Pop the last follow-up parked above the composer while a turn is
             // running (mirrors the per-item Remove affordance for the tail).
@@ -277,9 +275,9 @@ fn main() {
                 }
             });
         });
-        // Terminal actions share the same deferred-dispatch path as Settings:
-        // menu items fire App-level handlers, which reach the active window's
-        // Workspace via the stashed handles.
+        // Taking focus back to the conversation rides the same deferred
+        // dispatch as Settings: the App-level handler reaches the active
+        // window's Workspace through the stashed handles.
         cx.on_action(|_: &agent_ui::FocusConversation, cx: &mut App| {
             let (workspace, handle) = (
                 agent_ui::dispatch::workspace_global(),

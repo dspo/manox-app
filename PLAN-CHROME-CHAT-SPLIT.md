@@ -24,6 +24,12 @@
 > 宿主打开的浏览器页签（`Workspace::open_browser_tab` 建好 webview 后开真页签）。
 > 另修：重启窗口复用进程级 `Workspace`（原 chrome 路径每次开窗新建，dispatch 槽会指旧实体）。
 >
+> **接受的行为差异（评审 c4）**：`mount` 的 dock/右栏 per-thread stash 归壳所有，随窗口销毁 ——
+> 托盘关窗再开，dock 终端与右栏 terminal / CLI 页签会没（browser / editor 从 threads.db 回来）。
+> 旧壳把同样的状态挂在进程级 workspace 上，能活过窗口；chrome 壳历来是窗口级，而本次修复后
+> 本构建仍严格优于它所替代的 chrome 构建（那一个连 workspace 本身都会在每次重开时丢）。
+> 想要旧壳寿命，把 stash 移到 workspace（`right_pane_stash` / `dock_stash` 字段）即可，属独立后续。
+>
 > 随旧壳退役、当前壳无对应入口的能力（如需再议）：侧栏标签编辑 / 线程与分组的手工排序
 > 通知（`SetThreadTag` / `MoveThread` / `MoveFolder` / `RemoveProject`）、旧右栏的
 > 编辑器页签快捷入口（cmd-g 一组，新壳的编辑器在右栏 "+" 内）、会话 sidecar 的

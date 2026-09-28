@@ -68,3 +68,74 @@ pub(crate) fn cascade_provider_groups(
     }
     providers
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wire_model(
+        id: &str,
+        provider_name: Option<&str>,
+        api: &str,
+        config_id: Option<&str>,
+        agents: Option<Vec<&str>>,
+    ) -> manox_protocol::ModelInfo {
+        manox_protocol::ModelInfo {
+            id: id.into(),
+            name: format!("Model {id}"),
+            provider: "prov-a".into(),
+            provider_name: provider_name.map(str::to_string),
+            api: api.into(),
+            context_window: 100,
+            max_tokens: None,
+            config_id: config_id.map(str::to_string),
+            agents: agents.map(|list| list.into_iter().map(str::to_string).collect()),
+        }
+    }
+
+    /// U2 cross-domain #4: the cascade projects the WIRE models — the
+    /// agents-visibility filter (absent = visible; a present list must
+    /// contain the agent), the exact-duplicate collapse, the display-name
+    /// grouping, the config-key fallback, and the api-derived wire key.
+    #[test]
+    fn cascade_projects_the_wire_models() {
+        let models = vec![
+            wire_model("m1", Some("Provider A"), "anthropic", Some("cfg-1"), None),
+            // The exact duplicate (same provider + config key) collapses.
+            wire_model("m2", Some("Provider A"), "anthropic", Some("cfg-1"), None),
+            wire_model(
+                "m3",
+                Some("Provider B"),
+                "anthropic",
+                None,
+                Some(vec!["pi"]),
+            ),
+            // Visible to another agent only — filtered out.
+            wire_model(
+                "m4",
+                Some("Provider B"),
+                "anthropic",
+                Some("cfg-4"),
+                Some(vec!["other"]),
+            ),
+        ];
+        let groups = cascade_provider_groups("pi", &models);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        let (a_name, a_entries) = &groups[0];
+        assert_eq!(a_name, "Provider A");
+        assert_eq!(a_entries.len(), 1, "the exact duplicate collapses");
+        assert_eq!(a_entries[0].config_id, "cfg-1");
+        assert_eq!(
+            a_entries[0].wire.as_deref(),
+            Some("anthropic"),
+            "the wire key derives from the api column"
+        );
+        let (b_name, b_entries) = &groups[1];
+        assert_eq!(b_name, "Provider B");
+        assert_eq!(b_entries.len(), 1, "the other-agent model is filtered out");
+        assert_eq!(
+            b_entries[0].config_id, "m3",
+            "the config key falls back to the model id"
+        );
+    }
+}
