@@ -479,7 +479,7 @@ impl Workspace {
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                let plan_mode = crate::ahp_store::leaf(&view.book, &sid)
+                let plan_mode = crate::ahp_store::leaf(&view.book, sid)
                     .ext
                     .and_then(|x| x.plan_mode)
                     .unwrap_or(false);
@@ -575,7 +575,11 @@ impl Workspace {
     /// the chip's arrival or departure can never squeeze or shift the
     /// pinned model/send controls. Copy is keyed per reason via
     /// `indicator_key()`.
-    fn render_follow_stop_chip(&self, _theme: &Theme, _cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_follow_stop_chip(
+        &self,
+        _theme: &Theme,
+        _cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         // The retry chip retired with the v2 follow stream: a failed turn
         // surfaces as the chat's error part now.
         None
@@ -596,11 +600,9 @@ impl Workspace {
             .as_ref()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
+                crate::ahp_store::leaf(&view.book, sid)
                     .approval_mode()
-                    .and_then(|m| {
-                        serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok()
-                    })
+                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
             })
             .unwrap_or(PermissionMode::ReadOnly);
         let open = self.chat.read(cx).access_open;
@@ -884,16 +886,10 @@ impl Workspace {
     pub(crate) fn send_button_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A click with no foreground store is the teardown window: leave a
         // trace and drop the note, never a panic on the click path.
-        let Some(running) = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid).running()
-            })
-        else {
+        let Some(running) = self.chat.read(cx).store.clone().map(|(store, sid)| {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, &sid).running()
+        }) else {
             tracing::warn!("send/stop dropped: no foreground store bound");
             return;
         };
@@ -1052,7 +1048,9 @@ impl Workspace {
     ) -> AnyElement {
         let project = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
             let view = store.read(cx);
-            crate::ahp_store::leaf(&view.book, &sid).cwd().map(std::path::PathBuf::from)
+            crate::ahp_store::leaf(&view.book, &sid)
+                .cwd()
+                .map(std::path::PathBuf::from)
         });
         let open = self.chat.read(cx).project_chip_open;
         let workspace = cx.entity().downgrade();
@@ -1060,26 +1058,16 @@ impl Workspace {
         // The directory identity is the workspace row accounting this
         // session (dsh parity); the session's own project mirror is the
         // fallback for sessions no row accounts (loose).
-        let row: Option<()> = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .and_then(|(_, session_id)| {
-                self.multiplexer
-                    .read(cx)
-                    .workspace_of_session(&session_id, cx)
-            });
-        let (icon, label): (Option<IconName>, SharedString) = match (row, &project) {
-            (Some(()), None) | (None, &Some(_)) => (Some(IconName::FolderOpen), i18n::t("sidebar-section-projects")),
-            (Some(()), Some(_)) | (None, None) => {
-                let name = std::path::Path::new("").file_name()
+        let (icon, label): (Option<IconName>, SharedString) = match &project {
+            Some(dir) => {
+                let name = dir
+                    .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("project")
                     .to_string();
                 (Some(IconName::FolderOpen), name.into())
             }
-            (None, None) => (
+            None => (
                 Some(IconName::FolderOpen),
                 i18n::t("workspace-project-choose"),
             ),
@@ -1126,7 +1114,7 @@ impl Workspace {
                     .as_ref()
                     .map(|(store, sid)| {
                         let view = store.read(cx);
-                        crate::ahp_store::leaf(&view.book, &sid)
+                        crate::ahp_store::leaf(&view.book, sid)
                             .chat
                             .is_none_or(|c| c.turns.is_empty())
                     })
@@ -1211,10 +1199,7 @@ impl Workspace {
                                     let _ = ws_sel.update(cx, |this, cx| {
                                         this.close_project_chip_menu(cx);
                                         this.with_foreground_store(cx, |store, sid| {
-                                            store.set_cwd(
-                                                &sid,
-                                                p.to_str().unwrap_or_default(),
-                                            );
+                                            store.set_cwd(&sid, p.to_str().unwrap_or_default());
                                         });
                                         Self::register_project_in_store(&p, cx);
                                         cx.notify();

@@ -811,9 +811,9 @@ impl Workspace {
                 .store
                 .as_ref()
                 .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).running()
-            })
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, sid).running()
+                })
                 .expect("foreground store present"),
             self.chat.read(cx).pending_ask.is_some(),
             &text,

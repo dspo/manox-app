@@ -23,7 +23,7 @@
 use crate::ahp_store::{AhpStore, leaf as leaf_of};
 use crate::i18n;
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, MouseButton, MouseUpEvent, Render,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, MouseButton, MouseUpEvent, Render,
     SharedString, Window, prelude::*, px,
 };
 use gpui_component::{
@@ -302,9 +302,7 @@ impl ContextRail {
     fn render_panel(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let project = self.store.as_ref().and_then(|(store, sid)| {
             let book = &store.read(cx).book;
-            leaf_of(book, sid)
-                .cwd()
-                .map(std::path::PathBuf::from)
+            leaf_of(book, sid).cwd().map(std::path::PathBuf::from)
         });
         let agents_section = self.render_agents_section(theme, cx);
 

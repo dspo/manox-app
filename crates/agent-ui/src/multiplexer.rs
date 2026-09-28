@@ -11,9 +11,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ahp_types::state::AgentInfo;
-use gpui::{App, AppContext as _, Context, Entity};
 use crate::sidebar_projection::ThreadRow;
+use ahp_types::state::AgentInfo;
+use gpui::{App, Context, Entity};
 use manox_agent_chat_ui::ahp_store::{AhpStore, CLIENT_ID, chat_uri, session_uri};
 
 /// The per-app multiplexer: store handle plus attach/focus bookkeeping.
@@ -61,7 +61,7 @@ impl SessionMultiplexer {
         let store = self.store.clone();
         let sid = session_id.to_string();
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            let _ = store.update(cx, |store, cx| {
+            store.update(cx, |store, cx| {
                 store.subscribe(session_uri(&sid), cx);
                 // The chat channel rides the session's default-chat pointer;
                 // subscribing by session id too is tolerated by the host and
@@ -116,10 +116,10 @@ impl SessionMultiplexer {
     pub fn set_focused(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
         let changed = self.focused.as_deref() != session_id;
         self.focused = session_id.map(str::to_string);
-        if let Some(id) = session_id {
-            if self.unread.remove(id).is_some() {
-                cx.notify();
-            }
+        if let Some(id) = session_id
+            && self.unread.remove(id).is_some()
+        {
+            cx.notify();
         }
         if changed {
             cx.notify();
@@ -228,7 +228,8 @@ impl SessionMultiplexer {
 
     /// Refresh the sidebar catalogue from the host.
     pub fn fetch_thread_list(&mut self, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| store.refresh_sessions(cx));
+        self.store
+            .update(cx, |store, cx| store.refresh_sessions(cx));
     }
 
     /// Refresh the catalogue channels (baseline pull).

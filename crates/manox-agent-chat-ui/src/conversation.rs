@@ -99,7 +99,7 @@ pub enum ConvItem {
         /// the segment's header row carries the model name, so this reply
         /// renders no model row of its own (pure-text answers stay bare).
         activity_header: bool,
-        /// The reply's durable journal entry id (`ClientCall::ForkSession`'s
+        /// The reply's durable journal entry id (the fork command's
         /// `through_entry_id`) when it is a forkable anchor. `None` when it is
         /// not — `fork_unavailable` then says why, so the control stays
         /// visible and explains itself instead of vanishing.

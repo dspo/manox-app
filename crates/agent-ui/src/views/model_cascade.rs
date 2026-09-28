@@ -11,8 +11,6 @@
 //! falling back to the model id), which cx matches verbatim; the wire key
 //! pins the endpoint variant at launch resolution.
 
-use std::collections::HashSet;
-
 use crate::i18n;
 use gpui::{App, Context, Window, prelude::*};
 use gpui_component::{
@@ -127,69 +125,35 @@ pub(crate) fn build_model_cascade(
 mod tests {
     use super::*;
 
-    fn wire_model(
-        id: &str,
-        provider_name: Option<&str>,
-        api: &str,
-        config_id: Option<&str>,
-        agents: Option<Vec<&str>>,
-    ) -> manox_protocol::ModelInfo {
-        manox_protocol::ModelInfo {
-            id: id.into(),
-            name: format!("Model {id}"),
-            provider: "prov-a".into(),
-            provider_name: provider_name.map(str::to_string),
-            api: api.into(),
-            context_window: 100,
-            max_tokens: None,
-            config_id: config_id.map(str::to_string),
-            agents: agents.map(|list| list.into_iter().map(str::to_string).collect()),
-        }
+    fn agent(id: &str, display: &str) -> ahp_types::state::AgentInfo {
+        serde_json::from_value(serde_json::json!({
+            "provider": id,
+            "displayName": display,
+            "description": "",
+            "models": [
+                { "id": "m1", "provider": id, "name": "Model m1" },
+                { "id": "m2", "provider": id, "name": "Model m2" },
+            ],
+        }))
+        .expect("agent parses")
     }
 
-    /// U2 cross-domain #4: the cascade projects the WIRE models — the
-    /// agents-visibility filter (absent = visible; a present list must
-    /// contain the agent), the exact-duplicate collapse, the display-name
-    /// grouping, the config-key fallback, and the api-derived wire key.
+    /// The cascade groups one submenu per agent registration, with each
+    /// agent's models as entries (AHP's root catalogue carries the provider
+    /// identity the v2 wire list flattened).
     #[test]
-    fn cascade_projects_the_wire_models() {
-        let models = vec![
-            wire_model("m1", Some("Provider A"), "anthropic", Some("cfg-1"), None),
-            // The exact duplicate (same provider + config key) collapses.
-            wire_model("m2", Some("Provider A"), "anthropic", Some("cfg-1"), None),
-            wire_model(
-                "m3",
-                Some("Provider B"),
-                "anthropic",
-                None,
-                Some(vec!["pi"]),
-            ),
-            // Visible to another agent only — filtered out.
-            wire_model(
-                "m4",
-                Some("Provider B"),
-                "anthropic",
-                Some("cfg-4"),
-                Some(vec!["other"]),
-            ),
+    fn cascade_groups_one_submenu_per_agent() {
+        let agents = vec![
+            agent("prov-a", "Provider A"),
+            agent("prov-b", "Provider B"),
+            // Same display name merges (lookup grouping, not adjacency).
+            agent("prov-c", "Provider A"),
         ];
-        let groups = cascade_provider_groups("pi", &models);
+        let groups = cascade_provider_groups("pi", &agents);
         assert_eq!(groups.len(), 2, "{groups:?}");
-        let (a_name, a_entries) = &groups[0];
-        assert_eq!(a_name, "Provider A");
-        assert_eq!(a_entries.len(), 1, "the exact duplicate collapses");
-        assert_eq!(a_entries[0].config_id, "cfg-1");
-        assert_eq!(
-            a_entries[0].wire.as_deref(),
-            Some("anthropic"),
-            "the wire key derives from the api column"
-        );
-        let (b_name, b_entries) = &groups[1];
-        assert_eq!(b_name, "Provider B");
-        assert_eq!(b_entries.len(), 1, "the other-agent model is filtered out");
-        assert_eq!(
-            b_entries[0].config_id, "m3",
-            "the config key falls back to the model id"
-        );
+        assert_eq!(groups[0].0, "Provider A");
+        assert_eq!(groups[0].1.len(), 4, "two agents' models merge");
+        assert_eq!(groups[1].0, "Provider B");
+        assert_eq!(groups[0].1[0].config_id, "m1");
     }
 }

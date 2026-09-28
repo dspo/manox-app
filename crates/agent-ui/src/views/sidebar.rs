@@ -24,6 +24,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::i18n;
+use crate::sidebar_projection::ThreadRow;
 use crate::sidebar_view::{self, OrderBy};
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent,
@@ -42,7 +43,6 @@ use gpui_component::{
     v_flex,
 };
 use manox_agent::thread::PermissionMode;
-use crate::sidebar_projection::ThreadRow;
 
 /// How far the row wash translates (in pixels, clipped to the row) during the
 /// selection-slide. The two adjacent rows animate in opposite directions so
@@ -589,9 +589,7 @@ impl Sidebar {
                 .unwrap_or_default();
             let accounted: std::collections::HashMap<String, String> = items
                 .iter()
-                .filter_map(|row| {
-                    row.project.as_ref().map(|p| (row.id.clone(), p.clone()))
-                })
+                .filter_map(|row| row.project.as_ref().map(|p| (row.id.clone(), p.clone())))
                 .collect();
             (items, known, accounted)
         };
@@ -1184,10 +1182,7 @@ impl Sidebar {
         {
             // Owned (id, stamp) pairs first: `rows` must stay free to reorder
             // while the account is being computed from this snapshot.
-            let stamps: Vec<(String, i64)> = rows
-                .iter()
-                .map(|s| (s.id.clone(), 0i64))
-                .collect();
+            let stamps: Vec<(String, i64)> = rows.iter().map(|s| (s.id.clone(), 0i64)).collect();
             let input: Vec<sidebar_view::Row<'_>> = stamps
                 .iter()
                 .map(|(id, stamp)| sidebar_view::Row {
@@ -1771,11 +1766,7 @@ impl Render for Sidebar {
         // the folder order).
         let accounted: std::collections::HashMap<String, String> = items
             .iter()
-            .filter_map(|row| {
-                row.project
-                    .as_ref()
-                    .map(|p| (row.id.clone(), p.clone()))
-            })
+            .filter_map(|row| row.project.as_ref().map(|p| (row.id.clone(), p.clone())))
             .collect();
         // Same per-frame prune for the per-project new-session keys (the
         // conversations-header sentinel always stays).
@@ -2443,10 +2434,7 @@ impl SidebarThreadItem {
             team_collapsed: nesting.team_collapsed,
             nested: nesting.nested,
             icon: RowIcon::Thread,
-            wash: approval_mode_color(
-                PermissionMode::default().as_i64(),
-                theme,
-            ),
+            wash: approval_mode_color(PermissionMode::default().as_i64(), theme),
             kind: RowKind::Thread { archived: false },
         }
     }
@@ -3147,24 +3135,16 @@ mod tests {
         ThreadRow {
             id: "thread-abcdef12".into(),
             title: "Summarize the diff".into(),
-            updated_at: 0,
             running: false,
-            // GW5: the wire unread field is the deprecated constant-false;
-            // badges come from the leaf mirrors (or the multiplexer's
-            // client-owned row mirror).
             unread: false,
             errored: false,
             pending_auth: false,
             pending_plan: false,
-            background_work: false,
-            model_id: "claude".into(),
             pinned: false,
-            archived: false,
             parent_id: None,
             depth: 0,
             project: None,
             tag: None,
-            approval_mode: None,
         }
     }
 
@@ -3187,12 +3167,11 @@ mod tests {
     /// matching the webview forest.
     #[test]
     fn team_forest_keeps_members_when_leader_is_in_another_partition() {
-        let thread = |id: &str, parent: Option<&str>, depth: i32, at: i64| {
+        let thread = |id: &str, parent: Option<&str>, depth: i32, _at: i64| {
             let mut s = sample_item();
             s.id = id.into();
             s.parent_id = parent.map(str::to_string);
             s.depth = depth;
-            s.updated_at = at as i32;
             s
         };
         // Only the active partition is handed to the forest; the leader sits
@@ -3511,12 +3490,11 @@ mod tests {
     /// leader hides its subtree, and an orphan stays top-level.
     #[test]
     fn team_forest_nests_members_and_honors_collapse() {
-        let thread = |id: &str, parent: Option<&str>, depth: i32, at: i64| {
+        let thread = |id: &str, parent: Option<&str>, depth: i32, _at: i64| {
             let mut s = sample_item();
             s.id = id.into();
             s.parent_id = parent.map(str::to_string);
             s.depth = depth;
-            s.updated_at = at as i32;
             s
         };
         // Deliberately NOT stamp-ordered: the stamps must not move anything.
@@ -3549,10 +3527,9 @@ mod tests {
     /// the regression lock for rows that used to drift on background activity.
     #[test]
     fn team_forest_preserves_incoming_order_regardless_of_stamps() {
-        let thread = |id: &str, at: i64| {
+        let thread = |id: &str, _at: i64| {
             let mut s = sample_item();
             s.id = id.into();
-            s.updated_at = at as i32;
             s
         };
         let one = vec![thread("a", 300), thread("b", 100), thread("c", 200)];
@@ -3660,9 +3637,7 @@ mod tests {
         let mut item = sample_item();
         item.running = true;
         item.pending_plan = true;
-        item.background_work = true;
         item.tag = Some("chip".into());
-        item.approval_mode = Some(PermissionMode::default().as_i64());
         let nesting = RowNesting {
             indent: px(0.),
             team_leader: false,
@@ -3674,7 +3649,7 @@ mod tests {
         let with_override = SidebarThreadItem::from_wire(&item, false, Some(true), nesting, &theme);
         assert!(with_override.has_unread, "the leaf mirror wins");
         assert!(
-            with_override.running && with_override.pending_plan && with_override.background_work,
+            with_override.running && with_override.pending_plan,
             "the live flags ride the wire row"
         );
         assert_eq!(
@@ -3695,7 +3670,6 @@ mod tests {
         // renders (the optional columns' absence is legal).
         let mut bare_item = sample_item();
         bare_item.tag = None;
-        bare_item.approval_mode = None;
         let bare = SidebarThreadItem::from_wire(&bare_item, false, None, nesting, &theme);
         assert_eq!(bare.tag, None);
         assert_eq!(

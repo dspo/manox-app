@@ -211,7 +211,7 @@ pub enum FollowUpState {
     /// to be promoted to a steer via the Steer action).
     Queued,
     /// Promoted to the server steer queue for the running turn. Carries the
-    /// client-minted id sent with [`manox_protocol::ClientCall::Steer`]: the
+    /// client-minted id the steer dispatch carries: the
     /// injected row's durable identity (the retire-on-injection key) and the
     /// stranded-verdict key at settle. Not removable (no steer-withdrawal
     /// channel in the protocol). A normal settle the injection row missed
@@ -305,7 +305,7 @@ pub struct ChatColumn {
     /// landing, re-handled on thread switch.
     pub store: Option<(gpui::Entity<AhpStore>, String)>,
     /// γ-3: the AgentServer session_id for the landing thread. Used as the
-    /// `session_id` field in `FromClient` commands.
+    /// `session_id` field in the command payloads.
     pub session_id: Option<String>,
     /// Generation counter for git-status refreshes: bumping it means any
     /// prior in-flight refresh self-cancels instead of overwriting newer

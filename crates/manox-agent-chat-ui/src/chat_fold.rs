@@ -21,12 +21,12 @@ use ahp_types::state::{
     ToolCallState, ToolResultContent, ToolResultTextContent, Turn, UsageInfo,
 };
 use manox_agent::Message;
+use manox_agent::TokenUsage;
 use manox_agent::db::{HistoryEntry, UiNoteKind, UiNoteRecord};
 use manox_agent::language_model::{
     LanguageModelToolResult, LanguageModelToolUse, MessageContent, Role,
 };
 use manox_agent::thread::ToolCallStatus;
-use manox_agent::TokenUsage;
 
 /// A display-facing delta for the live conversation list.
 #[derive(Debug, Clone)]
@@ -94,13 +94,11 @@ impl ChatEvent {
                 let state = find_tool_call(chat, &confirmed.tool_call_id)?;
                 Some(tool_call_event(&confirmed.tool_call_id, state))
             }
-            A::ChatToolCallComplete(complete) => {
-                Some(ChatEvent::ToolResult {
-                    id: complete.tool_call_id.clone(),
-                    output: tool_result_text(complete.result.content.as_deref()),
-                    is_error: !complete.result.success,
-                })
-            }
+            A::ChatToolCallComplete(complete) => Some(ChatEvent::ToolResult {
+                id: complete.tool_call_id.clone(),
+                output: tool_result_text(complete.result.content.as_deref()),
+                is_error: !complete.result.success,
+            }),
             A::ChatToolCallContentChanged(changed) => {
                 let state = find_tool_call(chat, &changed.tool_call_id)?;
                 let output = running_output(state);
@@ -316,10 +314,9 @@ fn push_turn(turn: &Turn, entries: &mut Vec<HistoryEntry>, usage: &mut UsageTabl
                 });
             }
             ResponsePart::ToolCall(call) => {
-                let (use_block, result_block, status) = tool_blocks(&call.tool_call);
+                let (use_block, result_block) = tool_blocks(&call.tool_call);
                 assistant_content.push(MessageContent::ToolUse(use_block));
                 pending_results.push(MessageContent::ToolResult(result_block));
-                let _ = status;
             }
             ResponsePart::SystemNotification(note) => {
                 flush_assistant(&mut assistant_content, &mut pending_results, entries);
@@ -384,7 +381,7 @@ fn flush_assistant(
 }
 
 /// Lower one AHP tool call to the (use, result) pair the builder pairs back.
-fn tool_blocks(call: &ToolCallState) -> (LanguageModelToolUse, LanguageModelToolResult, ()) {
+fn tool_blocks(call: &ToolCallState) -> (LanguageModelToolUse, LanguageModelToolResult) {
     let (name, input_raw, output, is_error): (String, String, String, bool) = match call {
         ToolCallState::Completed(c) => (
             c.tool_name.clone(),
@@ -411,8 +408,7 @@ fn tool_blocks(call: &ToolCallState) -> (LanguageModelToolUse, LanguageModelTool
             id: tool_call_id_of(call).to_string(),
             name: Arc::from(name.as_str()),
             raw_input: input_raw.clone(),
-            input: serde_json::from_str(&input_raw)
-                .unwrap_or(serde_json::Value::Null),
+            input: serde_json::from_str(&input_raw).unwrap_or(serde_json::Value::Null),
             is_input_complete: true,
             thought_signature: None,
         },
@@ -422,7 +418,6 @@ fn tool_blocks(call: &ToolCallState) -> (LanguageModelToolUse, LanguageModelTool
             is_error,
             content: output,
         },
-        (),
     )
 }
 
@@ -552,7 +547,7 @@ mod tests {
             "id": "t-1",
             "message": { "text": "do a thing", "origin": { "kind": "user" } },
             "responseParts": [
-                { "type": "markdown", "id": "p-1", "content": "doing it" },
+                { "kind": "markdown", "id": "p-1", "content": "doing it" },
             ],
             "state": "complete",
         }))
@@ -577,16 +572,16 @@ mod tests {
             "id": "t-1",
             "message": { "text": "read a file", "origin": { "kind": "user" } },
             "responseParts": [
-                { "type": "toolCall", "toolCall": {
+                { "kind": "toolCall", "toolCall": {
                     "status": "completed",
                     "toolCallId": "tc-1",
                     "toolName": "Read",
                     "displayName": "Read",
                     "invocationMessage": "Reading",
-                    "toolInput": { "Inline": "{}" },
+                    "toolInput": "{}",
                     "success": true,
                     "pastTenseMessage": "Read it",
-                    "confirmed": { "kind": "auto" },
+                    "confirmed": "notNeeded",
                 }},
             ],
             "state": "complete",
@@ -615,7 +610,7 @@ mod tests {
             "id": "t-1",
             "message": { "text": "ask", "origin": { "kind": "user" } },
             "responseParts": [
-                { "type": "inputRequest", "request": {
+                { "kind": "inputRequest", "request": {
                     "id": "q-1",
                     "questions": [
                         { "type": "single-select", "id": "q", "message": "pick",

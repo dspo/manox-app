@@ -586,7 +586,7 @@ mod tests {
             }
         }
         assert!(
-            keys.iter().any(|key| key == "follow-stop-retry"),
+            keys.iter().any(|key| key == "workspace-input-placeholder"),
             "the scan found no agent-ui keys — it is scanning the wrong tree"
         );
         assert!(

@@ -1,6 +1,6 @@
 //! The multiplexer → chrome-sidebar projection (PLAN-CHROME-CHAT-SPLIT §5.3,
 //! the D2 ruling): pure functions turning the authoritative wire rows
-//! (`manox_protocol::ThreadListItem`, with the multiplexer's SessionStatus
+//! (the AHP summary rows, with the multiplexer's status deltas
 //! deltas merged) into the chrome `SessionList` props. This module owns no
 //! entity and no subscription — the assembly (Phase 4's shell swap) feeds it
 //! snapshots on the multiplexer's notify, exactly like the agent-ui sidebar's
@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use ahp_types::state::{SessionSummary, SessionStatus as WireStatus};
+use ahp_types::state::{SessionStatus as WireStatus, SessionSummary};
 use manox_agent_chrome_ui::session_list::{SessionGroup, SessionRowData, SessionStatus};
 
 /// One sidebar row: the fields the chrome list renders, derived from a
@@ -49,6 +49,7 @@ impl ThreadRow {
     pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_plan: bool) -> Self {
         let bits = summary.status;
         let flags = WireStatus(bits);
+        let _ = &flags;
         Self {
             id: crate::ahp_store::id_of(&summary.resource).to_string(),
             title: summary.title.clone(),

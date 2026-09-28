@@ -135,62 +135,6 @@ impl Workspace {
         }
     }
 
-    /// Synthesize the top-level AskUserQuestion card when the rebuilt
-    /// conversation lacks the matching `ToolCall` item. The live card is
-    /// created by the gate's `ToolCall` event, which a parked thread never
-    /// sees; the rebuild can miss the mirror's sync window. Without the item
-    /// the ask snapshot cannot attach, so the interaction UI never renders.
-    pub(super) fn ensure_ask_tool_item(
-        &mut self,
-        id: &str,
-        summary: &str,
-        input: serde_json::Value,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .chat_conversation(cx)
-            .read(cx)
-            .find_tool(id, cx)
-            .is_some()
-        {
-            return;
-        }
-        // The runtime always supplies a non-empty English summary for its own
-        // tool call (`CLARIFY_TITLE`), so there is no empty case to fall back
-        // from and no local bundle should be consulted — runtime-supplied
-        // values are never re-localized here. The card's own empty-header
-        // fallback lives at the render site, where the runtime value can
-        // actually be absent.
-        let title = summary.to_string();
-        let role = self.model_label(cx);
-        let _weak = cx.weak_entity();
-        self.chat_conversation(cx).update(cx, |conversation, cx| {
-            conversation.push_tool_call(
-                crate::conversation::ToolCallItem {
-                    id: id.to_string(),
-                    name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
-                    title,
-                    status: manox_agent::thread::ToolCallStatus::PendingApproval,
-                    output: String::new(),
-                    is_error: false,
-                    input,
-                    streaming: false,
-                    collapsed: false,
-                    user_toggled: false,
-                    panel: None,
-                },
-                role,
-                self.chat.read(cx).host.clone(),
-                cx,
-            );
-        });
-        self.sync_list_count(cx);
-        self.chat
-            .read(cx)
-            .list_state
-            .set_follow_mode(FollowMode::Tail);
-    }
-
     pub(crate) fn resolve_auth(&mut self, decision: PermissionDecision, cx: &mut Context<Self>) {
         // The generic approval card's allow/deny leg. The question card's
         // close is NOT this path — it is `dismiss_ask` (B2-PR-3): a close is
@@ -210,7 +154,6 @@ impl Workspace {
             if let Some((chat_id, turn_id, tool_call_id)) =
                 crate::ahp_store::leaf(&view.book, &sid).confirmation(&id)
             {
-                drop(view);
                 store.update(cx, |store, _| {
                     store.confirm_tool_call(&chat_id, &turn_id, &tool_call_id, allow);
                 });
@@ -220,11 +163,6 @@ impl Workspace {
         }
         cx.notify();
     }
-
-    /// Drop a locally-settled card's leaf correlations so a later PR-4
-    /// `DeliveryCancelled` for the same delivery cannot mis-fire the "handled
-    /// elsewhere" notice.
-    fn retire_wire_auth(&mut self, _auth_id: &str, _cx: &mut Context<Self>) {}
 
     /// Close the pending question card without answering: reply with the
     /// Batch-1 dismissal marker (`{"dismissed": true}` on the wire,
@@ -298,7 +236,6 @@ impl Workspace {
                 crate::ahp_store::leaf(&view.book, &sid).chat_input(&ask.id)
             {
                 let request_id = _request.id.clone();
-                drop(view);
                 store.update(cx, |store, _| {
                     store.complete_input(&chat_id, &request_id, Default::default());
                 });
@@ -463,7 +400,6 @@ impl Workspace {
                 crate::ahp_store::leaf(&view.book, &sid).chat_input(&id)
             {
                 let request_id = request.id.clone();
-                drop(view);
                 store.update(cx, |store, _| {
                     store.complete_input(&chat_id, &request_id, Default::default());
                 });
@@ -473,7 +409,6 @@ impl Workspace {
         }
         cx.notify();
     }
-
 
     /// Align the per-question custom-answer scratch with the current ask:
     /// reset lengths to `questions.len()` (on re-seed / count change) and
@@ -610,11 +545,6 @@ impl Workspace {
     /// Wire api string → text color for the pi composer model label and the
     /// context rail's per-model usage rows. Tinted directly from theme tokens
     /// (matching `mode_chip_visual` and the settings panel) so both surfaces
-    /// follow the active light/dark theme automatically.
-    pub(crate) fn pi_wire_text_color(api: &str, theme: &Theme) -> gpui::Hsla {
-        crate::views::context_rail::pi_wire_text_color(api, theme)
-    }
-
     /// The foreground session's model identity from the `model` projection:
     /// the canonical `{provider, modelId}` wire identity (L8) — never a full
     /// `Model` blob. Deserializing the projection into `Model` (an earlier
@@ -623,40 +553,11 @@ impl Workspace {
     pub(crate) fn foreground_model_identity(&self, cx: &App) -> Option<(String, String)> {
         let (store, sid) = self.chat.read(cx).store.clone()?;
         let view = store.read(cx);
-        let model = crate::ahp_store::leaf(&view.book, &sid).model_id()?.to_string();
+        let model = crate::ahp_store::leaf(&view.book, &sid)
+            .model_id()?
+            .to_string();
         let (provider, id) = model.split_once('/')?;
-        (!provider.is_empty() && !id.is_empty())
-            .then(|| (provider.to_string(), id.to_string()))
-    }
-
-    /// Exact registration match of a canonical model identity against the
-    /// kernel provider registry, returning the kernel `Model`. The display
-    /// surfaces resolve against the gateway's wire snapshot
-    /// ([`Self::resolve_model_display`]); this kernel-model resolver outlived the
-    /// `ExecuteFresh` facade that was its last production caller (retired by
-    /// B2-PR-5), so it now exists for the model-resolution unit tests only. A
-    /// stale id resolves to `None`, never a fuzzy look-alike.
-    #[cfg(test)]
-    pub(crate) fn resolve_model_identity(
-        provider: &str,
-        id: &str,
-    ) -> Option<manox_harness::types::Model> {
-        Self::resolve_model_identity_in(&manox_agent::provider_glue::global(), provider, id)
-    }
-
-    /// The pure core of [`Self::resolve_model_identity`] against an explicit
-    /// registry (tests construct one synchronously — the global builds on a
-    /// background thread).
-    #[cfg(test)]
-    pub(crate) fn resolve_model_identity_in(
-        registry: &manox_harness::core::ProviderRegistry,
-        provider: &str,
-        id: &str,
-    ) -> Option<manox_harness::types::Model> {
-        registry
-            .models()
-            .into_iter()
-            .find(|m| m.provider == provider && m.id == id)
+        (!provider.is_empty() && !id.is_empty()).then(|| (provider.to_string(), id.to_string()))
     }
 
     /// Exact registration match of a canonical model identity against the
@@ -829,7 +730,7 @@ impl Workspace {
                         .as_ref()
                         .and_then(|(store, sid)| {
                             let view = store.read(cx);
-                            crate::ahp_store::leaf(&view.book, &sid)
+                            crate::ahp_store::leaf(&view.book, sid)
                                 .reasoning_effort()
                                 .map(str::to_string)
                         })
@@ -959,30 +860,29 @@ impl Workspace {
                     let model = m.clone();
                     let model_name = model.name.clone();
                     let ws = ws.clone();
-                    submenu = submenu.item(
-                        PopupMenuItem::Label(model_name.clone().into())
-                    
-                        .on_click(move |_, _, cx: &mut gpui::App| {
-                            let model = model.clone();
-                            let _ = ws.update(cx, |this, cx| {
-                                // L8 wire identity: the registration-qualified
-                                // `{provider}/{model}` ref, so a pick pins the
-                                // exact endpoint (wire variants of one model
-                                // share the bare id).
-                                this.with_foreground_store(cx, |store, sid| {
-                                    let mut config = serde_json::Map::new();
-                                    config.insert(
-                                        "model".into(),
-                                        serde_json::json!(format!(
-                                            "{}/{}",
-                                            model.provider, model.id
-                                        )),
-                                    );
-                                    store.set_config(&sid, config);
+                    submenu =
+                        submenu.item(PopupMenuItem::Label(model_name.clone().into()).on_click(
+                            move |_, _, cx: &mut gpui::App| {
+                                let model = model.clone();
+                                let _ = ws.update(cx, |this, cx| {
+                                    // L8 wire identity: the registration-qualified
+                                    // `{provider}/{model}` ref, so a pick pins the
+                                    // exact endpoint (wire variants of one model
+                                    // share the bare id).
+                                    this.with_foreground_store(cx, |store, sid| {
+                                        let mut config = serde_json::Map::new();
+                                        config.insert(
+                                            "model".into(),
+                                            serde_json::json!(format!(
+                                                "{}/{}",
+                                                model.provider, model.id
+                                            )),
+                                        );
+                                        store.set_config(&sid, config);
+                                    });
                                 });
-                            });
-                        }),
-                    );
+                            },
+                        ));
                 }
                 submenu
             });
@@ -1343,8 +1243,7 @@ impl Workspace {
                                         this.with_foreground_store(cx, |store, sid| {
                                             let reply =
                                                 store.send_goal(&sid, "pause", None, None, None);
-                                            let _ = manox_agent::runtime::handle()
-                                                .block_on(async { let _ = reply.recv().await; });
+                                            crate::ahp_store::await_reply(reply);
                                         });
                                     })),
                             )
@@ -1365,8 +1264,7 @@ impl Workspace {
                                         this.with_foreground_store(cx, |store, sid| {
                                             let reply =
                                                 store.send_goal(&sid, "resume", None, None, None);
-                                            let _ = manox_agent::runtime::handle()
-                                                .block_on(async { let _ = reply.recv().await; });
+                                            crate::ahp_store::await_reply(reply);
                                         });
                                     })),
                             )
@@ -1479,8 +1377,7 @@ impl Workspace {
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.with_foreground_store(cx, |store, sid| {
                                     let reply = store.send_goal(&sid, "clear", None, None, None);
-                                    let _ = manox_agent::runtime::handle()
-                                        .block_on(async { let _ = reply.recv().await; });
+                                    crate::ahp_store::await_reply(reply);
                                 });
                                 this.chat.update(cx, |chat, cx| {
                                     chat.goal_popover_open = false;

@@ -133,7 +133,7 @@ impl WorkspaceBrowserHost {
         Self::set_concrete(host);
         // Register the capability provider on the same seam: the kernel drives
         // the browser through `capability::provider()` without holding an
-        // `&mut App` (capability inversion; protocol `ServerCall::BrowserOp`
+        // `&mut App` (capability inversion; the host→client browser request
         // later).
         manox_agent::capability::set_provider(GpuiCapability::start(cx));
         cx.update(|cx| {

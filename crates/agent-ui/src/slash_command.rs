@@ -451,7 +451,7 @@ impl SlashCommand for CompactCommand {
         };
         workspace.with_foreground_store(cx, |store, sid| {
             let reply = store.send_compact(&sid, instructions.clone());
-            let _ = manox_agent::runtime::handle().block_on(async { let _ = reply.recv().await; });
+            crate::ahp_store::await_reply(reply);
         });
         cx.notify();
         SlashResult::Handled
@@ -500,8 +500,9 @@ impl SlashCommand for GoalCommand {
             });
         if let Some(objective) = trimmed.strip_prefix("replace ").map(str::trim) {
             workspace.with_foreground_store(cx, |store, sid| {
-                let reply = store.send_goal(&sid, "replace", Some(objective.to_string()), None, None);
-                let _ = manox_agent::runtime::handle().block_on(async { let _ = reply.recv().await; });
+                let reply =
+                    store.send_goal(&sid, "replace", Some(objective.to_string()), None, None);
+                crate::ahp_store::await_reply(reply);
             });
             return SlashResult::Handled;
         }
@@ -518,8 +519,7 @@ impl SlashCommand for GoalCommand {
                     budget,
                     max_rounds,
                 );
-                let _ =
-                    manox_agent::runtime::handle().block_on(async { let _ = reply.recv().await; });
+                crate::ahp_store::await_reply(reply);
             });
             return SlashResult::Handled;
         }
@@ -533,8 +533,7 @@ impl SlashCommand for GoalCommand {
             let max_rounds = current_goal.as_ref().and_then(|g| g.max_rounds);
             workspace.with_foreground_store(cx, |store, sid| {
                 let reply = store.send_goal(&sid, "edit", objective, budget, max_rounds);
-                let _ =
-                    manox_agent::runtime::handle().block_on(async { let _ = reply.recv().await; });
+                crate::ahp_store::await_reply(reply);
             });
             return SlashResult::Handled;
         }
@@ -548,8 +547,7 @@ impl SlashCommand for GoalCommand {
             let budget = current_goal.as_ref().and_then(|g| g.token_budget);
             workspace.with_foreground_store(cx, |store, sid| {
                 let reply = store.send_goal(&sid, "edit", objective, budget, max_rounds);
-                let _ =
-                    manox_agent::runtime::handle().block_on(async { let _ = reply.recv().await; });
+                crate::ahp_store::await_reply(reply);
             });
             return SlashResult::Handled;
         }
@@ -565,8 +563,7 @@ impl SlashCommand for GoalCommand {
             "clear" => {
                 workspace.with_foreground_store(cx, |store, sid| {
                     let reply = store.send_goal(&sid, "clear", None, None, None);
-                    let _ = manox_agent::runtime::handle()
-                        .block_on(async { let _ = reply.recv().await; });
+                    crate::ahp_store::await_reply(reply);
                 });
                 cx.notify();
                 SlashResult::Handled
@@ -574,14 +571,14 @@ impl SlashCommand for GoalCommand {
             "pause" | "stop" => {
                 workspace.with_foreground_store(cx, |store, sid| {
                     let reply = store.send_goal(&sid, "pause", None, None, None);
-                    let _ = manox_agent::runtime::handle().block_on(async { let _ = reply.recv().await; });
+                    crate::ahp_store::await_reply(reply);
                 });
                 SlashResult::Handled
             }
             "resume" => {
                 workspace.with_foreground_store(cx, |store, sid| {
                     let reply = store.send_goal(&sid, "resume", None, None, None);
-                    let _ = manox_agent::runtime::handle().block_on(async { let _ = reply.recv().await; });
+                    crate::ahp_store::await_reply(reply);
                 });
                 SlashResult::Handled
             }
@@ -603,8 +600,9 @@ impl SlashCommand for GoalCommand {
                     return SlashResult::Handled;
                 }
                 workspace.with_foreground_store(cx, |store, sid| {
-                    let reply = store.send_goal(&sid, "create", Some(trimmed.to_string()), None, None);
-                    let _ = manox_agent::runtime::handle().block_on(async { let _ = reply.recv().await; });
+                    let reply =
+                        store.send_goal(&sid, "create", Some(trimmed.to_string()), None, None);
+                    crate::ahp_store::await_reply(reply);
                 });
                 cx.notify();
                 SlashResult::InjectUserTurn(trimmed.to_string())

@@ -26,39 +26,6 @@ impl Workspace {
     /// (`insert_user_message` + `run_turn`) bypassed the journal's
     /// accept-time persistence (K5) and the server's queue/drain merge; the
     /// parked thread has no optimistic bubble, so no echo is pushed — the
-    /// origin_rpc still rides the Submit for the entry correlation.
-    pub(super) fn flush_parked_follow_ups(&mut self, thread_id: &str, cx: &mut Context<Self>) {
-        let drained = self.chat.update(cx, |chat, cc| {
-            let v = chat.drain_parked_queue(thread_id);
-            cc.notify();
-            v
-        });
-        if drained.is_empty() {
-            return;
-        }
-        let n = drained.len();
-        for (i, turn) in drained.into_iter().enumerate() {
-            if i + 1 < n {
-                // All but the last: park as queued on the parked thread's chat.
-                let id = uuid::Uuid::new_v4().to_string();
-                self.with_foreground_store(cx, |store, sid| {
-                    store.set_pending_message(
-                        &sid,
-                        &id,
-                        ahp_types::state::PendingMessageKind::Queued,
-                        turn.text.clone(),
-                    );
-                });
-            } else {
-                // Last: start the turn on the parked thread's chat.
-                let turn_id = uuid::Uuid::new_v4().to_string();
-                self.with_foreground_store(cx, |store, sid| {
-                    store.submit_turn(&sid, &turn_id, turn.text.clone(), None);
-                });
-            }
-        }
-    }
-
     pub(crate) fn submit_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         tracing::info!("composer submit fired");
         // T10c (§D.6): the v1 `history_phase` loading gate is gone — the
@@ -305,7 +272,12 @@ impl Workspace {
         // the server projects the same command/skill registries the macro
         // and skill adapters dispatch against, so a remote server's
         // registry decides the hit.
-        let commands = self.multiplexer.read(cx).commands(cx).cloned().unwrap_or(serde_json::json!([]));
+        let commands = self
+            .multiplexer
+            .read(cx)
+            .commands(cx)
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
         let hit = match kind {
             RegistryTurnKind::Command => wire_commands_has(&commands, key, "command"),
             RegistryTurnKind::Skill => wire_commands_has(&commands, key, "skill"),
@@ -425,125 +397,12 @@ impl Workspace {
     /// from the kernel queue so a retry can never double-deliver). The remaining
     /// `Queued` cards flush as the next turn afterwards, so the list order ends
     /// up matching the real delivery order (injected steers first, then the
-    /// batched queue). `Failed` cards stay parked for a retry.
-    pub(super) fn promote_settled_steers(&mut self, cx: &mut Context<Self>) {
-        if !self
-            .chat
-            .read(cx)
-            .queued_follow_ups
-            .iter()
-            .any(|item| matches!(item.state, FollowUpState::SteerPending { .. }))
-        {
-            return;
-        }
-        let _weak = cx.weak_entity();
-        let follow_tail = self.chat.read(cx).list_state.is_following_tail();
-        let mut promoted = false;
-        let mut retain: Vec<QueuedFollowUp> = Vec::new();
-        let mut queue = self.chat.update(cx, |chat, cc| {
-            let v = std::mem::take(&mut chat.queued_follow_ups);
-            cc.notify();
-            v
-        });
-        while let Some(item) = queue.pop_front() {
-            match item.state {
-                FollowUpState::SteerPending { .. } => {
-                    let mut meta = item.turn.meta.clone();
-                    // The 「已引导」 badge rides `meta.steered` (rendered in
-                    // `render_user`), now that the pending bubble is gone.
-                    meta.steered = true;
-                    self.chat_conversation(cx).update(cx, |c, cx| {
-                        c.push_user(
-                            item.turn.text.clone(),
-                            item.turn.user_images.clone(),
-                            meta,
-                            self.chat.read(cx).host.clone(),
-                            cx,
-                        )
-                    });
-                    promoted = true;
-                }
-                _ => retain.push(item),
-            }
-        }
-        self.chat.update(cx, |chat, cx| {
-            chat.queued_follow_ups.extend(retain);
-            cx.notify();
-        });
-        if !promoted {
-            return;
-        }
-        self.chat.update(cx, |chat, cx| {
-            chat.queue_drag = None;
-            cx.notify();
-        });
-        self.sync_list_count(cx);
-        if follow_tail {
-            self.follow_message_tail(cx);
-        }
-        self.chat.update(cx, |chat, cx| {
-            chat.list_state.remeasure();
-            cx.notify();
-        });
-        cx.notify();
-    }
-
     /// Retire ONE `SteerPending` card whose injected row just landed
     /// (`ThreadEvent::UserRowLanded`): the model has consumed the steer, so the
     /// card leaves the queue immediately and its `steered` bubble enters the
     /// list — the dsh `claimed` instant, not the turn boundary. A no-op when no
     /// card matches the id (every ordinary prompt row reports the same event;
     /// only steers carry a card id). The settle path stays as the fallback for
-    /// a row that raced it.
-    pub(super) fn retire_injected_steer(&mut self, message_id: &str, cx: &mut Context<Self>) {
-        let Some(pos) = self
-            .chat
-            .read(cx)
-            .queued_follow_ups
-            .iter()
-            .position(|item| match &item.state {
-                FollowUpState::SteerPending { message_id: card } => card.as_str() == message_id,
-                _ => false,
-            })
-        else {
-            return;
-        };
-        let Some(item) = self.chat.update(cx, |chat, cc| {
-            let v = chat.queued_follow_ups.remove(pos);
-            cc.notify();
-            v
-        }) else {
-            return;
-        };
-        self.chat.update(cx, |chat, cx| {
-            chat.queue_drag = None;
-            cx.notify();
-        });
-        let _weak = cx.weak_entity();
-        let follow_tail = self.chat.read(cx).list_state.is_following_tail();
-        let mut meta = item.turn.meta.clone();
-        // The 「已引导」 badge rides `meta.steered` (rendered in `render_user`).
-        meta.steered = true;
-        self.chat_conversation(cx).update(cx, |c, cx| {
-            c.push_user(
-                item.turn.text.clone(),
-                item.turn.user_images.clone(),
-                meta,
-                self.chat.read(cx).host.clone(),
-                cx,
-            )
-        });
-        self.sync_list_count(cx);
-        if follow_tail {
-            self.follow_message_tail(cx);
-        }
-        self.chat.update(cx, |chat, cx| {
-            chat.list_state.remeasure();
-            cx.notify();
-        });
-        cx.notify();
-    }
-
     pub(super) fn append_and_run_user_turn(
         &mut self,
         turn: DeferredUserTurn,
@@ -574,128 +433,14 @@ impl Workspace {
     /// `TurnFinished` settle boundary — promoted into the message list
     /// ([`Self::promote_settled_steers`]) or stranded to `Failed`
     /// ([`Self::mark_stranded_steers_failed`]) — before this runs, so none
-    /// reach here.
-    pub(super) fn flush_queued_follow_ups(&mut self, cx: &mut Context<Self>) {
-        if self.chat.read(cx).queued_follow_ups.is_empty() {
-            return;
-        }
-        let _weak = cx.weak_entity();
-        let follow_tail = self.chat.read(cx).list_state.is_following_tail();
-        let mut retain: Vec<QueuedFollowUp> = Vec::new();
-        let mut queue = self.chat.update(cx, |chat, cc| {
-            let v = std::mem::take(&mut chat.queued_follow_ups);
-            cc.notify();
-            v
-        });
-        let mut drained_turns: Vec<DeferredUserTurn> = Vec::new();
-        while let Some(item) = queue.pop_front() {
-            match item.state {
-                FollowUpState::Queued => {
-                    self.chat_conversation(cx).update(cx, |c, cx| {
-                        c.push_user(
-                            item.turn.text.clone(),
-                            item.turn.user_images.clone(),
-                            item.turn.meta.clone(),
-                            self.chat.read(cx).host.clone(),
-                            cx,
-                        )
-                    });
-                    self.sync_list_count(cx);
-                    if follow_tail {
-                        self.follow_message_tail(cx);
-                    }
-                    drained_turns.push(item.turn);
-                }
-                _ => retain.push(item),
-            }
-        }
-        self.chat.update(cx, |chat, cx| {
-            chat.queued_follow_ups.extend(retain);
-            cx.notify();
-        });
-        if drained_turns.is_empty() {
-            cx.notify();
-            return;
-        }
-        // The `Queued` group just shifted: any in-flight drag's indices are
-        // stale — void the gesture rather than move the wrong row.
-        self.chat.update(cx, |chat, cx| {
-            chat.queue_drag = None;
-            cx.notify();
-        });
-        let n = drained_turns.len();
-        for (i, turn) in drained_turns.into_iter().enumerate() {
-            let attachments: Vec<serde_json::Value> = Vec::new();
-            let _ = &attachments;
-            if i + 1 < n {
-                // All but the last: park as queued.
-                let id = uuid::Uuid::new_v4().to_string();
-                self.with_foreground_store(cx, |store, sid| {
-                    store.set_pending_message(
-                        &sid,
-                        &id,
-                        ahp_types::state::PendingMessageKind::Queued,
-                        turn.text.clone(),
-                    );
-                });
-            } else {
-                // Last: start the turn.
-                let _ = self.send_submit_v2(turn.text.clone(), attachments, cx);
-            }
-        }
-        self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
-        cx.notify();
-    }
-
     /// Settle the foreground steer group at a turn boundary with the server's
     /// per-id verdict: `stranded` is `stranded_steer_ids.len()` from the wire —
     /// the server retracts only the not-yet-injected tail (FIFO), so the first
     /// `N - stranded` cards were injected (promote into the list) and the LAST
     /// `stranded` retracted (Failed, retryable). `stranded.min(n)` keeps a
     /// miscount harmless. A normal settle carries zero stranded and promotes
-    /// the whole group. The drag marker is dropped: the group just moved.
-    pub(super) fn settle_steer_group(&mut self, stranded: usize, cx: &mut Context<Self>) {
-        if stranded > 0 {
-            self.chat.update(cx, |chat, cx| {
-                chat.queue_drag = None;
-                cx.notify();
-            });
-            let positions: Vec<usize> = self
-                .chat
-                .read(cx)
-                .queued_follow_ups
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| matches!(item.state, FollowUpState::SteerPending { .. }))
-                .map(|(ix, _)| ix)
-                .collect();
-            let n = positions.len();
-            let to_fail = stranded.min(n);
-            for &ix in &positions[n - to_fail..] {
-                self.chat.update(cx, |chat, cc| {
-                    chat.queued_follow_ups[ix].state = FollowUpState::Failed;
-                    cc.notify();
-                });
-            }
-        }
-        self.promote_settled_steers(cx);
-    }
-
     /// Settle a parked thread's steer group by the same per-id rule: the
     /// retracted tail turns `Failed`, every other card drops (a parked thread
-    /// has no live list; the injected ones surface through the transcript on
-    pub(super) fn settle_parked_steer_group(
-        &mut self,
-        thread_id: &str,
-        stranded: usize,
-        cx: &mut Context<Self>,
-    ) {
-        self.chat.update(cx, |chat, cc| {
-            chat.settle_parked_group(thread_id, stranded);
-            cc.notify();
-        });
-    }
-
     /// Promote a parked follow-up to a steer. While running, hand it to the
     /// server's steer queue and park the card at the head of the queued group
     /// (the end of the steer group) — no message-list bubble is pushed; the card

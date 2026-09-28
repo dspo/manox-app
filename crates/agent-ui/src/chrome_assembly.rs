@@ -296,7 +296,7 @@ impl MainSurface for PendingMain {
             .as_ref()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
+                crate::ahp_store::leaf(&view.book, sid)
                     .display_title()
                     .map(str::to_string)
             })

@@ -40,24 +40,23 @@ use gpui_component::{
     ThemeStyled as _,
     menu::PopupMenuItem,
     tab::{Tab, TabBar},
-    tag::{Tag, TagVariant},
+    tag::TagVariant,
 };
 /// `WindowExt::push_notification` + `Notification` are shared: the
 /// ChatGPT.app launch path (#410) reports outcomes under either harness.
 use gpui_component::{WindowExt as _, notification::Notification, tooltip::Tooltip};
 use manox_agent::PermissionDecision;
-use manox_agent::language_model::StopReason;
 use manox_agent::thread::PermissionMode;
 use manox_agent::thread_engine::BrowserTabId;
-use manox_agent::{Thread, ThreadEvent, ThreadId};
+use manox_agent::{Thread, ThreadId};
 use manox_components::markdown::HeadingMode;
 use manox_components::markdown::Markdown;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 
-use crate::cockpit::{CockpitPhase, format_elapsed};
+use crate::cockpit::format_elapsed;
 use crate::conversation::ConvItem;
-use crate::conversation::{ApplyOutcome, ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
+use crate::conversation::{ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
 use crate::external_session::{
     ExternalSession, ResumeSidecar, SessionKind, SessionPlacement, claude_cwd_from_file_head,
     claude_project_dir_for_cwd, claude_session_id_from_file_name, codex_session_id_from_rollout,
@@ -124,14 +123,19 @@ fn goal_popover_row(label: &str, value: &str, fg: gpui::Hsla, muted: gpui::Hsla)
 /// `Workspace` itself would double-lease. `None` only when the path is empty.
 fn thread_cwd(
     thread: &manox_agent::thread::ThreadHandle,
-    store: &Option<(gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>, String)>,
+    store: &Option<(
+        gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        String,
+    )>,
     cx: &App,
 ) -> Option<SharedString> {
     let cwd = store
         .as_ref()
         .and_then(|(store, sid)| {
             let view = store.read(cx);
-            crate::ahp_store::leaf(&view.book, sid).cwd().map(std::path::PathBuf::from)
+            crate::ahp_store::leaf(&view.book, sid)
+                .cwd()
+                .map(std::path::PathBuf::from)
         })
         .unwrap_or_else(|| thread.read(|t| t.cwd().to_path_buf()));
     if cwd.as_os_str().is_empty() {
@@ -357,7 +361,10 @@ struct SubagentPrompt {
 /// disposes while parked — the reclaim is an in-place re-attach, no reopen.
 struct BackgroundThread {
     id: String,
-    store: Option<(gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>, String)>,
+    store: Option<(
+        gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        String,
+    )>,
     session_id: Option<String>,
     _sub: Subscription,
 }
@@ -373,10 +380,9 @@ enum RegistryTurnKind {
 // The chat-column state types moved to manox-agent-chat-ui's `column`
 // module (Phase 2 tail); these re-exports keep every bare/`super::` name in
 // the workspace family resolving unchanged.
-pub(crate) use manox_agent_chat_ui::column::parse_pending_ask;
 pub use manox_agent_chat_ui::column::{
     AskIntent, AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState,
-    PendingAsk, PendingAuth, QueuedFollowUp,
+    PendingAsk, PendingAuth, QueuedFollowUp, parse_pending_ask,
 };
 
 pub struct Workspace {
@@ -397,6 +403,8 @@ pub struct Workspace {
     pub(crate) multiplexer: gpui::Entity<crate::multiplexer::SessionMultiplexer>,
     /// T-D: the shared app-level client used by the fire-and-forget
     /// `send_note` and `Reply` verdict paths (no per-session connection).
+    /// (retired: the protocol client lives in the AhpStore)
+    #[allow(dead_code)]
     pub(crate) client: (),
     /// Threads that were running when the user switched away (U6b⑤: the
     /// turn runs server-side and survives the switch on its own — the park
@@ -725,13 +733,6 @@ impl Workspace {
         let (store, sid) = pair;
         Some(store.update(cx, |store, _| f(store, sid)))
     }
-
-    // Entity-handle accessors for ChatColumn fields: each returns a cloned
-    // handle so callers can `.update(cx, …)` without holding the chat
-    // entity's read guard across a mutable borrow of `cx`.
-    pub(crate) fn chat_thread(&self, cx: &App) -> manox_agent::thread::ThreadHandle {
-        self.chat.read(cx).thread.clone()
-    }
     pub(crate) fn chat_store(
         &self,
         cx: &App,
@@ -774,9 +775,8 @@ impl Workspace {
         // construction installs the AHP runtime builder; the store then
         // dials the host over the in-proc leg.
         let _agent_server = manox_session_core::agent_server::global(cwd.clone());
-        let ahp_store = cx.new(|cx| {
-            manox_agent_chat_ui::ahp_store::AhpStore::connect(cwd.clone(), cx)
-        });
+        let ahp_store =
+            cx.new(|cx| manox_agent_chat_ui::ahp_store::AhpStore::connect(cwd.clone(), cx));
         // The landing session id is client-minted (the createSession
         // idempotency key), so the session the workspace renders and the one
         // the server drives are the same conversation.
@@ -1250,22 +1250,6 @@ impl Workspace {
     /// what the live `Request` frame does. Diagnostic-only: lets tests drive
     /// the reply-leg bookkeeping without a wire round-trip.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_seed_store_pending_auth(
-        &mut self,
-        auth_id: &str,
-        msg_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(store) = self.chat.read(cx).store.clone() {
-            store.update(cx, |h, cx| {
-                h.store
-                    .pending_auth
-                    .insert(auth_id.to_string(), manox_protocol::MsgId::new(msg_id));
-                cx.notify();
-            });
-        }
-    }
-
     /// Merge a projection into the bound leaf store. Diagnostic-only: stands
     /// in for the gateway's `Projections` stream without a wire round-trip.
     #[cfg(feature = "test-support")]
@@ -1307,100 +1291,6 @@ impl Workspace {
             chat.conversation_sub = Some(sub);
             cc.notify();
         });
-    }
-
-    /// Rebuild the conversation view from the thread's v2 display fold. The
-    /// trigger is the follow stream's authoritative history boundary
-    /// (`WindowChange::Replace` → `ThreadEvent::HistoryRestored`, §D.1); the
-    /// T10c-era successor of the deleted `ThreadHistory` note replay.
-    pub(crate) fn rebuild_conversation_from_thread(&mut self, cx: &mut Context<Self>) {
-        let display: Vec<manox_agent::db::HistoryEntry> = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                let chat = crate::ahp_store::leaf(&view.book, &sid).chat?;
-                let mut usage = crate::chat_fold::UsageTable::new();
-                Some(crate::chat_fold::synth_display(chat, &mut usage))
-            })
-            .expect("foreground store present");
-        // The sub-agent tree rides the x-manox work channel (unmodelled on
-        // this pass), so the restore starts empty.
-        let subagent_rows = manox_agent::subagent_restore::rebuild_from_messages(&[]);
-        let usage = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid).metrics.map(|m| {
-                    m.per_model_usage
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.to_tokens()))
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
-        let role = self.model_label(cx);
-        let recipient = self.recipient_author(cx);
-        let _weak = cx.weak_entity();
-        let running = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid).running()
-            })
-            .expect("foreground store present");
-        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
-        // A rebuild from the thread is that session's journal replayed, so its
-        // rows may anchor forks.
-        let fork_source = self.fork_source_session(cx);
-        let new_conv = cx.new(|cx| {
-            ConversationState::rebuild_from_display(
-                &display,
-                &usage,
-                &role,
-                recipient,
-                running,
-                crate::conversation::ApplyCtx {
-                    host: self.chat.read(cx).host.clone(),
-                    cwd,
-                    fork_source,
-                },
-                cx,
-            )
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.conversation = new_conv;
-            cx.notify();
-        });
-        self.observe_conversation(cx);
-        let count = self.chat_conversation(cx).read(cx).items().len();
-        self.chat.update(cx, |chat, cx| {
-            chat.list_state.reset(count);
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.list_count = count;
-            cx.notify();
-        });
-        // `Tail` natively pins to the end and keeps following; an upward user
-        // scroll disengages it and landing back at the bottom re-arms it.
-        self.chat
-            .read(cx)
-            .list_state
-            .set_follow_mode(FollowMode::Tail);
-        // Recover the settled sub-agent observation rows alongside the
-        // conversation: a restored transcript is the only record of runs that
-        // finished (or were killed) before the restart / switch.
-        self.apply_subagent_rows(subagent_rows, cx);
-        cx.notify();
     }
 
     /// Wire the workspace to the foreground leaf: the `ThreadEvent` stream
@@ -1690,7 +1580,15 @@ impl Workspace {
             Some(det) => {
                 let items = if det.trigger == '/' {
                     // U2: the popover lists the gateway's command snapshot.
-                    slash_source(&det.query, &self.multiplexer.read(cx).commands(cx).cloned().unwrap_or(serde_json::json!([])))
+                    slash_source(
+                        &det.query,
+                        &self
+                            .multiplexer
+                            .read(cx)
+                            .commands(cx)
+                            .cloned()
+                            .unwrap_or(serde_json::json!([])),
+                    )
                 } else {
                     mention_source(&det.query)
                 };
@@ -1923,47 +1821,6 @@ impl Workspace {
         true
     }
 
-    /// Reconcile the `list_state` with a conversation mutation: splice the
-    /// count (append/remove) and remeasure the affected index/indices. Call
-    /// after any `ConversationState::apply` (the outcome tells which path) so
-    /// the virtualized list's per-item height cache never goes stale.
-    fn apply_list_outcome(&mut self, outcome: ApplyOutcome, cx: &mut App) {
-        let count_changed = self.sync_list_count(cx);
-        match outcome {
-            ApplyOutcome::Remeasure(ix) => {
-                self.chat.read(cx).list_state.remeasure_items(ix..ix + 1)
-            }
-            ApplyOutcome::RemeasureAll => self.chat.read(cx).list_state.remeasure(),
-            // Remeasure the just-mutated segment (e.g. an activity segment
-            // closed for an incoming reply) in addition to the append splice
-            // `sync_list_count` already performed. When the append was net-
-            // neutralized by a trailing `Retry` pop (count unchanged → no
-            // splice), the new assistant bubble occupies a reused `Measured`
-            // tail slot whose cached height is the popped retry badge's, so
-            // remeasure the tail too. (When `popped_retry` was false the push
-            // grew the count by one, `count_changed` is true, and the splice
-            // already inserted the new bubble as `Unmeasured` — so the tail
-            // remeasure is skipped as redundant, not because the branch is
-            // dead.)
-            ApplyOutcome::RemeasureAndAppend { remeasure_ix } => {
-                self.chat
-                    .read(cx)
-                    .list_state
-                    .remeasure_items(remeasure_ix..remeasure_ix + 1);
-                if !count_changed {
-                    let tail = self.chat.read(cx).list_count.saturating_sub(1);
-                    self.chat
-                        .read(cx)
-                        .list_state
-                        .remeasure_items(tail..tail + 1);
-                }
-            }
-            // `Unchanged` touched no item; `Appended`/`RemovedTail` only changed
-            // the count, which `sync_list_count` already spliced.
-            ApplyOutcome::Unchanged | ApplyOutcome::Appended | ApplyOutcome::RemovedTail => {}
-        }
-    }
-
     /// Splice a single newly inserted conversation item at `ix` into
     /// `list_state`. Mid-list insertions (anchored notices) can't ride the
     /// tail-diff in `sync_list_count`, so this splices at the exact position
@@ -2163,15 +2020,12 @@ impl Workspace {
             .clone()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid).cwd().map(std::path::PathBuf::from)
+                crate::ahp_store::leaf(&view.book, &sid)
+                    .cwd()
+                    .map(std::path::PathBuf::from)
             })
             .expect("foreground store present");
-        let worktree_branch = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .and_then(|_| None::<String>);
+        let worktree_branch = self.chat.read(cx).store.as_ref().and(None::<String>);
         cx.spawn(async move |_this, cx| {
             // Debounce: coalesce a burst of tool results / a turn's worth of
             // file writes into a single git call.
@@ -2258,7 +2112,9 @@ impl Workspace {
                 .as_ref()
                 .and_then(|(store, sid)| {
                     let view = store.read(cx);
-                    crate::ahp_store::leaf(&view.book, &sid).model_id().map(str::to_string)
+                    crate::ahp_store::leaf(&view.book, sid)
+                        .model_id()
+                        .map(str::to_string)
                 })
                 .unwrap_or_else(|| {
                     self.chat
@@ -2369,7 +2225,6 @@ impl Workspace {
             let turn_id = manox_agent_chat_ui::ahp_store::leaf(&view.book, &sid)
                 .chat
                 .and_then(|c| c.active_turn.as_ref().map(|t| t.id.clone()));
-            drop(view);
             store.update(cx, |store, _| {
                 if let Some(turn_id) = turn_id {
                     store.cancel_turn(&sid, &turn_id);
@@ -2381,7 +2236,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Send a `ClientNote` to the AgentServer when the landing-thread
+    /// Send a protocol write when the landing-thread
     /// connection is available (γ-3 mutation path). Returns `true` when the
     /// note was sent; the caller falls back to `self.chat.thread.update` when `false`.
     #[allow(dead_code)]
@@ -2389,7 +2244,7 @@ impl Workspace {
 
     /// v2 §D.2 submit path: mint an `origin_rpc` correlation id, register the
     /// optimistic echo in the foreground store, and send the
-    /// [`ClientCall::Submit`] (receipt-only per L7 — the durable user row
+    /// the submit dispatch (receipt-only per L7 — the durable user row
     /// arrives through the follow stream and retires the echo by matching its
     /// `originRpc`). The conversation's optimistic bubble was already pushed by
     /// the caller; retirement just clears the store's echo bookkeeping so the
@@ -2420,7 +2275,7 @@ impl Workspace {
     /// mirror, so the old `thread.enqueue_steer` only inserted a local id and
     /// never reached the server — a dead end where the card sat forever and the
     /// message was neither injected nor confirmed. This sends the real
-    /// [`manox_protocol::ClientCall::Steer`] (server: enqueue while running,
+    /// the steer dispatch (host: enqueue while running,
     /// insert + start a turn while idle). Receipt-only like
     /// [`Self::send_submit_v2`]; no echo is registered because the message does
     /// not enter the conversation here — it moves in only when the turn settles

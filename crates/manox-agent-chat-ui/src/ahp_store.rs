@@ -31,11 +31,11 @@ use ahp_types::commands::{
     ChatSource, CreateChatParams, CreateSessionParams, FetchTurnsParams, ForkChatSource,
     ListSessionsParams, ListSessionsResult, SubscribeResult,
 };
-use ahp_types::state::{ChatInputAnswer, ChatInputResponseKind, PendingMessageKind};
 use ahp_types::common::ROOT_RESOURCE_URI;
+use ahp_types::state::{ChatInputAnswer, ChatInputResponseKind, PendingMessageKind};
 use ahp_types::state::{ChatState, RootState, SessionState, SessionSummary, SnapshotState};
 use manox_ahp::ext;
-use manox_ahp::ext::reducer::{apply as apply_ext, Outcome as ExtOutcome, XManoxState};
+use manox_ahp::ext::reducer::{Outcome as ExtOutcome, XManoxState, apply as apply_ext};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -222,7 +222,7 @@ impl ChannelBook {
                 self.chats.insert(id_of(uri).to_string(), *chat);
                 true
             }
-            SnapshotState::Terminal(_) | _ => false,
+            _ => false,
         }
     }
 
@@ -255,7 +255,7 @@ impl ChannelBook {
 /// An empty root state (the root snapshot always arrives via `initialize`/
 /// `subscribe`, but `Default` must exist for the book).
 fn empty_root() -> RootState {
-    serde_json::from_value(serde_json::json!({}))
+    serde_json::from_value(serde_json::json!({ "agents": [] }))
         .expect("an empty root state is constructible")
 }
 
@@ -263,14 +263,29 @@ fn empty_root() -> RootState {
 /// (the SDK guarantees snapshot-then-delta, but a first delta can race a
 /// subscribe reply through the fan-in stream).
 fn empty_session(uri: &str) -> SessionState {
-    serde_json::from_value(serde_json::json!({ "resource": uri }))
-        .expect("an empty session state is constructible from its resource alone")
+    serde_json::from_value(serde_json::json!({
+        "resource": uri,
+        "provider": "",
+        "title": "",
+        "status": 0,
+        "modifiedAt": "",
+        "lifecycle": "creating",
+        "activeClients": [],
+        "chats": [],
+    }))
+    .expect("an empty session state is constructible from its resource alone")
 }
 
 /// See [`empty_session`].
 fn empty_chat(uri: &str) -> ChatState {
-    serde_json::from_value(serde_json::json!({ "resource": uri }))
-        .expect("an empty chat state is constructible from its resource alone")
+    serde_json::from_value(serde_json::json!({
+        "resource": uri,
+        "title": "",
+        "status": 0,
+        "modifiedAt": "",
+        "turns": [],
+    }))
+    .expect("an empty chat state is constructible from its resource alone")
 }
 
 /// One per-model (or per-request) usage row of the Q face (`metricType:
@@ -376,16 +391,23 @@ pub fn chat_uri(id: &str) -> String {
 /// A reply slot for a command that awaits the host's answer.
 pub type Reply = async_channel::Receiver<Result<Value, String>>;
 
+/// The UI-side answerer signature for host → client capability requests.
+pub type RequestHook = Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+
+/// One inbound host → client capability request plus its reply slot.
+pub struct CapabilityRequest {
+    pub method: String,
+    pub params: Value,
+    pub reply: async_channel::Sender<Result<Value, String>>,
+}
+
 /// The GPUI-facing store. One per process: the host is a singleton (L11) and
 /// this is its only desktop client.
 pub struct AhpStore {
     pub book: ChannelBook,
     client: Option<Client>,
-    /// Connection-level extension catalogues, subscribed once after the
-    /// handshake.
-    catalogues: Vec<&'static str>,
     /// Host → client capability requests, answered by the UI layer's hook.
-    request_hook: Option<Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>>,
+    request_hook: Option<RequestHook>,
     /// Recent dispatch rejections (bounded ring) for UI surfacing.
     rejections: std::collections::VecDeque<String>,
     _tasks: Vec<gpui::Task<()>>,
@@ -398,12 +420,10 @@ impl AhpStore {
     /// runtime builder this dials into.
     pub fn connect(cwd: PathBuf, cx: &mut gpui::Context<Self>) -> Self {
         let (event_tx, event_rx) = async_channel::unbounded::<ahp::ClientEvent>();
-        let (req_tx, req_rx) =
-            async_channel::unbounded::<(String, Value, async_channel::Sender<Result<Value, String>>)>();
+        let (req_tx, req_rx) = async_channel::unbounded::<CapabilityRequest>();
         let mut store = Self {
             book: ChannelBook::default(),
             client: None,
-            catalogues: vec![ext::channels::WORKSPACES, ext::channels::COMMANDS],
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             _tasks: Vec::new(),
@@ -423,11 +443,7 @@ impl AhpStore {
         &mut self,
         cwd: PathBuf,
         event_tx: async_channel::Sender<ahp::ClientEvent>,
-        req_tx: async_channel::Sender<(
-            String,
-            Value,
-            async_channel::Sender<Result<Value, String>>,
-        )>,
+        req_tx: async_channel::Sender<CapabilityRequest>,
         cx: &mut gpui::Context<Self>,
     ) {
         let take = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
@@ -510,15 +526,16 @@ impl AhpStore {
 
     fn spawn_capability_pump(
         &mut self,
-        req_rx: async_channel::Receiver<(
-            String,
-            Value,
-            async_channel::Sender<Result<Value, String>>,
-        )>,
+        req_rx: async_channel::Receiver<CapabilityRequest>,
         cx: &mut gpui::Context<Self>,
     ) {
         let pump = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            while let Ok((method, params, reply)) = req_rx.recv().await {
+            while let Ok(req) = req_rx.recv().await {
+                let CapabilityRequest {
+                    method,
+                    params,
+                    reply,
+                } = req;
                 let answered = this.read_with(cx, |store, _| {
                     store
                         .request_hook
@@ -540,10 +557,7 @@ impl AhpStore {
 
     /// Register the UI-side answerer for host → client capability requests
     /// (`x-manox/browserOp|clipboardRead|openExternal|invokeTool`).
-    pub fn set_request_handler(
-        &mut self,
-        hook: Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>,
-    ) {
+    pub fn set_request_handler(&mut self, hook: RequestHook) {
         self.request_hook = Some(hook);
     }
 
@@ -558,10 +572,8 @@ impl AhpStore {
                     FoldEffect::Rejected(reason) => {
                         tracing::warn!(channel = %envelope.channel, reason = %reason,
                             "dispatch rejected");
-                        self.rejections.push_back(format!(
-                            "{}: {reason}",
-                            envelope.channel
-                        ));
+                        self.rejections
+                            .push_back(format!("{}: {reason}", envelope.channel));
                         while self.rejections.len() > 32 {
                             self.rejections.pop_front();
                         }
@@ -570,17 +582,22 @@ impl AhpStore {
                 }
             }
             ahp::SubscriptionEvent::SessionAdded(params) => {
-                if self.book.seed_summaries(vec![params.summary]) {
+                let changed = self.book.seed_summaries(vec![params.summary]);
+                if changed {
                     cx.notify();
                 }
             }
+            // (the collapsible-if lint fires on the guard-shaped ifs below;
+            // they are match-arm bodies, kept as-is is not allowed, so they
+            // are restructured)
             ahp::SubscriptionEvent::SessionSummaryChanged(_) => {
                 // Deltas are partial; refetching the page is the fold-correct
                 // response (the host answers from store rows, not journals).
                 self.refresh_sessions(cx);
             }
             ahp::SubscriptionEvent::SessionRemoved(params) => {
-                if self.book.remove_summary(&params.channel) {
+                let removed = self.book.remove_summary(&params.channel);
+                if removed {
                     self.book.sessions.remove(id_of(&params.channel));
                     cx.notify();
                 }
@@ -607,17 +624,14 @@ impl AhpStore {
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             let value = tokio_wait(move || async move {
                 client
-                    .request::<_, Value>(
-                        "subscribe",
-                        serde_json::json!({ "channel": uri }),
-                    )
+                    .request::<_, Value>("subscribe", serde_json::json!({ "channel": uri }))
                     .await
                     .map_err(|err| err.to_string())
             })
             .await;
-            let result: SubscribeResult = match value.and_then(|v| {
-                serde_json::from_value(v).map_err(|err| err.to_string())
-            }) {
+            let result: SubscribeResult = match value
+                .and_then(|v| serde_json::from_value(v).map_err(|err| err.to_string()))
+            {
                 Ok(result) => result,
                 Err(err) => {
                     tracing::warn!(error = %err, "subscribe failed");
@@ -642,7 +656,7 @@ impl AhpStore {
             return;
         };
         let uri = uri.into();
-        let task = manox_agent::runtime::handle().spawn(async move {
+        manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client
                 .request::<_, Value>("unsubscribe", serde_json::json!({ "channel": uri }))
                 .await
@@ -650,7 +664,6 @@ impl AhpStore {
                 tracing::warn!(error = %err, "unsubscribe failed");
             }
         });
-        let _ = task;
     }
 
     /// Dispatch one action (write-ahead; the echo folds it). Fire-and-forget:
@@ -661,20 +674,15 @@ impl AhpStore {
             return;
         };
         let channel = channel.into();
-        let task = manox_agent::runtime::handle().spawn(async move {
+        manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client.dispatch(channel, action).await {
                 tracing::warn!(error = %err, "dispatch failed");
             }
         });
-        let _ = task;
     }
 
     /// Issue one command and await the raw result value.
-    fn call(
-        &self,
-        method: &'static str,
-        params: impl Serialize + Send + 'static,
-    ) -> Reply {
+    fn call(&self, method: &'static str, params: impl Serialize + Send + 'static) -> Reply {
         let (tx, rx) = async_channel::bounded(1);
         if let Some(client) = self.client.clone() {
             manox_agent::runtime::handle().spawn(async move {
@@ -685,7 +693,7 @@ impl AhpStore {
                 let _ = tx.send(result).await;
             });
         } else {
-            let _ = tx.send(Err("not connected".into()));
+            drop(tx.send(Err("not connected".into())));
         }
         rx
     }
@@ -743,7 +751,11 @@ impl AhpStore {
     pub fn fetch_turns(&self, chat_id: &str, cursor: Option<String>) -> Reply {
         self.call(
             "fetchTurns",
-            FetchTurnsParams { channel: chat_uri(chat_id), meta: None, cursor },
+            FetchTurnsParams {
+                channel: chat_uri(chat_id),
+                meta: None,
+                cursor,
+            },
         )
     }
 
@@ -791,12 +803,7 @@ impl AhpStore {
     }
 
     /// Retire a steering or queued follow-up.
-    pub fn remove_pending_message(
-        &mut self,
-        chat_id: &str,
-        id: &str,
-        kind: PendingMessageKind,
-    ) {
+    pub fn remove_pending_message(&mut self, chat_id: &str, id: &str, kind: PendingMessageKind) {
         let action = StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
             kind,
             id: id.to_string(),
@@ -816,7 +823,13 @@ impl AhpStore {
 
     /// Settle a tool-call confirmation (the approval gate). The host keys
     /// the settle on the pending call's auth id, carried in `tool_call_id`.
-    pub fn confirm_tool_call(&mut self, chat_id: &str, turn_id: &str, tool_call_id: &str, approved: bool) {
+    pub fn confirm_tool_call(
+        &mut self,
+        chat_id: &str,
+        turn_id: &str,
+        tool_call_id: &str,
+        approved: bool,
+    ) {
         let action = StateAction::ChatToolCallConfirmed(ChatToolCallConfirmedAction {
             turn_id: turn_id.to_string(),
             tool_call_id: tool_call_id.to_string(),
@@ -951,6 +964,14 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Block until a command reply lands. The callers live on the gpui thread,
+/// so the wait rides the manox runtime handle (never the GPUI executor).
+pub fn await_reply(reply: Reply) {
+    manox_agent::runtime::handle()
+        .block_on(async move { reply.recv().await })
+        .ok();
+}
+
 /// A user-authored message (the submit/steer/queue payload).
 fn user_message(text: String) -> ahp_types::state::Message {
     serde_json::from_value(serde_json::json!({
@@ -978,16 +999,17 @@ where
 
 /// Answer one host → client request through the bridge channel.
 async fn answer_via_bridge(
-    tx: async_channel::Sender<(
-        String,
-        Value,
-        async_channel::Sender<Result<Value, String>>,
-    )>,
+    tx: async_channel::Sender<CapabilityRequest>,
     method: String,
     params: Value,
 ) -> Result<Value, ahp_types::messages::JsonRpcError> {
     let (reply_tx, reply_rx) = async_channel::bounded::<Result<Value, String>>(1);
-    if tx.send((method.clone(), params, reply_tx)).await.is_err() {
+    let request = CapabilityRequest {
+        method,
+        params,
+        reply: reply_tx,
+    };
+    if tx.send(request).await.is_err() {
         return Err(ahp_types::messages::JsonRpcError {
             code: -32000,
             message: "client is shutting down".into(),
@@ -1092,9 +1114,8 @@ impl LeafView<'_> {
 
     /// Whether the session is archived (`SessionStatus::IsArchived` bit).
     pub fn archived(&self) -> bool {
-        self.session.is_some_and(|s| {
-            s.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0
-        })
+        self.session
+            .is_some_and(|s| s.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0)
     }
 
     /// Whether the session has an open input request (approval or question).
@@ -1114,13 +1135,11 @@ impl LeafView<'_> {
     /// `(chat id, turn id, tool call id)`.
     pub fn confirmation(&self, id: &str) -> Option<(String, String, String)> {
         self.requests().iter().find_map(|r| match r {
-            ahp_types::state::SessionInputRequest::ToolConfirmation(c) if c.id == id => {
-                Some((
-                    crate::ahp_store::id_of(&c.chat).to_string(),
-                    c.turn_id.clone(),
-                    confirmation_tool_call_id(&c.tool_call).to_string(),
-                ))
-            }
+            ahp_types::state::SessionInputRequest::ToolConfirmation(c) if c.id == id => Some((
+                crate::ahp_store::id_of(&c.chat).to_string(),
+                c.turn_id.clone(),
+                confirmation_tool_call_id(&c.tool_call).to_string(),
+            )),
             _ => None,
         })
     }
@@ -1180,10 +1199,11 @@ mod tests {
     #[test]
     fn the_extension_baseline_replaces_the_channel_state() {
         let mut book = ChannelBook::default();
+        let plan_channel = format!("{}c-1", ext::channels::PLAN);
         book.ext.insert(
-            ext::channels::WORKSPACES.to_string(),
+            plan_channel.clone(),
             XManoxState {
-                order: Some(serde_json::json!([ "b", "a" ])),
+                order: Some(serde_json::json!(["b", "a"])),
                 ..Default::default()
             },
         );
@@ -1191,13 +1211,10 @@ mod tests {
             "type": ext::actions::BASELINE,
             "state": { "order": ["a", "b"] },
         });
-        let effect = book.apply(
-            ext::channels::WORKSPACES,
-            &StateAction::Unknown(baseline),
-        );
+        let effect = book.apply(&plan_channel, &StateAction::Unknown(baseline));
         assert_eq!(effect, FoldEffect::Changed);
         assert_eq!(
-            book.ext[ext::channels::WORKSPACES].order,
+            book.ext[&plan_channel].order,
             Some(serde_json::json!(["a", "b"]))
         );
     }
@@ -1205,7 +1222,8 @@ mod tests {
     #[test]
     fn unknown_extension_actions_are_tolerated() {
         let mut book = ChannelBook::default();
-        book.ext.insert("x-manox-plan:/c-1".into(), XManoxState::default());
+        book.ext
+            .insert("x-manox-plan:/c-1".into(), XManoxState::default());
         let effect = book.apply(
             "x-manox-plan:/c-1",
             &StateAction::Unknown(serde_json::json!({
@@ -1228,7 +1246,7 @@ mod tests {
             })),
         );
         assert_eq!(effect, FoldEffect::Rejected("blank title".into()));
-        assert!(book.sessions.get("s-1").is_none());
+        assert!(!book.sessions.contains_key("s-1"));
     }
 
     #[test]
@@ -1239,6 +1257,7 @@ mod tests {
             "provider": "test",
             "title": "row",
             "status": 0,
+            "createdAt": "2026-01-01T00:00:00Z",
             "modifiedAt": "2026-01-01T00:00:00Z",
         }))
         .expect("a summary parses");
