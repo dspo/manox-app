@@ -590,11 +590,7 @@ impl Workspace {
                 })
             })
             .and_then(|a| {
-                let display = if a.display_name.is_empty() {
-                    a.provider.clone()
-                } else {
-                    a.display_name.clone()
-                };
+                let display = Self::provider_display_key(a);
                 a.models
                     .iter()
                     .find(|m| {
@@ -844,6 +840,30 @@ impl Workspace {
     /// several wire apis appears once per wire endpoint (registration names
     /// differ), so the responses and completions variants stay selectable
     /// alongside the anthropic one.
+    /// The provider segment a picker shows: the display name, with the
+    /// registration machinery's `-{wire_api}` suffix stripped when a host
+    /// predates the display-name field and fills it with the registration
+    /// key ("百炼-anthropic" → "百炼").
+    fn provider_display_key(agent: &ahp_types::state::AgentInfo) -> String {
+        let raw = if agent.display_name.is_empty() {
+            agent.provider.as_str()
+        } else {
+            agent.display_name.as_str()
+        };
+        for suffix in [
+            "-anthropic",
+            "-openai_responses",
+            "-openai_completions",
+            "-responses",
+            "-completions",
+        ] {
+            if let Some(stripped) = raw.strip_suffix(suffix) {
+                return stripped.to_string();
+            }
+        }
+        raw.to_string()
+    }
+
     /// The wire api a host stashed under `meta["x-manox"]["api"]` (manox
     /// hosts do; third-party hosts may not).
     pub(crate) fn model_api(meta: &Option<ahp_types::common::JsonObject>) -> &str {
@@ -885,12 +905,8 @@ impl Workspace {
         // One submenu per agent registration; AHP's root catalogue carries
         // the provider identity the v2 wire list flattened.
         let mut providers: Vec<(String, Vec<ahp_types::state::SessionModelInfo>)> = Vec::new();
-        for agent in models {
-            let prov = if agent.display_name.is_empty() {
-                agent.provider.clone()
-            } else {
-                agent.display_name.clone()
-            };
+        for agent in &models {
+            let prov = Self::provider_display_key(agent);
             match providers.iter_mut().find(|(name, _)| *name == prov) {
                 Some((_, models)) => models.extend(agent.models.iter().cloned()),
                 None => providers.push((prov, agent.models.clone())),
