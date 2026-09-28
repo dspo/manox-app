@@ -55,7 +55,8 @@ manox-providers.workspace = true
 
 # pi harness backend.
 manox-harness = { workspace = true }
-manox-protocol.workspace = true
+ahp.workspace = true
+ahp-types.workspace = true
 manox-session-core.workspace = true
 
 
