@@ -11,7 +11,7 @@ use gpui::{Entity, FocusHandle, ListState, Subscription};
 use gpui_component::input::{InputState, TextareaState};
 use gpui_component::menu::PopupMenu;
 
-use crate::client_store_handle::ClientStoreHandle;
+use crate::ahp_store::AhpStore;
 use crate::conversation::{ConversationState, UserImage, UserTurnMeta};
 use crate::host::ChatHostHandle;
 use crate::views::completion::CompletionState;
@@ -300,13 +300,10 @@ pub struct ChatColumn {
     pub host: ChatHostHandle,
 
     pub thread: manox_agent::thread::ThreadHandle,
-    /// The `AgentServer`-backed `ClientStoreHandle` — the v2 `SessionStore`
-    /// (journal window + projection face + echo map) fed by the multiplexer's
-    /// follow stream. `None` until the workspace creates the AgentServer
-    /// connection (landing thread); views read the store mirror. Held on
-    /// the workspace for the next wiring step (re-handling the store on
-    /// thread switch) — written at landing, read there.
-    pub store: Option<gpui::Entity<ClientStoreHandle>>,
+    /// The AHP store plus this column's session id. Views derive every
+    /// former mirror field from the book's channel state. Written at
+    /// landing, re-handled on thread switch.
+    pub store: Option<(gpui::Entity<AhpStore>, String)>,
     /// γ-3: the AgentServer session_id for the landing thread. Used as the
     /// `session_id` field in `FromClient` commands.
     pub session_id: Option<String>,

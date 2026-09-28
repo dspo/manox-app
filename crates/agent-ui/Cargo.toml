@@ -57,6 +57,7 @@ manox-providers.workspace = true
 manox-harness = { workspace = true }
 ahp.workspace = true
 ahp-types.workspace = true
+manox-ahp.workspace = true
 manox-session-core.workspace = true
 
 

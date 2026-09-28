@@ -10,10 +10,7 @@ pub use chat_host::WorkspaceChatHost;
 // The chat foundation now lives in manox-agent-chat-ui (Phase 2); these
 // re-exports keep every `crate::…` path inside agent-ui (and the tests)
 // resolving unchanged.
-pub use manox_agent_chat_ui::{
-    client_store, client_store_handle, cockpit, conversation, git_status, journal_fold,
-    journal_translate, overlap_diag, server_note_translate,
-};
+pub use manox_agent_chat_ui::{ahp_store, chat_fold, cockpit, conversation, git_status, overlap_diag};
 pub mod browser_host;
 pub mod chatgpt_app;
 pub mod chrome_assembly;

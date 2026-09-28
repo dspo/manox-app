@@ -18,15 +18,30 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.plan_mode)
-            .expect("foreground store present")
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                manox_agent_chat_ui::ahp_store::leaf(&view.book, sid)
+                    .ext
+                    .and_then(|x| x.plan_mode)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
     }
 
     /// Toggle plan mode on the current thread (persisted by the engine).
     pub(crate) fn set_thread_plan_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::SetPlanMode {
-            session_id: sid.into(),
-            enabled,
+        let (store, sid) = match self.chat.read(cx).store.clone() {
+            Some(pair) => pair,
+            None => return,
+        };
+        store.update(cx, |store, _| {
+            store.dispatch(
+                format!("{}{sid}", manox_ahp::ext::channels::PLAN),
+                ahp::StateAction::Unknown(serde_json::json!({
+                    "type": manox_ahp::ext::actions::PLAN_MODE_CHANGED,
+                    "enabled": enabled,
+                })),
+            );
         });
     }
 }

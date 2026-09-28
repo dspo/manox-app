@@ -39,43 +39,32 @@ pub(crate) struct CascadeEntry {
 /// display-name-sorted, so equal names must merge).
 pub(crate) fn cascade_provider_groups(
     agent_id: &str,
-    models: &[manox_protocol::ModelInfo],
+    agents: &[ahp_types::state::AgentInfo],
 ) -> Vec<(String, Vec<CascadeEntry>)> {
     let mut providers: Vec<(String, Vec<CascadeEntry>)> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    for m in models {
-        // Missing agents column = non-cx registration (visible); otherwise
-        // the effective agent list must contain the cascade's agent (parity
-        // with the retired manox `visible_agents` filter).
-        let visible = m
-            .agents
-            .as_ref()
-            .map(|list| list.iter().any(|a| a == agent_id))
-            .unwrap_or(true);
-        if !visible {
-            continue;
-        }
-        let prov = m
-            .provider_name
-            .clone()
-            .unwrap_or_else(|| m.provider.clone());
-        let config_id = m.config_id.clone().unwrap_or_else(|| m.id.clone());
-        // Identity is the registration name (unique per wire endpoint), so
-        // wire variants of one provider stay separate; only exact
-        // duplicates collapse (parity with the composer model menu).
-        if !seen.insert((m.provider.clone(), config_id.clone())) {
-            continue;
-        }
-        let entry = CascadeEntry {
-            config_id,
-            display: m.name.clone(),
-            api: m.api.clone(),
-            wire: manox_agent::provider_glue::wire_key_from_api(&m.api).map(str::to_string),
+    // One group per agent registration: AHP's root catalogue already carries
+    // the provider identity the v2 wire list flattened, so the dedupe and the
+    // visible-agents filter the retired wire shape needed are structural now.
+    for agent in agents {
+        let entries = agent
+            .models
+            .iter()
+            .map(|m| CascadeEntry {
+                config_id: m.id.clone(),
+                display: m.name.clone(),
+                api: String::new(),
+                wire: None,
+            })
+            .collect();
+        let prov = if agent.display_name.is_empty() {
+            agent.provider.clone()
+        } else {
+            agent.display_name.clone()
         };
-        // Lookup-based grouping (not adjacency): equal display names merge.
+        let _ = agent_id;
         match providers.iter_mut().find(|(name, _)| *name == prov) {
-            Some((_, entries)) => entries.push(entry),
-            None => providers.push((prov, vec![entry])),
+            Some((_, existing)) => existing.extend(entries),
+            None => providers.push((prov, entries)),
         }
     }
     providers
@@ -84,7 +73,7 @@ pub(crate) fn cascade_provider_groups(
 pub(crate) fn build_model_cascade(
     menu: PopupMenu,
     agent_id: &'static str,
-    models: &[manox_protocol::ModelInfo],
+    agents: &[ahp_types::state::AgentInfo],
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
     on_pick: impl Fn(String, String, Option<String>, &mut Window, &mut App) + Clone + 'static,

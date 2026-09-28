@@ -20,7 +20,7 @@
 //! the conversation, and while it is open the card stays hidden so the
 //! conversation reclaims its width.
 
-use crate::client_store_handle::ClientStoreHandle;
+use crate::ahp_store::{AhpStore, leaf as leaf_of};
 use crate::i18n;
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, MouseButton, MouseUpEvent, Render,
@@ -61,13 +61,10 @@ const RAIL_NARROW_BREAK: f32 = 900.;
 /// environment/cockpit panel that used to float as an absolute card over the
 /// conversation.
 pub struct ContextRail {
-    /// The AgentServer-backed store mirroring kernel state via
-    /// `ServerNote`s (U7b: the rail's only read face — per-model usage,
-    /// project, cwd and title all read this leaf; the γ-2a dual-read
-    /// fallback the retired kernel thread-handle field served is gone).
-    /// `None` only before the workspace creates the AgentServer
-    /// connection.
-    store: Option<Entity<ClientStoreHandle>>,
+    /// The AHP store plus the attached session id (the rail's only read
+    /// face — per-model usage, project, cwd and title all derive from the
+    /// book's channel state). `None` only before the workspace connects.
+    store: Option<(gpui::Entity<AhpStore>, String)>,
     /// Coarse run phase. Derived from `ThreadEvent`s routed here by
     /// `Workspace`; used to determine the main agent's status indicator.
     pub cockpit_phase: CockpitPhase,
@@ -108,7 +105,7 @@ pub fn pi_wire_text_color(api: &str, theme: &gpui_component::Theme) -> gpui::Hsl
 }
 
 impl ContextRail {
-    pub fn new(store: Option<Entity<ClientStoreHandle>>) -> Self {
+    pub fn new(store: Option<(gpui::Entity<AhpStore>, String)>) -> Self {
         Self {
             store,
             cockpit_phase: CockpitPhase::Idle,
@@ -136,7 +133,11 @@ impl ContextRail {
     /// the ATTACHED session, so a rail left bound to a previous leaf
     /// renders a permanently frozen status row and usage face (the
     /// rail-freeze regression from the visual-acceptance run).
-    pub fn bind_store(&mut self, store: Option<Entity<ClientStoreHandle>>, cx: &mut Context<Self>) {
+    pub fn bind_store(
+        &mut self,
+        store: Option<(gpui::Entity<AhpStore>, String)>,
+        cx: &mut Context<Self>,
+    ) {
         self.store = store;
         cx.notify();
     }
@@ -144,7 +145,7 @@ impl ContextRail {
     /// Diagnostic: the entity id of the bound store leaf (the rail-freeze
     /// regression asserts the attach-time re-bind).
     pub fn diagnostic_store_id(&self) -> Option<gpui::EntityId> {
-        self.store.as_ref().map(|s| s.entity_id())
+        self.store.as_ref().map(|(store, _)| store.entity_id())
     }
 
     /// Whether the floating context card is shown at the given main-column
@@ -299,10 +300,11 @@ impl ContextRail {
     /// `Render` impl positions this as an absolute overlay over the
     /// conversation column's top-right; this fn only paints the card itself.
     fn render_panel(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let project = self.store.as_ref().map(|s| {
-            s.read(cx)
-                .store
-                .with(|st| std::path::PathBuf::from(st.cwd.clone()))
+        let project = self.store.as_ref().and_then(|(store, sid)| {
+            let book = &store.read(cx).book;
+            leaf_of(book, sid)
+                .cwd()
+                .map(std::path::PathBuf::from)
         });
         let agents_section = self.render_agents_section(theme, cx);
 
@@ -364,14 +366,11 @@ impl ContextRail {
         let total = crate::cockpit::format_tokens(
             self.store
                 .as_ref()
-                .map(|s| {
-                    s.read(cx)
-                        .store
-                        .cumulative_usage
-                        .as_ref()
-                        .map(|u| u.input + u.output)
-                        .unwrap_or(0)
+                .and_then(|(store, sid)| {
+                    let book = &store.read(cx).book;
+                    leaf_of(book, sid).metrics.and_then(|m| m.cumulative_usage)
                 })
+                .map(|u| u.input + u.output)
                 .unwrap_or(0),
         );
         // Rate-card cost (#418 wire-boundary pricing); backends/sessions
@@ -379,7 +378,10 @@ impl ContextRail {
         let cumulative_cost = self
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.cumulative_cost))
+            .and_then(|(store, sid)| {
+                let book = &store.read(cx).book;
+                leaf_of(book, sid).metrics.map(|m| m.cumulative_cost)
+            })
             .unwrap_or(0.0);
         let total = if cumulative_cost > 0.0 {
             SharedString::from(format!("{total} · {}", format_cost(cumulative_cost)))
@@ -431,43 +433,21 @@ impl ContextRail {
         };
 
         // Per-model token breakdown tree with context budget integrated.
-        let s = &self
+        let (per_model, per_model_cost) = self
             .store
             .as_ref()
-            .expect("foreground store present")
-            .read(cx)
-            .store;
-        let per_model = s
-            .per_model_usage
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    manox_agent::TokenUsage {
-                        input_tokens: v.input,
-                        output_tokens: v.output,
-                        cache_creation_input_tokens: v.cache_creation,
-                        cache_read_input_tokens: v.cache_read,
-                    },
-                )
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                leaf_of(&view.book, sid).metrics.map(|m| {
+                    let usage = m
+                        .per_model_usage
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_tokens()))
+                        .collect::<HashMap<_, _>>();
+                    (usage, m.per_model_cost.clone())
+                })
             })
-            .collect::<HashMap<_, _>>();
-        let per_model_last = s
-            .per_request_usage
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    manox_agent::TokenUsage {
-                        input_tokens: v.input,
-                        output_tokens: v.output,
-                        cache_creation_input_tokens: v.cache_creation,
-                        cache_read_input_tokens: v.cache_read,
-                    },
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let per_model_cost = s.per_model_cost.clone();
+            .unwrap_or_default();
         let warn_color = theme.warning;
         let mut section = v_flex().w_full().gap_0p5().child(header);
         if !per_model.is_empty() {
@@ -531,7 +511,7 @@ impl ContextRail {
                 // registered (so its window size is resolvable).
                 let window_tokens = model_window_tokens(model_name);
                 let budget = window_tokens.and_then(|cap| {
-                    per_model_last.get(*model_name).and_then(|u| {
+                    per_model.get(*model_name).and_then(|u| {
                         let active = u
                             .input_tokens
                             .saturating_add(u.cache_creation_input_tokens)
@@ -630,17 +610,9 @@ impl ContextRail {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // The store mirrors the session's effective cwd as a string (the v2
-        // `cwd` projection; T10c retired the separate `cwd_path` note field —
-        // it was the same directory path).
-        let cwd_path = self.store.as_ref().and_then(|s| {
-            s.read(cx).store.with(|st| {
-                if st.cwd.is_empty() {
-                    None
-                } else {
-                    Some(st.cwd.clone())
-                }
-            })
+        let cwd_path = self.store.as_ref().and_then(|(store, sid)| {
+            let book = &store.read(cx).book;
+            leaf_of(book, sid).cwd()
         });
         let display = self.git_branch_display.clone();
 
@@ -790,7 +762,10 @@ impl ContextRail {
         let running = self
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.running))
+            .map(|(store, sid)| {
+                let book = &store.read(cx).book;
+                leaf_of(book, sid).running()
+            })
             .unwrap_or(false);
         let main_status = if self.cockpit_phase == CockpitPhase::Failed {
             manox_agent::ToolCallStatus::Error

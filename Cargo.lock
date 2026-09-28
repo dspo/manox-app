@@ -127,6 +127,7 @@ dependencies = [
  "manox-agent",
  "manox-agent-chat-ui",
  "manox-agent-chrome-ui",
+ "manox-ahp",
  "manox-components",
  "manox-ext-agents",
  "manox-harness",
