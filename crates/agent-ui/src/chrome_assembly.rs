@@ -42,7 +42,21 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     {
         let ws = ws.clone();
         cx.spawn(async move |cx| {
-            crate::browser_host::WorkspaceBrowserHost::install(ws, cx);
+            crate::browser_host::WorkspaceBrowserHost::install(ws.clone(), cx);
+            // The install lands asynchronously, so a tab restored from
+            // threads.db before it (startup) missed its route registration:
+            // re-register every live view now that the host exists.
+            if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
+                let ids = ws.read_with(cx, |ws, _| {
+                    ws.browser_views
+                        .keys()
+                        .copied()
+                        .collect::<Vec<_>>()
+                });
+                for id in ids {
+                    host.register_ui_tab(id);
+                }
+            }
         })
         .detach();
     }
@@ -114,7 +128,6 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .map(|s| s.read(cx).store.id.0.clone());
         if fg != dock_thread && fg.is_some() {
             let old_id = dock_thread.take();
-            let shell_entity = shell.clone();
             shell.update(cx, |shell, cx| {
                 let taken = shell.take_panel_view(cx);
                 if let (Some(old_id), Some(view)) = (&old_id, taken) {
@@ -160,14 +173,14 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                         });
                         match restored {
                             Some((tabs, visible, active)) => {
+                                // We are already inside `shell.update`; the
+                                // window handle (the restore builds webviews)
+                                // comes from the dispatch slot. Re-entering
+                                // the Shell entity here would double-lease.
                                 if let Some(handle) = crate::dispatch::window_global() {
                                     let _ = handle.update(cx, |_, w, cx| {
-                                        shell_entity.update(cx, |shell, cx| {
-                                            shell.right.update(cx, |pane, cx| {
-                                                pane.restore_persisted(
-                                                    tabs, visible, active, w, cx,
-                                                );
-                                            });
+                                        shell.right.update(cx, |pane, cx| {
+                                            pane.restore_persisted(tabs, visible, active, w, cx);
                                         });
                                     });
                                 }
