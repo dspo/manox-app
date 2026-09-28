@@ -9,8 +9,10 @@
 //! handlers and the `tests` child.
 
 use super::*;
+use gpui_component::ColorName;
 use gpui_component::ThemeStyled as _;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::tag::{Tag, TagVariant};
 
 /// The protocol id of an open input request.
 fn request_id(r: &ahp_types::state::SessionInputRequest) -> &str {
@@ -575,10 +577,13 @@ impl Workspace {
         provider: &str,
         id: &str,
     ) -> Option<ahp_types::state::SessionModelInfo> {
+        // The caller may hold either the bare model id or the canonical
+        // `{provider}/{id}` the host mints (`SessionModelInfo.id`); both
+        // resolve to the same registration row.
         agents
             .iter()
             .flat_map(|a| a.models.iter())
-            .find(|m| m.provider == provider && m.id == id)
+            .find(|m| m.provider == provider && (m.id == id || m.id == format!("{provider}/{id}")))
             .cloned()
     }
 
@@ -621,7 +626,8 @@ impl Workspace {
             .hover(|s| s.bg(theme.accent.opacity(0.08)))
             .cursor_pointer()
             .children(if let Some(ref m) = model {
-                let model_color = theme.muted_foreground;
+                let model_color =
+                    crate::views::context_rail::pi_wire_text_color(Self::model_api(&m.meta), theme);
                 let dot = || {
                     gpui::div()
                         .text_xs()
@@ -821,6 +827,33 @@ impl Workspace {
     /// several wire apis appears once per wire endpoint (registration names
     /// differ), so the responses and completions variants stay selectable
     /// alongside the anthropic one.
+    /// The wire api a host stashed under `meta["x-manox"]["api"]` (manox
+    /// hosts do; third-party hosts may not).
+    pub(crate) fn model_api(meta: &Option<ahp_types::common::JsonObject>) -> &str {
+        meta.as_ref()
+            .and_then(|m| m.get("x-manox"))
+            .and_then(|x| x.get("api"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    }
+
+    /// Wire api string → Tag variant + label for the model menu. Third-party
+    /// hosts that don't expose the api (meta absent) fall back to a neutral
+    /// untagged row.
+    fn model_wire_tag(meta: &Option<ahp_types::common::JsonObject>) -> (TagVariant, &'static str) {
+        let api = meta
+            .as_ref()
+            .and_then(|m| m.get("x-manox"))
+            .and_then(|x| x.get("api"))
+            .and_then(serde_json::Value::as_str);
+        match api {
+            Some("anthropic") => (TagVariant::Color(ColorName::Blue), "Anthropic"),
+            Some("openai_responses") => (TagVariant::Color(ColorName::Cyan), "Responses"),
+            Some("openai_completions") => (TagVariant::Color(ColorName::Amber), "Completions"),
+            _ => (TagVariant::Secondary, "N/A"),
+        }
+    }
+
     pub(super) fn build_model_popup_menu_pi(
         menu: PopupMenu,
         workspace: WeakEntity<Workspace>,
@@ -857,30 +890,37 @@ impl Workspace {
                 for m in &models {
                     let model = m.clone();
                     let model_name = model.name.clone();
+                    let (variant, label) = Self::model_wire_tag(&model.meta);
                     let ws = ws.clone();
-                    submenu =
-                        submenu.item(PopupMenuItem::Label(model_name.clone().into()).on_click(
-                            move |_, _, cx: &mut gpui::App| {
-                                let model = model.clone();
-                                let _ = ws.update(cx, |this, cx| {
-                                    // L8 wire identity: the registration-qualified
-                                    // `{provider}/{model}` ref, so a pick pins the
-                                    // exact endpoint (wire variants of one model
-                                    // share the bare id).
-                                    this.with_foreground_store(cx, |store, sid| {
-                                        let mut config = serde_json::Map::new();
-                                        config.insert(
-                                            "model".into(),
-                                            serde_json::json!(format!(
-                                                "{}/{}",
-                                                model.provider, model.id
-                                            )),
-                                        );
-                                        store.set_config(&sid, config);
-                                    });
+                    submenu = submenu.item(
+                        PopupMenuItem::element(move |_window, _cx| {
+                            h_flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Tag::new()
+                                        .with_variant(variant)
+                                        .outline()
+                                        .small()
+                                        .child(label),
+                                )
+                                .child(model_name.clone())
+                        })
+                        .on_click(move |_, _, cx: &mut gpui::App| {
+                            let model = model.clone();
+                            let _ = ws.update(cx, |this, cx| {
+                                // L8 wire identity: `SessionModelInfo.id` is
+                                // already the registration-qualified
+                                // `{provider}/{model}` ref (the host mints it),
+                                // so a pick pins the exact endpoint.
+                                this.with_foreground_store(cx, |store, sid| {
+                                    let mut config = serde_json::Map::new();
+                                    config.insert("model".into(), serde_json::json!(model.id));
+                                    store.set_config(&sid, config);
                                 });
-                            },
-                        ));
+                            });
+                        }),
+                    );
                 }
                 submenu
             });
