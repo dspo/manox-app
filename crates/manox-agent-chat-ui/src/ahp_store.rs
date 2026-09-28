@@ -29,7 +29,7 @@ use ahp_types::actions::{
 };
 use ahp_types::commands::{
     ChatSource, CreateChatParams, CreateSessionParams, FetchTurnsParams, ForkChatSource,
-    ListSessionsParams, ListSessionsResult, SubscribeResult,
+    InitializeResult, ListSessionsParams, ListSessionsResult, SubscribeResult,
 };
 use ahp_types::common::ROOT_RESOURCE_URI;
 use ahp_types::state::{ChatInputAnswer, ChatInputResponseKind, PendingMessageKind};
@@ -482,7 +482,7 @@ impl AhpStore {
         cx: &mut gpui::Context<Self>,
     ) {
         let take = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            let client = match tokio_wait(move || async move {
+            let (client, init) = match tokio_wait(move || async move {
                 let runtime = manox_ahp_runtime::ahp::runtime::runtime(cwd);
                 let transport = runtime.inproc();
                 let client = Client::connect(transport, ClientConfig::default())
@@ -491,7 +491,7 @@ impl AhpStore {
                 // Explicit — the SDK's read pump starts here, not in
                 // `Client::connect`; skipping it leaves every request timing
                 // out against a perfectly healthy host.
-                client
+                let init = client
                     .initialize(
                         CLIENT_ID.to_string(),
                         vec![ahp_types::version::PROTOCOL_VERSION.to_string()],
@@ -506,11 +506,11 @@ impl AhpStore {
                     let tx = bridge_tx.clone();
                     async move { answer_via_bridge(tx, method, params).await }
                 });
-                Ok::<Client, String>(client)
+                Ok::<(Client, InitializeResult), String>((client, init))
             })
             .await
             {
-                Ok(client) => client,
+                Ok((client, init)) => (client, init),
                 Err(err) => {
                     tracing::error!(error = %err, "ahp handshake failed");
                     return;
@@ -611,6 +611,24 @@ impl AhpStore {
                 }
             }
             let _ = this.update(cx, |store, _| store.replay_pending = false);
+            // Initial catalogue pull — the v3 successor of the v2 Ready →
+            // first-pull leg. The initialize snapshots carry the root state
+            // (the agents catalogue); listSessions seeds the sidebar with
+            // existing history; the two catalogue channels bring the
+            // project/command surfaces up. Without this the sidebar and the
+            // model list stay empty until an unrelated event fires.
+            let _ = this.update(cx, |store, cx| {
+                for snap in init.snapshots {
+                    let uri = snap.resource.clone();
+                    if store.book.apply_snapshot(&uri, snap.state) {
+                        cx.notify();
+                    }
+                }
+                for uri in [ext::channels::WORKSPACES, ext::channels::COMMANDS] {
+                    store.subscribe(uri, cx);
+                }
+                store.refresh_sessions(cx);
+            });
             // The events receiver must exist before any subscribe: the
             // extension baselines are pushed while the subscribe is answered.
             let mut events = client.events();
