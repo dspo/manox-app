@@ -11,11 +11,13 @@ manox-app 是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端�
 ```
 crates/                    # 全部 workspace 成员平铺于此（本仓只有一个交付物：桌面 app + 独立 bin 的 cx CLI）
   manox/                   # 主二进制入口（窗口 + 主题 + 托盘 + 接线）
-  agent-ui/                # GPUI UI 层（Workspace/ConversationState/views）
-  manox-agent-chrome-ui/   # 应用壳 crate（agents-window 复刻搬运：2026-Light 令牌/
-                           #   SessionList/右栏 ToolTab/底部 dock/MainSurface 槽；
-                           #   无数据源，example shell 为目视验收面，拆分计划见
-                           #   PLAN-CHROME-CHAT-SPLIT.md）
+  agent-ui/                # 状态 + 装配层（multiplexer/client_store/browser_host/
+                           #   dispatch/侧栏投影）+ 会话列（Workspace 的状态机与渲染）
+  manox-agent-chrome-ui/   # 唯一壳 crate（2026-Light 令牌/SessionList/右栏 ToolTab/
+                           #   底部 dock/工具栏/MainSurface 槽；无数据源，example shell
+                           #   为目视验收面，装配在 agent-ui::chrome_assembly）
+  manox-agent-chat-ui/     # 会话列的状态机与消息管线（chat crate 依赖面见
+                           #   script/check-chat-crate-deps.sh）
   terminal-ui/             # 终端渲染层（TerminalElement/TerminalView；仿真核心在 dspo/manox 的 manox-terminal）
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   manox-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
@@ -50,8 +52,7 @@ runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题
 
 ```bash
 cargo build                          # debug 下 gpui 依赖需 opt-level=3，否则渲染极慢
-cargo run                            # 桌面应用（旧壳，默认）
-cargo run --features chrome-shell    # 桌面应用（chrome 壳：新侧栏/右栏/聊天列装配）
+cargo run                            # 桌面应用（chrome 壳，唯一）
 cargo run -p cx-cli                  # cx CLI
 cargo test                           # live 测试用 MANOX_RUN_LIVE=1 env 门控，默认安全
 cargo clippy --all-targets
@@ -87,11 +88,11 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 
 ## 工作流约定
 
-- **双壳并行（2026-09-22 裁决）**：两套壳长期共存、构建时决定——默认旧壳（agent-ui 的
-  Workspace 全壳），`--features chrome-shell` 挂 `agent-ui::chrome_assembly`（chrome crate
-  的 Shell + 投影侧栏 + 右栏 ToolTab 注册表 + 聊天列嵌入渲染）。新功能两壳都要考虑；
-  计划与分工见 `PLAN-CHROME-CHAT-SPLIT.md`。CI 双配置门禁（默认 + chrome-shell）。
-- 每 PR 门禁：`cargo clippy -D warnings --all-targets`（+ chrome-shell 配置）+ 全量
+- **唯一壳（2026-09-28 旧壳退役）**：窗口只有 `agent-ui::chrome_assembly` 这一个装配
+  （chrome crate 的 Shell + 投影侧栏 + 右栏 ToolTab 注册表 + 会话列作为主区卡内容）。
+  双壳构建开关（`--features chrome-shell`）与 `agent-ui::Workspace` 的旧全壳渲染已删净；
+  上一个双壳形态留在 tag `dual-shell-final`。计划与历史见 `PLAN-CHROME-CHAT-SPLIT.md`。
+- 每 PR 门禁：`cargo clippy -D warnings --all-targets` + 全量
   `cargo test` + `cargo test -p agent-ui --features test-support` + `cargo fmt`；
   PR 写清 Test Plan 与 Assumptions。
 - **合并前必须把 manox 依赖 bump 到最新兼容 commit**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下执行 `cargo update -p manox-agent`——同出 dspo/manox 一个 git source 的全部依赖（manox-agent/harness/protocol/session-core/providers/supervisor/manox-terminal/hyperlinks）在 Cargo.lock 中共用同一锁 rev，任一条目即可整体抬升——重跑全部门禁，并把 Cargo.lock 变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容 rev 再 bump，或在 PR 中显式声明滞留原因（旧 rev 停留是债务，不是默认状态）。

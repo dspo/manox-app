@@ -1,27 +1,12 @@
-//! The workspace chrome render face (U9b cluster 7): the `Render` impl
-//! and the three large element builders it composes — `render_manox`
-//! (the full sidebar/conversation/right-pane/overlay chrome),
-//! `shell_root` (the shared layout container) and
-//! `render_terminal_column`. Split from `workspace.rs` as one
-//! contiguous run of impl blocks — `super` is the workspace module, so
-//! the builders reach the parent's private fields and methods
-//! unchanged.
+//! The workspace render face: the `Render` impl and its builders — the
+//! conversation column mounted as the chrome shell's main surface
+//! (`render_column`), the in-card settings swap (`render_settings_card`),
+//! the shared action decoration (`apply_chat_actions`), and the follow-stop
+//! notice. Split from `workspace.rs` as one contiguous run of impl blocks —
+//! `super` is the workspace module, so the builders reach the parent's
+//! private fields and methods unchanged.
 
 use super::*;
-
-/// The in-card title bar: gpui-component's `TitleBar` chrome minus the
-/// macOS traffic-light left padding (hardcoded `pl(80)` there) — a card
-/// title bar never sits at the window's left edge (the sidebar slot does),
-/// so the reservation would just push the leading controls away from the
-/// edge. Leading children bring their own `pl_2`.
-fn card_title_bar() -> TitleBar {
-    let bar = TitleBar::new();
-    if cfg!(target_os = "macos") {
-        bar.pl(px(0.))
-    } else {
-        bar
-    }
-}
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -36,884 +21,50 @@ impl Render for Workspace {
             self.open_thread(next, window, cx);
             cx.notify();
         }
-        // Dual-shell embed (PLAN Phase 4 tranche 3): mounted as the chrome
-        // shell's main surface, the workspace renders ONLY the conversation
-        // column — no shell gutter, no sidebar slot, no card chrome, no
-        // right pane (the chrome shell owns all of those). The body drops
-        // the legacy title-bar inset (the chrome card starts the column at
-        // its top edge).
-        if self.embedded {
-            // Settings is a main-column swap in the chrome shell too: the
-            // card hosts the settings nav + panel until the back control
-            // exits (the state machine and its subscription are the legacy
-            // ones; only the layout differs — the nav lives inside the card
-            // because the chrome sidebar slot is the session list).
-            if matches!(self.view_mode, ViewMode::Settings) && !self.exiting_settings {
-                return self.render_embedded_settings(window, cx);
-            }
-            return self.render_embedded_column(window, cx);
+        // The turn navigator belongs to the conversation page; leaving it
+        // drops the overlay.
+        if !matches!(self.view_mode, ViewMode::Workspace) {
+            self.drop_turn_navigator(cx);
         }
         // gpui cancels a drag on any mouse-up that doesn't land inside a
         // payload-matching drop target (`on_drop` never runs) — prune the
-        // queue-drag marker here, the same policy as the sidebar's rows. gpui
-        // refreshes on that cancel, so this clears the same frame; without it
-        // the source row would stay dimmed and the insertion line pinned.
+        // queue-drag marker here. gpui refreshes on that cancel, so this
+        // clears the same frame; without it the source row would stay dimmed
+        // and the insertion line pinned.
         if !cx.has_active_drag() && self.chat.read(cx).queue_drag.is_some() {
             self.chat.update(cx, |chat, cx| {
                 chat.queue_drag = None;
                 cx.notify();
             });
         }
-        self.render_manox(window, cx)
-    }
-}
-impl Workspace {
-    /// The full workspace chrome: sidebar, conversation column, context rail,
-    /// right pane, question-card overlays. Shared by both harness builds.
-    fn render_manox(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        if !matches!(self.view_mode, ViewMode::Workspace) {
-            self.drop_turn_navigator(cx);
-        }
-        // The native webview keeps its last bounds until explicitly hidden,
-        // so every frame must pin which one may draw (the active browser tab
-        // of a visible right pane) — an inactive tab would otherwise paint
-        // over the pane's content.
-        self.sync_browser_visibility(cx);
-        // Settings reuses the shared shell (`sidebar slot | main card`) — the
-        // same layout container as the app page, only with the settings nav in
-        // the sidebar slot and the settings panel as the main column. The
-        // underlying Workspace state (conversation sidebar, composer) is
-        // preserved and returns unchanged when the user clicks "Back to app".
-        if matches!(self.view_mode, ViewMode::Settings) {
-            let settings = self
-                .settings_view
-                .as_ref()
-                .expect("enter_settings must have created the SettingsView")
-                .clone();
-            let nav = settings.update(cx, |s, cx| s.render_nav(window, cx));
-            let main = settings.update(cx, |s, cx| s.render_main(window, cx));
-            // Horizontal slide: enter glides the panel in from the left edge
-            // (offset -PANEL_W → 0), exit glides it out to the right
-            // (offset 0 → +PANEL_W). The animation id mixes the current
-            // transition generation into the per-direction tag so a fresh
-            // tween fires on every direction change (a stable id would
-            // replay from the cached delta and visibly jump, and a
-            // direction change with the same id would not animate at all).
-            let (anim_id, sign) = if self.exiting_settings {
-                (
-                    format!("settings-exit-{}", self.settings_transition_gen),
-                    1.0,
-                )
-            } else {
-                (
-                    format!("settings-enter-{}", self.settings_transition_gen),
-                    -1.0,
-                )
-            };
-            let panel_w = px(280.0);
-            let shell = self.shell_root(nav, main, cx);
-            let anim_el = shell.with_animation(
-                anim_id,
-                Animation::new(Duration::from_millis(SLIDE_MS)).with_easing(ease_out_quint()),
-                move |el, delta| {
-                    let offset = panel_w * sign * (1.0 - delta);
-                    el.relative().ml(offset)
-                },
-            );
-            return h_flex().size_full().child(anim_el).into_any_element();
-        }
-        // Terminal pane: the shared shell (sidebar + draggable divider) with a
-        // full-bleed terminal view as the main column. The terminal view owns
-        // its PTY and grid; this branch only mounts it.
-        // Resize/scrollback/selection are handled inside `TerminalView` /
-        // `TerminalElement`.
-        if matches!(self.view_mode, ViewMode::Terminal) {
-            let title_text: SharedString = self
-                .chat
-                .read(cx)
-                .store
-                .as_ref()
-                .and_then(|s| {
-                    s.read(cx)
-                        .store
-                        .project
-                        .clone()
-                        .map(std::path::PathBuf::from)
-                })
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                .unwrap_or("manox")
-                .to_string()
-                .into();
-            let terminal = self
-                .terminal_view
-                .clone()
-                .expect("view_mode == Terminal implies terminal_view is set");
-            let icon = Icon::new(IconName::SquareTerminal)
-                .small()
-                .into_any_element();
-            // Bind the column before the shell call: its builder borrows `cx`
-            // for the sidebar-toggle listener, which would collide with
-            // `shell_root`'s `cx` argument inside a single call expression.
-            let column = self.render_terminal_column(icon, title_text, terminal, cx);
-            return self
-                .shell_root(self.sidebar.clone(), column, cx)
-                .on_action(
-                    cx.listener(|this, _: &crate::ToggleCockpitTasks, _window, cx| {
-                        this.chat_rail(cx).update(cx, |r, cx| {
-                            r.cockpit_hide_tasks = !r.cockpit_hide_tasks;
-                            cx.notify();
-                        });
-                        cx.notify();
-                    }),
-                )
-                .into_any_element();
-        }
-        // External agent CLI session: render the active session's terminal TUI
-        // in place of the conversation. Same shared shell as the conversation
-        // and terminal views — only the main column (the agent's TUI) and the
-        // title differ, so the sidebar divider stays draggable here too. The
-        // bar title is the agent's OSC title (mirrored from
-        // `TerminalEvent::Title`), falling back to the kind label ("Claude
-        // Code" / "Codex" / "GitHub Copilot") until the TUI sets its own. The
-        // provider/model picked at spawn is intentionally omitted: the user
-        // can switch models mid-session inside the TUI (`/model`), and manox
-        // cannot observe that change.
-        if matches!(self.view_mode, ViewMode::ExternalSession) {
-            let active = self
-                .active_external
-                .as_deref()
-                .and_then(|id| self.external_sessions.iter().find(|s| s.id == id));
-            if let Some(session) = active {
-                let kind = session.kind;
-                // Titlebar + sidebar share `display_title()` so a TUI rename
-                // (OSC title) updates both at once.
-                let title: SharedString = session.display_title();
-                let terminal = session.terminal_view.clone();
-                let icon = gpui::svg()
-                    .path(kind.icon_asset())
-                    .size(px(16.))
-                    .text_color(cx.theme().muted_foreground)
-                    .into_any_element();
-                // Bind the column before the shell call (same `cx` borrow
-                // reason as the Terminal mode above).
-                let column = self.render_terminal_column(icon, title, terminal, cx);
-                return self
-                    .shell_root(self.sidebar.clone(), column, cx)
-                    .into_any_element();
-            }
-            // No live session matches the recorded id (closed underneath us).
-            // Fall back to the conversation pane: flip the mode and fall
-            // through to the Workspace branch below, so this frame renders the
-            // full shell (sidebar + divider + conversation) rather than a
-            // sidebar-only stub that skips the divider and the mode-switching
-            // actions.
-            self.view_mode = ViewMode::Workspace;
-            cx.notify();
-        }
-        let theme = cx.theme().clone();
-        let running = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.running)
-            .expect("foreground store present");
-
+        // The render pass is the only place a `Window` is in hand, so the
+        // composer's blank-project input is maintained here.
         self.ensure_blank_project_input(window, cx);
-
+        // Settings is a main-column swap: the card hosts the settings nav +
+        // panel until the back control exits. The nav lives inside the card
+        // because the chrome sidebar slot is the session list.
+        if matches!(self.view_mode, ViewMode::Settings) && !self.exiting_settings {
+            return self.render_settings_card(window, cx);
+        }
+        // A blocking overlay owns the page: the turn navigator cannot stay
+        // mounted under it.
         if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {
             self.close_turn_navigator(window, cx);
         }
-
-        let editor_open = self.editor_open;
-        let right_pane_open = self.right_pane_open();
-        let editor_preview = self.editor_preview;
-        let editor_width = self.editor_width;
-        // Title text is the active thread's display title (persisted/generated
-        // title > mechanical summary). Falls back to "manox" so an unselected
-        // first screen stays branded before any title is generated.
-        let title_text: SharedString = {
-            let s = self
-                .chat
-                .read(cx)
-                .store
-                .as_ref()
-                .map(|s| s.read(cx).store.with(|st| st.display_title.clone()))
-                .expect("foreground store present");
-            if s.is_empty() { "manox".to_string() } else { s }
-        }
-        .into();
-        // Empty first screen: no messages and nothing streaming. The composer is
-        // hoisted into a vertically-centered hero (heading + composer + "Choose
-        // project"); once the conversation starts it drops to the bottom footer.
-        // Restoring history keeps the composer mounted so the user can draft
-        // immediately, while submission remains gated until the transcript is
-        // authoritative.
-        let first_screen = self.chat_conversation(cx).read(cx).is_empty(cx) && !running;
-        // T10c (§D.6): the v1 `history_phase` mirror retired with the fold —
-        // at HEAD the field was unwritten (default `Ready`), so the loading
-        // branch already never fired. The §D.1 snapshot is the restore
-        // boundary; a pending-snapshot loading indicator belongs to the
-        // §K.5 closeout.
-        let loading = false;
-        let composer_placement = composer_placement(editor_open && right_pane_open, first_screen);
-        let main_body_w = window.bounds().size.width
-            - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
-            - px(CARD_BORDER)
-            - self.effective_sidebar_width()
-            - if right_pane_open {
-                editor_width + px(EDITOR_DIVIDER_WIDTH)
-            } else {
-                px(0.)
-            };
-        let show_rail = !first_screen
-            && (!editor_open || !right_pane_open)
-            && self
-                .chat
-                .read(cx)
-                .store
-                .as_ref()
-                .map(|s| s.read(cx).store.has_interacted)
-                .expect("foreground store present")
-            && crate::views::context_rail::ContextRail::rail_width_for(main_body_w).is_some();
-        let overlay = self
-            .render_blank_project_overlay(window, &theme, cx)
-            .or_else(|| self.render_pending_auth_overlay(&theme, cx));
-        let _turn_navigator_overlay =
-            self.render_turn_navigator_overlay(window, &theme, right_pane_open, show_rail, cx);
-        // The inline composer stays visible while inline AskUserQuestion cards
-        // are open; submitting text resolves the ask as a free-form response.
-        // The editor pane still hides the inline composer while editing there.
-        let footer = (composer_placement == ComposerPlacement::Footer).then(|| {
-            v_flex()
-                .w_full()
-                .flex_shrink_0()
-                .bg(theme.background)
-                .py_2()
-                .gap_2()
-                .child(centered(gpui::div().w_full().h(px(1.)).bg(theme.border)))
-                .children(self.render_attachments(&theme, cx))
-                .child(centered(self.render_composer(running, window, &theme, cx)))
-        });
-
-        // Hero occupies the message-list region on the first screen.
-        // Notice items on the first screen (e.g. mode-switch acknowledgement).
-        // They are stored in the conversation but hidden behind the hero layout;
-        // show them as a temporary banner below the composer so the user sees
-        // the feedback without leaving the first-screen view.
-        let hero_notices = if first_screen {
-            self.chat
-                .read(cx)
-                .conversation
-                .read(cx)
-                .items()
-                .iter()
-                .rev()
-                .filter_map(|e| {
-                    if let ConvItem::Error(msg) | ConvItem::Notice(msg) = e.read(cx).kind() {
-                        Some(msg.clone())
-                    } else {
-                        None
-                    }
-                })
-                .next()
-        } else {
-            None
-        };
-        let hero = if composer_placement != ComposerPlacement::Hero {
-            None
-        } else if loading {
-            // History restore and drafting are independent: the progress label
-            // describes the transcript while the disabled send action makes the
-            // input gate explicit without delaying the editor itself.
-            Some(
-                v_flex()
-                    .flex_1()
-                    .w_full()
-                    .justify_center()
-                    .items_center()
-                    .child(centered(
-                        v_flex()
-                            .w_full()
-                            .gap_3()
-                            .items_center()
-                            .child(ai_elements::BrailleSpinner::new().color(theme.muted_foreground))
-                            .child(
-                                gpui::div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(i18n::t("workspace-loading-history")),
-                            )
-                            .children(self.render_attachments(&theme, cx))
-                            .child(self.render_composer(running, window, &theme, cx)),
-                    )),
-            )
-        } else {
-            Some(
-                v_flex()
-                    .flex_1()
-                    .w_full()
-                    .justify_center()
-                    .items_center()
-                    .child(centered(
-                        v_flex()
-                            .w_full()
-                            .gap_5()
-                            .items_center()
-                            .child(
-                                gpui::div()
-                                    .text_base()
-                                    .font_weight(gpui::FontWeight::BLACK)
-                                    .text_color(theme.foreground)
-                                    .child(i18n::t("workspace-empty-prompt")),
-                            )
-                            .children(self.render_attachments(&theme, cx))
-                            .child(self.render_composer(running, window, &theme, cx))
-                            .children(hero_notices.map(|msg| {
-                                gpui::div()
-                                    .w_full()
-                                    .px_3()
-                                    .py_1p5()
-                                    .rounded(theme.radius)
-                                    .bg(theme.accent.opacity(0.1))
-                                    .border_1()
-                                    .border_color(theme.accent.opacity(0.2))
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(msg)
-                            })),
-                    )),
-            )
-        };
-
-        // No chrome on the panel: Ctrl-G closes, Cmd-Enter sends, Cmd-Shift-P
-        // toggles preview — all keyboard-driven per the no-button constraint.
-        // The divider is the visual separator and the drag handle for resizing.
-        let editor_divider = gpui::div()
-            .id("editor-divider")
-            .w(px(EDITOR_DIVIDER_WIDTH))
-            .h_full()
-            .flex_shrink_0()
-            .relative()
-            .cursor(CursorStyle::ResizeLeftRight)
-            .child(
-                gpui::div()
-                    .absolute()
-                    .left(px(2.5))
-                    .w(px(1.))
-                    .h_full()
-                    .bg(theme.border),
-            )
-            .on_drag(DraggedEditorDivider, |_, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| DraggedEditorDivider)
-            })
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseUpEvent, _, cx| {
-                    // Double-click resets the pane to its default width.
-                    if e.click_count >= 2 {
-                        this.editor_width = px(EDITOR_PANEL_WIDTH);
-                        cx.notify();
-                    }
-                }),
-            );
-        // The sidebar divider lives in `shell_root` — shared by every view
-        // mode so the sidebar resizes identically everywhere.
-        // Right pane is a peer tab container for the editor, launcher,
-        // browser, sub-agent observers, and embedded sessions. The
-        // top-level TabBar is built from `right_tabs`; the content below
-        // dispatches on the active tab.
-        let active_tab = self.right_tabs.get(self.active_right_tab).cloned();
-        let hovered_tab = self.hovered_right_tab;
-        let right_tab_children: Vec<Tab> = self
-            .right_tabs
-            .iter()
-            .enumerate()
-            .map(|(ix, tab)| {
-                // Full label rides the tooltip; the fixed-width tab shows the
-                // capped form. Session tabs additionally carry their kind's
-                // brand glyph as a prefix.
-                let (full, icon_path): (SharedString, Option<&'static str>) = match tab {
-                    RightTab::Editor => (i18n::t("member-editor-tab"), None),
-                    RightTab::Launcher => (i18n::t("right-tab-launcher"), None),
-                    RightTab::Browser(id) => {
-                        // The page's <title>, polled by the host; the URL is
-                        // the fallback before the first title lands.
-                        let label = self
-                            .browser_views
-                            .get(id)
-                            .map(|v| {
-                                let view = v.read(cx);
-                                let title = view.title();
-                                if title.is_empty() {
-                                    view.url().to_string()
-                                } else {
-                                    title.to_string()
-                                }
-                            })
-                            .unwrap_or_default();
-                        (i18n::t_str("browser-tab", &[("title", &label)]), None)
-                    }
-                    // The subagent's address (e.g. `Sailor_0`); the panel's
-                    // banner carries the topic.
-                    RightTab::Subagent(id) => (id.as_str().into(), None),
-                    RightTab::Session(id) => {
-                        let session = self.external_sessions.iter().find(|s| s.id == *id);
-                        let label = session.map(|s| s.display_title()).unwrap_or_default();
-                        (label, session.map(|s| s.kind.icon_asset()))
-                    }
-                };
-                let mut base = Tab::new()
-                    .label(cap_tab_label(&full))
-                    .w(px(RIGHT_TAB_WIDTH))
-                    .tooltip({
-                        let full = full.clone();
-                        move |window, cx| Tooltip::new(full.clone()).build(window, cx)
-                    })
-                    .on_hover(cx.listener(move |this, hovering: &bool, _window, cx| {
-                        if *hovering {
-                            this.hovered_right_tab = Some(ix);
-                        } else if this.hovered_right_tab == Some(ix) {
-                            this.hovered_right_tab = None;
-                        }
-                        cx.notify();
-                    }));
-                if let Some(path) = icon_path {
-                    base = base.prefix(
-                        Icon::default()
-                            .path(path)
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    );
-                }
-                // The close × reveals on hover for every tab kind. Routing
-                // stays in `close_right_tab`: Editor keeps its draft-transfer
-                // semantics, Session kills + tears the session down.
-                if hovered_tab == Some(ix) {
-                    base = base.suffix(
-                        gpui::div()
-                            .id(("right-tab-close", ix))
-                            .cursor_pointer()
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .xsmall()
-                                    .text_color(theme.muted_foreground),
-                            )
-                            // Stop the click from also selecting the tab
-                            // underneath the ×.
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.close_right_tab(ix, window, cx);
-                            })),
-                    );
-                }
-                base
-            })
-            .collect();
-        let editor_pane = v_flex()
-            .w(editor_width)
-            .h_full()
-            .flex_shrink_0()
-            .bg(theme.background)
-            // The card-wide title bar overlays the pane's top strip; keep the
-            // tab bar and content below it.
-            .pt(TITLE_BAR_HEIGHT)
-            .child(
-                h_flex().w_full().px_2().pt_1().items_center().child(
-                    TabBar::new("right-tabs")
-                        .underline()
-                        .small()
-                        .selected_index(self.active_right_tab)
-                        .on_click(cx.listener(|this, ix: &usize, _window, cx| {
-                            this.set_active_right_tab(*ix, cx);
-                        }))
-                        .children(right_tab_children)
-                        .suffix(
-                            Button::new("right-tab-new")
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Plus)
-                                .tooltip(i18n::t("right-tab-new"))
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.open_launcher_tab(cx);
-                                })),
-                        ),
-                ),
-            )
-            .child(
-                gpui::div()
-                    .id("right-pane-content")
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(match active_tab {
-                        Some(RightTab::Editor) => v_flex()
-                            .h_full()
-                            .child(
-                                h_flex().w_full().px_2().child(
-                                    TabBar::new("editor-write-preview")
-                                        .underline()
-                                        .small()
-                                        .selected_index(if editor_preview { 1 } else { 0 })
-                                        .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                                            this.set_editor_preview(*ix == 1, window, cx);
-                                        }))
-                                        .child("Write")
-                                        .child("Preview"),
-                                ),
-                            )
-                            .child(if editor_preview {
-                                // The preview entity is lazily created and kept stable
-                                // across renders so the source is only re-parsed when
-                                // the draft changes. The scroll lives on an explicit
-                                // `ScrollHandle` + an outer `flex_1`-sized container
-                                // — the message-list pattern — rather than the
-                                // markdown entity's own `overflow_y_scroll`: an explicit
-                                // handle keeps the offset pinned and defaulting to the
-                                // top, and a flex-resolved (not `h_full`-percentage)
-                                // scroll box reliably clips long content instead of
-                                // letting it overflow and lose the first lines off the
-                                // top.
-                                let value = self.editor_state.read(cx).value().to_string();
-                                let theme = cx.theme().clone();
-                                if self.editor_preview_md.is_none() {
-                                    self.editor_preview_md = Some(cx.new(|_cx| {
-                                        Markdown::new("editor-preview", value.clone())
-                                            .theme(&theme)
-                                            .heading_mode(HeadingMode::Uniform)
-                                            .body_size(crate::views::message::MESSAGE_BODY_SIZE)
-                                    }));
-                                }
-                                let md = self
-                                    .editor_preview_md
-                                    .clone()
-                                    .expect("preview md initialized above");
-                                if md.read(cx).source() != value.as_str() {
-                                    md.update(cx, |m, cx| m.replace(value, cx));
-                                }
-                                let scroll = self.editor_preview_scroll.clone();
-                                gpui::div()
-                                    .id("editor-preview-scroll")
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .overflow_y_scroll()
-                                    .track_scroll(&scroll)
-                                    .child(gpui::div().w_full().p_4().child(md.into_any_element()))
-                                    .into_any_element()
-                            } else {
-                                gpui::div()
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .overflow_hidden()
-                                    .child(
-                                        // The panel editor is a plain-text
-                                        // composer for the same message
-                                        // content, so it shares the inline
-                                        // input's body typeface: Lilex Light
-                                        // at MESSAGE_BODY_SIZE (13px).
-                                        Editor::new(&self.editor_state)
-                                            .size_full()
-                                            .appearance(false)
-                                            .font_family(theme.mono_font_family.clone())
-                                            .font_weight(gpui::FontWeight::LIGHT)
-                                            .text_size(crate::views::message::MESSAGE_BODY_SIZE)
-                                            .into_any_element(),
-                                    )
-                                    .into_any_element()
-                            })
-                            .into_any_element(),
-                        Some(RightTab::Browser(id)) => self
-                            .browser_views
-                            .get(&id)
-                            .map(|v| v.clone().into_any_element())
-                            .unwrap_or_else(|| gpui::div().into_any_element()),
-                        Some(RightTab::Subagent(id)) => self
-                            .subagent_panels
-                            .get(&id)
-                            .map(|p| p.clone().into_any_element())
-                            .unwrap_or_else(|| gpui::div().into_any_element()),
-                        Some(RightTab::Launcher) => {
-                            self.render_launcher_content(self.active_right_tab, cx)
-                        }
-                        Some(RightTab::Session(id)) => self
-                            .external_sessions
-                            .iter()
-                            .find(|s| s.id == id)
-                            .map(|s| s.terminal_view.clone().into_any_element())
-                            .unwrap_or_else(|| gpui::div().into_any_element()),
-                        None => gpui::div().into_any_element(),
-                    }),
-            );
-
-        // The shared shell provides the sidebar + draggable divider and the
-        // mode-switching actions; this mode chains the conversation-only
-        // actions and the turn-navigator overlay onto it. The shell's main
-        // slot is the main view: a two-column container holding the message
-        // column (conversation + rail) and, when any right-pane tab is open,
-        // the right side view (editor / launcher / browser / session tabs).
-        // Bind the column to a local before the shell call: the column's
-        // builder borrows `self` (title-menu trigger, context rail), which
-        // would collide with `shell_root`'s `&mut self` receiver inside a
-        // single call expression.
+        // Per-frame conversation maintenance, all of it needing `&mut Window`
+        // (the ask card's per-question inputs) or draining a one-shot marker:
+        // reconcile the local cards against the server projections, allocate
+        // the missing ask inputs, sync the workspace-derived snapshot onto the
+        // owning tool row, and announce cards retired on another client.
         self.reconcile_pending_with_projections(cx);
-        // Allocate the ask card's per-question `custom` inputs while a `Window`
-        // is in hand (the render path is the only place one is available), then
-        // sync the Workspace-derived snapshot onto the owning tool row.
         self.ensure_ask_custom_inputs(window, cx);
         self.sync_ask_card_snapshots(cx);
-        // PR-4: announce cards retired on another client (drains the marker).
         self.notice_settled_elsewhere(window, cx);
-        // Title-bar overlay for the whole main card: mounted on `main_view`
-        // (not the conversation column) so it spans the message column and
-        // the right pane alike; painted last so the "..." menu isn't covered
-        // by either column's content.
-        let title_bar_overlay = gpui::div()
-            .absolute()
-            .top(px(0.))
-            .left(px(0.))
-            .right(px(0.))
-            .h(TITLE_BAR_HEIGHT)
-            .child(
-                card_title_bar()
-                    .child(
-                        h_flex().items_center().pl_2().child(
-                            Button::new("sidebar-toggle")
-                                .ghost()
-                                .xsmall()
-                                .icon(if self.sidebar_visible {
-                                    IconName::PanelLeftClose
-                                } else {
-                                    IconName::PanelLeftOpen
-                                })
-                                .tooltip(i18n::t("sidebar-toggle"))
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.toggle_sidebar(cx);
-                                })),
-                        ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .flex_1()
-                            .min_w_0()
-                            .pr_4()
-                            .child(
-                                gpui::svg()
-                                    .path("icons/manox.svg")
-                                    .size(px(16.))
-                                    .text_color(theme.muted_foreground),
-                            )
-                            .child(
-                                gpui::div()
-                                    .text_sm()
-                                    .text_left()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(title_text),
-                            ),
-                    )
-                    .child(
-                        h_flex().items_center().pr_2().child(
-                            Button::new("right-pane-toggle")
-                                .ghost()
-                                .xsmall()
-                                .icon(if right_pane_open {
-                                    Icon::new(IconName::PanelRight)
-                                } else {
-                                    Icon::default().path("icons/panel-right-dashed.svg")
-                                })
-                                .tooltip(i18n::t("right-pane-toggle"))
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.toggle_right_pane(cx);
-                                })),
-                        ),
-                    ),
-            );
-        let conversation_column = {
-            v_flex()
-                .flex_1()
-                .h_full()
-                .min_w_0()
-                .relative()
-                .overflow_hidden()
-                .child({
-                    // Body wrapper: hero / list / footer / overlay. `pt`
-                    // reserves space for the title-bar overlay; `pr` (when
-                    // the card is shown) reserves the floating card's width
-                    // so the message list never hides behind it.
-                    v_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .w_full()
-                        .overflow_hidden()
-                        .pt(TITLE_BAR_HEIGHT)
-                        .pb_2()
-                        .when(show_rail, |this| {
-                            this.pr(px(crate::views::context_rail::ENV_CONTENT_INSET))
-                        })
-                        .children(self.render_follow_stop_banner(&theme, cx))
-                        // Empty first screen shows the centered hero in place
-                        // of the (empty) message list; otherwise a bottom-
-                        // anchored, tail-following native list.
-                        .children(hero)
-                        .children({
-                            // Keep the row factory a pure read-only projection.
-                            // GPUI invokes it while measuring and prepainting;
-                            // mutating a MessageItem here invalidates the same
-                            // entity tree whose height is being cached.
-                            let conversation = self.chat.read(cx).conversation.clone();
-                            let diag_enabled = crate::overlap_diag::enabled();
-                            let processor = move |ix: usize, _window: &mut Window, cx: &mut App| {
-                                let item = conversation.read(cx).items().get(ix).cloned();
-                                match item {
-                                    // `flex_shrink_0` guards against any
-                                    // available height leaking down the
-                                    // flex chain and compressing a row.
-                                    Some(item) => {
-                                        if diag_enabled {
-                                            crate::overlap_diag::record_mapping(
-                                                ix,
-                                                item.read(cx).diagnostic_id(),
-                                            );
-                                        }
-                                        v_flex()
-                                            .w_full()
-                                            .pt_1()
-                                            .pb_4()
-                                            .flex_shrink_0()
-                                            .min_w_0()
-                                            .debug_selector(move || {
-                                                format!("workspace-message-row-{ix}")
-                                            })
-                                            .when(diag_enabled, |this| {
-                                                this.on_prepaint(move |bounds, _window, _cx| {
-                                                    crate::overlap_diag::record_row(ix, bounds);
-                                                })
-                                            })
-                                            .child(item)
-                                            .into_any_element()
-                                    }
-                                    // Index out of range mid-splice (count
-                                    // changed between a layout pass and the
-                                    // render closure): render an empty row.
-                                    None => gpui::div().into_any_element(),
-                                }
-                            };
-                            let list_state = self.chat.read(cx).list_state.clone();
-                            let width_state = self.chat.read(cx).list_state.clone();
-                            let message_list_width = self.chat.read(cx).message_list_width.clone();
-                            let diag_state = self.chat.read(cx).list_state.clone();
-                            let mono_family = theme.mono_font_family.clone();
-                            (!first_screen).then(move || {
-                                // Native `gpui::list`: it owns virtualization,
-                                // scroll, the per-item height cache, and tail-
-                                // follow. Visible rows re-measure every frame;
-                                // the wrapper below explicitly invalidates all
-                                // cached heights after a width change. `Tail`
-                                // mode pins to the live end and
-                                // re-engages at the bottom after an upward
-                                // scroll. Item heights are reconciled from the
-                                // ThreadEvent handler via
-                                // `splice`/`remeasure_items`.
-                                let list_el = gpui::list(list_state, processor)
-                                    .w_full()
-                                    .h_full()
-                                    .min_h_0()
-                                    .min_w_0();
-                                // Body typeface: Lilex Light. Every message row
-                                // (assistant, user, reasoning, tool cards, notices)
-                                // inherits from this wrapper div: gpui's List applies
-                                // its own text refinements only while requesting its
-                                // own layout, and with `Auto` sizing the item rows are
-                                // laid out in prepaint outside that scope — so the
-                                // family/weight must live on a wrapping div. Markdown
-                                // bold/headings resolve to Medium via nearest-weight,
-                                // italic syntax and tool-card overrides hit the
-                                // italic cuts.
-                                let list_wrap = v_flex()
-                                    .flex_1()
-                                    .h_full()
-                                    .min_h_0()
-                                    .min_w_0()
-                                    .font_family(mono_family.clone())
-                                    .font_weight(gpui::FontWeight::LIGHT)
-                                    .child(list_el)
-                                    .on_prepaint(move |bounds, window, _app| {
-                                        if message_list_width
-                                            .update(bounds.size.width, &width_state)
-                                        {
-                                            window.refresh();
-                                        }
-                                        if crate::overlap_diag::enabled() {
-                                            crate::overlap_diag::check_completed_frame(
-                                                bounds,
-                                                diag_state.item_count(),
-                                            );
-                                        }
-                                    });
-                                h_flex()
-                                    .flex_1()
-                                    .w_full()
-                                    .min_h_0()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .child(list_wrap)
-                            })
-                        })
-                        .children(footer)
-                        // Question card overlay (if any)
-                        .children(overlay)
-                })
-                // Floating context card: absolute top-right of the
-                // conversation column, below the title bar. Its own `Render`
-                // positions it (`top` clears the title bar, `right` + the
-                // body wrapper's `pr` keep the message list clear). Hidden
-                // while the editor pane is open, on the first screen, before
-                // the thread interacts, or below the narrow width gate.
-                .when(show_rail, |this| {
-                    this.child(self.chat.read(cx).context_rail.clone())
-                })
-        };
-        // The main view is the shell's main slot: the message column plus the
-        // right side view (editor / launcher / browser / session tabs) as its
-        // sub-columns. Nesting the right pane inside the main view keeps the
-        // shell uniformly
-        // `sidebar slot | main card` across every view mode (Terminal /
-        // ExternalSession / Settings pass a single-column main).
-        let main_view = h_flex()
-            .flex_1()
-            .h_full()
-            .min_w_0()
-            .relative()
-            .child(conversation_column)
-            .when(right_pane_open, |this| {
-                this.child(editor_divider).child(editor_pane)
-            })
-            // Card-wide title bar, painted after both columns so it spans
-            // (and overlays) the message column and the right pane alike.
-            .child(title_bar_overlay);
-        let root = self
-            .shell_root(self.sidebar.clone(), main_view, cx)
-            .id("workspace-root");
-        self.apply_chat_actions(root, window, cx)
+        self.render_column(window, cx)
     }
+}
 
-    /// The shared action/overlay decoration for the conversation column's
-    /// root element — applied by both shells (the legacy shell root and the
-    /// chrome-embed column root): every workspace-level keybinding action,
-    /// the turn-navigator overlay, and the editor-divider drag.
+impl Workspace {
     /// The turn-navigator overlay for the shared action root. The full
     /// positioning variant (render_turn_navigator_overlay) needs the shell's
     /// geometry flags; the shared root re-renders the overlay entity's
@@ -946,26 +97,9 @@ impl Workspace {
         root.on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
             this.enter_settings(window, cx);
         }))
-        .on_action(cx.listener(|this, _: &crate::ToggleEditor, window, cx| {
-            this.toggle_editor(window, cx);
-        }))
-        .on_action(
-            cx.listener(|this, _: &crate::ToggleEditorPreview, window, cx| {
-                this.toggle_editor_preview(window, cx);
-            }),
-        )
-        .on_action(cx.listener(|this, _: &crate::CloseEditor, window, cx| {
-            this.close_editor(window, cx);
-        }))
         .on_action(cx.listener(|this, _: &ToggleTurnNavigator, window, cx| {
             this.toggle_turn_navigator(window, cx);
             cx.stop_propagation();
-        }))
-        .on_action(cx.listener(|this, _: &OpenBrowserTab, window, cx| {
-            this.open_browser_tab(crate::views::browser_view::DEFAULT_URL, window, cx);
-        }))
-        .on_action(cx.listener(|this, _: &CloseBrowserTab, _window, cx| {
-            this.close_active_browser_tab(cx);
         }))
         .on_action(
             cx.listener(|this, _: &crate::BackgroundCurrentThread, window, cx| {
@@ -1020,47 +154,14 @@ impl Workspace {
                 this.archive_current_thread(window, cx);
             }),
         )
-        // The right editor pane moved inside the shell's main view (the
-        // `main_view` container above); it is no longer a top-level shell
-        // column.
         .children(self.render_turn_navigator_overlay_placeholder(cx))
-        .on_drag_move(cx.listener(
-            |this, e: &DragMoveEvent<DraggedEditorDivider>, _window, cx| {
-                // The root fills the window, but the card interior ends
-                // one gutter inset (+1px border) before the window's right
-                // edge, so the editor pane's width is the distance from
-                // the cursor to that inset edge. Clamp both to a minimum
-                // and to leave the message column at least
-                // `MAIN_MIN_WIDTH` (sidebar + main view sit left of the
-                // editor), so dragging wide never overflows the card or
-                // collapses the conversation column. The
-                // context card is hidden while the editor is open, so it
-                // does not claim a width here — the conversation alone
-                // holds the message column. `sidebar_width` is read live
-                // so a wide sidebar correctly shrinks the available
-                // editor envelope.
-                let new_w =
-                    e.bounds.right() - e.event.position.x - px(SHELL_PAD_EDGE + CARD_BORDER / 2.);
-                let dynamic_max = e.bounds.size.width
-                    - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
-                    - px(CARD_BORDER)
-                    - this.effective_sidebar_width()
-                    - px(EDITOR_DIVIDER_WIDTH)
-                    - px(MAIN_MIN_WIDTH);
-                let max_w = dynamic_max
-                    .min(px(EDITOR_MAX_WIDTH))
-                    .max(px(EDITOR_MIN_WIDTH));
-                this.editor_width = new_w.clamp(px(EDITOR_MIN_WIDTH), max_w);
-                cx.notify();
-            },
-        ))
         .into_any_element()
     }
 
-    /// Settings inside the chrome card: the settings nav column + the
-    /// selected panel, side by side (the legacy shell put the nav in the
-    /// window's sidebar slot; the chrome slot belongs to the session list).
-    fn render_embedded_settings(
+    /// Settings inside the card: the settings nav column + the selected
+    /// panel, side by side (the shell's sidebar slot belongs to the session
+    /// list, so the nav lives in here).
+    fn render_settings_card(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1090,17 +191,12 @@ impl Workspace {
         self.apply_chat_actions(root, window, cx)
     }
 
-    /// The chrome-embed render: the conversation column bare of the legacy
-    /// shell (gutter/sidebar/card/title bar all belong to the chrome shell
-    /// around it), still carrying the full action surface. The composition
-    /// mirrors the legacy column's body: hero-or-list, footer composer, the
-    /// floating context rail, the blank-project / pending-auth overlays, and
-    /// the turn-navigator overlay.
-    fn render_embedded_column(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    /// The conversation column — the chrome card's main surface, bare of the
+    /// shell furniture (gutter/sidebar/card/title bar all belong to the
+    /// chrome shell around it). Hero-or-list, footer composer, the floating
+    /// context rail, the blank-project / pending-auth overlays, and the
+    /// turn-navigator overlay.
+    fn render_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui_component::{h_flex, v_flex};
         let theme = cx.theme().clone();
 
@@ -1112,7 +208,7 @@ impl Workspace {
             .map(|s| s.read(cx).store.running)
             .unwrap_or(false);
         let first_screen = self.chat_conversation(cx).read(cx).is_empty(cx) && !running;
-        let composer_placement = composer_placement(false, first_screen);
+        let composer_placement = composer_placement(first_screen);
         // The chrome card's interior width: the window minus the chrome
         // shell's own furniture (gutter, sidebar, right-pane seam) — read
         // from the bounds the chrome layout gives this view.
@@ -1130,7 +226,7 @@ impl Workspace {
             .render_blank_project_overlay(window, &theme, cx)
             .or_else(|| self.render_pending_auth_overlay(&theme, cx));
         let turn_navigator_overlay =
-            self.render_turn_navigator_overlay(window, &theme, false, show_rail, cx);
+            self.render_turn_navigator_overlay(window, &theme, show_rail, cx);
 
         let footer = (composer_placement == ComposerPlacement::Footer).then(|| {
             v_flex()
@@ -1176,9 +272,8 @@ impl Workspace {
             .relative()
             .overflow_hidden()
             .child(
-                // Same body wrapper as the legacy column minus the
-                // title-bar inset (the chrome card starts the content at
-                // its top edge).
+                // The chrome card starts the content at its top edge, so
+                // the body carries no title-bar inset.
                 v_flex()
                     .flex_1()
                     .min_h_0()
@@ -1192,8 +287,8 @@ impl Workspace {
                     .children(self.render_follow_stop_banner(&theme, cx))
                     .children(hero)
                     .children({
-                        // The legacy list block verbatim: the row factory is
-                        // a pure read-only projection over the conversation.
+                        // The row factory is a pure read-only projection
+                        // over the conversation.
                         let conversation = self.chat.read(cx).conversation.clone();
                         let diag_enabled = crate::overlap_diag::enabled();
                         let processor = move |ix: usize, _window: &mut Window, cx: &mut App| {
@@ -1279,251 +374,6 @@ impl Workspace {
             .children(turn_navigator_overlay);
         self.apply_chat_actions(root, window, cx)
     }
-    /// The width the sidebar slot actually claims in the shell layout: zero
-    /// while collapsed, the remembered drag width otherwise. Every width
-    /// budget (drag clamps, the rail gate, the turn-navigator insets) goes
-    /// through this so a collapsed sidebar never reserves space.
-    pub(super) fn effective_sidebar_width(&self) -> Pixels {
-        if self.sidebar_visible {
-            self.sidebar_width
-        } else {
-            px(0.)
-        }
-    }
-
-    /// Collapse/expand the sidebar slot (the TitleBar's panel-left toggle).
-    /// The drag width survives the round trip; hiding only drops the slot
-    /// and its resize handle from the shell layout.
-    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_visible = !self.sidebar_visible;
-        cx.notify();
-    }
-
-    /// The shared window shell every full-window `ViewMode` renders through:
-    /// a gutter around an `sidebar slot | main card` pair — `SHELL_PAD_LEFT`
-    /// on the left (the sidebar's seamless outer edge), `SHELL_PAD_EDGE` on
-    /// the top/bottom/right card sides.
-    /// The sidebar slot is visually seamless (no border or own background —
-    /// the shell's background shows through); the main slot is wrapped in a
-    /// bordered, rounded card. The two sit flush (no layout gap): the resize
-    /// handle is an invisible absolute strip overlaying their boundary, so
-    /// the conversation, built-in terminal, external-session, and Settings
-    /// pages all resize the sidebar identically — only the sidebar slot and
-    /// the card's content differ per mode. The Settings page passes its own
-    /// nav as the sidebar slot; dragging the handle there updates the same
-    /// width state so the layout behaves identically across pages.
-    fn shell_root(
-        &mut self,
-        sidebar: impl IntoElement,
-        main: impl IntoElement,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let theme = cx.theme().clone();
-        // The collapse gate hides the conversation sidebar; the Settings nav
-        // is exempt — its back control is the only way out of the Settings
-        // page, so hiding it would strand the user there.
-        let sidebar_shown = self.sidebar_visible || matches!(self.view_mode, ViewMode::Settings);
-        // The divider is the (invisible) drag handle for resizing the sidebar.
-        // Double-click resets to the default `SIDEBAR_WIDTH` for symmetry with
-        // the editor pane.
-        let sync_width = |this: &mut Self, cx: &mut App, width: Pixels| {
-            this.sidebar_width = width;
-            this.sidebar.update(cx, |s, cx| s.set_width(width, cx));
-            if let Some(settings) = this.settings_view.as_ref() {
-                settings.update(cx, |s, cx| s.set_width(width, cx));
-            }
-        };
-        // Centered on the sidebar/card boundary, which lives at
-        // `SHELL_PAD_LEFT + sidebar_width` from the window's left edge.
-        let handle_left = px(SHELL_PAD_LEFT) + self.sidebar_width - px(SIDEBAR_DIVIDER_WIDTH / 2.);
-        let sidebar_divider = gpui::div()
-            .id("sidebar-divider")
-            .absolute()
-            .left(handle_left)
-            .top(px(SHELL_PAD_EDGE))
-            .bottom(px(SHELL_PAD_EDGE))
-            .w(px(SIDEBAR_DIVIDER_WIDTH))
-            .cursor(CursorStyle::ResizeLeftRight)
-            .on_drag(DraggedSidebarDivider, |_, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| DraggedSidebarDivider)
-            })
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, e: &MouseUpEvent, _, cx| {
-                    if e.click_count >= 2 {
-                        sync_width(this, cx, px(SIDEBAR_WIDTH));
-                        cx.notify();
-                    }
-                }),
-            );
-        // Window-drag hot zones for everything above/outside the card's own
-        // title bar: the slim full-width strip over the top gutter, plus the
-        // sidebar slot's empty top band (its traffic-light/content inset) —
-        // dragging there feels identical to dragging the title bar (the
-        // seamless sidebar shows no bar of its own). The band stops exactly
-        // where the sidebar's first interactive row begins, so the Settings
-        // back control and the "+" new-session button stay clickable on
-        // every platform; macOS traffic lights float over the band and keep
-        // their native click handling. While the sidebar is collapsed the
-        // zone shrinks to the left gutter strip.
-        let top_drag_gutter = gpui::div()
-            .id("window-drag-gutter")
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .h(px(SHELL_PAD_EDGE))
-            .on_mouse_down(MouseButton::Left, |_, window, _| {
-                window.start_window_move();
-            });
-        let sidebar_drag_zone = gpui::div()
-            .id("sidebar-drag-zone")
-            .absolute()
-            .top_0()
-            .left_0()
-            .w(px(SHELL_PAD_LEFT)
-                + if sidebar_shown {
-                    self.sidebar_width
-                } else {
-                    px(0.)
-                })
-            .h(px(SHELL_PAD_EDGE) + sidebar_top_inset())
-            .on_mouse_down(MouseButton::Left, |_, window, _| {
-                window.start_window_move();
-            });
-        // The main card: bordered + rounded, clipping its children so the
-        // in-card title bar's square background never spills over the
-        // rounded corners.
-        let main_card = gpui::div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .relative()
-            .overflow_hidden()
-            .border_1()
-            .border_color(theme.border)
-            .rounded(theme.radius_lg)
-            .bg(theme.background)
-            .child(main);
-
-        h_flex()
-            .size_full()
-            .relative()
-            .pl(px(SHELL_PAD_LEFT))
-            .pt(px(SHELL_PAD_EDGE))
-            .pr(px(SHELL_PAD_EDGE))
-            .pb(px(SHELL_PAD_EDGE))
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            // Mode-switching shortcuts apply in every view mode.
-            .on_action(cx.listener(|this, _: &FocusConversation, _window, cx| {
-                this.focus_conversation(cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusTerminal, _window, cx| {
-                this.focus_terminal(cx);
-            }))
-            .on_action(cx.listener(|this, _: &NewTerminalTab, _window, cx| {
-                this.open_terminal_tab(cx);
-            }))
-            .on_action(cx.listener(|this, _: &CloseTerminalTab, _window, cx| {
-                this.close_terminal_tab(cx);
-            }))
-            .children(sidebar_shown.then_some(sidebar))
-            .child(main_card)
-            .child(top_drag_gutter)
-            .child(sidebar_drag_zone)
-            // Last so the resize handle paints (and hit-tests) above the drag
-            // zones — the boundary strip stays draggable for its full height
-            // instead of losing its top patch to the window-move zone.
-            .children(sidebar_shown.then_some(sidebar_divider))
-            .on_drag_move(cx.listener(
-                move |this, e: &DragMoveEvent<DraggedSidebarDivider>, _window, cx| {
-                    // The root fills the window; the sidebar slot starts one
-                    // left gutter inset from its left edge, so the sidebar's
-                    // right edge is the cursor's x minus `SHELL_PAD_LEFT`.
-                    // Clamp so the card interior (message column, and the
-                    // editor pane when open) always retains at least
-                    // `MAIN_MIN_WIDTH`.
-                    let new_w = e.event.position.x - e.bounds.left() - px(SHELL_PAD_LEFT);
-                    let editor_reserve = if this.right_pane_open() {
-                        this.editor_width + px(EDITOR_DIVIDER_WIDTH)
-                    } else {
-                        px(0.)
-                    };
-                    let dynamic_max = e.bounds.size.width
-                        - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
-                        - px(CARD_BORDER)
-                        - editor_reserve
-                        - px(MAIN_MIN_WIDTH);
-                    let max_w = dynamic_max
-                        .min(px(SIDEBAR_MAX_WIDTH))
-                        .max(px(SIDEBAR_MIN_WIDTH));
-                    let clamped = new_w.clamp(px(SIDEBAR_MIN_WIDTH), max_w);
-                    sync_width(this, cx, clamped);
-                    cx.notify();
-                },
-            ))
-    }
-
-    /// The terminal-style main column shared by the built-in Terminal tab and
-    /// external agent CLI sessions: a TitleBar (sidebar toggle, leading icon,
-    /// title) over a full-bleed terminal view. One shape for both, so the
-    /// two terminal surfaces read as peers inside the shared shell — and the
-    /// sidebar toggle stays reachable while a collapsed sidebar persists
-    /// across mode switches.
-    fn render_terminal_column(
-        &self,
-        icon: AnyElement,
-        title: SharedString,
-        content: impl IntoElement,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        v_flex()
-            .flex_1()
-            .h_full()
-            .min_w_0()
-            .relative()
-            .child(
-                card_title_bar()
-                    .child(
-                        h_flex().items_center().pl_2().child(
-                            Button::new("sidebar-toggle")
-                                .ghost()
-                                .xsmall()
-                                .icon(if self.sidebar_visible {
-                                    IconName::PanelLeftClose
-                                } else {
-                                    IconName::PanelLeftOpen
-                                })
-                                .tooltip(i18n::t("sidebar-toggle"))
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.toggle_sidebar(cx);
-                                })),
-                        ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .flex_1()
-                            .min_w_0()
-                            .child(icon)
-                            .child(
-                                gpui::div()
-                                    .text_sm()
-                                    .text_left()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(title),
-                            ),
-                    ),
-            )
-            .child(v_flex().flex_1().h_full().w_full().child(content))
-    }
-
     /// §二.3 stop notice — the dismissible BROADCAST arm. Shown above the
     /// message area while the foreground leaf's reopen budget is exhausted
     /// AND not dismissed. It names what stopped (the reason copy is keyed

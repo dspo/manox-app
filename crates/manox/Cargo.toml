@@ -8,14 +8,6 @@ publish.workspace = true
 name = "manox"
 path = "src/main.rs"
 
-[features]
-# Dual-shell ruling (2026-09-22): both shells ship; the build chooses the
-# mounted root. Default is the legacy workspace shell; `--features
-# chrome-shell` mounts the chrome assembly instead. Both configurations
-# run the full gate matrix in CI.
-chrome-shell = []
-default = []
-
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true

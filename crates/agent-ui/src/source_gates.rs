@@ -79,9 +79,9 @@ mod tests {
                 STORE_WRITE,
                 0,
             ),
-            // Phase 4: the pin/archive HostHooks (the legacy sidebar's own
-            // seam) plus the right-pane durable snapshot's upsert/load —
-            // the same two call shapes the legacy workspace carries.
+            // Phase 4: the pin/archive HostHooks plus the right-pane durable
+            // snapshot's upsert/load — the two call shapes the assembly
+            // carries.
             ("chrome_assembly.rs", "store reads (U2)", STORE_GLOBAL, 4),
             ("chrome_assembly.rs", "wire sends", SENDS, 0),
             ("workspace.rs", "store mirror writes (U3)", STORE_WRITE, 3),
@@ -99,12 +99,6 @@ mod tests {
             ),
             (
                 "workspace/chips.rs",
-                "store mirror writes (U3)",
-                STORE_WRITE,
-                0,
-            ),
-            (
-                "workspace/right_pane.rs",
                 "store mirror writes (U3)",
                 STORE_WRITE,
                 0,
@@ -169,12 +163,6 @@ mod tests {
                 3,
             ),
             (
-                "workspace/right_pane.rs",
-                "facade writes (U1/U6)",
-                FACADE_WRITE,
-                0,
-            ),
-            (
                 "workspace/external.rs",
                 "facade writes (U1/U6)",
                 FACADE_WRITE,
@@ -227,12 +215,6 @@ mod tests {
             ),
             ("workspace/render.rs", "store reads (U2)", STORE_GLOBAL, 0),
             ("workspace/chips.rs", "store reads (U2)", STORE_GLOBAL, 0),
-            (
-                "workspace/right_pane.rs",
-                "store reads (U2)",
-                STORE_GLOBAL,
-                3,
-            ),
             ("workspace/external.rs", "store reads (U2)", STORE_GLOBAL, 0),
             ("workspace/composer.rs", "store reads (U2)", STORE_GLOBAL, 0),
             (
@@ -277,7 +259,6 @@ mod tests {
             ),
             ("workspace/render.rs", "protocol sends (U9)", SENDS, 0),
             ("workspace/chips.rs", "protocol sends (U9)", SENDS, 5),
-            ("workspace/right_pane.rs", "protocol sends (U9)", SENDS, 0),
             ("workspace/external.rs", "protocol sends (U9)", SENDS, 0),
             ("workspace/composer.rs", "protocol sends (U9)", SENDS, 3),
             ("workspace/plan_review.rs", "protocol sends (U9)", SENDS, 3),
@@ -289,10 +270,10 @@ mod tests {
             // sanctioned wire surface and stay unbudgeted here, but they
             // must never spread to other files (checked below).
             ("slash_command.rs", "protocol sends (controller)", SENDS, 9),
-            // U2: retired — the sidebar's rows come from the multiplexer's
-            // wire list and its decoration from the workspace push; the
-            // store acquisition and event pump are gone.
-            ("views/sidebar.rs", "store reads (U2)", STORE_GLOBAL, 0),
+            // 2026-09-28 legacy-shell retirement: the right observation pane
+            // (`workspace/right_pane.rs`) and the legacy sidebar
+            // (`views/sidebar.rs`) are deleted — their rows leave this ledger
+            // outright rather than ratcheting to zero.
         ];
         for (file, family, needles, max) in budget {
             let got = prod_count(&src, file, needles);
@@ -339,10 +320,6 @@ mod tests {
             // U9b cluster 4: the external-view session family (all-zero
             // budgets below — it never touched the wire or the store).
             "workspace/external.rs",
-            // U9b cluster 5: the right observation pane (budgeted by its
-            // own rows below — the three store globals are its threads.db
-            // persistence reads/writes).
-            "workspace/right_pane.rs",
             // U9b cluster 6: the chip + interaction-card families
             // (budgeted by their own rows below — the five sends are the
             // ask/auth resolve legs' wire replies).
@@ -350,6 +327,9 @@ mod tests {
             // U9b cluster 7: the chrome render face (all-zero budgets
             // below — pure element builders, no wire or store reach).
             "workspace/render.rs",
+            // The sub-agent observation face: builds panel tabs from the chat
+            // state and hands them to the shell (no wire or store reach).
+            "workspace/subagent.rs",
             // U9b cluster 8: the composer + overlay render helpers
             // (budgeted by their own rows below — they carry the two
             // browser-suite landing fallbacks and the blank-project

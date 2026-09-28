@@ -6,7 +6,7 @@
 static GLOBALS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use super::{
     ComposerPlacement, RecallDirection, RecallStep, Workspace, composer_key_context,
-    composer_placement, editor_can_submit,
+    composer_placement,
 };
 use gpui::InteractiveElement as _;
 use gpui::prelude::*;
@@ -152,23 +152,8 @@ fn a_stale_walk_index_starts_a_fresh_walk() {
 
 #[test]
 fn history_restore_keeps_composer_mounted() {
-    assert_eq!(composer_placement(false, true), ComposerPlacement::Hero);
-    assert_eq!(composer_placement(false, false), ComposerPlacement::Footer);
-}
-
-#[test]
-fn editor_remains_the_only_composer_exclusion() {
-    assert_eq!(composer_placement(true, true), ComposerPlacement::Hidden);
-    assert_eq!(composer_placement(true, false), ComposerPlacement::Hidden);
-}
-
-#[test]
-fn editor_submission_waits_for_authoritative_history() {
-    assert!(!editor_can_submit(true, false, false, "draft"));
-    assert!(editor_can_submit(false, false, false, "draft"));
-    assert!(!editor_can_submit(false, true, false, "draft"));
-    assert!(!editor_can_submit(false, false, true, "draft"));
-    assert!(!editor_can_submit(false, false, false, "   "));
+    assert_eq!(composer_placement(true), ComposerPlacement::Hero);
+    assert_eq!(composer_placement(false), ComposerPlacement::Footer);
 }
 
 #[test]
@@ -267,163 +252,6 @@ fn bare_arrows_move_caret_and_alt_arrows_recall(cx: &mut gpui::TestAppContext) {
         selected
     );
 }
-#[test]
-fn cap_tab_label_caps_with_ellipsis() {
-    let long = "a very long tab label that must be capped";
-    let capped = super::cap_tab_label(long);
-    assert_eq!(capped.chars().count(), super::RIGHT_TAB_LABEL_CAP + 1);
-    assert!(capped.ends_with('\u{2026}'), "{capped}");
-    // Short labels pass through untouched; unicode caps on char bounds.
-    assert_eq!(super::cap_tab_label("short"), "short");
-    let unicode = "\u{4e2d}".repeat(super::RIGHT_TAB_LABEL_CAP + 4);
-    assert_eq!(
-        super::cap_tab_label(&unicode).chars().count(),
-        super::RIGHT_TAB_LABEL_CAP + 1
-    );
-}
-/// Right-pane state machine coverage: persisted-snapshot remap, the
-/// stash/restore round trip, orphan-tab drops, and db re-materialization
-/// across a simulated restart. Runs on an in-memory store so the real
-/// `~/.manox/threads.db` is never touched.
-#[gpui::test]
-async fn right_pane_state_machine(cx: &mut gpui::TestAppContext) {
-    use super::{PersistedRightTab, RightTab};
-    use gpui::AppContext as _;
-    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    let _store = store_test_guard();
-    cx.update(gpui_component::init);
-    let db_path = std::env::temp_dir().join(format!("manox-right-pane-test-{}.db", uuid_like_id()));
-    let db = std::sync::Arc::new(
-        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
-    );
-    cx.update(|_cx| {
-        manox_agent::runtime::init();
-        manox_agent::provider_glue::init();
-        manox_agent::thread_store::init_for_test(db.clone());
-    });
-
-    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let slot = captured.clone();
-    let window = cx.open_window(
-        gpui::size(gpui::px(960.), gpui::px(640.)),
-        move |window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(window, cx));
-            *slot.borrow_mut() = Some(workspace.clone());
-            gpui_component::Root::new(workspace, window, cx)
-        },
-    );
-    cx.run_until_parked();
-    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-    let ws = captured.borrow().clone().expect("workspace captured");
-
-    // ── persisted_right_pane: subagent filter + active remap ──────────
-    visual.update(|_window, cx| {
-        ws.update(cx, |ws, cx| {
-            ws.right_tabs = vec![
-                RightTab::Editor,
-                RightTab::Subagent("s1".into()),
-                RightTab::Launcher,
-            ];
-            ws.active_right_tab = 2;
-            ws.right_pane_visible = true;
-            let p = ws.persisted_right_pane(cx);
-            assert_eq!(p.tabs.len(), 2, "subagent tab must drop out");
-            assert!(matches!(p.tabs[0], PersistedRightTab::Editor));
-            assert!(matches!(p.tabs[1], PersistedRightTab::Launcher));
-            assert_eq!(p.active, 1, "active remaps into the filtered list");
-            assert!(p.visible);
-
-            // An active subagent tab falls back to the head.
-            ws.active_right_tab = 1;
-            let p = ws.persisted_right_pane(cx);
-            assert_eq!(p.active, 0);
-        });
-    });
-
-    // ── stash → restore round trip (in-session) ────────────────────────
-    visual.update(|window, cx| {
-        ws.update(cx, |ws, cx| {
-            ws.right_tabs = vec![RightTab::Editor, RightTab::Launcher];
-            ws.active_right_tab = 1;
-            ws.right_pane_visible = true;
-            ws.stash_right_pane("threadA".into(), cx);
-            assert!(ws.right_tabs.is_empty());
-            assert!(!ws.right_pane_visible);
-            ws.restore_right_pane("threadA", window, cx);
-            assert_eq!(ws.right_tabs.len(), 2);
-            assert!(matches!(ws.right_tabs[0], RightTab::Editor));
-            assert!(matches!(ws.right_tabs[1], RightTab::Launcher));
-            assert_eq!(ws.active_right_tab, 1);
-            assert!(ws.right_pane_visible);
-        });
-    });
-    // The stash wrote the db row keyed by thread.
-    assert!(
-        db.load_right_pane("threadA")
-            .expect("db readable")
-            .is_some()
-    );
-
-    // ── orphaned tabs drop on restore ──────────────────────────────────
-    // A browser view closed and a session exited while another thread was
-    // foreground: the stashed tabs referencing them must not come back.
-    visual.update(|window, cx| {
-        ws.update(cx, |ws, cx| {
-            ws.right_tabs = vec![
-                RightTab::Browser(987_654),
-                RightTab::Session("external:claude:dead".into()),
-                RightTab::Editor,
-            ];
-            ws.active_right_tab = 2;
-            ws.right_pane_visible = true;
-            ws.stash_right_pane("threadB".into(), cx);
-            ws.restore_right_pane("threadB", window, cx);
-            assert_eq!(ws.right_tabs.len(), 1, "orphans dropped");
-            assert!(matches!(ws.right_tabs[0], RightTab::Editor));
-            assert_eq!(ws.active_right_tab, 0, "active remaps onto the survivor");
-        });
-    });
-
-    // ── db re-materialization across a simulated restart ───────────────
-    visual.update(|window, cx| {
-        ws.update(cx, |ws, cx| {
-            ws.right_tabs = vec![RightTab::Editor, RightTab::Launcher];
-            ws.active_right_tab = 0;
-            ws.right_pane_visible = true;
-            ws.stash_right_pane("threadC".into(), cx);
-            // Restart: the in-session stash is gone, only the db row
-            // survives.
-            ws.right_pane_by_thread.clear();
-            ws.restore_right_pane("threadC", window, cx);
-            assert_eq!(ws.right_tabs.len(), 2);
-            assert!(matches!(ws.right_tabs[0], RightTab::Editor));
-            assert!(matches!(ws.right_tabs[1], RightTab::Launcher));
-            assert!(ws.right_pane_visible);
-        });
-    });
-
-    // ── toggle on an empty pane lands on a fresh Launcher ──────────────
-    visual.update(|_window, cx| {
-        ws.update(cx, |ws, cx| {
-            ws.right_tabs.clear();
-            ws.right_pane_visible = false;
-            ws.editor_open = true; // stale on purpose
-            ws.toggle_right_pane(cx);
-            assert!(ws.right_pane_visible);
-            assert_eq!(ws.right_tabs.len(), 1);
-            assert!(matches!(ws.right_tabs[0], RightTab::Launcher));
-            assert!(!ws.editor_open, "a Launcher is never the editor");
-        });
-    });
-
-    // Release the process-global store override so the gpui leak
-    // detector doesn't trip on it at teardown.
-    manox_agent::thread_store::drop_for_test();
-    let _ = std::fs::remove_file(&db_path);
-}
-
 /// `thread_store::init_for_test` swaps a process-global, and a gpui test
 /// runs on its own scheduler thread, so every test that builds a real
 /// `Workspace` against a temp db holds this for its whole body.
@@ -3811,22 +3639,21 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
         }
     }
     assert!(listed, "real scan lists the target thread");
-    let sidebar = ws.read_with(&visual, |ws, _cx| ws.sidebar.clone());
-    visual.update(|_window, cx| {
-        sidebar.update(cx, |_, cx| {
-            cx.emit(crate::views::sidebar::SidebarEvent::OpenThread(
-                target.clone(),
-            ))
-        });
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.open_thread(target.clone(), window, cx));
     });
-    // The selection must move on that single event (the sidebar's
-    // selected id is set synchronously inside open_thread → attach).
+    // The foreground must move on that single call (the row-click path sets
+    // it synchronously inside open_thread → attach).
     let mut selected_now = false;
     for _ in 0..50 {
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(20));
         let sel = ws.read_with(&visual, |ws, cx| {
-            ws.sidebar.read(cx).selected_id().map(str::to_string)
+            ws.chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|s| s.read(cx).store.id.0.clone())
         });
         if sel.as_deref() == Some(target.as_str()) {
             selected_now = true;
@@ -3835,9 +3662,9 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
     }
     assert!(
         selected_now,
-        "one OpenThread event must select the row (no second click needed)"
+        "one row click must bring the thread to the foreground"
     );
-    // And the transcript restores on that same single event.
+    // And the transcript restores on that same single call.
     let mut restored = 0usize;
     for _ in 0..3000 {
         cx.run_until_parked();
@@ -4212,158 +4039,6 @@ fn rail_store_rebinds_on_thread_attach(cx: &mut gpui::TestAppContext) {
 /// closure used to read the Workspace entity from inside that lease.
 /// gpui's double-lease panic cannot unwind past `handle_view_event`
 /// (`extern "C"`), so the app aborted on the spot — every click of a
-/// Claude Code / Codex / Copilot launcher row was a hard crash. The
-/// sidebar twin of this bug pinned its fix the same way
-/// (`new_session_menu_builds_inside_sidebar_update`): the models are
-/// read BEFORE the eager build, so opening the cascade inside an
-/// update must build cleanly.
-#[gpui::test]
-fn launcher_cascade_builds_inside_workspace_update(cx: &mut gpui::TestAppContext) {
-    use super::{LauncherPick, RightTab};
-    use gpui::AppContext as _;
-
-    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _store = store_test_guard();
-    cx.update(gpui_component::init);
-    let db_path =
-        std::env::temp_dir().join(format!("manox-launcher-cascade-test-{}.db", uuid_like_id()));
-    let db = std::sync::Arc::new(
-        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
-    );
-    cx.update(|_cx| {
-        manox_agent::runtime::init();
-        manox_agent::provider_glue::init();
-        manox_agent::thread_store::init_for_test(db.clone());
-    });
-
-    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let slot = captured.clone();
-    let window = cx.open_window(
-        gpui::size(gpui::px(960.), gpui::px(640.)),
-        move |window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(window, cx));
-            *slot.borrow_mut() = Some(workspace.clone());
-            gpui_component::Root::new(workspace, window, cx)
-        },
-    );
-    cx.run_until_parked();
-    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-    let ws = captured.borrow().clone().expect("workspace captured");
-
-    visual.update(|window, cx| {
-        ws.update(cx, |ws, cx| {
-            ws.right_tabs = vec![RightTab::Launcher];
-            ws.active_right_tab = 0;
-            // The crash shape: the very lease the launcher's on_pick
-            // click handler holds when it routes into the cascade.
-            ws.launcher_pick(
-                LauncherPick::Agent(crate::external_session::SessionKind::ClaudeCode),
-                0,
-                window,
-                cx,
-            );
-            assert!(
-                ws.launcher_menu.is_some(),
-                "the cascade menu must be built (not crashed)"
-            );
-            assert_eq!(
-                ws.launcher_menu_kind,
-                Some(crate::external_session::SessionKind::ClaudeCode)
-            );
-        });
-    });
-    let _ = std::fs::remove_file(&db_path);
-}
-
-/// The right-pane spawn cwd source: `launcher_thread_cwd` tracks the
-/// foreground store's `cwd` projection exactly — seeded value wins, an
-/// unseeded (empty) projection and a missing store both yield `None` so
-/// the spawn paths fall back to the workspace default. All three branches
-/// are load-bearing: the terminal pane and every launcher row key off
-/// this one helper.
-#[gpui::test]
-fn launcher_thread_cwd_tracks_the_foreground_projection(cx: &mut gpui::TestAppContext) {
-    use gpui::AppContext as _;
-
-    let _g = GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _store = store_test_guard();
-    cx.update(gpui_component::init);
-    let db_path =
-        std::env::temp_dir().join(format!("manox-launcher-cwd-test-{}.db", uuid_like_id()));
-    let db = std::sync::Arc::new(
-        manox_agent::db::ThreadsDatabase::open(&db_path).expect("open temp threads db"),
-    );
-    cx.update(|_cx| {
-        manox_agent::runtime::init();
-        manox_agent::provider_glue::init();
-        manox_agent::thread_store::init_for_test(db.clone());
-    });
-
-    let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let slot = captured.clone();
-    let window = cx.open_window(
-        gpui::size(gpui::px(960.), gpui::px(640.)),
-        move |window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(window, cx));
-            *slot.borrow_mut() = Some(workspace.clone());
-            gpui_component::Root::new(workspace, window, cx)
-        },
-    );
-    cx.run_until_parked();
-    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-    let ws = captured.borrow().clone().expect("workspace captured");
-
-    // Seeded projection wins.
-    visual.update(|_window, cx| {
-        ws.update(cx, |ws, cx| {
-            let handle = ws
-                .chat
-                .read(cx)
-                .store
-                .clone()
-                .expect("the ctor workspace has a leaf");
-            handle.update(cx, |h, _| {
-                h.store
-                    .merge_projection("cwd", serde_json::json!("/seeded/project"), 5);
-            });
-            assert_eq!(
-                ws.launcher_thread_cwd(cx),
-                Some(std::path::PathBuf::from("/seeded/project")),
-                "a seeded cwd projection is the spawn source"
-            );
-
-            // Unseeded (empty) projection: fall back to the workspace default.
-            handle.update(cx, |h, _| {
-                h.store.merge_projection("cwd", serde_json::json!(""), 6);
-            });
-            assert_eq!(
-                ws.launcher_thread_cwd(cx),
-                None,
-                "an empty cwd projection yields None"
-            );
-
-            // Missing foreground store: None (warned), never a panic.
-            let saved = ws.chat.update(cx, |chat, cc| {
-                let v = chat.store.take();
-                cc.notify();
-                v
-            });
-            assert_eq!(
-                ws.launcher_thread_cwd(cx),
-                None,
-                "a missing foreground store yields None instead of panicking"
-            );
-            ws.chat.update(cx, |chat, cc| {
-                chat.store = saved;
-                cc.notify();
-            });
-        });
-    });
-    let _ = std::fs::remove_file(&db_path);
-}
-
 /// The identity hand-off (review #39 round-2 [issue] 2): the predecessor's
 /// store records the successor, the observer stages it, the next render
 /// switches the foreground onto it — and the signal is consumed, so nothing
@@ -4447,50 +4122,39 @@ fn successor_hand_off_switches_the_foreground_and_consumes_the_signal(
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// `turn_navigator_layout` matrix: the gutter/border compensation must keep
-/// the overlay centered over the message column's card interior at every
-/// combination of sidebar collapse, right pane, and context rail.
+/// `turn_navigator_layout` matrix: the overlay anchors to the conversation
+/// card's padding box — the card's own 1px border is the only furniture on
+/// either side (the shell's sidebar and right pane sit outside this view) —
+/// with the context rail's content inset joining the right side when the rail
+/// is shown.
 #[test]
-fn turn_navigator_layout_compensates_shell_gutter_and_card_border() {
-    use super::{CARD_BORDER, SHELL_PAD_EDGE, SHELL_PAD_LEFT, turn_navigator_layout};
+fn turn_navigator_layout_anchors_to_the_card_padding_box() {
+    use super::{CARD_BORDER, turn_navigator_layout};
     use gpui::px;
 
     let rail_inset = px(crate::views::context_rail::ENV_CONTENT_INSET);
     let half_border = px(CARD_BORDER / 2.);
 
-    // Default: expanded sidebar (260), no right pane, no rail. The insets are
-    // gutter + card border on each side; the wide leftover clamps to 480.
-    let l = turn_navigator_layout(px(1200.), px(260.), None, false);
-    assert_eq!(l.left_inset, px(SHELL_PAD_LEFT) + px(260.) + half_border);
-    assert_eq!(l.right_inset, px(SHELL_PAD_EDGE) + half_border);
+    // No rail: half the card border on each side; the wide leftover clamps
+    // to the 480 cap.
+    let l = turn_navigator_layout(px(1200.), false);
+    assert_eq!(l.left_inset, half_border);
+    assert_eq!(l.right_inset, half_border);
     assert_eq!(l.panel_width, px(480.));
 
-    // Collapsed sidebar: the left inset is just the gutter + border.
-    let l = turn_navigator_layout(px(1200.), px(0.), None, false);
-    assert_eq!(l.left_inset, px(SHELL_PAD_LEFT) + half_border);
-    assert_eq!(l.panel_width, px(480.));
-
-    // Right pane open: its width + editor divider join the right inset and
-    // the available span shrinks below the 480 cap.
-    let l = turn_navigator_layout(px(1200.), px(260.), Some(px(640.)), false);
-    assert_eq!(
-        l.right_inset,
-        px(SHELL_PAD_EDGE) + half_border + px(640.) + px(super::EDITOR_DIVIDER_WIDTH)
-    );
-    assert!(l.panel_width < px(480.) && l.panel_width > px(0.));
-
-    // Context rail shown: its content inset joins the right side instead.
-    let l = turn_navigator_layout(px(1200.), px(260.), None, true);
-    assert_eq!(l.right_inset, px(SHELL_PAD_EDGE) + half_border + rail_inset);
+    // Context rail shown: its content inset joins the right side.
+    let l = turn_navigator_layout(px(1200.), true);
+    assert_eq!(l.left_inset, half_border);
+    assert_eq!(l.right_inset, half_border + rail_inset);
 
     // Narrow window: the panel takes whatever fits, then floors at zero —
     // never negative (a negative width would poison the overlay layout).
-    let l = turn_navigator_layout(px(400.), px(260.), None, false);
+    let l = turn_navigator_layout(px(600.), true);
     assert_eq!(
         l.panel_width,
-        px(400.) - l.left_inset - l.right_inset - px(24.)
+        px(600.) - l.left_inset - l.right_inset - px(24.)
     );
-    let l = turn_navigator_layout(px(290.), px(260.), None, true);
+    let l = turn_navigator_layout(px(30.), true);
     assert_eq!(l.panel_width, px(0.));
 }
 

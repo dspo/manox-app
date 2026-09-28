@@ -20,12 +20,10 @@ pub mod chrome_assembly;
 #[cfg(test)]
 mod client_store_handle_tests;
 pub mod dispatch;
-pub mod external_session;
 pub mod i18n;
 pub mod menu;
 pub mod multiplexer;
 pub mod sidebar_projection;
-pub mod sidebar_view;
 pub mod slash_command;
 pub(crate) mod source_gates;
 pub mod tool_tabs;

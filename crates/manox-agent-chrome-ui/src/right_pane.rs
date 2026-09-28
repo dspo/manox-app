@@ -215,9 +215,15 @@ impl RightPane {
         self.activate(tab, cx);
     }
 
+    /// The live entity behind an open tab, for callers that know its type
+    /// (the host that put it there does) — how a host streams into a tab it
+    /// opened itself, without owning the tab's lifetime.
+    pub fn tab_entity<T: 'static>(&self, id: &str) -> Option<Entity<T>> {
+        self.store.get::<T>(id)
+    }
+
     /// The pane's persistable shape: tab kinds + their payloads, in order,
-    /// with the active index (mirrors the legacy `PersistedRightPane`; the
-    /// host owns the final on-disk schema).
+    /// with the active index (the host owns the final on-disk schema).
     pub fn persisted(&self, cx: &App) -> (bool, usize, Vec<(String, String)>) {
         let mut tabs = Vec::new();
         let mut active = 0usize;

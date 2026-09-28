@@ -1,7 +1,7 @@
 # 拆分计划：manox-agent-chrome-ui + manox-agent-chat-ui
 
-> 状态：**Phase 1/2/3 全部落地；Phase 4 全部落地（前哨 + 批 1-4 + 三条修复批）——计划
-> 功能性收尾完成，转入收敛期。**
+> 状态：**全部落地，含 2026-09-28 的旧壳退役（本计划的最后一步）。单壳形态已进 main；
+> 双壳形态留在 tag `dual-shell-final`（回滚点）。**
 > （截至 2026-09-22：Phase 3 = #58；1 = #59；2 = #60/#61/#63/#64；4 前哨 = #62；
 > 批 1 = #65 五态 props+投影；批 2 = #66 双壳构建开关 + chrome 装配落地；批 3 = #67
 > 真聊天（embedded 渲染 + 单 Workspace 装配 + 生产 open_thread）；修复批 1 = #68
@@ -11,12 +11,23 @@
 > + 装配层进程级注册表（dispatch/browser host）+ ToolTab::close 资源回收签名 +
 > i18n 扫描韧性**。）
 >
-> **收敛期入口**：`cargo run --features chrome-shell` 即 chrome 壳全功能构建（真实会话
-> 侧栏五态/团队森林、聊天列、右栏四类页签 per-thread、底部 dock 随线程、cwd 随线程、
-> 浏览器页签接生产 IPC 宿主）。默认构建仍为旧壳；旧壳不退役（双壳裁决）。收敛期任务：
-> 日常以 chrome 构建为主用，攒真机反馈修缺陷；视稳定度再议旧壳去留与遗留打磨项
-> （页签标题镜像 ticker、右栏快照 threads.db 持久化、settings/菜单在新壳下的入口、
-> UI-MAP 重写）。
+> **旧壳退役（2026-09-28，Phase 4 完结）**：`cargo run` 即唯一壳（chrome 装配）。
+> 删净：`--features chrome-shell` 开关、`Workspace` 的旧全壳渲染（render_manox /
+> WorkspaceShell / TerminalColumn / 内嵌 TitleBar）、旧侧栏实体（`views/sidebar.rs` +
+> `sidebar_view.rs` + `SidebarEvent` 全套）、旧右栏（`RightTab` / threads.db 快照 /
+> 编辑器面板 / Launcher / 外部会话族 `external_session.rs`）、旧全窗 ViewMode
+> （Terminal / ExternalSession）与 title_menu。
+>
+> 同时**重挂**三处活着的入口（原先只在旧壳渲染路径上跑或只落进旧右栏）：
+> 会话列的每帧维护（blank-project input / ask 卡 reconcile / 投影快照 / 跨端 settle 通知）；
+> 子代理观察面板（改为 `ToolTab` kind `subagent`，经 `chrome_assembly::open_tool_tab`）；
+> 宿主打开的浏览器页签（`Workspace::open_browser_tab` 建好 webview 后开真页签）。
+> 另修：重启窗口复用进程级 `Workspace`（原 chrome 路径每次开窗新建，dispatch 槽会指旧实体）。
+>
+> 随旧壳退役、当前壳无对应入口的能力（如需再议）：侧栏标签编辑 / 线程与分组的手工排序
+> 通知（`SetThreadTag` / `MoveThread` / `MoveFolder` / `RemoveProject`）、旧右栏的
+> 编辑器页签快捷入口（cmd-g 一组，新壳的编辑器在右栏 "+" 内）、会话 sidecar 的
+> 卸载恢复族（`ResumeSidecar` / `claude --resume` 等）、编辑器草稿随线程 stash。
 
 > Phase 1 落地差异记录（相对 §3 原案）：以单次机械化提交交付（原 1a-1e 切片
 > 是为手工编辑去险；实际为脚本改写 + 编译错误驱动补链 + diff 复核），ChatHost
