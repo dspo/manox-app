@@ -566,25 +566,42 @@ impl Workspace {
         provider: &str,
         id: &str,
         cx: &App,
-    ) -> Option<ahp_types::state::SessionModelInfo> {
+    ) -> Option<(String, ahp_types::state::SessionModelInfo)> {
         Self::resolve_model_display_in(&self.multiplexer.read(cx).agents(cx), provider, id)
     }
 
     /// The pure core of [`Self::resolve_model_display`] against an explicit
     /// wire snapshot.
+    /// Resolve a canonical model identity to its row plus the owning
+    /// registration's human display name (the chip's provider segment).
     pub(crate) fn resolve_model_display_in(
         agents: &[ahp_types::state::AgentInfo],
         provider: &str,
         id: &str,
-    ) -> Option<ahp_types::state::SessionModelInfo> {
+    ) -> Option<(String, ahp_types::state::SessionModelInfo)> {
         // The caller may hold either the bare model id or the canonical
         // `{provider}/{id}` the host mints (`SessionModelInfo.id`); both
         // resolve to the same registration row.
         agents
             .iter()
-            .flat_map(|a| a.models.iter())
-            .find(|m| m.provider == provider && (m.id == id || m.id == format!("{provider}/{id}")))
-            .cloned()
+            .find(|a| {
+                a.models.iter().any(|m| {
+                    m.provider == provider && (m.id == id || m.id == format!("{provider}/{id}"))
+                })
+            })
+            .and_then(|a| {
+                let display = if a.display_name.is_empty() {
+                    a.provider.clone()
+                } else {
+                    a.display_name.clone()
+                };
+                a.models
+                    .iter()
+                    .find(|m| {
+                        m.provider == provider && (m.id == id || m.id == format!("{provider}/{id}"))
+                    })
+                    .map(|m| (display, m.clone()))
+            })
     }
 
     /// The pi-harness model selector. Reads the gateway's model-registry
@@ -625,7 +642,7 @@ impl Workspace {
             .rounded(theme.radius)
             .hover(|s| s.bg(theme.accent.opacity(0.08)))
             .cursor_pointer()
-            .children(if let Some(ref m) = model {
+            .children(if let Some((ref prov_display, ref m)) = model {
                 let model_color =
                     crate::views::context_rail::pi_wire_text_color(Self::model_api(&m.meta), theme);
                 let dot = || {
@@ -638,7 +655,7 @@ impl Workspace {
                     gpui::div()
                         .text_xs()
                         .text_color(theme.foreground)
-                        .child(m.provider.clone())
+                        .child(prov_display.clone())
                         .into_any_element(),
                     dot().into_any_element(),
                     gpui::div()
