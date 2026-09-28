@@ -3,23 +3,13 @@
 //! Models are the multiplexer's wire `ModelInfo` rows (U2 cross-domain #4 —
 //! the former `provider_glue` direct read retired): filtered by the agent id
 //! (the registration's `agents` column, absent = visible to all); grouped by
-//! provider display name, each provider a nested submenu. A config model
-//! registered through several wire apis appears once per wire endpoint (exact
-//! duplicates collapse), each row tagged with its wire api like the composer
-//! model menu. Picking a model invokes `on_pick` with (provider, model id,
-//! wire) — the emitted model id is the raw cx config key (`config_id`,
-//! falling back to the model id), which cx matches verbatim; the wire key
-//! pins the endpoint variant at launch resolution.
+//! provider display name. A config model registered through several wire
+//! apis appears once per wire endpoint (exact duplicates collapse). The
+//! emitted model id is the raw cx config key (`config_id`, falling back to
+//! the model id), which cx matches verbatim; `wire` pins the endpoint variant
+//! at launch resolution.
 
 use std::collections::HashSet;
-
-use crate::i18n;
-use gpui::{App, Context, Window, prelude::*};
-use gpui_component::{
-    Sizable as _, h_flex,
-    menu::{PopupMenu, PopupMenuItem},
-    tag::Tag,
-};
 
 /// One cascade entry: the raw cx config key, its display name, the wire api
 /// (the row tag's source), and the wire key for the launch pin.
@@ -27,7 +17,6 @@ use gpui_component::{
 pub(crate) struct CascadeEntry {
     pub config_id: String,
     pub display: String,
-    pub api: String,
     pub wire: Option<String>,
 }
 
@@ -69,7 +58,6 @@ pub(crate) fn cascade_provider_groups(
         let entry = CascadeEntry {
             config_id,
             display: m.name.clone(),
-            api: m.api.clone(),
             wire: manox_agent::provider_glue::wire_key_from_api(&m.api).map(str::to_string),
         };
         // Lookup-based grouping (not adjacency): equal display names merge.
@@ -79,59 +67,6 @@ pub(crate) fn cascade_provider_groups(
         }
     }
     providers
-}
-
-pub(crate) fn build_model_cascade(
-    menu: PopupMenu,
-    agent_id: &'static str,
-    models: &[manox_protocol::ModelInfo],
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-    on_pick: impl Fn(String, String, Option<String>, &mut Window, &mut App) + Clone + 'static,
-) -> PopupMenu {
-    let providers = cascade_provider_groups(agent_id, models);
-
-    let mut menu = menu;
-    if providers.is_empty() {
-        menu = menu.label(i18n::t("external-wizard-no-model"));
-        return menu;
-    }
-    for (prov_name, entries) in providers {
-        let prov_for_items = prov_name.clone();
-        let on_pick = on_pick.clone();
-        menu = menu.submenu(prov_name, window, cx, move |submenu, _window, _cx| {
-            let mut submenu = submenu;
-            for m in &entries {
-                let model_id = m.config_id.clone();
-                let model_name = m.display.clone();
-                let (variant, label) = crate::Workspace::pi_wire_tag_variant(&m.api);
-                let wire = m.wire.clone();
-                let prov = prov_for_items.clone();
-                let on_pick = on_pick.clone();
-                submenu = submenu.item(
-                    PopupMenuItem::element(move |_window, _cx| {
-                        h_flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                Tag::new()
-                                    .with_variant(variant)
-                                    .outline()
-                                    .small()
-                                    .child(label),
-                            )
-                            .child(model_name.clone())
-                            .into_any_element()
-                    })
-                    .on_click(move |_e, window, cx: &mut App| {
-                        on_pick(prov.clone(), model_id.clone(), wire.clone(), window, cx);
-                    }),
-                );
-            }
-            submenu
-        });
-    }
-    menu
 }
 
 #[cfg(test)]

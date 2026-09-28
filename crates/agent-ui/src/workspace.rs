@@ -10,36 +10,30 @@
 //! Enter in the input box → append a user message + run_turn + persist (the sidebar shows the new entry immediately).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::PathBuf;
 
 use crate::i18n;
-use crate::views::launcher::LauncherPick;
+use gpui::ClickEvent;
 use gpui::DismissEvent;
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Context, Entity, FollowMode,
-    ListAlignment, ListOffset, ListState, MouseButton, Pixels, Render, ScrollHandle, SharedString,
-    Subscription, WeakEntity, Window, anchored, deferred, ease_out_quint, prelude::*, px,
+    Anchor, AnyElement, App, Context, Entity, FollowMode, ListAlignment, ListOffset, ListState,
+    MouseButton, Pixels, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
+    anchored, deferred, prelude::*, px,
 };
-use gpui::{ClickEvent, CursorStyle, DragMoveEvent, MouseUpEvent};
 /// Shared across both harnesses: workspace struct fields hold
 /// `Option<Entity<PopupMenu>>` regardless of feature.
 use gpui_component::menu::PopupMenu;
 use gpui_component::{
     ActiveTheme as _, ColorName, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _,
-    Size, TITLE_BAR_HEIGHT, Theme, TitleBar,
+    Size, Theme,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
-    input::{
-        Editor, EditorState, Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState,
-    },
+    input::{Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState},
     v_flex,
 };
 use gpui_component::{
     ThemeStyled as _,
     menu::PopupMenuItem,
-    tab::{Tab, TabBar},
     tag::{Tag, TagVariant},
 };
 /// `WindowExt::push_notification` + `Notification` are shared: the
@@ -50,21 +44,14 @@ use manox_agent::language_model::StopReason;
 use manox_agent::thread::PermissionMode;
 use manox_agent::thread_engine::BrowserTabId;
 use manox_agent::{Thread, ThreadEvent, ThreadId};
-use manox_components::markdown::HeadingMode;
-use manox_components::markdown::Markdown;
-use serde::{Deserialize, Serialize};
-use std::rc::Rc;
 
+use crate::OpenSettings;
+use crate::ToggleTurnNavigator;
 use crate::client_store_handle::ClientStoreHandle;
 use crate::cockpit::{CockpitPhase, format_elapsed};
+#[cfg(feature = "test-support")]
 use crate::conversation::ConvItem;
 use crate::conversation::{ApplyOutcome, ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
-use crate::external_session::{
-    ExternalSession, ResumeSidecar, SessionKind, SessionPlacement, claude_cwd_from_file_head,
-    claude_project_dir_for_cwd, claude_session_id_from_file_name, codex_session_id_from_rollout,
-    codex_sessions_dir, list_nested_jsonl, list_sidecars, list_top_level_jsonl,
-    merge_external_summaries, new_file_names, remove_sidecar, resume_args, write_sidecar,
-};
 use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
@@ -77,16 +64,7 @@ use crate::views::composer_menu::{
 };
 use crate::views::popup_menu;
 use crate::views::settings::{SettingsEvent, SettingsView};
-use crate::views::sidebar::{Sidebar, SidebarEvent};
 use crate::views::turn_navigator::{TurnNavigator, TurnNavigatorEvent, collect_user_turns};
-use crate::{
-    CloseBrowserTab, CloseTerminalTab, FocusTerminal, NewTerminalTab, OpenBrowserTab,
-    ToggleTurnNavigator,
-};
-use crate::{FocusConversation, OpenSettings};
-use manox_terminal::Terminal;
-use terminal_ui::TerminalView;
-use terminal_ui::terminal_proxy::TerminalProxy;
 
 mod attach;
 mod catch_up;
@@ -247,79 +225,20 @@ fn build_permission_content(
 mod composer;
 mod external;
 mod plan_review;
-mod right_pane;
-
-/// A tab in the right observation pane. `Editor` is the markdown composer
-/// (Write/Preview); `Launcher` is the empty-tab launcher offering the
-/// built-in browser / terminal / CLI-agent views; `Browser(id)` is an
-/// untrusted embedded webview (see [`BrowserView`]); `Session(id)` embeds an
-/// [`ExternalSession`]'s terminal (plain PTY or CLI agent TUI).
-#[derive(Clone, Debug)]
-enum RightTab {
-    Editor,
-    Launcher,
-    Browser(BrowserTabId),
-
-    /// A pi sub-agent's observation panel, keyed by subagent address.
-    Subagent(String),
-    /// An embedded terminal/CLI-agent session, keyed by `ExternalSession.id`.
-    Session(String),
-}
-
-/// Persisted shape of a thread's right-pane state — one row per thread in
-/// `threads.db` (`thread_right_pane`). The UI layer owns this shape; the db
-/// stores opaque TEXT. Subagent tabs are ephemeral by design and never
-/// serialized.
-#[derive(Serialize, Deserialize)]
-struct PersistedRightPane {
-    visible: bool,
-    active: usize,
-    tabs: Vec<PersistedRightTab>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum PersistedRightTab {
-    Editor,
-    Launcher,
-    Browser { url: String },
-
-    Session { id: String },
-}
-
-/// In-session per-thread right-pane stash: the live tabs (browser views
-/// keep their entities across switches), the active index, and visibility.
-/// The persistent copy lives in `threads.db`.
-struct RightPaneSnapshot {
-    tabs: Vec<RightTab>,
-    active: usize,
-    visible: bool,
-}
+mod subagent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerPlacement {
-    Hidden,
     Hero,
     Footer,
 }
 
-fn composer_placement(editor_open: bool, first_screen: bool) -> ComposerPlacement {
-    if editor_open {
-        ComposerPlacement::Hidden
-    } else if first_screen {
+fn composer_placement(first_screen: bool) -> ComposerPlacement {
+    if first_screen {
         ComposerPlacement::Hero
     } else {
         ComposerPlacement::Footer
     }
-}
-
-fn editor_can_submit(
-    history_loading: bool,
-    running: bool,
-    has_pending_ask: bool,
-    text: &str,
-) -> bool {
-    !history_loading && !running && !has_pending_ask && !text.trim().is_empty()
 }
 
 /// Key context for the composer wrapper. `completion = open` shadows the
@@ -379,12 +298,6 @@ pub use manox_agent_chat_ui::column::{
 
 pub struct Workspace {
     pub(crate) cwd: PathBuf,
-    /// Dual-shell embed (PLAN Phase 4 tranche 3): true when this workspace
-    /// is mounted as the chrome shell's main surface — render then produces
-    /// ONLY the conversation column (the chrome shell owns gutter, sidebar,
-    /// card chrome, and right pane). Fixed at construction; the legacy
-    /// full-shell path is the default.
-    pub(crate) embedded: bool,
     /// The chat column's state (thread face, conversation, composer, ask
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
@@ -402,63 +315,12 @@ pub struct Workspace {
     /// no reopen, and the parked subscription keeps the settle unread, the
     /// plan-review stash and the follow-up stash coordinated).
     background_threads: Vec<BackgroundThread>,
-    pub(crate) sidebar: Entity<Sidebar>,
     /// Distinct bound-project paths of the active summaries, in list order
     /// (the project chip's "recent, unregistered" section; U2 push cache).
     /// Registered project folders (chip menu + the sidebar grouping push).
     /// Repaint observer on the multiplexer's list/registry state (U2): its
     /// notify drives the sidebar rows and the workspace's model surfaces.
     _mux_lists: gpui::Subscription,
-    /// Per-thread right-side editor text, keyed by thread id. The editor pane
-    /// is a right-side resource of the thread it was written for: switching
-    /// away stashes the outgoing text, switching back restores it, so no
-    /// thread ever sees another thread's draft and returning recovers the
-    /// text. Mirrors `drafts` (the composer's per-thread stash).
-    editor_drafts: HashMap<String, String>,
-    /// Right-side markdown composer; opened via the `ToggleEditor` shortcut.
-    /// Plain-text edit mode by default; `ToggleEditorPreview` switches to a
-    /// rendered markdown preview (`Markdown`).
-    editor_state: Entity<EditorState>,
-    /// Whether the Editor tab is the active right-pane tab. Drives the inline
-    /// composer hide (writing happens in the side panel) and the env/hero
-    /// gates.
-    editor_open: bool,
-    editor_preview: bool,
-    /// Stable markdown preview entity kept across renders so the source is
-    /// only re-parsed when the draft changes (not every frame).
-    editor_preview_md: Option<Entity<Markdown>>,
-    /// Explicit pixel-anchored scroll state for the preview column. Mirrors the
-    /// message-list pattern: an explicit handle (not entity-state scroll) keeps
-    /// the offset stable and defaulting to the top, and a `flex_1`-sized (not
-    /// `h_full`-percentage) scroll container reliably engages `overflow_y_scroll`
-    /// instead of letting content overflow and clip.
-    editor_preview_scroll: ScrollHandle,
-    /// Peer right-pane tabs for the editor, launcher, browser, sub-agent
-    /// observers, and embedded terminal/CLI sessions. `editor_open` tracks
-    /// whether the Editor tab specifically is active.
-    right_tabs: Vec<RightTab>,
-    active_right_tab: usize,
-    /// Right-pane visibility gate, orthogonal to the tab list: hiding the pane
-    /// keeps every tab (and its state) alive for the next toggle. Closing the
-    /// last tab hides the pane; the TitleBar toggle restores the tabs.
-    right_pane_visible: bool,
-    /// Per-thread right-pane stash for in-session round trips; the persistent
-    /// copy lives in `threads.db` (`thread_right_pane`).
-    right_pane_by_thread: HashMap<String, RightPaneSnapshot>,
-    /// The tab currently under the mouse — the close `×` reveals on hover.
-    hovered_right_tab: Option<usize>,
-    /// Generation counter for the browser page-title ticker; bumped when the
-    /// last browser tab closes so the prior ticker self-terminates.
-    browser_title_ticker_gen: u64,
-    /// Provider→model cascade opened from the Launcher's CLI-agent rows.
-    /// Created on open, destroyed on close (the model-selector pattern).
-    launcher_menu: Option<Entity<PopupMenu>>,
-    launcher_menu_sub: Option<Subscription>,
-    /// The CLI agent kind the open launcher cascade belongs to — anchors the
-    /// popup under its launcher row.
-    launcher_menu_kind: Option<SessionKind>,
-    /// Live sub-agent observation panels keyed by Agent tool-call id.
-    subagent_panels: HashMap<String, Entity<crate::views::subagent_panel::SubagentPanel>>,
     /// Accumulated child-session events per Agent tool-call id, so a panel
     /// opened mid-run backfills from the start.
     subagent_transcripts: HashMap<String, Vec<manox_agent::SubagentChildEvent>>,
@@ -476,19 +338,6 @@ pub struct Workspace {
     /// tab switches; dropped when the tab closes, which detaches the native
     /// view via [`manox_webview::webview::WebView`]'s `Drop`.
     pub(crate) browser_views: BTreeMap<BrowserTabId, Entity<BrowserView>>,
-    /// Editor pane width, driven by dragging the divider. In-memory only.
-    editor_width: Pixels,
-    /// Sidebar width, driven by dragging the divider on its right edge.
-    /// In-memory only; never persisted so the user's drag state stays
-    /// session-local.
-    sidebar_width: Pixels,
-    /// Sidebar collapse gate (the TitleBar's panel-left toggle): collapsed
-    /// hides the sidebar slot and its resize handle so the main card takes
-    /// the full width; the remembered `sidebar_width` survives the round
-    /// trip. In-memory only, like the width.
-    sidebar_visible: bool,
-    sidebar_sub: Option<Subscription>,
-    editor_sub: Option<Subscription>,
     /// Top-level view mode. `Settings` replaces the entire window content
     /// with the SettingsView overlay until the user requests exit.
     view_mode: ViewMode,
@@ -506,93 +355,22 @@ pub struct Workspace {
     /// cost when the user never opens Settings.
     settings_view: Option<Entity<SettingsView>>,
     settings_sub: Option<Subscription>,
-    /// The terminal tab's view, lazily created on the first `FocusTerminal` /
-    /// `NewTerminalTab`. `None` until then. Dropped on `CloseTerminalTab`.
-    terminal_view: Option<Entity<TerminalView>>,
-    /// Live external agent CLI sessions (claude / codex / copilot) launched from
-    /// the sidebar `+` menu. In-memory only — never persisted. Each owns its
-    /// `TerminalView` plus a shared `Arc<SessionHandle>` so the close path can
-    /// `kill` the agent explicitly.
-    pub(crate) external_sessions: Vec<crate::external_session::ExternalSession>,
-    /// Unclosed external sessions from previous runs, restored from their
-    /// sidecars at startup. Rendered in the sidebar as resumable rows; clicking
-    /// one re-spawns the CLI with its resume flag. Never auto-resumed.
-    resumable_external: Vec<ResumeSidecar>,
-    /// Ids of resumable rows whose CLI re-spawn is in flight; the sidebar
-    /// shows a loading indicator on each such row. A set (not a single slot)
-    /// so resuming two rows concurrently cannot steal each other's spinner.
-    resuming_external: std::collections::HashSet<String>,
-    /// Conversation file names already claimed by a live session's CLI-session
-    /// watcher, keyed by watched directory — concurrent watchers on the same
-    /// directory (two sessions in one cwd) can never claim the same file.
-    cli_session_claims: std::collections::HashMap<PathBuf, std::collections::HashSet<String>>,
-    /// The currently-displayed external session id when
-    /// `view_mode == ExternalSession`. Mirrors `terminal_view`'s "one at a
-    /// time" model; switching away parks the session (its terminal keeps
-    /// running) rather than killing it.
-    active_external: Option<String>,
 }
 
-/// Top-level rendering mode of the Workspace window. `Settings` and
-/// `Terminal` are full-pane switches off the default `Workspace` (conversation)
-/// mode; `ExternalSession` shows an external agent CLI's TUI terminal in place
-/// of the conversation. Future overlays can extend this enum rather than
-/// carrying parallel `bool` flags.
+/// Top-level rendering mode of the app page. `Settings` is a main-column swap
+/// off the conversation; every other surface (terminal, browser, external
+/// session, sub-agent panel) is a shell surface — a right-pane tab or the
+/// bottom dock — and never a view mode.
 #[derive(Default)]
 enum ViewMode {
     #[default]
     Workspace,
     Settings,
-    Terminal,
-    ExternalSession,
 }
 
-/// Right-side composer width. Wide enough for rendered markdown
-/// (headings, lists, code blocks) alongside the 1100px window.
-const EDITOR_PANEL_WIDTH: f32 = 640.;
-const EDITOR_MIN_WIDTH: f32 = 320.;
-const EDITOR_MAX_WIDTH: f32 = 960.;
-/// Fixed width of every right-pane tab: long labels cap + ellipsis instead
-/// of stretching the bar.
-const RIGHT_TAB_WIDTH: f32 = 160.;
-/// Character cap for right-pane tab labels; longer labels end in `…` and the
-/// full text rides the tab's tooltip.
-const RIGHT_TAB_LABEL_CAP: usize = 16;
-
-/// Cap a right-pane tab label at [`RIGHT_TAB_LABEL_CAP`] chars + `…`.
-fn cap_tab_label(label: &str) -> String {
-    let mut chars = label.chars();
-    let head: String = chars.by_ref().take(RIGHT_TAB_LABEL_CAP).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
-    }
-}
-/// Width of the drag handle between the message column and the right side
-/// view (the editor pane).
-const EDITOR_DIVIDER_WIDTH: f32 = 6.;
-// Mirrors `views/sidebar.rs` (`Sidebar` renders at `w(px(SIDEBAR_WIDTH))`).
-// Kept here so the editor pane's resize clamp can reserve space for the
-// sidebar + main column without depending on the sidebar's internals.
-const SIDEBAR_WIDTH: f32 = 260.;
-const SIDEBAR_MIN_WIDTH: f32 = 200.;
-const SIDEBAR_MAX_WIDTH: f32 = 480.;
-/// Width of the invisible sidebar resize hot zone. It overlays the
-/// sidebar/card boundary as an absolute strip and claims no layout space —
-/// the two panels sit flush against each other.
-const SIDEBAR_DIVIDER_WIDTH: f32 = 6.;
-/// Gutter between the window edge and the shell content (the sidebar slot
-/// and the main card): wider on the left (the sidebar's seamless outer
-/// edge), tighter on the top/bottom/right card sides.
-const SHELL_PAD_LEFT: f32 = 10.;
-const SHELL_PAD_EDGE: f32 = 4.;
-
-/// The empty band the sidebar slot reserves at its top before any content:
+/// The empty band the session list reserves at its top before any content:
 /// macOS floats the traffic lights over it (28px), other platforms need only
-/// a small breathing inset (8px). Shared by the sidebar/settings-nav scroll
-/// bodies (`pt(top_inset)`) and the shell's sidebar window-drag zone, which
-/// must cover exactly this band and never the interactive rows below it.
+/// a small breathing inset (8px). Shared by the settings nav's scroll body.
 pub(crate) fn sidebar_top_inset() -> Pixels {
     if cfg!(target_os = "macos") {
         px(28.)
@@ -600,12 +378,13 @@ pub(crate) fn sidebar_top_inset() -> Pixels {
         px(8.)
     }
 }
+
 /// The main card's `border_1` on both edges; width budgets that measure
 /// card-interior space subtract this.
 const CARD_BORDER: f32 = 2.;
-/// Floor for the message column width when the right side view (editor
-/// pane) is dragged wide.
-const MAIN_MIN_WIDTH: f32 = 160.;
+
+/// The settings nav column's width inside the conversation card.
+const SETTINGS_NAV_WIDTH: f32 = 240.;
 
 /// Trailing overdraw for the message list: rows within this many pixels
 /// below the viewport are pre-measured so scrolling never pops an
@@ -619,26 +398,22 @@ struct TurnNavigatorLayout {
     panel_width: Pixels,
 }
 
-fn turn_navigator_layout(
-    window_width: Pixels,
-    sidebar_width: Pixels,
-    right_pane_width: Option<Pixels>,
-    show_context_rail: bool,
-) -> TurnNavigatorLayout {
-    // The overlay anchors to the shell root's padding box (gpui absolute
-    // positioning is CSS-style), so both insets carry the shell gutter plus
-    // the card's 1px border on their side.
-    let left_inset = px(SHELL_PAD_LEFT) + sidebar_width + px(CARD_BORDER / 2.);
-    let right_pane_inset = right_pane_width
-        .map(|width| width + px(EDITOR_DIVIDER_WIDTH))
-        .unwrap_or(px(0.));
+fn turn_navigator_layout(card_width: Pixels, show_context_rail: bool) -> TurnNavigatorLayout {
+    // The overlay anchors to the conversation card's padding box (gpui
+    // absolute positioning is CSS-style), and it must fit INSIDE it: the card
+    // clips its children, so a panel sized from the window would be cut off on
+    // both sides whenever the shell's sidebar or right pane claims width. The
+    // card's own 1px border is the only furniture on either side here; the
+    // shell's sidebar and right pane live OUTSIDE the card, which is exactly
+    // why the caller passes the measured card width and never the window's.
+    let left_inset = px(CARD_BORDER / 2.);
     let context_inset = if show_context_rail {
         px(crate::views::context_rail::ENV_CONTENT_INSET)
     } else {
         px(0.)
     };
-    let right_inset = px(SHELL_PAD_EDGE) + px(CARD_BORDER / 2.) + right_pane_inset + context_inset;
-    let available = window_width - left_inset - right_inset - px(24.);
+    let right_inset = px(CARD_BORDER / 2.) + context_inset;
+    let available = card_width - left_inset - right_inset - px(24.);
     let panel_width = if available <= px(0.) {
         px(0.)
     } else if available < px(480.) {
@@ -654,34 +429,10 @@ fn turn_navigator_layout(
     }
 }
 
-/// Settings overlay slide duration. The enter animation glides the panel in
-/// from the left edge, the exit animation glides it out to the right.
-const SLIDE_MS: u64 = 180;
 /// The Exit handler in `subscribe_settings` waits this long before flipping
-/// `view_mode` back to `Workspace`, giving the exit animation time to play.
-/// Set slightly above `SLIDE_MS` so the last frame is not popped mid-tween.
+/// `view_mode` back to `Workspace`, giving the outgoing page a frame to
+/// settle before the swap.
 const SLIDE_OUT_MS: u64 = 200;
-
-/// Drag payload for the editor pane divider. Doubles as the invisible drag
-/// ghost view, mirroring the `DraggedDock` drag-ghost pattern.
-struct DraggedEditorDivider;
-
-impl Render for DraggedEditorDivider {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::Empty
-    }
-}
-
-/// Drag payload for the sidebar divider. Same shape as the editor divider's
-/// payload; the two are distinguished by type so their drag-move handlers
-/// can each run only on the matching payload.
-struct DraggedSidebarDivider;
-
-impl Render for DraggedSidebarDivider {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::Empty
-    }
-}
 
 enum RecallDirection {
     Up,
@@ -697,18 +448,6 @@ enum RecallStep {
     Recall(String),
     /// The walk ended with an empty draft: clear the input.
     Clear,
-}
-
-/// The cascade selection backing [`Workspace::spawn_external_session`]; one
-/// struct keeps the spawn entry point under clippy's argument cap.
-pub(crate) struct ExternalSpawn {
-    kind: SessionKind,
-    provider_name: String,
-    model_id: String,
-    /// Cx wire key pinning the endpoint variant (`anthropic` /
-    /// `responses` / `completions`); `None` = default derivation.
-    wire_api: Option<String>,
-    project_cwd: Option<PathBuf>,
 }
 
 impl Workspace {
@@ -732,15 +471,6 @@ impl Workspace {
     }
     pub(crate) fn chat_rail(&self, cx: &App) -> Entity<crate::views::context_rail::ContextRail> {
         self.chat.read(cx).context_rail.clone()
-    }
-
-    /// The chrome-embed constructor: identical state machine and
-    /// subscriptions, flagged to render column-only inside the chrome
-    /// shell's main surface. [`Self::new`] stays the legacy full shell.
-    pub fn new_embedded(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut ws = Self::new(window, cx);
-        ws.embedded = true;
-        ws
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -793,20 +523,6 @@ impl Workspace {
                 .placeholder(i18n::t("workspace-input-placeholder"))
         });
 
-        let editor_state = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("markdown")
-                .line_number(true)
-                .folding(false)
-                .soft_wrap(true)
-                .submit_on_enter(false)
-                .placeholder(i18n::t("workspace-composer-placeholder"))
-        });
-
-        let sidebar = cx.new(|cx| Sidebar::new(px(SIDEBAR_WIDTH), cx));
-        // U2 list source + GW5 badge source: rows are the multiplexer's wire
-        // list, and badges prefer the leaves' client-owned unread mirrors.
-        sidebar.update(cx, |s, _| s.bind_multiplexer(multiplexer.clone()));
         // U6a/U6b②: no store handle at all — the list refresh rides the
         // server's watcher broadcast, and the attach path is the landing
         // mirror (the wire owns the session state).
@@ -826,49 +542,20 @@ impl Workspace {
         context_rail.update(cx, |r, _| r.set_host(chat_host.clone()));
 
         let mut ws = Self {
-            embedded: false,
             cwd,
             multiplexer,
             client,
             background_threads: Vec::new(),
-            sidebar,
             _mux_lists,
-            editor_drafts: HashMap::new(),
-            editor_state,
-            editor_open: false,
-            editor_preview: false,
-            editor_preview_md: None,
-            editor_preview_scroll: ScrollHandle::new(),
-            right_tabs: Vec::new(),
-            active_right_tab: 0,
-            right_pane_visible: false,
-            right_pane_by_thread: HashMap::new(),
-            hovered_right_tab: None,
-            browser_title_ticker_gen: 0,
-            launcher_menu: None,
-            launcher_menu_sub: None,
-            launcher_menu_kind: None,
-            subagent_panels: HashMap::new(),
             subagent_transcripts: HashMap::new(),
             subagent_final_text: HashMap::new(),
             subagent_prompts: HashMap::new(),
             browser_views: BTreeMap::new(),
-            editor_width: px(EDITOR_PANEL_WIDTH),
-            sidebar_width: px(SIDEBAR_WIDTH),
-            sidebar_visible: true,
-            sidebar_sub: None,
-            editor_sub: None,
             view_mode: ViewMode::default(),
             exiting_settings: false,
             settings_transition_gen: 0,
             settings_view: None,
             settings_sub: None,
-            terminal_view: None,
-            external_sessions: Vec::new(),
-            resumable_external: list_sidecars(),
-            resuming_external: std::collections::HashSet::new(),
-            cli_session_claims: std::collections::HashMap::new(),
-            active_external: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
@@ -922,6 +609,7 @@ impl Workspace {
                 conversation_sub: None,
                 list_state: ListState::new(0, ListAlignment::Bottom, MSG_LIST_OVERDRAW),
                 message_list_width: crate::views::MessageListWidthInvalidator::default(),
+                card_width: crate::views::CardWidth::default(),
                 list_count: 0,
                 goal_popover_open: false,
                 goal_ticker_gen: 0,
@@ -939,17 +627,12 @@ impl Workspace {
             chat.store_observe = Some(store_changes);
             cx.notify();
         });
-        ws.sidebar_sub = Some(ws.subscribe_sidebar(window, cx));
         let input_sub = ws.subscribe_input(window, cx);
         ws.chat.update(cx, |chat, cc| {
             chat.input_sub = Some(input_sub);
             cc.notify();
         });
-        ws.editor_sub = Some(ws.subscribe_editor(window, cx));
         ws.observe_conversation(cx);
-        // The sidebar lists the restored resumable rows from the first frame;
-        // nothing is resumed until the user clicks one.
-        ws.sync_sidebar_external(cx);
         // Focus the composer so typing works immediately on the hero screen.
         ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
         ws
@@ -1882,132 +1565,15 @@ impl Workspace {
         (events, observe)
     }
 
-    fn subscribe_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        let sidebar = self.sidebar.clone();
-        cx.subscribe_in(
-            &sidebar,
-            window,
-            |this, _sidebar, ev: &SidebarEvent, window, cx| match ev {
-                SidebarEvent::NewThread => this.start_new_thread(None, window, cx),
-                SidebarEvent::NewThreadWithProject(dir) => {
-                    this.start_new_thread(Some(dir.clone()), window, cx);
-                }
-                SidebarEvent::OpenThread(id) => this.open_thread(id.clone(), window, cx),
-                SidebarEvent::SpawnExternalSession(kind, provider, model, wire, project) => {
-                    this.spawn_external_session(
-                        ExternalSpawn {
-                            kind: *kind,
-                            provider_name: provider.clone(),
-                            model_id: model.clone(),
-                            wire_api: wire.clone(),
-                            project_cwd: project.clone(),
-                        },
-                        SessionPlacement::FullWindow,
-                        window,
-                        cx,
-                    );
-                }
-                SidebarEvent::SpawnPlainSession(kind, project) => {
-                    this.spawn_plain_session(
-                        *kind,
-                        project.clone(),
-                        SessionPlacement::FullWindow,
-                        window,
-                        cx,
-                    );
-                }
-                SidebarEvent::LaunchVSCode(project) => {
-                    // VS Code opens the project directory the menu was launched
-                    // from; from the Conversations header (no project) it
-                    // falls back to the workspace cwd — the same directory a
-                    // fresh session runs in. Injection targets come from the
-                    // persisted `vscode_app:` settings (no launch-time choice).
-                    let folder = project.clone().unwrap_or_else(|| this.cwd.clone());
-                    this.launch_vscode_app(Some(folder), window, cx);
-                }
-                SidebarEvent::OpenExternalSession(id) => {
-                    this.open_external_session(id, window, cx);
-                }
-                SidebarEvent::ArchiveExternalSession(id) => {
-                    this.close_external_session(id, cx);
-                }
-                SidebarEvent::ArchiveThread(id, archived) => {
-                    let is_current = this
-                        .chat
-                        .read(cx)
-                        .store
-                        .as_ref()
-                        .map(|s| s.read(cx).store.id.0 == *id)
-                        .expect("foreground store present");
-                    let store = manox_agent::thread_store_global();
-                    store.with_mut(|s| s.archive_thread(id, *archived));
-                    // Sync the in-memory flag so the title-bar menu label stays
-                    // fresh when the sidebar archives the currently active thread.
-                    if is_current {
-                        let _ =
-                            this.send_note(cx, |sid| manox_protocol::ClientNote::ArchiveThread {
-                                session_id: sid.into(),
-                                archived: *archived,
-                            });
-                    }
-                    // Archiving the active thread navigates away to a fresh
-                    // empty thread (Hero view) so the user doesn't stare at a
-                    // ghost conversation that just vanished from the sidebar.
-                    if *archived && is_current {
-                        this.start_new_thread(None, window, cx);
-                    }
-                }
-                SidebarEvent::SetThreadTag(id, tag) => {
-                    let store = manox_agent::thread_store_global();
-                    store.with_mut(|s| s.set_thread_tag(id, tag.clone()));
-                }
-                // Sidebar order is the server's durable manual account, so a
-                // move rides the gateway rather than an in-process store write
-                // (the same-face rule the archive/tag migrations converged on).
-                // These notes carry no session: they address a thread and a
-                // folder, not the landing conversation.
-                SidebarEvent::MoveThread { id, before_id } => {
-                    // These notes address no session, so they go straight to the
-                    // shared client rather than the session-scoped helper.
-                    this.client
-                        .send_note(manox_protocol::ClientNote::InsertThreadBefore {
-                            thread_id: id.clone(),
-                            before_thread_id: before_id.clone(),
-                        });
-                }
-                SidebarEvent::MoveFolder { path, before_path } => {
-                    this.client
-                        .send_note(manox_protocol::ClientNote::InsertGroupBefore {
-                            path: path.to_string_lossy().into_owned(),
-                            before_path: before_path
-                                .as_ref()
-                                .map(|p| p.to_string_lossy().into_owned()),
-                        });
-                }
-                SidebarEvent::RemoveProject(path) => {
-                    // Unregister the folder; the sidebar drops the group and
-                    // its threads fall back to the loose Conversations list.
-                    // Conversation history is never touched.
-                    let store = manox_agent::thread_store_global();
-                    store.with_mut(|s| s.remove_project(&path.to_string_lossy()));
-                }
-            },
-        )
-    }
-
     /// Switch into the Settings overlay. The Settings view is created lazily on
     /// first entry; from then on the entity + subscription are reused so the
     /// user's last selection (and any scroll position) survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_view.is_none() {
-            let settings = cx.new(|cx| SettingsView::new(self.sidebar_width, window, cx));
+            let settings = cx.new(|cx| SettingsView::new(px(SETTINGS_NAV_WIDTH), window, cx));
             let sub = self.subscribe_settings(&settings, cx);
             self.settings_view = Some(settings);
             self.settings_sub = Some(sub);
-        } else if let Some(settings) = self.settings_view.as_ref() {
-            // Re-entry after a divider resize in the app page: the settings
-            // nav follows the shared sidebar width.
-            settings.update(cx, |s, cx| s.set_width(self.sidebar_width, cx));
         }
         self.view_mode = ViewMode::Settings;
         // Clear any pending exit animation: clicking Settings… while the
@@ -2083,21 +1649,6 @@ impl Workspace {
                 InputEvent::Focus | InputEvent::Blur => {}
             },
         )
-    }
-
-    /// Submit the right-side editor on Cmd/Ctrl-Enter (`InputEvent::PressEnter`
-    /// with `secondary` set). Plain Enter inserts a newline (submit_on_enter
-    /// is off for the panel editor).
-    fn subscribe_editor(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        let editor = self.editor_state.clone();
-        cx.subscribe_in(&editor, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { secondary, shift } = ev
-                && *secondary
-                && !shift
-            {
-                this.submit_editor(window, cx);
-            }
-        })
     }
 
     /// Re-evaluate the completion popover against the live input value + caret.
@@ -2481,19 +2032,13 @@ impl Workspace {
 
     fn render_turn_navigator_overlay(
         &self,
-        window: &mut Window,
         theme: &Theme,
-        right_pane_open: bool,
         show_context_rail: bool,
+        card_width: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let navigator = self.chat.read(cx).turn_navigator.clone()?;
-        let layout = turn_navigator_layout(
-            window.bounds().size.width,
-            self.effective_sidebar_width(),
-            right_pane_open.then_some(self.editor_width),
-            show_context_rail,
-        );
+        let layout = turn_navigator_layout(card_width, show_context_rail);
         let panel_height = navigator.read(cx).panel_height(cx);
 
         Some(
@@ -2520,9 +2065,7 @@ impl Workspace {
                         .bottom_0()
                         .left(layout.left_inset)
                         .items_center()
-                        // The card (and its title bar) starts below the shell
-                        // gutter, so the panel clears them from the window top.
-                        .pt(px(SHELL_PAD_EDGE) + TITLE_BAR_HEIGHT + px(8.0))
+                        .pt(px(8.0))
                         .child(
                             popup_menu::popup_container(theme, navigator)
                                 .id("turn-navigator-panel")

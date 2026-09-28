@@ -3,34 +3,41 @@
 Shared vocabulary for every named UI component in manox. When discussing UI, reference
 component names from this file so both parties refer to the same thing.
 
-**两套壳并存（§0）**：不带限定词的组件名默认指旧壳（默认构建）；
-chrome 构建的组件集中在 §6A，组件名以 `Chrome` / `Embedded` 前缀或 crate 路径区分。
+组件名以 crate 归属区分：壳与壳内组件在 `manox-agent-chrome-ui`（`Chrome` 前缀或
+crate 路径），会话列与其状态机在 `manox-agent-chat-ui` / `agent-ui`。
 
 Component names use PascalCase. The hierarchy mirrors the visual containment tree.
 
 ---
 
-## 0. 双壳架构与构建选择（2026-09-22 起）
+## 0. 架构（2026-09-28 起：唯一壳）
 
-窗口有两套**长期并行**的壳，**构建时决定**（`crates/manox` 的 feature，非运行时开关）：
+窗口只有一个壳，无构建开关：
 
 ```sh
-cargo run                       # 旧壳（默认）：agent_ui::Workspace 全壳
-cargo run --features chrome-shell   # chrome 壳：agent_ui::chrome_assembly 装配
+cargo run                       # 桌面应用（chrome 壳，唯一）
 ```
 
-| 层 | 旧壳（默认构建） | chrome 壳（`--features chrome-shell`） |
-| --- | --- | --- |
-| 根视图 | `Workspace`（含侧栏槽 + 主卡 + 右栏 + Settings/终端/外部会话 ViewMode） | `manox_agent_chrome_ui::Shell`（chrome crate 的壳：工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
-| 侧栏 | `views/sidebar.rs`（agent-ui，全语义：五态/团队森林/标签/排序 reconcile） | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影，D2） |
-| 聊天主栏 | `Workspace::render_manox` 的会话列 | `Workspace::new_embedded` 的**嵌入渲染模式**（只渲会话列，挂进 chrome 的 `MainSurface` 槽） |
-| 右栏 | `Workspace` 的 `right_tabs`（`RightTab` 枚举，线程绑定 + threads.db 快照） | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（浏览器/终端族/CLI agents/编辑器）；per-thread 会话由 `RightPaneSession` stash/restore，快照同样落 threads.db |
-| 底部 dock | 无（面板在旧壳为右栏/ViewMode） | `chrome::panel` + `PanelSurface` 注入（manox 装终端；随前台线程 cwd） |
-| Settings | 全窗 `ViewMode::Settings`（shell_root 的 nav｜main） | 同状态机，**渲染换位**：`render_embedded_settings` 把 nav｜main 放进主卡 |
+| 层 | 组件 |
+| --- | --- |
+| 根视图 | `manox_agent_chrome_ui::Shell`（壳：38px 工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
+| 侧栏 | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影） |
+| 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
+| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
+| 底部 dock | `chrome::panel` + `PanelSurface` 注入（manox 装终端；随前台线程 cwd） |
+| Settings | 主区卡内的 nav｜panel 换位（`Workspace::render_settings_card`） |
 
-共享不变的部分：`agent-ui` 的状态层（multiplexer/client_store/external_session/browser_host/dispatch）、`manox-agent-chat-ui` 的聊天状态机与消息管线、`terminal-ui` 渲染、`manox-webview`。
+共享状态层不变：`agent-ui`（multiplexer / client_store / browser_host / dispatch / 侧栏投影 /
+slash_command / Settings 视图）、`manox-agent-chat-ui`（聊天状态机与消息管线）、`terminal-ui`、
+`manox-webview`。
 
-chrome 壳的契约（均可在不改 agent-ui 的前提下扩展）：`MainSurface`（主栏槽）、`ToolTab`/`ToolTabFactory`（右栏 kind）、`PanelSurface`（dock 内容）、`HostHooks`（pin/archive/new/select 回调）。依赖不变量：chat crate 不得依赖 terminal-ui/manox-webview/manox-ext-agents（`script/check-chat-crate-deps.sh` 门禁）；chrome crate 不依赖 manox-agent。计划与分工详见 `PLAN-CHROME-CHAT-SPLIT.md`。
+壳的契约（均可在不改 agent-ui 的前提下扩展）：`MainSurface`（主栏槽）、`ToolTab` /
+`ToolTabFactory`（右栏 kind）、`PanelSurface`（dock 内容）、`HostHooks`（pin/archive/new/select
+回调）。装配层另有两条进程级通路：`chrome_assembly::{open_tool_tab, subagent_panel}` ——
+宿主（agent 的浏览器打开、会话列/rail 上的子代理点击）经它把页签落到活着的右上栏。
+依赖不变量：chat crate 不得依赖 terminal-ui/manox-webview/manox-ext-agents
+（`script/check-chat-crate-deps.sh` 门禁）；chrome crate 不依赖 manox-agent。
+计划与后续见 `PLAN-CHROME-CHAT-SPLIT.md`。
 
 ---
 
@@ -54,7 +61,8 @@ chrome 壳的契约（均可在不改 agent-ui 的前提下扩展）：`MainSurf
 | ContextRail（usage/cost/cockpit 相位/git 状态/plan/changes/branch） | ✅ | cost 来自内核 `session_stats`（rate card 计价）；cockpit 相位随事件流驱动 |
 | `/compact` + Recap 卡片 | ✅ | 内核 `HarnessEvent` compaction 事件（manual/threshold/overflow） |
 | 后台线程（ctrl-b 置底 / 切换自动 park） | ✅ | `background_threads` + `attach_thread` parking |
-| 外部会话（Claude Code / Codex / GitHub Copilot CLI / VS Code 注入 / 终端纯 PTY） | ✅ | 侧栏 provider→model 级联（agents）+ 终端直接入口（`SpawnPlainSession`）+ `ViewMode::ExternalSession`；agent 会话退出后可从侧栏恢复（sidecar 记录 CLI session id，`claude --resume <id>` / `codex resume <id>` 定向恢复；未捕获时走 CLI picker；copilot `--continue`） |
+| CLI agent 终端（Claude Code / Codex / GitHub Copilot） | ✅ | 右栏 ToolTab：先落 provider→model 级联（共享投影 `cascade_provider_groups`），选中即以该端点 `AgentBuilder` 拉起 CLI（PTY relay → `TerminalView`；cwd = 前台线程项目目录） |
+| 集成终端 / VS Code 注入 / ChatGPT.app 注入 | ✅ | 右栏终端页签（$SHELL，独立 PTY）+ 工具菜单的 VS Code / ChatGPT.app 注入启动（后台线程 + 通知，应用独立存活） |
 | Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface |
 | TurnNavigator | ✅ | cmd-m 打开；↑/↓ 选条、enter 定位、⌘↵ 回填 composer、⌘C 复制；历史回溯另有 ⌥↑/⌥↓ |
 | 图片附件 | ✅ | 剪贴板粘贴 / plus 选择 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
@@ -72,17 +80,13 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ## 索引
 
-### Chrome Shell（chrome 构建）
+### 壳（Shell）
 
-- [ChromeShell](#chromeshell) · [ChromeSessionList](#chromesessionlist) · [SidebarProjection](#sidebarprojection) · [ChromeRightPane](#chromerightpane) · [ToolTabRegistry](#tooltabregistry) · [ChromePanel](#chromepanel) · [EmbeddedColumn](#embeddedcolumn) · [EmbeddedSettings](#embeddedsettings)
+- [ChromeShell](#chromeshell) · [ChromeSessionList](#chromesessionlist) · [SidebarProjection](#sidebarprojection) · [ChromeRightPane](#chromerightpane) · [ToolTabRegistry](#tooltabregistry) · [ChromePanel](#chromepanel) · [ConversationColumn](#conversationcolumn) · [SettingsCard](#settingscard)
 
 ### 顶层
 
-- [Window](#window) · [NativeMenuBar](#nativemenubar) · [AboutWindow](#aboutwindow) · [Workspace](#workspace) · [WorkspaceShell](#workspaceshell) · [MainView](#mainview) · [TerminalColumn](#terminalcolumn) · [ViewMode](#viewmode) · [ViewMode::Workspace](#viewmodeworkspace-layout) · [ViewMode::Settings](#viewmodesettings) · [ViewMode::Terminal](#viewmodeterminal) · [ViewMode::ExternalSession](#viewmodeexternalsession)
-
-### Sidebar
-
-- [Sidebar](#sidebar) · [SidebarScrollBody](#sidebarscrollbody) · [SidebarPinnedSectionHeader](#sidebarpinnedsectionheader) · [SidebarProjectsSection](#sidebarprojectssection) · [SidebarProjectGroup](#sidebarprojectgroup) · [SidebarConversationsSection](#sidebarconversationssection) · [SidebarNewSessionMenu](#sidebarnewsessionmenu) · [SidebarOrderToggle](#sidebarordertoggle) · [SidebarProjectMenu](#sidebarprojectmenu) · [SidebarThreadItem](#sidebarthreaditem) · [SidebarThreadRowMenu](#sidebarthreadrowmenu) · [SidebarTagChip](#sidebartagchip) · [SidebarShowMoreRow](#sidebarshowmorerow) · [ResumeSidecar](#resumesidecar) · [SidebarDivider](#sidebardivider)
+- [Window](#window) · [NativeMenuBar](#nativemenubar) · [AboutWindow](#aboutwindow) · [Workspace](#workspace) · [ViewMode](#viewmode) · [ViewMode::Workspace](#viewmodeworkspace) · [ViewMode::Settings](#viewmodesettings)
 
 ### MainView
 
@@ -90,7 +94,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### MessageColumn
 
-- [MessageColumn](#messagecolumn) · [TitleBar](#titlebar) · [TitleBarThreadTitle](#titlebarthreadtitle) · [TitleBarMenuButton](#titlebarmenubutton) · [SidebarToggleBtn](#sidebartogglebtn) · [RightPaneToggleBtn](#rightpanetogglebtn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice)
+- [MessageColumn](#messagecolumn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice) · [FollowStopProjection](#followstapprojection)
 
 ### ContextRail
 
@@ -118,15 +122,15 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Popups & Dropdowns
 
-- [CompletionPopover](#completionpopover) · [ModelMenu](#modelmenu) · [AccessMenu](#accessmenu) · [ProjectMenu](#projectmenu) · [TitleMenu](#titlemenu)
+- [CompletionPopover](#completionpopover) · [ModelMenu](#modelmenu) · [AccessMenu](#accessmenu) · [ProjectMenu](#projectmenu)
 
 ### Overlays
 
 - [BlankProjectOverlay](#blankprojectoverlay)
 
-### EditorPane
+### 右栏页签内容
 
-- [EditorDivider](#editordivider) · [RightPane](#rightpane) · [RightTabBar](#righttabbar) · [LauncherTab](#launchertab) · [SessionTab](#sessiontab) · [EditorWriteTab](#editorwritetab) · [EditorPreviewTab](#editorpreviewtab) · [SubagentPanel](#subagentpanel) · [BrowserView](#browserview)
+- [SubagentPanel](#subagentpanel) · [BrowserView](#browserview)
 
 ### ManagementShell
 
@@ -184,235 +188,63 @@ The count on the macOS Dock icon (`NSDockTile.setBadgeLabel` via `objc2-app-kit`
 
 ## 2. Workspace
 
+`agent-ui` 的会话列（`crates/agent-ui/src/workspace.rs`）：状态 + 装配层。持有
+multiplexer（单连接 demux）、`ChatColumn`（线程面/会话状态/composer/ask drawer/rail）、
+browser host 槽位、侧栏投影泵所需的全部状态；渲染只产出会话列本身（render 入口见
+`workspace/render.rs`），由 `chrome_assembly` 挂进壳的主区卡。
+
 #### Workspace
 
-Root container, horizontal flex (`h_flex`), owns all sub-views — **the legacy shell's root**;
-under `--features chrome-shell` it mounts as the chrome shell's main surface in embedded
-render mode (see [EmbeddedColumn](#embeddedcolumn)).
+会话列的根容器：hero 空屏或虚拟化消息列表、composer footer（附件 + chips）、
+ask / blank-project overlay、浮动 [ContextRail](#contextrail)、TurnNavigator overlay，
+外面套一层键盘动作装饰（`apply_chat_actions`：settings / turn navigator / 队列回退 /
+completion / 回忆 / archive / 后台化）。每帧在这里维护的状态：blank-project input、
+ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端已结 settle 通知。
 
-> Source: `crates/agent-ui/src/workspace.rs`
+> Source: `crates/agent-ui/src/workspace.rs`, `crates/agent-ui/src/workspace/render.rs`
 
 ### 2.1 ViewMode
 
-`Workspace` switches between four mutually exclusive full-window modes:
+`Workspace` 只有两个模式：
 
 #### ViewMode::Workspace
-Default — sidebar + conversation + composer.
+默认 —— 会话列（hero 或消息列表 + composer）。
 
 #### ViewMode::Settings
-Full-window settings overlay with slide-in animation.
-
-#### ViewMode::Terminal
-Full-window terminal emulator, rendered through the shared [WorkspaceShell](#workspaceshell) with a [TerminalColumn](#terminalcolumn) (TitleBar + the built-in `TerminalView`) as the main column — the sidebar divider stays draggable here.
-
-#### ViewMode::ExternalSession
-Full-window external agent CLI session (claude / codex / copilot) or a plain terminal session (the user's shell — `SessionKind::Terminal`, no cx involvement). Rendered through the shared [WorkspaceShell](#workspaceshell) with a [TerminalColumn](#terminalcolumn) showing the active `ExternalSession`'s `TerminalView` (the agent's TUI or the shell) in place of the conversation; the TitleBar shows the session's live OSC title (falling back to the kind label — "Claude Code" / "Codex" / "GitHub Copilot" / 终端). The session has no dedicated titlebar close button: it is archived the same way a thread row is — via the hover archive control on its unified [SidebarThreadItem](#sidebarthreaditem) row (or the title menu). Agent-kind sessions write a [`ResumeSidecar`](#resumesidecar) at spawn (deleted only on explicit close), so an unclosed session survives an app exit as a resumable sidebar row; clicking it re-spawns the CLI targeting the sidecar's captured CLI session id (`claude --resume <id>` / `codex resume <id>`; the CLI's own picker when no id was captured, `copilot --continue`). The sidebar row is removed both on archive (agent kinds kill through the cx `SessionHandle`; a plain terminal's `PtyHandle` tears its child tree down on drop) and when the child exits on its own (a `ChildExit` subscription on the terminal tears the session down without user action). The terminal's OSC title is mirrored into `ExternalSession.title` so the titlebar and sidebar row share one `display_title()`. If the removed session was the active one, the view falls back to the conversation pane.
+主区卡内的设置页（nav｜panel 两栏，替换会话列，直到 back 控件退出），带 200ms 退出延迟。
 
 ---
 
-## 3. ViewMode::Workspace Layout
+## 3. 会话列布局
 
-Every non-Settings `ViewMode` renders through one shared shell ([WorkspaceShell](#workspaceshell)): a gutter around the window edge (10px left / 4px top-bottom-right) containing `sidebar slot | main card`, the two flush against each other (no layout gap). The sidebar slot is visually seamless — no own background or border, the shell background shows through — while the main slot is wrapped in a bordered + rounded card (`border_1` / `rounded(theme.radius_lg)` / `bg:background` / `overflow_hidden`) so each mode's content reads as one floating panel. The sidebar resize handle ([SidebarDivider](#sidebardivider)) is an invisible absolute strip overlaying the sidebar/card boundary (drag-resize, double-click reset, width clamp + sync to the sidebar entity), defined in exactly one place, so the conversation, built-in terminal, and external-session views all resize the sidebar identically — only the card's content differs per mode. The gutter strip above the card carries its own window-drag hot zone so the top window edge stays draggable. In the default mode the card's content is a two-column container ([MainView](#mainview)): the [MessageColumn](#messagecolumn) (conversation) on the left and, when any right-pane tab is open, the right side view ([RightPane](#rightpane)) on the right. The old third top-level shell column now nests inside the main view, so the shell stays uniformly two columns. The [ContextRail](#contextrail) is NOT a flex sibling column — it is an absolute overlay floating over the message column's top-right (`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`), content height (never full-height), with the conversation body reserving `ENV_CONTENT_INSET` right padding so the message list never hides behind the card. While the right pane is open the card stays hidden so the conversation reclaims its width. The card also folds away below `RAIL_NARROW_BREAK` (900px message-column width), in which case the message column fills the main view.
+会话列是壳主区卡的内部内容，四周的 gutter / 侧栏槽 / 卡壳 / 内嵌标题栏全部由壳负责。
+列宽口径：浮动的 [ContextRail](#contextrail) 不是 flex 兄弟列，而是绝对浮层
+（`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`，内容高度），
+会话正文预留 `ENV_CONTENT_INSET` 右内边距；窄于 `RAIL_NARROW_BREAK`（消息列 900px）时卡片折叠、
+消息列吃满。TurnNavigator 浮层锚定卡片内边距盒（左右各 `CARD_BORDER / 2`，显示 rail 时右侧再加
+其内容内边距）。
 
 ```
-┌──────────────────────────────────────────────┐ ← window (native decorations)
-│ ╭──────────┬───────────────────────────────╮ │
-│ │ Sidebar  ┊Main card (bordered, rounded)  │ │
-│ │ (seamless┊ ┌───────────────────────────┐ │ │
-│ │  slot)   ┊ │TitleBar (spans whole card)│ │ │
-│ │          ┊ ├──────────────┬──┬─────────┤ │ │
-│ │ invisible┊ │ MessageColumn│▌ │RightPane│ │ │
-│ │ drag     ┊ │ conversation │  │TabBar   │ │ │
-│ │ handle on┊ │              │  │(editor/ │ │ │
-│ │ boundary ┊ │ ContextRail  │  │browser) │ │ │
-│ │          ┊ │ float overlay│  │         │ │ │
-│ │          ┊ └──────────────┴──┴─────────┘ │ │
-│ ╰──────────┴───────────────────────────────╯ │
-└──────────────────────────────────────────────┘
+┌ 壳主区卡（圆角 + 边框）──────────────────────┐
+│ ╭─────────────────────────────┬──────────╮ │
+│ │ 会话列                      │ 右栏     │ │
+│ │  消息列表 / hero            │ ToolTab  │ │
+│ │  浮动 ContextRail           │ 页签体   │ │
+│ │  composer footer            │          │ │
+│ ╰─────────────────────────────┴──────────╯ │
+└────────────────────────────────────────────┘
 ```
-
-#### WorkspaceShell
-
-The shared window shell built by `Workspace::shell_root(sidebar, main)`: an `h_flex` root with an asymmetric gutter (`SHELL_PAD_LEFT` 10px on the left, `SHELL_PAD_EDGE` 4px on the top/bottom/right), holding `sidebar-slot | main card` flush against each other plus the mode-switching actions (`FocusConversation` / `FocusTerminal` / `NewTerminalTab` / `CloseTerminalTab`) and the sidebar drag/reset handling. The main slot is wrapped in the shell's card chrome (`border_1` + `rounded(theme.radius_lg)` + `bg:background` + `overflow_hidden`), and an invisible absolute [SidebarDivider](#sidebardivider) strip overlays the sidebar/card boundary (painted last, so its top patch stays draggable rather than being claimed by a drag zone). Window-drag hot zones cover everything above/outside the card's own title bar: a slim full-width strip on the top gutter, plus the sidebar slot's empty top band (gutter + `sidebar_top_inset()` — 28px on macOS for the traffic lights, 8px elsewhere) so dragging there feels identical to dragging the title bar (the seamless sidebar shows no bar of its own) while the band stops exactly where the sidebar's first interactive row begins; while the sidebar is collapsed the zone shrinks to the left gutter strip. In-card title bars are built by `card_title_bar()`: gpui-component's `TitleBar` chrome minus its hardcoded macOS `pl(80)` traffic-light reservation — the card never sits at the window's left edge, so leading controls (the [SidebarToggleBtn](#sidebartogglebtn)) hug the card edge. Every full-window `ViewMode` routes through it — the sidebar slot is the conversation `Sidebar` for Workspace / Terminal / ExternalSession modes and the [SettingsLeftNav](#settingsleftnav) for Settings; the Workspace mode chains the conversation-only actions (settings / editor / browser / completion / archive…) and the turn-navigator overlay onto it, and passes a [MainView](#mainview) (message column + right side view) as the main slot; the Terminal and ExternalSession modes pass a single-column [TerminalColumn](#terminalcolumn) instead. The divider drag/double-click-reset writes one shared width (`Workspace::sidebar_width`) and syncs it to both the `Sidebar` entity and the `SettingsView`, so the Settings page resizes its sidebar exactly like the app page. Terminal-style main views are built by `Workspace::render_terminal_column` ([TerminalColumn](#terminalcolumn)).
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### MainView
-
-The Workspace mode's main slot: an `h_flex` container holding the [MessageColumn](#messagecolumn) and, when any right-pane tab is open, the [EditorDivider](#editordivider) + [RightPane](#rightpane) as sub-columns, with the card-wide [TitleBar](#titlebar) overlay mounted last so it spans (and paints over) both. Nesting the right pane inside the main view keeps the shell uniformly `sidebar | main card` across every view mode — the right pane is no longer a third top-level shell column. The right side view's contents are per-thread: switching threads stashes the outgoing editor draft and restores the incoming one, so no thread ever shows another thread's right-side content, and returning to a thread recovers its editor text.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### TerminalColumn
-
-The terminal-style main column shared by [ViewMode::Terminal](#viewmodeterminal) and [ViewMode::ExternalSession](#viewmodeexternalsession): a [TitleBar](#titlebar) (leading icon + title) over a full-bleed terminal view (`flex_1`). One shape for both, so the two terminal surfaces read as peers inside the shared shell.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-### 3.1 Sidebar
-
-Left panel, fixed width (260px default, 200–480 draggable).
-
-#### Sidebar
-
-Full-height left panel, vertical flex, seamless slot — no own background or border (the shell's gutter background shows through; the main card's left border is the only visible boundary).
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarScrollBody
-
-Scrollable body inside Sidebar (`overflow_y_scroll`, `.track_scroll` on a `ScrollHandle`). Its children are two fixed slots measured by the sticky overlay: child 0 = the Projects section (its section header + project-grouped threads, a zero-height slot when no registered projects exist), child 1 = the Conversations section (its section header + loose threads + external sessions). Both section headers live in-flow inside their own slot so the parent-child grouping (each header directly above its rows) is preserved; the sticky overlay only overlays a copy once a header would scroll away.
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarPinnedSectionHeader
-
-Sticky overlay copy of the current section header, absolutely positioned above the scroll body (`top_0`, `pt(top_inset)` for the traffic-light inset, `bg:background` + bottom border). It appears only once `scroll_top > 0` — the in-flow headers stay in the content (parent-child grouping intact) and the overlay takes their place at the resting position while rows scroll underneath. Shows the Projects header while the viewport is inside the projects section, then the Conversations header (with its `+` new-session button + dropdown) once the projects content has scrolled fully past the top. The switch threshold is the measured height of scroll-body child 0 (`bounds_for_item(0)`, fallback keeps Projects before the container is laid out). The overlay only appears once `scroll_top > 0`, which cannot happen before the first layout, so offset/bounds are always measured by then. Because the overlay and the in-flow copy coexist in one tree, the Conversations header's element ids and deferred dropdown are disambiguated by an id prefix and gated so only the visible copy anchors the new-session menu.
-
-#### SidebarProjectsSection
-
-The folder list is the workspace registry (paths in host display order);
-the host owns registration, so the old `known_projects` pull is only a
-fallback mirror.
-
-Middle section: project-grouped threads (if any projects exist). Its section header sits in-flow directly above the folder groups (scroll-body child 0), preserving the parent-child grouping.
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarProjectGroup
-
-Collapsible folder: chevron + folder icon + project name, indented thread list, and a trailing ellipsis button opening the [SidebarProjectMenu](#sidebarprojectmenu). Threads inside a folder order as a team forest (`team_forest`): top-level rows merged by recency, each team leader followed by its member rows indented one level (`14px` per `depth`); a leader with members renders a collapse chevron and hides its subtree when folded. The header is also a drag source (`DraggedFolderRow` payload) and a drop target for reordering folders: while a folder drag is live, a 2px accent insertion line hugs the hovered header's top/bottom half (`drag_boundary`), and the drop forwards `MoveFolder` (`InsertGroupBefore`) with the anchor resolved against the rendered folder sequence (`folder_order`) — a drop back onto the dragged folder's own boundary, any already-in-place move, or a line whose host vanished mid-drag is a no-op (mirroring `move_in_account`), never an accidental append.
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarConversationsSection
-
-Loose (non-project) threads + external sessions (scroll-body child 1). Its section header sits in-flow directly above these rows and carries two header actions: the `+` button opening the `SidebarNewSessionMenu` popup and the ordering-mode toggle ([SidebarOrderToggle](#sidebarordertoggle)); the sticky overlay (`SidebarPinnedSectionHeader`) pins a copy when scrolled. Like the project folders, loose rows order as a team forest with member rows nested under their leader, fold at the quota behind a [SidebarShowMoreRow](#sidebarshowmorerow), and their thread rows carry the drag roles described under [SidebarThreadItem](#sidebarthreaditem).
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarNewSessionMenu
-
-`PopupMenu` anchored below the "Conversations" header `+` button — the flat new-session menu (project folders use the structured [SidebarProjectMenu](#sidebarprojectmenu) instead). One flat row (Manox → `NewThread`), one flat Terminal row (`sidebar-new-terminal` label shared with the project menu; plain PTY session in the workspace cwd → `SpawnPlainSession(Terminal, None)`, no cascade), one `submenu_with_icon` per external agent kind (Claude Code / Codex / GitHub Copilot), and a single flat VS Code entry (injection resolves from the persisted `vscode_app:` settings — no provider/model cascade; disabled when VS Code is not installed, parity with 工具 → VS Code). All top-level rows use the menu component's native icon slot with a monochrome brand SVG, keeping their icon and label columns aligned. Each agent submenu is a provider→model cascade built by the shared `build_model_cascade`: models from `manox_agent::provider_glue::global()` filtered by registration metadata `agents` containing the agent id (`claude` / `codex` / `copilot`), grouped by provider display name into provider submenus; a config model registered through several wire apis appears once per wire endpoint (dedup keyed on registration name + config id, parity with the composer model menu), each row carrying the same wire-api Tag (Anthropic/Responses/Completions) as the composer popup. The emitted payload is (provider display name, raw cx config key, optional cx wire key); the workspace forwards the wire key to `cx::AgentBuilder::wire_api` so the picked endpoint variant is the one launched (claude/codex cascades show a single wire after the visibility filter; copilot exposes all three). The Terminal entry skips the cascade entirely — the workspace spawns the user's shell through `spawn_plain_session` with no provider/model injection. Picking a model in a CLI-agent cascade emits `SpawnExternalSession(kind, provider, model, wire, None)` and the VS Code entry emits `LaunchVSCode(None)` — the workspace then launches VS Code through `cx::launch_vscode_app` with Claude Code BYOK env injected, opening the workspace cwd. An agent with no supporting model renders a muted "no model configured" label row instead of provider submenus.
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarOrderToggle
-
-Ghost `SortDescending`-icon toggle beside the Conversations header's `+` (tooltip "View options: &lt;mode&gt; → &lt;next&gt;", composed from `sidebar-view-options` and the two mode keys) and the sidebar's ordering-mode editor — its only surface. A click flips `OrderBy` between Last updated (`sidebar-order-updated`) and Manual (`sidebar-order-manual`) in place: a two-state preference renders its state on the button itself (`selected` + `toggled` mark Last updated) and states the pair it toggles through, so there is no popup, anchor, or dismissal subscription to carry. The flip is pure client state (never a kernel write): entering Last updated runs the one complete recency sort and leaving it keeps every current position while only stopping further promotion; entering Manual additionally reconciles — the drift the Updated account accumulated is replayed to the server's durable account as one minimal `MoveThread` batch, so the order the user lands on is the order a Manual drag edits against (see [SidebarThreadItem](#sidebarthreaditem)'s drag roles). Both edges live in `Sidebar::set_order_by`, and the mode persists in the sidebar-view file.
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarProjectMenu
-
-`PopupMenu` anchored below a project folder's ellipsis button (`build_project_menu`), carrying the project path so every session action is scoped to it. Rows, in order: a 「新建会话 / New session」 submenu (`submenu_with_icon`, opens on hover or click — the submenu row paints selected and its child menu mounts while selected) holding the flat Manox row (`NewThreadWithProject(project)`) and the same three provider→model agent cascades as the [SidebarNewSessionMenu](#sidebarnewsessionmenu) (`build_agent_model_cascade` → `SpawnExternalSession(kind, provider, model, wire, project)`); a flat New Terminal row (`sidebar-new-terminal` label, shared with the flat menu; `SpawnPlainSession(Terminal, project)` in the project directory); the flat VS Code entry (`LaunchVSCode(project)`, disabled when not installed); a separator; and a destructive Remove Project row (trash icon tinted `theme.danger`; deliberate no-confirmation — history is never deleted and the folder re-registers on rebind) emitting `RemoveProject(project)` — the workspace unregisters the path through `ThreadStore::remove_project` (in-memory list + the threads.db `projects` table), the folder disappears and its threads + bound external sessions fall back to the loose Conversations list, while conversation history is never touched (durable across restarts; re-binding the folder via the ProjectChip re-registers it). The loose partition itself covers any session bound to an unregistered path (`external_session_is_loose`), not just removed folders.
-
-#### SidebarThreadItem
-
-Unified row projection (`SidebarThreadItem` struct: `id`/`short_id`/`title`/`updated`/`pinned`/`tag`/`has_unread`/`errored`/`running`/`pending_auth`/`pending_plan`/`background_work`/`resumable`/`resuming`/`selected`/`indent`/`team_leader`/`team_collapsed`/`icon`/`wash`/`kind`, live flags packed in `ThreadLiveState`) rendered by one `render_thread_item` for both native threads and external-agent sessions. The two kinds are merged into one recency-ordered list (loose rows under "Conversations", project-bound rows inside their folder group) and share the selection-slide wash animation, the hover/active wash, and the trailing-action slot — a hover-visible three-dot overflow trigger ([SidebarThreadRowMenu](#sidebarthreadrowmenu)) on thread rows, a single hover close button on external rows. A leader row (`team_leader`, from the store's `parent_id`/`depth` team hierarchy) renders a collapse chevron before the status icon (`ChevronDown` expanded / `ChevronRight` folded) that folds its indented member rows without opening the conversation; member rows render indented (`indent` = `depth * 14px`) under their leader with a 1px left guide rail (`nested`, team/fork 通用) tying them to the parent; both ride in `RowNesting` (indent/team_leader/team_collapsed/nested) so `from_thread` stays within the arg cap. Native thread row: leading `ship-wheel` icon with a five-state machine — danger `TriangleAlert` on `errored`; `theme.info` static while waiting on the user (`pending_auth` tool authorization / AskUserQuestion, or `pending_plan` plan-review verdict); `theme.success` + clockwise spin while the loop can self-advance (`running` turn in flight, or `background_work` live monitors / background bash — `ThreadLiveState.background_work` refreshed from `BackgroundTaskUpdated` via `thread_has_running_tasks`); `theme.info` static while a finished turn awaits the user's view (`has_unread`); `theme.foreground` static otherwise (read pause or never-run thread) — pinned star, pending-auth spinner (accent, tooltip "Waiting for approval", shown while a tool authorization awaits the user's verdict — the thread's approval card is only visible when it is the active thread), title, short-id tag (shimmer while the loop can self-advance), the persisted user tag chip ([SidebarTagChip](#sidebartagchip)) beside it, relative time, and the three-dot overflow trigger (Archive + Tag…; its dropdown anchors below the button, deferred so it escapes the row's `overflow_hidden`). The hover/active/selected wash uses the thread's last saved permission-mode color (`theme.warning` ReadOnly / `theme.info` WorkspaceWrite / `theme.danger` FullAccess). External rows reuse the same layout but swap the leading icon for the agent's brand SVG (`claude.svg` / `codex.svg` / `githubcopilot.svg`), carry the same visible wash as Workspace Access threads (`theme.info` — `theme.accent` resolves to the near-white `neutral-100` in the forced Light theme, invisible on the sidebar), show the cx session id prefix in the short-id tag (click-to-copy of the full id / socket path, traceable to `~/.manox/sessions/<id>.sock`), and drop the unread/pin/error/tag/running-shimmer affordances. A resumable row (restored from a [`ResumeSidecar`](#resumesidecar), no live process) renders dimmed with a Play hover action (`render_hover_action` emits `OpenExternalSession`, same as the row click) instead of the Inbox close button, and swaps its leading icon for a `BrailleSpinner` while a resume is in flight. The row kind (`RowKind::Thread { archived }` vs `RowKind::External`) routes the open click and the trailing action to the right `SidebarEvent` (`OpenThread` / overflow-menu `ArchiveThread` + `SetThreadTag` vs `OpenExternalSession` / `ArchiveExternalSession` — the latter kills + drops the `SessionHandle`, the unified archive semantics).
-Only top-level external sessions list here: a session mounted as a right-pane
-[SessionTab](#sessiontab) is thread-bound (`ExternalSession.thread_bound`) — a
-resource of its thread — and never projects into this list, live or resumable
-(thread-bound spawns write no [`ResumeSidecar`](#resumesidecar)).
-Row titles render single-line with ellipsis (`.truncate()` replaces the old
-wrap-and-clip `overflow_hidden`), so no title — sanitized OSC titles and
-pre-sanitize sidecar titles folded at projection alike — can stretch a row at
-any sidebar width.
-Drag roles (thread rows only — an external session has no server-side account,
-so it is never a drag source, a drop target or a line host): a row drags via a
-`DraggedThreadRow` payload and renders at 0.4 opacity while it is the dragged
-source; every other thread row is a drop target and insertion-line host, showing
-the same 2px accent line as the folder headers hugging the hovered half
-(`drag_boundary`, so the line reads as "insert before / after this row"). A drop
-reorders the partition's client view account immediately (`move_in_account`
-insertBefore semantics; a line under the last row is the append gesture) and —
-in Manual mode only — forwards the same move to the server as `MoveThread`
-(`InsertThreadBefore`); Last updated drags stay pure view state because the
-head promotions have already split the view order from the server account.
-Because that split is exactly what would make a Manual drag resolve its anchor
-against an order the server disagrees with, landing back in Manual first
-reconciles: `reconcile_manual_account` diffs the view account against the wire
-list's committed per-partition order (`wire_partition_orders` — the same
-project/loose rule render groups by) and replays the diff through
-`sidebar_view::reconcile_moves` as one minimal batch of `MoveThread` moves
-(an LCS keep-set, so each drifted row moves at most once and no shorter batch
-exists). Manual drags keep both accounts in step afterwards, so the switch
-edge is the only place drift can exist.
-Drag markers (`drag_row` / `drag_folder`) are pruned at the top of render
-whenever gpui no longer carries an active drag, so an interrupted gesture
-(release below the list, over a mismatched payload type, or outside the
-sidebar) never leaves the insertion line or the ghosted source row stuck.
-
-#### SidebarThreadRowMenu
-
-Three-dot (`IconName::Ellipsis`) hover overflow trigger on a thread row's right edge, replacing the old single Inbox archive button; external rows keep their single hover button. The trigger toggles a `PopupMenu` anchored at its own window-space bottom-right corner: the wrapper div's `on_prepaint` records that corner into `Sidebar::row_menu_anchor`, and the deferred popup mounts through the shared `anchored_dropdown` helper — `deferred(anchored().anchor(TopRight).position(corner).offset((0, 2)))`, whose default `SwitchAnchor` fit mode keeps the menu below-right of the trigger when there is room and flips it to open upward when it would overflow the window's bottom edge (the old downward-only `top_full().right_0()` hang was clipped away out of reach near the list bottom). One row menu is open at a time; `occlude()` + the `DismissEvent` subscription close it on outside click. Two flat items: Archive / Unarchive (emits `ArchiveThread(id, !archived)`, reusing the archive path) and Add tag / Rename tag (sidebar-internal: mounts the inline tag `Input` on that row — at most one row edits at a time, `TagEdit { id, input }` on the Sidebar; the input is focused on mount, clamped to 10 chars on every change, commits on Enter/blur when non-empty via `SetThreadTag(id, Some(value))`, cancels on Escape). The same `anchored_dropdown` + per-trigger `on_prepaint` anchor flip is used by [SidebarNewSessionMenu](#sidebarnewsessionmenu) and [SidebarProjectMenu](#sidebarprojectmenu).
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarTagChip
-
-The persisted user tag rendered as an outlined secondary `Tag` beside the short-id tag chip (thread rows only; one tag per thread, persisted in the pi session sidecar's `tag` field via `ThreadStore::set_thread_tag`). A ghost xsmall ✕ button inside the chip clears it (`SetThreadTag(id, None)`); double-clicking the chip enters rename mode (the inline input prefilled with the current tag). Chip clicks stop propagation so they never trip the row's open-thread click.
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarShowMoreRow
-
-The reveal affordance of the per-partition fold (`folded_rows`): when a partition projects more than `COLLAPSED_ROWS` (5) rows, only whole leader units that fit the quota render and a ghost xsmall "Show {N} more" button (`sidebar-show-more`, `t_count`) closes the section — a quota landing mid-subtree cuts back to the unit's leader, so a member is never shown without its leader. One click sets that partition's `revealed` flag (transient per mount: closing the folder clears it, so reopening returns to the bounded projection) and renders the rest of the account; rows are hidden, never unloaded. Rendered by `render_partition_rows`, so both the project partitions and the loose Conversations partition fold identically.
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-
-#### ResumeSidecar
-
-Durable record of an unclosed external agent session (`crates/agent-ui/src/external_session.rs`): one `<id>.json` under `~/.manox/external-sessions/`, written at spawn (atomic temp+rename), deleted only on an explicit close (`×` / natural CLI exit), and re-scanned at `Workspace::new` into the `resumable_external` list — so a graceful quit or a crash leaves exactly the sessions the user never closed. Fields: `id` / `agent_id` (claude / codex / copilot) / `cwd` / `project` / `created_at` / `provider` / `model` / `wire_api` (optional cx wire key of the endpoint variant, replayed on resume; pre-wire sidecars lack it and resume falls back to the default wire derivation) / `title` / `cli_session_id` (the CLI's own session id — claude: assigned by manox at spawn via `--session-id <uuid>`; codex: captured from the rollout's `session_meta` by `Workspace::start_cli_session_watch` while the session runs — which also tracks claude forks such as `/clear`; `None` until captured, always for copilot). Clicking a resumable row routes through `Workspace::open_external_session` → `resume_external_session`: it re-spawns the CLI with `resume_args` via `cx::AgentBuilder::passthrough` on a background thread (the row shows a spinner meanwhile) and attaches the new `TerminalView`. With a captured `cli_session_id` the resume targets exactly that conversation (`claude --resume <id>` / `codex resume <id>`); without one the CLI shows its interactive picker — resume never silently guesses (`copilot` keeps `--continue`, no verifiable targeted flag). The sidecar is removed from `resumable_external` and disk when the session closes. Nothing is auto-resumed at launch — the user picks the row, mirroring the native-thread contract.
-Thread-bound (right-pane) spawns write no sidecar at all: the session belongs
-to its thread, so a restart must not resurface it as a top-level resumable row
-(the right pane drops Session tabs on restart anyway).
-
-> Source: `crates/agent-ui/src/views/sidebar.rs`
-
-#### SidebarDivider
-
-Invisible 6px drag handle overlaying the Sidebar/main-card boundary (absolute strip centered on it, `cursor:col-resize`, no layout space — the two panels sit flush), spanning the gutter-to-gutter content height. Constructed once inside [WorkspaceShell](#workspaceshell), so it appears — and behaves identically (drag-resize, double-click reset to the 260px default) — in the conversation, terminal, and external-session views.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
 
 ### 3.2 MessageColumn
 
-Central conversation column, flex-1 — the left sub-column of the [MainView](#mainview) (not a sibling of the shell root). Under the card-wide [TitleBar](#titlebar) overlay that spans the whole main card (mounted on the MainView, not on this column). The [ContextRail](#contextrail) floats over this column's top-right as an absolute overlay (not a flex sibling); the conversation body reserves `ENV_CONTENT_INSET` right padding when the card is shown so the message list clears it. The composer no longer spans underneath the card.
+Central conversation column, flex-1 — the main card's only content (the shell's sidebar and right
+pane are siblings of the card, outside this view). The [ContextRail](#contextrail) floats over this
+column's top-right as an absolute overlay (not a flex sibling); the conversation body reserves
+`ENV_CONTENT_INSET` right padding when the rail is shown so the message list clears it.
 
 #### MessageColumn
 
 Vertical flex container, fills remaining width.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### TitleBar
-
-Absolute-positioned top bar at the [MainView](#mainview) level, height `TITLE_BAR_HEIGHT`, spanning the entire main card — the [MessageColumn](#messagecolumn) (with the [ContextRail](#contextrail) card floating under it) and the [RightPane](#rightpane) alike, painted after both columns so the whole card reads under a single bar. Contains thread title, the "..." menu, and the [RightPaneToggleBtn](#rightpanetogglebtn) at its right edge. The right pane reserves `pt(TITLE_BAR_HEIGHT)` so its [RightTabBar](#righttabbar) sits below the bar as a second row.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### TitleBarThreadTitle
-
-Thread title text, clickable → opens [TitleMenu](#titlemenu).
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### TitleBarMenuButton
-
-"..." button → opens [TitleMenu](#titlemenu) popup.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### SidebarToggleBtn
-
-Ghost icon button at the TitleBar's left edge toggling the sidebar slot's visibility (`Workspace::toggle_sidebar`, state `sidebar_visible`, in-memory only). The icon is `IconName::PanelLeftClose` while the sidebar is shown and `IconName::PanelLeftOpen` while collapsed (the lucide panel-left pair, mirroring the right pane's toggle). Collapsing drops the sidebar slot and its resize handle from the shell layout — the main card takes the full width and every width budget (`effective_sidebar_width()` → 0) follows — while the remembered drag width survives the round trip. The Settings page is exempt: its nav carries the only back control, so it stays visible regardless of the gate. The same button leads the [TerminalColumn](#terminalcolumn) TitleBar so a collapsed sidebar can be re-expanded from the terminal and external-session modes too.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### RightPaneToggleBtn
-
-Ghost icon button at the TitleBar's right edge toggling the [RightPane](#rightpane)'s visibility (`Workspace::toggle_right_pane`). The icon is lucide `panel-right-dashed` (a manox-local asset through `ExtrasAssetSource`) while the pane is hidden and `IconName::PanelRight` while shown. Hiding never discards tabs — the visibility gate (`right_pane_visible`) is orthogonal to the tab list; showing with no tabs opens a fresh [LauncherTab](#launchertab). Composer/ContextRail suppression keyed off an active Editor tab applies only while the pane is actually visible.
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 
@@ -867,10 +699,6 @@ Trigger: [ProjectChip](#projectchip). Recent projects + create blank / select fo
 
 > Source: `crates/agent-ui/src/workspace/chips.rs`
 
-#### TitleMenu
-
-Trigger: [TitleBarMenuButton](#titlebarmenubutton). Pin, archive, copy, schedule, new window.
-
 > Source: `crates/agent-ui/src/views/title_menu.rs`
 
 #### 3.2.5 Overlays
@@ -890,7 +718,10 @@ Right-side context panel that floats over the Workspace's conversation column to
 
 Visibility is gated on the main-column body width (`ContextRail::rail_width_for`): shown as `Some(ENV_CARD_WIDTH)` (260px) at/above `RAIL_NARROW_BREAK` (900px), folded away (`None`) below it. The card's `top` clears the shared [TitleBar](#titlebar) overlay.
 
-The card stays **hidden while the [EditorPane](#editorpane) is open** — opening the right pane reclaims the card's width for the conversation — and on the empty first screen / before the thread has interacted. The editor is not the card's replacement: it lives in the right side view, a sub-column of the same [MainView](#mainview) to the right of the message column. Because the card is absent while the editor is open, the editor-divider drag clamp reserves only `MAIN_MIN_WIDTH` (no card width) — the conversation alone holds the message column while the editor is open. The card floats as an absolute overlay (content height); the conversation column is `flex_1`/`min_w_0` and reserves `ENV_CONTENT_INSET` right padding when the card is shown.
+The card is hidden on the empty first screen and before the thread has interacted; the right pane's
+width is the shell's business (it sits outside the card), so the only width the rail gate reads is
+the card interior. The card floats as an absolute overlay (content height); the conversation column
+is `flex_1`/`min_w_0` and reserves `ENV_CONTENT_INSET` right padding when the card is shown.
 
 #### ContextRail
 
@@ -970,76 +801,57 @@ Pure parsing + tokio-bridged IO module backing [ContextRailChangesRow](#contextr
 
 > Source: `crates/manox-agent-chat-ui/src/git_status.rs`
 
-### 3.4 EditorPane
+### 3.4 右栏页签内容
 
-Right side view of the [MainView](#mainview), shown when any right-pane tab is open. 640px default (320–960 draggable). Its contents (the editor's text) are per-thread — switching threads stashes the outgoing draft and restores the incoming one.
-
-#### EditorDivider
-
-6px drag handle between MessageColumn and the right side view (conditional — shown while any right-pane tab is open).
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### RightPane
-
-Vertical flex, right sub-column of the [MainView](#mainview), topped by `pt(TITLE_BAR_HEIGHT)` so the card-wide [TitleBar](#titlebar) overlays its top strip and the [RightTabBar](#righttabbar) reads as a second row below it. A tab container holding the markdown editor, the [LauncherTab](#launchertab), browser views, sub-agent observers, and embedded [SessionTab](#sessiontab) terminals as peer tab types. Visibility is the `right_pane_visible` gate AND a non-empty `right_tabs` — the [RightPaneToggleBtn](#rightpanetogglebtn) hides/shows without discarding tabs, and closing the last tab hides the pane automatically. The active tab's content fills the body. The pane state (tab list, active tab, visibility) is **per-thread**: `attach_thread` stashes the outgoing pane into an in-session map (`right_pane_by_thread`, live tabs keep their webview/panel entities) and restores the incoming one, and every mutation persists the foreground thread's snapshot to `threads.db` (`thread_right_pane` — one opaque UI-layer-owned JSON row keyed by thread id). Subagent tabs are ephemeral — cleared on switch, never stashed or persisted. Browser tabs persist as their URL (rebuilt as fresh webviews after a restart, re-registered in the host routing table + title poll); Session tabs restore only while the external session is still alive — after a restart they drop (the sidebar's resumable rows remain the external-session recovery surface). The retired team-member observation tab (old `RightTab::Member` + `MemberPanel`) was removed with the `Entity<Team>` cleanup.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### RightTabBar
-
-Top-level underline tab bar over `right_tabs`. Every tab is fixed-width (`RIGHT_TAB_WIDTH`, 160px) with long labels capped at 16 chars + `…` (the full text rides the tab's tooltip); selecting a tab switches `active_right_tab`. Hovering a tab reveals a `×` suffix that closes the tab via `close_right_tab` (click stops propagation so it does not also select) — for every tab kind: the Editor keeps its draft-transfer semantics (`close_editor`), a Session kills the session (`close_external_session`). A `+` suffix button right of the last tab opens (or focuses) a [LauncherTab](#launchertab).
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### LauncherTab
-
-The right pane's "new tab" surface (`RightTab::Launcher`): five vertically centered shortcut rows — 打开集成浏览器 / 打开集成终端 / 打开 Claude Code / 打开 Codex / 打开 Github Copilot (i18n `launcher-open-*`). The picked view opens **on the tab itself**: the browser via `open_browser_tab(DEFAULT_URL)`; the terminal and the three CLI agents via `spawn_plain_session` / `spawn_external_session` with `SessionPlacement::RightPane` and the **active thread's cwd** as the spawn CWD (workspace-cwd fallback when unset). A CLI-agent row first opens the shared provider→model cascade (the popup anchored under the row; `views/model_cascade.rs`) and spawns on model pick.
-
-> Source: `crates/agent-ui/src/views/launcher.rs`, `crates/agent-ui/src/workspace/right_pane.rs` (content + picks), `crates/agent-ui/src/workspace/render.rs` (tab mount)
-
-#### SessionTab
-
-A right-pane tab embedding an external session's terminal (`RightTab::Session(id)` — a plain PTY or a CLI-agent TUI). Mounted by the [LauncherTab](#launchertab) pick (replacing the launcher tab in place); the tab label is the session's `display_title()` (OSC title → kind label) with the kind's brand glyph as prefix. `×` kills the session via `close_external_session`; a natural CLI exit (`ChildExit`) closes the tab through `remove_external_session`. Full-window attach (`ViewMode::ExternalSession`) and the tab mount are mutually exclusive by construction — only one mounts the terminal entity per frame.
-Sessions mounted here are thread-bound (`ExternalSession.thread_bound`):
-excluded from the sidebar's top-level list and sidecar-free; the tab `×` still
-kills through `close_external_session`.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### EditorWriteTab
-
-Plain-text multi-line [InputField](#inputfield) for markdown editing. A second-level Write/Preview toggle lives inside the Editor tab's content area. Cmd/Ctrl+Enter submits only after the active thread's authoritative history is ready; restoring sessions keep the draft intact and ignore the shortcut until then.
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
-
-#### EditorPreviewTab
-
-Rendered markdown view (`Markdown`).
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
+右栏本体（页签条 / 新标签页空态 / per-thread stash / threads.db 快照）归壳，见
+[ChromeRightPane](#chromerightpane)；kind 注册表见 [ToolTabRegistry](#tooltabregistry)。
+内容实体由 `ToolTab` 实现提供：
 
 #### SubagentPanel
 
-A right-pane read-only observation tab for one Steer-bus sub-agent run (`RightTab::Subagent(address)`, equal citizen of the right tab bar). The tab label shows the subagent's **address** (`SubagentProgress.id`, e.g. `Sailor_0`); the panel's second-level header banner shows the **topic** — status indicator + mono topic text (the shared `subagent_topic` / dispatch-prompt first-line derivation, address fallback when empty). Body: a miniature conversation rendered through the **same `ConversationState` + message pipeline as the main conversation** — it opens with the Captain's dispatch prompt as a user bubble (captured from the Steer tool call into `Workspace::subagent_prompts` with its send time), header reading `Captain > {recipient}·{model}·{time}` where `recipient` is the sub-agent type (the conversation's `to`) and `model` is the child session's dispatch-reported model (`SubagentChildEvent::Model`, sent once at dispatch; the parent's live model label stands in until then and after reload), then the bridged child events translated to the shared `ThreadEvent` contract (`AgentText` / `AgentThinking` / `ToolCall` / `ToolResult`, child tool ids pair start/end under parallel child execution and titles derive via the shared `tool_title`) — assistant bubbles, reasoning folds, tool cards, tail-follow scrolling. The live accumulation lives in `Workspace::subagent_transcripts` and is kept for the session lifetime (no longer trimmed at terminal status), so a tab opened after the run replays the full work; a panel opened after a reload falls back to `subagent_final_text` replayed as the assistant message plus the `subagent-panel-final-note` hint. Opened by clicking the sub-agent row in the [ContextRail](#contextrail) agents section; tabs are dropped together with their transcripts on thread switch (`clear_subagent_observation`, which reseats the active tab for bulk removal). Attaching a thread replays the parked thread's window rows (`SubagentProgress` / `SubagentChild`), so the rail rows and the drill-down transcript survive a switch away and back.
+单个子代理运行的只读观察页签（装配层宿主页签，`ToolTab` kind `subagent`）。页签标签是子代理
+**地址**（`SubagentProgress.id`，如 `Sailor_0`）；面板二级头显示 **topic** —— 状态指示 + mono
+topic 文本（共享 `subagent_topic` / 派发提示首行推导，空则回退地址）。正文是一段微型会话，走与
+主会话**同一套 `ConversationState` + 消息管线**：以 Captain 的派发提示作为首条用户气泡
+（来自 Steer 工具调用，存入 `Workspace::subagent_prompts`，带发送时间），头部读作
+`Captain > {recipient}·{model}·{time}`（`recipient` 为子代理类型，`model` 为子会话派发时上报的
+模型），随后是 bridged 子事件翻译成共享 `ThreadEvent` 契约后的助手气泡、推理折叠、工具卡片。
+实时累积在 `Workspace::subagent_transcripts`，整个会话期保留（终态也不再裁剪），所以事后打开仍
+重放全过程；重载后打开则回退到 `subagent_final_text` + `subagent-panel-final-note` 提示。
+由 [ContextRail](#contextrail) agents 段的子代理行、或会话里的子代理卡片点击打开
+（`ChatHost::open_subagent_tab` → 装配层 `chrome_assembly::open_tool_tab`）；页签随线程走壳的
+per-thread stash，切线程时只清该线程的转写数据（`clear_subagent_observation`）。
 
-> Source: `crates/agent-ui/src/views/subagent_panel.rs`, `crates/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/views/subagent_panel.rs`, `crates/agent-ui/src/workspace/subagent.rs`
 
 #### BrowserView
 
-A right-pane tab hosting an untrusted embedded native webview (`RightTab::Browser(BrowserTabId)`, an equal citizen of the right tab bar alongside `Editor`). Chrome row is pure GPUI: back / forward buttons + a single-line address bar whose `Enter` navigates (re-submitting the current URL reloads). The content area is the native `WebViewElement` from `manox-webview`, which tracks the gpui layout via `set_bounds`. Built with `TrustMode::Untrusted`: only the closed-enum notify bridge and the inbound-write request bridge are injected — the page has no Tauri command surface. The process-wide bridges attach at build via `WorkspaceBrowserHost::attach_to_builder`; the host itself is installed once at startup in `main` (`WorkspaceBrowserHost::install`) and routes notifications back to their tab. Tabs are opened via the `OpenBrowserTab` action (`cmd-b`), the [LauncherTab](#launchertab), or the host's `open_tab`, and closed via the tab's × affordance or `CloseBrowserTab` (`cmd-shift-b`, closes the active browser tab). The tab label mirrors the page's `<title>` — polled as `document.title` by the workspace's 2s title ticker through the host's `page_title` eval (which never raises the read hint), with the URL as fallback until the first title lands. `tab_id`s are process-unique and woven into the webview label so the host can route inbound notifications back to their tab. The inbound-write authorization overlay (manox's `InboundWriteOverlay`) was retired with the manox harness; `ThreadEvent::InboundAuthorization` still exists but has no UI consumer today.
+一个不可信内嵌原生 webview 的页签体（`ToolTab` kind `browser`）。chrome 行是纯 GPUI：
+后退/前进 + 单行地址栏（`Enter` 导航）。内容区是 `manox-webview` 的 `WebViewElement`，
+按 gpui 布局走 `set_bounds`。以 `TrustMode::Untrusted` 构建：只注入封闭枚举的 notify 桥与
+inbound 写入请求桥 —— 页面没有 Tauri 命令面。进程级桥在构建时经
+`WorkspaceBrowserHost::attach_to_builder` 挂上；宿主在启动时装一次
+（`WorkspaceBrowserHost::install`），按 tab 路由通知。打开入口：右栏 "+" 的快捷操作、或 agent
+自己的 web 工具（宿主 `open_tab` → `Workspace::open_browser_tab` → 装配层开页签）；关闭走页签
+× 或 `ToolTab::close`。页签标签镜像页面 `<title>`（页签自己的 2s ticker 轮询
+`document.title`，URL 兜底），`on_active` 负责显示/隐藏 OS 子视图（否则会浮在所有页签之上）。
+`tab_id` 进程内唯一并织入 webview label，宿主据此把 inbound 通知路由回页签。
 
-Two transient banners render between the chrome row and the content area, both driven by flags the `BrowserHost` sets on the view (cleared on navigation / resolution):
+两个瞬时横幅渲染在 chrome 行与内容区之间，均由 host 设在视图上的标志驱动（导航/解决时清除）：
 
-- **Yield banner** — shown while a `web_explore_yield` call is parked. A "Done" button resolves the parked Task via `WorkspaceBrowserHost::resolve_handback` (the page-side `user_handback` notify is ignored by design — an untrusted page must not resume a parked yield). Retired by the "Done" click, by navigation, or by Stop/Error cleanup (`clear_yields_for_thread`).
-- **Read hint** — a muted one-liner shown after `read_text` / `read_dom` / `screenshot` / `eval_script` extracts content from an `https://` origin, signalling that logged-in page content was exposed to the agent.
+- **Yield banner** —— `web_explore_yield` 挂起期间显示；"Done" 经
+  `WorkspaceBrowserHost::resolve_handback` 解决挂起的 Task（页面侧 `user_handback` 通知按设计忽略）。
+- **Read hint** —— `read_text` / `read_dom` / `screenshot` / `eval_script` 从 `https://` 源取到内容后
+  显示的一行弱化提示，表明登录态页面内容已暴露给 agent。
 
 > Source: `crates/agent-ui/src/views/browser_view.rs`
 
 
 ## 4. ViewMode::Settings
 
-Full-window settings page rendered through the shared [WorkspaceShell](#workspaceshell) (`SettingsLeftNav | divider | main`), so the sidebar divider stays draggable exactly like the app page. Slides in from left (180ms), slides out to right (200ms).
+Settings page rendered inside the shell's main card (`SettingsLeftNav | divider | main`, the nav
+column fixed at 240px), swapping the conversation column until the back control exits. The exit
+waits 200ms before flipping the mode back.
 
 #### ManagementBackControl
 
@@ -1145,31 +957,7 @@ The plugin/skill management UI (PluginManagerView, tab bar, marketplace/plugin/s
 Plugin management lives under Settings → Plugins (`PluginManagerView`): a Marketplace tab (add/refresh/remove marketplaces, browse + install their plugins) and a Plugin tab (installed set with update/enable/disable/uninstall), all async with a busy spinner + notice banner; registry changes apply on restart (notice texts say so). Skill authoring and mcp.toml server authoring tabs from the retired harness are not ported yet (need shared-layer write APIs).
 ---
 
-## 6. ViewMode::Terminal
-
-Full-window terminal emulator, rendered through the shared [WorkspaceShell](#workspaceshell): sidebar + draggable divider + a [TerminalColumn](#terminalcolumn) (TitleBar over the full-bleed `TerminalView`). The terminal view owns its PTY and grid; the workspace only mounts it. Resize/scrollback/selection are handled inside `TerminalView` / `TerminalElement`.
-
-#### TerminalView
-
-Root view, `size_full`. Owns the focus handle; `focus(&self, window, cx)` is called after spawning/attaching/switching an external-agent session so the TUI receives keystrokes immediately. The focused root intercepts `tab` / `shift-tab` (when no search overlay is open) and forwards them to the PTY as `\t` / `\x1b[Z` with `stop_propagation`, so tab never escapes into GPUI focus traversal. Mouse-wheel events are forwarded to the PTY as xterm mouse reports when a TUI app captures the mouse (e.g. claude code / vim / htop), so its own viewport scrolls; on the alt screen without mouse capture the wheel becomes arrow-key presses (xterm alternateScroll, DECRST 1007 permitting); otherwise the local scrollback scrolls. Click count picks selection granularity (1 = char, 2 = semantic word, 3 = line). Hovering text tracks a target — OSC 8 hyperlink span first, else a semantic word that looks like a URL or a path (`:` is not a word separator, so URLs hover whole): the grid underlines the span, a tooltip anchored under the span shows the target text, and cmd/ctrl+click opens it (URLs in the browser; paths revealed in the file manager — directories open, `~` expands, relative paths resolve against the terminal cwd). Overlay chips: a starting indicator at the top right until the shell/agent TUI reports ready (OSC 6973 marker tap, output-quiet window, or fallback timeout), and the foreground process name at the bottom right while something other than the shell owns the foreground process group (1s poll). OSC 10/11/12 color queries are answered from the active theme. The cursor blinks per the `cursor_blink` setting (`off` / `on` / `terminal` = follow the program's DECSET 12/DECSCUSR flag) on a 530ms phase timer; selection, IME preedit, and input within the last 500ms pin it visible. A 2px scrollbar (8px hit area) shows at the right edge while scrollback exists; click/drag maps the y fraction onto the display offset, sharing `display_offset` with wheel/vi scrolling.
-
-> Source: `crates/terminal-ui/src/terminal_view.rs`
-
-#### TerminalTabBar
-
-Tab bar for multiple terminal tabs.
-
-> Source: `crates/terminal-ui/src/terminal_view.rs`
-
-#### TerminalGrid
-
-Monospace grid renderer, `flex_1`. Shapes text runs per line through a content-fingerprint cache (`layout_cache::LineShapeCache`, keyed by alacritty grid line + FNV-1a over each line's cells) so frames that repaint unchanged lines skip `shape_line`; a theme switch clears the cache and a per-frame sweep bounds it to the visible window. The cursor glyph honors the program's DECSCUSR shape (block / underline / beam / hollow-block / hidden) and is skipped on blinked-out phases. The scrollbar track/thumb quads paint here; the element writes the track bounds back to the view for hit-testing.
-
-> Source: `crates/terminal-ui/src/terminal_view.rs`
-
----
-
-## 6A. Chrome Shell（`--features chrome-shell`）
+## 6. 壳（Shell）
 
 #### ChromeShell
 
@@ -1197,7 +985,7 @@ wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar
 
 #### ToolTabRegistry
 
-chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 与旧壳页签同权；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮）。
+chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮）。
 
 > Source: `crates/agent-ui/src/tool_tabs.rs`
 
@@ -1207,15 +995,15 @@ chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操
 
 > Source: `crates/manox-agent-chrome-ui/src/panel.rs`, `crates/agent-ui/src/chrome_assembly.rs`
 
-#### EmbeddedColumn
+#### ConversationColumn
 
-`Workspace::render_embedded_column`：嵌入渲染模式下的会话列（hero 空屏／虚拟化消息列表／composer footer＋附件与 chips／ask 与 blank-project overlay／浮动 ContextRail／TurnNavigator overlay），去掉旧壳的 gutter/侧栏槽/卡壳/内嵌标题栏；键盘动作面经共享根装饰器 `apply_chat_actions`（两壳同源）。装配把该视图作为 chrome 的 `MainSurface`，其 multiplexer 同时喂侧栏投影泵。
+`Workspace::render_column`：会话列本身（hero 空屏／虚拟化消息列表／composer footer＋附件与 chips／ask 与 blank-project overlay／浮动 ContextRail／TurnNavigator overlay），四周的 gutter / 侧栏槽 / 卡壳 / 内嵌标题栏全部归壳；键盘动作面经根装饰器 `apply_chat_actions`。装配把该视图作为壳的 `MainSurface`，其 multiplexer 同时喂侧栏投影泵。
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 
-#### EmbeddedSettings
+#### SettingsCard
 
-chrome 构建下的 Settings（`Workspace::render_embedded_settings`）：同一状态机（`ViewMode::Settings` + `SettingsView` 订阅），渲染换位——设置导航列（240px）｜分隔线｜面板 放进主卡（chrome 侧栏槽是会话列表）；⌘, 与原生菜单 `Settings…` 经 `apply_chat_actions` 的 `OpenSettings` 处理进入，返回走 nav 的 back 控件（`SettingsEvent::Exit` → 滑出后回会话）。
+Settings（`Workspace::render_settings_card`）：同一状态机（`ViewMode::Settings` + `SettingsView` 订阅），渲染换位——设置导航列（240px）｜分隔线｜面板 放进主卡（chrome 侧栏槽是会话列表）；⌘, 与原生菜单 `Settings…` 经 `apply_chat_actions` 的 `OpenSettings` 处理进入，返回走 nav 的 back 控件（`SettingsEvent::Exit` → 滑出后回会话）。
 
 > Source: `crates/agent-ui/src/workspace/render.rs`, `crates/agent-ui/src/views/settings/mod.rs`
 

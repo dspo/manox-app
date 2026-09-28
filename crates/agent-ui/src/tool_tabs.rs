@@ -4,8 +4,8 @@
 //! Kinds shipped here:
 //! - integrated terminal ($SHELL, standalone PTY);
 //! - CLI agent terminals (claude / codex / copilot via the cx
-//!   `AgentBuilder`): the tab opens on a MODEL PICKER (the legacy `+`
-//!   menu's provider→model cascade reborn) and hands over to the TUI;
+//!   `AgentBuilder`): the tab opens on a provider→model MODEL PICKER and
+//!   hands over to the TUI;
 //! - the editor (markdown write/preview, a `gpui_component` editor).
 //!
 //! The browser tab awaits its host's decoupling
@@ -135,6 +135,25 @@ impl BrowserTool {
     pub fn new(ws: Entity<crate::Workspace>) -> Self {
         Self { ws }
     }
+
+    /// Adopt a browser tab the HOST opened (the agent's web tooling): its
+    /// webview already exists in the workspace and is routed in the browser
+    /// host, so the pane tab only renders it.
+    pub fn adopt(
+        &self,
+        tab_id: manox_agent::thread_engine::BrowserTabId,
+        url: &str,
+    ) -> Arc<dyn ToolTab> {
+        Arc::new(BrowserTab {
+            id: next_instance_id("browser"),
+            ws: self.ws.clone(),
+            tab_id: std::sync::Mutex::new(Some(tab_id)),
+            url: Arc::new(std::sync::Mutex::new(url.to_string())),
+            title: Arc::new(std::sync::Mutex::new(String::new())),
+            ticker_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ticker_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        })
+    }
 }
 
 impl ToolTabFactory for BrowserTool {
@@ -194,7 +213,7 @@ struct BrowserTab {
     /// The live tab label (the page's `<title>`, mirrored by the ticker).
     title: Arc<std::sync::Mutex<String>>,
     /// Ticker lifecycle: cleared on close; `visible` follows `on_active`
-    /// (hidden tabs idle, like the legacy ticker).
+    /// (hidden tabs idle).
     ticker_alive: Arc<std::sync::atomic::AtomicBool>,
     ticker_visible: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -230,8 +249,8 @@ impl ToolTab for BrowserTab {
     ) {
         // The production browser-tab path on the embedded workspace: the
         // view registers with the browser host (IPC routing) and lives in
-        // the workspace's own `browser_views` map — the host's routing
-        // reaches it exactly as it reaches legacy tabs.
+        // the workspace's own `browser_views` map — the host routes by tab
+        // id, so every open path reaches the same surface.
         let url = {
             let persisted = self.url.lock().expect("browser url lock").clone();
             if persisted.is_empty() {
@@ -240,20 +259,26 @@ impl ToolTab for BrowserTab {
                 persisted
             }
         };
+        // A preset id means the host already built and routed this webview
+        // (the agent's browser-open path); otherwise this open mints one.
+        let preset = *self.tab_id.lock().expect("browser tab id lock");
         let (tab_id, view) = self.ws.update(cx, |ws, cx| {
-            let tab_id = ws.restore_browser_tab(&url, window, cx);
+            let tab_id = match preset {
+                Some(tab_id) => tab_id,
+                None => ws.restore_browser_tab(&url, window, cx),
+            };
             let view = ws
                 .browser_views
                 .get(&tab_id)
                 .cloned()
-                .expect("restore_browser_tab inserts the view");
+                .expect("the tab's view is registered in the workspace");
             (tab_id, view)
         });
         *self.tab_id.lock().expect("browser tab id lock") = Some(tab_id);
         *self.url.lock().expect("browser url lock") = url;
         store.put(&self.id, view);
-        // Mirror the page's `<title>` onto the tab label (the legacy 2s
-        // ticker): hidden tabs idle, the loop dies with the tab.
+        // Mirror the page's `<title>` onto the tab label: hidden tabs idle,
+        // the loop dies with the tab.
         let alive = self.ticker_alive.clone();
         let visible = self.ticker_visible.clone();
         let title_slot = self.title.clone();
@@ -351,6 +376,89 @@ impl ToolTab for BrowserTab {
     }
 }
 
+/// Surface a browser tab the host opened as a right-pane tab (see
+/// [`crate::Workspace::open_browser_tab`]).
+pub fn adopt_browser_tab(
+    ws: Entity<crate::Workspace>,
+    tab_id: manox_agent::thread_engine::BrowserTabId,
+    url: &str,
+) -> Arc<dyn ToolTab> {
+    BrowserTool::new(ws).adopt(tab_id, url)
+}
+
+// ── sub-agent observation ─────────────────────────────────────────────────
+
+/// The tab id one sub-agent address's panel rides on (the address is the
+/// tab's identity — one panel per subagent).
+pub fn subagent_tab_id(address: &str) -> String {
+    format!("subagent:{address}")
+}
+
+/// Wrap a built observation panel as a right-pane tab. The panel entity is
+/// built by the workspace (it owns the child transcript the panel renders);
+/// the shell owns placement and teardown.
+pub fn subagent_tab(
+    address: &str,
+    panel: Entity<crate::views::subagent_panel::SubagentPanel>,
+) -> Arc<dyn ToolTab> {
+    Arc::new(SubagentTab {
+        id: subagent_tab_id(address),
+        label: address.to_string(),
+        panel,
+    })
+}
+
+struct SubagentTab {
+    id: String,
+    /// The subagent's address — the tab label (the panel's own banner shows
+    /// the task topic).
+    label: String,
+    /// The observation panel this tab renders; its entity is the tab's
+    /// content, so teardown is a store reset.
+    panel: Entity<crate::views::subagent_panel::SubagentPanel>,
+}
+
+impl ToolTab for SubagentTab {
+    fn kind(&self) -> &'static str {
+        "subagent"
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn title(&self, _cx: &App) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn icon(&self, _cx: &App) -> AnyElement {
+        icon(icons::ROBOT, 15.).into_any_element()
+    }
+
+    fn open(
+        &self,
+        _window: &mut Window,
+        _cx: &mut App,
+        store: &mut TabStore,
+        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
+        store.put(&self.id, self.panel.clone());
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
+        match store.get::<crate::views::subagent_panel::SubagentPanel>(&self.id) {
+            Some(panel) => panel.into_any_element(),
+            None => div_missing().into_any_element(),
+        }
+    }
+
+    /// Session-only: a child transcript does not survive the process, so the
+    /// kind has no persisted form.
+    fn persist(&self, _cx: &App, _store: &TabStore) -> Option<String> {
+        None
+    }
+}
+
 // ── CLI agent terminals ────────────────────────────────────────────────────
 
 /// The factory carries the multiplexer (the wire model rows — the picker's
@@ -434,8 +542,8 @@ impl ToolTab for AgentTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
     ) {
-        // The tab opens on the MODEL PICKER (the legacy `+` menu's cascade
-        // reborn); picking one spawns the agent under that endpoint and the
+        // The tab opens on the MODEL PICKER; picking one spawns the agent
+        // under that endpoint and the
         // picker renders the TUI from then on — one entity for the tab's
         // whole lifetime, so close-tab teardown stays a single drop.
         let picker = cx.new(|_| AgentPicker {
@@ -656,8 +764,8 @@ impl gpui::Render for AgentPicker {
 
 // ── editor ────────────────────────────────────────────────────────────────
 
-/// The markdown editor kind (write/preview), the legacy right pane's editor
-/// tab reborn as a chrome tool tab. Content is per-tab-instance (a fresh
+/// The markdown editor kind (write/preview), a right-pane tool tab. Content
+/// is per-tab-instance (a fresh
 /// editor per open); the chrome session stash carries it across thread
 /// switches.
 pub struct EditorTool;
@@ -764,8 +872,7 @@ pub(crate) fn spawn_standalone_terminal(
 }
 
 /// Brand glyph: the SVG asset rides the app's asset source
-/// (`ExtrasAssetSource`), rendered the same way the legacy sidebar renders
-/// its brand marks — a gpui-component `Icon` with the custom path, sized
+/// (`ExtrasAssetSource`) — a gpui-component `Icon` with the custom path, sized
 /// `.small()`, colored by the surrounding text color.
 fn brand_icon(svg_path: &'static str) -> AnyElement {
     use gpui_component::Sizable as _;

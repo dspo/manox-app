@@ -1,10 +1,9 @@
 //! manox — an in-process native agent workbench (thin bin).
 //!
-//! Only handles window, theme, and tracing init, and mounts `agent_ui::Workspace` in the window.
-//! Agent logic lives in the `agent` crate; UI lives in the `agent-ui` crate.
+//! Only handles window, theme, and tracing init, and mounts the chrome shell
+//! (`agent_ui::chrome_assembly`) in the window. Agent logic lives in the
+//! `agent` crate; UI lives in the `agent-ui` crate.
 
-#[cfg(not(feature = "chrome-shell"))]
-use gpui::AppContext as _;
 use gpui::{App, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
 use gpui::{WindowBounds, WindowOptions};
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
@@ -167,18 +166,6 @@ fn main() {
             gpui::KeyBinding::new("cmd-ctrl-f", ToggleFullscreen, None),
             #[cfg(not(target_os = "macos"))]
             gpui::KeyBinding::new("f11", ToggleFullscreen, None),
-            // Ctrl-G opens the right-side markdown composer.
-            gpui::KeyBinding::new("ctrl-g", agent_ui::ToggleEditor, None),
-            // Cmd/Ctrl-W closes the markdown composer and returns the draft to the inline input.
-            #[cfg(target_os = "macos")]
-            gpui::KeyBinding::new("cmd-w", agent_ui::CloseEditor, None),
-            #[cfg(not(target_os = "macos"))]
-            gpui::KeyBinding::new("ctrl-w", agent_ui::CloseEditor, None),
-            // Cmd/Ctrl-Shift-P toggles between plain-text edit and markdown preview.
-            #[cfg(target_os = "macos")]
-            gpui::KeyBinding::new("cmd-shift-p", agent_ui::ToggleEditorPreview, None),
-            #[cfg(not(target_os = "macos"))]
-            gpui::KeyBinding::new("ctrl-shift-p", agent_ui::ToggleEditorPreview, None),
             // Cmd/Ctrl-, opens the Settings overlay. The handler lives on the
             // active Workspace (see `Workspace::Render`), so menu items and
             // keybindings both reach the same `cx.listener` once the window
@@ -191,28 +178,16 @@ fn main() {
             gpui::KeyBinding::new("left", agent_ui::AskPrev, Some("AskDrawer")),
             gpui::KeyBinding::new("right", agent_ui::AskNext, Some("AskDrawer")),
             gpui::KeyBinding::new("escape", agent_ui::AskCancel, Some("AskDrawer")),
-            // Terminal tab: cmd-t opens, cmd-shift-t focuses, cmd-shift-c
-            // returns to the conversation pane. Handlers live on the active
-            // Workspace (see `Workspace::Render`).
-            gpui::KeyBinding::new("cmd-t", agent_ui::NewTerminalTab, None),
-            gpui::KeyBinding::new("cmd-shift-t", agent_ui::FocusTerminal, None),
+            // Return focus to the conversation pane. The shell owns the
+            // terminal/browser tab opening (its dock and right pane), so this
+            // is the only pane-focused binding.
             #[cfg(target_os = "macos")]
             gpui::KeyBinding::new("cmd-shift-c", agent_ui::FocusConversation, None),
-            gpui::KeyBinding::new("ctrl-t", agent_ui::NewTerminalTab, None),
-            gpui::KeyBinding::new("ctrl-shift-t", agent_ui::FocusTerminal, None),
             #[cfg(not(target_os = "macos"))]
             gpui::KeyBinding::new("ctrl-shift-c", agent_ui::FocusConversation, None),
-            // Built-in browser. cmd-b opens a new browser tab in the right
-            // pane, cmd-shift-b closes the active browser tab.
-            gpui::KeyBinding::new("cmd-b", agent_ui::OpenBrowserTab, None),
-            gpui::KeyBinding::new("cmd-shift-b", agent_ui::CloseBrowserTab, None),
-            gpui::KeyBinding::new("ctrl-alt-b", agent_ui::OpenBrowserTab, None),
-            gpui::KeyBinding::new("ctrl-shift-b", agent_ui::CloseBrowserTab, None),
             // Park the active running thread into the background and open a
             // fresh empty thread in the same project — the explicit "background
-            // this task" gesture. No-op when idle. cmd-b stays the browser key
-            // on macOS, so ctrl-b is free there; on other platforms the browser
-            // tab moved to ctrl-alt-b to free ctrl-b for this action.
+            // this task" gesture. No-op when idle.
             gpui::KeyBinding::new("ctrl-b", agent_ui::BackgroundCurrentThread, None),
             // Pop the last follow-up parked above the composer while a turn is
             // running (mirrors the per-item Remove affordance for the tail).
@@ -300,9 +275,9 @@ fn main() {
                 }
             });
         });
-        // Terminal actions share the same deferred-dispatch path as Settings:
-        // menu items fire App-level handlers, which reach the active window's
-        // Workspace via the stashed handles.
+        // Taking focus back to the conversation rides the same deferred
+        // dispatch as Settings: the App-level handler reaches the active
+        // window's Workspace through the stashed handles.
         cx.on_action(|_: &agent_ui::FocusConversation, cx: &mut App| {
             let (workspace, handle) = (
                 agent_ui::dispatch::workspace_global(),
@@ -484,36 +459,16 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
 
             // The chrome shell's glyphs ride the codicon font — register
             // it before the first chrome frame paints (tofu otherwise).
-            #[cfg(feature = "chrome-shell")]
             manox_agent_chrome_ui::register_fonts(cx);
-            #[cfg(feature = "chrome-shell")]
-            let root = {
-                // Dual-shell build (chrome): the chrome assembly replaces
-                // the workspace root — its own multiplexer, projected
-                // sidebar, tool tabs, and dock. Workspace-scoped extras
-                // (dispatch registry, dock badge, focus restore) are
-                // legacy-only below.
-                let shell = agent_ui::chrome_assembly::mount(window, cx);
-                cx.bind_keys([gpui::KeyBinding::new(
-                    "cmd-n",
-                    manox_agent_chrome_ui::shell::NewSession,
-                    None,
-                )]);
-                agent_ui::chrome_assembly::root(shell, window, cx)
-            };
-            #[cfg(not(feature = "chrome-shell"))]
-            let root = {
-                let view = match agent_ui::dispatch::workspace_global() {
-                    Some(view) => view,
-                    None => {
-                        let view = cx.new(|cx| agent_ui::Workspace::new(window, cx));
-                        agent_ui::dispatch::set_workspace(view.clone());
-                        view
-                    }
-                };
-                cx.new(|cx| Root::new(view, window, cx))
-            };
-            root
+            // The chrome assembly is the window root: its own multiplexer,
+            // projected sidebar, tool tabs, and dock.
+            let shell = agent_ui::chrome_assembly::mount(window, cx);
+            cx.bind_keys([gpui::KeyBinding::new(
+                "cmd-n",
+                manox_agent_chrome_ui::shell::NewSession,
+                None,
+            )]);
+            agent_ui::chrome_assembly::root(shell, window, cx)
         })
         .map_err(|e| anyhow::anyhow!("failed to open the main window: {e}"))?;
     agent_ui::dispatch::set_window(handle);

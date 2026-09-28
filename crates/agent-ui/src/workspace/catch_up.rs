@@ -141,7 +141,7 @@ impl Workspace {
             self.subagent_final_text
                 .insert(id.to_string(), text.to_string());
         }
-        if let Some(panel) = self.subagent_panels.get(id) {
+        if let Some(panel) = crate::chrome_assembly::subagent_panel(id, cx) {
             panel.update(cx, |p, cx| p.set_status(status, cx));
         }
     }
@@ -159,7 +159,7 @@ impl Workspace {
             .entry(id.to_string())
             .or_default()
             .push(child.clone());
-        if let Some(panel) = self.subagent_panels.get(id) {
+        if let Some(panel) = crate::chrome_assembly::subagent_panel(id, cx) {
             panel.update(cx, |p, cx| p.push(child, cx));
         }
     }
