@@ -536,7 +536,7 @@ struct AgentPicker {
 
 impl AgentPicker {
     fn groups(&self, cx: &App) -> Vec<(String, Vec<PickRow>)> {
-        let models = self.mux.read(cx).models().to_vec();
+        let models = self.mux.read(cx).agents(cx);
         cascade_provider_groups(self.agent_id, &models)
             .into_iter()
             .map(|(provider, entries)| {

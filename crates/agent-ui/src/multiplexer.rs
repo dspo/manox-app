@@ -11,8 +11,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ahp_types::state::{AgentInfo, SessionSummary};
+use ahp_types::state::AgentInfo;
 use gpui::{App, AppContext as _, Context, Entity};
+use crate::sidebar_projection::ThreadRow;
 use manox_agent_chat_ui::ahp_store::{AhpStore, CLIENT_ID, chat_uri, session_uri};
 
 /// The per-app multiplexer: store handle plus attach/focus bookkeeping.
@@ -97,7 +98,8 @@ impl SessionMultiplexer {
             self.focused = None;
         }
         let uri = session_uri(session_id);
-        self.store.update(|store, _| store.unsubscribe(uri));
+        self.store
+            .update(|store: &mut AhpStore, _| store.unsubscribe(uri));
     }
 
     /// The client-owned focus (GW5).
@@ -147,16 +149,39 @@ impl SessionMultiplexer {
 
     // ── catalogue accessors (the sidebar/model/command faces) ──────────
 
-    /// The sidebar catalogue: session id + summary, most recently modified
+    /// The sidebar catalogue as projected rows, most recently modified
     /// first (the host's list order).
-    pub fn thread_list(&self, cx: &App) -> Vec<(String, SessionSummary)> {
-        let book = &self.store.read(cx).book;
-        let mut rows: Vec<(String, SessionSummary)> = book
+    pub fn thread_list(&self, cx: &App) -> Vec<ThreadRow> {
+        let view = self.store.read(cx);
+        let book = &view.book;
+        let mut rows: Vec<ThreadRow> = book
             .summaries
-            .iter()
-            .map(|(id, s)| (id.clone(), s.clone()))
+            .values()
+            .map(|summary| {
+                let sid = manox_agent_chat_ui::ahp_store::id_of(&summary.resource);
+                let ext = book.ext.get(&session_uri(sid));
+                let pinned = ext.and_then(|x| x.pinned).unwrap_or(false);
+                let pending_plan = ext
+                    .and_then(|x| x.plan_review.as_ref())
+                    .and_then(|r| r.get("state"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|s| s == "proposed");
+                ThreadRow::from_summary(summary, pinned, pending_plan)
+            })
             .collect();
-        rows.sort_by(|a, b| b.1.modified_at.cmp(&a.1.modified_at));
+        rows.sort_by(|a, b| {
+            let ta = book
+                .summaries
+                .get(&a.id)
+                .map(|s| s.modified_at.as_str())
+                .unwrap_or("");
+            let tb = book
+                .summaries
+                .get(&b.id)
+                .map(|s| s.modified_at.as_str())
+                .unwrap_or("");
+            tb.cmp(ta)
+        });
         rows
     }
 

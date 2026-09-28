@@ -18,15 +18,64 @@
 
 use std::collections::HashMap;
 
+use ahp_types::state::{SessionSummary, SessionStatus as WireStatus};
 use manox_agent_chrome_ui::session_list::{SessionGroup, SessionRowData, SessionStatus};
-use manox_protocol::ThreadListItem;
+
+/// One sidebar row: the fields the chrome list renders, derived from a
+/// session summary plus its extension fold. Replaces the retired v2
+/// `ThreadListItem`.
+#[derive(Debug, Clone)]
+pub struct ThreadRow {
+    pub id: String,
+    pub title: String,
+    pub running: bool,
+    pub unread: bool,
+    pub errored: bool,
+    pub pending_auth: bool,
+    pub pending_plan: bool,
+    pub pinned: bool,
+    pub parent_id: Option<String>,
+    pub depth: i32,
+    pub project: Option<String>,
+    pub tag: Option<String>,
+}
+
+impl ThreadRow {
+    /// Derive a row from the AHP summary and its extension state. The
+    /// five-state inputs are bit tests over the summary's status set; plan
+    /// pending rides the extension fold's plan review lifecycle. Sub-agent
+    /// nesting (depth/parent) has no summary face yet — flat, until the
+    /// work channel carries the tree.
+    pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_plan: bool) -> Self {
+        let bits = summary.status;
+        let flags = WireStatus(bits);
+        Self {
+            id: crate::ahp_store::id_of(&summary.resource).to_string(),
+            title: summary.title.clone(),
+            running: bits & WireStatus::InProgress.bits() != 0,
+            unread: bits & WireStatus::IsRead.bits() == 0,
+            errored: bits & WireStatus::Error.bits() != 0,
+            pending_auth: bits & WireStatus::InputNeeded.bits() != 0,
+            pending_plan,
+            pinned,
+            parent_id: None,
+            depth: 0,
+            project: summary
+                .working_directories
+                .as_ref()
+                .and_then(|dirs| dirs.first())
+                .map(|uri| uri.trim_start_matches("file://").to_string()),
+            tag: None,
+        }
+    }
+}
 
 /// The client-owned unread mirrors (leaf entity ids → live flags), keyed by
 /// thread id; `None` entries fall back to the wire row's flag.
 pub type UnreadMirrors = HashMap<String, bool>;
 
 /// Project one wire row (GW5: `unread_override` from the live leaf wins).
-pub fn project_row(item: &ThreadListItem, unread_override: Option<bool>) -> SessionRowData {
+pub fn project_row(item: &ThreadRow, unread_override: Option<bool>) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),
         title: item.title.clone(),
@@ -41,7 +90,7 @@ pub fn project_row(item: &ThreadListItem, unread_override: Option<bool>) -> Sess
 }
 
 /// The five-state machine over a wire row.
-pub fn five_state(item: &ThreadListItem, unread_override: Option<bool>) -> SessionStatus {
+pub fn five_state(item: &ThreadRow, unread_override: Option<bool>) -> SessionStatus {
     if item.errored {
         SessionStatus::Errored
     } else if item.pending_auth {
@@ -63,13 +112,13 @@ pub fn five_state(item: &ThreadListItem, unread_override: Option<bool>) -> Sessi
 /// never deeper (pi sub-agents), so no recursion is needed. Orphans (a
 /// parent that is missing, archived, or outside the partition) flatten to
 /// top-level rather than vanishing.
-pub fn project_forest(rows: &[ThreadListItem], unread: &UnreadMirrors) -> Vec<SessionRowData> {
-    let by_id: HashMap<&str, &ThreadListItem> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
+pub fn project_forest(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<SessionRowData> {
+    let by_id: HashMap<&str, &ThreadRow> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         if row.depth == 0 {
             let mut leader = project_row(row, unread.get(&row.id).copied());
-            let members: Vec<&ThreadListItem> = rows
+            let members: Vec<&ThreadRow> = rows
                 .iter()
                 .filter(|r| r.depth > 0 && r.parent_id.as_deref() == Some(row.id.as_str()))
                 .collect();
@@ -100,9 +149,9 @@ pub fn project_forest(rows: &[ThreadListItem], unread: &UnreadMirrors) -> Vec<Se
 /// Group a full wire list into chrome `SessionGroup`s keyed by project
 /// display name (the path's last segment; empty → "Chats"), applying
 /// `project_forest` per partition.
-pub fn project_groups(rows: &[ThreadListItem], unread: &UnreadMirrors) -> Vec<SessionGroup> {
+pub fn project_groups(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<SessionGroup> {
     let mut order: Vec<String> = Vec::new();
-    let mut buckets: HashMap<String, Vec<ThreadListItem>> = HashMap::new();
+    let mut buckets: HashMap<String, Vec<ThreadRow>> = HashMap::new();
     for row in rows {
         let key = project_label(row.project.as_deref().unwrap_or(""));
         if !buckets.contains_key(&key) {
@@ -136,25 +185,20 @@ fn project_label(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn row(id: &str, depth: i32, parent: Option<&str>) -> ThreadListItem {
-        ThreadListItem {
+    fn row(id: &str, depth: i32, parent: Option<&str>) -> ThreadRow {
+        ThreadRow {
             id: id.into(),
             title: format!("row {id}"),
-            updated_at: 0,
             running: false,
             unread: false,
             errored: false,
             pending_auth: false,
             pending_plan: false,
-            background_work: false,
-            model_id: "m".into(),
             pinned: false,
-            archived: false,
             parent_id: parent.map(|p| p.to_string()),
             depth,
             project: Some("/p/wire".into()),
             tag: None,
-            approval_mode: None,
         }
     }
 

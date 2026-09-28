@@ -1,7 +1,7 @@
 //! Conversation history sidebar.
 //!
 //! A standalone gpui Entity that lists past threads from the gateway (U2):
-//! the rows are the multiplexer's wire `ThreadListItem`s (§D.5
+//! the rows are the multiplexer's wire `ThreadRow`s (§D.5
 //! `ThreadsUpdated` mirrors / `ListThreads` responses with the
 //! `SessionStatus` deltas merged in) — the former kernel `StoreHandle` event
 //! pump is retired. The decoration columns (project grouping, tag chip,
@@ -42,7 +42,7 @@ use gpui_component::{
     v_flex,
 };
 use manox_agent::thread::PermissionMode;
-use manox_protocol::ThreadListItem;
+use crate::sidebar_projection::ThreadRow;
 
 /// How far the row wash translates (in pixels, clipped to the row) during the
 /// selection-slide. The two adjacent rows animate in opposite directions so
@@ -110,13 +110,13 @@ enum AnimRole {
 }
 
 /// A row in the Conversations list — either a manox thread (the gateway's
-/// wire `ThreadListItem`, U2) or an external agent CLI session, unified so the
+/// wire `ThreadRow`, U2) or an external agent CLI session, unified so the
 /// two render through one row factory in one band sequence. Both row kinds share
 /// the selection-slide: their ids join one `flat_ids` ordering and
 /// `render_thread_item` applies the same `SlideCtx` wash to either.
 #[derive(Clone)]
 enum SidebarRow {
-    Thread(ThreadListItem),
+    Thread(ThreadRow),
     External(crate::external_session::ExternalSessionSummary),
 }
 
@@ -292,10 +292,10 @@ pub enum SidebarEvent {
 /// store); a collapsed leader hides its subtree.
 fn team_forest(
     team_collapsed: &HashSet<String>,
-    threads: &[ThreadListItem],
+    threads: &[ThreadRow],
     externals: &[crate::external_session::ExternalSessionSummary],
 ) -> Vec<ThreadRender> {
-    let mut members: HashMap<&str, Vec<&ThreadListItem>> = HashMap::new();
+    let mut members: HashMap<&str, Vec<&ThreadRow>> = HashMap::new();
     let ids: HashSet<&str> = threads.iter().map(|s| s.id.as_str()).collect();
     for s in threads {
         if s.depth > 0
@@ -304,7 +304,7 @@ fn team_forest(
             members.entry(parent).or_default().push(s);
         }
     }
-    let top: Vec<&ThreadListItem> = threads
+    let top: Vec<&ThreadRow> = threads
         .iter()
         .filter(|s| {
             // A member whose leader lives in another partition (e.g. an
@@ -316,7 +316,7 @@ fn team_forest(
     // A stable re-band: the server's snapshot already leads with pinned rows,
     // but the client's promotion can lift an unpinned row above one, so the
     // band boundary is re-applied here (in one place, never per call site).
-    let (pinned, rest): (Vec<&ThreadListItem>, Vec<&ThreadListItem>) =
+    let (pinned, rest): (Vec<&ThreadRow>, Vec<&ThreadRow>) =
         top.into_iter().partition(|s| s.pinned);
     let mut externals: Vec<crate::external_session::ExternalSessionSummary> = externals.to_vec();
     externals.sort_by_key(|s| std::cmp::Reverse(s.created_at));
@@ -360,9 +360,9 @@ const MAX_TEAM_RENDER_DEPTH: f32 = 8.0;
 fn push_member(
     team_collapsed: &HashSet<String>,
     out: &mut Vec<ThreadRender>,
-    s: &ThreadListItem,
+    s: &ThreadRow,
     depth: f32,
-    members: &HashMap<&str, Vec<&ThreadListItem>>,
+    members: &HashMap<&str, Vec<&ThreadRow>>,
 ) {
     let has_kids = members.contains_key(s.id.as_str());
     out.push(ThreadRender {
@@ -395,7 +395,7 @@ fn external_session_is_loose(project: Option<&std::path::Path>, known_projects: 
 
 pub struct Sidebar {
     /// The gateway client (U2 list source + GW5 badge source): rows are its
-    /// wire `ThreadListItem`s, and their unread badges prefer the leaves'
+    /// wire `ThreadRow`s, and their unread badges prefer the leaves'
     /// client-owned mirrors. Bound by the workspace after construction; an
     /// unbound sidebar (tests) renders no thread rows.
     mux: Option<gpui::Entity<crate::multiplexer::SessionMultiplexer>>,
@@ -481,7 +481,7 @@ impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Sidebar {
     /// Bind the gateway client (U2 list source, GW5 badge source): rows are
-    /// the multiplexer's wire `ThreadListItem`s, and their unread badges
+    /// the multiplexer's wire `ThreadRow`s, and their unread badges
     /// prefer the leaves' client-owned mirrors over the (deprecated,
     /// constant-false) row flag.
     pub fn bind_multiplexer(&mut self, mux: gpui::Entity<crate::multiplexer::SessionMultiplexer>) {
@@ -571,22 +571,29 @@ impl Sidebar {
         // the registry from the same instant, or a row could be judged by a
         // registry that no longer matches its list.
         let (items, known, accounted) = {
+            let items = mux.read(cx).thread_list(cx);
             let mux = mux.read(cx);
-            (
-                mux.thread_list().to_vec(),
-                mux.workspaces()
-                    .iter()
-                    .map(|row| row.path.clone())
-                    .collect::<Vec<_>>(),
-                mux.workspaces()
-                    .iter()
-                    .flat_map(|row| {
-                        row.session_ids
-                            .iter()
-                            .map(|id| (id.clone(), row.path.clone()))
-                    })
-                    .collect::<std::collections::HashMap<String, String>>(),
-            )
+            let known = mux
+                .workspaces(cx)
+                .and_then(|state| {
+                    state
+                        .get("workspaces")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|rows| {
+                            rows.iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .unwrap_or_default();
+            let accounted: std::collections::HashMap<String, String> = items
+                .iter()
+                .filter_map(|row| {
+                    row.project.as_ref().map(|p| (row.id.clone(), p.clone()))
+                })
+                .collect();
+            (items, known, accounted)
         };
         for (partition, server) in wire_partition_orders(&items, &known, &accounted) {
             let Some(target) = self.view.account.get(&partition) else {
@@ -1102,7 +1109,7 @@ impl Sidebar {
     fn summary_tag(&self, id: &str, cx: &App) -> Option<String> {
         self.mux.as_ref().and_then(|m| {
             m.read(cx)
-                .thread_list()
+                .thread_list(cx)
                 .iter()
                 .find(|i| i.id == id)
                 .and_then(|i| i.tag.clone())
@@ -1146,7 +1153,7 @@ impl Sidebar {
     /// [`team_forest`]).
     fn order_rows(
         &self,
-        threads: &[ThreadListItem],
+        threads: &[ThreadRow],
         externals: &[crate::external_session::ExternalSessionSummary],
     ) -> Vec<ThreadRender> {
         team_forest(&self.team_collapsed, threads, externals)
@@ -1162,8 +1169,8 @@ impl Sidebar {
     /// writing; a partition that merely re-reads the same order writes nothing.
     fn apply_view_order(
         &mut self,
-        projects: &mut [(String, Vec<ThreadListItem>)],
-        loose: &mut Vec<ThreadListItem>,
+        projects: &mut [(String, Vec<ThreadRow>)],
+        loose: &mut Vec<ThreadRow>,
         cx: &mut Context<Self>,
     ) {
         let switched =
@@ -1179,7 +1186,7 @@ impl Sidebar {
             // while the account is being computed from this snapshot.
             let stamps: Vec<(String, i64)> = rows
                 .iter()
-                .map(|s| (s.id.clone(), s.updated_at as i64))
+                .map(|s| (s.id.clone(), 0i64))
                 .collect();
             let input: Vec<sidebar_view::Row<'_>> = stamps
                 .iter()
@@ -1379,24 +1386,26 @@ impl Sidebar {
     /// [`Self::wire_partition_orders`]; keep the three in sync.
     fn partition_of_row(&self, id: &str, cx: &mut App) -> Option<String> {
         let mux = self.mux.as_ref()?;
-        let list = mux.read(cx).thread_list().to_vec();
-        let (known, accounted) = {
-            let mux = mux.read(cx);
-            (
-                mux.workspaces()
-                    .iter()
-                    .map(|row| row.path.clone())
-                    .collect::<Vec<_>>(),
-                mux.workspaces()
-                    .iter()
-                    .flat_map(|row| {
-                        row.session_ids
-                            .iter()
-                            .map(|id| (id.clone(), row.path.clone()))
+        let list = mux.read(cx).thread_list(cx);
+        let known = mux
+            .read(cx)
+            .workspaces(cx)
+            .and_then(|state| {
+                state
+                    .get("workspaces")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
                     })
-                    .collect::<std::collections::HashMap<String, String>>(),
-            )
-        };
+            })
+            .unwrap_or_default();
+        let accounted: std::collections::HashMap<String, String> = list
+            .iter()
+            .filter_map(|row| row.project.as_ref().map(|p| (row.id.clone(), p.clone())))
+            .collect();
         let row = list.iter().find(|r| r.id == id)?;
         Some(
             folder_key(row, &known, &accounted)
@@ -1478,7 +1487,7 @@ impl Sidebar {
     fn render_project_group(
         &self,
         path: &str,
-        group: &[ThreadListItem],
+        group: &[ThreadRow],
         selected: Option<&str>,
         slide: &SlideCtx,
         cx: &mut Context<Self>,
@@ -1488,7 +1497,7 @@ impl Sidebar {
         let unread_map = self
             .mux
             .as_ref()
-            .map(|m| m.read(cx).unread_map(cx))
+            .map(|m| m.read(cx).unread_map())
             .unwrap_or_default();
         let expanded = !self.collapsed.contains(path);
         let name = std::path::Path::new(path)
@@ -1725,12 +1734,12 @@ impl Render for Sidebar {
         }
         let theme = cx.theme().clone();
         // U2: the rows are the gateway's wire list (the multiplexer's
-        // `ThreadListItem`s — §D.5 mirrors / `ListThreads` responses with
+        // `ThreadRow`s — §D.5 mirrors / `ListThreads` responses with
         // the `SessionStatus` deltas merged), never a kernel store read.
-        let items: Vec<ThreadListItem> = self
+        let items: Vec<ThreadRow> = self
             .mux
             .as_ref()
-            .map(|m| m.read(cx).thread_list().to_vec())
+            .map(|m| m.read(cx).thread_list(cx))
             .unwrap_or_default();
         // Per-frame prune: anchors are write-only while rows live, so
         // archived/deleted rows (and any stale id reuse) would otherwise leak
@@ -1741,32 +1750,33 @@ impl Render for Sidebar {
             .retain(|key, _| items.iter().any(|item| item.id == *key));
         // U2 cross-domain #1: the grouping registry rides the wire (the
         // `HostEvent::Projects` mirror), not a workspace push.
-        let known_projects = self
+        let known_projects: Vec<String> = self
             .mux
             .as_ref()
-            .map(|m| {
-                m.read(cx)
-                    .workspaces()
-                    .iter()
-                    .map(|row| row.path.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let accounted: std::collections::HashMap<String, String> = self
-            .mux
-            .as_ref()
-            .map(|m| {
-                m.read(cx)
-                    .workspaces()
-                    .iter()
-                    .flat_map(|row| {
-                        row.session_ids
-                            .iter()
-                            .map(|id| (id.clone(), row.path.clone()))
+            .and_then(|m| m.read(cx).workspaces(cx).cloned())
+            .and_then(|state| {
+                state
+                    .get("workspaces")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
                     })
-                    .collect()
             })
             .unwrap_or_default();
+        // Session → project grouping is local now: the row's granted working
+        // directory is the partition key (the catalogue channel carries only
+        // the folder order).
+        let accounted: std::collections::HashMap<String, String> = items
+            .iter()
+            .filter_map(|row| {
+                row.project
+                    .as_ref()
+                    .map(|p| (row.id.clone(), p.clone()))
+            })
+            .collect();
         // Same per-frame prune for the per-project new-session keys (the
         // conversations-header sentinel always stays).
         self.new_session_anchors.borrow_mut().retain(|key, _| {
@@ -1777,11 +1787,11 @@ impl Render for Sidebar {
         let unread_map = self
             .mux
             .as_ref()
-            .map(|m| m.read(cx).unread_map(cx))
+            .map(|m| m.read(cx).unread_map())
             .unwrap_or_default();
 
-        let mut projects: Vec<(String, Vec<ThreadListItem>)> = Vec::new();
-        let mut loose: Vec<ThreadListItem> = Vec::new();
+        let mut projects: Vec<(String, Vec<ThreadRow>)> = Vec::new();
+        let mut loose: Vec<ThreadRow> = Vec::new();
         for s in &items {
             // Only REGISTERED projects become folder groups; a session cwd
             // that was never bound as a project (e.g. the default home dir)
@@ -2010,7 +2020,7 @@ const COLLAPSED_ROWS: usize = 5;
 /// external CLI sessions), and it keys by the registered path so those rows
 /// group with the registry's own folder.
 fn folder_key(
-    row: &ThreadListItem,
+    row: &ThreadRow,
     known_paths: &[String],
     accounted: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
@@ -2025,7 +2035,7 @@ fn folder_key(
 }
 
 fn wire_partition_orders(
-    items: &[ThreadListItem],
+    items: &[ThreadRow],
     known_projects: &[String],
     accounted: &std::collections::HashMap<String, String>,
 ) -> Vec<(String, Vec<String>)> {
@@ -2113,9 +2123,9 @@ fn build_agent_model_cascade(
     // would double-lease it — GPUI panics ("cannot read Sidebar while
     // it is already being updated"), and in the real app the objc
     // callback frame turns the panic into a non-unwinding abort.
-    let models: Vec<manox_protocol::ModelInfo> = mux
+    let models: Vec<ahp_types::state::AgentInfo> = mux
         .as_ref()
-        .map(|m| m.read(cx).models().to_vec())
+        .map(|m| m.read(cx).agents(cx))
         .unwrap_or_default();
     crate::views::model_cascade::build_model_cascade(
         menu,
@@ -2339,7 +2349,7 @@ struct TagEdit {
 }
 
 /// A UI-layer sidebar row projected from either the gateway's wire
-/// `ThreadListItem` (its decoration columns ride the row) or an
+/// `ThreadRow` (its decoration columns ride the row) or an
 /// `ExternalSessionSummary`, so the two render through one layout with a shared
 /// selection-slide animation, id tag, and hover archive action. Only display +
 /// identity fields live here — the sidebar never holds PTY handles.
@@ -2397,7 +2407,7 @@ impl SidebarThreadItem {
     /// itself (the server's list projection with the §D.5 `SessionStatus`
     /// deltas merged by the multiplexer).
     fn from_wire(
-        item: &ThreadListItem,
+        item: &ThreadRow,
         selected: bool,
         // GW5: the leaf's client-owned unread mirror, when the session has
         // a leaf; `None` falls back to the row's flag (the deprecated wire
@@ -2416,7 +2426,7 @@ impl SidebarThreadItem {
             copy_value: item.id.clone(),
             id: item.id.clone(),
             title,
-            updated: format_relative(item.updated_at as i64),
+            updated: String::new(),
             pinned: item.pinned,
             tag: item.tag.clone(),
             has_unread: unread_override.unwrap_or(item.unread),
@@ -2424,7 +2434,7 @@ impl SidebarThreadItem {
             running: item.running,
             pending_auth: item.pending_auth,
             pending_plan: item.pending_plan,
-            background_work: item.background_work,
+            background_work: false,
             resumable: false,
             resuming: false,
             selected,
@@ -2434,13 +2444,10 @@ impl SidebarThreadItem {
             nested: nesting.nested,
             icon: RowIcon::Thread,
             wash: approval_mode_color(
-                item.approval_mode
-                    .unwrap_or_else(|| PermissionMode::default().as_i64()),
+                PermissionMode::default().as_i64(),
                 theme,
             ),
-            kind: RowKind::Thread {
-                archived: item.archived,
-            },
+            kind: RowKind::Thread { archived: false },
         }
     }
 
@@ -3136,8 +3143,8 @@ mod tests {
 
     /// The U2 wire row sample: the server projects the display title into
     /// `title` and the recency column into `updated_at` (unix seconds).
-    fn sample_item() -> ThreadListItem {
-        ThreadListItem {
+    fn sample_item() -> ThreadRow {
+        ThreadRow {
             id: "thread-abcdef12".into(),
             title: "Summarize the diff".into(),
             updated_at: 0,
@@ -3348,7 +3355,7 @@ mod tests {
     /// [issue] 2).
     #[test]
     fn accounted_sessions_partition_regardless_of_the_project_string() {
-        let item = |id: &str, project: Option<&str>| ThreadListItem {
+        let item = |id: &str, project: Option<&str>| ThreadRow {
             id: id.into(),
             project: project.map(str::to_string),
             ..sample_item()
@@ -3380,7 +3387,7 @@ mod tests {
     /// account — and keeps the wire's committed order inside each partition.
     #[test]
     fn the_wire_list_partitions_in_committed_order() {
-        let item = |id: &str, project: Option<&str>| ThreadListItem {
+        let item = |id: &str, project: Option<&str>| ThreadRow {
             id: id.into(),
             project: project.map(str::to_string),
             ..sample_item()
