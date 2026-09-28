@@ -735,7 +735,12 @@ impl Workspace {
                                 .map(str::to_string)
                         })
                         .and_then(|e| parse_effort(&e))
-                        .expect("foreground store present");
+                        .unwrap_or_else(|| {
+                            tracing::debug!(
+                                "foreground store not bound yet (ahp handshake in flight)"
+                            );
+                            Default::default()
+                        });
                     let workspace = cx.entity().downgrade();
                     // U2: the menu lists the gateway's model-registry
                     // snapshot (the server projects the same pi registry the

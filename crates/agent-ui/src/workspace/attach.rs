@@ -372,7 +372,10 @@ impl Workspace {
                     })
                     .collect()
             })
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         self.chat.update(cx, |chat, cc| {
             chat.active_browser_suites = suites;
             cc.notify();
@@ -383,7 +386,10 @@ impl Workspace {
             .store
             .as_ref()
             .map(|(_, sid)| sid.clone())
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         // Derive the transcript's plan and the sub-agent rows inside one
         // store read — the display fold's message rows ARE the messages
         // (L6, mechanical transcription), and cloning the whole transcript
@@ -403,7 +409,10 @@ impl Workspace {
                     manox_agent::subagent_restore::rebuild_from_messages(&msgs),
                 )
             })
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         let (display, usage) = self
             .chat
             .read(cx)
@@ -430,7 +439,10 @@ impl Workspace {
                 let view = store.read(cx);
                 crate::ahp_store::leaf(&view.book, sid).running()
             })
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
         let new_conv = cx.new(|cx| {
             let mut conversation = ConversationState::rebuild_from_display(
@@ -634,7 +646,10 @@ impl Workspace {
                 let view = store.read(cx);
                 crate::ahp_store::leaf(&view.book, sid).running()
             })
-            .expect("foreground store present")
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            })
         {
             return false;
         }
@@ -644,7 +659,10 @@ impl Workspace {
             .store
             .as_ref()
             .map(|(_, sid)| sid.clone())
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         self.with_foreground_store(cx, |store, sid| {
             store.set_archived(&sid, true);
         });

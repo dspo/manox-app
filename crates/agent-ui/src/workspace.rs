@@ -2024,7 +2024,10 @@ impl Workspace {
                     .cwd()
                     .map(std::path::PathBuf::from)
             })
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         let worktree_branch = self.chat.read(cx).store.as_ref().and(None::<String>);
         cx.spawn(async move |_this, cx| {
             // Debounce: coalesce a burst of tool results / a turn's worth of

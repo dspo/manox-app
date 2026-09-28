@@ -119,7 +119,10 @@ impl Workspace {
                 let view = store.read(cx);
                 crate::ahp_store::leaf(&view.book, sid).running()
             })
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         if attachments.is_empty()
             && let Some(parsed) = crate::slash_command::parse(&text)
             && (!running || parsed.name == "mode")
@@ -326,7 +329,10 @@ impl Workspace {
                 let view = store.read(cx);
                 crate::ahp_store::leaf(&view.book, sid).running()
             })
-            .expect("foreground store present")
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            })
         {
             self.chat.update(cx, |chat, cx| {
                 chat.queue_drag = None;
@@ -457,7 +463,10 @@ impl Workspace {
                 let view = store.read(cx);
                 crate::ahp_store::leaf(&view.book, sid).running()
             })
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         let Some(mut item) = self.chat.update(cx, |chat, cc| {
             let v = chat.queued_follow_ups.remove(idx);
             cc.notify();

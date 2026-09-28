@@ -221,7 +221,10 @@ impl Workspace {
                 let view = store.read(cx);
                 crate::ahp_store::leaf(&view.book, sid).running()
             })
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
 
         self.ensure_blank_project_input(window, cx);
 
@@ -248,7 +251,10 @@ impl Workspace {
                         .display_title()
                         .map(str::to_string)
                 })
-                .expect("foreground store present");
+                .unwrap_or_else(|| {
+                    tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                    Default::default()
+                });
             if s.is_empty() { "manox".to_string() } else { s }
         }
         .into();
@@ -286,7 +292,10 @@ impl Workspace {
                     let view = store.read(cx);
                     crate::ahp_store::leaf(&view.book, sid).running()
                 })
-                .expect("foreground store present")
+                .unwrap_or_else(|| {
+                    tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                    Default::default()
+                })
             && crate::views::context_rail::ContextRail::rail_width_for(main_body_w).is_some();
         let overlay = self
             .render_blank_project_overlay(window, &theme, cx)

@@ -391,6 +391,14 @@ pub fn chat_uri(id: &str) -> String {
 /// A reply slot for a command that awaits the host's answer.
 pub type Reply = async_channel::Receiver<Result<Value, String>>;
 
+/// A write issued before the handshake, replayed on connect. `Dispatch` is
+/// boxed: the typed actions dwarf the URI strings and the queue is transient.
+enum PendingWrite {
+    Subscribe(String),
+    Unsubscribe(String),
+    Dispatch(String, Box<StateAction>),
+}
+
 /// The UI-side answerer signature for host → client capability requests.
 pub type RequestHook = Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
 
@@ -406,6 +414,11 @@ pub struct CapabilityRequest {
 pub struct AhpStore {
     pub book: ChannelBook,
     client: Option<Client>,
+    /// Writes issued before the handshake completed, replayed in order on
+    /// connect. The landing session's create/subscribe rides this: the
+    /// workspace constructs the store and binds the chat column in the same
+    /// frame, long before the in-proc handshake answers.
+    pending_writes: Vec<PendingWrite>,
     /// Host → client capability requests, answered by the UI layer's hook.
     request_hook: Option<RequestHook>,
     /// Recent dispatch rejections (bounded ring) for UI surfacing.
@@ -424,6 +437,7 @@ impl AhpStore {
         let mut store = Self {
             book: ChannelBook::default(),
             client: None,
+            pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             _tasks: Vec::new(),
@@ -484,6 +498,18 @@ impl AhpStore {
             if this
                 .update(cx, |store, cx| {
                     store.client = Some(client.clone());
+                    // Replay the writes the UI issued before the handshake
+                    // answered (the landing session's create/subscribe).
+                    let pending = std::mem::take(&mut store.pending_writes);
+                    for write in pending {
+                        match write {
+                            PendingWrite::Subscribe(uri) => store.subscribe(uri, cx),
+                            PendingWrite::Unsubscribe(uri) => store.unsubscribe(uri),
+                            PendingWrite::Dispatch(channel, action) => {
+                                store.dispatch(channel, *action)
+                            }
+                        }
+                    }
                     cx.notify();
                 })
                 .is_err()
@@ -616,11 +642,11 @@ impl AhpStore {
     /// Subscribe one channel. The snapshot (state-bearing channels) folds
     /// into the book when the host answers.
     pub fn subscribe(&mut self, uri: impl Into<String>, cx: &mut gpui::Context<Self>) {
+        let uri: String = uri.into();
         let Some(client) = self.client.clone() else {
-            tracing::warn!("subscribe before the handshake completed");
+            self.pending_writes.push(PendingWrite::Subscribe(uri));
             return;
         };
-        let uri = uri.into();
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             let value = tokio_wait(move || async move {
                 client
@@ -653,6 +679,8 @@ impl AhpStore {
     /// Unsubscribe one channel.
     pub fn unsubscribe(&mut self, uri: impl Into<String>) {
         let Some(client) = self.client.clone() else {
+            self.pending_writes
+                .push(PendingWrite::Unsubscribe(uri.into()));
             return;
         };
         let uri = uri.into();
@@ -670,7 +698,8 @@ impl AhpStore {
     /// rejections come back as envelopes and are logged/recorded by the pump.
     pub fn dispatch(&mut self, channel: impl Into<String>, action: StateAction) {
         let Some(client) = self.client.clone() else {
-            tracing::warn!("dispatch before the handshake completed");
+            self.pending_writes
+                .push(PendingWrite::Dispatch(channel.into(), Box::new(action)));
             return;
         };
         let channel = channel.into();

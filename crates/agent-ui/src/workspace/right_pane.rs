@@ -113,7 +113,10 @@ impl Workspace {
             .store
             .as_ref()
             .map(|(_, sid)| sid.clone())
-            .expect("foreground store present");
+            .unwrap_or_else(|| {
+                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                Default::default()
+            });
         let persisted = self.persisted_right_pane(cx);
         let json = match serde_json::to_string(&persisted) {
             Ok(j) => j,
@@ -814,7 +817,10 @@ impl Workspace {
                     let view = store.read(cx);
                     crate::ahp_store::leaf(&view.book, sid).running()
                 })
-                .expect("foreground store present"),
+                .unwrap_or_else(|| {
+                    tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
+                    Default::default()
+                }),
             self.chat.read(cx).pending_ask.is_some(),
             &text,
         ) {
