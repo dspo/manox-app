@@ -19,6 +19,7 @@ pub mod chrome_assembly;
 pub mod dispatch;
 pub mod i18n;
 pub mod menu;
+pub mod model_catalog;
 pub mod multiplexer;
 pub mod sidebar_projection;
 pub mod slash_command;

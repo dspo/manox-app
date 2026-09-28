@@ -9,10 +9,9 @@
 //! handlers and the `tests` child.
 
 use super::*;
-use gpui_component::ColorName;
-use gpui_component::ThemeStyled as _;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::tag::{Tag, TagVariant};
+use gpui_component::{ColorName, ThemeStyled as _};
 
 /// The protocol id of an open input request.
 fn request_id(r: &ahp_types::state::SessionInputRequest) -> &str {
@@ -565,39 +564,12 @@ impl Workspace {
         &self,
         provider: &str,
         id: &str,
-        cx: &App,
-    ) -> Option<(String, ahp_types::state::SessionModelInfo)> {
-        Self::resolve_model_display_in(&self.multiplexer.read(cx).agents(cx), provider, id)
-    }
-
-    /// The pure core of [`Self::resolve_model_display`] against an explicit
-    /// wire snapshot.
-    /// Resolve a canonical model identity to its row plus the owning
-    /// registration's human display name (the chip's provider segment).
-    pub(crate) fn resolve_model_display_in(
-        agents: &[ahp_types::state::AgentInfo],
-        provider: &str,
-        id: &str,
-    ) -> Option<(String, ahp_types::state::SessionModelInfo)> {
-        // The caller may hold either the bare model id or the canonical
-        // `{provider}/{id}` the host mints (`SessionModelInfo.id`); both
-        // resolve to the same registration row.
-        agents
-            .iter()
-            .find(|a| {
-                a.models.iter().any(|m| {
-                    m.provider == provider && (m.id == id || m.id == format!("{provider}/{id}"))
-                })
-            })
-            .and_then(|a| {
-                let display = Self::provider_display_key(a);
-                a.models
-                    .iter()
-                    .find(|m| {
-                        m.provider == provider && (m.id == id || m.id == format!("{provider}/{id}"))
-                    })
-                    .map(|m| (display, m.clone()))
-            })
+        _cx: &App,
+    ) -> Option<(String, crate::model_catalog::ModelRow)> {
+        // Display resolution rides the in-process provider registry (the
+        // same source the streaming side matches against); the AHP root
+        // catalogue serves remote clients.
+        crate::model_catalog::resolve(provider, id).map(|row| (row.provider_display.clone(), row))
     }
 
     /// The pi-harness model selector. Reads the gateway's model-registry
@@ -639,8 +611,8 @@ impl Workspace {
             .hover(|s| s.bg(theme.accent.opacity(0.08)))
             .cursor_pointer()
             .children(if let Some((ref prov_display, ref m)) = model {
-                let model_color =
-                    crate::views::context_rail::pi_wire_text_color(Self::model_api(&m.meta), theme);
+                let (_, _, color_name) = Self::wire_visual(&m.api);
+                let model_color = color_name.scale(500);
                 let dot = || {
                     gpui::div()
                         .text_xs()
@@ -760,7 +732,7 @@ impl Workspace {
                     // re-pulls, so a settings-side provider reload (no
                     // server push yet — §D.5 cross-domain ask) converges by
                     // the next open at the latest.
-                    let models = this.multiplexer.read(cx).agents(cx);
+                    let models = crate::model_catalog::rows();
                     let menu = PopupMenu::build(window, cx, |menu, window, cx| {
                         Self::build_model_popup_menu_pi(
                             menu,
@@ -840,61 +812,34 @@ impl Workspace {
     /// several wire apis appears once per wire endpoint (registration names
     /// differ), so the responses and completions variants stay selectable
     /// alongside the anthropic one.
-    /// The provider segment a picker shows: the display name, with the
-    /// registration machinery's `-{wire_api}` suffix stripped when a host
-    /// predates the display-name field and fills it with the registration
-    /// key ("百炼-anthropic" → "百炼").
-    fn provider_display_key(agent: &ahp_types::state::AgentInfo) -> String {
-        let raw = if agent.display_name.is_empty() {
-            agent.provider.as_str()
-        } else {
-            agent.display_name.as_str()
-        };
-        for suffix in [
-            "-anthropic",
-            "-openai_responses",
-            "-openai_completions",
-            "-responses",
-            "-completions",
-        ] {
-            if let Some(stripped) = raw.strip_suffix(suffix) {
-                return stripped.to_string();
-            }
-        }
-        raw.to_string()
-    }
-
-    /// The wire api a host stashed under `meta["x-manox"]["api"]` (manox
-    /// hosts do; third-party hosts may not).
-    pub(crate) fn model_api(meta: &Option<ahp_types::common::JsonObject>) -> &str {
-        meta.as_ref()
-            .and_then(|m| m.get("x-manox"))
-            .and_then(|x| x.get("api"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-    }
-
-    /// Wire api string → Tag variant + label for the model menu. Third-party
-    /// hosts that don't expose the api (meta absent) fall back to a neutral
-    /// untagged row.
-    fn model_wire_tag(meta: &Option<ahp_types::common::JsonObject>) -> (TagVariant, &'static str) {
-        let api = meta
-            .as_ref()
-            .and_then(|m| m.get("x-manox"))
-            .and_then(|x| x.get("api"))
-            .and_then(serde_json::Value::as_str);
+    /// The one wire-api visual mapping: the menu row's tag and the chip
+    /// echo's text color read the same source, so the surfaces cannot
+    /// drift apart.
+    pub(crate) fn wire_visual(api: &str) -> (TagVariant, &'static str, gpui_component::ColorName) {
         match api {
-            Some("anthropic") => (TagVariant::Color(ColorName::Blue), "Anthropic"),
-            Some("openai_responses") => (TagVariant::Color(ColorName::Cyan), "Responses"),
-            Some("openai_completions") => (TagVariant::Color(ColorName::Amber), "Completions"),
-            _ => (TagVariant::Secondary, "N/A"),
+            "anthropic" => (
+                TagVariant::Color(ColorName::Blue),
+                "Anthropic",
+                ColorName::Blue,
+            ),
+            "openai_responses" => (
+                TagVariant::Color(ColorName::Cyan),
+                "Responses",
+                ColorName::Cyan,
+            ),
+            "openai_completions" => (
+                TagVariant::Color(ColorName::Amber),
+                "Completions",
+                ColorName::Amber,
+            ),
+            _ => (TagVariant::Secondary, "N/A", ColorName::Gray),
         }
     }
 
     pub(super) fn build_model_popup_menu_pi(
         menu: PopupMenu,
         workspace: WeakEntity<Workspace>,
-        models: Vec<ahp_types::state::AgentInfo>,
+        models: Vec<crate::model_catalog::ModelRow>,
         current_effort: manox_agent::language_model::ReasoningEffort,
         window: &mut Window,
         cx: &mut Context<PopupMenu>,
@@ -904,12 +849,17 @@ impl Workspace {
         // different registrations must still merge into one submenu.
         // One submenu per agent registration; AHP's root catalogue carries
         // the provider identity the v2 wire list flattened.
-        let mut providers: Vec<(String, Vec<ahp_types::state::SessionModelInfo>)> = Vec::new();
-        for agent in &models {
-            let prov = Self::provider_display_key(agent);
-            match providers.iter_mut().find(|(name, _)| *name == prov) {
-                Some((_, models)) => models.extend(agent.models.iter().cloned()),
-                None => providers.push((prov, agent.models.clone())),
+        // Group by the provider's display name via lookup: wire variants of
+        // one cx config merge into a single submenu, each row carrying its
+        // own wire tag.
+        let mut providers: Vec<(String, Vec<crate::model_catalog::ModelRow>)> = Vec::new();
+        for m in models {
+            match providers
+                .iter_mut()
+                .find(|(name, _)| *name == m.provider_display)
+            {
+                Some((_, rows)) => rows.push(m),
+                None => providers.push((m.provider_display.clone(), vec![m])),
             }
         }
         let mut menu = menu;
@@ -923,7 +873,7 @@ impl Workspace {
                 for m in &models {
                     let model = m.clone();
                     let model_name = model.name.clone();
-                    let (variant, label) = Self::model_wire_tag(&model.meta);
+                    let (variant, label, _) = Self::wire_visual(&model.api);
                     let ws = ws.clone();
                     submenu = submenu.item(
                         PopupMenuItem::element(move |_window, _cx| {
@@ -942,13 +892,19 @@ impl Workspace {
                         .on_click(move |_, _, cx: &mut gpui::App| {
                             let model = model.clone();
                             let _ = ws.update(cx, |this, cx| {
-                                // L8 wire identity: `SessionModelInfo.id` is
-                                // already the registration-qualified
-                                // `{provider}/{model}` ref (the host mints it),
-                                // so a pick pins the exact endpoint.
+                                // L8 wire identity: the registration-qualified
+                                // `{provider}/{model}` ref, so a pick pins the
+                                // exact endpoint (wire variants of one model
+                                // share the bare id).
                                 this.with_foreground_store(cx, |store, sid| {
                                     let mut config = serde_json::Map::new();
-                                    config.insert("model".into(), serde_json::json!(model.id));
+                                    config.insert(
+                                        "model".into(),
+                                        serde_json::json!(format!(
+                                            "{}/{}",
+                                            model.provider, model.id
+                                        )),
+                                    );
                                     store.optimistic_config(&sid, &config);
                                     store.set_config(&sid, config);
                                 });
