@@ -998,6 +998,50 @@ impl Workspace {
     /// drives the conversation surface, and the entity-level observe repaints
     /// on projection-only frames (the mid-session chip updates — see the
     /// `store_observe` field note).
+    /// Rebuild the foreground conversation from the book's chat fold (the
+    /// AHP successor of the v2 snapshot-rebuild: the subscribe snapshot is
+    /// the authoritative transcript, and `synth_display` lowers it).
+    pub(crate) fn rebuild_conversation_from_book(&mut self, cx: &mut Context<Self>) {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            return;
+        };
+        let (running, display, usage) = {
+            let view = store.read(cx);
+            let leaf = crate::ahp_store::leaf(&view.book, &sid);
+            let running = leaf.running();
+            let Some(chat) = leaf.chat else {
+                return;
+            };
+            let mut usage = crate::chat_fold::UsageTable::new();
+            let display = crate::chat_fold::synth_display(chat, &mut usage);
+            (running, display, usage)
+        };
+        let role = self.model_label(cx);
+        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
+        let fork_source = self.fork_source_session(cx);
+        let new_conv = cx.new(|cx| {
+            ConversationState::rebuild_from_display(
+                &display,
+                &usage,
+                &role,
+                manox_agent::MessageAuthor::Lead,
+                running,
+                crate::conversation::ApplyCtx {
+                    host: self.chat.read(cx).host.clone(),
+                    cwd,
+                    fork_source,
+                },
+                cx,
+            )
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.conversation = new_conv;
+            cx.notify();
+        });
+        self.sync_list_count(cx);
+        cx.notify();
+    }
+
     fn subscribe_thread(&self, cx: &mut Context<Self>) -> (Subscription, Subscription) {
         // v3: the per-thread `ThreadEvent` pump is gone — the AhpStore pump
         // folds every channel and notifies. What remains here is the
@@ -1010,6 +1054,28 @@ impl Workspace {
             return (a, b);
         };
         let repaint = cx.observe(&store, |this, store, cx| {
+            // Snapshot → transcript transition: the attach-time rebuild ran
+            // against an empty fold (the chat snapshot lands asynchronously
+            // after subscribe), so the hero screen would stick forever. The
+            // moment the foreground chat has turns and the conversation is
+            // still empty, rebuild from the snapshot — and discard the
+            // drained deltas (they are already inside it).
+            let snapshot_ready = this
+                .chat
+                .read(cx)
+                .store
+                .clone()
+                .and_then(|(store, sid)| {
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, &sid)
+                        .chat
+                        .map(|c| !c.turns.is_empty())
+                })
+                .unwrap_or(false);
+            if snapshot_ready && this.chat_conversation(cx).read(cx).is_empty(cx) {
+                this.rebuild_conversation_from_book(cx);
+                return;
+            }
             // Live streaming leg: the pump folded chat actions into the book;
             // drain the display events they derived and run the conversation
             // applier over them (the v2 ThreadEvent pump's transcript role).
