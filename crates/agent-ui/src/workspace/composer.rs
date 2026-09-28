@@ -13,24 +13,6 @@ use super::*;
 /// (round 4 §5.1): the base64 `Image { data, mime_type }` shape four call
 /// sites used to repeat verbatim. Non-image blocks are `None`; a failed
 /// decode is dropped (an undecodable attachment cannot ride the wire).
-fn wire_image_attachment(
-    c: &manox_agent::language_model::MessageContent,
-) -> Option<manox_protocol::ImageAttachment> {
-    use base64::Engine as _;
-    match c {
-        manox_agent::language_model::MessageContent::Image { data, mime_type } => {
-            base64::engine::general_purpose::STANDARD
-                .decode(data.as_bytes())
-                .ok()
-                .map(|bytes| manox_protocol::ImageAttachment {
-                    data: bytes,
-                    mime_type: mime_type.clone(),
-                })
-        }
-        _ => None,
-    }
-}
-
 impl Workspace {
     /// Flip EVERY parked thread's `SteerPending` card to `Failed` when its turn
     /// Drain the stashed `Queued` follow-ups of a parked thread whose turn
@@ -56,27 +38,22 @@ impl Workspace {
         }
         let n = drained.len();
         for (i, turn) in drained.into_iter().enumerate() {
-            let attachments: Vec<manox_protocol::ImageAttachment> = turn
-                .images
-                .iter()
-                .filter_map(wire_image_attachment)
-                .collect();
             if i + 1 < n {
-                // All but the last: accept without starting a run.
-                self.client
-                    .send_note(manox_protocol::ClientNote::AppendUserMessage {
-                        session_id: thread_id.to_string(),
-                        text: turn.text.clone(),
-                        images: attachments,
-                    });
+                // All but the last: park as queued on the parked thread's chat.
+                let id = uuid::Uuid::new_v4().to_string();
+                self.with_foreground_store(cx, |store, sid, cx| {
+                    store.set_pending_message(
+                        &sid,
+                        &id,
+                        ahp_types::state::PendingMessageKind::Queued,
+                        turn.text.clone(),
+                    );
+                });
             } else {
-                // Last: accept + start the turn (K5 persists at acceptance;
-                // the server's queue/drain merges anything racing in).
-                self.client.send_call(manox_protocol::ClientCall::Submit {
-                    session_id: thread_id.to_string(),
-                    text: turn.text,
-                    images: attachments,
-                    origin_rpc: Some(uuid::Uuid::new_v4().to_string()),
+                // Last: start the turn on the parked thread's chat.
+                let turn_id = uuid::Uuid::new_v4().to_string();
+                self.with_foreground_store(cx, |store, sid, cx| {
+                    store.submit_turn(&sid, &turn_id, turn.text.clone(), None);
                 });
             }
         }
@@ -171,7 +148,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid).running()
+            })
             .expect("foreground store present");
         if attachments.is_empty()
             && let Some(parsed) = crate::slash_command::parse(&text)
@@ -325,7 +305,7 @@ impl Workspace {
         // the server projects the same command/skill registries the macro
         // and skill adapters dispatch against, so a remote server's
         // registry decides the hit.
-        let commands = self.multiplexer.read(cx).commands().clone();
+        let commands = self.multiplexer.read(cx).commands(cx).cloned().unwrap_or(serde_json::json!([]));
         let hit = match kind {
             RegistryTurnKind::Command => wire_commands_has(&commands, key, "command"),
             RegistryTurnKind::Skill => wire_commands_has(&commands, key, "skill"),
@@ -343,7 +323,7 @@ impl Workspace {
         // Persist on submit so the sidebar shows the new entry immediately
         // (cross-domain #5: the wire refetch — the server self-holds the
         // rescan in its answer).
-        self.multiplexer.update(cx, |m, _| m.fetch_thread_list());
+        self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
         cx.notify();
     }
 
@@ -370,7 +350,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid).running()
+            })
             .expect("foreground store present")
         {
             self.chat.update(cx, |chat, cx| {
@@ -396,7 +379,7 @@ impl Workspace {
         // The conversation exists the moment the message is sent: refetch
         // the sidebar list now (the transcript-side refetch on the user
         // MessageEnd notice then fills in the summary text).
-        self.multiplexer.update(cx, |m, _| m.fetch_thread_list());
+        self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
     }
 
     /// Promote a parked follow-up to an ONLINE steer: mint a local message id,
@@ -414,7 +397,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let message_id = uuid::Uuid::new_v4().to_string();
-        let attachments: Vec<manox_protocol::ImageAttachment> = turn
+        let attachments: Vec<serde_json::Value> = turn
             .images
             .iter()
             .filter_map(wire_image_attachment)
@@ -584,7 +567,7 @@ impl Workspace {
         self.sync_list_count(cx);
         self.follow_message_tail(cx);
         // Dual-path: protocol Submit (kernel inserts + runs) vs direct insert + run.
-        let attachments: Vec<manox_protocol::ImageAttachment> = turn
+        let attachments: Vec<serde_json::Value> = turn
             .images
             .iter()
             .filter_map(wire_image_attachment)
@@ -650,27 +633,25 @@ impl Workspace {
         });
         let n = drained_turns.len();
         for (i, turn) in drained_turns.into_iter().enumerate() {
-            let attachments: Vec<manox_protocol::ImageAttachment> = turn
-                .images
-                .iter()
-                .filter_map(wire_image_attachment)
-                .collect();
+            let attachments: Vec<serde_json::Value> = Vec::new();
+            let _ = &attachments;
             if i + 1 < n {
-                // All but the last: insert without running.
-                let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::AppendUserMessage {
-                    session_id: sid.into(),
-                    text: turn.text.clone(),
-                    images: attachments,
+                // All but the last: park as queued.
+                let id = uuid::Uuid::new_v4().to_string();
+                self.with_foreground_store(cx, |store, sid, cx| {
+                    store.set_pending_message(
+                        &sid,
+                        &id,
+                        ahp_types::state::PendingMessageKind::Queued,
+                        turn.text.clone(),
+                    );
                 });
             } else {
-                // Last: insert + start the turn. The v2 Submit carries the
-                // origin_rpc so the optimistic bubble retires when the durable
-                // user row lands (batched predecessors insert without a turn
-                // via the compat note and have no echo to retire).
+                // Last: start the turn.
                 let _ = self.send_submit_v2(turn.text.clone(), attachments, cx);
             }
         }
-        self.multiplexer.update(cx, |m, _| m.fetch_thread_list());
+        self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
         cx.notify();
     }
 
@@ -735,7 +716,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid).running()
+            })
             .expect("foreground store present");
         let Some(mut item) = self.chat.update(cx, |chat, cc| {
             let v = chat.queued_follow_ups.remove(idx);

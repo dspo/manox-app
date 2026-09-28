@@ -924,14 +924,16 @@ impl AhpStore {
         )
     }
 
-    /// Fork the session's chat at a completed turn.
-    pub fn fork_chat(&self, session_id: &str, turn_id: &str) -> Reply {
-        self.call(
+    /// Fork the session's chat at a completed turn. The new chat's URI is
+    /// client-minted (the idempotency key), returned alongside the reply.
+    pub fn fork_chat(&self, session_id: &str, turn_id: &str) -> (Reply, String) {
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let reply = self.call(
             "createChat",
             CreateChatParams {
                 channel: ROOT_RESOURCE_URI.to_string(),
                 meta: None,
-                chat: session_uri(session_id),
+                chat: chat_uri(&chat_id),
                 initial_message: None,
                 source: Some(ChatSource::Fork(ForkChatSource {
                     chat: session_uri(session_id),
@@ -939,7 +941,8 @@ impl AhpStore {
                 })),
                 working_directories: None,
             },
-        )
+        );
+        (reply, chat_id)
     }
 }
 

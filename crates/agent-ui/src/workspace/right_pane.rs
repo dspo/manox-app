@@ -434,7 +434,7 @@ impl Workspace {
         // acceptance-run crash; every CLI-agent row click was a hard
         // crash until this hoist). The multiplexer is a separate entity,
         // so this read is lease-clean.
-        let models: Vec<manox_protocol::ModelInfo> = self.multiplexer.read(cx).models().to_vec();
+        let models: Vec<ahp_types::state::AgentInfo> = self.multiplexer.read(cx).agents(cx);
         let ws = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
             // U2 cross-domain #4: the cascade projects the multiplexer's

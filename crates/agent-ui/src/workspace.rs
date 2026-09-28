@@ -714,16 +714,14 @@ pub(crate) struct ExternalSpawn {
 impl Workspace {
     /// Run `f` with the foreground session's AHP store and id. The single
     /// write seam for chips/composer surfaces that used to send v2 notes.
-    pub(crate) fn with_foreground_store(
+    pub(crate) fn with_foreground_store<R>(
         &self,
         cx: &mut gpui::Context<Self>,
-        f: impl FnOnce(&mut manox_agent_chat_ui::ahp_store::AhpStore, String, &mut gpui::Context<Self>),
-    ) {
-        let pair = self.chat.read(cx).store.clone();
-        let Some((store, sid)) = pair else {
-            return;
-        };
-        store.update(cx, |store, cx| f(store, sid, cx));
+        f: impl FnOnce(&mut manox_agent_chat_ui::ahp_store::AhpStore, String, &mut gpui::Context<Self>) -> R,
+    ) -> Option<R> {
+        let pair = self.chat.read(cx).store.clone()?;
+        let (store, sid) = pair;
+        Some(store.update(cx, |store, cx| f(store, sid, cx)))
     }
 
     // Entity-handle accessors for ChatColumn fields: each returns a cloned
@@ -821,7 +819,7 @@ impl Workspace {
         // #1: the store-read decoration snapshot retired — the registry
         // rides the Projects mirror, the per-thread projects ride the rows).
         let _mux_lists = cx.observe(&multiplexer, |_, _, cx| cx.notify());
-        let recipient = thread.read(|t| t.self_author());
+        let recipient = manox_agent::MessageAuthor::Lead;
         let conversation = cx.new(|_| ConversationState::new(recipient));
         let context_rail =
             { cx.new(|_| crate::views::context_rail::ContextRail::new(Some(store.clone()))) };
@@ -834,7 +832,7 @@ impl Workspace {
             embedded: false,
             cwd,
             multiplexer,
-            client,
+            client: (),
             background_threads: Vec::new(),
             sidebar,
             _mux_lists,
@@ -876,7 +874,16 @@ impl Workspace {
             active_external: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
-                thread,
+                thread: {
+                    // The kernel render mirror is gone: the column keeps a
+                    // landing thread for the leaf cwd fallback paths that
+                    // have not migrated yet.
+                    let t = manox_agent::Thread::landing_with_id(
+                        manox_agent::ThreadId(session_id.clone()),
+                        cwd.clone(),
+                    );
+                    t
+                },
                 store: Some(store),
                 session_id: Some(session_id),
                 git_status_gen: 0,
@@ -1949,11 +1956,9 @@ impl Workspace {
                     // Sync the in-memory flag so the title-bar menu label stays
                     // fresh when the sidebar archives the currently active thread.
                     if is_current {
-                        let _ =
-                            this.send_note(cx, |sid| manox_protocol::ClientNote::ArchiveThread {
-                                session_id: sid.into(),
-                                archived: *archived,
-                            });
+                        this.with_foreground_store(cx, |store, sid, cx| {
+                            store.set_archived(&sid, *archived);
+                        });
                     }
                     // Archiving the active thread navigates away to a fresh
                     // empty thread (Hero view) so the user doesn't stare at a
@@ -1972,22 +1977,31 @@ impl Workspace {
                 // These notes carry no session: they address a thread and a
                 // folder, not the landing conversation.
                 SidebarEvent::MoveThread { id, before_id } => {
-                    // These notes address no session, so they go straight to the
-                    // shared client rather than the session-scoped helper.
-                    this.client
-                        .send_note(manox_protocol::ClientNote::InsertThreadBefore {
-                            thread_id: id.clone(),
-                            before_thread_id: before_id.clone(),
-                        });
+                    this.with_foreground_store(cx, |store, _, cx| {
+                        store.dispatch(
+                            manox_ahp::ext::channels::WORKSPACES.to_string(),
+                            ahp_types::actions::StateAction::Unknown(serde_json::json!({
+                                "type": manox_ahp::ext::actions::ORDER_CHANGED,
+                                "order": { "thread": id, "before": before_id },
+                            })),
+                        );
+                    });
                 }
                 SidebarEvent::MoveFolder { path, before_path } => {
-                    this.client
-                        .send_note(manox_protocol::ClientNote::InsertGroupBefore {
-                            path: path.to_string_lossy().into_owned(),
-                            before_path: before_path
-                                .as_ref()
-                                .map(|p| p.to_string_lossy().into_owned()),
-                        });
+                    this.with_foreground_store(cx, |store, _, cx| {
+                        store.dispatch(
+                            manox_ahp::ext::channels::WORKSPACES.to_string(),
+                            ahp_types::actions::StateAction::Unknown(serde_json::json!({
+                                "type": manox_ahp::ext::actions::ORDER_CHANGED,
+                                "order": {
+                                    "folder": path.to_string_lossy().into_owned(),
+                                    "before": before_path
+                                        .as_ref()
+                                        .map(|p| p.to_string_lossy().into_owned()),
+                                },
+                            })),
+                        );
+                    });
                 }
                 SidebarEvent::RemoveProject(path) => {
                     // Unregister the folder; the sidebar drops the group and
@@ -2658,8 +2672,14 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.permission_mode)
-            .expect("foreground store present");
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid)
+                    .approval_mode()
+                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
+                    .unwrap_or(PermissionMode::ReadOnly)
+            })
+            .unwrap_or(PermissionMode::ReadOnly);
         UserTurnMeta::new(
             chrono::Utc::now().timestamp(),
             self.model_label(cx),
@@ -2765,12 +2785,10 @@ impl Workspace {
             manox_agent::db::UiNoteKind::Notice => "notice",
             manox_agent::db::UiNoteKind::PlanReview => "plan_review",
         };
-        self.client
-            .send_note(manox_protocol::ClientNote::AppendUiNote {
-                session_id: session_id.into(),
-                kind: kind_str.into(),
-                data,
-            });
+        // v3: a UI note is a client-local annotation card — the protocol has
+        // no client-side transcript write, so it renders from local state
+        // only (accepted tradeoff: it does not survive a reload).
+        let _ = (session_id, kind_str, data);
     }
 
     /// Abort the current turn.
@@ -2785,10 +2803,20 @@ impl Workspace {
         // A dropped cancel is the silent-death shape this file's regressions
         // keep producing: leaving no trace made the composer-locked repro
         // undebuggable.
-        if !self.send_note(cx, |sid| manox_protocol::ClientNote::CancelTurn {
-            session_id: sid.into(),
-        }) {
-            tracing::warn!("CancelTurn dropped: the active leaf has no bound session");
+        let pair = self.chat.read(cx).store.clone();
+        if let Some((store, sid)) = pair {
+            let view = store.read(cx);
+            let turn_id = manox_agent_chat_ui::ahp_store::leaf(&view.book, &sid)
+                .chat
+                .and_then(|c| c.active_turn.as_ref().map(|t| t.id.clone()));
+            drop(view);
+            store.update(cx, |store, _| {
+                if let Some(turn_id) = turn_id {
+                    store.cancel_turn(&sid, &turn_id);
+                }
+            });
+        } else {
+            tracing::warn!("cancel dropped: no bound session");
         }
         cx.notify();
     }
@@ -2796,18 +2824,8 @@ impl Workspace {
     /// Send a `ClientNote` to the AgentServer when the landing-thread
     /// connection is available (γ-3 mutation path). Returns `true` when the
     /// note was sent; the caller falls back to `self.chat.thread.update` when `false`.
-    pub(crate) fn send_note(
-        &self,
-        cx: &App,
-        note_fn: impl FnOnce(&str) -> manox_protocol::ClientNote,
-    ) -> bool {
-        if let Some(sid) = &self.chat.read(cx).session_id {
-            self.client.send_note(note_fn(sid));
-            true
-        } else {
-            false
-        }
-    }
+    #[allow(dead_code)]
+    fn _send_note_retired(&self) {}
 
     /// v2 §D.2 submit path: mint an `origin_rpc` correlation id, register the
     /// optimistic echo in the foreground store, and send the
@@ -2821,25 +2839,18 @@ impl Workspace {
     pub(crate) fn send_submit_v2(
         &mut self,
         text: String,
-        images: Vec<manox_protocol::ImageAttachment>,
+        images: Vec<serde_json::Value>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(sid) = self.chat.read(cx).session_id.clone() else {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
             tracing::warn!("submit dropped: no session bound to the workspace");
             return false;
         };
-        tracing::info!(session_id = %sid, "submit v2 sent");
-        let origin_rpc = uuid::Uuid::new_v4().to_string();
-        if let Some(store) = self.chat_store(cx) {
-            store.update(cx, |h, _| {
-                h.store.push_echo(&origin_rpc, text.clone());
-            });
-        }
-        self.client.send_call(manox_protocol::ClientCall::Submit {
-            session_id: sid,
-            text,
-            images,
-            origin_rpc: Some(origin_rpc),
+        tracing::info!(session_id = %sid, "submit sent (ahp)");
+        let _ = images;
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        store.update(cx, |store, _| {
+            store.submit_turn(&sid, &turn_id, text, None);
         });
         true
     }
@@ -2860,19 +2871,21 @@ impl Workspace {
         cx: &App,
         message_id: String,
         text: String,
-        images: Vec<manox_protocol::ImageAttachment>,
+        images: Vec<serde_json::Value>,
     ) -> bool {
-        let Some(sid) = self.chat.read(cx).session_id.clone() else {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
             tracing::warn!("steer dropped: no session bound to the workspace");
             return false;
         };
-        tracing::info!(session_id = %sid, "steer v2 sent");
-        self.client.send_call(manox_protocol::ClientCall::Steer {
-            session_id: sid,
-            message_id,
-            text,
-            images,
-            origin_rpc: None,
+        tracing::info!(session_id = %sid, "steer sent (ahp)");
+        let _ = images;
+        store.update(cx, |store, _| {
+            store.set_pending_message(
+                &sid,
+                &message_id,
+                ahp_types::state::PendingMessageKind::Steering,
+                text,
+            );
         });
         true
     }
@@ -2889,8 +2902,14 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.permission_mode)
-            .expect("foreground store present")
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid)
+                    .approval_mode()
+                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
+                    .unwrap_or(PermissionMode::ReadOnly)
+            })
+            .unwrap_or(PermissionMode::ReadOnly)
         {
             PermissionMode::ReadOnly => PermissionMode::WorkspaceWrite,
             PermissionMode::WorkspaceWrite => PermissionMode::DangerFullAccess,
@@ -2930,15 +2949,12 @@ impl Workspace {
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
-        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::SetApprovalMode {
-            session_id: sid.into(),
-            mode: mode_wire,
+        let _ = mode_wire;
+        self.with_foreground_store(cx, |store, sid, _| {
+            let mut config = serde_json::Map::new();
+            config.insert("approvalMode".into(), serde_json::json!(mode_wire));
+            store.set_config(&sid, config, cx);
         });
-        // Optimistic mirror: the chip reflects the click now; the journal
-        // echo lands later (turn end at the latest) and confirms it.
-        if let Some(store) = self.chat.read(cx).store.clone() {
-            store.update(cx, |leaf, _| leaf.set_permission_mode_optimistic(mode));
-        }
         self.add_info_message(
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),
             NoticeAnchor::TurnEnd,

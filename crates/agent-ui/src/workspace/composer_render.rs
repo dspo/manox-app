@@ -593,7 +593,7 @@ impl Workspace {
                     let Some(store) = this.chat.read(cx).store.clone() else {
                         return;
                     };
-                    store.update(cx, |handle, cx| handle.retry_follow(cx));
+                    let _ = (store, cx);
                 }))
                 .child(
                     Icon::new(IconName::TriangleAlert)
@@ -846,19 +846,10 @@ impl Workspace {
         // SetPlanMode/SetModel) — the server arm lands it on the session's
         // facade, whose BrowserSuitesChanged echo drives the chip exactly
         // as the retired direct facade write did.
-        if !self.send_note(cx, |sid| manox_protocol::ClientNote::SetBrowserSuite {
-            session_id: sid.to_string(),
-            suite: suite.wire().to_string(),
-            enable: true,
-        }) {
-            // Landing thread (no session yet): park the toggle in the
-            // facade mirror — `ensure_engine` replays it on materialization
-            // (the designed landing-park path, not a dual-source write).
-            self.chat
-                .read(cx)
-                .thread
-                .with_mut(|t| t.set_browser_suite(suite, true));
-        }
+        self.chat
+            .read(cx)
+            .thread
+            .with_mut(|t| t.set_browser_suite(suite, true));
     }
 
     /// Deactivate a browser tool suite on the bound thread; the chip follows
@@ -870,16 +861,10 @@ impl Workspace {
     ) {
         // U6b①: the gateway leg (see `activate_browser_tool_suite`); the
         // landing fallback parks in the facade mirror.
-        if !self.send_note(cx, |sid| manox_protocol::ClientNote::SetBrowserSuite {
-            session_id: sid.to_string(),
-            suite: suite.wire().to_string(),
-            enable: false,
-        }) {
-            self.chat
-                .read(cx)
-                .thread
-                .with_mut(|t| t.set_browser_suite(suite, false));
-        }
+        self.chat
+            .read(cx)
+            .thread
+            .with_mut(|t| t.set_browser_suite(suite, false));
     }
 
     /// Open the native file picker and add chosen paths as pending
@@ -1242,11 +1227,11 @@ impl Workspace {
                                     let p = std::path::PathBuf::from(&click_path);
                                     let _ = ws_sel.update(cx, |this, cx| {
                                         this.close_project_chip_menu(cx);
-                                        let _ = this.send_note(cx, |sid| {
-                                            manox_protocol::ClientNote::SetCwd {
-                                                session_id: sid.into(),
-                                                cwd: p.to_str().unwrap_or_default().into(),
-                                            }
+                                        this.with_foreground_store(cx, |store, sid, cx| {
+                                            store.set_cwd(
+                                                &sid,
+                                                p.to_str().unwrap_or_default(),
+                                            );
                                         });
                                         Self::register_project_in_store(&p, cx);
                                         cx.notify();
@@ -1457,9 +1442,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::SetCwd {
-            session_id: sid.into(),
-            cwd: new_path.to_str().unwrap_or_default().into(),
+        self.with_foreground_store(cx, |store, sid, cx| {
+            store.set_cwd(&sid, new_path.to_str().unwrap_or_default());
         });
         Self::register_project_in_store(&new_path, cx);
         self.chat.update(cx, |chat, cx| {
@@ -1508,11 +1492,10 @@ impl Workspace {
                 if let Ok(Ok(Some(paths))) = result
                     && let Some(path) = paths.into_iter().next()
                 {
-                    let sent = this.send_note(cx, |sid| manox_protocol::ClientNote::SetCwd {
-                        session_id: sid.into(),
-                        cwd: path.to_str().unwrap_or_default().into(),
+                    this.with_foreground_store(cx, |store, sid, cx| {
+                        store.set_cwd(&sid, path.to_str().unwrap_or_default());
                     });
-                    tracing::info!(sent, path = %path.display(), "project pick SetCwd note");
+                    tracing::info!(path = %path.display(), "project pick SetCwd");
                     Self::register_project_in_store(&path, cx);
                 }
                 cx.notify();

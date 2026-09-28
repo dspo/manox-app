@@ -78,7 +78,7 @@ pub(crate) fn build_model_cascade(
     cx: &mut Context<PopupMenu>,
     on_pick: impl Fn(String, String, Option<String>, &mut Window, &mut App) + Clone + 'static,
 ) -> PopupMenu {
-    let providers = cascade_provider_groups(agent_id, models);
+    let providers = cascade_provider_groups(agent_id, agents);
 
     let mut menu = menu;
     if providers.is_empty() {

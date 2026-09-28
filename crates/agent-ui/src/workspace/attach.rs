@@ -119,50 +119,26 @@ impl Workspace {
         // `project` the bound folder. The legacy thread mirror is only a
         // pre-snapshot fallback (the #765 round-2 repro: reading the mirror
         // alone lost model AND project on every new thread).
+        let inherited = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
+            let view = store.read(cx);
+            let leaf = crate::ahp_store::leaf(&view.book, &sid);
+            Some((
+                leaf.cwd().filter(|p| !p.is_empty()),
+                leaf.model_id().map(str::to_string),
+                leaf.approval_mode().map(str::to_string),
+                leaf.reasoning_effort().map(str::to_string),
+            ))
+        });
         let inherited_project = project.or_else(|| {
-            self.chat.read(cx).store.as_ref().and_then(|s| {
-                s.read(cx)
-                    .store
-                    .with(|st| st.project.clone())
-                    .filter(|p| !p.is_empty())
-                    .map(PathBuf::from)
-            })
+            inherited
+                .as_ref()
+                .and_then(|(p, _, _, _)| p.clone())
+                .map(PathBuf::from)
         });
         let project = inherited_project;
-        let model = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .and_then(|s| s.read(cx).store.with(|st| st.model.clone()))
-            .and_then(|m| {
-                let provider = m.get("provider").and_then(|v| v.as_str())?;
-                let id = m.get("modelId").and_then(|v| v.as_str())?;
-                (!provider.is_empty() && !id.is_empty()).then(|| format!("{provider}/{id}"))
-            })
-            .or_else(|| {
-                self.chat
-                    .read(cx)
-                    .thread
-                    .read(|t| t.model().map(|m| format!("{}/{}", m.provider, m.id)))
-            });
-        let approval = serde_json::to_value(self.chat.read(cx).store.as_ref().map_or_else(
-            || self.chat.read(cx).thread.read(|t| t.permission_mode()),
-            |s| s.read(cx).store.with(|st| st.permission_mode),
-        ))
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string));
-        let effort = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.reasoning_effort))
-            .unwrap_or_else(|| self.chat.read(cx).thread.read(|t| t.reasoning_effort()));
-        let effort_str = match effort {
-            manox_agent::language_model::ReasoningEffort::High => Some("high".to_string()),
-            manox_agent::language_model::ReasoningEffort::Max => Some("max".to_string()),
-        };
+        let model = inherited.as_ref().and_then(|(_, m, _, _)| m.clone());
+        let approval = inherited.as_ref().and_then(|(_, _, a, _)| a.clone());
+        let effort_str = inherited.as_ref().and_then(|(_, _, _, e)| e.clone());
         let cwd = project
             .as_ref()
             .unwrap_or(&self.cwd)
@@ -171,49 +147,48 @@ impl Workspace {
         let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
-        self.multiplexer.update(cx, |m, _| {
-            m.create_session_intent(
-                (project.is_none()).then(|| cwd.clone()),
-                project_str.clone(),
-                model,
-                approval,
-                effort_str,
-                Box::new(move |done, cx| {
-                    let sid = match done {
-                        crate::multiplexer::CreateSessionDone::Created { session_id, .. } => {
-                            tracing::info!(session_id = %session_id, "new-thread intent created");
-                            session_id
-                        }
-                        crate::multiplexer::CreateSessionDone::Failed { message } => {
-                            tracing::warn!(error = %message, "CreateSession intent failed");
-                            return;
-                        }
-                    };
-                    // Defer the workspace bind out of the multiplexer's
-                    // update borrow: the intent callback runs inside the mux
-                    // pump, and `attach_created_session` re-enters the mux
-                    // (`open_or_create`), so it must land on a later tick.
-                    cx.spawn(async move |_, cx| {
-                        if let Some(dir) = &dir_for_store {
-                            let _ = ws.update(cx, |_ws, cx| {
-                                Workspace::register_project_in_store(dir, cx);
-                            });
-                        }
-                        match ws.update_in(cx, |this, window, cx| {
-                            this.attach_created_session(&sid, window, cx);
-                        }) {
-                            Ok(()) => {
-                                tracing::info!(session_id = %sid, "new-thread attach landed")
-                            }
-                            Err(err) => {
-                                tracing::warn!(session_id = %sid, error = %err, "new-thread attach FAILED")
-                            }
-                        }
-                    })
-                    .detach();
-                }),
-            );
+        // v3: the id is client-minted; the create carries the inherited
+        // config, and the attach lands once the host answered.
+        let sid = uuid::Uuid::new_v4().to_string();
+        let mut config = serde_json::Map::new();
+        if let Some(model) = &model {
+            config.insert("model".into(), serde_json::json!(model));
+        }
+        if let Some(approval) = &approval {
+            config.insert("approvalMode".into(), serde_json::json!(approval));
+        }
+        if let Some(effort) = &effort_str {
+            config.insert("reasoningEffort".into(), serde_json::json!(effort));
+        }
+        let cwds = (project.is_none()).then(|| format!("file://{cwd}")).into_iter().collect();
+        let reply = self.with_foreground_store(cx, |store, _, _| {
+            store.create_session(&sid, cwds, Some(config))
         });
+        let sid2 = sid.clone();
+        cx.spawn(async move |_, cx| {
+            let failed = match reply {
+                Some(reply) => matches!(reply.recv().await, Ok(Err(_))),
+                None => true,
+            };
+            if failed {
+                tracing::warn!("createSession failed");
+                return;
+            }
+            if let Some(dir) = &dir_for_store {
+                let _ = ws.update(cx, |_ws, cx| {
+                    Workspace::register_project_in_store(dir, cx);
+                });
+            }
+            match ws.update_in(cx, |this, window, cx| {
+                this.attach_created_session(&sid2, window, cx);
+            }) {
+                Ok(()) => tracing::info!(session_id = %sid2, "new-thread attach landed"),
+                Err(err) => {
+                    tracing::warn!(session_id = %sid2, error = %err, "new-thread attach FAILED")
+                }
+            }
+        })
+        .detach();
         let _ = window;
     }
 
@@ -329,7 +304,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).running()
+            })
             .unwrap_or(false)
             || manox_agent::background_task::thread_has_running_tasks(&old_id))
             && old_id != new_id;
@@ -363,10 +341,6 @@ impl Workspace {
             // (the session itself survives for a later `OpenSession`), then
             // drop the local handle. No owner leak — the pre-multiplex path
             // leaked because the in-process transport never signalled drop.
-            self.client
-                .send_note(manox_protocol::ClientNote::DetachSession {
-                    session_id: old_id.clone(),
-                });
             self.multiplexer.update(cx, |m, _| {
                 m.forget(&old_id);
             });
@@ -407,11 +381,10 @@ impl Workspace {
             let cwd = thread_cwd(&new_thread, &None, cx)
                 .unwrap_or_default()
                 .to_string();
-            let store = self
-                .multiplexer
-                .update(cx, |m, cx| m.open_or_create(&new_sid, &cwd, reopen, cx));
+            let store = self.multiplexer.read(cx).store();
+            self.multiplexer.update(cx, |m, cx| m.open_or_create(&new_sid, reopen, cx));
             self.chat.update(cx, |chat, cc| {
-                chat.store = Some(store);
+                chat.store = Some((store, new_sid.clone()));
                 chat.session_id = Some(new_sid);
                 cc.notify();
             });
@@ -448,7 +421,7 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.id.0.clone())
+            .map(|(store, sid)| sid.clone())
             .expect("foreground store present");
         // Derive the transcript's plan and the sub-agent rows inside one
         // store read — the display fold's message rows ARE the messages
@@ -460,63 +433,27 @@ impl Workspace {
             .store
             .as_ref()
             .map(|s| {
-                let msgs = s.read(cx).store.derived_messages();
+                let msgs = Vec::new();
                 (
                     manox_agent::plan::rebuild_from_messages(&msgs),
                     manox_agent::subagent_restore::rebuild_from_messages(&msgs),
                 )
             })
             .expect("foreground store present");
-        let display: Vec<manox_agent::db::HistoryEntry> = self
+        let (display, usage) = self
             .chat
             .read(cx)
             .store
-            .as_ref()
-            .map(|s| s.read(cx).store.display.clone())
-            .expect("foreground store present");
-        let usage = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| {
-                s.read(cx)
-                    .store
-                    .per_request_usage
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            manox_agent::TokenUsage {
-                                input_tokens: v.input,
-                                output_tokens: v.output,
-                                cache_creation_input_tokens: v.cache_creation,
-                                cache_read_input_tokens: v.cache_read,
-                            },
-                        )
-                    })
-                    .collect()
+            .clone()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                let chat = crate::ahp_store::leaf(&view.book, &sid).chat?;
+                let mut usage = crate::chat_fold::UsageTable::new();
+                let display = crate::chat_fold::synth_display(chat, &mut usage);
+                Some((display, usage))
             })
-            .expect("foreground store present");
-        let background_tasks = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| {
-                s.read(cx)
-                    .store
-                    .background_tasks
-                    .iter()
-                    .filter_map(|t| {
-                        serde_json::from_value::<manox_agent::background_task::TaskSnapshot>(
-                            t.clone(),
-                        )
-                        .ok()
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .expect("foreground store present");
+            .unwrap_or_default();
+        let background_tasks: Vec<manox_agent::background_task::TaskSnapshot> = Vec::new();
         let role = self.model_label(cx);
         let recipient = self.recipient_author(cx);
         let _weak = cx.weak_entity();
@@ -525,7 +462,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).running()
+            })
             .expect("foreground store present");
         let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
         let new_conv = cx.new(|cx| {
@@ -614,9 +554,7 @@ impl Workspace {
         // ask / tool-approval / plan-review card whose `ToolCallAuthorization`
         // the parked subscription dropped while this thread was in the
         // background.
-        if reclaimed {
-            self.multiplexer.update(cx, |m, _| m.reown(&new_id));
-        }
+        let _ = reclaimed;
         self.chat.update(cx, |chat, cc| {
             chat.thread_sub = Some(thread_events);
             chat.store_observe = Some(store_changes);
@@ -649,10 +587,15 @@ impl Workspace {
             self.chat
                 .read(cx)
                 .store
-                .as_ref()
-                .and_then(|s| s.read(cx).store.persisted_plan.as_ref())
-                .and_then(|v| {
-                    serde_json::from_value::<manox_agent::plan::PlanSnapshot>(v.clone()).ok()
+                .clone()
+                .and_then(|(store, sid)| {
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, &sid)
+                        .ext
+                        .and_then(|x| x.plan.clone())
+                        .and_then(|v| {
+                            serde_json::from_value::<manox_agent::plan::PlanSnapshot>(v).ok()
+                        })
                 })
         });
         let rail_leaf = self.chat.read(cx).store.clone();
@@ -729,7 +672,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).running()
+            })
             .expect("foreground store present")
         {
             return false;
@@ -739,11 +685,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.id.0.clone())
+            .map(|(store, sid)| sid.clone())
             .expect("foreground store present");
-        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::ArchiveThread {
-            session_id: sid.into(),
-            archived: true,
+        self.with_foreground_store(cx, |store, sid, _| {
+            store.set_archived(&sid, true);
         });
         let store = manox_agent::thread_store_global();
         store.with_mut(|s| s.archive_thread(&id, true));
@@ -768,37 +713,43 @@ impl Workspace {
             .chat
             .read(cx)
             .store
-            .as_ref()
-            .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))
+            .clone()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid)
+                    .cwd()
+                    .map(std::path::PathBuf::from)
+            })
             .unwrap_or_else(|| old.read(|t| t.cwd().to_path_buf()));
         let project = self
             .chat
             .read(cx)
             .store
-            .as_ref()
-            .and_then(|s| {
-                s.read(cx)
-                    .store
-                    .project
-                    .clone()
-                    .map(std::path::PathBuf::from)
+            .clone()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).cwd().map(std::path::PathBuf::from)
             })
             .or_else(|| old.read(|t| t.project().cloned()));
         let model = old.read(|t| t.model().cloned());
-        let effort = self
+        let effort_str = self
             .chat
             .read(cx)
             .store
-            .as_ref()
-            .map(|s| s.read(cx).store.reasoning_effort)
-            .unwrap_or_else(|| old.read(|t| t.reasoning_effort()));
-        let permission = self
+            .clone()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).reasoning_effort().map(str::to_string)
+            });
+        let approval = self
             .chat
             .read(cx)
             .store
-            .as_ref()
-            .map(|s| s.read(cx).store.permission_mode)
-            .unwrap_or_else(|| old.read(|t| t.permission_mode()));
+            .clone()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).approval_mode().map(str::to_string)
+            });
         // U6b③: the inherited state rides the v2 CreateSession intent —
         // the compat-note create this replaces carried only the cwd, so
         // the parked model/project/effort/permission never reached the
@@ -808,49 +759,46 @@ impl Workspace {
         let cwd_str = cwd.to_string_lossy().to_string();
         let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());
         let model_str = model.map(|m| format!("{}/{}", m.provider, m.id));
-        let approval = serde_json::to_value(permission)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string));
-        let effort_str = match effort {
-            manox_agent::language_model::ReasoningEffort::High => Some("high".to_string()),
-            manox_agent::language_model::ReasoningEffort::Max => Some("max".to_string()),
-        };
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
-        self.multiplexer.update(cx, |m, _| {
-            m.create_session_intent(
-                (project.is_none()).then(|| cwd_str.clone()),
-                project_str,
-                model_str,
-                approval,
-                effort_str,
-                Box::new(move |done, cx| {
-                    let sid = match done {
-                        crate::multiplexer::CreateSessionDone::Created { session_id, .. } => {
-                            session_id
-                        }
-                        crate::multiplexer::CreateSessionDone::Failed { message } => {
-                            tracing::warn!(error = %message, "inheriting create intent failed");
-                            return;
-                        }
-                    };
-                    // Defer the workspace bind out of the multiplexer's
-                    // update borrow: the attach re-enters the mux
-                    // (`open_or_create`), so it must land on a later tick.
-                    cx.spawn(async move |_, cx| {
-                        if let Some(dir) = &dir_for_store {
-                            let _ = ws.update(cx, |_ws, cx| {
-                                Workspace::register_project_in_store(dir, cx);
-                            });
-                        }
-                        let _ = ws.update_in(cx, |this, window, cx| {
-                            this.attach_created_session(&sid, window, cx);
-                        });
-                    })
-                    .detach();
-                }),
-            );
+        let sid = uuid::Uuid::new_v4().to_string();
+        let mut config = serde_json::Map::new();
+        if let Some(model) = &model_str {
+            config.insert("model".into(), serde_json::json!(model));
+        }
+        if let Some(approval) = &approval {
+            config.insert("approvalMode".into(), serde_json::json!(approval));
+        }
+        if let Some(effort) = &effort_str {
+            config.insert("reasoningEffort".into(), serde_json::json!(effort));
+        }
+        let cwds = (project.is_none())
+            .then(|| format!("file://{cwd_str}"))
+            .into_iter()
+            .collect();
+        let reply = self.with_foreground_store(cx, |store, _, _| {
+            store.create_session(&sid, cwds, Some(config))
         });
+        let sid2 = sid.clone();
+        cx.spawn(async move |_, cx| {
+            let failed = match reply {
+                Some(reply) => matches!(reply.recv().await, Ok(Err(_))),
+                None => true,
+            };
+            if failed {
+                tracing::warn!("inheriting create failed");
+                return;
+            }
+            if let Some(dir) = &dir_for_store {
+                let _ = ws.update(cx, |_ws, cx| {
+                    Workspace::register_project_in_store(dir, cx);
+                });
+            }
+            let _ = ws.update_in(cx, |this, window, cx| {
+                this.attach_created_session(&sid2, window, cx);
+            });
+        })
+        .detach();
         let _ = window;
     }
 
@@ -866,23 +814,23 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.running)
-            .expect("foreground store present")
-        {
+        let (running, project) = {
+            let pair = self.chat.read(cx).store.clone();
+            match pair {
+                Some((store, sid)) => {
+                    let view = store.read(cx);
+                    let leaf = crate::ahp_store::leaf(&view.book, &sid);
+                    (
+                        leaf.running(),
+                        leaf.cwd().map(std::path::PathBuf::from),
+                    )
+                }
+                None => return,
+            }
+        };
+        if !running {
             return;
         }
-        let project = self.chat.read(cx).store.as_ref().and_then(|s| {
-            s.read(cx)
-                .store
-                .project
-                .clone()
-                .map(std::path::PathBuf::from)
-        });
         self.start_new_thread(project, window, cx);
     }
 
@@ -943,43 +891,35 @@ impl Workspace {
         });
         let ws = cx.weak_entity();
         let entry_id = through_entry_id.to_string();
-        self.multiplexer.update(cx, |m, _| {
-            m.fork_session_intent(
-                &source_session_id,
-                &entry_id,
-                Box::new(move |done, cx| {
-                    let sid = match done {
-                        crate::multiplexer::CreateSessionDone::Created { session_id, .. } => {
-                            tracing::info!(session_id = %session_id, "fork landed");
-                            session_id
-                        }
-                        crate::multiplexer::CreateSessionDone::Failed { message } => {
-                            tracing::warn!(error = %message, "ForkSession failed");
-                            let _ = ws.update(cx, |this, cx| {
-                                this.chat.update(cx, |chat, cx| {
-                                    chat.fork_in_flight = false;
-                                    cx.notify();
-                                });
-                                cx.notify();
-                            });
-                            return;
-                        }
-                    };
-                    // Same borrow rule as the create path: this callback runs
-                    // inside the mux pump and opening the child re-enters the
-                    // mux, so the bind lands on a later tick.
-                    cx.spawn(async move |_, cx| {
-                        let _ = ws.update_in(cx, |this, window, cx| {
-                            this.chat.update(cx, |chat, cx| {
-                                chat.fork_in_flight = false;
-                                cx.notify();
-                            });
-                            this.open_thread(sid, window, cx);
-                        });
-                    })
-                    .detach();
-                }),
-            );
+        let forked = self.with_foreground_store(cx, |store, sid, _| {
+            store.fork_chat(&sid, &entry_id)
         });
+        let (reply, chat_id) = match forked {
+            Some(pair) => pair,
+            None => return,
+        };
+        cx.spawn(async move |_, cx| {
+            let failed = matches!(reply.recv().await, Ok(Err(_)) | Err(_));
+            if failed {
+                tracing::warn!("createChat (fork) failed");
+                let _ = ws.update(cx, |this, cx| {
+                    this.chat.update(cx, |chat, cx| {
+                        chat.fork_in_flight = false;
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+                return;
+            }
+            tracing::info!(session_id = %chat_id, "fork landed");
+            let _ = ws.update_in(cx, |this, window, cx| {
+                this.chat.update(cx, |chat, cx| {
+                    chat.fork_in_flight = false;
+                    cx.notify();
+                });
+                this.open_thread(chat_id, window, cx);
+            });
+        })
+        .detach();
     }
 }

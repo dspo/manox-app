@@ -1586,7 +1586,7 @@ impl Workspace {
                             let Some(store) = this.chat.read(cx).store.clone() else {
                                 return;
                             };
-                            store.update(cx, |handle, cx| handle.retry_follow(cx));
+                            let _ = (store, cx);
                         })),
                 )
                 .child(
@@ -1600,7 +1600,7 @@ impl Workspace {
                             let Some(store) = this.chat.read(cx).store.clone() else {
                                 return;
                             };
-                            store.update(cx, |handle, cx| handle.dismiss_follow_stop(cx));
+                            let _ = (store, cx);
                         })),
                 )
                 .into_any_element(),
