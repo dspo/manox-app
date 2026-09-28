@@ -391,9 +391,18 @@ pub fn chat_uri(id: &str) -> String {
 /// A reply slot for a command that awaits the host's answer.
 pub type Reply = async_channel::Receiver<Result<Value, String>>;
 
-/// A write issued before the handshake, replayed on connect. `Dispatch` is
-/// boxed: the typed actions dwarf the URI strings and the queue is transient.
+/// A write issued before the handshake, replayed **in order** on connect —
+/// the landing createSession precedes its subscribes, and the subscribes
+/// precede the active-client claim, so the replay awaits each step before
+/// issuing the next. `Dispatch` is boxed: the typed actions dwarf the URI
+/// strings and the queue is transient.
 enum PendingWrite {
+    CreateSession {
+        session_id: String,
+        cwds: Vec<String>,
+        config: Option<serde_json::Map<String, Value>>,
+        reply: async_channel::Sender<Result<Value, String>>,
+    },
     Subscribe(String),
     Unsubscribe(String),
     Dispatch(String, Box<StateAction>),
@@ -414,6 +423,9 @@ pub struct CapabilityRequest {
 pub struct AhpStore {
     pub book: ChannelBook,
     client: Option<Client>,
+    /// True while the pre-connect queue is being replayed; writes issued in
+    /// that window queue behind the replay instead of racing it.
+    replay_pending: bool,
     /// Writes issued before the handshake completed, replayed in order on
     /// connect. The landing session's create/subscribe rides this: the
     /// workspace constructs the store and binds the chat column in the same
@@ -437,6 +449,7 @@ impl AhpStore {
         let mut store = Self {
             book: ChannelBook::default(),
             client: None,
+            replay_pending: false,
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
@@ -448,9 +461,17 @@ impl AhpStore {
         store
     }
 
-    /// Whether the handshake completed (writes before this are dropped).
+    /// Whether the handshake completed (writes before this are queued).
     pub fn is_connected(&self) -> bool {
         self.client.is_some()
+    }
+
+    /// Pop the next queued write, if any and if the replay may proceed.
+    fn next_pending(&mut self) -> Option<PendingWrite> {
+        if !self.replay_pending {
+            return None;
+        }
+        (!self.pending_writes.is_empty()).then(|| self.pending_writes.remove(0))
     }
 
     fn spawn_handshake(
@@ -496,26 +517,100 @@ impl AhpStore {
                 }
             };
             if this
-                .update(cx, |store, cx| {
+                .update(cx, |store, _| {
                     store.client = Some(client.clone());
-                    // Replay the writes the UI issued before the handshake
-                    // answered (the landing session's create/subscribe).
-                    let pending = std::mem::take(&mut store.pending_writes);
-                    for write in pending {
-                        match write {
-                            PendingWrite::Subscribe(uri) => store.subscribe(uri, cx),
-                            PendingWrite::Unsubscribe(uri) => store.unsubscribe(uri),
-                            PendingWrite::Dispatch(channel, action) => {
-                                store.dispatch(channel, *action)
-                            }
-                        }
-                    }
-                    cx.notify();
+                    store.replay_pending = true;
                 })
                 .is_err()
             {
                 return;
             }
+            // Replay the pre-connect writes **sequentially**: the landing
+            // createSession must complete before its subscribes, and the
+            // subscribes before the active-client claim. Concurrent issue
+            // lets the host answer `not found` for a chat whose session is
+            // still being created (real-device smoke, round 5).
+            while let Some(write) = this
+                .update(cx, |store, _| store.next_pending())
+                .ok()
+                .flatten()
+            {
+                match write {
+                    PendingWrite::CreateSession {
+                        session_id,
+                        cwds,
+                        config,
+                        reply,
+                    } => {
+                        let result = tokio_wait({
+                            let client = client.clone();
+                            let channel = session_uri(&session_id);
+                            move || async move {
+                                client
+                                    .request::<_, Value>(
+                                        "createSession",
+                                        CreateSessionParams {
+                                            channel,
+                                            meta: None,
+                                            provider: None,
+                                            working_directories: Some(cwds),
+                                            config,
+                                            active_client: None,
+                                            progress_token: None,
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|err| err.to_string())
+                            }
+                        })
+                        .await;
+                        let _ = reply.send(result).await;
+                    }
+                    PendingWrite::Subscribe(uri) => {
+                        let _ = tokio_wait({
+                            let client = client.clone();
+                            move || async move {
+                                client
+                                    .request::<_, Value>(
+                                        "subscribe",
+                                        serde_json::json!({ "channel": uri }),
+                                    )
+                                    .await
+                                    .map_err(|err| err.to_string())
+                            }
+                        })
+                        .await;
+                    }
+                    PendingWrite::Unsubscribe(uri) => {
+                        let _ = tokio_wait({
+                            let client = client.clone();
+                            move || async move {
+                                client
+                                    .request::<_, Value>(
+                                        "unsubscribe",
+                                        serde_json::json!({ "channel": uri }),
+                                    )
+                                    .await
+                                    .map_err(|err| err.to_string())
+                            }
+                        })
+                        .await;
+                    }
+                    PendingWrite::Dispatch(channel, action) => {
+                        let _ = tokio_wait({
+                            let client = client.clone();
+                            move || async move {
+                                client
+                                    .dispatch(channel, *action)
+                                    .await
+                                    .map_err(|err| err.to_string())
+                            }
+                        })
+                        .await;
+                    }
+                }
+            }
+            let _ = this.update(cx, |store, _| store.replay_pending = false);
             // The events receiver must exist before any subscribe: the
             // extension baselines are pushed while the subscribe is answered.
             let mut events = client.events();
@@ -755,24 +850,51 @@ impl AhpStore {
 
     /// Create a session over a client-minted id (the idempotency key).
     /// Returns the raw result; callers subscribe the session channel next.
+    /// Before the handshake completes the request is queued and the reply
+    /// resolves once the replay reaches it.
     pub fn create_session(
-        &self,
+        &mut self,
         session_id: &str,
         cwds: Vec<String>,
         config: Option<serde_json::Map<String, Value>>,
     ) -> Reply {
-        self.call(
-            "createSession",
-            CreateSessionParams {
-                channel: session_uri(session_id),
-                meta: None,
-                provider: None,
-                working_directories: Some(cwds),
+        let (tx, rx) = async_channel::bounded::<Result<Value, String>>(1);
+        if let Some(client) = self.client.clone() {
+            // Connected: issue directly (the replay loop only runs during
+            // the handshake window).
+            let channel = session_uri(session_id);
+            manox_agent::runtime::handle().spawn(async move {
+                let result = tokio_wait(move || async move {
+                    client
+                        .request::<_, Value>(
+                            "createSession",
+                            CreateSessionParams {
+                                channel,
+                                meta: None,
+                                provider: None,
+                                working_directories: Some(cwds),
+                                config,
+                                active_client: None,
+                                progress_token: None,
+                            },
+                        )
+                        .await
+                        .map_err(|err| err.to_string())
+                })
+                .await;
+                let _ = tx.send(result).await;
+            });
+        } else {
+            // Pre-connect: queue behind the handshake; the replay resolves
+            // the reply once the host answered.
+            self.pending_writes.push(PendingWrite::CreateSession {
+                session_id: session_id.to_string(),
+                cwds,
                 config,
-                active_client: None,
-                progress_token: None,
-            },
-        )
+                reply: tx,
+            });
+        }
+        rx
     }
 
     /// Page older turns into the chat state; the turns arrive as a

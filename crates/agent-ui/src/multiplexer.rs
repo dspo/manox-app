@@ -81,14 +81,15 @@ impl SessionMultiplexer {
         session_id: &str,
         cx: &mut Context<Self>,
     ) -> manox_agent_chat_ui::ahp_store::Reply {
-        let reply = {
-            let store = self.store.read(cx);
+        // The create is queued when the handshake is still in flight and
+        // resolved by the replay in order (before this session's subscribes).
+        let reply = self.store.update(cx, |store, _| {
             store.create_session(
                 session_id,
                 vec![format!("file://{}", self.cwd.display())],
                 None,
             )
-        };
+        });
         self.open_or_create(session_id, false, cx);
         reply
     }
