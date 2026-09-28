@@ -688,3 +688,67 @@ mod tests {
         }
     }
 }
+
+#[gpui::test]
+fn rebuild_renders_user_bubbles_from_a_host_fold_chat(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    // The chat state exactly as the host fold leaves it: the same actions
+    // the translator emits for a journal, applied through the published
+    // reducers.
+    use ahp::reducers::apply_action_to_chat;
+    let mut chat: ChatState = serde_json::from_value(serde_json::json!({
+        "resource": "ahp-chat:/c-1",
+        "title": "t",
+        "status": 0,
+        "modifiedAt": "2026-01-01T00:00:00Z",
+        "turns": [],
+    }))
+    .expect("chat parses");
+    let actions: Vec<ahp_types::actions::StateAction> = serde_json::from_value(serde_json::json!([
+        {"type": "chat/turnStarted", "turnId": "t-1",
+         "startedAt": "2026-01-01T00:00:00Z",
+         "message": {"text": "hello world", "origin": {"kind": "user"}}},
+        {"type": "chat/delta", "turnId": "t-1", "partId": "p-1", "content": "hi there"},
+        {"type": "chat/turnComplete", "turnId": "t-1", "duration": 5},
+    ]))
+    .expect("actions parse");
+    for action in &actions {
+        apply_action_to_chat(&mut chat, action);
+    }
+    assert_eq!(chat.turns.len(), 1);
+    assert_eq!(chat.turns[0].message.text, "hello world");
+
+    let mut usage = UsageTable::new();
+    let display = synth_display(&chat, &mut usage);
+    let user_row = display.iter().find_map(|e| match e {
+        HistoryEntry::Message(m) if m.role == Role::User => Some(m.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        user_row.and_then(|m| m.content.first().cloned()),
+        Some(MessageContent::Text("hello world".into()))
+    );
+
+    cx.update(|cx| {
+        let conv = crate::conversation::ConversationState::rebuild_from_display(
+            &display,
+            &usage,
+            "lead",
+            manox_agent::MessageAuthor::Lead,
+            false,
+            crate::conversation::ApplyCtx {
+                host: crate::host::noop_host(),
+                cwd: None,
+                fork_source: None,
+            },
+            cx,
+        );
+        let user_bubble = conv.items().iter().any(|item| {
+            matches!(
+                item.read(cx).kind(),
+                crate::conversation::ConvItem::User { text, .. } if text == "hello world"
+            )
+        });
+        assert!(user_bubble, "the user bubble must render");
+    });
+}

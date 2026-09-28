@@ -1010,10 +1010,27 @@ impl Workspace {
             let leaf = crate::ahp_store::leaf(&view.book, &sid);
             let running = leaf.running();
             let Some(chat) = leaf.chat else {
+                tracing::info!(session_id = %sid, "rebuild: no chat in the book yet");
                 return;
             };
             let mut usage = crate::chat_fold::UsageTable::new();
             let display = crate::chat_fold::synth_display(chat, &mut usage);
+            let user_rows = display
+                .iter()
+                .filter(|e| {
+                    matches!(e, manox_agent::db::HistoryEntry::Message(m) if m.role == manox_agent::language_model::Role::User)
+                })
+                .count();
+            let entry_count = display.len();
+            let turns = chat.turns.len();
+            tracing::info!(
+                session_id = %sid,
+                turns,
+                entries = entry_count,
+                user_rows,
+                first_user_text_empty = chat.turns.first().is_some_and(|t| t.message.text.is_empty()),
+                "rebuild: synthesized transcript from the chat fold"
+            );
             (running, display, usage)
         };
         let role = self.model_label(cx);
