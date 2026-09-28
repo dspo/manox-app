@@ -463,6 +463,11 @@ async fn navigator_fill_lands_the_walk_and_hands_the_draft_back(cx: &mut gpui::T
         manox_agent::provider_glue::init();
         manox_agent::thread_store::init_for_test(db.clone());
     });
+    // The AgentServer replies to the gpui store pump across threads on the
+    // real tokio runtime; that legitimate cross-thread wake is flagged by the
+    // deterministic test scheduler unless parking is allowed — without this
+    // the test flakes (the tokio reply lands while the pump is parked).
+    cx.background_executor.allow_parking();
     let captured: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let slot = captured.clone();
