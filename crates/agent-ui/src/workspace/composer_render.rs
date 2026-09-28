@@ -8,6 +8,8 @@
 //! parent's render face and the `tests` child.
 
 use super::*;
+use gpui_component::ThemeStyled as _;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 pub use manox_agent_chat_ui::column::{QueueDragEdge, QueueRowDrag};
 
 /// Drag payload for a queued follow-up row. The index is all the gesture

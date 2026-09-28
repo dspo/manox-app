@@ -417,14 +417,7 @@ pub fn foreground_cwd() -> Option<std::path::PathBuf> {
 /// Upsert the current foreground thread's right-pane snapshot into
 /// `threads.db` (the pane's own kind/spec encoding, one row per thread).
 fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
-    let Some(thread_id) = ws
-        .read(cx)
-        .chat
-        .read(cx)
-        .store
-        .as_ref()
-        .map(|(_, sid)| sid.clone())
-    else {
+    let Some(thread_id) = ws.read(cx).chat.read(cx).store.clone().map(|(_, sid)| sid) else {
         return;
     };
     let (visible, active, tabs) = shell.read(cx).right.read(cx).persisted(cx);

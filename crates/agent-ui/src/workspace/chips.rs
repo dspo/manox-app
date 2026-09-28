@@ -9,6 +9,8 @@
 //! handlers and the `tests` child.
 
 use super::*;
+use gpui_component::ThemeStyled as _;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 
 /// The protocol id of an open input request.
 fn request_id(r: &ahp_types::state::SessionInputRequest) -> &str {
@@ -533,15 +535,6 @@ impl Workspace {
     }
 
     /// Wire api string → Tag variant + label for the pi model menu.
-    pub(crate) fn pi_wire_tag_variant(api: &str) -> (TagVariant, &'static str) {
-        match api {
-            "anthropic" => (TagVariant::Color(ColorName::Blue), "Anthropic"),
-            "openai_responses" => (TagVariant::Color(ColorName::Cyan), "Responses"),
-            "openai_completions" => (TagVariant::Color(ColorName::Amber), "Completions"),
-            _ => (TagVariant::Secondary, "N/A"),
-        }
-    }
-
     /// Wire api string → text color for the pi composer model label and the
     /// context rail's per-model usage rows. Tinted directly from theme tokens
     /// (matching `mode_chip_visual` and the settings panel) so both surfaces

@@ -8,7 +8,7 @@
 //!   pump owns the thread-store flags; the desktop mirror writes are
 //!   redundant in-proc and race the pump across processes.
 //! - facade writes (`with_mut(|t|` / `with_mut(|thread|`) — U1/U6: user
-//!   intent goes through the gateway (`ClientCall::Submit` etc.); rendering
+//!   intent goes through the gateway (the submit dispatch etc.); rendering
 //!   state comes from the client store, not a locally driven kernel facade.
 //! - store reads (`thread_store::global()` / `thread_store_global()`) — U2:
 //!   lists and summaries come from `ListThreads` + host events. Landed for
@@ -247,7 +247,7 @@ mod tests {
             // UI-polish #5: the composer's dead-end steer (four bypass facade
             // writes on the engine-less `thread` mirror — `enqueue_steer` +
             // three `cancel_pending_steer`) migrates to ONE real wire send
-            // (`send_steer_v2`'s `ClientCall::Steer`), the ledger-mandated
+            // (the steer dispatch), the ledger-mandated
             // direction (a bypass write → a protocol send); composer.rs's
             // FACADE_WRITE budget ratchets 4→0 in the same commit.
             ("workspace.rs", "protocol sends (U9)", SENDS, 9),

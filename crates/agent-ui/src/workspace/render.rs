@@ -412,72 +412,11 @@ impl Workspace {
     /// or a retry dies again.
     fn render_follow_stop_banner(
         &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
+        _theme: &Theme,
+        _cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let stop = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()?
-            .read(cx)
-            .follow_stop()
-            .filter(|stop| !stop.dismissed)?;
-        Some(
-            h_flex()
-                .debug_selector(|| "follow-stopped-notice".into())
-                .flex_shrink_0()
-                .items_center()
-                .gap_2()
-                .mx_2()
-                .mt_1()
-                .px_3()
-                .py_1p5()
-                .rounded(theme.radius)
-                .border_1()
-                .border_color(theme.danger.opacity(0.35))
-                .bg(theme.danger.opacity(0.08))
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .xsmall()
-                        .text_color(theme.danger),
-                )
-                .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(i18n::t(stop.reason.notice_key())),
-                )
-                .child(
-                    Button::new("follow-stop-retry")
-                        .label(i18n::t("follow-stop-retry"))
-                        .ghost()
-                        .small()
-                        .debug_selector(|| "follow-stop-retry-btn".into())
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            let Some(store) = this.chat.read(cx).store.clone() else {
-                                return;
-                            };
-                            let _ = (store, cx);
-                        })),
-                )
-                .child(
-                    Button::new("follow-stop-dismiss")
-                        .icon(IconName::Close)
-                        .ghost()
-                        .xsmall()
-                        .tooltip(i18n::t("follow-stop-dismiss"))
-                        .debug_selector(|| "follow-stop-dismiss-btn".into())
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            let Some(store) = this.chat.read(cx).store.clone() else {
-                                return;
-                            };
-                            let _ = (store, cx);
-                        })),
-                )
-                .into_any_element(),
-        )
+        // The retry notice retired with the v2 follow stream: a failed turn
+        // surfaces as the chat's error part now.
+        None
     }
 }
