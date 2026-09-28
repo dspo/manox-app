@@ -133,11 +133,11 @@ impl Workspace {
                 .read(cx)
                 .store
                 .as_ref()
-                .and_then(|s| {
-                    s.read(cx)
-                        .store
-                        .project
-                        .clone()
+                .and_then(|(store, sid)| {
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, &sid)
+                        .cwd()
+                        .map(std::path::PathBuf::from)
                         .map(std::path::PathBuf::from)
                 })
                 .as_ref()
@@ -218,7 +218,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid).running()
+            })
             .expect("foreground store present");
 
         self.ensure_blank_project_input(window, cx);
@@ -240,7 +243,12 @@ impl Workspace {
                 .read(cx)
                 .store
                 .as_ref()
-                .map(|s| s.read(cx).store.with(|st| st.display_title.clone()))
+                .and_then(|(store, sid)| {
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, &sid)
+                        .display_title()
+                        .map(str::to_string)
+                })
                 .expect("foreground store present");
             if s.is_empty() { "manox".to_string() } else { s }
         }
@@ -275,7 +283,10 @@ impl Workspace {
                 .read(cx)
                 .store
                 .as_ref()
-                .map(|s| s.read(cx).store.has_interacted)
+                .map(|(store, sid)| {
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, sid).running()
+                })
                 .expect("foreground store present")
             && crate::views::context_rail::ContextRail::rail_width_for(main_body_w).is_some();
         let overlay = self
@@ -1109,7 +1120,10 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid).running()
+            })
             .unwrap_or(false);
         let first_screen = self.chat_conversation(cx).read(cx).is_empty(cx) && !running;
         let composer_placement = composer_placement(false, first_screen);
@@ -1123,7 +1137,10 @@ impl Workspace {
                 .read(cx)
                 .store
                 .as_ref()
-                .map(|s| s.read(cx).store.has_interacted)
+                .map(|(store, sid)| {
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, sid).running()
+                })
                 .unwrap_or(false)
             && crate::views::context_rail::ContextRail::rail_width_for(main_body_w).is_some();
         let overlay = self
@@ -1541,14 +1558,12 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let stop = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()?
-            .read(cx)
-            .follow_stop()
-            .filter(|stop| !stop.dismissed)?;
+        // The retry notice retired with the v2 follow stream: a failed turn
+        // now surfaces as the chat's error part.
+        let stop: Option<()> = None;
+        let _ = stop;
+        return None;
+        #[allow(unreachable_code)]
         Some(
             h_flex()
                 .debug_selector(|| "follow-stopped-notice".into())
@@ -1574,7 +1589,7 @@ impl Workspace {
                     gpui::div()
                         .flex_1()
                         .min_w_0()
-                        .child(i18n::t(stop.reason.notice_key())),
+                        .child(i18n::t("follow-stop-retry")),
                 )
                 .child(
                     Button::new("follow-stop-retry")

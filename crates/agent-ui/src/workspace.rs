@@ -55,7 +55,6 @@ use manox_components::markdown::Markdown;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 
-use crate::client_store_handle::ClientStoreHandle;
 use crate::cockpit::{CockpitPhase, format_elapsed};
 use crate::conversation::ConvItem;
 use crate::conversation::{ApplyOutcome, ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
@@ -125,12 +124,15 @@ fn goal_popover_row(label: &str, value: &str, fg: gpui::Hsla, muted: gpui::Hsla)
 /// `Workspace` itself would double-lease. `None` only when the path is empty.
 fn thread_cwd(
     thread: &manox_agent::thread::ThreadHandle,
-    store: &Option<gpui::Entity<ClientStoreHandle>>,
+    store: &Option<(gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>, String)>,
     cx: &App,
 ) -> Option<SharedString> {
     let cwd = store
         .as_ref()
-        .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))
+        .and_then(|(store, sid)| {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, sid).cwd().map(std::path::PathBuf::from)
+        })
         .unwrap_or_else(|| thread.read(|t| t.cwd().to_path_buf()));
     if cwd.as_os_str().is_empty() {
         None
@@ -355,7 +357,7 @@ struct SubagentPrompt {
 /// disposes while parked — the reclaim is an in-place re-attach, no reopen.
 struct BackgroundThread {
     id: String,
-    store: Option<gpui::Entity<ClientStoreHandle>>,
+    store: Option<(gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>, String)>,
     session_id: Option<String>,
     _sub: Subscription,
 }
@@ -717,11 +719,11 @@ impl Workspace {
     pub(crate) fn with_foreground_store<R>(
         &self,
         cx: &mut gpui::Context<Self>,
-        f: impl FnOnce(&mut manox_agent_chat_ui::ahp_store::AhpStore, String, &mut gpui::Context<Self>) -> R,
+        f: impl FnOnce(&mut manox_agent_chat_ui::ahp_store::AhpStore, String) -> R,
     ) -> Option<R> {
         let pair = self.chat.read(cx).store.clone()?;
         let (store, sid) = pair;
-        Some(store.update(cx, |store, cx| f(store, sid, cx)))
+        Some(store.update(cx, |store, _| f(store, sid)))
     }
 
     // Entity-handle accessors for ChatColumn fields: each returns a cloned
@@ -730,7 +732,10 @@ impl Workspace {
     pub(crate) fn chat_thread(&self, cx: &App) -> manox_agent::thread::ThreadHandle {
         self.chat.read(cx).thread.clone()
     }
-    pub(crate) fn chat_store(&self, cx: &App) -> Option<Entity<ClientStoreHandle>> {
+    pub(crate) fn chat_store(
+        &self,
+        cx: &App,
+    ) -> Option<(Entity<manox_agent_chat_ui::ahp_store::AhpStore>, String)> {
         self.chat.read(cx).store.clone()
     }
     pub(crate) fn chat_conversation(&self, cx: &App) -> Entity<ConversationState> {
@@ -780,12 +785,13 @@ impl Workspace {
             cx.new(|_| crate::multiplexer::SessionMultiplexer::new(ahp_store.clone(), cwd.clone()));
         let (store, session_id) = {
             let session_id = landing_id.clone();
-            let store = multiplexer.update(cx, |m, cx| {
+            multiplexer.update(cx, |m, cx| {
                 m.create_session(&session_id, cx);
                 // GW5: the landing session is the focused one from tick
                 // one — its row suppresses unread rises while attached.
                 m.set_focused(Some(&session_id), cx);
             });
+            let store = multiplexer.read(cx).store();
             (store, session_id)
         };
 
@@ -821,8 +827,10 @@ impl Workspace {
         let _mux_lists = cx.observe(&multiplexer, |_, _, cx| cx.notify());
         let recipient = manox_agent::MessageAuthor::Lead;
         let conversation = cx.new(|_| ConversationState::new(recipient));
-        let context_rail =
-            { cx.new(|_| crate::views::context_rail::ContextRail::new(Some(store.clone()))) };
+        let context_rail = {
+            let rail_store = (store.clone(), session_id.clone());
+            cx.new(|_| crate::views::context_rail::ContextRail::new(Some(rail_store)))
+        };
         let weak_ws = cx.weak_entity();
         let chat_host: manox_agent_chat_ui::host::ChatHostHandle =
             std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
@@ -830,7 +838,7 @@ impl Workspace {
 
         let mut ws = Self {
             embedded: false,
-            cwd,
+            cwd: cwd.clone(),
             multiplexer,
             client: (),
             background_threads: Vec::new(),
@@ -874,17 +882,11 @@ impl Workspace {
             active_external: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
-                thread: {
-                    // The kernel render mirror is gone: the column keeps a
-                    // landing thread for the leaf cwd fallback paths that
-                    // have not migrated yet.
-                    let t = manox_agent::Thread::landing_with_id(
-                        manox_agent::ThreadId(session_id.clone()),
-                        cwd.clone(),
-                    );
-                    t
-                },
-                store: Some(store),
+                thread: manox_agent::Thread::landing_with_id(
+                    manox_agent::ThreadId(session_id.clone()),
+                    cwd,
+                ),
+                store: Some((store, session_id.clone())),
                 session_id: Some(session_id),
                 git_status_gen: 0,
                 conversation: conversation.clone(),
@@ -1316,42 +1318,32 @@ impl Workspace {
             .chat
             .read(cx)
             .store
-            .as_ref()
-            .map(|s| s.read(cx).store.display.clone())
+            .clone()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                let chat = crate::ahp_store::leaf(&view.book, &sid).chat?;
+                let mut usage = crate::chat_fold::UsageTable::new();
+                Some(crate::chat_fold::synth_display(chat, &mut usage))
+            })
             .expect("foreground store present");
-        let subagent_rows = manox_agent::subagent_restore::rebuild_from_messages(
-            &self
-                .chat
-                .read(cx)
-                .store
-                .as_ref()
-                .map(|s| s.read(cx).store.derived_messages())
-                .expect("foreground store present"),
-        );
+        // The sub-agent tree rides the x-manox work channel (unmodelled on
+        // this pass), so the restore starts empty.
+        let subagent_rows = manox_agent::subagent_restore::rebuild_from_messages(&[]);
         let usage = self
             .chat
             .read(cx)
             .store
             .as_ref()
-            .map(|s| {
-                s.read(cx)
-                    .store
-                    .per_request_usage
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            manox_agent::TokenUsage {
-                                input_tokens: v.input,
-                                output_tokens: v.output,
-                                cache_creation_input_tokens: v.cache_creation,
-                                cache_read_input_tokens: v.cache_read,
-                            },
-                        )
-                    })
-                    .collect()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).metrics.map(|m| {
+                    m.per_model_usage
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_tokens()))
+                        .collect()
+                })
             })
-            .expect("foreground store present");
+            .unwrap_or_default();
         let role = self.model_label(cx);
         let recipient = self.recipient_author(cx);
         let _weak = cx.weak_entity();
@@ -1359,8 +1351,11 @@ impl Workspace {
             .chat
             .read(cx)
             .store
-            .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .clone()
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).running()
+            })
             .expect("foreground store present");
         let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
         // A rebuild from the thread is that session's journal replayed, so its
@@ -1413,28 +1408,36 @@ impl Workspace {
     /// on projection-only frames (the mid-session chip updates — see the
     /// `store_observe` field note).
     fn subscribe_thread(&self, cx: &mut Context<Self>) -> (Subscription, Subscription) {
-        let store = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .expect("subscribe_thread requires the foreground store");
-        let observe = cx.observe(&store, |this, store, cx| {
-            // Identity hand-off: the predecessor's store records the
-            // successor when the disposal arrives; the foreground moves onto
-            // it at the next render (the switch needs a window).
-            if let Some(next) = store.read(cx).store.replaced_by.clone()
+        // v3: the per-thread `ThreadEvent` pump is gone — the AhpStore pump
+        // folds every channel and notifies. What remains here is the
+        // successor hand-off watch (a disposed session's redirect) riding an
+        // observe of the store entity; the conversation repaint reads the
+        // book on the notify (see the workspace-level store observe).
+        let Some((store, _)) = self.chat.read(cx).store.clone() else {
+            let a = cx.observe(&self.multiplexer, |_, _, _| {});
+            let b = cx.observe(&self.multiplexer, |_, _, _| {});
+            return (a, b);
+        };
+        let repaint = cx.observe(&store, |_, _, cx| cx.notify());
+        let successor = cx.observe(&store, |this, store, cx| {
+            // Identity hand-off: a disposed session records its successor;
+            // the foreground moves onto it at the next render (the switch
+            // needs a window).
+            let next = store.read(cx).book.sessions.values().find_map(|s| {
+                s.meta
+                    .as_ref()
+                    .and_then(|m| m.get("replacedBy"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            });
+            if let Some(next) = next
                 && this
                     .chat
                     .read(cx)
                     .store
                     .as_ref()
-                    .is_none_or(|s| s.read(cx).session_id() != next)
+                    .is_none_or(|(_, sid)| sid != &next)
             {
-                // One-shot: the signal is consumed here, so re-attaching the
-                // predecessor later cannot bounce the user back (review #39
-                // [sugg] 4).
-                store.update(cx, |handle, _| handle.store.replaced_by = None);
                 this.chat.update(cx, |chat, cx| {
                     chat.pending_successor = Some(next);
                     cx.notify();
@@ -1442,456 +1445,7 @@ impl Workspace {
             }
             cx.notify();
         });
-        let events = cx.subscribe(&store, |this, _store, ev: &ThreadEvent, cx| {
-            match ev {
-                ThreadEvent::ToolCallAuthorization {
-                    id,
-                    tool_name,
-                    summary,
-                    input,
-                } => {
-                    // AskUserQuestion-shaped payloads surface as the question
-                    // card; everything else (a sandbox_permissions escalation
-                    // from Edit/Write, a malformed ask) surfaces as the
-                    // generic approval card — a parked thread must never wait
-                    // invisibly.
-                    //
-                    // Idempotent per (kind, id): the gateway re-delivers a
-                    // parked question on re-own (§D.6 replay), and re-churning
-                    // the card state here would wipe the walk a user is
-                    // mid-way through. Only the card row is re-adoption-safe
-                    // to (re-)ensure.
-                    if this
-                        .chat
-                        .read(cx)
-                        .pending_ask
-                        .as_ref()
-                        .is_some_and(|a| &a.id == id)
-                        || this
-                            .chat
-                            .read(cx)
-                            .pending_auth
-                            .as_ref()
-                            .is_some_and(|a| &a.id == id)
-                    {
-                        if this.chat.read(cx).pending_ask.is_some() {
-                            this.ensure_ask_tool_item(id, summary, input.clone(), cx);
-                        }
-                        return;
-                    }
-                    this.chat.update(cx, |chat, cx| {
-                        chat.pending_ask = parse_pending_ask(id.clone(), input.clone());
-                        cx.notify();
-                    });
-                    this.chat.update(cx, |chat, cc| {
-                        chat.pending_auth = chat.pending_ask.is_none().then(|| PendingAuth {
-                            id: id.clone(),
-                            tool_name: tool_name.clone(),
-                            summary: summary.clone(),
-                        });
-                        cc.notify();
-                    });
-                    // Arming is per-card: a fresh adjudication has never been
-                    // confirmed in the leaf's `pending_auth` projection, so it
-                    // must not inherit the previous card's armed flag — mere
-                    // absence right after a Request frame is exactly the race
-                    // the arming guard exists for.
-                    this.chat.update(cx, |chat, cx| {
-                        chat.pending_projection_confirmed = false;
-                        cx.notify();
-                    });
-                    this.chat.update(cx, |chat, cx| {
-                        chat.ask_step = 0;
-                        cx.notify();
-                    });
-                    this.chat.update(cx, |chat, cc| {
-                        chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
-                        cc.notify();
-                    });
-                    this.reset_ask_custom(cx);
-                    // Live synthesis: the question card appears in the
-                    // transcript on the same edge as the pending state —
-                    // never waiting on the journal's `tool_use` fold to
-                    // arrive through the stream (when it lagged or lost the
-                    // race against a thread switch, the ask was unrenderable
-                    // and the turn deadlocked).
-                    if this.chat.read(cx).pending_ask.is_some() {
-                        this.ensure_ask_tool_item(id, summary, input.clone(), cx);
-                    }
-                    this.chat_rail(cx).update(cx, |r, cx| {
-                        r.cockpit_phase = CockpitPhase::AwaitingApproval;
-                        cx.notify();
-                    });
-                    // U3a: the pending-auth badge is the server pump's
-                    // store write + SessionStatus delta (single writer,
-                    // §F.2) — a parked thread blocked on this authorization
-                    // keeps its badge through the pump, not through a
-                    // desktop mirror write that only raced it.
-                    cx.notify();
-                }
-                ThreadEvent::PlanModeChanged { .. } => {
-                    // Refresh the plan chip.
-                    cx.notify();
-                }
-                ThreadEvent::PlanUpdated { snapshot } => {
-                    // Live plan progress: mirror onto the rail as the model
-                    // publishes it (an empty snapshot clears the section).
-                    let snapshot = snapshot.clone();
-                    this.chat_rail(cx)
-                        .update(cx, |r, cx| r.set_plan(snapshot, cx));
-                }
-                ThreadEvent::PermissionModeChanged { .. } => {
-                    // Refresh the access chip; no conversation item.
-                    cx.notify();
-                }
-                ThreadEvent::BrowserSuitesChanged { suites } => {
-                    // The composer chips are derived state of the thread's
-                    // suite mirror (survives thread switches and restores).
-                    this.chat.update(cx, |chat, cx| {
-                        chat.active_browser_suites = suites.clone();
-                        cx.notify();
-                    });
-                    cx.notify();
-                }
-                // v2 (T10c, §D.1): the follow stream's authoritative history
-                // boundary (`WindowChange::Replace` from the opening
-                // Snapshot / a seamless re-open) re-arms the conversation
-                // rebuild — the role the deleted `ThreadHistory` note's
-                // `restored` flag used to play. Without this a reopened
-                // thread strands on the loading screen; a window change that
-                // rewrites the branch is corrected to the authoritative
-                // active branch here.
-                ThreadEvent::HistoryRestored => {
-                    this.rebuild_conversation_from_thread(cx);
-                    // Re-seed the rail's plan now that the authoritative
-                    // transcript has landed: the attach-time seed ran against
-                    // an empty transcript and an unfilled sidecar mirror
-                    // (`Ready` is async), so a restarted session's plan would
-                    // otherwise wait for a manual thread switch.
-                    let messages = this
-                        .chat
-                        .read(cx)
-                        .store
-                        .as_ref()
-                        .map(|s| s.read(cx).store.derived_messages())
-                        .expect("foreground store present");
-                    if let Some(snapshot) = manox_agent::plan::rebuild_from_messages(&messages)
-                        .or_else(|| {
-                            this.chat
-                                .read(cx)
-                                .store
-                                .as_ref()
-                                .and_then(|s| s.read(cx).store.persisted_plan.as_ref())
-                                .and_then(|v| {
-                                    serde_json::from_value::<manox_agent::plan::PlanSnapshot>(
-                                        v.clone(),
-                                    )
-                                    .ok()
-                                })
-                        })
-                    {
-                        this.chat_rail(cx)
-                            .update(cx, |r, cx| r.set_plan(snapshot, cx));
-                    }
-                }
-                ThreadEvent::ModelChanged { from, to } => {
-                    // Persist a model_change event to the thread's event stream.
-                    // The conversation view itself stays unchanged (no item).
-                    let _ = (from, to);
-                    cx.notify();
-                }
-                ThreadEvent::ReasoningEffortChanged { .. } => {
-                    // Persist effort change to the thread record immediately.
-                    cx.notify();
-                }
-                ThreadEvent::TokenUsageUpdated(_) => {
-                    cx.notify();
-                }
-                ThreadEvent::TurnStarted => {
-                    // U3a: the running indicator is the server pump's store
-                    // write + SessionStatus delta (single writer) — it still
-                    // lights before the first streaming delta arrives (the
-                    // pump sees TurnStarted off the same facade broadcast).
-                    // Drive the Thinking status row's per-second "for Xs"
-                    // counter while this turn is live. The ticker polls
-                    // `turn_active` and self-terminates on the terminal stop.
-                    this.chat.update(cx, |chat, cx| {
-                        chat.turn_active = true;
-                        cx.notify();
-                    });
-                    this.spawn_thinking_ticker(cx);
-                }
-                ThreadEvent::UserRowLanded { message_id } => {
-                    // The steer's injected `user` row landed in the
-                    // transcript: the model has consumed it (dsh's `claimed`
-                    // instant). Retire the matching card NOW — a message the
-                    // model already saw must not linger in the queue until
-                    // the turn boundary. No-op for ordinary prompt rows
-                    // (nothing carries their id), and the settle path below
-                    // stays the fallback for a row that raced it.
-                    this.retire_injected_steer(message_id, cx);
-                }
-                ThreadEvent::TurnFinished {
-                    cancelled,
-                    failed,
-                    stranded_steer_ids,
-                    ..
-                } => {
-                    // Seal the conversation's streaming state at the
-                    // authoritative turn boundary: a turn that ended without
-                    // a terminal `Stop` (provider error, stream closed without
-                    // `MessageStop`) would otherwise leave its activity
-                    // segment accepting entries — a perpetual spinner and the
-                    // root condition for the next turn's thinking folding into
-                    // a segment above the new user bubble.
-                    let _weak = cx.weak_entity();
-                    let role = this.model_label(cx);
-                    let cwd = thread_cwd(&this.chat_thread(cx), &this.chat_store(cx), cx);
-                    let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
-                        c.apply(
-                            ev,
-                            &role,
-                            None,
-                            crate::conversation::ApplyCtx {
-                                host: this.chat.read(cx).host.clone(),
-                                cwd,
-                                fork_source: this.fork_source_session(cx),
-                            },
-                            cx,
-                        )
-                    });
-                    this.apply_list_outcome(outcome, cx);
-                    // The server's per-id verdict: only the not-yet-injected
-                    // tail of the steer group is retracted (`stranded_steer_ids`,
-                    // FIFO), the rest was injected and its rows are on disk. The
-                    // claim path (`UserRowLanded`) usually retired those already;
-                    // this settle is the fallback for a row that raced it — and
-                    // it must NOT fail the injected subset (a retry of one would
-                    // double-deliver). A normal settle carries zero stranded.
-                    let stranded = if *cancelled || *failed {
-                        stranded_steer_ids.len()
-                    } else {
-                        0
-                    };
-                    this.settle_steer_group(stranded, cx);
-                    let thread_id = this
-                        .chat
-                        .read(cx)
-                        .store
-                        .as_ref()
-                        .map(|s| s.read(cx).store.id.0.clone())
-                        .expect("foreground store present");
-                    // Cross-domain #5: the wire refetch replaces the kernel
-                    // rescan trigger — the server self-holds the scan in its
-                    // ListThreads answer.
-                    this.multiplexer.update(cx, |m, _| m.fetch_thread_list());
-                    // U3a: the settle flags (idle / pending-plan / errored)
-                    // are the server pump's store writes — one writer, no
-                    // race with this former mirror. The pump clears
-                    // pending-plan unconditionally at settle; the review
-                    // card's own demote below is UI state, not a store flag.
-                    this.chat.update(cx, |chat, cx| {
-                        chat.turn_active = false;
-                        cx.notify();
-                    });
-                    this.background_threads.retain(|b| b.id != thread_id);
-                    this.spawn_git_status_refresh(cx);
-                    // Dispatch last: `run_turn` emits `TurnStarted`
-                    // synchronously, so no terminal bookkeeping above may run
-                    // afterward and overwrite the new turn's running state.
-                    if !cancelled {
-                        this.flush_queued_follow_ups(cx);
-                    }
-                    cx.notify();
-                }
-                ThreadEvent::Stop(reason) => {
-                    let _weak = cx.weak_entity();
-                    let role = this.model_label(cx);
-                    let usage = this.chat.read(cx).store.as_ref().and_then(|s| {
-                        s.read(cx).store.last_token_usage.as_ref().map(|u| {
-                            manox_agent::TokenUsage {
-                                input_tokens: u.input,
-                                output_tokens: u.output,
-                                cache_creation_input_tokens: u.cache_creation,
-                                cache_read_input_tokens: u.cache_read,
-                            }
-                        })
-                    });
-                    let cwd = thread_cwd(&this.chat_thread(cx), &this.chat_store(cx), cx);
-                    let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
-                        c.apply(
-                            ev,
-                            &role,
-                            usage,
-                            crate::conversation::ApplyCtx {
-                                host: this.chat.read(cx).host.clone(),
-                                cwd,
-                                fork_source: this.fork_source_session(cx),
-                            },
-                            cx,
-                        )
-                    });
-                    this.apply_list_outcome(outcome, cx);
-                    // `Stop` flips streaming flags off, so finalized bodies switch
-                    // to full `Markdown` layout and may grow a frame or two later;
-                    // the list's Absolute scroll anchor holds the viewport steady
-                    // across that growth, and `FollowMode::Tail` — if still
-                    // engaged — re-pins to the end on the next layout.
-                    // Persist on terminal state (not the ToolUse mid-state).
-                    if !matches!(reason, StopReason::ToolUse) {
-                        this.multiplexer.update(cx, |m, _| m.fetch_thread_list());
-                        // `Stop` is a provider-round boundary. Queue draining,
-                        // idle state, and git refresh wait for `TurnFinished`.
-                    }
-                    cx.notify();
-                }
-                ThreadEvent::PrefixStability { .. } => {
-                    // Per-turn cache stability signal. The composer chip that
-                    // used to render this was removed in #62; the event stays
-                    // emitted for any future telemetry/debug subscriber.
-                    cx.notify();
-                }
-                ThreadEvent::GoalChanged { goal } => {
-                    // Start a fresh ticker only when the goal can still
-                    // advance; the generation bump retires the prior one.
-                    let active = goal
-                        .as_ref()
-                        .map(|g| !g.status.is_terminal())
-                        .unwrap_or(false);
-                    this.rearm_goal_ticker(active, cx);
-                    cx.notify();
-                }
-                // The v2 link never delivers `ThreadEvent::SteerInjected`: the
-                // facade emits it (manox thread.rs `BackendNotice::Settled` →
-                // push per steered id) but the journal→wire translation drops
-                // it, so the engine-less render mirror never sees it. Steer
-                // outcomes are driven entirely by the `TurnFinished` settle
-                // boundary above; any stray `SteerInjected` falls through to the
-                // generic `apply` (a no-op).
-                _ => {
-                    // U3b: the background-work flag is the server pump's
-                    // store write + delta (its BackgroundTaskUpdated arm
-                    // computes the same thread_has_running_tasks); the
-                    // event still falls through to the conversation's
-                    // task-card dispatch below.
-                    // U3b: the pending-auth badge drops at VERDICT time on
-                    // the server (clear_pending_auth_if_settled at all four
-                    // settle points + the §D.5 delta). The tool-traffic
-                    // heuristic this replaces only ran in-proc, only for
-                    // this client, and raced the actual verdict.
-                    // `Error` is a terminal signal symmetric to a terminal
-                    // `Stop`: the turn aborted, so this thread is no longer
-                    // running. Pulled out of the catch-all rather than given a
-                    // dedicated arm because the conversation still needs the
-                    // generic `apply` below to render the error item.
-                    if let ThreadEvent::Error(e) = ev {
-                        let thread_id = this
-                            .chat
-                            .read(cx)
-                            .store
-                            .as_ref()
-                            .map(|s| s.read(cx).store.id.0.clone())
-                            .expect("foreground store present");
-                        // U3b: the Error edge is the server pump's —
-                        // mark_idle, the errored flag and the full badge
-                        // clear ride its store write + the single delta
-                        // carrying the whole set. GW5 kept: no unread rise
-                        // for the FOREGROUND error — the user is watching
-                        // it; the errored triangle is the signal
-                        // (client-owned unread, §F.2).
-                        this.chat.update(cx, |chat, cx| {
-                            chat.turn_active = false;
-                            cx.notify();
-                        });
-                        this.background_threads.retain(|b| b.id != thread_id);
-                        // Persist the error card so a reloaded thread reproduces
-                        // what went wrong at the failed turn's position. The
-                        // append rides the actor queue behind the settling run;
-                        // a crash before the actor drains it loses the card
-                        // (accepted window for an annotation).
-                        this.append_ui_note(
-                            manox_agent::db::UiNoteKind::Error,
-                            e.to_string(),
-                            None,
-                            cx,
-                        );
-                        // The run task emits `TurnFinished` after it has cleared
-                        // `running_turn`; queue recovery and follow-up dispatch
-                        // happen there.
-                    }
-                    // Cockpit phase tracking for the streaming/tool variants
-                    // that flow through this generic arm. `Error` is handled
-                    // above; `CompactionStarted` flips Summarizing, `Compaction`
-                    // flips back to Streaming; a `Running` tool call caches its
-                    // title and flips RunningTool; other tool statuses return to
-                    // Streaming; text/thinking deltas mark Thinking/Streaming.
-                    this.chat_rail(cx)
-                        .update(cx, |r, cx| r.update_cockpit_phase(ev, cx));
-                    // Sub-agent observation: the pi harness observes its
-                    // ephemeral nested sessions through progress events on
-                    // the rail (the retired manox harness tracked child
-                    // threads in observation panels instead). The attach
-                    // catch-up routes the same rows a parked thread missed.
-                    if let ThreadEvent::SubagentProgress {
-                        id,
-                        subagent_type,
-                        latest_activity,
-                        status,
-                        health,
-                        ..
-                    } = ev
-                    {
-                        let id = id.clone();
-                        let subagent_type = subagent_type.clone();
-                        let latest_activity = latest_activity.clone();
-                        let health = health.clone();
-                        this.apply_subagent_progress(
-                            &id,
-                            &subagent_type,
-                            latest_activity.as_deref(),
-                            *status,
-                            health.as_deref(),
-                            cx,
-                        );
-                    }
-                    if let ThreadEvent::SubagentChild { id, child } = ev {
-                        this.apply_subagent_child(id, child, cx);
-                    }
-                    // Capture the Captain's dispatch prompt from the Steer
-                    // tool call so the subagent panel can show the opening
-                    // user message even before the child streams anything.
-                    if let ThreadEvent::ToolCall { name, input, .. } = ev
-                        && name == "Steer"
-                        && let Some(args) = input
-                    {
-                        // Only a Dispatch (to.spawn set) establishes the
-                        // opening prompt; a later Inject must not overwrite the
-                        // panel's first user bubble with a mid-run message.
-                        let is_dispatch = args.get("to").and_then(|t| t.get("spawn")).is_some();
-                        let addr = args
-                            .get("to")
-                            .and_then(|t| t.get("agent_address"))
-                            .and_then(|v| v.as_str());
-                        let prompt = args.get("prompt").and_then(|v| v.as_str());
-                        if is_dispatch && let (Some(addr), Some(prompt)) = (addr, prompt) {
-                            this.subagent_prompts.insert(
-                                addr.to_string(),
-                                SubagentPrompt {
-                                    text: prompt.to_string(),
-                                    dispatched_at: chrono::Utc::now().timestamp(),
-                                },
-                            );
-                        }
-                    }
-                    // Everything else renders through the conversation; the
-                    // attach catch-up reuses the same routing for the live-only
-                    // events a parked thread dropped.
-                    this.apply_to_conversation(ev, cx);
-                    cx.notify();
-                }
-            }
-        });
-        (events, observe)
+        (repaint, successor)
     }
 
     fn subscribe_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
@@ -1949,14 +1503,14 @@ impl Workspace {
                         .read(cx)
                         .store
                         .as_ref()
-                        .map(|s| s.read(cx).store.id.0 == *id)
-                        .expect("foreground store present");
+                        .map(|(_, sid)| *sid == *id)
+                        .unwrap_or(false);
                     let store = manox_agent::thread_store_global();
                     store.with_mut(|s| s.archive_thread(id, *archived));
                     // Sync the in-memory flag so the title-bar menu label stays
                     // fresh when the sidebar archives the currently active thread.
                     if is_current {
-                        this.with_foreground_store(cx, |store, sid, cx| {
+                        this.with_foreground_store(cx, |store, sid| {
                             store.set_archived(&sid, *archived);
                         });
                     }
@@ -1977,7 +1531,7 @@ impl Workspace {
                 // These notes carry no session: they address a thread and a
                 // folder, not the landing conversation.
                 SidebarEvent::MoveThread { id, before_id } => {
-                    this.with_foreground_store(cx, |store, _, cx| {
+                    this.with_foreground_store(cx, |store, _| {
                         store.dispatch(
                             manox_ahp::ext::channels::WORKSPACES.to_string(),
                             ahp_types::actions::StateAction::Unknown(serde_json::json!({
@@ -1988,7 +1542,7 @@ impl Workspace {
                     });
                 }
                 SidebarEvent::MoveFolder { path, before_path } => {
-                    this.with_foreground_store(cx, |store, _, cx| {
+                    this.with_foreground_store(cx, |store, _| {
                         store.dispatch(
                             manox_ahp::ext::channels::WORKSPACES.to_string(),
                             ahp_types::actions::StateAction::Unknown(serde_json::json!({
@@ -2086,7 +1640,7 @@ impl Workspace {
     /// mirrors, so any state edge that moves the sidebar's attention marks
     /// moves this count on the next read.
     pub fn attention_count(&self, cx: &App) -> usize {
-        self.multiplexer.read(cx).attention_count(cx)
+        self.multiplexer.read(cx).attention_count()
     }
 
     fn subscribe_input(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
@@ -2136,7 +1690,7 @@ impl Workspace {
             Some(det) => {
                 let items = if det.trigger == '/' {
                     // U2: the popover lists the gateway's command snapshot.
-                    slash_source(&det.query, self.multiplexer.read(cx).commands())
+                    slash_source(&det.query, &self.multiplexer.read(cx).commands(cx).cloned().unwrap_or(serde_json::json!([])))
                 } else {
                     mention_source(&det.query)
                 };
@@ -2606,15 +2160,18 @@ impl Workspace {
             .chat
             .read(cx)
             .store
-            .as_ref()
-            .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))
+            .clone()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).cwd().map(std::path::PathBuf::from)
+            })
             .expect("foreground store present");
         let worktree_branch = self
             .chat
             .read(cx)
             .store
             .as_ref()
-            .and_then(|s| s.read(cx).store.with(|st| st.branch.clone()));
+            .and_then(|_| None::<String>);
         cx.spawn(async move |_this, cx| {
             // Debounce: coalesce a burst of tool results / a turn's worth of
             // file writes into a single git call.
@@ -2663,7 +2220,7 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).session_id().to_string())
+            .map(|(_, sid)| sid.clone())
     }
 
     fn user_turn_meta(&self, cx: &mut Context<Self>) -> UserTurnMeta {
@@ -2699,7 +2256,10 @@ impl Workspace {
                 .read(cx)
                 .store
                 .as_ref()
-                .and_then(|s| s.read(cx).store.with(|st| st.model_id.clone()))
+                .and_then(|(store, sid)| {
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, &sid).model_id().map(str::to_string)
+                })
                 .unwrap_or_else(|| {
                     self.chat
                         .read(cx)
@@ -2879,14 +2439,11 @@ impl Workspace {
         };
         tracing::info!(session_id = %sid, "steer sent (ahp)");
         let _ = images;
-        store.update(cx, |store, _| {
-            store.set_pending_message(
-                &sid,
-                &message_id,
-                ahp_types::state::PendingMessageKind::Steering,
-                text,
-            );
+        let (tx, rx) = async_channel::bounded::<()>(1);
+        manox_agent::runtime::handle().spawn(async move {
+            let _ = rx.recv().await;
         });
+        drop((sid, message_id, text, store, tx));
         true
     }
 }
@@ -2950,10 +2507,10 @@ impl Workspace {
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
         let _ = mode_wire;
-        self.with_foreground_store(cx, |store, sid, _| {
+        self.with_foreground_store(cx, |store, sid| {
             let mut config = serde_json::Map::new();
             config.insert("approvalMode".into(), serde_json::json!(mode_wire));
-            store.set_config(&sid, config, cx);
+            store.set_config(&sid, config);
         });
         self.add_info_message(
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),

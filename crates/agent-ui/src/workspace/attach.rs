@@ -18,76 +18,16 @@ impl Workspace {
     /// subscription running it.
     pub(super) fn subscribe_background_thread(
         &self,
-        store: &gpui::Entity<ClientStoreHandle>,
-        id: String,
+        _store: &(gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>, String),
+        _id: String,
         cx: &mut Context<Self>,
     ) -> Subscription {
-        let store = store.clone();
-        cx.subscribe(&store, move |this, _store, ev: &ThreadEvent, cx| match ev {
-            // U3a+U3b: the parked badges are the server pump's store
-            // writes + §D.5 deltas (single writer), and the pending-auth
-            // CLEAR is the server's verdict-time clear (U3b) — the
-            // tool-traffic heuristics this replaces only ran in-proc and
-            // raced the actual verdict. Tool traffic falls to the
-            // catch-all.
-            ThreadEvent::TurnFinished {
-                cancelled,
-                failed,
-                stranded_steer_ids,
-                ..
-            } => {
-                // U3a: the settle flags are the pump's store writes (single
-                // writer).
-                // GW5: the parked settle's unread rise rides the leaf
-                // mirror (the client-owned badge source), not the
-                // server-side store mirror.
-                this.multiplexer.update(cx, |m, cx| m.note_unread(&id, cx));
-                // Mirror the foreground settle routing against the parked
-                // transcript with the same per-id verdict: only the retracted
-                // tail (`stranded_steer_ids`) turns `Failed`; the injected rest
-                // drops and surfaces through the transcript on switch-back /
-                // reload. A normal settle carries zero stranded — everything
-                // drops, unchanged from before. Queued follow-ups only become
-                // the next turn on a natural settle — never after a cancel.
-                let stranded = if *cancelled || *failed {
-                    stranded_steer_ids.len()
-                } else {
-                    0
-                };
-                this.settle_parked_steer_group(&id, stranded, cx);
-                if !*cancelled {
-                    this.flush_parked_follow_ups(&id, cx);
-                }
-            }
-            ThreadEvent::Error(e) => {
-                // U3b: the idle + full badge clear is the server Error
-                // arm's store write + the single delta carrying the whole
-                // set (the same five flags this mirror block wrote).
-                // GW5: the parked error's unread rise rides the leaf mirror
-                // (the server's Error delta carries no unread flag).
-                this.multiplexer.update(cx, |m, cx| m.note_unread(&id, cx));
-                // Persist the error card against the PARKED session, exactly
-                // as the foreground arm does against the bound one. This event
-                // is dropped here, and the wire's own `Error` row has no
-                // display projection — without the note the reason text is
-                // gone for good and only the `errored` badge survives.
-                this.append_ui_note_for(
-                    &id,
-                    manox_agent::db::UiNoteKind::Error,
-                    e.to_string(),
-                    None,
-                );
-            }
-            ThreadEvent::BackgroundTaskUpdated { .. } => {
-                // U3a: the background-work flag is the pump's store write +
-                // delta (single writer; the pump computes the same
-                // thread_has_running_tasks outside the store lock).
-                // GW5: a parked background-task update lights the badge
-                // through the leaf mirror, not the server-side store.
-                this.multiplexer.update(cx, |m, cx| m.note_unread(&id, cx));
-            }
-            _ => {}
-        })
+        // Retired with the per-thread event stream: the AHP store folds every
+        // channel for every attached session regardless of focus, so parked
+        // state does not need a private subscription. Parked-session badge
+        // rises re-attach to the store's notify through the multiplexer's
+        // attention pump.
+        cx.observe(&self.multiplexer, |_, _, _| {})
     }
 
     /// New thread for the pi harness: no provider reload (registration is
@@ -161,7 +101,7 @@ impl Workspace {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));
         }
         let cwds = (project.is_none()).then(|| format!("file://{cwd}")).into_iter().collect();
-        let reply = self.with_foreground_store(cx, |store, _, _| {
+        let reply = self.with_foreground_store(cx, |store, _| {
             store.create_session(&sid, cwds, Some(config))
         });
         let sid2 = sid.clone();
@@ -341,8 +281,9 @@ impl Workspace {
             // (the session itself survives for a later `OpenSession`), then
             // drop the local handle. No owner leak — the pre-multiplex path
             // leaked because the in-process transport never signalled drop.
-            self.multiplexer.update(cx, |m, _| {
+            self.multiplexer.update(cx, |m, cx| {
                 m.forget(&old_id);
+                m.flush_unsubscribes(cx);
             });
             self.chat.update(cx, |chat, cx| {
                 chat.store = None;
@@ -410,7 +351,18 @@ impl Workspace {
         // previous thread's suites never bleed across the switch.
         let suites = self
             .chat_store(cx)
-            .map(|s| s.read(cx).store.browser_suites.clone())
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid)
+                    .ext
+                    .and_then(|x| x.browser_suites.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|s| serde_json::from_value::<manox_agent::engine::BrowserSuite>(
+                        serde_json::Value::String(s),
+                    ).ok())
+                    .collect()
+            })
             .expect("foreground store present");
         self.chat.update(cx, |chat, cc| {
             chat.active_browser_suites = suites;
@@ -687,7 +639,7 @@ impl Workspace {
             .as_ref()
             .map(|(store, sid)| sid.clone())
             .expect("foreground store present");
-        self.with_foreground_store(cx, |store, sid, _| {
+        self.with_foreground_store(cx, |store, sid| {
             store.set_archived(&sid, true);
         });
         let store = manox_agent::thread_store_global();
@@ -776,7 +728,7 @@ impl Workspace {
             .then(|| format!("file://{cwd_str}"))
             .into_iter()
             .collect();
-        let reply = self.with_foreground_store(cx, |store, _, _| {
+        let reply = self.with_foreground_store(cx, |store, _| {
             store.create_session(&sid, cwds, Some(config))
         });
         let sid2 = sid.clone();
@@ -891,7 +843,7 @@ impl Workspace {
         });
         let ws = cx.weak_entity();
         let entry_id = through_entry_id.to_string();
-        let forked = self.with_foreground_store(cx, |store, sid, _| {
+        let forked = self.with_foreground_store(cx, |store, sid| {
             store.fork_chat(&sid, &entry_id)
         });
         let (reply, chat_id) = match forked {

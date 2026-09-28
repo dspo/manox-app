@@ -112,7 +112,7 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.id.0.clone())
+            .map(|(_, sid)| sid.clone())
             .expect("foreground store present");
         let persisted = self.persisted_right_pane(cx);
         let json = match serde_json::to_string(&persisted) {
@@ -401,7 +401,14 @@ impl Workspace {
             );
             return None;
         };
-        let cwd = std::path::PathBuf::from(store.read(cx).store.cwd.clone());
+        let cwd = {
+            let (store, sid) = (&store.0, &store.1);
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, sid)
+                .cwd()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+        };
         if cwd.as_os_str().is_empty() {
             None
         } else {
@@ -692,19 +699,11 @@ impl Workspace {
     /// reload when no live transcript was accumulated. T10c: reads the v2
     /// display fold (the message rows ARE the transcript).
     pub(super) fn agent_final_text(&self, id: &str, cx: &App) -> Option<String> {
-        use manox_agent::language_model::MessageContent;
-        self.chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.derived_messages())
-            .expect("foreground store present")
-            .iter()
-            .flat_map(|m| m.content.iter())
-            .find_map(|c| match c {
-                MessageContent::ToolResult(r) if r.tool_use_id == id => Some(r.content.clone()),
-                _ => None,
-            })
+        // Tool-result text is inside the transcript's tool calls now; the
+        // reload backfill reads them off the same fold. Not wired on this
+        // pass — the pane falls back to live state.
+        let _ = (id, cx);
+        None
     }
 
     /// Drop per-thread sub-agent observation state and close its tabs.
@@ -811,7 +810,10 @@ impl Workspace {
                 .read(cx)
                 .store
                 .as_ref()
-                .map(|s| s.read(cx).store.running)
+                .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid).running()
+            })
                 .expect("foreground store present"),
             self.chat.read(cx).pending_ask.is_some(),
             &text,
@@ -832,7 +834,7 @@ impl Workspace {
         self.sync_list_count(cx);
         self.follow_message_tail(cx);
         let _ = self.send_submit_v2(text.clone(), Vec::new(), cx);
-        self.multiplexer.update(cx, |m, _| m.fetch_thread_list());
+        self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
         self.editor_state.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });

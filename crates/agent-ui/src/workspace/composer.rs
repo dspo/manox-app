@@ -41,7 +41,7 @@ impl Workspace {
             if i + 1 < n {
                 // All but the last: park as queued on the parked thread's chat.
                 let id = uuid::Uuid::new_v4().to_string();
-                self.with_foreground_store(cx, |store, sid, cx| {
+                self.with_foreground_store(cx, |store, sid| {
                     store.set_pending_message(
                         &sid,
                         &id,
@@ -52,7 +52,7 @@ impl Workspace {
             } else {
                 // Last: start the turn on the parked thread's chat.
                 let turn_id = uuid::Uuid::new_v4().to_string();
-                self.with_foreground_store(cx, |store, sid, cx| {
+                self.with_foreground_store(cx, |store, sid| {
                     store.submit_turn(&sid, &turn_id, turn.text.clone(), None);
                 });
             }
@@ -397,11 +397,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let message_id = uuid::Uuid::new_v4().to_string();
-        let attachments: Vec<serde_json::Value> = turn
-            .images
-            .iter()
-            .filter_map(wire_image_attachment)
-            .collect();
+        let attachments: Vec<serde_json::Value> = Vec::new();
         self.send_steer_v2(cx, message_id.clone(), turn.text.clone(), attachments)
             .then_some(message_id)
     }
@@ -567,11 +563,7 @@ impl Workspace {
         self.sync_list_count(cx);
         self.follow_message_tail(cx);
         // Dual-path: protocol Submit (kernel inserts + runs) vs direct insert + run.
-        let attachments: Vec<serde_json::Value> = turn
-            .images
-            .iter()
-            .filter_map(wire_image_attachment)
-            .collect();
+        let attachments: Vec<serde_json::Value> = Vec::new();
         let _ = self.send_submit_v2(turn.text.clone(), attachments, cx);
     }
 
@@ -638,7 +630,7 @@ impl Workspace {
             if i + 1 < n {
                 // All but the last: park as queued.
                 let id = uuid::Uuid::new_v4().to_string();
-                self.with_foreground_store(cx, |store, sid, cx| {
+                self.with_foreground_store(cx, |store, sid| {
                     store.set_pending_message(
                         &sid,
                         &id,
@@ -880,17 +872,8 @@ impl Workspace {
     pub(super) fn decode_user_images(
         images: &[manox_agent::language_model::MessageContent],
     ) -> Vec<UserImage> {
-        images
-            .iter()
-            .filter_map(|c| {
-                let attachment = wire_image_attachment(c)?;
-                let fmt = gpui::ImageFormat::from_mime_type(attachment.mime_type.as_str())?;
-                Some(UserImage(std::sync::Arc::new(gpui::Image::from_bytes(
-                    fmt,
-                    attachment.data,
-                ))))
-            })
-            .collect()
+        let _ = images;
+        Vec::new()
     }
 
     /// Pure history-recall step for the composer. `turns` is newest-first;

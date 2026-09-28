@@ -829,9 +829,11 @@ impl Workspace {
                         .as_ref()
                         .and_then(|(store, sid)| {
                             let view = store.read(cx);
-                            crate::ahp_store::leaf(&view.book, sid).reasoning_effort()
+                            crate::ahp_store::leaf(&view.book, &sid)
+                                .reasoning_effort()
+                                .map(str::to_string)
                         })
-                        .and_then(parse_effort)
+                        .and_then(|e| parse_effort(&e))
                         .expect("foreground store present");
                     let workspace = cx.entity().downgrade();
                     // U2: the menu lists the gateway's model-registry
@@ -967,7 +969,7 @@ impl Workspace {
                                 // `{provider}/{model}` ref, so a pick pins the
                                 // exact endpoint (wire variants of one model
                                 // share the bare id).
-                                this.with_foreground_store(cx, |store, sid, cx| {
+                                this.with_foreground_store(cx, |store, sid| {
                                     let mut config = serde_json::Map::new();
                                     config.insert(
                                         "model".into(),
@@ -976,7 +978,7 @@ impl Workspace {
                                             model.provider, model.id
                                         )),
                                     );
-                                    store.set_config(&sid, config, cx);
+                                    store.set_config(&sid, config);
                                 });
                             });
                         }),
@@ -1025,10 +1027,10 @@ impl Workspace {
                             manox_agent::language_model::ReasoningEffort::High => "high",
                             manox_agent::language_model::ReasoningEffort::Max => "max",
                         };
-                        this.with_foreground_store(cx, |store, sid, cx| {
+                        this.with_foreground_store(cx, |store, sid| {
                             let mut config = serde_json::Map::new();
                             config.insert("reasoningEffort".into(), serde_json::json!(effort_str));
-                            store.set_config(&sid, config, cx);
+                            store.set_config(&sid, config);
                         });
                     });
                 }),
@@ -1338,12 +1340,11 @@ impl Workspace {
                                     .small()
                                     .label(pause_label)
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.with_foreground_store(cx, |store, sid, cx| {
+                                        this.with_foreground_store(cx, |store, sid| {
                                             let reply =
                                                 store.send_goal(&sid, "pause", None, None, None);
                                             let _ = manox_agent::runtime::handle()
                                                 .block_on(async { let _ = reply.recv().await; });
-                                            cx.notify();
                                         });
                                     })),
                             )
@@ -1361,12 +1362,11 @@ impl Workspace {
                                     .small()
                                     .label(resume_label)
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.with_foreground_store(cx, |store, sid, cx| {
+                                        this.with_foreground_store(cx, |store, sid| {
                                             let reply =
                                                 store.send_goal(&sid, "resume", None, None, None);
                                             let _ = manox_agent::runtime::handle()
                                                 .block_on(async { let _ = reply.recv().await; });
-                                            cx.notify();
                                         });
                                     })),
                             )
@@ -1477,11 +1477,10 @@ impl Workspace {
                             .small()
                             .label(clear_label)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.with_foreground_store(cx, |store, sid, cx| {
+                                this.with_foreground_store(cx, |store, sid| {
                                     let reply = store.send_goal(&sid, "clear", None, None, None);
                                     let _ = manox_agent::runtime::handle()
                                         .block_on(async { let _ = reply.recv().await; });
-                                    cx.notify();
                                 });
                                 this.chat.update(cx, |chat, cx| {
                                     chat.goal_popover_open = false;

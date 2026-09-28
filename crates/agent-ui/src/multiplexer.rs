@@ -28,6 +28,8 @@ pub struct SessionMultiplexer {
     focused: Option<String>,
     /// Local unread flags keyed by session id (GW5).
     unread: HashMap<String, bool>,
+    /// Unsubscribes deferred for a Context-bearing call site.
+    unsubscribe_queue: Vec<String>,
 }
 
 impl SessionMultiplexer {
@@ -38,6 +40,7 @@ impl SessionMultiplexer {
             cwd,
             attached: Vec::new(),
             focused: None,
+            unsubscribe_queue: Vec::new(),
             unread: HashMap::new(),
         }
     }
@@ -90,6 +93,14 @@ impl SessionMultiplexer {
         reply
     }
 
+    /// Drain deferred unsubscribes (call from a Context-bearing site).
+    pub fn flush_unsubscribes(&mut self, cx: &mut Context<Self>) {
+        let uris = std::mem::take(&mut self.unsubscribe_queue);
+        for uri in uris {
+            self.store.update(cx, |store, _| store.unsubscribe(uri));
+        }
+    }
+
     /// Detach (unsubscribe) a session — the park leg of a thread switch.
     pub fn forget(&mut self, session_id: &str) {
         self.attached.retain(|id| id != session_id);
@@ -98,8 +109,7 @@ impl SessionMultiplexer {
             self.focused = None;
         }
         let uri = session_uri(session_id);
-        self.store
-            .update(|store: &mut AhpStore, _| store.unsubscribe(uri));
+        self.unsubscribe_queue.push(uri);
     }
 
     /// The client-owned focus (GW5).
@@ -191,7 +201,7 @@ impl SessionMultiplexer {
     }
 
     /// The command catalogue payload (verbatim `x-manox-commands://` state).
-    pub fn commands(&self, cx: &App) -> Option<&serde_json::Value> {
+    pub fn commands<'a>(&self, cx: &'a App) -> Option<&'a serde_json::Value> {
         self.store
             .read(cx)
             .book
@@ -200,12 +210,20 @@ impl SessionMultiplexer {
     }
 
     /// The workspace catalogue payload (verbatim `x-manox-workspaces://`).
-    pub fn workspaces(&self, cx: &App) -> Option<&serde_json::Value> {
+    pub fn workspaces<'a>(&self, cx: &'a App) -> Option<&'a serde_json::Value> {
         self.store
             .read(cx)
             .book
             .catalogues
             .get(manox_ahp::ext::channels::WORKSPACES)
+    }
+
+    /// The workspace row accounting a session: the catalogue channel no
+    /// longer carries per-session ownership, so there is none — callers
+    /// fall back to the row's own project path.
+    pub fn workspace_of_session(&self, _session_id: &str, cx: &App) -> Option<()> {
+        let _ = cx;
+        None
     }
 
     /// Refresh the sidebar catalogue from the host.
