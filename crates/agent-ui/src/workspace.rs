@@ -395,7 +395,7 @@ pub struct Workspace {
     pub(crate) multiplexer: gpui::Entity<crate::multiplexer::SessionMultiplexer>,
     /// T-D: the shared app-level client used by the fire-and-forget
     /// `send_note` and `Reply` verdict paths (no per-session connection).
-    pub(crate) client: std::sync::Arc<manox_session_core::agent_client::AgentClient>,
+    pub(crate) client: (),
     /// Threads that were running when the user switched away (U6b⑤: the
     /// turn runs server-side and survives the switch on its own — the park
     /// keeps the session ATTACHED so the reclaim re-attaches in place with
@@ -712,6 +712,20 @@ pub(crate) struct ExternalSpawn {
 }
 
 impl Workspace {
+    /// Run `f` with the foreground session's AHP store and id. The single
+    /// write seam for chips/composer surfaces that used to send v2 notes.
+    pub(crate) fn with_foreground_store(
+        &self,
+        cx: &mut gpui::Context<Self>,
+        f: impl FnOnce(&mut manox_agent_chat_ui::ahp_store::AhpStore, String, &mut gpui::Context<Self>),
+    ) {
+        let pair = self.chat.read(cx).store.clone();
+        let Some((store, sid)) = pair else {
+            return;
+        };
+        store.update(cx, |store, cx| f(store, sid, cx));
+    }
+
     // Entity-handle accessors for ChatColumn fields: each returns a cloned
     // handle so callers can `.update(cx, …)` without holding the chat
     // entity's read guard across a mutable borrow of `cx`.
@@ -753,35 +767,26 @@ impl Workspace {
             cwd = home;
         }
         // L11: the process-global server — every window and the embedded
-        // web UI share one AgentServer (one ownership/routing table).
-        let agent_server = manox_session_core::agent_server::global(cwd.clone());
-        // The landing thread id doubles as its AgentServer session id
-        // (`CreateSession` uses the session id as the `ThreadId`), so the
-        // thread the workspace renders and the thread the server drives are
-        // the same conversation.
+        // web UI share one AgentServer (one ownership/routing table). Its
+        // construction installs the AHP runtime builder; the store then
+        // dials the host over the in-proc leg.
+        let _agent_server = manox_session_core::agent_server::global(cwd.clone());
+        let ahp_store = cx.new(|cx| {
+            manox_agent_chat_ui::ahp_store::AhpStore::connect(cwd.clone(), cx)
+        });
+        // The landing session id is client-minted (the createSession
+        // idempotency key), so the session the workspace renders and the one
+        // the server drives are the same conversation.
         let landing_id = uuid::Uuid::new_v4().to_string();
-        let thread =
-            Thread::landing_with_id(manox_agent::ThreadId(landing_id.clone()), cwd.clone());
-        let client = std::sync::Arc::new(manox_session_core::agent_client::AgentClient::connect(
-            &agent_server,
-            "desktop",
-            vec![
-                manox_protocol::AnswerKind::Approve,
-                manox_protocol::AnswerKind::AskUserQuestion,
-            ],
-            vec![],
-        ));
         let multiplexer =
-            cx.new(|cx| crate::multiplexer::SessionMultiplexer::with_client(client.clone(), cx));
+            cx.new(|_| crate::multiplexer::SessionMultiplexer::new(ahp_store.clone(), cwd.clone()));
         let (store, session_id) = {
             let session_id = landing_id.clone();
             let store = multiplexer.update(cx, |m, cx| {
-                let handle =
-                    m.open_or_create(&session_id, cwd.to_str().unwrap_or_default(), false, cx);
+                m.create_session(&session_id, cx);
                 // GW5: the landing session is the focused one from tick
-                // one — its leaf suppresses unread rises while attached.
+                // one — its row suppresses unread rises while attached.
                 m.set_focused(Some(&session_id), cx);
-                handle
             });
             (store, session_id)
         };

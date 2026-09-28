@@ -892,6 +892,38 @@ impl AhpStore {
         self.dispatch(session_uri(session_id), action);
     }
 
+    /// Compact the session's history through the `x-manox/compact` command.
+    pub fn send_compact(&self, session_id: &str, instructions: Option<String>) -> Reply {
+        self.call(
+            "x-manox/compact",
+            serde_json::json!({
+                "channel": session_uri(session_id),
+                "instructions": instructions,
+            }),
+        )
+    }
+
+    /// Apply one goal lifecycle action through the `x-manox/goal` command.
+    pub fn send_goal(
+        &self,
+        session_id: &str,
+        action: &str,
+        objective: Option<String>,
+        budget: Option<u64>,
+        max_rounds: Option<u64>,
+    ) -> Reply {
+        self.call(
+            "x-manox/goal",
+            serde_json::json!({
+                "channel": session_uri(session_id),
+                "action": action,
+                "objective": objective,
+                "budget": budget,
+                "maxRounds": max_rounds,
+            }),
+        )
+    }
+
     /// Fork the session's chat at a completed turn.
     pub fn fork_chat(&self, session_id: &str, turn_id: &str) -> Reply {
         self.call(
@@ -1001,6 +1033,17 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
     }
 }
 
+/// The call id of a confirmation-state tool call (pending / pending-result).
+fn confirmation_tool_call_id(call: &ahp_types::state::ToolCallConfirmationState) -> &str {
+    match call {
+        ahp_types::state::ToolCallConfirmationState::PendingConfirmation(c) => &c.tool_call_id,
+        ahp_types::state::ToolCallConfirmationState::PendingResultConfirmation(c) => {
+            &c.tool_call_id
+        }
+        ahp_types::state::ToolCallConfirmationState::Unknown(_) => "",
+    }
+}
+
 impl LeafView<'_> {
     /// The session's display title (AHP keeps it on both channel states).
     pub fn display_title(&self) -> Option<&str> {
@@ -1055,6 +1098,44 @@ impl LeafView<'_> {
     pub fn input_needed(&self) -> bool {
         self.session
             .is_some_and(|s| s.input_needed.as_ref().is_some_and(|v| !v.is_empty()))
+    }
+
+    /// The open input-request list, when any.
+    pub fn requests(&self) -> &[ahp_types::state::SessionInputRequest] {
+        self.session
+            .and_then(|s| s.input_needed.as_deref())
+            .unwrap_or(&[])
+    }
+
+    /// The tool confirmation whose request id is `id`:
+    /// `(chat id, turn id, tool call id)`.
+    pub fn confirmation(&self, id: &str) -> Option<(String, String, String)> {
+        self.requests().iter().find_map(|r| match r {
+            ahp_types::state::SessionInputRequest::ToolConfirmation(c) if c.id == id => {
+                Some((
+                    crate::ahp_store::id_of(&c.chat).to_string(),
+                    c.turn_id.clone(),
+                    confirmation_tool_call_id(&c.tool_call).to_string(),
+                ))
+            }
+            _ => None,
+        })
+    }
+
+    /// The chat-input (elicitation) request whose id is `id`:
+    /// `(chat id, request)`.
+    pub fn chat_input(&self, id: &str) -> Option<(String, &ahp_types::state::ChatInputRequest)> {
+        self.requests().iter().find_map(|r| match r {
+            ahp_types::state::SessionInputRequest::ChatInput(c) if c.id == id => {
+                Some((crate::ahp_store::id_of(&c.chat).to_string(), &c.request))
+            }
+            _ => None,
+        })
+    }
+
+    /// The session goal (verbatim payload).
+    pub fn goal(&self) -> Option<&Value> {
+        self.ext.and_then(|x| x.goal.as_ref())
     }
 }
 

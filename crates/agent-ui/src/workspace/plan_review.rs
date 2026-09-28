@@ -37,7 +37,7 @@ impl Workspace {
         store.update(cx, |store, _| {
             store.dispatch(
                 format!("{}{sid}", manox_ahp::ext::channels::PLAN),
-                ahp::StateAction::Unknown(serde_json::json!({
+                ahp_types::actions::StateAction::Unknown(serde_json::json!({
                     "type": manox_ahp::ext::actions::PLAN_MODE_CHANGED,
                     "enabled": enabled,
                 })),
