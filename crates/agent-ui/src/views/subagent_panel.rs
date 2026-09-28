@@ -77,7 +77,7 @@ fn thread_event_of(child: &SubagentChildEvent) -> Option<(ThreadEvent, Option<To
     }
 }
 
-pub(crate) struct SubagentPanel {
+pub struct SubagentPanel {
     /// The sub-agent's task topic — the panel's second-level banner. The
     /// right-pane tab label shows the subagent's address instead.
     topic: String,

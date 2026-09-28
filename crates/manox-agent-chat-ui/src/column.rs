@@ -464,6 +464,10 @@ pub struct ChatColumn {
     /// at the pinned revision does not invalidate off-screen row heights when
     /// this changes, so the application explicitly remeasures the cache.
     pub message_list_width: crate::views::MessageListWidthInvalidator,
+    /// Exact width of the conversation card from the previous prepaint — the
+    /// width every card-relative budget (the rail's fit gate, the turn
+    /// navigator's panel) is computed from, never the window's.
+    pub card_width: crate::views::CardWidth,
     /// Cached `items().len()`; the event handler reconciles the list count via
     /// `splice` whenever the conversation grows or shrinks.
     pub list_count: usize,

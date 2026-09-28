@@ -176,13 +176,11 @@ impl Workspace {
         let new_id = new_thread.read(|t| t.id.0.clone());
 
         // Sub-agent observation is per-thread ephemeral state; drop the
-        // outgoing thread's panels and transcripts before rebinding.
+        // outgoing thread's transcripts AND its live panels before rebinding
+        // (the shell has not stashed the outgoing pane yet — that happens in
+        // the assembly's observer, after this attach — so the panels closed
+        // here are exactly the outgoing thread's).
         self.clear_subagent_observation(cx);
-        // The right pane belongs to a thread: stash the outgoing pane (live
-        // tabs, active index, visibility) to the in-session map + threads.db
-        // before the incoming thread rebinds. Subagent tabs were already
-        // stripped above, so the stash never carries ephemeral entries.
-        self.stash_right_pane(old_id.clone(), cx);
 
         // Save the outgoing thread's unsent composer text before switching, so
         // a draft survives a round-trip through another thread (Bug 1). A
@@ -199,13 +197,6 @@ impl Workspace {
             cx.notify();
         });
         self.end_recall_walk(cx);
-        // The editor pane is a right-side resource of the outgoing thread:
-        // stash its text so a switch-back restores the draft (mirrors the
-        // composer `drafts` stash above).
-        self.editor_drafts.insert(
-            old_id.clone(),
-            self.editor_state.read(cx).value().to_string(),
-        );
 
         // Queue state is session-local but belongs to a thread, not to the
         // currently visible workspace. Move it aside before rebinding.
@@ -481,17 +472,6 @@ impl Workspace {
         self.chat_input(cx)
             .update(cx, |s, cx| s.set_value(saved, window, cx));
         self.sync_completion(window, cx);
-        // Restore the incoming thread's stashed editor draft, or clear the
-        // pane so the previous thread's text never bleeds into this one.
-        // `set_value` is silent (no Change event), so the editor's submit
-        // binding is unaffected.
-        let editor_saved = self.editor_drafts.remove(&new_id).unwrap_or_default();
-        self.editor_state
-            .update(cx, |s, cx| s.set_value(editor_saved, window, cx));
-        // Restore the incoming thread's right pane: the in-session stash,
-        // else the threads.db snapshot; a thread with neither gets the empty
-        // hidden pane.
-        self.restore_right_pane(&new_id, window, cx);
         // Reveal the latest turn for the new thread: `reset` drops the old
         // thread's measured heights and scroll position, then reveal the latest
         // turn once. Both running and completed threads arm `FollowMode::Tail`:
@@ -595,8 +575,6 @@ impl Workspace {
         // subscription drops all of it, and none of it has a display
         // projection, so the rebuild above cannot reproduce it.
         self.catch_up_live_only_state(cx);
-        self.sidebar
-            .update(cx, |s, cx| s.set_selected(Some(id.clone()), cx));
         // The user is now viewing this thread: clear any unread red dot it
         // carried from a prior background completion, and any pending-auth
         // badge. Re-surfacing a parked interaction rides the re-own above: the
@@ -614,11 +592,7 @@ impl Workspace {
         // The incoming thread's cwd / worktree may differ from the outgoing
         // one; refresh the rail's git stats/branch display for it.
         self.spawn_git_status_refresh(cx);
-        // Returning to a thread leaves the external-session view: without this
-        // the render still takes the ExternalSession branch and the swapped-in
-        // thread is invisible behind the terminal TUI.
         self.view_mode = ViewMode::Workspace;
-        self.active_external = None;
         cx.notify();
     }
 

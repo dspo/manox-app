@@ -97,6 +97,11 @@ pub fn init_harness(cx: &mut TestAppContext) {
         manox_agent::provider_glue::init();
         manox_agent::thread_store::init();
     });
+    // The AgentServer replies to the gpui store pump across threads on the
+    // real tokio runtime; that legitimate cross-thread wake is flagged by the
+    // deterministic test scheduler unless parking is allowed — without this
+    // the test flakes (the tokio reply lands while the pump is parked).
+    cx.background_executor.allow_parking();
 }
 
 /// Open the production workspace shell and return the window + workspace.

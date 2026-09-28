@@ -41,6 +41,39 @@ impl MessageListWidthInvalidator {
     }
 }
 
+/// The conversation card's own width, recorded at prepaint by the host.
+///
+/// Layout budgets that must not be spent on the shell's furniture read this
+/// instead of `window.bounds()`: the shell's sidebar and right pane are
+/// siblings of the card, so the window width overstates the card by whatever
+/// they claim — enough to mis-gate the context rail and to size the turn
+/// navigator's panel wider than the card. `None` until the first prepaint, so
+/// callers fall back to the window width for exactly one frame.
+#[derive(Clone, Default)]
+pub struct CardWidth {
+    last_width: Rc<Cell<Option<Pixels>>>,
+}
+
+impl CardWidth {
+    /// Record this frame's measured card width. Returns `true` when it moved
+    /// by more than half a pixel — the caller then schedules one more frame so
+    /// the budgets computed from the stale value converge immediately.
+    /// Sub-pixel jitter is ignored, and a non-positive width is not a
+    /// measurement (an unlaid-out frame).
+    pub fn set(&self, width: Pixels) -> bool {
+        if width <= px(0.) {
+            return false;
+        }
+        let previous = self.last_width.replace(Some(width));
+        previous.is_none_or(|previous| (previous - width).abs() > px(0.5))
+    }
+
+    /// The last measured card width, when one has been laid out.
+    pub fn get(&self) -> Option<Pixels> {
+        self.last_width.get()
+    }
+}
+
 /// Wrap content in a full-width, centered container that adapts to the
 /// window width (no cap — the host dropped the fixed content width so wide
 /// windows get the full span).

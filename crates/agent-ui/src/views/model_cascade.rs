@@ -3,13 +3,11 @@
 //! Models are the multiplexer's wire `ModelInfo` rows (U2 cross-domain #4 —
 //! the former `provider_glue` direct read retired): filtered by the agent id
 //! (the registration's `agents` column, absent = visible to all); grouped by
-//! provider display name, each provider a nested submenu. A config model
-//! registered through several wire apis appears once per wire endpoint (exact
-//! duplicates collapse), each row tagged with its wire api like the composer
-//! model menu. Picking a model invokes `on_pick` with (provider, model id,
-//! wire) — the emitted model id is the raw cx config key (`config_id`,
-//! falling back to the model id), which cx matches verbatim; the wire key
-//! pins the endpoint variant at launch resolution.
+//! provider display name. A config model registered through several wire
+//! apis appears once per wire endpoint (exact duplicates collapse). The
+//! emitted model id is the raw cx config key (`config_id`, falling back to
+//! the model id), which cx matches verbatim; `wire` pins the endpoint variant
+//! at launch resolution.
 
 use crate::i18n;
 use gpui::{App, Context, Window, prelude::*};
@@ -25,7 +23,6 @@ use gpui_component::{
 pub(crate) struct CascadeEntry {
     pub config_id: String,
     pub display: String,
-    pub api: String,
     pub wire: Option<String>,
 }
 

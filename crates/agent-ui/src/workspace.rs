@@ -10,59 +10,48 @@
 //! Enter in the input box → append a user message + run_turn + persist (the sidebar shows the new entry immediately).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::PathBuf;
 
 use crate::i18n;
-use crate::views::launcher::LauncherPick;
+use gpui::ClickEvent;
 use gpui::DismissEvent;
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Context, Entity, FollowMode,
-    ListAlignment, ListOffset, ListState, MouseButton, Pixels, Render, ScrollHandle, SharedString,
-    Subscription, WeakEntity, Window, anchored, deferred, ease_out_quint, prelude::*, px,
+    Anchor, AnyElement, App, Context, Entity, FollowMode, ListAlignment, ListOffset, ListState,
+    MouseButton, Pixels, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
+    anchored, deferred, prelude::*, px,
 };
-use gpui::{ClickEvent, CursorStyle, DragMoveEvent, MouseUpEvent};
 /// Shared across both harnesses: workspace struct fields hold
 /// `Option<Entity<PopupMenu>>` regardless of feature.
 use gpui_component::menu::PopupMenu;
 use gpui_component::{
     ActiveTheme as _, ColorName, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _,
-    Size, TITLE_BAR_HEIGHT, Theme, TitleBar,
+    Size, Theme,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
-    input::{
-        Editor, EditorState, Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState,
-    },
+    input::{Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState},
     v_flex,
 };
 use gpui_component::{
     ThemeStyled as _,
     menu::PopupMenuItem,
-    tab::{Tab, TabBar},
-    tag::TagVariant,
+    tag::{Tag, TagVariant},
 };
 /// `WindowExt::push_notification` + `Notification` are shared: the
 /// ChatGPT.app launch path (#410) reports outcomes under either harness.
 use gpui_component::{WindowExt as _, notification::Notification, tooltip::Tooltip};
 use manox_agent::PermissionDecision;
+use manox_agent::language_model::StopReason;
 use manox_agent::thread::PermissionMode;
 use manox_agent::thread_engine::BrowserTabId;
-use manox_agent::{Thread, ThreadId};
-use manox_components::markdown::HeadingMode;
-use manox_components::markdown::Markdown;
-use serde::{Deserialize, Serialize};
-use std::rc::Rc;
+use manox_agent::{Thread, ThreadEvent, ThreadId};
 
-use crate::cockpit::format_elapsed;
+use crate::OpenSettings;
+use crate::ToggleTurnNavigator;
+use crate::client_store_handle::ClientStoreHandle;
+use crate::cockpit::{CockpitPhase, format_elapsed};
+#[cfg(feature = "test-support")]
 use crate::conversation::ConvItem;
-use crate::conversation::{ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
-use crate::external_session::{
-    ExternalSession, ResumeSidecar, SessionKind, SessionPlacement, claude_cwd_from_file_head,
-    claude_project_dir_for_cwd, claude_session_id_from_file_name, codex_session_id_from_rollout,
-    codex_sessions_dir, list_nested_jsonl, list_sidecars, list_top_level_jsonl,
-    merge_external_summaries, new_file_names, remove_sidecar, resume_args, write_sidecar,
-};
+use crate::conversation::{ApplyOutcome, ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
 use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
@@ -75,16 +64,7 @@ use crate::views::composer_menu::{
 };
 use crate::views::popup_menu;
 use crate::views::settings::{SettingsEvent, SettingsView};
-use crate::views::sidebar::{Sidebar, SidebarEvent};
 use crate::views::turn_navigator::{TurnNavigator, TurnNavigatorEvent, collect_user_turns};
-use crate::{
-    CloseBrowserTab, CloseTerminalTab, FocusTerminal, NewTerminalTab, OpenBrowserTab,
-    ToggleTurnNavigator,
-};
-use crate::{FocusConversation, OpenSettings};
-use manox_terminal::Terminal;
-use terminal_ui::TerminalView;
-use terminal_ui::terminal_proxy::TerminalProxy;
 
 mod attach;
 mod catch_up;
@@ -123,20 +103,12 @@ fn goal_popover_row(label: &str, value: &str, fg: gpui::Hsla, muted: gpui::Hsla)
 /// `Workspace` itself would double-lease. `None` only when the path is empty.
 fn thread_cwd(
     thread: &manox_agent::thread::ThreadHandle,
-    store: &Option<(
-        gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
-        String,
-    )>,
+    store: &Option<gpui::Entity<ClientStoreHandle>>,
     cx: &App,
 ) -> Option<SharedString> {
     let cwd = store
         .as_ref()
-        .and_then(|(store, sid)| {
-            let view = store.read(cx);
-            crate::ahp_store::leaf(&view.book, sid)
-                .cwd()
-                .map(std::path::PathBuf::from)
-        })
+        .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))
         .unwrap_or_else(|| thread.read(|t| t.cwd().to_path_buf()));
     if cwd.as_os_str().is_empty() {
         None
@@ -253,79 +225,20 @@ fn build_permission_content(
 mod composer;
 mod external;
 mod plan_review;
-mod right_pane;
-
-/// A tab in the right observation pane. `Editor` is the markdown composer
-/// (Write/Preview); `Launcher` is the empty-tab launcher offering the
-/// built-in browser / terminal / CLI-agent views; `Browser(id)` is an
-/// untrusted embedded webview (see [`BrowserView`]); `Session(id)` embeds an
-/// [`ExternalSession`]'s terminal (plain PTY or CLI agent TUI).
-#[derive(Clone, Debug)]
-enum RightTab {
-    Editor,
-    Launcher,
-    Browser(BrowserTabId),
-
-    /// A pi sub-agent's observation panel, keyed by subagent address.
-    Subagent(String),
-    /// An embedded terminal/CLI-agent session, keyed by `ExternalSession.id`.
-    Session(String),
-}
-
-/// Persisted shape of a thread's right-pane state — one row per thread in
-/// `threads.db` (`thread_right_pane`). The UI layer owns this shape; the db
-/// stores opaque TEXT. Subagent tabs are ephemeral by design and never
-/// serialized.
-#[derive(Serialize, Deserialize)]
-struct PersistedRightPane {
-    visible: bool,
-    active: usize,
-    tabs: Vec<PersistedRightTab>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum PersistedRightTab {
-    Editor,
-    Launcher,
-    Browser { url: String },
-
-    Session { id: String },
-}
-
-/// In-session per-thread right-pane stash: the live tabs (browser views
-/// keep their entities across switches), the active index, and visibility.
-/// The persistent copy lives in `threads.db`.
-struct RightPaneSnapshot {
-    tabs: Vec<RightTab>,
-    active: usize,
-    visible: bool,
-}
+mod subagent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerPlacement {
-    Hidden,
     Hero,
     Footer,
 }
 
-fn composer_placement(editor_open: bool, first_screen: bool) -> ComposerPlacement {
-    if editor_open {
-        ComposerPlacement::Hidden
-    } else if first_screen {
+fn composer_placement(first_screen: bool) -> ComposerPlacement {
+    if first_screen {
         ComposerPlacement::Hero
     } else {
         ComposerPlacement::Footer
     }
-}
-
-fn editor_can_submit(
-    history_loading: bool,
-    running: bool,
-    has_pending_ask: bool,
-    text: &str,
-) -> bool {
-    !history_loading && !running && !has_pending_ask && !text.trim().is_empty()
 }
 
 /// Key context for the composer wrapper. `completion = open` shadows the
@@ -361,10 +274,7 @@ struct SubagentPrompt {
 /// disposes while parked — the reclaim is an in-place re-attach, no reopen.
 struct BackgroundThread {
     id: String,
-    store: Option<(
-        gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
-        String,
-    )>,
+    store: Option<gpui::Entity<ClientStoreHandle>>,
     session_id: Option<String>,
     _sub: Subscription,
 }
@@ -380,19 +290,14 @@ enum RegistryTurnKind {
 // The chat-column state types moved to manox-agent-chat-ui's `column`
 // module (Phase 2 tail); these re-exports keep every bare/`super::` name in
 // the workspace family resolving unchanged.
+pub(crate) use manox_agent_chat_ui::column::parse_pending_ask;
 pub use manox_agent_chat_ui::column::{
     AskIntent, AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState,
-    PendingAsk, PendingAuth, QueuedFollowUp, parse_pending_ask,
+    PendingAsk, PendingAuth, QueuedFollowUp,
 };
 
 pub struct Workspace {
     pub(crate) cwd: PathBuf,
-    /// Dual-shell embed (PLAN Phase 4 tranche 3): true when this workspace
-    /// is mounted as the chrome shell's main surface — render then produces
-    /// ONLY the conversation column (the chrome shell owns gutter, sidebar,
-    /// card chrome, and right pane). Fixed at construction; the legacy
-    /// full-shell path is the default.
-    pub(crate) embedded: bool,
     /// The chat column's state (thread face, conversation, composer, ask
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
@@ -403,72 +308,19 @@ pub struct Workspace {
     pub(crate) multiplexer: gpui::Entity<crate::multiplexer::SessionMultiplexer>,
     /// T-D: the shared app-level client used by the fire-and-forget
     /// `send_note` and `Reply` verdict paths (no per-session connection).
-    /// (retired: the protocol client lives in the AhpStore)
-    #[allow(dead_code)]
-    pub(crate) client: (),
+    pub(crate) client: std::sync::Arc<manox_session_core::agent_client::AgentClient>,
     /// Threads that were running when the user switched away (U6b⑤: the
     /// turn runs server-side and survives the switch on its own — the park
     /// keeps the session ATTACHED so the reclaim re-attaches in place with
     /// no reopen, and the parked subscription keeps the settle unread, the
     /// plan-review stash and the follow-up stash coordinated).
     background_threads: Vec<BackgroundThread>,
-    pub(crate) sidebar: Entity<Sidebar>,
     /// Distinct bound-project paths of the active summaries, in list order
     /// (the project chip's "recent, unregistered" section; U2 push cache).
     /// Registered project folders (chip menu + the sidebar grouping push).
     /// Repaint observer on the multiplexer's list/registry state (U2): its
     /// notify drives the sidebar rows and the workspace's model surfaces.
     _mux_lists: gpui::Subscription,
-    /// Per-thread right-side editor text, keyed by thread id. The editor pane
-    /// is a right-side resource of the thread it was written for: switching
-    /// away stashes the outgoing text, switching back restores it, so no
-    /// thread ever sees another thread's draft and returning recovers the
-    /// text. Mirrors `drafts` (the composer's per-thread stash).
-    editor_drafts: HashMap<String, String>,
-    /// Right-side markdown composer; opened via the `ToggleEditor` shortcut.
-    /// Plain-text edit mode by default; `ToggleEditorPreview` switches to a
-    /// rendered markdown preview (`Markdown`).
-    editor_state: Entity<EditorState>,
-    /// Whether the Editor tab is the active right-pane tab. Drives the inline
-    /// composer hide (writing happens in the side panel) and the env/hero
-    /// gates.
-    editor_open: bool,
-    editor_preview: bool,
-    /// Stable markdown preview entity kept across renders so the source is
-    /// only re-parsed when the draft changes (not every frame).
-    editor_preview_md: Option<Entity<Markdown>>,
-    /// Explicit pixel-anchored scroll state for the preview column. Mirrors the
-    /// message-list pattern: an explicit handle (not entity-state scroll) keeps
-    /// the offset stable and defaulting to the top, and a `flex_1`-sized (not
-    /// `h_full`-percentage) scroll container reliably engages `overflow_y_scroll`
-    /// instead of letting content overflow and clip.
-    editor_preview_scroll: ScrollHandle,
-    /// Peer right-pane tabs for the editor, launcher, browser, sub-agent
-    /// observers, and embedded terminal/CLI sessions. `editor_open` tracks
-    /// whether the Editor tab specifically is active.
-    right_tabs: Vec<RightTab>,
-    active_right_tab: usize,
-    /// Right-pane visibility gate, orthogonal to the tab list: hiding the pane
-    /// keeps every tab (and its state) alive for the next toggle. Closing the
-    /// last tab hides the pane; the TitleBar toggle restores the tabs.
-    right_pane_visible: bool,
-    /// Per-thread right-pane stash for in-session round trips; the persistent
-    /// copy lives in `threads.db` (`thread_right_pane`).
-    right_pane_by_thread: HashMap<String, RightPaneSnapshot>,
-    /// The tab currently under the mouse — the close `×` reveals on hover.
-    hovered_right_tab: Option<usize>,
-    /// Generation counter for the browser page-title ticker; bumped when the
-    /// last browser tab closes so the prior ticker self-terminates.
-    browser_title_ticker_gen: u64,
-    /// Provider→model cascade opened from the Launcher's CLI-agent rows.
-    /// Created on open, destroyed on close (the model-selector pattern).
-    launcher_menu: Option<Entity<PopupMenu>>,
-    launcher_menu_sub: Option<Subscription>,
-    /// The CLI agent kind the open launcher cascade belongs to — anchors the
-    /// popup under its launcher row.
-    launcher_menu_kind: Option<SessionKind>,
-    /// Live sub-agent observation panels keyed by Agent tool-call id.
-    subagent_panels: HashMap<String, Entity<crate::views::subagent_panel::SubagentPanel>>,
     /// Accumulated child-session events per Agent tool-call id, so a panel
     /// opened mid-run backfills from the start.
     subagent_transcripts: HashMap<String, Vec<manox_agent::SubagentChildEvent>>,
@@ -486,19 +338,6 @@ pub struct Workspace {
     /// tab switches; dropped when the tab closes, which detaches the native
     /// view via [`manox_webview::webview::WebView`]'s `Drop`.
     pub(crate) browser_views: BTreeMap<BrowserTabId, Entity<BrowserView>>,
-    /// Editor pane width, driven by dragging the divider. In-memory only.
-    editor_width: Pixels,
-    /// Sidebar width, driven by dragging the divider on its right edge.
-    /// In-memory only; never persisted so the user's drag state stays
-    /// session-local.
-    sidebar_width: Pixels,
-    /// Sidebar collapse gate (the TitleBar's panel-left toggle): collapsed
-    /// hides the sidebar slot and its resize handle so the main card takes
-    /// the full width; the remembered `sidebar_width` survives the round
-    /// trip. In-memory only, like the width.
-    sidebar_visible: bool,
-    sidebar_sub: Option<Subscription>,
-    editor_sub: Option<Subscription>,
     /// Top-level view mode. `Settings` replaces the entire window content
     /// with the SettingsView overlay until the user requests exit.
     view_mode: ViewMode,
@@ -516,93 +355,22 @@ pub struct Workspace {
     /// cost when the user never opens Settings.
     settings_view: Option<Entity<SettingsView>>,
     settings_sub: Option<Subscription>,
-    /// The terminal tab's view, lazily created on the first `FocusTerminal` /
-    /// `NewTerminalTab`. `None` until then. Dropped on `CloseTerminalTab`.
-    terminal_view: Option<Entity<TerminalView>>,
-    /// Live external agent CLI sessions (claude / codex / copilot) launched from
-    /// the sidebar `+` menu. In-memory only — never persisted. Each owns its
-    /// `TerminalView` plus a shared `Arc<SessionHandle>` so the close path can
-    /// `kill` the agent explicitly.
-    pub(crate) external_sessions: Vec<crate::external_session::ExternalSession>,
-    /// Unclosed external sessions from previous runs, restored from their
-    /// sidecars at startup. Rendered in the sidebar as resumable rows; clicking
-    /// one re-spawns the CLI with its resume flag. Never auto-resumed.
-    resumable_external: Vec<ResumeSidecar>,
-    /// Ids of resumable rows whose CLI re-spawn is in flight; the sidebar
-    /// shows a loading indicator on each such row. A set (not a single slot)
-    /// so resuming two rows concurrently cannot steal each other's spinner.
-    resuming_external: std::collections::HashSet<String>,
-    /// Conversation file names already claimed by a live session's CLI-session
-    /// watcher, keyed by watched directory — concurrent watchers on the same
-    /// directory (two sessions in one cwd) can never claim the same file.
-    cli_session_claims: std::collections::HashMap<PathBuf, std::collections::HashSet<String>>,
-    /// The currently-displayed external session id when
-    /// `view_mode == ExternalSession`. Mirrors `terminal_view`'s "one at a
-    /// time" model; switching away parks the session (its terminal keeps
-    /// running) rather than killing it.
-    active_external: Option<String>,
 }
 
-/// Top-level rendering mode of the Workspace window. `Settings` and
-/// `Terminal` are full-pane switches off the default `Workspace` (conversation)
-/// mode; `ExternalSession` shows an external agent CLI's TUI terminal in place
-/// of the conversation. Future overlays can extend this enum rather than
-/// carrying parallel `bool` flags.
+/// Top-level rendering mode of the app page. `Settings` is a main-column swap
+/// off the conversation; every other surface (terminal, browser, external
+/// session, sub-agent panel) is a shell surface — a right-pane tab or the
+/// bottom dock — and never a view mode.
 #[derive(Default)]
 enum ViewMode {
     #[default]
     Workspace,
     Settings,
-    Terminal,
-    ExternalSession,
 }
 
-/// Right-side composer width. Wide enough for rendered markdown
-/// (headings, lists, code blocks) alongside the 1100px window.
-const EDITOR_PANEL_WIDTH: f32 = 640.;
-const EDITOR_MIN_WIDTH: f32 = 320.;
-const EDITOR_MAX_WIDTH: f32 = 960.;
-/// Fixed width of every right-pane tab: long labels cap + ellipsis instead
-/// of stretching the bar.
-const RIGHT_TAB_WIDTH: f32 = 160.;
-/// Character cap for right-pane tab labels; longer labels end in `…` and the
-/// full text rides the tab's tooltip.
-const RIGHT_TAB_LABEL_CAP: usize = 16;
-
-/// Cap a right-pane tab label at [`RIGHT_TAB_LABEL_CAP`] chars + `…`.
-fn cap_tab_label(label: &str) -> String {
-    let mut chars = label.chars();
-    let head: String = chars.by_ref().take(RIGHT_TAB_LABEL_CAP).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
-    }
-}
-/// Width of the drag handle between the message column and the right side
-/// view (the editor pane).
-const EDITOR_DIVIDER_WIDTH: f32 = 6.;
-// Mirrors `views/sidebar.rs` (`Sidebar` renders at `w(px(SIDEBAR_WIDTH))`).
-// Kept here so the editor pane's resize clamp can reserve space for the
-// sidebar + main column without depending on the sidebar's internals.
-const SIDEBAR_WIDTH: f32 = 260.;
-const SIDEBAR_MIN_WIDTH: f32 = 200.;
-const SIDEBAR_MAX_WIDTH: f32 = 480.;
-/// Width of the invisible sidebar resize hot zone. It overlays the
-/// sidebar/card boundary as an absolute strip and claims no layout space —
-/// the two panels sit flush against each other.
-const SIDEBAR_DIVIDER_WIDTH: f32 = 6.;
-/// Gutter between the window edge and the shell content (the sidebar slot
-/// and the main card): wider on the left (the sidebar's seamless outer
-/// edge), tighter on the top/bottom/right card sides.
-const SHELL_PAD_LEFT: f32 = 10.;
-const SHELL_PAD_EDGE: f32 = 4.;
-
-/// The empty band the sidebar slot reserves at its top before any content:
+/// The empty band the session list reserves at its top before any content:
 /// macOS floats the traffic lights over it (28px), other platforms need only
-/// a small breathing inset (8px). Shared by the sidebar/settings-nav scroll
-/// bodies (`pt(top_inset)`) and the shell's sidebar window-drag zone, which
-/// must cover exactly this band and never the interactive rows below it.
+/// a small breathing inset (8px). Shared by the settings nav's scroll body.
 pub(crate) fn sidebar_top_inset() -> Pixels {
     if cfg!(target_os = "macos") {
         px(28.)
@@ -610,12 +378,13 @@ pub(crate) fn sidebar_top_inset() -> Pixels {
         px(8.)
     }
 }
+
 /// The main card's `border_1` on both edges; width budgets that measure
 /// card-interior space subtract this.
 const CARD_BORDER: f32 = 2.;
-/// Floor for the message column width when the right side view (editor
-/// pane) is dragged wide.
-const MAIN_MIN_WIDTH: f32 = 160.;
+
+/// The settings nav column's width inside the conversation card.
+const SETTINGS_NAV_WIDTH: f32 = 240.;
 
 /// Trailing overdraw for the message list: rows within this many pixels
 /// below the viewport are pre-measured so scrolling never pops an
@@ -629,26 +398,22 @@ struct TurnNavigatorLayout {
     panel_width: Pixels,
 }
 
-fn turn_navigator_layout(
-    window_width: Pixels,
-    sidebar_width: Pixels,
-    right_pane_width: Option<Pixels>,
-    show_context_rail: bool,
-) -> TurnNavigatorLayout {
-    // The overlay anchors to the shell root's padding box (gpui absolute
-    // positioning is CSS-style), so both insets carry the shell gutter plus
-    // the card's 1px border on their side.
-    let left_inset = px(SHELL_PAD_LEFT) + sidebar_width + px(CARD_BORDER / 2.);
-    let right_pane_inset = right_pane_width
-        .map(|width| width + px(EDITOR_DIVIDER_WIDTH))
-        .unwrap_or(px(0.));
+fn turn_navigator_layout(card_width: Pixels, show_context_rail: bool) -> TurnNavigatorLayout {
+    // The overlay anchors to the conversation card's padding box (gpui
+    // absolute positioning is CSS-style), and it must fit INSIDE it: the card
+    // clips its children, so a panel sized from the window would be cut off on
+    // both sides whenever the shell's sidebar or right pane claims width. The
+    // card's own 1px border is the only furniture on either side here; the
+    // shell's sidebar and right pane live OUTSIDE the card, which is exactly
+    // why the caller passes the measured card width and never the window's.
+    let left_inset = px(CARD_BORDER / 2.);
     let context_inset = if show_context_rail {
         px(crate::views::context_rail::ENV_CONTENT_INSET)
     } else {
         px(0.)
     };
-    let right_inset = px(SHELL_PAD_EDGE) + px(CARD_BORDER / 2.) + right_pane_inset + context_inset;
-    let available = window_width - left_inset - right_inset - px(24.);
+    let right_inset = px(CARD_BORDER / 2.) + context_inset;
+    let available = card_width - left_inset - right_inset - px(24.);
     let panel_width = if available <= px(0.) {
         px(0.)
     } else if available < px(480.) {
@@ -664,34 +429,10 @@ fn turn_navigator_layout(
     }
 }
 
-/// Settings overlay slide duration. The enter animation glides the panel in
-/// from the left edge, the exit animation glides it out to the right.
-const SLIDE_MS: u64 = 180;
 /// The Exit handler in `subscribe_settings` waits this long before flipping
-/// `view_mode` back to `Workspace`, giving the exit animation time to play.
-/// Set slightly above `SLIDE_MS` so the last frame is not popped mid-tween.
+/// `view_mode` back to `Workspace`, giving the outgoing page a frame to
+/// settle before the swap.
 const SLIDE_OUT_MS: u64 = 200;
-
-/// Drag payload for the editor pane divider. Doubles as the invisible drag
-/// ghost view, mirroring the `DraggedDock` drag-ghost pattern.
-struct DraggedEditorDivider;
-
-impl Render for DraggedEditorDivider {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::Empty
-    }
-}
-
-/// Drag payload for the sidebar divider. Same shape as the editor divider's
-/// payload; the two are distinguished by type so their drag-move handlers
-/// can each run only on the matching payload.
-struct DraggedSidebarDivider;
-
-impl Render for DraggedSidebarDivider {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::Empty
-    }
-}
 
 enum RecallDirection {
     Up,
@@ -709,34 +450,14 @@ enum RecallStep {
     Clear,
 }
 
-/// The cascade selection backing [`Workspace::spawn_external_session`]; one
-/// struct keeps the spawn entry point under clippy's argument cap.
-pub(crate) struct ExternalSpawn {
-    kind: SessionKind,
-    provider_name: String,
-    model_id: String,
-    /// Cx wire key pinning the endpoint variant (`anthropic` /
-    /// `responses` / `completions`); `None` = default derivation.
-    wire_api: Option<String>,
-    project_cwd: Option<PathBuf>,
-}
-
 impl Workspace {
-    /// Run `f` with the foreground session's AHP store and id. The single
-    /// write seam for chips/composer surfaces that used to send v2 notes.
-    pub(crate) fn with_foreground_store<R>(
-        &self,
-        cx: &mut gpui::Context<Self>,
-        f: impl FnOnce(&mut manox_agent_chat_ui::ahp_store::AhpStore, String) -> R,
-    ) -> Option<R> {
-        let pair = self.chat.read(cx).store.clone()?;
-        let (store, sid) = pair;
-        Some(store.update(cx, |store, _| f(store, sid)))
+    // Entity-handle accessors for ChatColumn fields: each returns a cloned
+    // handle so callers can `.update(cx, …)` without holding the chat
+    // entity's read guard across a mutable borrow of `cx`.
+    pub(crate) fn chat_thread(&self, cx: &App) -> manox_agent::thread::ThreadHandle {
+        self.chat.read(cx).thread.clone()
     }
-    pub(crate) fn chat_store(
-        &self,
-        cx: &App,
-    ) -> Option<(Entity<manox_agent_chat_ui::ahp_store::AhpStore>, String)> {
+    pub(crate) fn chat_store(&self, cx: &App) -> Option<Entity<ClientStoreHandle>> {
         self.chat.read(cx).store.clone()
     }
     pub(crate) fn chat_conversation(&self, cx: &App) -> Entity<ConversationState> {
@@ -752,15 +473,6 @@ impl Workspace {
         self.chat.read(cx).context_rail.clone()
     }
 
-    /// The chrome-embed constructor: identical state machine and
-    /// subscriptions, flagged to render column-only inside the chrome
-    /// shell's main surface. [`Self::new`] stays the legacy full shell.
-    pub fn new_embedded(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut ws = Self::new(window, cx);
-        ws.embedded = true;
-        ws
-    }
-
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         // An unbound conversation must not inherit the launch terminal's
@@ -771,27 +483,36 @@ impl Workspace {
             cwd = home;
         }
         // L11: the process-global server — every window and the embedded
-        // web UI share one AgentServer (one ownership/routing table). Its
-        // construction installs the AHP runtime builder; the store then
-        // dials the host over the in-proc leg.
-        let _agent_server = manox_session_core::agent_server::global(cwd.clone());
-        let ahp_store =
-            cx.new(|cx| manox_agent_chat_ui::ahp_store::AhpStore::connect(cwd.clone(), cx));
-        // The landing session id is client-minted (the createSession
-        // idempotency key), so the session the workspace renders and the one
-        // the server drives are the same conversation.
+        // web UI share one AgentServer (one ownership/routing table).
+        let agent_server = manox_session_core::agent_server::global(cwd.clone());
+        // The landing thread id doubles as its AgentServer session id
+        // (`CreateSession` uses the session id as the `ThreadId`), so the
+        // thread the workspace renders and the thread the server drives are
+        // the same conversation.
         let landing_id = uuid::Uuid::new_v4().to_string();
+        let thread =
+            Thread::landing_with_id(manox_agent::ThreadId(landing_id.clone()), cwd.clone());
+        let client = std::sync::Arc::new(manox_session_core::agent_client::AgentClient::connect(
+            &agent_server,
+            "desktop",
+            vec![
+                manox_protocol::AnswerKind::Approve,
+                manox_protocol::AnswerKind::AskUserQuestion,
+            ],
+            vec![],
+        ));
         let multiplexer =
-            cx.new(|_| crate::multiplexer::SessionMultiplexer::new(ahp_store.clone(), cwd.clone()));
+            cx.new(|cx| crate::multiplexer::SessionMultiplexer::with_client(client.clone(), cx));
         let (store, session_id) = {
             let session_id = landing_id.clone();
-            multiplexer.update(cx, |m, cx| {
-                m.create_session(&session_id, cx);
+            let store = multiplexer.update(cx, |m, cx| {
+                let handle =
+                    m.open_or_create(&session_id, cwd.to_str().unwrap_or_default(), false, cx);
                 // GW5: the landing session is the focused one from tick
-                // one — its row suppresses unread rises while attached.
+                // one — its leaf suppresses unread rises while attached.
                 m.set_focused(Some(&session_id), cx);
+                handle
             });
-            let store = multiplexer.read(cx).store();
             (store, session_id)
         };
 
@@ -802,20 +523,6 @@ impl Workspace {
                 .placeholder(i18n::t("workspace-input-placeholder"))
         });
 
-        let editor_state = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("markdown")
-                .line_number(true)
-                .folding(false)
-                .soft_wrap(true)
-                .submit_on_enter(false)
-                .placeholder(i18n::t("workspace-composer-placeholder"))
-        });
-
-        let sidebar = cx.new(|cx| Sidebar::new(px(SIDEBAR_WIDTH), cx));
-        // U2 list source + GW5 badge source: rows are the multiplexer's wire
-        // list, and badges prefer the leaves' client-owned unread mirrors.
-        sidebar.update(cx, |s, _| s.bind_multiplexer(multiplexer.clone()));
         // U6a/U6b②: no store handle at all — the list refresh rides the
         // server's watcher broadcast, and the attach path is the landing
         // mirror (the wire owns the session state).
@@ -825,68 +532,34 @@ impl Workspace {
         // #1: the store-read decoration snapshot retired — the registry
         // rides the Projects mirror, the per-thread projects ride the rows).
         let _mux_lists = cx.observe(&multiplexer, |_, _, cx| cx.notify());
-        let recipient = manox_agent::MessageAuthor::Lead;
+        let recipient = thread.read(|t| t.self_author());
         let conversation = cx.new(|_| ConversationState::new(recipient));
-        let context_rail = {
-            let rail_store = (store.clone(), session_id.clone());
-            cx.new(|_| crate::views::context_rail::ContextRail::new(Some(rail_store)))
-        };
+        let context_rail =
+            { cx.new(|_| crate::views::context_rail::ContextRail::new(Some(store.clone()))) };
         let weak_ws = cx.weak_entity();
         let chat_host: manox_agent_chat_ui::host::ChatHostHandle =
             std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
         context_rail.update(cx, |r, _| r.set_host(chat_host.clone()));
 
         let mut ws = Self {
-            embedded: false,
-            cwd: cwd.clone(),
+            cwd,
             multiplexer,
-            client: (),
+            client,
             background_threads: Vec::new(),
-            sidebar,
             _mux_lists,
-            editor_drafts: HashMap::new(),
-            editor_state,
-            editor_open: false,
-            editor_preview: false,
-            editor_preview_md: None,
-            editor_preview_scroll: ScrollHandle::new(),
-            right_tabs: Vec::new(),
-            active_right_tab: 0,
-            right_pane_visible: false,
-            right_pane_by_thread: HashMap::new(),
-            hovered_right_tab: None,
-            browser_title_ticker_gen: 0,
-            launcher_menu: None,
-            launcher_menu_sub: None,
-            launcher_menu_kind: None,
-            subagent_panels: HashMap::new(),
             subagent_transcripts: HashMap::new(),
             subagent_final_text: HashMap::new(),
             subagent_prompts: HashMap::new(),
             browser_views: BTreeMap::new(),
-            editor_width: px(EDITOR_PANEL_WIDTH),
-            sidebar_width: px(SIDEBAR_WIDTH),
-            sidebar_visible: true,
-            sidebar_sub: None,
-            editor_sub: None,
             view_mode: ViewMode::default(),
             exiting_settings: false,
             settings_transition_gen: 0,
             settings_view: None,
             settings_sub: None,
-            terminal_view: None,
-            external_sessions: Vec::new(),
-            resumable_external: list_sidecars(),
-            resuming_external: std::collections::HashSet::new(),
-            cli_session_claims: std::collections::HashMap::new(),
-            active_external: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
-                thread: manox_agent::Thread::landing_with_id(
-                    manox_agent::ThreadId(session_id.clone()),
-                    cwd,
-                ),
-                store: Some((store, session_id.clone())),
+                thread,
+                store: Some(store),
                 session_id: Some(session_id),
                 git_status_gen: 0,
                 conversation: conversation.clone(),
@@ -936,6 +609,7 @@ impl Workspace {
                 conversation_sub: None,
                 list_state: ListState::new(0, ListAlignment::Bottom, MSG_LIST_OVERDRAW),
                 message_list_width: crate::views::MessageListWidthInvalidator::default(),
+                card_width: crate::views::CardWidth::default(),
                 list_count: 0,
                 goal_popover_open: false,
                 goal_ticker_gen: 0,
@@ -953,17 +627,12 @@ impl Workspace {
             chat.store_observe = Some(store_changes);
             cx.notify();
         });
-        ws.sidebar_sub = Some(ws.subscribe_sidebar(window, cx));
         let input_sub = ws.subscribe_input(window, cx);
         ws.chat.update(cx, |chat, cc| {
             chat.input_sub = Some(input_sub);
             cc.notify();
         });
-        ws.editor_sub = Some(ws.subscribe_editor(window, cx));
         ws.observe_conversation(cx);
-        // The sidebar lists the restored resumable rows from the first frame;
-        // nothing is resumed until the user clicks one.
-        ws.sync_sidebar_external(cx);
         // Focus the composer so typing works immediately on the hero screen.
         ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
         ws
@@ -1250,6 +919,22 @@ impl Workspace {
     /// what the live `Request` frame does. Diagnostic-only: lets tests drive
     /// the reply-leg bookkeeping without a wire round-trip.
     #[cfg(feature = "test-support")]
+    pub fn diagnostic_seed_store_pending_auth(
+        &mut self,
+        auth_id: &str,
+        msg_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(store) = self.chat.read(cx).store.clone() {
+            store.update(cx, |h, cx| {
+                h.store
+                    .pending_auth
+                    .insert(auth_id.to_string(), manox_protocol::MsgId::new(msg_id));
+                cx.notify();
+            });
+        }
+    }
+
     /// Merge a projection into the bound leaf store. Diagnostic-only: stands
     /// in for the gateway's `Projections` stream without a wire round-trip.
     #[cfg(feature = "test-support")]
@@ -1293,41 +978,134 @@ impl Workspace {
         });
     }
 
+    /// Rebuild the conversation view from the thread's v2 display fold. The
+    /// trigger is the follow stream's authoritative history boundary
+    /// (`WindowChange::Replace` → `ThreadEvent::HistoryRestored`, §D.1); the
+    /// T10c-era successor of the deleted `ThreadHistory` note replay.
+    pub(crate) fn rebuild_conversation_from_thread(&mut self, cx: &mut Context<Self>) {
+        let display: Vec<manox_agent::db::HistoryEntry> = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|s| s.read(cx).store.display.clone())
+            .expect("foreground store present");
+        let subagent_rows = manox_agent::subagent_restore::rebuild_from_messages(
+            &self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|s| s.read(cx).store.derived_messages())
+                .expect("foreground store present"),
+        );
+        let usage = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|s| {
+                s.read(cx)
+                    .store
+                    .per_request_usage
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            manox_agent::TokenUsage {
+                                input_tokens: v.input,
+                                output_tokens: v.output,
+                                cache_creation_input_tokens: v.cache_creation,
+                                cache_read_input_tokens: v.cache_read,
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .expect("foreground store present");
+        let role = self.model_label(cx);
+        let recipient = self.recipient_author(cx);
+        let _weak = cx.weak_entity();
+        let running = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|s| s.read(cx).store.running)
+            .expect("foreground store present");
+        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
+        // A rebuild from the thread is that session's journal replayed, so its
+        // rows may anchor forks.
+        let fork_source = self.fork_source_session(cx);
+        let new_conv = cx.new(|cx| {
+            ConversationState::rebuild_from_display(
+                &display,
+                &usage,
+                &role,
+                recipient,
+                running,
+                crate::conversation::ApplyCtx {
+                    host: self.chat.read(cx).host.clone(),
+                    cwd,
+                    fork_source,
+                },
+                cx,
+            )
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.conversation = new_conv;
+            cx.notify();
+        });
+        self.observe_conversation(cx);
+        let count = self.chat_conversation(cx).read(cx).items().len();
+        self.chat.update(cx, |chat, cx| {
+            chat.list_state.reset(count);
+            cx.notify();
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.list_count = count;
+            cx.notify();
+        });
+        // `Tail` natively pins to the end and keeps following; an upward user
+        // scroll disengages it and landing back at the bottom re-arms it.
+        self.chat
+            .read(cx)
+            .list_state
+            .set_follow_mode(FollowMode::Tail);
+        // Recover the settled sub-agent observation rows alongside the
+        // conversation: a restored transcript is the only record of runs that
+        // finished (or were killed) before the restart / switch.
+        self.apply_subagent_rows(subagent_rows, cx);
+        cx.notify();
+    }
+
     /// Wire the workspace to the foreground leaf: the `ThreadEvent` stream
     /// drives the conversation surface, and the entity-level observe repaints
     /// on projection-only frames (the mid-session chip updates — see the
     /// `store_observe` field note).
     fn subscribe_thread(&self, cx: &mut Context<Self>) -> (Subscription, Subscription) {
-        // v3: the per-thread `ThreadEvent` pump is gone — the AhpStore pump
-        // folds every channel and notifies. What remains here is the
-        // successor hand-off watch (a disposed session's redirect) riding an
-        // observe of the store entity; the conversation repaint reads the
-        // book on the notify (see the workspace-level store observe).
-        let Some((store, _)) = self.chat.read(cx).store.clone() else {
-            let a = cx.observe(&self.multiplexer, |_, _, _| {});
-            let b = cx.observe(&self.multiplexer, |_, _, _| {});
-            return (a, b);
-        };
-        let repaint = cx.observe(&store, |_, _, cx| cx.notify());
-        let successor = cx.observe(&store, |this, store, cx| {
-            // Identity hand-off: a disposed session records its successor;
-            // the foreground moves onto it at the next render (the switch
-            // needs a window).
-            let next = store.read(cx).book.sessions.values().find_map(|s| {
-                s.meta
-                    .as_ref()
-                    .and_then(|m| m.get("replacedBy"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            });
-            if let Some(next) = next
+        let store = self
+            .chat
+            .read(cx)
+            .store
+            .clone()
+            .expect("subscribe_thread requires the foreground store");
+        let observe = cx.observe(&store, |this, store, cx| {
+            // Identity hand-off: the predecessor's store records the
+            // successor when the disposal arrives; the foreground moves onto
+            // it at the next render (the switch needs a window).
+            if let Some(next) = store.read(cx).store.replaced_by.clone()
                 && this
                     .chat
                     .read(cx)
                     .store
                     .as_ref()
-                    .is_none_or(|(_, sid)| sid != &next)
+                    .is_none_or(|s| s.read(cx).session_id() != next)
             {
+                // One-shot: the signal is consumed here, so re-attaching the
+                // predecessor later cannot bounce the user back (review #39
+                // [sugg] 4).
+                store.update(cx, |handle, _| handle.store.replaced_by = None);
                 this.chat.update(cx, |chat, cx| {
                     chat.pending_successor = Some(next);
                     cx.notify();
@@ -1335,127 +1113,456 @@ impl Workspace {
             }
             cx.notify();
         });
-        (repaint, successor)
-    }
-
-    fn subscribe_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        let sidebar = self.sidebar.clone();
-        cx.subscribe_in(
-            &sidebar,
-            window,
-            |this, _sidebar, ev: &SidebarEvent, window, cx| match ev {
-                SidebarEvent::NewThread => this.start_new_thread(None, window, cx),
-                SidebarEvent::NewThreadWithProject(dir) => {
-                    this.start_new_thread(Some(dir.clone()), window, cx);
+        let events = cx.subscribe(&store, |this, _store, ev: &ThreadEvent, cx| {
+            match ev {
+                ThreadEvent::ToolCallAuthorization {
+                    id,
+                    tool_name,
+                    summary,
+                    input,
+                } => {
+                    // AskUserQuestion-shaped payloads surface as the question
+                    // card; everything else (a sandbox_permissions escalation
+                    // from Edit/Write, a malformed ask) surfaces as the
+                    // generic approval card — a parked thread must never wait
+                    // invisibly.
+                    //
+                    // Idempotent per (kind, id): the gateway re-delivers a
+                    // parked question on re-own (§D.6 replay), and re-churning
+                    // the card state here would wipe the walk a user is
+                    // mid-way through. Only the card row is re-adoption-safe
+                    // to (re-)ensure.
+                    if this
+                        .chat
+                        .read(cx)
+                        .pending_ask
+                        .as_ref()
+                        .is_some_and(|a| &a.id == id)
+                        || this
+                            .chat
+                            .read(cx)
+                            .pending_auth
+                            .as_ref()
+                            .is_some_and(|a| &a.id == id)
+                    {
+                        if this.chat.read(cx).pending_ask.is_some() {
+                            this.ensure_ask_tool_item(id, summary, input.clone(), cx);
+                        }
+                        return;
+                    }
+                    this.chat.update(cx, |chat, cx| {
+                        chat.pending_ask = parse_pending_ask(id.clone(), input.clone());
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cc| {
+                        chat.pending_auth = chat.pending_ask.is_none().then(|| PendingAuth {
+                            id: id.clone(),
+                            tool_name: tool_name.clone(),
+                            summary: summary.clone(),
+                        });
+                        cc.notify();
+                    });
+                    // Arming is per-card: a fresh adjudication has never been
+                    // confirmed in the leaf's `pending_auth` projection, so it
+                    // must not inherit the previous card's armed flag — mere
+                    // absence right after a Request frame is exactly the race
+                    // the arming guard exists for.
+                    this.chat.update(cx, |chat, cx| {
+                        chat.pending_projection_confirmed = false;
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cx| {
+                        chat.ask_step = 0;
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cc| {
+                        chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+                        cc.notify();
+                    });
+                    this.reset_ask_custom(cx);
+                    // Live synthesis: the question card appears in the
+                    // transcript on the same edge as the pending state —
+                    // never waiting on the journal's `tool_use` fold to
+                    // arrive through the stream (when it lagged or lost the
+                    // race against a thread switch, the ask was unrenderable
+                    // and the turn deadlocked).
+                    if this.chat.read(cx).pending_ask.is_some() {
+                        this.ensure_ask_tool_item(id, summary, input.clone(), cx);
+                    }
+                    this.chat_rail(cx).update(cx, |r, cx| {
+                        r.cockpit_phase = CockpitPhase::AwaitingApproval;
+                        cx.notify();
+                    });
+                    // U3a: the pending-auth badge is the server pump's
+                    // store write + SessionStatus delta (single writer,
+                    // §F.2) — a parked thread blocked on this authorization
+                    // keeps its badge through the pump, not through a
+                    // desktop mirror write that only raced it.
+                    cx.notify();
                 }
-                SidebarEvent::OpenThread(id) => this.open_thread(id.clone(), window, cx),
-                SidebarEvent::SpawnExternalSession(kind, provider, model, wire, project) => {
-                    this.spawn_external_session(
-                        ExternalSpawn {
-                            kind: *kind,
-                            provider_name: provider.clone(),
-                            model_id: model.clone(),
-                            wire_api: wire.clone(),
-                            project_cwd: project.clone(),
-                        },
-                        SessionPlacement::FullWindow,
-                        window,
-                        cx,
-                    );
+                ThreadEvent::PlanModeChanged { .. } => {
+                    // Refresh the plan chip.
+                    cx.notify();
                 }
-                SidebarEvent::SpawnPlainSession(kind, project) => {
-                    this.spawn_plain_session(
-                        *kind,
-                        project.clone(),
-                        SessionPlacement::FullWindow,
-                        window,
-                        cx,
-                    );
+                ThreadEvent::PlanUpdated { snapshot } => {
+                    // Live plan progress: mirror onto the rail as the model
+                    // publishes it (an empty snapshot clears the section).
+                    let snapshot = snapshot.clone();
+                    this.chat_rail(cx)
+                        .update(cx, |r, cx| r.set_plan(snapshot, cx));
                 }
-                SidebarEvent::LaunchVSCode(project) => {
-                    // VS Code opens the project directory the menu was launched
-                    // from; from the Conversations header (no project) it
-                    // falls back to the workspace cwd — the same directory a
-                    // fresh session runs in. Injection targets come from the
-                    // persisted `vscode_app:` settings (no launch-time choice).
-                    let folder = project.clone().unwrap_or_else(|| this.cwd.clone());
-                    this.launch_vscode_app(Some(folder), window, cx);
+                ThreadEvent::PermissionModeChanged { .. } => {
+                    // Refresh the access chip; no conversation item.
+                    cx.notify();
                 }
-                SidebarEvent::OpenExternalSession(id) => {
-                    this.open_external_session(id, window, cx);
+                ThreadEvent::BrowserSuitesChanged { suites } => {
+                    // The composer chips are derived state of the thread's
+                    // suite mirror (survives thread switches and restores).
+                    this.chat.update(cx, |chat, cx| {
+                        chat.active_browser_suites = suites.clone();
+                        cx.notify();
+                    });
+                    cx.notify();
                 }
-                SidebarEvent::ArchiveExternalSession(id) => {
-                    this.close_external_session(id, cx);
-                }
-                SidebarEvent::ArchiveThread(id, archived) => {
-                    let is_current = this
+                // v2 (T10c, §D.1): the follow stream's authoritative history
+                // boundary (`WindowChange::Replace` from the opening
+                // Snapshot / a seamless re-open) re-arms the conversation
+                // rebuild — the role the deleted `ThreadHistory` note's
+                // `restored` flag used to play. Without this a reopened
+                // thread strands on the loading screen; a window change that
+                // rewrites the branch is corrected to the authoritative
+                // active branch here.
+                ThreadEvent::HistoryRestored => {
+                    this.rebuild_conversation_from_thread(cx);
+                    // Re-seed the rail's plan now that the authoritative
+                    // transcript has landed: the attach-time seed ran against
+                    // an empty transcript and an unfilled sidecar mirror
+                    // (`Ready` is async), so a restarted session's plan would
+                    // otherwise wait for a manual thread switch.
+                    let messages = this
                         .chat
                         .read(cx)
                         .store
                         .as_ref()
-                        .map(|(_, sid)| *sid == *id)
+                        .map(|s| s.read(cx).store.derived_messages())
+                        .expect("foreground store present");
+                    if let Some(snapshot) = manox_agent::plan::rebuild_from_messages(&messages)
+                        .or_else(|| {
+                            this.chat
+                                .read(cx)
+                                .store
+                                .as_ref()
+                                .and_then(|s| s.read(cx).store.persisted_plan.as_ref())
+                                .and_then(|v| {
+                                    serde_json::from_value::<manox_agent::plan::PlanSnapshot>(
+                                        v.clone(),
+                                    )
+                                    .ok()
+                                })
+                        })
+                    {
+                        this.chat_rail(cx)
+                            .update(cx, |r, cx| r.set_plan(snapshot, cx));
+                    }
+                }
+                ThreadEvent::ModelChanged { from, to } => {
+                    // Persist a model_change event to the thread's event stream.
+                    // The conversation view itself stays unchanged (no item).
+                    let _ = (from, to);
+                    cx.notify();
+                }
+                ThreadEvent::ReasoningEffortChanged { .. } => {
+                    // Persist effort change to the thread record immediately.
+                    cx.notify();
+                }
+                ThreadEvent::TokenUsageUpdated(_) => {
+                    cx.notify();
+                }
+                ThreadEvent::TurnStarted => {
+                    // U3a: the running indicator is the server pump's store
+                    // write + SessionStatus delta (single writer) — it still
+                    // lights before the first streaming delta arrives (the
+                    // pump sees TurnStarted off the same facade broadcast).
+                    // Drive the Thinking status row's per-second "for Xs"
+                    // counter while this turn is live. The ticker polls
+                    // `turn_active` and self-terminates on the terminal stop.
+                    this.chat.update(cx, |chat, cx| {
+                        chat.turn_active = true;
+                        cx.notify();
+                    });
+                    this.spawn_thinking_ticker(cx);
+                }
+                ThreadEvent::UserRowLanded { message_id } => {
+                    // The steer's injected `user` row landed in the
+                    // transcript: the model has consumed it (dsh's `claimed`
+                    // instant). Retire the matching card NOW — a message the
+                    // model already saw must not linger in the queue until
+                    // the turn boundary. No-op for ordinary prompt rows
+                    // (nothing carries their id), and the settle path below
+                    // stays the fallback for a row that raced it.
+                    this.retire_injected_steer(message_id, cx);
+                }
+                ThreadEvent::TurnFinished {
+                    cancelled,
+                    failed,
+                    stranded_steer_ids,
+                    ..
+                } => {
+                    // Seal the conversation's streaming state at the
+                    // authoritative turn boundary: a turn that ended without
+                    // a terminal `Stop` (provider error, stream closed without
+                    // `MessageStop`) would otherwise leave its activity
+                    // segment accepting entries — a perpetual spinner and the
+                    // root condition for the next turn's thinking folding into
+                    // a segment above the new user bubble.
+                    let _weak = cx.weak_entity();
+                    let role = this.model_label(cx);
+                    let cwd = thread_cwd(&this.chat_thread(cx), &this.chat_store(cx), cx);
+                    let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
+                        c.apply(
+                            ev,
+                            &role,
+                            None,
+                            crate::conversation::ApplyCtx {
+                                host: this.chat.read(cx).host.clone(),
+                                cwd,
+                                fork_source: this.fork_source_session(cx),
+                            },
+                            cx,
+                        )
+                    });
+                    this.apply_list_outcome(outcome, cx);
+                    // The server's per-id verdict: only the not-yet-injected
+                    // tail of the steer group is retracted (`stranded_steer_ids`,
+                    // FIFO), the rest was injected and its rows are on disk. The
+                    // claim path (`UserRowLanded`) usually retired those already;
+                    // this settle is the fallback for a row that raced it — and
+                    // it must NOT fail the injected subset (a retry of one would
+                    // double-deliver). A normal settle carries zero stranded.
+                    let stranded = if *cancelled || *failed {
+                        stranded_steer_ids.len()
+                    } else {
+                        0
+                    };
+                    this.settle_steer_group(stranded, cx);
+                    let thread_id = this
+                        .chat
+                        .read(cx)
+                        .store
+                        .as_ref()
+                        .map(|s| s.read(cx).store.id.0.clone())
+                        .expect("foreground store present");
+                    // Cross-domain #5: the wire refetch replaces the kernel
+                    // rescan trigger — the server self-holds the scan in its
+                    // ListThreads answer.
+                    this.multiplexer.update(cx, |m, _| m.fetch_thread_list());
+                    // U3a: the settle flags (idle / pending-plan / errored)
+                    // are the server pump's store writes — one writer, no
+                    // race with this former mirror. The pump clears
+                    // pending-plan unconditionally at settle; the review
+                    // card's own demote below is UI state, not a store flag.
+                    this.chat.update(cx, |chat, cx| {
+                        chat.turn_active = false;
+                        cx.notify();
+                    });
+                    this.background_threads.retain(|b| b.id != thread_id);
+                    this.spawn_git_status_refresh(cx);
+                    // Dispatch last: `run_turn` emits `TurnStarted`
+                    // synchronously, so no terminal bookkeeping above may run
+                    // afterward and overwrite the new turn's running state.
+                    if !cancelled {
+                        this.flush_queued_follow_ups(cx);
+                    }
+                    cx.notify();
+                }
+                ThreadEvent::Stop(reason) => {
+                    let _weak = cx.weak_entity();
+                    let role = this.model_label(cx);
+                    let usage = this.chat.read(cx).store.as_ref().and_then(|s| {
+                        s.read(cx).store.last_token_usage.as_ref().map(|u| {
+                            manox_agent::TokenUsage {
+                                input_tokens: u.input,
+                                output_tokens: u.output,
+                                cache_creation_input_tokens: u.cache_creation,
+                                cache_read_input_tokens: u.cache_read,
+                            }
+                        })
+                    });
+                    let cwd = thread_cwd(&this.chat_thread(cx), &this.chat_store(cx), cx);
+                    let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
+                        c.apply(
+                            ev,
+                            &role,
+                            usage,
+                            crate::conversation::ApplyCtx {
+                                host: this.chat.read(cx).host.clone(),
+                                cwd,
+                                fork_source: this.fork_source_session(cx),
+                            },
+                            cx,
+                        )
+                    });
+                    this.apply_list_outcome(outcome, cx);
+                    // `Stop` flips streaming flags off, so finalized bodies switch
+                    // to full `Markdown` layout and may grow a frame or two later;
+                    // the list's Absolute scroll anchor holds the viewport steady
+                    // across that growth, and `FollowMode::Tail` — if still
+                    // engaged — re-pins to the end on the next layout.
+                    // Persist on terminal state (not the ToolUse mid-state).
+                    if !matches!(reason, StopReason::ToolUse) {
+                        this.multiplexer.update(cx, |m, _| m.fetch_thread_list());
+                        // `Stop` is a provider-round boundary. Queue draining,
+                        // idle state, and git refresh wait for `TurnFinished`.
+                    }
+                    cx.notify();
+                }
+                ThreadEvent::PrefixStability { .. } => {
+                    // Per-turn cache stability signal. The composer chip that
+                    // used to render this was removed in #62; the event stays
+                    // emitted for any future telemetry/debug subscriber.
+                    cx.notify();
+                }
+                ThreadEvent::GoalChanged { goal } => {
+                    // Start a fresh ticker only when the goal can still
+                    // advance; the generation bump retires the prior one.
+                    let active = goal
+                        .as_ref()
+                        .map(|g| !g.status.is_terminal())
                         .unwrap_or(false);
-                    let store = manox_agent::thread_store_global();
-                    store.with_mut(|s| s.archive_thread(id, *archived));
-                    // Sync the in-memory flag so the title-bar menu label stays
-                    // fresh when the sidebar archives the currently active thread.
-                    if is_current {
-                        this.with_foreground_store(cx, |store, sid| {
-                            store.set_archived(&sid, *archived);
+                    this.rearm_goal_ticker(active, cx);
+                    cx.notify();
+                }
+                // The v2 link never delivers `ThreadEvent::SteerInjected`: the
+                // facade emits it (manox thread.rs `BackendNotice::Settled` →
+                // push per steered id) but the journal→wire translation drops
+                // it, so the engine-less render mirror never sees it. Steer
+                // outcomes are driven entirely by the `TurnFinished` settle
+                // boundary above; any stray `SteerInjected` falls through to the
+                // generic `apply` (a no-op).
+                _ => {
+                    // U3b: the background-work flag is the server pump's
+                    // store write + delta (its BackgroundTaskUpdated arm
+                    // computes the same thread_has_running_tasks); the
+                    // event still falls through to the conversation's
+                    // task-card dispatch below.
+                    // U3b: the pending-auth badge drops at VERDICT time on
+                    // the server (clear_pending_auth_if_settled at all four
+                    // settle points + the §D.5 delta). The tool-traffic
+                    // heuristic this replaces only ran in-proc, only for
+                    // this client, and raced the actual verdict.
+                    // `Error` is a terminal signal symmetric to a terminal
+                    // `Stop`: the turn aborted, so this thread is no longer
+                    // running. Pulled out of the catch-all rather than given a
+                    // dedicated arm because the conversation still needs the
+                    // generic `apply` below to render the error item.
+                    if let ThreadEvent::Error(e) = ev {
+                        let thread_id = this
+                            .chat
+                            .read(cx)
+                            .store
+                            .as_ref()
+                            .map(|s| s.read(cx).store.id.0.clone())
+                            .expect("foreground store present");
+                        // U3b: the Error edge is the server pump's —
+                        // mark_idle, the errored flag and the full badge
+                        // clear ride its store write + the single delta
+                        // carrying the whole set. GW5 kept: no unread rise
+                        // for the FOREGROUND error — the user is watching
+                        // it; the errored triangle is the signal
+                        // (client-owned unread, §F.2).
+                        this.chat.update(cx, |chat, cx| {
+                            chat.turn_active = false;
+                            cx.notify();
                         });
-                    }
-                    // Archiving the active thread navigates away to a fresh
-                    // empty thread (Hero view) so the user doesn't stare at a
-                    // ghost conversation that just vanished from the sidebar.
-                    if *archived && is_current {
-                        this.start_new_thread(None, window, cx);
-                    }
-                }
-                SidebarEvent::SetThreadTag(id, tag) => {
-                    let store = manox_agent::thread_store_global();
-                    store.with_mut(|s| s.set_thread_tag(id, tag.clone()));
-                }
-                // Sidebar order is the server's durable manual account, so a
-                // move rides the gateway rather than an in-process store write
-                // (the same-face rule the archive/tag migrations converged on).
-                // These notes carry no session: they address a thread and a
-                // folder, not the landing conversation.
-                SidebarEvent::MoveThread { id, before_id } => {
-                    this.with_foreground_store(cx, |store, _| {
-                        store.dispatch(
-                            manox_ahp::ext::channels::WORKSPACES.to_string(),
-                            ahp_types::actions::StateAction::Unknown(serde_json::json!({
-                                "type": manox_ahp::ext::actions::ORDER_CHANGED,
-                                "order": { "thread": id, "before": before_id },
-                            })),
+                        this.background_threads.retain(|b| b.id != thread_id);
+                        // Persist the error card so a reloaded thread reproduces
+                        // what went wrong at the failed turn's position. The
+                        // append rides the actor queue behind the settling run;
+                        // a crash before the actor drains it loses the card
+                        // (accepted window for an annotation).
+                        this.append_ui_note(
+                            manox_agent::db::UiNoteKind::Error,
+                            e.to_string(),
+                            None,
+                            cx,
                         );
-                    });
-                }
-                SidebarEvent::MoveFolder { path, before_path } => {
-                    this.with_foreground_store(cx, |store, _| {
-                        store.dispatch(
-                            manox_ahp::ext::channels::WORKSPACES.to_string(),
-                            ahp_types::actions::StateAction::Unknown(serde_json::json!({
-                                "type": manox_ahp::ext::actions::ORDER_CHANGED,
-                                "order": {
-                                    "folder": path.to_string_lossy().into_owned(),
-                                    "before": before_path
-                                        .as_ref()
-                                        .map(|p| p.to_string_lossy().into_owned()),
+                        // The run task emits `TurnFinished` after it has cleared
+                        // `running_turn`; queue recovery and follow-up dispatch
+                        // happen there.
+                    }
+                    // Cockpit phase tracking for the streaming/tool variants
+                    // that flow through this generic arm. `Error` is handled
+                    // above; `CompactionStarted` flips Summarizing, `Compaction`
+                    // flips back to Streaming; a `Running` tool call caches its
+                    // title and flips RunningTool; other tool statuses return to
+                    // Streaming; text/thinking deltas mark Thinking/Streaming.
+                    this.chat_rail(cx)
+                        .update(cx, |r, cx| r.update_cockpit_phase(ev, cx));
+                    // Sub-agent observation: the pi harness observes its
+                    // ephemeral nested sessions through progress events on
+                    // the rail (the retired manox harness tracked child
+                    // threads in observation panels instead). The attach
+                    // catch-up routes the same rows a parked thread missed.
+                    if let ThreadEvent::SubagentProgress {
+                        id,
+                        subagent_type,
+                        latest_activity,
+                        status,
+                        health,
+                        ..
+                    } = ev
+                    {
+                        let id = id.clone();
+                        let subagent_type = subagent_type.clone();
+                        let latest_activity = latest_activity.clone();
+                        let health = health.clone();
+                        this.apply_subagent_progress(
+                            &id,
+                            &subagent_type,
+                            latest_activity.as_deref(),
+                            *status,
+                            health.as_deref(),
+                            cx,
+                        );
+                    }
+                    if let ThreadEvent::SubagentChild { id, child } = ev {
+                        this.apply_subagent_child(id, child, cx);
+                    }
+                    // Capture the Captain's dispatch prompt from the Steer
+                    // tool call so the subagent panel can show the opening
+                    // user message even before the child streams anything.
+                    if let ThreadEvent::ToolCall { name, input, .. } = ev
+                        && name == "Steer"
+                        && let Some(args) = input
+                    {
+                        // Only a Dispatch (to.spawn set) establishes the
+                        // opening prompt; a later Inject must not overwrite the
+                        // panel's first user bubble with a mid-run message.
+                        let is_dispatch = args.get("to").and_then(|t| t.get("spawn")).is_some();
+                        let addr = args
+                            .get("to")
+                            .and_then(|t| t.get("agent_address"))
+                            .and_then(|v| v.as_str());
+                        let prompt = args.get("prompt").and_then(|v| v.as_str());
+                        if is_dispatch && let (Some(addr), Some(prompt)) = (addr, prompt) {
+                            this.subagent_prompts.insert(
+                                addr.to_string(),
+                                SubagentPrompt {
+                                    text: prompt.to_string(),
+                                    dispatched_at: chrono::Utc::now().timestamp(),
                                 },
-                            })),
-                        );
-                    });
+                            );
+                        }
+                    }
+                    // Everything else renders through the conversation; the
+                    // attach catch-up reuses the same routing for the live-only
+                    // events a parked thread dropped.
+                    this.apply_to_conversation(ev, cx);
+                    cx.notify();
                 }
-                SidebarEvent::RemoveProject(path) => {
-                    // Unregister the folder; the sidebar drops the group and
-                    // its threads fall back to the loose Conversations list.
-                    // Conversation history is never touched.
-                    let store = manox_agent::thread_store_global();
-                    store.with_mut(|s| s.remove_project(&path.to_string_lossy()));
-                }
-            },
-        )
+            }
+        });
+        (events, observe)
     }
 
     /// Switch into the Settings overlay. The Settings view is created lazily on
@@ -1463,14 +1570,10 @@ impl Workspace {
     /// user's last selection (and any scroll position) survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_view.is_none() {
-            let settings = cx.new(|cx| SettingsView::new(self.sidebar_width, window, cx));
+            let settings = cx.new(|cx| SettingsView::new(px(SETTINGS_NAV_WIDTH), window, cx));
             let sub = self.subscribe_settings(&settings, cx);
             self.settings_view = Some(settings);
             self.settings_sub = Some(sub);
-        } else if let Some(settings) = self.settings_view.as_ref() {
-            // Re-entry after a divider resize in the app page: the settings
-            // nav follows the shared sidebar width.
-            settings.update(cx, |s, cx| s.set_width(self.sidebar_width, cx));
         }
         self.view_mode = ViewMode::Settings;
         // Clear any pending exit animation: clicking Settings… while the
@@ -1530,7 +1633,7 @@ impl Workspace {
     /// mirrors, so any state edge that moves the sidebar's attention marks
     /// moves this count on the next read.
     pub fn attention_count(&self, cx: &App) -> usize {
-        self.multiplexer.read(cx).attention_count()
+        self.multiplexer.read(cx).attention_count(cx)
     }
 
     fn subscribe_input(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
@@ -1546,21 +1649,6 @@ impl Workspace {
                 InputEvent::Focus | InputEvent::Blur => {}
             },
         )
-    }
-
-    /// Submit the right-side editor on Cmd/Ctrl-Enter (`InputEvent::PressEnter`
-    /// with `secondary` set). Plain Enter inserts a newline (submit_on_enter
-    /// is off for the panel editor).
-    fn subscribe_editor(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        let editor = self.editor_state.clone();
-        cx.subscribe_in(&editor, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { secondary, shift } = ev
-                && *secondary
-                && !shift
-            {
-                this.submit_editor(window, cx);
-            }
-        })
     }
 
     /// Re-evaluate the completion popover against the live input value + caret.
@@ -1580,15 +1668,7 @@ impl Workspace {
             Some(det) => {
                 let items = if det.trigger == '/' {
                     // U2: the popover lists the gateway's command snapshot.
-                    slash_source(
-                        &det.query,
-                        &self
-                            .multiplexer
-                            .read(cx)
-                            .commands(cx)
-                            .cloned()
-                            .unwrap_or(serde_json::json!([])),
-                    )
+                    slash_source(&det.query, self.multiplexer.read(cx).commands())
                 } else {
                     mention_source(&det.query)
                 };
@@ -1821,6 +1901,47 @@ impl Workspace {
         true
     }
 
+    /// Reconcile the `list_state` with a conversation mutation: splice the
+    /// count (append/remove) and remeasure the affected index/indices. Call
+    /// after any `ConversationState::apply` (the outcome tells which path) so
+    /// the virtualized list's per-item height cache never goes stale.
+    fn apply_list_outcome(&mut self, outcome: ApplyOutcome, cx: &mut App) {
+        let count_changed = self.sync_list_count(cx);
+        match outcome {
+            ApplyOutcome::Remeasure(ix) => {
+                self.chat.read(cx).list_state.remeasure_items(ix..ix + 1)
+            }
+            ApplyOutcome::RemeasureAll => self.chat.read(cx).list_state.remeasure(),
+            // Remeasure the just-mutated segment (e.g. an activity segment
+            // closed for an incoming reply) in addition to the append splice
+            // `sync_list_count` already performed. When the append was net-
+            // neutralized by a trailing `Retry` pop (count unchanged → no
+            // splice), the new assistant bubble occupies a reused `Measured`
+            // tail slot whose cached height is the popped retry badge's, so
+            // remeasure the tail too. (When `popped_retry` was false the push
+            // grew the count by one, `count_changed` is true, and the splice
+            // already inserted the new bubble as `Unmeasured` — so the tail
+            // remeasure is skipped as redundant, not because the branch is
+            // dead.)
+            ApplyOutcome::RemeasureAndAppend { remeasure_ix } => {
+                self.chat
+                    .read(cx)
+                    .list_state
+                    .remeasure_items(remeasure_ix..remeasure_ix + 1);
+                if !count_changed {
+                    let tail = self.chat.read(cx).list_count.saturating_sub(1);
+                    self.chat
+                        .read(cx)
+                        .list_state
+                        .remeasure_items(tail..tail + 1);
+                }
+            }
+            // `Unchanged` touched no item; `Appended`/`RemovedTail` only changed
+            // the count, which `sync_list_count` already spliced.
+            ApplyOutcome::Unchanged | ApplyOutcome::Appended | ApplyOutcome::RemovedTail => {}
+        }
+    }
+
     /// Splice a single newly inserted conversation item at `ix` into
     /// `list_state`. Mid-list insertions (anchored notices) can't ride the
     /// tail-diff in `sync_list_count`, so this splices at the exact position
@@ -1911,19 +2032,13 @@ impl Workspace {
 
     fn render_turn_navigator_overlay(
         &self,
-        window: &mut Window,
         theme: &Theme,
-        right_pane_open: bool,
         show_context_rail: bool,
+        card_width: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let navigator = self.chat.read(cx).turn_navigator.clone()?;
-        let layout = turn_navigator_layout(
-            window.bounds().size.width,
-            self.effective_sidebar_width(),
-            right_pane_open.then_some(self.editor_width),
-            show_context_rail,
-        );
+        let layout = turn_navigator_layout(card_width, show_context_rail);
         let panel_height = navigator.read(cx).panel_height(cx);
 
         Some(
@@ -1950,9 +2065,7 @@ impl Workspace {
                         .bottom_0()
                         .left(layout.left_inset)
                         .items_center()
-                        // The card (and its title bar) starts below the shell
-                        // gutter, so the panel clears them from the window top.
-                        .pt(px(SHELL_PAD_EDGE) + TITLE_BAR_HEIGHT + px(8.0))
+                        .pt(px(8.0))
                         .child(
                             popup_menu::popup_container(theme, navigator)
                                 .id("turn-navigator-panel")
@@ -2017,18 +2130,15 @@ impl Workspace {
             .chat
             .read(cx)
             .store
-            .clone()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
-                    .cwd()
-                    .map(std::path::PathBuf::from)
-            })
-            .unwrap_or_else(|| {
-                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
-                Default::default()
-            });
-        let worktree_branch = self.chat.read(cx).store.as_ref().and(None::<String>);
+            .as_ref()
+            .map(|s| std::path::PathBuf::from(s.read(cx).store.cwd.clone()))
+            .expect("foreground store present");
+        let worktree_branch = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .and_then(|s| s.read(cx).store.with(|st| st.branch.clone()));
         cx.spawn(async move |_this, cx| {
             // Debounce: coalesce a burst of tool results / a turn's worth of
             // file writes into a single git call.
@@ -2077,7 +2187,7 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|(_, sid)| sid.clone())
+            .map(|s| s.read(cx).session_id().to_string())
     }
 
     fn user_turn_meta(&self, cx: &mut Context<Self>) -> UserTurnMeta {
@@ -2086,14 +2196,8 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid)
-                    .approval_mode()
-                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
-                    .unwrap_or(PermissionMode::ReadOnly)
-            })
-            .unwrap_or(PermissionMode::ReadOnly);
+            .map(|s| s.read(cx).store.permission_mode)
+            .expect("foreground store present");
         UserTurnMeta::new(
             chrono::Utc::now().timestamp(),
             self.model_label(cx),
@@ -2113,12 +2217,7 @@ impl Workspace {
                 .read(cx)
                 .store
                 .as_ref()
-                .and_then(|(store, sid)| {
-                    let view = store.read(cx);
-                    crate::ahp_store::leaf(&view.book, sid)
-                        .model_id()
-                        .map(str::to_string)
-                })
+                .and_then(|s| s.read(cx).store.with(|st| st.model_id.clone()))
                 .unwrap_or_else(|| {
                     self.chat
                         .read(cx)
@@ -2204,10 +2303,12 @@ impl Workspace {
             manox_agent::db::UiNoteKind::Notice => "notice",
             manox_agent::db::UiNoteKind::PlanReview => "plan_review",
         };
-        // v3: a UI note is a client-local annotation card — the protocol has
-        // no client-side transcript write, so it renders from local state
-        // only (accepted tradeoff: it does not survive a reload).
-        let _ = (session_id, kind_str, data);
+        self.client
+            .send_note(manox_protocol::ClientNote::AppendUiNote {
+                session_id: session_id.into(),
+                kind: kind_str.into(),
+                data,
+            });
     }
 
     /// Abort the current turn.
@@ -2222,32 +2323,33 @@ impl Workspace {
         // A dropped cancel is the silent-death shape this file's regressions
         // keep producing: leaving no trace made the composer-locked repro
         // undebuggable.
-        let pair = self.chat.read(cx).store.clone();
-        if let Some((store, sid)) = pair {
-            let view = store.read(cx);
-            let turn_id = manox_agent_chat_ui::ahp_store::leaf(&view.book, &sid)
-                .chat
-                .and_then(|c| c.active_turn.as_ref().map(|t| t.id.clone()));
-            store.update(cx, |store, _| {
-                if let Some(turn_id) = turn_id {
-                    store.cancel_turn(&sid, &turn_id);
-                }
-            });
-        } else {
-            tracing::warn!("cancel dropped: no bound session");
+        if !self.send_note(cx, |sid| manox_protocol::ClientNote::CancelTurn {
+            session_id: sid.into(),
+        }) {
+            tracing::warn!("CancelTurn dropped: the active leaf has no bound session");
         }
         cx.notify();
     }
 
-    /// Send a protocol write when the landing-thread
+    /// Send a `ClientNote` to the AgentServer when the landing-thread
     /// connection is available (γ-3 mutation path). Returns `true` when the
     /// note was sent; the caller falls back to `self.chat.thread.update` when `false`.
-    #[allow(dead_code)]
-    fn _send_note_retired(&self) {}
+    pub(crate) fn send_note(
+        &self,
+        cx: &App,
+        note_fn: impl FnOnce(&str) -> manox_protocol::ClientNote,
+    ) -> bool {
+        if let Some(sid) = &self.chat.read(cx).session_id {
+            self.client.send_note(note_fn(sid));
+            true
+        } else {
+            false
+        }
+    }
 
     /// v2 §D.2 submit path: mint an `origin_rpc` correlation id, register the
     /// optimistic echo in the foreground store, and send the
-    /// the submit dispatch (receipt-only per L7 — the durable user row
+    /// [`ClientCall::Submit`] (receipt-only per L7 — the durable user row
     /// arrives through the follow stream and retires the echo by matching its
     /// `originRpc`). The conversation's optimistic bubble was already pushed by
     /// the caller; retirement just clears the store's echo bookkeeping so the
@@ -2257,18 +2359,25 @@ impl Workspace {
     pub(crate) fn send_submit_v2(
         &mut self,
         text: String,
-        images: Vec<serde_json::Value>,
+        images: Vec<manox_protocol::ImageAttachment>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+        let Some(sid) = self.chat.read(cx).session_id.clone() else {
             tracing::warn!("submit dropped: no session bound to the workspace");
             return false;
         };
-        tracing::info!(session_id = %sid, "submit sent (ahp)");
-        let _ = images;
-        let turn_id = uuid::Uuid::new_v4().to_string();
-        store.update(cx, |store, _| {
-            store.submit_turn(&sid, &turn_id, text, None);
+        tracing::info!(session_id = %sid, "submit v2 sent");
+        let origin_rpc = uuid::Uuid::new_v4().to_string();
+        if let Some(store) = self.chat_store(cx) {
+            store.update(cx, |h, _| {
+                h.store.push_echo(&origin_rpc, text.clone());
+            });
+        }
+        self.client.send_call(manox_protocol::ClientCall::Submit {
+            session_id: sid,
+            text,
+            images,
+            origin_rpc: Some(origin_rpc),
         });
         true
     }
@@ -2278,7 +2387,7 @@ impl Workspace {
     /// mirror, so the old `thread.enqueue_steer` only inserted a local id and
     /// never reached the server — a dead end where the card sat forever and the
     /// message was neither injected nor confirmed. This sends the real
-    /// the steer dispatch (host: enqueue while running,
+    /// [`manox_protocol::ClientCall::Steer`] (server: enqueue while running,
     /// insert + start a turn while idle). Receipt-only like
     /// [`Self::send_submit_v2`]; no echo is registered because the message does
     /// not enter the conversation here — it moves in only when the turn settles
@@ -2289,19 +2398,20 @@ impl Workspace {
         cx: &App,
         message_id: String,
         text: String,
-        images: Vec<serde_json::Value>,
+        images: Vec<manox_protocol::ImageAttachment>,
     ) -> bool {
-        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+        let Some(sid) = self.chat.read(cx).session_id.clone() else {
             tracing::warn!("steer dropped: no session bound to the workspace");
             return false;
         };
-        tracing::info!(session_id = %sid, "steer sent (ahp)");
-        let _ = images;
-        let (tx, rx) = async_channel::bounded::<()>(1);
-        manox_agent::runtime::handle().spawn(async move {
-            let _ = rx.recv().await;
+        tracing::info!(session_id = %sid, "steer v2 sent");
+        self.client.send_call(manox_protocol::ClientCall::Steer {
+            session_id: sid,
+            message_id,
+            text,
+            images,
+            origin_rpc: None,
         });
-        drop((sid, message_id, text, store, tx));
         true
     }
 }
@@ -2317,14 +2427,8 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid)
-                    .approval_mode()
-                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
-                    .unwrap_or(PermissionMode::ReadOnly)
-            })
-            .unwrap_or(PermissionMode::ReadOnly)
+            .map(|s| s.read(cx).store.permission_mode)
+            .expect("foreground store present")
         {
             PermissionMode::ReadOnly => PermissionMode::WorkspaceWrite,
             PermissionMode::WorkspaceWrite => PermissionMode::DangerFullAccess,
@@ -2364,12 +2468,15 @@ impl Workspace {
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
-        let _ = mode_wire;
-        self.with_foreground_store(cx, |store, sid| {
-            let mut config = serde_json::Map::new();
-            config.insert("approvalMode".into(), serde_json::json!(mode_wire));
-            store.set_config(&sid, config);
+        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::SetApprovalMode {
+            session_id: sid.into(),
+            mode: mode_wire,
         });
+        // Optimistic mirror: the chip reflects the click now; the journal
+        // echo lands later (turn end at the latest) and confirms it.
+        if let Some(store) = self.chat.read(cx).store.clone() {
+            store.update(cx, |leaf, _| leaf.set_permission_mode_optimistic(mode));
+        }
         self.add_info_message(
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),
             NoticeAnchor::TurnEnd,

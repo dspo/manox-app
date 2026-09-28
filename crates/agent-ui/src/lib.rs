@@ -17,12 +17,10 @@ pub mod browser_host;
 pub mod chatgpt_app;
 pub mod chrome_assembly;
 pub mod dispatch;
-pub mod external_session;
 pub mod i18n;
 pub mod menu;
 pub mod multiplexer;
 pub mod sidebar_projection;
-pub mod sidebar_view;
 pub mod slash_command;
 pub mod tool_tabs;
 pub mod views;
@@ -49,16 +47,8 @@ pub use manox_agent_chat_ui::{
 gpui::actions!(
     agent_ui,
     [
-        ToggleEditor,
-        ToggleEditorPreview,
-        CloseEditor,
         OpenSettings,
-        NewTerminalTab,
-        CloseTerminalTab,
-        FocusTerminal,
         FocusConversation,
-        OpenBrowserTab,
-        CloseBrowserTab,
         BackgroundCurrentThread,
         ArchiveCurrentThread
     ]
