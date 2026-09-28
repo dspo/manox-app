@@ -933,6 +933,7 @@ impl Workspace {
                                 this.with_foreground_store(cx, |store, sid| {
                                     let mut config = serde_json::Map::new();
                                     config.insert("model".into(), serde_json::json!(model.id));
+                                    store.optimistic_config(&sid, &config);
                                     store.set_config(&sid, config);
                                 });
                             });

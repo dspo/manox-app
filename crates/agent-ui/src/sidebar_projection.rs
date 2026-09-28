@@ -61,11 +61,20 @@ impl ThreadRow {
             pinned,
             parent_id: None,
             depth: 0,
+            // The host fills `project` from the thread row for every session;
+            // workingDirectories only exists on seeded folds (live engine), so
+            // the project is the grouping source of truth.
             project: summary
-                .working_directories
+                .project
                 .as_ref()
-                .and_then(|dirs| dirs.first())
-                .map(|uri| uri.trim_start_matches("file://").to_string()),
+                .map(|p| p.uri.trim_start_matches("file://").to_string())
+                .or_else(|| {
+                    summary
+                        .working_directories
+                        .as_ref()
+                        .and_then(|dirs| dirs.first())
+                        .map(|uri| uri.trim_start_matches("file://").to_string())
+                }),
             tag: None,
         }
     }

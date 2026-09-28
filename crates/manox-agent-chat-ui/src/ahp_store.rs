@@ -968,6 +968,29 @@ impl AhpStore {
         )
     }
 
+    /// Optimistic config merge: the chip reflects the pick immediately; the
+    /// host's configChanged echo (or the next snapshot) is the confirmation.
+    /// Mirrors the v2 permission-chip's optimistic mirror semantics.
+    pub fn optimistic_config(&mut self, session_id: &str, config: &serde_json::Map<String, Value>) {
+        use ahp_types::state::SessionConfigState;
+        let state = self
+            .book
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| empty_session(&session_uri(session_id)));
+        let seat = state.config.get_or_insert_with(|| SessionConfigState {
+            schema: ahp_types::state::SessionConfigSchema {
+                r#type: "object".to_string(),
+                properties: Default::default(),
+                required: None,
+            },
+            values: Default::default(),
+        });
+        for (k, v) in config {
+            seat.values.insert(k.clone(), v.clone());
+        }
+    }
+
     /// Drain the chat display events derived since the last drain (the live
     /// streaming leg into the conversation applier).
     pub fn drain_chat_events(&mut self) -> Vec<crate::chat_fold::ChatEvent> {
