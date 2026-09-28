@@ -35,9 +35,11 @@ anyhow.workspace = true
 serde_json.workspace = true
 image.workspace = true
 gpui_platform.workspace = true
-# test-support must also reach the macOS platform layer: render_to_image's
-# implementation is cfg-gated there.
 gpui = { workspace = true, features = ["test-support"] }
+
+# The offscreen visual harness (tests/visual.rs) reads back a Metal texture,
+# so it is macOS-only — as is the platform crate it needs.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui-pre-macos = { version = "=0.3.6", features = ["test-support"] }
 
 [lints.clippy]
