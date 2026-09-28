@@ -479,22 +479,39 @@ mod tests {
         "follow-stop-indicator-stream-failing",
     ];
 
-    /// Every literal key an `i18n::t*` call site in agent-ui passes must
-    /// resolve in BOTH locales, and so must the dynamically referenced set.
-    /// This is the class gate for the follow-stop leak: keys registered in
-    /// code but never landed in the `.ftl` resources render as their own
-    /// names, and the parity gate cannot see a key missing from both files at
-    /// once. Lives here rather than in agent-ui because flipping the
-    /// process-global `LANG` needs this module's `TEST_LANG_LOCK`
-    /// serialization; the sibling sources sit one workspace-relative step
-    /// away.
+    /// Every literal key an `i18n::t*` call site in agent-ui or the chrome
+    /// shell crate passes must resolve in BOTH locales, and so must the
+    /// dynamically referenced set. This is the class gate for the follow-stop
+    /// leak: keys registered in code but never landed in the `.ftl` resources
+    /// render as their own names, and the parity gate cannot see a key
+    /// missing from both files at once. Lives here rather than in either UI
+    /// crate because flipping the process-global `LANG` needs this module's
+    /// `TEST_LANG_LOCK` serialization; the sibling sources sit one
+    /// workspace-relative step away.
     #[test]
     fn agent_ui_referenced_keys_resolve_in_both_locales() {
-        const NEEDLE: &str = "i18n::t";
+        // agent-ui resolves through its `i18n` wrapper; the chrome crate
+        // calls `manox_i18n` directly. Both needles cover the same helpers
+        // (`t`, `t_str`, `t_count`, `t_str_count`).
+        const NEEDLES: [&str; 2] = ["i18n::t", "manox_i18n::t"];
 
         fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
+            // A whole-workspace `cargo test` runs many binaries at once; an
+            // exhausted fd table makes `read_dir` fail transiently, which
+            // would read as "directory missing" and fire the wrong assert.
+            // Retry briefly, then surface the real io error.
+            let mut attempts = 0;
+            let entries = loop {
+                match std::fs::read_dir(dir) {
+                    Ok(entries) => break entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(e) if attempts < 20 => {
+                        attempts += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        let _ = e;
+                    }
+                    Err(e) => panic!("cannot scan {}: {e}", dir.display()),
+                }
             };
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -525,6 +542,16 @@ mod tests {
             !sources.is_empty(),
             "the agent-ui sources are not where the scan expects them"
         );
+        collect_rs(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../manox-agent-chrome-ui/src"),
+            &mut sources,
+        );
+        assert!(
+            sources.iter().any(|p| p
+                .components()
+                .any(|c| c.as_os_str() == "manox-agent-chrome-ui")),
+            "the chrome-shell sources are not where the scan expects them"
+        );
 
         let mut keys: Vec<String> = DYNAMICALLY_REFERENCED_KEYS
             .iter()
@@ -534,31 +561,37 @@ mod tests {
             let Ok(source) = std::fs::read_to_string(file) else {
                 continue;
             };
-            for (idx, _) in source.match_indices(NEEDLE) {
-                // Whole-identifier check: `crate::i18n::t` and `manox_i18n::t`
-                // are the same API; a longer name merely containing the needle
-                // is not.
-                if source[..idx]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                {
-                    continue;
-                }
-                let rest = &source[idx + NEEDLE.len()..];
-                let rest = rest
-                    .strip_prefix("_str_count")
-                    .or_else(|| rest.strip_prefix("_str"))
-                    .or_else(|| rest.strip_prefix("_count"))
-                    .unwrap_or(rest);
-                if let Some(key) = literal_key(rest) {
-                    keys.push(key);
+            for needle in NEEDLES {
+                for (idx, _) in source.match_indices(needle) {
+                    // Whole-identifier check: `crate::i18n::t` and
+                    // `manox_i18n::t` are the same API; a longer name merely
+                    // containing the needle is not.
+                    if source[..idx]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        continue;
+                    }
+                    let rest = &source[idx + needle.len()..];
+                    let rest = rest
+                        .strip_prefix("_str_count")
+                        .or_else(|| rest.strip_prefix("_str"))
+                        .or_else(|| rest.strip_prefix("_count"))
+                        .unwrap_or(rest);
+                    if let Some(key) = literal_key(rest) {
+                        keys.push(key);
+                    }
                 }
             }
         }
         assert!(
             keys.iter().any(|key| key == "follow-stop-retry"),
             "the scan found no agent-ui keys — it is scanning the wrong tree"
+        );
+        assert!(
+            keys.iter().any(|key| key == "chrome-sessions-title"),
+            "the scan found no chrome-shell keys — it is scanning the wrong tree"
         );
 
         let _g = TEST_LANG_LOCK.lock().unwrap();

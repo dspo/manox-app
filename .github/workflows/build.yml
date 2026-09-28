@@ -69,11 +69,22 @@ jobs:
       - name: GPUI track guard
         run: ./script/check-no-zed-git.sh
 
+      # Chrome/chat split invariant: the chat crate never depends on
+      # terminals, webviews, or external-agent wiring (PLAN-CHROME-CHAT-SPLIT
+      # §1 — the executable definition of the decoupling).
+      - name: Chat-crate dependency guard
+        run: ./script/check-chat-crate-deps.sh
+
       - name: Fmt check
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      # Dual-shell ruling (2026-09-22): the chrome-shell feature config is a
+      # first-class build — gate it beside the default one.
+      - name: Clippy (chrome-shell feature)
+        run: cargo clippy -p manox --features chrome-shell --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace --all-targets --no-fail-fast

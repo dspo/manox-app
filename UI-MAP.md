@@ -3,7 +3,34 @@
 Shared vocabulary for every named UI component in manox. When discussing UI, reference
 component names from this file so both parties refer to the same thing.
 
+**两套壳并存（§0）**：不带限定词的组件名默认指旧壳（默认构建）；
+chrome 构建的组件集中在 §6A，组件名以 `Chrome` / `Embedded` 前缀或 crate 路径区分。
+
 Component names use PascalCase. The hierarchy mirrors the visual containment tree.
+
+---
+
+## 0. 双壳架构与构建选择（2026-09-22 起）
+
+窗口有两套**长期并行**的壳，**构建时决定**（`crates/manox` 的 feature，非运行时开关）：
+
+```sh
+cargo run                       # 旧壳（默认）：agent_ui::Workspace 全壳
+cargo run --features chrome-shell   # chrome 壳：agent_ui::chrome_assembly 装配
+```
+
+| 层 | 旧壳（默认构建） | chrome 壳（`--features chrome-shell`） |
+| --- | --- | --- |
+| 根视图 | `Workspace`（含侧栏槽 + 主卡 + 右栏 + Settings/终端/外部会话 ViewMode） | `manox_agent_chrome_ui::Shell`（chrome crate 的壳：工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
+| 侧栏 | `views/sidebar.rs`（agent-ui，全语义：五态/团队森林/标签/排序 reconcile） | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影，D2） |
+| 聊天主栏 | `Workspace::render_manox` 的会话列 | `Workspace::new_embedded` 的**嵌入渲染模式**（只渲会话列，挂进 chrome 的 `MainSurface` 槽） |
+| 右栏 | `Workspace` 的 `right_tabs`（`RightTab` 枚举，线程绑定 + threads.db 快照） | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（浏览器/终端族/CLI agents/编辑器）；per-thread 会话由 `RightPaneSession` stash/restore，快照同样落 threads.db |
+| 底部 dock | 无（面板在旧壳为右栏/ViewMode） | `chrome::panel` + `PanelSurface` 注入（manox 装终端；随前台线程 cwd） |
+| Settings | 全窗 `ViewMode::Settings`（shell_root 的 nav｜main） | 同状态机，**渲染换位**：`render_embedded_settings` 把 nav｜main 放进主卡 |
+
+共享不变的部分：`agent-ui` 的状态层（multiplexer/client_store/external_session/browser_host/dispatch）、`manox-agent-chat-ui` 的聊天状态机与消息管线、`terminal-ui` 渲染、`manox-webview`。
+
+chrome 壳的契约（均可在不改 agent-ui 的前提下扩展）：`MainSurface`（主栏槽）、`ToolTab`/`ToolTabFactory`（右栏 kind）、`PanelSurface`（dock 内容）、`HostHooks`（pin/archive/new/select 回调）。依赖不变量：chat crate 不得依赖 terminal-ui/manox-webview/manox-ext-agents（`script/check-chat-crate-deps.sh` 门禁）；chrome crate 不依赖 manox-agent。计划与分工详见 `PLAN-CHROME-CHAT-SPLIT.md`。
 
 ---
 
@@ -44,6 +71,10 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 ---
 
 ## 索引
+
+### Chrome Shell（chrome 构建）
+
+- [ChromeShell](#chromeshell) · [ChromeSessionList](#chromesessionlist) · [SidebarProjection](#sidebarprojection) · [ChromeRightPane](#chromerightpane) · [ToolTabRegistry](#tooltabregistry) · [ChromePanel](#chromepanel) · [EmbeddedColumn](#embeddedcolumn) · [EmbeddedSettings](#embeddedsettings)
 
 ### 顶层
 
@@ -155,7 +186,9 @@ The count on the macOS Dock icon (`NSDockTile.setBadgeLabel` via `objc2-app-kit`
 
 #### Workspace
 
-Root container, horizontal flex (`h_flex`), owns all sub-views.
+Root container, horizontal flex (`h_flex`), owns all sub-views — **the legacy shell's root**;
+under `--features chrome-shell` it mounts as the chrome shell's main surface in embedded
+render mode (see [EmbeddedColumn](#embeddedcolumn)).
 
 > Source: `crates/agent-ui/src/workspace.rs`
 
@@ -393,13 +426,13 @@ Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNo
 
 Dismissible BROADCAST banner above the message area, shown while the foreground leaf's §二.3 reopen budget is exhausted AND this session's notice is not dismissed (the transcript silently keeps its last window). Row: `IconName::TriangleAlert` + reason copy (a Fluent key chosen by the leaf's typed `FollowStopReason` — today only `follow-stop-stream-failing`, deliberately cause-agnostic because the client cannot observe more; the server-side lease-holder signal, dspo/manox#811, lands as a new variant + key, not a wire-code guess), a ghost **Retry** button (leaf `retry_follow`: re-arms the budget and requests a full re-attach — `OpenSession` ahead of the `StreamOpen`, so the retry also recovers the attach's `OpenSession` having failed once; automatic reopens stay pure `StreamOpen`) and a ghost `×` dismiss (leaf `dismiss_follow_stop`). Dismissing hides ONLY the broadcast — the permanent [FollowStopProjection](#followstapprojection) in the composer's footer chip group keeps the state visible and the retry entry live forever after (one trigger, the write-lease arm, never self-heals; the frozen view may never be signal-less). Dismissal lives on the leaf — per session: no automatic path re-shows the banner (a re-exhaustion keeps the flag), a good snapshot withdraws the whole state (both surfaces retire together), and a thread switch builds a fresh leaf. A manual retry's own terminal exhaustion re-shows the banner undismissed (an explicit user action's outcome must be visible).
 
-> Source: `crates/agent-ui/src/workspace/render.rs` (`render_follow_stop_banner`); state: `crates/agent-ui/src/client_store_handle.rs` (`FollowStop` / `FollowStopReason`)
+> Source: `crates/agent-ui/src/workspace/render.rs` (`render_follow_stop_banner`); state: `crates/manox-agent-chat-ui/src/client_store_handle.rs` (`FollowStop` / `FollowStopReason`)
 
 #### FollowStopProjection
 
 Permanent minimal projection of the stopped-follow state: a compact danger chip in the composer's footer chip group (tail of the left cluster, beside the send control — where the user reaches to resend/retry; a global overlay was rejected: the status belongs beside the recovery action). Shown while the foreground leaf's `follow_stop()` is `Some` — it deliberately does NOT read `dismissed`: the state outlives the broadcast's dismissal, so the entry never disappears on its own (only a good snapshot or a live retry retires it). The chip IS the retry entry: clicking fires the same leaf `retry_follow` the banner's Retry button wires (no-op with no multiplexer — the entry survives its own dead click), and its tooltip previews that consequence. Visible copy is a per-reason Fluent key (`FollowStopReason::indicator_key()` — today `follow-stop-indicator-stream-failing`), so a new reason adds a variant + key, never edited prose. Geometry: `flex_shrink_0` at the group tail; arrival/departure can never squeeze or shift the pinned model/send controls.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_follow_stop_chip`); state: `crates/agent-ui/src/client_store_handle.rs` (`FollowStop` / `FollowStopReason`)
+> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_follow_stop_chip`); state: `crates/manox-agent-chat-ui/src/client_store_handle.rs` (`FollowStop` / `FollowStopReason`)
 
 
 #### 3.2.1 Hero
@@ -439,7 +472,7 @@ Virtual list backed by native `gpui::list` (`gpui::list(list_state, render_item)
 
 Single rendered conversation item, centered, full width (no fixed content cap — the transcript adapts to the window width). Each `MessageItem` renders one of the variant cards below based on `ConvItem` kind. Every kind that carries a text body — user (incl. peer deliveries), assistant, error, notice, recap, retry detail, plan review — mounts a persistent `Entity<Markdown>` (`MessageItem::markdown`, created lazily by `ensure_markdown`) instead of rebuilding one per frame: a per-frame `Entity` resets the document's `DocSelection`/`FocusHandle` on every render and breaks drag-select + Cmd/Ctrl+C (the old `markdown_tv` fallback), while a persistent body keeps its selection state alive across frames and leaves inline links clickable.
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 ##### MessageItem variants
 
@@ -447,13 +480,13 @@ Single rendered conversation item, centered, full width (no fixed content cap �
 
 Full-width user turn block rendered inside [TurnFrame](#turnframe): `{from} > {to}·ModelID·Time` metadata header (`user_turn_header`; empty segments drop, no `>` clause when nothing follows `from`), persistent selectable markdown body, copy btn (hover; flips to a check briefly after copying — [Copy Feedback](#copy-feedback)), and a permission-mode-colored frame captured at send time. `from` is the turn's real author — unattributed human input renders the localized "You", otherwise Captain (lead), Harness (host-injected turns, e.g. the plan-execution seed), or the named agent (team peer delivery, shown with a `theme.primary` peer accent); `to` is the agent whose conversation renders the turn (main thread shows Captain, a member thread its own name, a sub-agent panel the sub-agent type) — a view-side fact stamped by the owning `ConversationState`, never persisted. Peer deliveries share this same renderer live and after reload.
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 #### AssistantMessage
 
 Full-width block: optional model row + markdown body (plain text while streaming) + a hover-revealed action row beneath the body. A reply that immediately follows an [ActivitySegment](#activitysegment) omits its own model row — the segment's header row carries the model name. The action row (`assistant_action_row`) renders **under** the body, never overlaid on prose, and carries the copy button (flips to a check briefly after copying — [Copy Feedback](#copy-feedback)) followed by the fork button; the whole row fades in on hover of the enclosing group.
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 #### AssistantActions
 
@@ -461,19 +494,19 @@ Fork affordance for an assistant reply (`ClientCall::ForkSession`, dspo/manox#77
 
 Note: the child inherits the source's **title** — a fork copies the prefix including the journal `title` entry the auto-titler writes after the first response — so the sidebar shows two same-named rows. The runtime exposes no rename primitive yet (`thread_store::rename_thread` is still only referenced in a comment), so no `increaseTitle` increment is applied.
 
-> Source: `crates/agent-ui/src/views/message.rs`, `crates/agent-ui/src/workspace/attach.rs`, `crates/agent-ui/src/multiplexer.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`, `crates/agent-ui/src/workspace/attach.rs`, `crates/agent-ui/src/multiplexer.rs`
 
 #### ReasoningBlock
 
 Collapsible: chevron + "Reasoning" label + muted italic body, rendered as the label and content of a [Chain of Thought](#activitysegment) step — the round's status marker (spinner while streaming, book-open when settled) sits in the step's marker column rather than in this row. The `ai_elements::Reasoning` component itself is not wired here yet; this still uses the entry's own row and body. Each reasoning round (an `ActivityEntry::Reasoning` inside a `Thinking` segment, plus the top-level `ConvItem::Reasoning`) owns a persistent `Entity<Markdown>` (`markdown` field) mounted on first sync — so drag-select + Cmd/Ctrl+C survive across frames (a per-frame `Entity` would reset the `DocSelection`/`FocusHandle` every render and break selection on reasoning text the same way it did on tool output). Italic styling propagates from the row's `Markdown::italic` toggle.
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 #### ActivitySegment
 
-One contiguous thinking + tool-call segment within a user turn, rendered as a **Chain of Thought** (`ai_elements::ChainOfThought`, `render_thinking`) — the first `ai-elements` component wired into the conversation. Header row: model display name (the row's label) + chevron + live braille spinner + per-kind counts (`Read×7`, `Edit×6`, `思考×8` via `message-reasoning`) + elapsed (`thinking-duration`) + red `activity-failed` / orange `activity-awaiting-approval` badges — counts, spinner and badges ride the header's `meta` slots; clicking the row fires the component's `on_toggle`, which writes the container's `collapsed` and sets `user_toggled` (manual state is sticky — auto-collapse never fights the user). The header row and a step's title row are tab stops: keyboard enter / space answers the same toggle. Collapsed shows the header alone whether live or settled; expanded lists one `ChainOfThoughtStep` per entry (`render_activity_entry`), each drawing the connector rail below its marker — the last step draws none, so the list does not end on a stub. A step's marker column carries the entry's status (braille spinner while a reasoning round streams or a tool runs; book-open / check / cross / minus once settled), its label is the entry's own clickable row (chevron + title), and its content is the entry's body (the reasoning round's persistent `Entity<Markdown>`, or a tool's terminal-styled output panel). **The component holds no policy**: `open` is `layout.expanded` — which already folds in the approval force-open — and the click handler is the host's; `animated(false)` keeps the reveal layout-neutral so the list's cached row heights stay honest. Segments with fewer than two entries render flat under a model-name-only header with no cover to click. An approval-pending entry force-opens the segment so the interactive row is never hidden. The assistant reply that follows a segment renders no model row of its own — the header is the single place the model shows. The elapsed counter ticks every second via a gpui background timer spawned on `TurnStarted` and self-terminating on terminal `Stop`/`Error`; `frozen_secs` pins the final value so later re-renders don't inflate it. Ordinary tool calls fold here instead of producing standalone cards. Attaching a thread replays the leaf window's live-only tail, so an in-flight tool's streamed output survives a switch away and back; a settled call's chunks are skipped (its display row already carries the output).
+One contiguous thinking + tool-call segment within a user turn, rendered as a **Chain of Thought** (`ai_elements::ChainOfThought`, `render_thinking`) — the first `ai-elements` component wired into the conversation. Header row: model display name (the row's label) + chevron + live braille spinner + per-kind counts (`Read×7`, `Edit×6`, `思考×8` via `message-reasoning`) + elapsed (`thinking-duration`) + red `activity-failed` / orange `activity-awaiting-approval` badges — counts, spinner and badges ride the header's `meta` slots; clicking the row fires the component's `on_toggle`, which writes the container's `collapsed` and sets `user_toggled` (manual state is sticky — auto-collapse never fights the user). The header row and a step's title row are tab stops: keyboard enter / space answers the same toggle. Collapsed shows the header alone whether live or settled; expanded lists one `ChainOfThoughtStep` per entry (`render_activity_entry`), each drawing the connector rail below its marker — the last step draws none, so the list does not end on a stub. A step's marker column carries the entry's status (braille spinner while a reasoning round streams or a tool runs; book-open / check / cross / minus once settled), its label is the entry's own clickable row (chevron + title), and its content is the entry's body (the reasoning round's persistent `Entity<Markdown>`, or a tool's terminal-styled output panel). **The component holds no policy**: `open` is `layout.expanded` — which already folds in the approval force-open — and the click handler is the host's; `animated(false)` keeps the reveal layout-neutral so the list's cached row heights stay honest. Segments with fewer than two entries render flat under a model-name-only header with no cover to click. An approval-pending entry force-opens the segment so the interactive row is never hidden. The assistant reply that follows a segment renders no model row of its own — the header is the single place the model shows. The elapsed counter ticks every second via a gpui background timer spawned on `TurnStarted` and self-terminating on terminal `Stop`/`Error`; `frozen_secs` pins the final value so later re-renders don't inflate it. Ordinary tool calls fold here instead of producing standalone cards. Attaching a thread replays the leaf window's live-only tail (`workspace/catch_up.rs`), so an in-flight tool's streamed output survives a switch away and back; a settled call's chunks are skipped (its display row already carries the output). Attaching a thread replays the leaf window's live-only tail, so an in-flight tool's streamed output survives a switch away and back; a settled call's chunks are skipped (its display row already carries the output).
 
-> Source: `crates/agent-ui/src/views/message.rs` — `render_thinking`, `render_activity_entry`, `reasoning_step`, `tool_step`, `segment_layout`, `segment_stats`. Component: `crates/ai-elements/src/chain_of_thought.rs`. Container state: `ConversationState` (`ConvItem::Thinking` / `ThinkingContainer`).
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs` — `render_thinking`, `render_activity_entry`, `reasoning_step`, `tool_step`, `segment_layout`, `segment_stats`. Component: `crates/ai-elements/src/chain_of_thought.rs`. Container state: `ConversationState` (`ConvItem::Thinking` / `ThinkingContainer`).
 
 #### ToolCallCard
 
@@ -481,49 +514,55 @@ A standalone tool-call card (`render_tool_call`) for the special-case tools that
 
 Statuses: `PendingApproval` | `Running` | `Success` | `Error` | `Denied` — see [ToolCallStatus](#tool-call-statuses).
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 #### AgentTaskCard
 
 Compact, single-line sub-agent row: `[status] type · short title`. Running and pending rows use a braille-dot spinner (`BrailleSpinner`); terminal rows use check, error, or minus icons. The title is always one line with truncation and a full-title tooltip. It deliberately renders no child text, nested messages, copy control, metrics, or expansion affordance; clicking stays a no-op. Live drill-down lives on the Agent tool-call card instead: the child session's streamed text/thinking deltas and tool lifecycle lines (`▸ Tool hint` / `✓ Tool` / `✗ Tool`) append to the card's output in real time (bridged through the Agent tool's progress channel).
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 #### BackgroundTaskCard
 
 Bordered card showing a background task's kind (Monitor command / Monitor WebSocket / Background Bash / subagent — async `Steer` Dispatch registered as `TaskKind::Subagent`), description, status badge (Running / Stopping / Completed / Failed / Timed out / Stopped / Session ended), event count, and total bytes. The title row keeps only the description's first line (a background bash description is the full command, heredoc body included) with single-line ellipsis; the complete text is shown in a hover tooltip. The detail row (failure summary or latest event) wraps in full — it is the only UI surface for a task's error text. Running tasks show a braille spinner and a Stop button that calls `background_task::stop` (cancels the child token the run task observes). Terminal tasks show a static status icon. Updated in-place by task ID via `ThreadEvent::BackgroundTaskUpdated` — the card is created when the first event snapshot arrives and never duplicated. A subagent's final text is delivered to the Captain via `BackendNotice::SteerDelivered{reason: Complete}` (facade injects a peer message + fires a turn), not via this card's Stop button; an explicit Abort settles silently (`TaskStatus::Stopped`).
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 #### ErrorMessage
 
-Rounded card, `bg:danger/0.06`, red text, "Error" label + copy btn. Body is a persistent selectable `Entity<Markdown>`. A turn that fails while its thread is parked persists the same card: the parked subscription annotates the error against its own session (`append_ui_note_for`), so the card is present on switch-back and on reload.
+Rounded card, `bg:danger/0.06`, red text, "Error" label + copy btn. Body is a persistent selectable `Entity<Markdown>`. A turn that fails while its thread is parked persists the same card: the parked subscription annotates the error against its own session (`append_ui_note_for`), so the card is present on switch-back and on reload. A turn that fails while its thread is parked persists the same card: the parked subscription annotates the error against its own session (`append_ui_note_for`), so the card is present on switch-back and on reload.
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 #### NoticeMessage
 
 Rounded card, `bg:secondary/0.15`, muted text, "Notice" label + copy btn. Body is a persistent paginated `TerminalPanel` (`PanelKind::Plain`, no command/cwd) — the same folded surface as tool output: default `PAGE_SIZE` (20) lines with a `+N` load-more row; selection + pagination cursor survive across frames. Mounted by `MessageItem::ensure_notice_panel` (live) and `new_history_item` (reload).
 
-> Source: `crates/agent-ui/src/views/message.rs` · panel: `crates/manox-components/src/markdown/terminal_panel.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs` · panel: `crates/manox-components/src/markdown/terminal_panel.rs`
 
 #### RecapCard
 
 Collapsible compaction summary card: chevron + book icon + "Context compacted" label + copy btn. Body is the model-generated handoff summary (markdown, not localized), mounted as a persistent selectable `Entity<Markdown>`. Collapsed by default; emitted on `ThreadEvent::Compaction` and rebuilt from `MessageContent::Compaction` on thread reload.
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
 
 #### CacheMissDivider
 
-Slim left-aligned divider rendered above an assistant turn whose request lost the prompt cache, matching oh-my-pi's `CacheInvalidationMarkerComponent`. Rendered as a 10-character rule + muted label `"cache miss · N tokens"` (tokens formatted by `format_tokens`). Emitted on `ThreadEvent::CacheInvalidation` and inserted as a `ConvItem::CacheMiss` into the conversation list. Live-only (`CacheInvalidation` has no journal row), so it does not survive a reload or a switch away and back.
+Slim left-aligned divider rendered above an assistant turn whose request lost the prompt cache, matching oh-my-pi's `CacheInvalidationMarkerComponent`. Rendered as a 10-character rule + muted label `"cache miss · N tokens"` (tokens formatted by `format_tokens`). Emitted on `ThreadEvent::CacheInvalidation` and inserted as a `ConvItem::CacheMiss` into the conversation list. Live-only (`CacheInvalidation` has no journal row), so it does not survive a reload or a switch away and back. Live-only (`CacheInvalidation` has no journal row), so it does not survive a reload or a switch away and back.
 
-> Source: `crates/agent-ui/src/views/message.rs` — `render_cache_miss`. Event handler: `crates/agent-ui/src/conversation.rs`. Enum: `crates/agent-ui/src/conversation.rs` (`ConvItem::CacheMiss`).
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs` — `render_cache_miss`. Event handler: `crates/manox-agent-chat-ui/src/conversation.rs`. Enum: `crates/manox-agent-chat-ui/src/conversation.rs` (`ConvItem::CacheMiss`).
 
 #### RetryBadge
 
-Amber badge, `bg:warning/0.12`, braille spinner + "Retry N/M (in Xs)" text. The retry detail body, when present, is a persistent selectable `Entity<Markdown>`, re-synced when a coalesced retry rewrites the item's detail in place. The trailing retry row is replayed when a thread is attached while its turn is still running (a parked thread's `Retry` never reached the foreground handler), and only while nothing has moved past it: content, a terminal error, or a turn boundary retires the candidate, mirroring the live pop.
+Amber badge, `bg:warning/0.12`, braille spinner + "Retry N/M (in Xs)" text. The retry detail body, when present, is a persistent selectable `Entity<Markdown>`, re-synced when a coalesced retry rewrites the item's detail in place. The trailing retry row is replayed when a thread is attached while its turn is still running (a parked thread's `Retry` never reached the foreground handler), and only while nothing has moved past it: content, a terminal error, or a turn boundary retires the candidate, mirroring the live pop. The trailing retry row is replayed when a thread is attached while its turn is still running (a parked thread's `Retry` never reached the foreground handler), and only while nothing has moved past it: content, a terminal error, or a turn boundary retires the candidate, mirroring the live pop.
 
-> Source: `crates/agent-ui/src/views/message.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs`
+
+#### AttachCatchUp
+
+Attach-time replay of the live-only rows a parked thread dropped (`crates/agent-ui/src/workspace/catch_up.rs`): streamed `ToolOutput` for an unsettled call, sub-agent child/progress rows, and the trailing retry notice — each replayed onto the freshly attached thread from the leaf window, and each bounded on its own terms (the settle row ends the output, the window moving past the retry ends it).
+
+> Source: `crates/agent-ui/src/workspace/catch_up.rs`
 
 #### 3.2.3 Footer
 
@@ -562,7 +601,7 @@ Dragging the grip handle reorders the parked **Queued** tail: the move uses the 
 
 Clicking Steer does **not** touch the message list: it sends the online `ClientCall::Steer` to the server (via `Workspace::send_steer_v2` — the desktop `thread` is an engine-less render mirror, so the old local `enqueue_steer` was a dead end) and turns the row into a **SteerPending** status line — an invisible grip-width spacer (to stay column-aligned), optional `image` badge, one-line summary, and a 「待引导」 badge on the right, no buttons (a live steer is already committed to the server and the protocol has no steer-withdrawal channel, so it is not removable, editable, or draggable). The message enters the conversation only at the **turn settle** boundary: a normal `TurnFinished{cancelled:false, failed:false}` moves every `SteerPending` card out of the queue and appends it to the message list as a persistent **steered** user bubble (「已引导」 badge, `meta.steered`), and the still-parked `Queued` cards then flush as the next turn — so the list order matches the real delivery order (injected steers first, then the batched queue). A cancelled/failed `TurnFinished` settles the group by the server's per-id verdict (`stranded_steer_ids`, FIFO): only the not-yet-injected tail turns into a red **Failed** row (立即-retry / Edit / Remove) — the injected head promotes with its `steered` bubble, so a retry can never double-deliver. A normal settle carries zero stranded and promotes the whole group. The client never observes the mid-turn injection instant; the settle is its earliest verifiable equivalent signal (dspo/manox's steer-continuation guarantee makes promote-at-settle honest: every accepted steer is injected this run or an auto-chained continuation, and an aborted run withdraws its stranded steers so a retry can't double-deliver). `⌘ + ⌥ + /` (`UndoLastQueued`) pops the last removable `Queued` card and skips any `SteerPending` at the tail (not undoable); `Failed` cards stay for the explicit retry/remove path. The 「待引导」 badge on the queue row is live-only (the steer hasn't reached the transcript yet), whereas 「已引导」 still appears only in the live list and drops on reload (the server builds the persisted steer row's `ui` without `steered` — a parity gap needing an upstream fix, not a regression here). Queues are retained in memory per task across task switches, but are not persisted across app restarts; the queue's per-view drag marker is dropped on thread switch (its indices are view-local).
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_queued_follow_ups`, the SteerPending status row, `DraggedQueueRow`/`QueueRowDrag` drag types); `crates/agent-ui/src/workspace/composer.rs` (`steer_follow_up`, `enqueue_steer_pending`, `steer_group_insert_index`, `queue_move_index`, `commit_queue_drag`, `edit_follow_up`, `retire_injected_steer`, `promote_settled_steers`, `settle_steer_group`, `settle_parked_steer_group`); `crates/agent-ui/src/workspace.rs` (`send_steer_v2` + the `TurnFinished` settle routing, the `queue_drag` field); steered badge render in `crates/agent-ui/src/views/message.rs` (`render_user`). The facade's `BackendNotice::Settled` emits `SteerInjected` per steered id, but `manox-session-core/src/translate.rs` drops it on the v2 wire, so the client never receives it and the settle alone drives the outcome.
+> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_queued_follow_ups`, the SteerPending status row, `DraggedQueueRow`/`QueueRowDrag` drag types); `crates/agent-ui/src/workspace/composer.rs` (`steer_follow_up`, `enqueue_steer_pending`, `steer_group_insert_index`, `queue_move_index`, `commit_queue_drag`, `edit_follow_up`, `retire_injected_steer`, `promote_settled_steers`, `settle_steer_group`, `settle_parked_steer_group`); `crates/agent-ui/src/workspace.rs` (`send_steer_v2` + the `TurnFinished` settle routing, the `queue_drag` field); steered badge render in `crates/manox-agent-chat-ui/src/views/message.rs` (`render_user`). The facade's `BackendNotice::Settled` emits `SteerInjected` per steered id, but `manox-session-core/src/translate.rs` drops it on the v2 wire, so the client never receives it and the settle alone drives the outcome.
 
 #### ComposerDivider
 
@@ -655,7 +694,7 @@ after having been confirmed in it settled remotely and is reconciled away.
 
 Multi-step question navigator rendered inside the conversation. The card
 carries two presentations routed at the one render entry
-(`render_ask_user_card`, `crates/agent-ui/src/views/message.rs`): a
+(`render_ask_user_card`, `crates/manox-agent-chat-ui/src/views/message.rs`): a
 single-question ask with a `plan-review` intent whose `approve` label matches
 one of its own options renders the [PlanReviewDecisionCard](#planreviewdecisioncard);
 every other ask renders the generic stepper flow (`render_question_card`).
@@ -671,7 +710,7 @@ the footer stays reachable on a long plan. The ask state
 Title + close (X, the dismissal leg). The stepper moved to
 [AskDrawerFooter](#askdrawerfooter).
 
-> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`)
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs` (`render_question_card`)
 
 #### AskDrawerQuestion
 
@@ -680,7 +719,7 @@ text rendered with the repo `Markdown` component (`markdown_tv`) beneath the
 question. On the generic card the plan-review body rides here when the intent
 fallback fires (see [PlanReviewDecisionCard](#planreviewdecisioncard)).
 
-> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`)
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs` (`render_question_card`)
 
 #### AskDrawerOptions
 
@@ -702,7 +741,7 @@ ever attach to its own question (the removed card-level "response" override is
 gone). The skip affordance that used to sit beside it moved to
 [AskDrawerFooter](#askdrawerfooter).
 
-> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs`
 
 #### AskDrawerFooter
 
@@ -715,7 +754,7 @@ the CURRENT question is answered (a pick or typed custom; dsh
 be reached as a no-op that reads as a broken button. Decision actions sit
 where the reading finishes, never pinned above the content they settle.
 
-> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`)
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs` (`render_question_card`)
 
 #### AskDrawerSkipButton
 
@@ -730,7 +769,7 @@ header X; the AskDrawer Esc binding only lands while focus sits INSIDE the
 card — reachable on the generic card after clicking the custom input, never
 on the decision card, which takes no focus).
 
-> Source: `crates/agent-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
+> Source: `crates/manox-agent-chat-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
 
 #### AskDrawerNav
 
@@ -780,7 +819,7 @@ separate dismissal. A plan-review ask that fails the routing (extra questions,
 a multi-select question, unmatched `approve`) renders the generic stepper flow
 instead.
 
-> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/agent-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`decide_ask_option`)
+> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/manox-agent-chat-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`decide_ask_option`)
 
 #### AskSettledElsewhereNotice
 
@@ -798,7 +837,7 @@ set and surfaces one transient `Notification::info` ("handled on another
 client"). A local settle (`resolve_ask` / `dismiss_ask` / `resolve_auth`) calls
 `retire_auth` so a later note for the same delivery cannot mis-fire the notice.
 
-> Source: `crates/agent-ui/src/client_store.rs` (`handle_delivery_cancelled`, `retire_auth`) + `crates/agent-ui/src/client_store_handle.rs` + `crates/agent-ui/src/multiplexer.rs` (broadcast) + `crates/agent-ui/src/workspace/chips.rs` (`notice_settled_elsewhere`)
+> Source: `crates/manox-agent-chat-ui/src/client_store.rs` (`handle_delivery_cancelled`, `retire_auth`) + `crates/manox-agent-chat-ui/src/client_store_handle.rs` + `crates/agent-ui/src/multiplexer.rs` (broadcast) + `crates/agent-ui/src/workspace/chips.rs` (`notice_settled_elsewhere`)
 
 #### 3.2.4 Popups & Dropdowns
 
@@ -808,7 +847,7 @@ client"). A local settle (`resolve_ask` / `dismiss_ask` / `resolve_auth`) calls
 
 Trigger: typing `/` (slash commands) or `@` (skills + subagents) at the caret in [InputField](#inputfield). A typeahead list anchored above the composer: filters live on every keystroke, navigated with up/down, confirmed with Tab or Enter, dismissed with Escape. While open the composer wrapper sets a `completion = open` key context so the `completion == open > Input` keybindings shadow the Input's own navigation bindings. A pure render overlay — [InputField](#inputfield) keeps focus throughout, so the query keeps filtering as the user types.
 
-> Source: `crates/agent-ui/src/views/completion.rs` (state + detection + rendering), wired in `crates/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/completion.rs` (state + detection + rendering), wired in `crates/agent-ui/src/workspace/composer_render.rs`
 
 #### ModelMenu
 
@@ -857,7 +896,7 @@ The card stays **hidden while the [EditorPane](#editorpane) is open** — openin
 
 Floating absolute card over the conversation column's top-right (`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`). Owns `Entity<Thread>` and renders the panel body (`render_panel`) which carries the card chrome (border / rounded / shadow / background + `p_3`/`gap_2`) at content height.
 
-> Source: `crates/agent-ui/src/views/context_rail.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs`
 
 #### ContextRailPanel
 
@@ -880,13 +919,13 @@ Contents, top to bottom:
 
 Each numeric cell animates scoreboard-style (`counter_animated`): a fresh `gen` is appended to the animation id on every value delta, so gpui fires a 600ms `ease_out_quint` tween from the previous rendered value to the new one. `env_counter_state: HashMap<String, (u64, u64)>` lives on `ContextRail`, rebuilt every render inside `render_usage_section` to auto-prune cells whose model disappeared.
 
-> Source: `crates/agent-ui/src/views/context_rail.rs` (`render_panel`)
+> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs` (`render_panel`)
 
 #### ContextRailCollapseBtn
 
 Ghost `xsmall` button in the panel header, `IconName::PanelRightClose`, tooltip i18n `context-rail-collapse`. Folds the rail into a drawer when narrow (the drawer's open affordance uses `context-rail-drawer-open` / `context-rail-expand`).
 
-> Source: `crates/agent-ui/src/views/context_rail.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs`
 
 #### ContextRailChangesRow
 
@@ -894,7 +933,7 @@ Working-tree diff stat line in the panel body. `env_row` with `Frame` icon, "Cha
 
 Stats come from `git diff --numstat HEAD` (binary rows `-`/`-` skipped) plus `git ls-files --others --exclude-standard` for untracked, shelled out via [`crate::git_status`](#git_status) on the global tokio runtime. Refreshed (debounced 400ms) by `Workspace` on thread attach and terminal `Stop`.
 
-> Source: `crates/agent-ui/src/views/context_rail.rs` (`render_changes_row`)
+> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs` (`render_changes_row`)
 
 #### ContextRailBranchRow
 
@@ -910,7 +949,7 @@ Resolved git identity block in the panel body (`render_branch_block`). When the 
 
 Both glyphs live in manox's local asset bundle (`ExtrasAssetSource` in `crates/agent-ui/src/assets.rs`), not `gpui-kit-assets` — `IconName` is generated at compile time from the latter's directory and cannot reference them, so the rows construct `Icon::default().path("icons/…")` instead of `Icon::new(IconName::…)`. Branch resolution shells out to `git branch --show-current`, falling back to `git rev-parse --short HEAD` for detached HEAD. All via [`crate::git_status`](#git_status).
 
-> Source: `crates/agent-ui/src/views/context_rail.rs` (`render_branch_block`)
+> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs` (`render_branch_block`)
 
 #### ContextRailBranchMenu
 
@@ -919,7 +958,7 @@ Both glyphs live in manox's local asset bundle (`ExtrasAssetSource` in `crates/a
 - **Copy branch name** (i18n `workspace-env-git-copy-branch`) — shown when a branch resolved; writes to the clipboard silently.
 - **Copy working-directory path** (i18n `workspace-env-git-copy-path`) — shown when an effective cwd is reported.
 
-> Source: `crates/agent-ui/src/views/context_rail.rs` (`render_branch_row`)
+> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs` (`render_branch_row`)
 
 #### git_status
 
@@ -929,7 +968,7 @@ Pure parsing + tokio-bridged IO module backing [ContextRailChangesRow](#contextr
 - `gather` — runs `git rev-parse --show-toplevel`, `git branch --show-current` / `git rev-parse --short HEAD`, `git diff --numstat HEAD`, `git ls-files --others --exclude-standard` in one background task; returns `None` when the cwd is not under git.
 - `gather_bridged` — spawns `gather` on the tokio runtime and awaits the result from a gpui `cx.spawn`.
 
-> Source: `crates/agent-ui/src/git_status.rs`
+> Source: `crates/manox-agent-chat-ui/src/git_status.rs`
 
 ### 3.4 EditorPane
 
@@ -1130,6 +1169,58 @@ Monospace grid renderer, `flex_1`. Shapes text runs per line through a content-f
 
 ---
 
+## 6A. Chrome Shell（`--features chrome-shell`）
+
+#### ChromeShell
+
+应用壳根视图（`crates/manox-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px、侧栏开关、session 下拉选择器、VS 徽标、Sync 胶囊、面板/右栏开关、头像）+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为隐形 absolute 层（挂在根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（选中、分组折叠、分组拖排、下拉/行菜单）。
+
+> Source: `crates/manox-agent-chrome-ui/src/shell.rs`, `crates/manox-agent-chrome-ui/src/titlebar.rs`, `crates/manox-agent-chrome-ui/src/divider.rs`
+
+#### ChromeSessionList
+
+侧栏会话树（props 驱动，`crates/manox-agent-chrome-ui/src/session_list.rs`）：两行 46px 行卡，五态字形（`Errored` 红三角／`PendingAuth`·`PendingPlan` accent 呼吸点／`Running` 落积木动画／`Unread` 蓝点／`Idle` 空槽）、置顶星标领先分区、用户标签 chip、短 id chip（点击复制）、team 嵌套（indent × 14px + 左导轨 + leader chevron）、选中行白卡 + 浮出 pin/archive/kebab 操作；分组头可折叠并作为拖拽源/放置目标（2px accent 插入线）。
+
+> Source: `crates/manox-agent-chrome-ui/src/session_list.rs`
+
+#### SidebarProjection
+
+wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ThreadListItem`（multiplexer 权威行，含 §D.5 增量合并）→ 五态优先级（errored > pending_auth > pending_plan > running > unread，叶子 unread 镜像覆盖 wire 标志）＋ team 森林（leader 保序、member 缩进一级、孤儿拍平）＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
+
+> Source: `crates/agent-ui/src/sidebar_projection.rs`
+
+#### ChromeRightPane
+
+右栏外壳（`crates/manox-agent-chrome-ui/src/right_pane.rs`）：圆角卡 + 页签条（激活页签顶圆角与内容相连）+ 新标签页空态（快捷操作由注册表生成）+ 打开/激活/关闭生命周期（最后一个页签关闭即收起）。内容经 `ToolTab` 注入、kind 经 `ToolTabFactory` 注册；**实例级 id**（一种 kind 可多开）。**per-thread 会话**：`RightPaneSession{open, store, active_id, visible}` 整体 stash/restore（挂起走 `on_active(false)`——浏览器子视图隐藏、终端保活；仅显式关页签才拆内容）。快照经 `ToolTab::persist` / `ToolTabFactory::restore`（浏览器 `{"url"}`、编辑器空稿可恢复；终端与 CLI 会话不可复活，恢复时丢弃）落 `threads.db` 的 `thread_right_pane`。
+
+> Source: `crates/manox-agent-chrome-ui/src/right_pane.rs`, `crates/agent-ui/src/chrome_assembly.rs`
+
+#### ToolTabRegistry
+
+chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 与旧壳页签同权；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮）。
+
+> Source: `crates/agent-ui/src/tool_tabs.rs`
+
+#### ChromePanel
+
+底部 dock（`crates/manox-agent-chrome-ui/src/panel.rs` + `shell.rs` 的渲染）：通用容器，内容经 `PanelSurface` 注入（`open`=展开即拉起、`close`=收起即回收；新建/清理/收起三个动作）。manox 装配装集成终端，cwd 随前台线程；dock 视图按线程 stash/restore（同右栏语义）。
+
+> Source: `crates/manox-agent-chrome-ui/src/panel.rs`, `crates/agent-ui/src/chrome_assembly.rs`
+
+#### EmbeddedColumn
+
+`Workspace::render_embedded_column`：嵌入渲染模式下的会话列（hero 空屏／虚拟化消息列表／composer footer＋附件与 chips／ask 与 blank-project overlay／浮动 ContextRail／TurnNavigator overlay），去掉旧壳的 gutter/侧栏槽/卡壳/内嵌标题栏；键盘动作面经共享根装饰器 `apply_chat_actions`（两壳同源）。装配把该视图作为 chrome 的 `MainSurface`，其 multiplexer 同时喂侧栏投影泵。
+
+> Source: `crates/agent-ui/src/workspace/render.rs`
+
+#### EmbeddedSettings
+
+chrome 构建下的 Settings（`Workspace::render_embedded_settings`）：同一状态机（`ViewMode::Settings` + `SettingsView` 订阅），渲染换位——设置导航列（240px）｜分隔线｜面板 放进主卡（chrome 侧栏槽是会话列表）；⌘, 与原生菜单 `Settings…` 经 `apply_chat_actions` 的 `OpenSettings` 处理进入，返回走 nav 的 back 控件（`SettingsEvent::Exit` → 滑出后回会话）。
+
+> Source: `crates/agent-ui/src/workspace/render.rs`, `crates/agent-ui/src/views/settings/mod.rs`
+
+---
+
 ## 7. Shared Primitives
 
 Reusable UI elements from `gpui_component` and `manox-components` used across all views.
@@ -1164,7 +1255,7 @@ First-party selectable text panel (`manox-components::markdown::TerminalPanel`, 
 
 **Pagination.** A finalized body renders `PAGE_SIZE` (20) lines at a time; a "load more" affordance below the body (a centered `ChevronDown` + `+N` count, top-bordered, hover-tinted) grows the window by another page via `show_more`, clamped to the total. Streaming bodies render the whole live output (no pagination); on the streaming→finalized transition the cursor resets to the first page so the result opens at the top. The panel has **no internal vertical scroll** — the message-list `message-list` div scrolls the whole panel — so `show_more` never touches a scroll handle: growing the window appends lines below the current viewport without jumping to the tail. The pixel-anchored, tail-following message-list arbitration (recomputed each frame in `on_prepaint`) keeps the viewport at the user's reading position across the growth, so successive "load more" clicks stay anchored to the current line rather than snapping to the end.
 
-> Source: `crates/manox-components/src/markdown/terminal_panel.rs` · wired by `crates/agent-ui/src/views/message.rs` (`tool_panel_body` → `ensure_tool_panel` / `sync_tool_*_panel` / `rebuild_tool_panels`, titlebar frame in `render_tool_entry` / `render_tool_call`) + `crates/agent-ui/src/conversation.rs` (`apply` ToolOutput/ToolResult arms, `rebuild_from_messages`)
+> Source: `crates/manox-components/src/markdown/terminal_panel.rs` · wired by `crates/manox-agent-chat-ui/src/views/message.rs` (`tool_panel_body` → `ensure_tool_panel` / `sync_tool_*_panel` / `rebuild_tool_panels`, titlebar frame in `render_tool_entry` / `render_tool_call`) + `crates/manox-agent-chat-ui/src/conversation.rs` (`apply` ToolOutput/ToolResult arms, `rebuild_from_messages`)
 
 #### Markdown
 

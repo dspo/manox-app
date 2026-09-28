@@ -173,7 +173,7 @@ pub struct SettingsView {
     /// top-level Workspace mode so plugins live under Settings →
     /// Integrations.
     plugins: Entity<PluginManagerView>,
-    /// Sidebar item currently highlighted. Stable fluent message id (e.g.
+    /// Sidebar item currently highlighted. Stable fluent message id (e.g
     /// `"settings-item-general"`) so it survives locale switches.
     selected: Option<SharedString>,
 

@@ -73,6 +73,17 @@ mod tests {
             // U6b⑤: the park-seed store writes retired (mark_running/
             // mark_background_work — the U3b server pump is the single
             // flag writer; its deltas already fed every mirror).
+            (
+                "chrome_assembly.rs",
+                "store mirror writes (U3)",
+                STORE_WRITE,
+                0,
+            ),
+            // Phase 4: the pin/archive HostHooks (the legacy sidebar's own
+            // seam) plus the right-pane durable snapshot's upsert/load —
+            // the same two call shapes the legacy workspace carries.
+            ("chrome_assembly.rs", "store reads (U2)", STORE_GLOBAL, 4),
+            ("chrome_assembly.rs", "wire sends", SENDS, 0),
             ("workspace.rs", "store mirror writes (U3)", STORE_WRITE, 3),
             (
                 "workspace/composer_render.rs",
@@ -344,6 +355,10 @@ mod tests {
             // browser-suite landing fallbacks and the blank-project
             // store legs).
             "workspace/composer_render.rs",
+            // Phase 4 dual-shell: the chrome assembly is the chrome build's
+            // workspace-equivalent — its HostHooks (pin/archive) are
+            // user-action store writes, budgeted by its own rows below.
+            "chrome_assembly.rs",
         ];
         let mut offenders: Vec<String> = Vec::new();
         collect_rs_files(&src, &src, &mut offenders, exempt);

@@ -40,7 +40,7 @@ impl Workspace {
     /// call's chunks would duplicate the output the display fold already
     /// carries, so the call's `ToolResult` row in the window is the gate.
     pub(super) fn catch_up_live_only_state(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = self.store.clone() else {
+        let Some(store) = self.chat.read(cx).store.clone() else {
             return;
         };
         let events: Vec<ThreadEvent> = store.read_with(cx, |handle, _| {
@@ -126,7 +126,7 @@ impl Workspace {
         health: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        self.context_rail.update(cx, |r, cx| {
+        self.chat_rail(cx).update(cx, |r, cx| {
             r.apply_subagent_progress(id, subagent_type, latest_activity, status, health, cx);
         });
         // Record the completion text so a panel opened later (after the Agent
@@ -168,9 +168,9 @@ impl Workspace {
     /// current role/usage/cwd context, then reconcile the list. Shared by the
     /// live foreground subscription and the attach catch-up.
     pub(super) fn apply_to_conversation(&mut self, ev: &ThreadEvent, cx: &mut Context<Self>) {
-        let weak = cx.weak_entity();
+        let host = self.chat.read(cx).host.clone();
         let role = self.model_label(cx);
-        let usage = self.store.as_ref().and_then(|s| {
+        let usage = self.chat.read(cx).store.as_ref().and_then(|s| {
             s.read(cx)
                 .store
                 .last_token_usage
@@ -182,14 +182,14 @@ impl Workspace {
                     cache_read_input_tokens: u.cache_read,
                 })
         });
-        let cwd = thread_cwd(&self.thread, &self.store, cx);
-        let outcome = self.conversation.update(cx, |c, cx| {
+        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
+        let outcome = self.chat_conversation(cx).update(cx, |c, cx| {
             c.apply(
                 ev,
                 &role,
                 usage,
                 crate::conversation::ApplyCtx {
-                    weak,
+                    host,
                     cwd,
                     fork_source: self.fork_source_session(cx),
                 },

@@ -28,17 +28,41 @@ impl Render for Workspace {
         // Identity hand-off: the successor takes the foreground, and the
         // predecessor's thread parks with its transcript (its id keeps
         // resolving server-side for stale sends).
-        if let Some(next) = self.pending_successor.take() {
+        if let Some(next) = self.chat.update(cx, |chat, cc| {
+            let v = chat.pending_successor.take();
+            cc.notify();
+            v
+        }) {
             self.open_thread(next, window, cx);
             cx.notify();
+        }
+        // Dual-shell embed (PLAN Phase 4 tranche 3): mounted as the chrome
+        // shell's main surface, the workspace renders ONLY the conversation
+        // column — no shell gutter, no sidebar slot, no card chrome, no
+        // right pane (the chrome shell owns all of those). The body drops
+        // the legacy title-bar inset (the chrome card starts the column at
+        // its top edge).
+        if self.embedded {
+            // Settings is a main-column swap in the chrome shell too: the
+            // card hosts the settings nav + panel until the back control
+            // exits (the state machine and its subscription are the legacy
+            // ones; only the layout differs — the nav lives inside the card
+            // because the chrome sidebar slot is the session list).
+            if matches!(self.view_mode, ViewMode::Settings) && !self.exiting_settings {
+                return self.render_embedded_settings(window, cx);
+            }
+            return self.render_embedded_column(window, cx);
         }
         // gpui cancels a drag on any mouse-up that doesn't land inside a
         // payload-matching drop target (`on_drop` never runs) — prune the
         // queue-drag marker here, the same policy as the sidebar's rows. gpui
         // refreshes on that cancel, so this clears the same frame; without it
         // the source row would stay dimmed and the insertion line pinned.
-        if !cx.has_active_drag() && self.queue_drag.is_some() {
-            self.queue_drag = None;
+        if !cx.has_active_drag() && self.chat.read(cx).queue_drag.is_some() {
+            self.chat.update(cx, |chat, cx| {
+                chat.queue_drag = None;
+                cx.notify();
+            });
         }
         self.render_manox(window, cx)
     }
@@ -46,7 +70,7 @@ impl Render for Workspace {
 impl Workspace {
     /// The full workspace chrome: sidebar, conversation column, context rail,
     /// right pane, question-card overlays. Shared by both harness builds.
-    fn render_manox(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_manox(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         if !matches!(self.view_mode, ViewMode::Workspace) {
             self.drop_turn_navigator(cx);
         }
@@ -105,6 +129,8 @@ impl Workspace {
         // `TerminalElement`.
         if matches!(self.view_mode, ViewMode::Terminal) {
             let title_text: SharedString = self
+                .chat
+                .read(cx)
                 .store
                 .as_ref()
                 .and_then(|s| {
@@ -135,7 +161,7 @@ impl Workspace {
                 .shell_root(self.sidebar.clone(), column, cx)
                 .on_action(
                     cx.listener(|this, _: &crate::ToggleCockpitTasks, _window, cx| {
-                        this.context_rail.update(cx, |r, cx| {
+                        this.chat_rail(cx).update(cx, |r, cx| {
                             r.cockpit_hide_tasks = !r.cockpit_hide_tasks;
                             cx.notify();
                         });
@@ -188,6 +214,8 @@ impl Workspace {
         }
         let theme = cx.theme().clone();
         let running = self
+            .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.running)
@@ -195,7 +223,7 @@ impl Workspace {
 
         self.ensure_blank_project_input(window, cx);
 
-        if self.blocking_overlay_active() && self.turn_navigator.is_some() {
+        if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {
             self.close_turn_navigator(window, cx);
         }
 
@@ -208,6 +236,8 @@ impl Workspace {
         // first screen stays branded before any title is generated.
         let title_text: SharedString = {
             let s = self
+                .chat
+                .read(cx)
                 .store
                 .as_ref()
                 .map(|s| s.read(cx).store.with(|st| st.display_title.clone()))
@@ -221,7 +251,7 @@ impl Workspace {
         // Restoring history keeps the composer mounted so the user can draft
         // immediately, while submission remains gated until the transcript is
         // authoritative.
-        let first_screen = self.conversation.read(cx).is_empty(cx) && !running;
+        let first_screen = self.chat_conversation(cx).read(cx).is_empty(cx) && !running;
         // T10c (§D.6): the v1 `history_phase` mirror retired with the fold —
         // at HEAD the field was unwritten (default `Ready`), so the loading
         // branch already never fired. The §D.1 snapshot is the restore
@@ -241,6 +271,8 @@ impl Workspace {
         let show_rail = !first_screen
             && (!editor_open || !right_pane_open)
             && self
+                .chat
+                .read(cx)
                 .store
                 .as_ref()
                 .map(|s| s.read(cx).store.has_interacted)
@@ -249,7 +281,7 @@ impl Workspace {
         let overlay = self
             .render_blank_project_overlay(window, &theme, cx)
             .or_else(|| self.render_pending_auth_overlay(&theme, cx));
-        let turn_navigator_overlay =
+        let _turn_navigator_overlay =
             self.render_turn_navigator_overlay(window, &theme, right_pane_open, show_rail, cx);
         // The inline composer stays visible while inline AskUserQuestion cards
         // are open; submitting text resolves the ask as a free-form response.
@@ -272,7 +304,9 @@ impl Workspace {
         // show them as a temporary banner below the composer so the user sees
         // the feedback without leaving the first-screen view.
         let hero_notices = if first_screen {
-            self.conversation
+            self.chat
+                .read(cx)
+                .conversation
                 .read(cx)
                 .items()
                 .iter()
@@ -739,7 +773,7 @@ impl Workspace {
                             // GPUI invokes it while measuring and prepainting;
                             // mutating a MessageItem here invalidates the same
                             // entity tree whose height is being cached.
-                            let conversation = self.conversation.clone();
+                            let conversation = self.chat.read(cx).conversation.clone();
                             let diag_enabled = crate::overlap_diag::enabled();
                             let processor = move |ix: usize, _window: &mut Window, cx: &mut App| {
                                 let item = conversation.read(cx).items().get(ix).cloned();
@@ -777,10 +811,10 @@ impl Workspace {
                                     None => gpui::div().into_any_element(),
                                 }
                             };
-                            let list_state = self.list_state.clone();
-                            let width_state = self.list_state.clone();
-                            let message_list_width = self.message_list_width.clone();
-                            let diag_state = self.list_state.clone();
+                            let list_state = self.chat.read(cx).list_state.clone();
+                            let width_state = self.chat.read(cx).list_state.clone();
+                            let message_list_width = self.chat.read(cx).message_list_width.clone();
+                            let diag_state = self.chat.read(cx).list_state.clone();
                             let mono_family = theme.mono_font_family.clone();
                             (!first_screen).then(move || {
                                 // Native `gpui::list`: it owns virtualization,
@@ -848,7 +882,9 @@ impl Workspace {
                 // body wrapper's `pr` keep the message list clear). Hidden
                 // while the editor pane is open, on the first screen, before
                 // the thread interacts, or below the narrow width gate.
-                .when(show_rail, |this| this.child(self.context_rail.clone()))
+                .when(show_rail, |this| {
+                    this.child(self.chat.read(cx).context_rail.clone())
+                })
         };
         // The main view is the shell's main slot: the message column plus the
         // right side view (editor / launcher / browser / session tabs) as its
@@ -868,121 +904,380 @@ impl Workspace {
             // Card-wide title bar, painted after both columns so it spans
             // (and overlays) the message column and the right pane alike.
             .child(title_bar_overlay);
-        let mut root = self.shell_root(self.sidebar.clone(), main_view, cx);
-        root = root
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.enter_settings(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &crate::ToggleEditor, window, cx| {
-                this.toggle_editor(window, cx);
-            }))
-            .on_action(
-                cx.listener(|this, _: &crate::ToggleEditorPreview, window, cx| {
-                    this.toggle_editor_preview(window, cx);
-                }),
-            )
-            .on_action(cx.listener(|this, _: &crate::CloseEditor, window, cx| {
-                this.close_editor(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleTurnNavigator, window, cx| {
-                this.toggle_turn_navigator(window, cx);
+        let root = self
+            .shell_root(self.sidebar.clone(), main_view, cx)
+            .id("workspace-root");
+        self.apply_chat_actions(root, window, cx)
+    }
+
+    /// The shared action/overlay decoration for the conversation column's
+    /// root element — applied by both shells (the legacy shell root and the
+    /// chrome-embed column root): every workspace-level keybinding action,
+    /// the turn-navigator overlay, and the editor-divider drag.
+    /// The turn-navigator overlay for the shared action root. The full
+    /// positioning variant (render_turn_navigator_overlay) needs the shell's
+    /// geometry flags; the shared root re-renders the overlay entity's
+    /// own absolute positioning via its Render impl.
+    fn render_turn_navigator_overlay_placeholder(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        self.chat
+            .read(cx)
+            .turn_navigator
+            .clone()
+            .map(|nav| nav.into_any_element())
+    }
+
+    fn apply_chat_actions<E>(
+        &self,
+        root: E,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement
+    where
+        E: gpui::InteractiveElement
+            + gpui::StatefulInteractiveElement
+            + gpui::Styled
+            + gpui::ParentElement
+            + gpui::IntoElement
+            + 'static,
+    {
+        root.on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+            this.enter_settings(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &crate::ToggleEditor, window, cx| {
+            this.toggle_editor(window, cx);
+        }))
+        .on_action(
+            cx.listener(|this, _: &crate::ToggleEditorPreview, window, cx| {
+                this.toggle_editor_preview(window, cx);
+            }),
+        )
+        .on_action(cx.listener(|this, _: &crate::CloseEditor, window, cx| {
+            this.close_editor(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleTurnNavigator, window, cx| {
+            this.toggle_turn_navigator(window, cx);
+            cx.stop_propagation();
+        }))
+        .on_action(cx.listener(|this, _: &OpenBrowserTab, window, cx| {
+            this.open_browser_tab(crate::views::browser_view::DEFAULT_URL, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CloseBrowserTab, _window, cx| {
+            this.close_active_browser_tab(cx);
+        }))
+        .on_action(
+            cx.listener(|this, _: &crate::BackgroundCurrentThread, window, cx| {
+                this.background_current_thread(window, cx);
+            }),
+        )
+        .on_action(cx.listener(|this, _: &crate::UndoLastQueued, _window, cx| {
+            this.undo_last_queued(cx);
+        }))
+        // Completion actions only match via the `completion == open > Input`
+        // keybindings, so any fire means the popover was open and these
+        // keystrokes belong to it. Stop propagation so the Input's own
+        // parallel up/down/enter/tab/escape binding (same depth, lower
+        // register index) doesn't also fire — otherwise Enter would both
+        // confirm and submit, Up/Down would move caret and selection, etc.
+        .on_action(cx.listener(|this, _: &crate::CompletionUp, window, cx| {
+            this.completion_up(window, cx);
+            cx.stop_propagation();
+        }))
+        .on_action(cx.listener(|this, _: &crate::CompletionDown, window, cx| {
+            this.completion_down(window, cx);
+            cx.stop_propagation();
+        }))
+        .on_action(
+            cx.listener(|this, _: &crate::CompletionConfirm, window, cx| {
+                this.completion_confirm_selected(window, cx);
                 cx.stop_propagation();
-            }))
-            .on_action(cx.listener(|this, _: &OpenBrowserTab, window, cx| {
-                this.open_browser_tab(crate::views::browser_view::DEFAULT_URL, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &CloseBrowserTab, _window, cx| {
-                this.close_active_browser_tab(cx);
-            }))
-            .on_action(
-                cx.listener(|this, _: &crate::BackgroundCurrentThread, window, cx| {
-                    this.background_current_thread(window, cx);
-                }),
-            )
-            .on_action(cx.listener(|this, _: &crate::UndoLastQueued, _window, cx| {
-                this.undo_last_queued(cx);
-            }))
-            // Completion actions only match via the `completion == open > Input`
-            // keybindings, so any fire means the popover was open and these
-            // keystrokes belong to it. Stop propagation so the Input's own
-            // parallel up/down/enter/tab/escape binding (same depth, lower
-            // register index) doesn't also fire — otherwise Enter would both
-            // confirm and submit, Up/Down would move caret and selection, etc.
-            .on_action(cx.listener(|this, _: &crate::CompletionUp, window, cx| {
-                this.completion_up(window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &crate::CompletionDismiss, _window, cx| {
+                this.close_completion(cx);
                 cx.stop_propagation();
-            }))
-            .on_action(cx.listener(|this, _: &crate::CompletionDown, window, cx| {
-                this.completion_down(window, cx);
-                cx.stop_propagation();
-            }))
-            .on_action(
-                cx.listener(|this, _: &crate::CompletionConfirm, window, cx| {
-                    this.completion_confirm_selected(window, cx);
-                    cx.stop_propagation();
-                }),
+            }),
+        )
+        // Composer history recall: reachable only through the
+        // `composer > Input` bindings on alt-up / alt-down, so these
+        // listeners never see the bare arrows the Input uses to move the
+        // caret.
+        .on_action(
+            cx.listener(|this, _: &crate::ComposerRecallUp, window, cx| {
+                this.composer_recall_up(window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &crate::ComposerRecallDown, window, cx| {
+                this.composer_recall_down(window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &crate::ArchiveCurrentThread, window, cx| {
+                this.archive_current_thread(window, cx);
+            }),
+        )
+        // The right editor pane moved inside the shell's main view (the
+        // `main_view` container above); it is no longer a top-level shell
+        // column.
+        .children(self.render_turn_navigator_overlay_placeholder(cx))
+        .on_drag_move(cx.listener(
+            |this, e: &DragMoveEvent<DraggedEditorDivider>, _window, cx| {
+                // The root fills the window, but the card interior ends
+                // one gutter inset (+1px border) before the window's right
+                // edge, so the editor pane's width is the distance from
+                // the cursor to that inset edge. Clamp both to a minimum
+                // and to leave the message column at least
+                // `MAIN_MIN_WIDTH` (sidebar + main view sit left of the
+                // editor), so dragging wide never overflows the card or
+                // collapses the conversation column. The
+                // context card is hidden while the editor is open, so it
+                // does not claim a width here — the conversation alone
+                // holds the message column. `sidebar_width` is read live
+                // so a wide sidebar correctly shrinks the available
+                // editor envelope.
+                let new_w =
+                    e.bounds.right() - e.event.position.x - px(SHELL_PAD_EDGE + CARD_BORDER / 2.);
+                let dynamic_max = e.bounds.size.width
+                    - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
+                    - px(CARD_BORDER)
+                    - this.effective_sidebar_width()
+                    - px(EDITOR_DIVIDER_WIDTH)
+                    - px(MAIN_MIN_WIDTH);
+                let max_w = dynamic_max
+                    .min(px(EDITOR_MAX_WIDTH))
+                    .max(px(EDITOR_MIN_WIDTH));
+                this.editor_width = new_w.clamp(px(EDITOR_MIN_WIDTH), max_w);
+                cx.notify();
+            },
+        ))
+        .into_any_element()
+    }
+
+    /// Settings inside the chrome card: the settings nav column + the
+    /// selected panel, side by side (the legacy shell put the nav in the
+    /// window's sidebar slot; the chrome slot belongs to the session list).
+    fn render_embedded_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use gpui::{ParentElement as _, Styled as _, div};
+        use gpui_component::{h_flex, v_flex};
+        let settings = self
+            .settings_view
+            .as_ref()
+            .expect("enter_settings must have created the SettingsView")
+            .clone();
+        let nav = settings.update(cx, |s, cx| s.render_nav(window, cx));
+        let main = settings.update(cx, |s, cx| s.render_main(window, cx));
+        let root = h_flex()
+            .id("embedded-settings")
+            .size_full()
+            .min_w_0()
+            .child(v_flex().w(px(240.)).h_full().flex_shrink_0().child(nav))
+            .child(
+                div()
+                    .w(px(1.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .bg(cx.theme().border),
             )
-            .on_action(
-                cx.listener(|this, _: &crate::CompletionDismiss, _window, cx| {
-                    this.close_completion(cx);
-                    cx.stop_propagation();
-                }),
+            .child(v_flex().flex_1().min_w_0().h_full().child(main));
+        self.apply_chat_actions(root, window, cx)
+    }
+
+    /// The chrome-embed render: the conversation column bare of the legacy
+    /// shell (gutter/sidebar/card/title bar all belong to the chrome shell
+    /// around it), still carrying the full action surface. The composition
+    /// mirrors the legacy column's body: hero-or-list, footer composer, the
+    /// floating context rail, the blank-project / pending-auth overlays, and
+    /// the turn-navigator overlay.
+    fn render_embedded_column(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use gpui_component::{h_flex, v_flex};
+        let theme = cx.theme().clone();
+
+        let running = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|s| s.read(cx).store.running)
+            .unwrap_or(false);
+        let first_screen = self.chat_conversation(cx).read(cx).is_empty(cx) && !running;
+        let composer_placement = composer_placement(false, first_screen);
+        // The chrome card's interior width: the window minus the chrome
+        // shell's own furniture (gutter, sidebar, right-pane seam) — read
+        // from the bounds the chrome layout gives this view.
+        let main_body_w = window.bounds().size.width - px(CARD_BORDER);
+        let show_rail = !first_screen
+            && self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|s| s.read(cx).store.has_interacted)
+                .unwrap_or(false)
+            && crate::views::context_rail::ContextRail::rail_width_for(main_body_w).is_some();
+        let overlay = self
+            .render_blank_project_overlay(window, &theme, cx)
+            .or_else(|| self.render_pending_auth_overlay(&theme, cx));
+        let turn_navigator_overlay =
+            self.render_turn_navigator_overlay(window, &theme, false, show_rail, cx);
+
+        let footer = (composer_placement == ComposerPlacement::Footer).then(|| {
+            v_flex()
+                .w_full()
+                .flex_shrink_0()
+                .bg(theme.background)
+                .py_2()
+                .gap_2()
+                .child(centered(gpui::div().w_full().h(px(1.)).bg(theme.border)))
+                .children(self.render_attachments(&theme, cx))
+                .child(centered(self.render_composer(running, window, &theme, cx)))
+        });
+        let hero = if composer_placement != ComposerPlacement::Hero {
+            None
+        } else {
+            Some(
+                v_flex()
+                    .flex_1()
+                    .w_full()
+                    .justify_center()
+                    .items_center()
+                    .child(centered(
+                        v_flex()
+                            .w_full()
+                            .gap_5()
+                            .items_center()
+                            .child(
+                                gpui::div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight::BLACK)
+                                    .child(i18n::t("workspace-hero-heading")),
+                            )
+                            .children(self.render_attachments(&theme, cx))
+                            .child(centered(self.render_composer(running, window, &theme, cx))),
+                    )),
             )
-            // Composer history recall: reachable only through the
-            // `composer > Input` bindings on alt-up / alt-down, so these
-            // listeners never see the bare arrows the Input uses to move the
-            // caret.
-            .on_action(
-                cx.listener(|this, _: &crate::ComposerRecallUp, window, cx| {
-                    this.composer_recall_up(window, cx);
-                }),
+        };
+
+        let conversation_column = v_flex()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .relative()
+            .overflow_hidden()
+            .child(
+                // Same body wrapper as the legacy column minus the
+                // title-bar inset (the chrome card starts the content at
+                // its top edge).
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .pb_2()
+                    .when(show_rail, |this| {
+                        this.pr(px(crate::views::context_rail::ENV_CONTENT_INSET))
+                    })
+                    .children(self.render_follow_stop_banner(&theme, cx))
+                    .children(hero)
+                    .children({
+                        // The legacy list block verbatim: the row factory is
+                        // a pure read-only projection over the conversation.
+                        let conversation = self.chat.read(cx).conversation.clone();
+                        let diag_enabled = crate::overlap_diag::enabled();
+                        let processor = move |ix: usize, _window: &mut Window, cx: &mut App| {
+                            let item = conversation.read(cx).items().get(ix).cloned();
+                            match item {
+                                Some(item) => {
+                                    if diag_enabled {
+                                        crate::overlap_diag::record_mapping(
+                                            ix,
+                                            item.read(cx).diagnostic_id(),
+                                        );
+                                    }
+                                    v_flex()
+                                        .w_full()
+                                        .pt_1()
+                                        .pb_4()
+                                        .flex_shrink_0()
+                                        .min_w_0()
+                                        .debug_selector(move || {
+                                            format!("workspace-message-row-{ix}")
+                                        })
+                                        .when(diag_enabled, |this| {
+                                            this.on_prepaint(move |bounds, _window, _cx| {
+                                                crate::overlap_diag::record_row(ix, bounds);
+                                            })
+                                        })
+                                        .child(item)
+                                        .into_any_element()
+                                }
+                                None => gpui::div().into_any_element(),
+                            }
+                        };
+                        let list_state = self.chat.read(cx).list_state.clone();
+                        let width_state = self.chat.read(cx).list_state.clone();
+                        let message_list_width = self.chat.read(cx).message_list_width.clone();
+                        let diag_state = self.chat.read(cx).list_state.clone();
+                        let mono_family = theme.mono_font_family.clone();
+                        (!first_screen).then(move || {
+                            let list_el = gpui::list(list_state, processor)
+                                .w_full()
+                                .h_full()
+                                .min_h_0()
+                                .min_w_0();
+                            let list_wrap = v_flex()
+                                .flex_1()
+                                .h_full()
+                                .min_h_0()
+                                .min_w_0()
+                                .font_family(mono_family.clone())
+                                .font_weight(gpui::FontWeight::LIGHT)
+                                .child(list_el)
+                                .on_prepaint(move |bounds, window, _app| {
+                                    if message_list_width.update(bounds.size.width, &width_state) {
+                                        window.refresh();
+                                    }
+                                    if crate::overlap_diag::enabled() {
+                                        crate::overlap_diag::check_completed_frame(
+                                            bounds,
+                                            diag_state.item_count(),
+                                        );
+                                    }
+                                });
+                            h_flex()
+                                .flex_1()
+                                .w_full()
+                                .min_h_0()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(list_wrap)
+                        })
+                    })
+                    .children(footer)
+                    .children(overlay),
             )
-            .on_action(
-                cx.listener(|this, _: &crate::ComposerRecallDown, window, cx| {
-                    this.composer_recall_down(window, cx);
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &crate::ArchiveCurrentThread, window, cx| {
-                    this.archive_current_thread(window, cx);
-                }),
-            )
-            // The right editor pane moved inside the shell's main view (the
-            // `main_view` container above); it is no longer a top-level shell
-            // column.
-            .children(turn_navigator_overlay)
-            .on_drag_move(cx.listener(
-                |this, e: &DragMoveEvent<DraggedEditorDivider>, _window, cx| {
-                    // The root fills the window, but the card interior ends
-                    // one gutter inset (+1px border) before the window's right
-                    // edge, so the editor pane's width is the distance from
-                    // the cursor to that inset edge. Clamp both to a minimum
-                    // and to leave the message column at least
-                    // `MAIN_MIN_WIDTH` (sidebar + main view sit left of the
-                    // editor), so dragging wide never overflows the card or
-                    // collapses the conversation column. The
-                    // context card is hidden while the editor is open, so it
-                    // does not claim a width here — the conversation alone
-                    // holds the message column. `sidebar_width` is read live
-                    // so a wide sidebar correctly shrinks the available
-                    // editor envelope.
-                    let new_w = e.bounds.right()
-                        - e.event.position.x
-                        - px(SHELL_PAD_EDGE + CARD_BORDER / 2.);
-                    let dynamic_max = e.bounds.size.width
-                        - px(SHELL_PAD_LEFT + SHELL_PAD_EDGE)
-                        - px(CARD_BORDER)
-                        - this.effective_sidebar_width()
-                        - px(EDITOR_DIVIDER_WIDTH)
-                        - px(MAIN_MIN_WIDTH);
-                    let max_w = dynamic_max
-                        .min(px(EDITOR_MAX_WIDTH))
-                        .max(px(EDITOR_MIN_WIDTH));
-                    this.editor_width = new_w.clamp(px(EDITOR_MIN_WIDTH), max_w);
-                    cx.notify();
-                },
-            ));
-        root.into_any_element()
+            .when(show_rail, |this| {
+                this.child(self.chat.read(cx).context_rail.clone())
+            });
+        let root = gpui::div()
+            .id("embedded-column")
+            .size_full()
+            .flex()
+            .child(conversation_column)
+            .children(turn_navigator_overlay);
+        self.apply_chat_actions(root, window, cx)
     }
     /// The width the sidebar slot actually claims in the shell layout: zero
     /// while collapsed, the remembered drag width otherwise. Every width
@@ -1247,6 +1542,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let stop = self
+            .chat
+            .read(cx)
             .store
             .as_ref()?
             .read(cx)
@@ -1286,7 +1583,7 @@ impl Workspace {
                         .small()
                         .debug_selector(|| "follow-stop-retry-btn".into())
                         .on_click(cx.listener(|this, _, _window, cx| {
-                            let Some(store) = this.store.clone() else {
+                            let Some(store) = this.chat.read(cx).store.clone() else {
                                 return;
                             };
                             store.update(cx, |handle, cx| handle.retry_follow(cx));
@@ -1300,7 +1597,7 @@ impl Workspace {
                         .tooltip(i18n::t("follow-stop-dismiss"))
                         .debug_selector(|| "follow-stop-dismiss-btn".into())
                         .on_click(cx.listener(|this, _, _window, cx| {
-                            let Some(store) = this.store.clone() else {
+                            let Some(store) = this.chat.read(cx).store.clone() else {
                                 return;
                             };
                             store.update(cx, |handle, cx| handle.dismiss_follow_stop(cx));
