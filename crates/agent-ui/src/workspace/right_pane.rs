@@ -108,6 +108,8 @@ impl Workspace {
     /// so the persisted row tracks the pane on every change.
     pub(super) fn persist_right_pane(&mut self, cx: &mut Context<Self>) {
         let thread_id = self
+            .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.id.0.clone())
@@ -260,7 +262,7 @@ impl Workspace {
     /// Recreate a persisted browser tab's webview (app-restart path): build
     /// the view, register it in the host routing table, arm the title poll —
     /// tab-list placement is the caller's.
-    pub(super) fn restore_browser_tab(
+    pub fn restore_browser_tab(
         &mut self,
         url: &str,
         window: &mut Window,
@@ -393,7 +395,7 @@ impl Workspace {
     /// paths then fall back to the workspace default (parity with the
     /// Conversations-header spawns).
     pub(super) fn launcher_thread_cwd(&self, cx: &App) -> Option<PathBuf> {
-        let Some(store) = self.store.as_ref() else {
+        let Some(store) = self.chat.read(cx).store.as_ref() else {
             tracing::warn!(
                 "right-pane spawn without a foreground store — falling back to the workspace cwd"
             );
@@ -529,13 +531,13 @@ impl Workspace {
     pub(super) fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Close any open inline menus so they don't linger behind the hidden footer.
         self.close_completion(cx);
-        self.close_plus_menu();
+        self.close_plus_menu(cx);
         self.right_pane_visible = true;
         if let Some(ix) = self.editor_tab_ix() {
             self.set_active_right_tab(ix, cx);
             return;
         }
-        let draft = self.input_state.read(cx).value().to_string();
+        let draft = self.chat_input(cx).read(cx).value().to_string();
         self.right_tabs.push(RightTab::Editor);
         let ix = self.right_tabs.len() - 1;
         self.editor_preview = false;
@@ -544,7 +546,7 @@ impl Workspace {
             s.set_value(draft, window, cx);
             s.focus(window, cx);
         });
-        self.input_state
+        self.chat_input(cx)
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.set_active_right_tab(ix, cx);
     }
@@ -559,7 +561,7 @@ impl Workspace {
         self.right_tabs.remove(ix);
         self.editor_preview = false;
         self.editor_preview_md = None;
-        self.input_state.update(cx, |s, cx| {
+        self.chat_input(cx).update(cx, |s, cx| {
             s.set_value(draft, window, cx);
             s.focus(window, cx);
         });
@@ -676,7 +678,7 @@ impl Workspace {
             &backfill,
             prompt.map(|p| (p.text, p.dispatched_at)),
             final_text,
-            cx.weak_entity(),
+            self.chat.read(cx).host.clone(),
             cx,
         );
         self.subagent_panels.insert(id.to_string(), panel);
@@ -691,7 +693,9 @@ impl Workspace {
     /// display fold (the message rows ARE the transcript).
     pub(super) fn agent_final_text(&self, id: &str, cx: &App) -> Option<String> {
         use manox_agent::language_model::MessageContent;
-        self.store
+        self.chat
+            .read(cx)
+            .store
             .as_ref()
             .map(|s| s.read(cx).store.derived_messages())
             .expect("foreground store present")
@@ -757,7 +761,7 @@ impl Workspace {
                 self.subagent_final_text
                     .insert(row.address.clone(), text.clone());
             }
-            self.context_rail.update(cx, |r, cx| {
+            self.chat_rail(cx).update(cx, |r, cx| {
                 r.apply_subagent_progress(
                     &row.address,
                     &row.subagent_type,
@@ -803,22 +807,30 @@ impl Workspace {
             // T10c: the v1 `history_phase` loading gate retired with the
             // fold (the restore boundary is now the §D.1 snapshot).
             false,
-            self.store
+            self.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .map(|s| s.read(cx).store.running)
                 .expect("foreground store present"),
-            self.pending_ask.is_some(),
+            self.chat.read(cx).pending_ask.is_some(),
             &text,
         ) {
             return;
         }
         let meta = self.user_turn_meta(cx);
-        let weak = cx.weak_entity();
-        self.conversation.update(cx, |c, cx| {
-            c.push_user(text.clone(), Vec::new(), meta, weak, cx)
+        let _weak = cx.weak_entity();
+        self.chat_conversation(cx).update(cx, |c, cx| {
+            c.push_user(
+                text.clone(),
+                Vec::new(),
+                meta,
+                self.chat.read(cx).host.clone(),
+                cx,
+            )
         });
         self.sync_list_count(cx);
-        self.follow_message_tail();
+        self.follow_message_tail(cx);
         let _ = self.send_submit_v2(text.clone(), Vec::new(), cx);
         self.multiplexer.update(cx, |m, _| m.fetch_thread_list());
         self.editor_state.update(cx, |state, cx| {
@@ -838,7 +850,7 @@ impl Workspace {
             .is_some_and(|t| matches!(t, RightTab::Editor));
         self.editor_preview = false;
         self.editor_preview_md = None;
-        self.input_state.update(cx, |s, cx| s.focus(window, cx));
+        self.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
     }
 }

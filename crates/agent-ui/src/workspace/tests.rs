@@ -10,6 +10,7 @@ use super::{
 };
 use gpui::InteractiveElement as _;
 use gpui::prelude::*;
+use manox_agent_chat_ui::host::noop_host;
 
 /// Drives the pure recall step. `applied` is the text the composer holds
 /// afterwards — `None` means the step left it untouched, `Some("")` means
@@ -652,33 +653,48 @@ async fn navigator_fill_lands_the_walk_and_hands_the_draft_back(cx: &mut gpui::T
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| {
             let weak = cx.entity().downgrade();
+            let _ = weak;
             let meta = || crate::conversation::UserTurnMeta::new(0, String::new(), None);
-            ws.conversation.update(cx, |conv, cx| {
-                conv.push_user("older turn".into(), vec![], meta(), weak.clone(), cx);
-                conv.push_user("newest turn".into(), vec![], meta(), weak, cx);
+            let conv = ws.chat.read(cx).conversation.clone();
+            conv.update(cx, |conv, cx| {
+                conv.push_user("older turn".into(), vec![], meta(), noop_host(), cx);
+                conv.push_user("newest turn".into(), vec![], meta(), noop_host(), cx);
             });
-            ws.input_state.update(cx, |s, cx| {
+            let input = ws.chat.read(cx).input_state.clone();
+            input.update(cx, |s, cx| {
                 s.set_value("half a sentence", window, cx);
             });
 
             // ⌘↵ on the older of the two turns.
             ws.fill_composer_from_turn("older turn".into(), window, cx);
-            assert_eq!(ws.input_state.read(cx).value().as_ref(), "older turn");
-            assert_eq!(ws.recall_index, 1, "newest-first puts it in slot 1");
+            assert_eq!(ws.chat_input(cx).read(cx).value().as_ref(), "older turn");
             assert_eq!(
-                ws.recall_draft.as_deref(),
+                ws.chat.read(cx).recall_index,
+                1,
+                "newest-first puts it in slot 1"
+            );
+            assert_eq!(
+                ws.chat.read(cx).recall_draft.as_deref(),
                 Some("half a sentence"),
                 "the displaced draft is the walk's working line"
             );
 
             // ⌥↓ to the newest turn, ⌥↓ again past it hands the draft back.
             ws.apply_recall_step(RecallDirection::Down, window, cx);
-            assert_eq!(ws.input_state.read(cx).value().as_ref(), "newest turn");
+            assert_eq!(ws.chat_input(cx).read(cx).value().as_ref(), "newest turn");
             ws.apply_recall_step(RecallDirection::Down, window, cx);
-            assert_eq!(ws.recall_index, -1, "the walk ends at its newest end");
-            assert_eq!(ws.recall_draft, None, "and its draft is spent");
             assert_eq!(
-                ws.input_state.read(cx).value().as_ref(),
+                ws.chat.read(cx).recall_index,
+                -1,
+                "the walk ends at its newest end"
+            );
+            assert_eq!(
+                ws.chat.read(cx).recall_draft,
+                None,
+                "and its draft is spent"
+            );
+            assert_eq!(
+                ws.chat_input(cx).read(cx).value().as_ref(),
                 "half a sentence",
                 "the user's own text is back in the composer"
             );
@@ -726,10 +742,12 @@ fn attach_thread_rebinds_store_to_new_session(cx: &mut gpui::TestAppContext) {
     cx.run_until_parked();
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     let ws = captured.borrow().clone().expect("workspace captured");
-    let landing_id = ws.read_with(&visual, |ws, _| ws.thread.read(|t| t.id.0.clone()));
+    let landing_id = ws.read_with(&visual, |ws, cx| {
+        ws.chat.read(cx).thread.read(|t| t.id.0.clone())
+    });
 
     // The landing thread's session is bound to its own id.
-    let session_id = ws.read_with(&visual, |ws, _| ws.session_id.clone());
+    let session_id = ws.read_with(&visual, |ws, cx| ws.chat.read(cx).session_id.clone());
     assert_eq!(session_id, Some(landing_id.clone()), "landing session id");
 
     // Attach a fresh thread: a new session is created for it, so the
@@ -746,11 +764,16 @@ fn attach_thread_rebinds_store_to_new_session(cx: &mut gpui::TestAppContext) {
     // Give the new session's pump a beat to deliver ThreadInfo.
     cx.run_until_parked();
     let rebound = ws.read_with(&visual, |ws, cx| {
-        let store_id = ws.store.as_ref().map(|s| s.read(cx).store.id.0.clone());
+        let store_id = ws
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|s| s.read(cx).store.id.0.clone());
         (
-            ws.session_id.clone(),
+            ws.chat.read(cx).session_id.clone(),
             store_id,
-            ws.thread.read(|t| t.id.0.clone()),
+            ws.chat.read(cx).thread.read(|t| t.id.0.clone()),
         )
     });
     cx.run_until_parked();
@@ -817,7 +840,7 @@ fn parked_follow_up_flush_rides_the_gateway_wire(cx: &mut gpui::TestAppContext) 
     // Spy client: the flush's wire frames land on a raw pair this test
     // reads directly (the multiplexer keeps its own server connection).
     let (client_conn, server_conn) = manox_protocol::in_process_pair();
-    ws.update(cx, |ws, _| {
+    ws.update(cx, |ws, _cx| {
         ws.client = std::sync::Arc::new(manox_session_core::agent_client::AgentClient::from_conn(
             client_conn,
         ));
@@ -847,7 +870,11 @@ fn parked_follow_up_flush_rides_the_gateway_wire(cx: &mut gpui::TestAppContext) 
             turn: turn("failed-card", cx),
             state: super::FollowUpState::Failed,
         });
-        ws.queued_follow_ups_by_thread.insert("s-parked".into(), q);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups_by_thread
+                .insert("s-parked".into(), q);
+            cc.notify();
+        });
     });
     ws.update(cx, |ws, cx| ws.flush_parked_follow_ups("s-parked", cx));
     // The two wire frames: the Append note first, the Submit last.
@@ -906,8 +933,10 @@ fn parked_follow_up_flush_rides_the_gateway_wire(cx: &mut gpui::TestAppContext) 
         other => panic!("expected the v2 Submit last, got {other:?}"),
     }
     // The Failed card stays parked; the Queued drains are gone.
-    ws.read_with(&visual, |ws, _| {
+    ws.read_with(&visual, |ws, cx| {
         let q = ws
+            .chat
+            .read(cx)
             .queued_follow_ups_by_thread
             .get("s-parked")
             .expect("the Failed card keeps the stash alive");
@@ -998,7 +1027,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
 
     // Forward move: row 1 dropped below row 3 → lands at the tail.
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 1,
@@ -1010,7 +1039,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     );
     // Backward move: row 3 dropped above row 1 → lands at 1.
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 3,
@@ -1022,7 +1051,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     );
     // Self drops no-op (own row, and the adjacent slot that re-inserts in place).
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 2,
@@ -1033,7 +1062,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
         None
     );
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 2,
@@ -1045,7 +1074,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     );
     // Landing inside the committed head is rejected.
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 3,
@@ -1057,7 +1086,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     );
     // A committed source never moves: SteerPending and Failed alike.
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &queue,
             D {
                 dragged: 0,
@@ -1071,7 +1100,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
         .into_iter()
         .collect();
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &with_failed,
             D {
                 dragged: 0,
@@ -1085,7 +1114,7 @@ fn queue_move_index_reorders_only_the_queued_tail() {
     let all_queued: std::collections::VecDeque<_> =
         [q(S::Queued), q(S::Queued)].into_iter().collect();
     assert_eq!(
-        super::Workspace::queue_move_index(
+        super::ChatColumn::queue_move_index_in(
             &all_queued,
             D {
                 dragged: 0,
@@ -1135,8 +1164,11 @@ fn running_foreground_with_spy(
         ws.client = std::sync::Arc::new(manox_session_core::agent_client::AgentClient::from_conn(
             client_conn,
         ));
-        ws.session_id = Some(session_id.to_string());
-        let store = ws.store.as_ref().expect("landing store bound");
+        ws.chat.update(cx, |chat, cc| {
+            chat.session_id = Some(session_id.to_string());
+            cc.notify();
+        });
+        let store = ws.chat.read(cx).store.clone().expect("landing store bound");
         store.update(cx, |h, _| h.store.running = true);
     });
     (ws, server_conn)
@@ -1155,34 +1187,37 @@ fn steer_click_wires_online_steer_and_parks_the_card(cx: &mut gpui::TestAppConte
     let (ws, server_conn) = running_foreground_with_spy(cx, "steer-wire", "s-steer");
     cx.run_until_parked();
 
-    let bubbles_before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let bubbles_before = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     ws.update(cx, |ws, cx| {
         let meta = ws.user_turn_meta(cx);
-        ws.queued_follow_ups.push_back(super::QueuedFollowUp {
-            turn: super::DeferredUserTurn {
-                text: "steer me".into(),
-                images: vec![],
-                meta,
-                user_images: vec![],
-            },
-            state: super::FollowUpState::Queued,
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(super::QueuedFollowUp {
+                turn: super::DeferredUserTurn {
+                    text: "steer me".into(),
+                    images: vec![],
+                    meta,
+                    user_images: vec![],
+                },
+                state: super::FollowUpState::Queued,
+            });
+            cc.notify();
         });
         ws.steer_follow_up(0, cx);
     });
 
     // ① card stays parked, promoted to SteerPending.
-    ws.read_with(cx, |ws, _| {
-        assert_eq!(ws.queued_follow_ups.len(), 1);
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(ws.chat.read(cx).queued_follow_ups.len(), 1);
         assert!(
             matches!(
-                ws.queued_follow_ups[0].state,
+                ws.chat.read(cx).queued_follow_ups[0].state,
                 super::FollowUpState::SteerPending { .. }
             ),
             "a running steer parks the card as SteerPending"
         );
     });
     // ② no message-list bubble was pushed.
-    let bubbles_after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let bubbles_after = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     assert_eq!(
         bubbles_before, bubbles_after,
         "steering must not surface a bubble before the turn settles"
@@ -1259,27 +1294,37 @@ fn settle_promotes_pending_steers_into_the_list(cx: &mut gpui::TestAppContext) {
             ws,
             cx,
         );
-        ws.queued_follow_ups.push_back(steer);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(steer);
+            cc.notify();
+        });
         let plain = mk("plain queue", super::FollowUpState::Queued, ws, cx);
-        ws.queued_follow_ups.push_back(plain);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(plain);
+            cc.notify();
+        });
     });
-    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let before = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
 
     ws.update(cx, |ws, cx| ws.promote_settled_steers(cx));
 
     // Steer card left the queue; the plain Queued card stays for the flush.
-    ws.read_with(cx, |ws, _| {
-        assert_eq!(ws.queued_follow_ups.len(), 1, "only the plain queue stays");
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(
+            ws.chat.read(cx).queued_follow_ups.len(),
+            1,
+            "only the plain queue stays"
+        );
         assert!(matches!(
-            ws.queued_follow_ups[0].state,
+            ws.chat.read(cx).queued_follow_ups[0].state,
             super::FollowUpState::Queued
         ));
     });
     // The steered bubble entered the list.
-    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let after = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     assert_eq!(after, before + 1, "settled steer pushes exactly one bubble");
     ws.read_with(cx, |ws, cx| {
-        let items = ws.conversation.read(cx).items();
+        let items = ws.chat_conversation(cx).read(cx).items();
         let last = items.last().expect("steered bubble appended");
         match last.read(cx).kind() {
             crate::conversation::ConvItem::User { text, meta, .. } => {
@@ -1338,9 +1383,12 @@ fn cancelled_settle_strands_steers_without_a_bubble(cx: &mut gpui::TestAppContex
     };
     ws.update(cx, |ws, cx| {
         let injected = mk("injected steer", "steer-injected", ws, cx);
-        ws.queued_follow_ups.push_back(injected);
         let retracted = mk("retracted steer", "steer-retracted", ws, cx);
-        ws.queued_follow_ups.push_back(retracted);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(injected);
+            chat.queued_follow_ups.push_back(retracted);
+            cc.notify();
+        });
         let plain = super::QueuedFollowUp {
             turn: super::DeferredUserTurn {
                 text: "plain queue".into(),
@@ -1350,32 +1398,45 @@ fn cancelled_settle_strands_steers_without_a_bubble(cx: &mut gpui::TestAppContex
             },
             state: super::FollowUpState::Queued,
         };
-        ws.queued_follow_ups.push_back(plain);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(plain);
+            cc.notify();
+        });
     });
-    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let before = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
 
     // The server's per-id verdict: one retracted id (the FIFO tail card).
     ws.update(cx, |ws, cx| ws.settle_steer_group(1, cx));
 
-    ws.read_with(cx, |ws, _| {
-        assert_eq!(ws.queued_follow_ups.len(), 2, "injected card promoted out");
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(
+            ws.chat.read(cx).queued_follow_ups.len(),
+            2,
+            "injected card promoted out"
+        );
         assert!(
-            matches!(ws.queued_follow_ups[0].state, super::FollowUpState::Failed),
+            matches!(
+                ws.chat.read(cx).queued_follow_ups[0].state,
+                super::FollowUpState::Failed
+            ),
             "the retracted tail lands Failed (retryable)"
         );
         assert!(
-            matches!(ws.queued_follow_ups[1].state, super::FollowUpState::Queued),
+            matches!(
+                ws.chat.read(cx).queued_follow_ups[1].state,
+                super::FollowUpState::Queued
+            ),
             "the plain queue stays for the flush"
         );
     });
-    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let after = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     assert_eq!(
         after,
         before + 1,
         "the injected steer promotes exactly one bubble; the retracted one adds none"
     );
     ws.read_with(cx, |ws, cx| {
-        let items = ws.conversation.read(cx).items();
+        let items = ws.chat_conversation(cx).read(cx).items();
         let last = items.last().expect("promoted bubble appended");
         match last.read(cx).kind() {
             crate::conversation::ConvItem::User { text, meta, .. } => {
@@ -1430,23 +1491,32 @@ fn cancelled_drag_prunes_the_queue_marker(cx: &mut gpui::TestAppContext) {
                 },
                 state: super::FollowUpState::Queued,
             };
-            ws.queued_follow_ups.push_back(item);
+            ws.chat.update(cx, |chat, cc| {
+                chat.queued_follow_ups.push_back(item);
+                cc.notify();
+            });
         }
         // The exact state a gpui-cancelled drag leaves behind.
-        ws.queue_drag = Some(super::composer_render::QueueRowDrag {
-            dragged: 0,
-            line_on: 1,
-            edge: super::composer_render::QueueDragEdge::Top,
+        ws.chat.update(cx, |chat, cc| {
+            chat.queue_drag = Some(super::composer_render::QueueRowDrag {
+                dragged: 0,
+                line_on: 1,
+                edge: super::composer_render::QueueDragEdge::Top,
+            });
+            cc.notify();
         });
-        cx.notify();
     });
     visual.run_until_parked();
-    ws.read_with(cx, |ws, _| {
+    ws.read_with(cx, |ws, cx| {
         assert!(
-            ws.queue_drag.is_none(),
+            ws.chat.read(cx).queue_drag.is_none(),
             "a cancelled drag must not survive the next render (the entry prune)"
         );
-        assert_eq!(ws.queued_follow_ups.len(), 2, "a cancel moves nothing");
+        assert_eq!(
+            ws.chat.read(cx).queued_follow_ups.len(),
+            2,
+            "a cancel moves nothing"
+        );
     });
 }
 
@@ -1487,23 +1557,37 @@ fn commit_queue_drag_moves_the_marked_row_and_clears_it(cx: &mut gpui::TestAppCo
                 },
                 state: super::FollowUpState::Queued,
             };
-            ws.queued_follow_ups.push_back(item);
+            // All writes in this block stay notify-less: any chat notify
+            // schedules a render whose no-active-drag prune would clear the
+            // synthetic marker before the commit runs.
+            ws.chat.update(cx, |chat, _| {
+                chat.queued_follow_ups.push_back(item);
+            });
         }
-        ws.queue_drag = Some(super::composer_render::QueueRowDrag {
-            dragged: 0,
-            line_on: 2,
-            edge: super::composer_render::QueueDragEdge::Bottom,
+        // Seed without notifying: the render-path prune (a no-active-drag
+        // marker is stale) must not run between the seed and the commit.
+        ws.chat.update(cx, |chat, _| {
+            chat.queue_drag = Some(super::composer_render::QueueRowDrag {
+                dragged: 0,
+                line_on: 2,
+                edge: super::composer_render::QueueDragEdge::Bottom,
+            });
         });
     });
     ws.update(cx, |ws, cx| ws.commit_queue_drag(cx));
-    ws.read_with(cx, |ws, _| {
+    ws.read_with(cx, |ws, cx| {
         let order: Vec<&str> = ws
+            .chat
+            .read(cx)
             .queued_follow_ups
             .iter()
             .map(|item| item.turn.text.as_str())
             .collect();
         assert_eq!(order, vec!["b", "c", "a"], "row `a` lands at the tail");
-        assert!(ws.queue_drag.is_none(), "the commit consumes the marker");
+        assert!(
+            ws.chat.read(cx).queue_drag.is_none(),
+            "the commit consumes the marker"
+        );
     });
 }
 
@@ -1546,25 +1630,36 @@ fn pending_steer_cards_refuse_delete_and_edit(cx: &mut gpui::TestAppContext) {
                 message_id: "guard-1".into(),
             },
         };
-        ws.queued_follow_ups.push_back(item);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(item);
+            cc.notify();
+        });
     });
 
     ws.update(cx, |ws, cx| ws.delete_follow_up(0, cx));
-    ws.read_with(cx, |ws, _| {
-        assert_eq!(ws.queued_follow_ups.len(), 1, "delete must refuse");
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(
+            ws.chat.read(cx).queued_follow_ups.len(),
+            1,
+            "delete must refuse"
+        );
         assert!(matches!(
-            ws.queued_follow_ups[0].state,
+            ws.chat.read(cx).queued_follow_ups[0].state,
             super::FollowUpState::SteerPending { .. }
         ));
     });
-    let before_input = ws.read_with(cx, |ws, cx| ws.input_state.read(cx).value().to_string());
+    let before_input = ws.read_with(cx, |ws, cx| ws.chat_input(cx).read(cx).value().to_string());
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| ws.edit_follow_up(0, window, cx));
     });
     ws.read_with(cx, |ws, cx| {
-        assert_eq!(ws.queued_follow_ups.len(), 1, "edit must refuse");
         assert_eq!(
-            ws.input_state.read(cx).value().to_string(),
+            ws.chat.read(cx).queued_follow_ups.len(),
+            1,
+            "edit must refuse"
+        );
+        assert_eq!(
+            ws.chat_input(cx).read(cx).value().to_string(),
             before_input,
             "edit must not touch the composer"
         );
@@ -1610,13 +1705,18 @@ fn retire_then_settle_pushes_exactly_one_bubble(cx: &mut gpui::TestAppContext) {
                 message_id: "race-1".into(),
             },
         };
-        ws.queued_follow_ups.push_back(item);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(item);
+            cc.notify();
+        });
     });
-    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let before = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     ws.update(cx, |ws, cx| ws.retire_injected_steer("race-1", cx));
     ws.update(cx, |ws, cx| ws.settle_steer_group(0, cx));
-    ws.read_with(cx, |ws, _| assert!(ws.queued_follow_ups.is_empty()));
-    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    ws.read_with(cx, |ws, cx| {
+        assert!(ws.chat.read(cx).queued_follow_ups.is_empty())
+    });
+    let after = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     assert_eq!(after, before + 1, "exactly one bubble across both paths");
 }
 
@@ -1651,13 +1751,19 @@ fn turn_finished_subscription_routes_the_per_id_stranded_verdict(cx: &mut gpui::
     };
     ws.update(cx, |ws, cx| {
         let a = mk("injected steer", "s-a", ws, cx);
-        ws.queued_follow_ups.push_back(a);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(a);
+            cc.notify();
+        });
         let b = mk("retracted steer", "s-b", ws, cx);
-        ws.queued_follow_ups.push_back(b);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(b);
+            cc.notify();
+        });
     });
-    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let before = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     let store = ws
-        .read_with(cx, |ws, _| ws.store.clone())
+        .read_with(cx, |ws, cx| ws.chat.read(cx).store.clone())
         .expect("foreground store");
     // Drive the subscription, not the method: a cancelled turn whose wire
     // verdict retracted exactly one id (the FIFO tail).
@@ -1669,18 +1775,21 @@ fn turn_finished_subscription_routes_the_per_id_stranded_verdict(cx: &mut gpui::
         });
     });
     cx.run_until_parked();
-    ws.read_with(cx, |ws, _| {
+    ws.read_with(cx, |ws, cx| {
         assert_eq!(
-            ws.queued_follow_ups.len(),
+            ws.chat.read(cx).queued_follow_ups.len(),
             1,
             "the injected head promoted out"
         );
         assert!(
-            matches!(ws.queued_follow_ups[0].state, super::FollowUpState::Failed),
+            matches!(
+                ws.chat.read(cx).queued_follow_ups[0].state,
+                super::FollowUpState::Failed
+            ),
             "the retracted tail lands Failed"
         );
     });
-    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let after = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     assert_eq!(
         after,
         before + 1,
@@ -1738,14 +1847,19 @@ fn parked_steer_group_settles_by_the_per_id_tail(cx: &mut gpui::TestAppContext) 
             },
             state: super::FollowUpState::Queued,
         });
-        ws.queued_follow_ups_by_thread
-            .insert("s-parked-settle".into(), q);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups_by_thread
+                .insert("s-parked-settle".into(), q);
+            cc.notify();
+        });
     });
-    ws.update(cx, |ws, _| {
-        ws.settle_parked_steer_group("s-parked-settle", 1)
+    ws.update(cx, |ws, cx| {
+        ws.settle_parked_steer_group("s-parked-settle", 1, cx)
     });
-    ws.read_with(cx, |ws, _| {
+    ws.read_with(cx, |ws, cx| {
         let q = ws
+            .chat
+            .read(cx)
             .queued_follow_ups_by_thread
             .get("s-parked-settle")
             .expect("the stash keeps the Failed + Queued cards");
@@ -1795,28 +1909,38 @@ fn undo_last_queued_pops_only_a_queued_tail(cx: &mut gpui::TestAppContext) {
     };
     // Empty: a no-op.
     ws.update(cx, |ws, cx| ws.undo_last_queued(cx));
-    ws.read_with(cx, |ws, _| assert!(ws.queued_follow_ups.is_empty()));
+    ws.read_with(cx, |ws, cx| {
+        assert!(ws.chat.read(cx).queued_follow_ups.is_empty())
+    });
 
     // [Failed, Queued]: the Queued tail pops; the Failed head stays (it is
     // kept for the explicit retry/remove path).
     ws.update(cx, |ws, cx| {
         let failed = mk("failed head", super::FollowUpState::Failed, ws, cx);
-        ws.queued_follow_ups.push_back(failed);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(failed);
+            cc.notify();
+        });
         let queued = mk("undo me", super::FollowUpState::Queued, ws, cx);
-        ws.queued_follow_ups.push_back(queued);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(queued);
+            cc.notify();
+        });
     });
     ws.update(cx, |ws, cx| ws.undo_last_queued(cx));
-    ws.read_with(cx, |ws, _| {
-        assert_eq!(ws.queued_follow_ups.len(), 1);
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(ws.chat.read(cx).queued_follow_ups.len(), 1);
         assert!(matches!(
-            ws.queued_follow_ups[0].state,
+            ws.chat.read(cx).queued_follow_ups[0].state,
             super::FollowUpState::Failed
         ));
     });
 
     // A Failed tail alone: the walk stops (no pop).
     ws.update(cx, |ws, cx| ws.undo_last_queued(cx));
-    ws.read_with(cx, |ws, _| assert_eq!(ws.queued_follow_ups.len(), 1));
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(ws.chat.read(cx).queued_follow_ups.len(), 1)
+    });
 
     // A SteerPending tail: not withdrawable — unchanged.
     ws.update(cx, |ws, cx| {
@@ -1828,13 +1952,16 @@ fn undo_last_queued_pops_only_a_queued_tail(cx: &mut gpui::TestAppContext) {
             ws,
             cx,
         );
-        ws.queued_follow_ups.push_back(steer);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(steer);
+            cc.notify();
+        });
     });
     ws.update(cx, |ws, cx| ws.undo_last_queued(cx));
-    ws.read_with(cx, |ws, _| {
-        assert_eq!(ws.queued_follow_ups.len(), 2);
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(ws.chat.read(cx).queued_follow_ups.len(), 2);
         assert!(matches!(
-            ws.queued_follow_ups[1].state,
+            ws.chat.read(cx).queued_follow_ups[1].state,
             super::FollowUpState::SteerPending { .. }
         ));
     });
@@ -1887,7 +2014,10 @@ fn injected_row_landing_retires_the_matching_steer_card(cx: &mut gpui::TestAppCo
             ws,
             cx,
         );
-        ws.queued_follow_ups.push_back(first);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(first);
+            cc.notify();
+        });
         let second = mk(
             "second steer",
             super::FollowUpState::SteerPending {
@@ -1896,17 +2026,23 @@ fn injected_row_landing_retires_the_matching_steer_card(cx: &mut gpui::TestAppCo
             ws,
             cx,
         );
-        ws.queued_follow_ups.push_back(second);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(second);
+            cc.notify();
+        });
         let plain = mk("plain queue", super::FollowUpState::Queued, ws, cx);
-        ws.queued_follow_ups.push_back(plain);
+        ws.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(plain);
+            cc.notify();
+        });
     });
-    let before = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let before = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
 
     // An ordinary prompt row (id carries no card) is inert.
     ws.update(cx, |ws, cx| ws.retire_injected_steer("prompt-row", cx));
-    ws.read_with(cx, |ws, _| {
+    ws.read_with(cx, |ws, cx| {
         assert_eq!(
-            ws.queued_follow_ups.len(),
+            ws.chat.read(cx).queued_follow_ups.len(),
             3,
             "unmatched id changes nothing"
         );
@@ -1914,21 +2050,25 @@ fn injected_row_landing_retires_the_matching_steer_card(cx: &mut gpui::TestAppCo
 
     // The injected row for steer-b retires exactly that card, immediately.
     ws.update(cx, |ws, cx| ws.retire_injected_steer("steer-b", cx));
-    ws.read_with(cx, |ws, _| {
-        assert_eq!(ws.queued_follow_ups.len(), 2, "the injected card left");
+    ws.read_with(cx, |ws, cx| {
+        assert_eq!(
+            ws.chat.read(cx).queued_follow_ups.len(),
+            2,
+            "the injected card left"
+        );
         assert!(matches!(
-            ws.queued_follow_ups[0].state,
+            ws.chat.read(cx).queued_follow_ups[0].state,
             super::FollowUpState::SteerPending { .. }
         ));
         assert!(matches!(
-            ws.queued_follow_ups[1].state,
+            ws.chat.read(cx).queued_follow_ups[1].state,
             super::FollowUpState::Queued
         ));
     });
-    let after = ws.read_with(cx, |ws, cx| ws.conversation.read(cx).items().len());
+    let after = ws.read_with(cx, |ws, cx| ws.chat_conversation(cx).read(cx).items().len());
     assert_eq!(after, before + 1, "exactly one steered bubble appears");
     ws.read_with(cx, |ws, cx| {
-        let items = ws.conversation.read(cx).items();
+        let items = ws.chat_conversation(cx).read(cx).items();
         let last = items.last().expect("steered bubble appended");
         match last.read(cx).kind() {
             crate::conversation::ConvItem::User { text, meta, .. } => {
@@ -2129,7 +2269,7 @@ fn new_thread_intent_lands_projections_and_set_model_updates(cx: &mut gpui::Test
     for _ in 0..400 {
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let sid = ws.read_with(&visual, |ws, _| ws.session_id.clone());
+        let sid = ws.read_with(&visual, |ws, cx| ws.chat.read(cx).session_id.clone());
         if let Some(sid) = sid {
             bound = Some(sid);
             break;
@@ -2144,7 +2284,7 @@ fn new_thread_intent_lands_projections_and_set_model_updates(cx: &mut gpui::Test
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let got = ws.read_with(&visual, |ws, cx| {
-            ws.store.as_ref().map(|s| {
+            ws.chat.read(cx).store.as_ref().map(|s| {
                 s.read(cx).store.with(|st| {
                     (
                         st.project.clone(),
@@ -2184,8 +2324,8 @@ fn new_thread_intent_lands_projections_and_set_model_updates(cx: &mut gpui::Test
     // contract lock for the switch.
     let qualified = format!("{}/{}", chosen.provider, chosen.id);
     visual.update(|_window, cx| {
-        ws.update(cx, |ws, _| {
-            let _ = ws.send_note(|sid| manox_protocol::ClientNote::SetModel {
+        ws.update(cx, |ws, cx| {
+            let _: bool = ws.send_note(cx, |sid| manox_protocol::ClientNote::SetModel {
                 session_id: sid.into(),
                 id: qualified.clone(),
             });
@@ -2196,7 +2336,9 @@ fn new_thread_intent_lands_projections_and_set_model_updates(cx: &mut gpui::Test
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let now = ws.read_with(&visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .and_then(|s| s.read(cx).store.with(|st| st.model_id.clone()))
         });
@@ -2265,7 +2407,12 @@ fn park_rides_the_leaf_running_mirror_and_reclaim_skips_reopen(cx: &mut gpui::Te
     });
     cx.run_until_parked();
     ws.update(cx, |this, cx| {
-        let leaf = this.store.as_ref().expect("A attached with a leaf");
+        let leaf = this
+            .chat
+            .read(cx)
+            .store
+            .clone()
+            .expect("A attached with a leaf");
         leaf.update(cx, |h, _cx| {
             h.store
                 .apply_session_status(Some(true), None, None, None, None, None);
@@ -2284,11 +2431,11 @@ fn park_rides_the_leaf_running_mirror_and_reclaim_skips_reopen(cx: &mut gpui::Te
         });
     });
     cx.run_until_parked();
-    let (parked_len, parked_id, fg_sid) = ws.read_with(&visual, |this, _| {
+    let (parked_len, parked_id, fg_sid) = ws.read_with(&visual, |this, cx| {
         (
             this.background_threads.len(),
             this.background_threads.first().map(|b| b.id.clone()),
-            this.session_id.clone(),
+            this.chat.read(cx).session_id.clone(),
         )
     });
     assert_eq!(parked_len, 1, "the running thread A parks on the switch");
@@ -2298,7 +2445,7 @@ fn park_rides_the_leaf_running_mirror_and_reclaim_skips_reopen(cx: &mut gpui::Te
         Some(b_id.as_str()),
         "B is the foreground session"
     );
-    let parked_leaf_id = ws.read_with(&visual, |this, _| {
+    let parked_leaf_id = ws.read_with(&visual, |this, _cx| {
         this.background_threads
             .first()
             .and_then(|b| b.store.as_ref())
@@ -2318,11 +2465,11 @@ fn park_rides_the_leaf_running_mirror_and_reclaim_skips_reopen(cx: &mut gpui::Te
         });
     });
     cx.run_until_parked();
-    let (after_len, after_sid, after_leaf) = ws.read_with(&visual, |this, _| {
+    let (after_len, after_sid, after_leaf) = ws.read_with(&visual, |this, cx| {
         (
             this.background_threads.len(),
-            this.session_id.clone(),
-            this.store.as_ref().map(|s| s.entity_id()),
+            this.chat.read(cx).session_id.clone(),
+            this.chat.read(cx).store.as_ref().map(|s| s.entity_id()),
         )
     });
     assert_eq!(after_len, 0, "the park is reclaimed, not double-held");
@@ -2368,7 +2515,7 @@ impl ParkedFix {
     /// after the reclaim re-owns the session.
     fn foreground_leaf(&self) -> gpui::Entity<crate::client_store_handle::ClientStoreHandle> {
         self.ws
-            .read_with(&self.visual, |this, _| this.store.clone())
+            .read_with(&self.visual, |this, cx| this.chat.read(cx).store.clone())
             .expect("foreground leaf")
     }
 
@@ -2477,7 +2624,7 @@ fn parked_fix(cx: &mut gpui::TestAppContext) -> ParkedFix {
     };
     let mark_running = |visual: &mut gpui::VisualTestContext| {
         ws.update(&mut *visual, |this, cx| {
-            let leaf = this.store.clone().expect("foreground store");
+            let leaf = this.chat.read(cx).store.clone().expect("foreground store");
             leaf.update(cx, |h, _| {
                 h.store
                     .apply_session_status(Some(true), None, None, None, None, None);
@@ -2514,7 +2661,11 @@ fn parked_adjudication_round_trip(f: &mut ParkedFix, auth_id: &str, input: serde
     let request = f.ask_request(auth_id, input);
     f.deliver_parked(request.clone());
     assert!(
-        f.ws.read_with(&f.visual, |this, _| this.pending_ask.is_none()),
+        f.ws.read_with(&f.visual, |this, cx| this
+            .chat
+            .read(cx)
+            .pending_ask
+            .is_none()),
         "the parked subscription drops the card while the thread is in the background"
     );
 
@@ -2537,7 +2688,7 @@ fn parked_adjudication_round_trip(f: &mut ParkedFix, auth_id: &str, input: serde
     // lacked one.
     f.deliver_foreground(request.clone());
     assert_eq!(
-        f.ws.read_with(&f.visual, |this, _| this.diagnostic_pending_ask_id()),
+        f.ws.read_with(&f.visual, |this, cx| this.diagnostic_pending_ask_id(cx)),
         Some(auth_id.to_string()),
         "the replayed adjudication re-arms the card"
     );
@@ -2553,7 +2704,7 @@ fn parked_adjudication_round_trip(f: &mut ParkedFix, auth_id: &str, input: serde
         "the re-armed card carries its interactive snapshot"
     );
     let walk_gen =
-        f.ws.read_with(&f.visual, |this, _| this.diagnostic_ask_transition_gen());
+        f.ws.read_with(&f.visual, |this, cx| this.diagnostic_ask_transition_gen(cx));
     assert!(walk_gen > 0, "the re-armed card starts its walk");
 
     // A duplicate delivery (the gateway may replay alongside the fan-out) must
@@ -2566,7 +2717,7 @@ fn parked_adjudication_round_trip(f: &mut ParkedFix, auth_id: &str, input: serde
         "re-delivery must not stack a second card"
     );
     assert_eq!(
-        f.ws.read_with(&f.visual, |this, _| this.diagnostic_ask_transition_gen()),
+        f.ws.read_with(&f.visual, |this, cx| this.diagnostic_ask_transition_gen(cx)),
         walk_gen,
         "re-delivery must not churn the walk"
     );
@@ -2631,9 +2782,9 @@ fn reclaim_moves_the_client_focus(cx: &mut gpui::TestAppContext) {
         f: &ParkedFix,
         id: &str,
     ) -> Option<gpui::Entity<crate::client_store_handle::ClientStoreHandle>> {
-        f.ws.read_with(&f.visual, |this, _| {
-            if this.session_id.as_deref() == Some(id) {
-                this.store.clone()
+        f.ws.read_with(&f.visual, |this, cx| {
+            if this.chat.read(cx).session_id.as_deref() == Some(id) {
+                this.chat.read(cx).store.clone()
             } else {
                 this.background_threads
                     .iter()
@@ -3041,11 +3192,12 @@ fn attach_rearms_the_goal_ticker_from_the_projection(cx: &mut gpui::TestAppConte
     leaf.update(&mut f.visual, |h, _| {
         h.store.merge_projection("goal", value, 1);
     });
-    let before = f.ws.read_with(&f.visual, |this, _| this.goal_ticker_gen);
+    let before =
+        f.ws.read_with(&f.visual, |this, cx| this.chat.read(cx).goal_ticker_gen);
     let a_id = f.a_id.clone();
     f.switch_to(&a_id);
     assert!(
-        f.ws.read_with(&f.visual, |this, _| this.goal_ticker_gen) > before,
+        f.ws.read_with(&f.visual, |this, cx| this.chat.read(cx).goal_ticker_gen) > before,
         "the attach re-arms the ticker generation"
     );
     assert!(
@@ -3146,7 +3298,9 @@ fn sidebar_thread_switch_restores_transcript(cx: &mut gpui::TestAppContext) {
     // The count of folded messages currently mirrored in the client store.
     let folded = |ws: &gpui::Entity<Workspace>, visual: &mut gpui::VisualTestContext| {
         ws.read_with(visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .map(|s| s.read(cx).store.with(|st| st.display.len()))
                 .unwrap_or(0)
@@ -3294,7 +3448,9 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
 
     let folded = |ws: &gpui::Entity<Workspace>, visual: &mut gpui::VisualTestContext| {
         ws.read_with(visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .map(|s| s.read(cx).store.with(|st| st.display.len()))
                 .unwrap_or(0)
@@ -3315,7 +3471,7 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
         let n = folded(&ws, &mut visual);
         if n > 0 {
             restored = n;
-            bound_sid = ws.read_with(&visual, |ws, _| ws.session_id.clone());
+            bound_sid = ws.read_with(&visual, |ws, cx| ws.chat.read(cx).session_id.clone());
             break;
         }
     }
@@ -3328,7 +3484,9 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
     // 3. The model chip contract on real data: the file's persisted
     //    model_change must be visible in the projection.
     let model_before = ws.read_with(&visual, |ws, cx| {
-        ws.store
+        ws.chat
+            .read(cx)
+            .store
             .as_ref()
             .and_then(|s| s.read(cx).store.with(|st| st.model_id.clone()))
     });
@@ -3347,8 +3505,8 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
     let qualified = format!("{}/{}", chosen.provider, chosen.id);
     eprintln!("REALDATA: SetModel ref = {qualified}");
     visual.update(|_window, cx| {
-        ws.update(cx, |ws, _| {
-            let _ = ws.send_note(|sid| manox_protocol::ClientNote::SetModel {
+        ws.update(cx, |ws, cx| {
+            let _: bool = ws.send_note(cx, |sid| manox_protocol::ClientNote::SetModel {
                 session_id: sid.into(),
                 id: qualified.clone(),
             });
@@ -3359,7 +3517,9 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let now = ws.read_with(&visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .and_then(|s| s.read(cx).store.with(|st| st.model_id.clone()))
         });
@@ -3377,7 +3537,9 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
     // 5. The inheritance contract: a new thread started from this state
     //    must carry the model into the new session's store.
     let project_before = ws.read_with(&visual, |ws, cx| {
-        ws.store
+        ws.chat
+            .read(cx)
+            .store
             .as_ref()
             .and_then(|s| s.read(cx).store.with(|st| st.project.clone()))
     });
@@ -3388,7 +3550,7 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
     for _ in 0..3000 {
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let sid = ws.read_with(&visual, |ws, _| ws.session_id.clone());
+        let sid = ws.read_with(&visual, |ws, cx| ws.chat.read(cx).session_id.clone());
         if sid.as_deref() != bound_sid.as_deref() {
             new_sid = sid;
             break;
@@ -3403,7 +3565,9 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let now = ws.read_with(&visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .and_then(|s| s.read(cx).store.with(|st| st.model_id.clone()))
         });
@@ -3413,7 +3577,9 @@ fn realdata_open_thread_restores_and_set_model_lands(cx: &mut gpui::TestAppConte
         }
     }
     let new_project = ws.read_with(&visual, |ws, cx| {
-        ws.store
+        ws.chat
+            .read(cx)
+            .store
             .as_ref()
             .and_then(|s| s.read(cx).store.with(|st| st.project.clone()))
     });
@@ -3461,7 +3627,9 @@ fn start_new_thread_creates_via_intent_and_binds_server_id(cx: &mut gpui::TestAp
     cx.run_until_parked();
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     let ws = captured.borrow().clone().expect("workspace captured");
-    let landing_id = ws.read_with(&visual, |ws, _| ws.thread.read(|t| t.id.0.clone()));
+    let landing_id = ws.read_with(&visual, |ws, cx| {
+        ws.chat.read(cx).thread.read(|t| t.id.0.clone())
+    });
 
     // Fire the intent-driven new-thread creation.
     visual.update(|window, cx| {
@@ -3475,16 +3643,20 @@ fn start_new_thread_creates_via_intent_and_binds_server_id(cx: &mut gpui::TestAp
         if i % 40 == 0 {
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
-        let rebound = ws.read_with(&visual, |ws, _| ws.session_id.clone());
+        let rebound = ws.read_with(&visual, |ws, cx| ws.chat.read(cx).session_id.clone());
         if rebound.as_deref() != Some(landing_id.as_str()) && rebound.is_some() {
             break;
         }
     }
     let (session, store_id, thread_id) = ws.read_with(&visual, |ws, cx| {
         (
-            ws.session_id.clone(),
-            ws.store.as_ref().map(|s| s.read(cx).store.id.0.clone()),
-            ws.thread.read(|t| t.id.0.clone()),
+            ws.chat.read(cx).session_id.clone(),
+            ws.chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|s| s.read(cx).store.id.0.clone()),
+            ws.chat.read(cx).thread.read(|t| t.id.0.clone()),
         )
     });
     let new_id = session.expect("session bound after the create receipt");
@@ -3581,8 +3753,8 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
     let qualified = format!("{}/{}", chosen.provider, chosen.id);
     eprintln!("REALDATA-BOOT: SetModel ref = {qualified} (fired with no settle wait)");
     visual.update(|_window, cx| {
-        ws.update(cx, |ws, _| {
-            let _ = ws.send_note(|sid| manox_protocol::ClientNote::SetModel {
+        ws.update(cx, |ws, cx| {
+            let _: bool = ws.send_note(cx, |sid| manox_protocol::ClientNote::SetModel {
                 session_id: sid.into(),
                 id: qualified.clone(),
             });
@@ -3593,7 +3765,9 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let now = ws.read_with(&visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .and_then(|s| s.read(cx).store.with(|st| st.model_id.clone()))
         });
@@ -3637,7 +3811,7 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
         }
     }
     assert!(listed, "real scan lists the target thread");
-    let sidebar = ws.read_with(&visual, |ws, _| ws.sidebar.clone());
+    let sidebar = ws.read_with(&visual, |ws, _cx| ws.sidebar.clone());
     visual.update(|_window, cx| {
         sidebar.update(cx, |_, cx| {
             cx.emit(crate::views::sidebar::SidebarEvent::OpenThread(
@@ -3669,7 +3843,9 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let n = ws.read_with(&visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .map(|s| s.read(cx).store.with(|st| st.display.len()))
                 .unwrap_or(0)
@@ -3698,7 +3874,9 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let hit = ws.read_with(&visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .map(|s| {
                     s.read(cx).store.with(|st| {
@@ -3734,13 +3912,17 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(50));
         let hit = ws.read_with(&visual, |ws, cx| {
-            ws.conversation.read(cx).items().iter().any(|item| {
-                matches!(
-                    item.read(cx).kind(),
-                    crate::conversation::ConvItem::User { text, .. }
-                        if text.contains(reopen_probe.as_str())
-                )
-            })
+            ws.chat_conversation(cx)
+                .read(cx)
+                .items()
+                .iter()
+                .any(|item| {
+                    matches!(
+                        item.read(cx).kind(),
+                        crate::conversation::ConvItem::User { text, .. }
+                            if text.contains(reopen_probe.as_str())
+                    )
+                })
         });
         if hit {
             conv_row = true;
@@ -3759,8 +3941,10 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
     //     sequence through the leaf exactly as the follow stream would:
     //     turn boundary + one text delta must grow the conversation.
     let (before_items, tail_seq) = ws.read_with(&visual, |ws, cx| {
-        let n = ws.conversation.read(cx).items().len();
+        let n = ws.chat_conversation(cx).read(cx).items().len();
         let tail = ws
+            .chat
+            .read(cx)
             .store
             .as_ref()
             .map(|s| s.read(cx).store.window.last().map(|e| e.seq).unwrap_or(0))
@@ -3769,7 +3953,7 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
     });
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
-            if let Some(store) = ws.store.clone() {
+            if let Some(store) = ws.chat.read(cx).store.clone() {
                 store.update(cx, |h, cx| {
                     h.apply_from_server(
                         manox_protocol::FromServer::StreamItem {
@@ -3807,7 +3991,9 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
     for _ in 0..100 {
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let n = ws.read_with(&visual, |ws, cx| ws.conversation.read(cx).items().len());
+        let n = ws.read_with(&visual, |ws, cx| {
+            ws.chat_conversation(cx).read(cx).items().len()
+        });
         if n > before_items {
             settled_row_renders = true;
             break;
@@ -3833,7 +4019,7 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
     for _ in 0..3000 {
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let sid = ws.read_with(&visual, |ws, _| ws.session_id.clone());
+        let sid = ws.read_with(&visual, |ws, cx| ws.chat.read(cx).session_id.clone());
         if let Some(sid) = sid
             && sid != target
         {
@@ -3857,7 +4043,9 @@ fn realdata_boot_set_model_and_single_event_open(cx: &mut gpui::TestAppContext) 
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let hit = ws.read_with(&visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .map(|s| {
                     s.read(cx).store.with(|st| {
@@ -3980,8 +4168,8 @@ fn rail_store_rebinds_on_thread_attach(cx: &mut gpui::TestAppContext) {
     // Construction: the rail is bound to the ctor leaf.
     let ctor = ws.read_with(&visual, |this, cx| {
         (
-            this.store.as_ref().map(|s| s.entity_id()),
-            this.context_rail.read(cx).diagnostic_store_id(),
+            this.chat.read(cx).store.as_ref().map(|s| s.entity_id()),
+            this.chat_rail(cx).read(cx).diagnostic_store_id(),
         )
     });
     assert!(ctor.0.is_some(), "the ctor workspace has a leaf");
@@ -4002,8 +4190,8 @@ fn rail_store_rebinds_on_thread_attach(cx: &mut gpui::TestAppContext) {
     cx.run_until_parked();
     let after = ws.read_with(&visual, |this, cx| {
         (
-            this.store.as_ref().map(|s| s.entity_id()),
-            this.context_rail.read(cx).diagnostic_store_id(),
+            this.chat.read(cx).store.as_ref().map(|s| s.entity_id()),
+            this.chat_rail(cx).read(cx).diagnostic_store_id(),
         )
     });
     assert!(after.0.is_some(), "B attached with a leaf");
@@ -4130,7 +4318,12 @@ fn launcher_thread_cwd_tracks_the_foreground_projection(cx: &mut gpui::TestAppCo
     // Seeded projection wins.
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
-            let handle = ws.store.clone().expect("the ctor workspace has a leaf");
+            let handle = ws
+                .chat
+                .read(cx)
+                .store
+                .clone()
+                .expect("the ctor workspace has a leaf");
             handle.update(cx, |h, _| {
                 h.store
                     .merge_projection("cwd", serde_json::json!("/seeded/project"), 5);
@@ -4152,13 +4345,20 @@ fn launcher_thread_cwd_tracks_the_foreground_projection(cx: &mut gpui::TestAppCo
             );
 
             // Missing foreground store: None (warned), never a panic.
-            let saved = ws.store.take();
+            let saved = ws.chat.update(cx, |chat, cc| {
+                let v = chat.store.take();
+                cc.notify();
+                v
+            });
             assert_eq!(
                 ws.launcher_thread_cwd(cx),
                 None,
                 "a missing foreground store yields None instead of panicking"
             );
-            ws.store = saved;
+            ws.chat.update(cx, |chat, cc| {
+                chat.store = saved;
+                cc.notify();
+            });
         });
     });
     let _ = std::fs::remove_file(&db_path);
@@ -4205,7 +4405,7 @@ fn successor_hand_off_switches_the_foreground_and_consumes_the_signal(
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     let ws = captured.borrow().clone().expect("workspace captured");
     let predecessor = ws
-        .read_with(&visual, |ws, _| ws.store.clone())
+        .read_with(&visual, |ws, cx| ws.chat.read(cx).store.clone())
         .expect("the ctor workspace has a leaf");
 
     // The leaf records the hand-off exactly as the disposal frame does.
@@ -4220,7 +4420,9 @@ fn successor_hand_off_switches_the_foreground_and_consumes_the_signal(
             window.draw(cx).clear(cx);
         });
         let foreground = ws.read_with(&visual, |ws, cx| {
-            ws.store
+            ws.chat
+                .read(cx)
+                .store
                 .as_ref()
                 .map(|store| store.read(cx).session_id().to_string())
         });
@@ -4343,16 +4545,25 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
     // the composer: the worst-case shape of the repro.
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| {
-            ws.pending_ask = super::parse_pending_ask("ask1".into(), ask_payload.clone());
-            assert!(ws.pending_ask.is_some(), "ask payload must parse");
-            ws.pending_auth = Some(super::PendingAuth {
-                id: "call_9".into(),
-                tool_name: "Edit".into(),
-                summary: "escalate sandbox to danger-full-access".into(),
+            ws.chat.update(cx, |chat, cc| {
+                chat.pending_ask = super::parse_pending_ask("ask1".into(), ask_payload.clone());
+                cc.notify();
             });
-            ws.input_state
-                .update(cx, |s, cx| s.replace("hello", window, cx));
-            let store = ws.store.as_ref().expect("landing store bound");
+            assert!(
+                ws.chat.read(cx).pending_ask.is_some(),
+                "ask payload must parse"
+            );
+            ws.chat.update(cx, |chat, cc| {
+                chat.pending_auth = Some(super::PendingAuth {
+                    id: "call_9".into(),
+                    tool_name: "Edit".into(),
+                    summary: "escalate sandbox to danger-full-access".into(),
+                });
+                cc.notify();
+            });
+            let input = ws.chat.read(cx).input_state.clone();
+            input.update(cx, |s, cx| s.replace("hello", window, cx));
+            let store = ws.chat.read(cx).store.clone().expect("landing store bound");
             store.update(cx, |h, _| h.store.running = true);
         });
     });
@@ -4382,15 +4593,15 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
             assert!(
-                ws.pending_ask.is_none(),
+                ws.chat.read(cx).pending_ask.is_none(),
                 "the interrupt retires the parked ask via dismissal"
             );
             assert!(
-                ws.pending_auth.is_some(),
+                ws.chat.read(cx).pending_auth.is_some(),
                 "cancel dismisses the ask only; the approval card stays"
             );
             assert_eq!(
-                ws.input_state.read(cx).value(),
+                ws.chat_input(cx).read(cx).value(),
                 "hello",
                 "cancel consumes no composer input"
             );
@@ -4402,8 +4613,11 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
                       "options": [{ "label": "A" }, { "label": "B" }] }
                 ]
             });
-            ws.pending_ask = super::parse_pending_ask("ask1".into(), ask_payload);
-            let store = ws.store.as_ref().expect("landing store bound");
+            ws.chat.update(cx, |chat, cc| {
+                chat.pending_ask = super::parse_pending_ask("ask1".into(), ask_payload);
+                cc.notify();
+            });
+            let store = ws.chat.read(cx).store.clone().expect("landing store bound");
             store.update(cx, |h, _| h.store.running = false);
         });
     });
@@ -4423,11 +4637,11 @@ fn send_control_cancels_while_running_with_pending_cards(cx: &mut gpui::TestAppC
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
             assert!(
-                ws.pending_ask.is_none(),
+                ws.chat.read(cx).pending_ask.is_none(),
                 "idle dispatch submits the parked ask card"
             );
             assert!(
-                ws.input_state.read(cx).value().is_empty(),
+                ws.chat_input(cx).read(cx).value().is_empty(),
                 "submitting the card clears the composer"
             );
         });
@@ -4478,7 +4692,9 @@ fn live_tool_call_authorization_synthesizes_card_and_redelivery_is_idempotent(
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     let ws = captured.borrow().clone().expect("workspace captured");
 
-    let tid = ws.read_with(&visual.cx, |ws, _| ws.thread.read(|t| t.id.0.clone()));
+    let tid = ws.read_with(&visual.cx, |ws, cx| {
+        ws.chat.read(cx).thread.read(|t| t.id.0.clone())
+    });
     let ask_payload = |q: &str| {
         serde_json::json!({
             "questions": [{ "question": q, "header": "Pick",
@@ -4509,7 +4725,7 @@ fn live_tool_call_authorization_synthesizes_card_and_redelivery_is_idempotent(
     // the walk starts.
     emit_auth(&ws, &mut visual, "ask1", "clarify the target", "Which one?");
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         Some("ask1".to_string()),
         "the live event surfaces the question card"
     );
@@ -4524,14 +4740,14 @@ fn live_tool_call_authorization_synthesizes_card_and_redelivery_is_idempotent(
             .diagnostic_ask_card_interactive("ask1", cx)),
         "the synthesized card carries the interactive snapshot"
     );
-    let walk_gen = ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen());
+    let walk_gen = ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_ask_transition_gen(cx));
     assert!(walk_gen > 0, "the first request starts the walk");
 
     // §D.6 re-delivery of the same id (a re-own replay): pending state and the
     // walk survive untouched — only the card row is re-adoption-safe to ensure.
     emit_auth(&ws, &mut visual, "ask1", "clarify the target", "Which one?");
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         Some("ask1".to_string())
     );
     assert_eq!(
@@ -4541,7 +4757,7 @@ fn live_tool_call_authorization_synthesizes_card_and_redelivery_is_idempotent(
         "re-delivery must not stack a second card"
     );
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_ask_transition_gen(cx)),
         walk_gen,
         "re-delivery must not restart the walk the user is answering"
     );
@@ -4560,7 +4776,7 @@ fn live_tool_call_authorization_synthesizes_card_and_redelivery_is_idempotent(
         });
     });
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         Some("ask1".to_string()),
         "an armed, still-pending card stays"
     );
@@ -4569,11 +4785,11 @@ fn live_tool_call_authorization_synthesizes_card_and_redelivery_is_idempotent(
     // restarts, and the new card is synthesized too.
     emit_auth(&ws, &mut visual, "ask2", "second question", "And now?");
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         Some("ask2".to_string())
     );
     assert!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen()) > walk_gen,
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_ask_transition_gen(cx)) > walk_gen,
         "a new id churns the walk"
     );
     assert_eq!(
@@ -4591,7 +4807,7 @@ fn live_tool_call_authorization_synthesizes_card_and_redelivery_is_idempotent(
         });
     });
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         Some("ask2".to_string()),
         "a new card never inherits the previous card's armed flag"
     );
@@ -4659,7 +4875,7 @@ fn armed_then_gone_projection_retires_the_local_card(cx: &mut gpui::TestAppConte
         });
     });
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         Some("ask1".to_string()),
         "an id never yet confirmed in the projection must not be cleared"
     );
@@ -4677,9 +4893,9 @@ fn armed_then_gone_projection_retires_the_local_card(cx: &mut gpui::TestAppConte
             ws.diagnostic_reconcile_pending_with_projections(cx);
         });
     });
-    let walk_gen = ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen());
+    let walk_gen = ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_ask_transition_gen(cx));
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         Some("ask1".to_string()),
         "a confirmed-pending card stays"
     );
@@ -4695,12 +4911,12 @@ fn armed_then_gone_projection_retires_the_local_card(cx: &mut gpui::TestAppConte
         });
     });
     assert_eq!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_ask_id()),
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         None,
         "armed-then-gone settles the dead interaction out of the composer"
     );
     assert!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_auth())
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_auth(cx))
             .is_none(),
         "the generic approval card retires alongside the ask"
     );
@@ -4711,7 +4927,7 @@ fn armed_then_gone_projection_retires_the_local_card(cx: &mut gpui::TestAppConte
         "the retired call's MsgId must not linger in the leaf store"
     );
     assert!(
-        ws.read_with(&visual.cx, |ws, _| ws.diagnostic_ask_transition_gen()) > walk_gen,
+        ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_ask_transition_gen(cx)) > walk_gen,
         "retiring churns the card state once"
     );
     let _ = std::fs::remove_file(&db_path);
@@ -4793,7 +5009,10 @@ fn seeded_ask_wire_spy_with(
     });
     ws.update(&mut visual, |ws, cx| {
         ws.diagnostic_seed_ask("ask1", ask_payload, cx);
-        assert!(ws.pending_ask.is_some(), "ask payload must parse");
+        assert!(
+            ws.chat.read(cx).pending_ask.is_some(),
+            "ask payload must parse"
+        );
         // The MsgId the live `Request` frame registered for the reply leg.
         ws.diagnostic_seed_store_pending_auth("ask1", "q1", cx);
     });
@@ -4869,7 +5088,7 @@ fn closing_the_ask_card_sends_the_dismissal_marker(cx: &mut gpui::TestAppContext
     // The card is retired locally: a stale second click replies to nothing.
     // (The dead call's MsgId leaves the leaf store with the settle
     // reconcile — same as the answer leg, which never deletes it either.)
-    let pending = ws.read_with(&visual, |ws, _| ws.diagnostic_pending_ask_id());
+    let pending = ws.read_with(&visual, |ws, cx| ws.diagnostic_pending_ask_id(cx));
     assert_eq!(pending, None, "the close retires the card");
     // A repeat close with nothing pending: no second frame, no panic.
     ws.update(&mut visual, |ws, cx| ws.dismiss_ask(cx));
@@ -4894,7 +5113,7 @@ fn turn_interrupt_dismisses_the_parked_ask_before_cancel(cx: &mut gpui::TestAppC
     let mut visual = f.visual;
     let ws = f.ws.clone();
     let session_id = ws
-        .read_with(&visual, |ws, _| ws.session_id.clone())
+        .read_with(&visual, |ws, cx| ws.chat.read(cx).session_id.clone())
         .expect("landing session bound");
     ws.update(&mut visual, |ws, cx| ws.cancel_turn(cx));
     let frames = spy_frames(cx, &f.rx, 2, "interrupt: dismissal + cancel");
@@ -4917,9 +5136,9 @@ fn turn_interrupt_dismisses_the_parked_ask_before_cancel(cx: &mut gpui::TestAppC
         }
         other => panic!("expected the CancelTurn note, got {other:?}"),
     }
-    ws.read_with(&visual, |ws, _| {
+    ws.read_with(&visual, |ws, cx| {
         assert!(
-            ws.diagnostic_pending_ask_id().is_none(),
+            ws.diagnostic_pending_ask_id(cx).is_none(),
             "the interrupt retires the parked card locally"
         );
     });
@@ -4969,8 +5188,8 @@ fn approval_denial_stays_on_the_decision_leg(cx: &mut gpui::TestAppContext) {
         }
         other => panic!("expected the deny Reply, got {other:?}"),
     }
-    ws.read_with(&visual, |ws, _| {
-        assert!(ws.diagnostic_pending_auth().is_none(), "the card retires");
+    ws.read_with(&visual, |ws, cx| {
+        assert!(ws.diagnostic_pending_auth(cx).is_none(), "the card retires");
     });
     let _ = std::fs::remove_file(&f.db_path);
 }
@@ -5059,7 +5278,7 @@ fn a_typed_custom_rides_its_question_and_not_the_card(cx: &mut gpui::TestAppCont
     let ws = f.ws.clone();
     ws.update(&mut visual, |ws, cx| {
         ws.toggle_ask_option(0, 0, cx);
-        ws.diagnostic_set_ask_custom(0, "  a quick note  ");
+        ws.diagnostic_set_ask_custom(0, "  a quick note  ", cx);
     });
     ws.update(&mut visual, |ws, cx| ws.resolve_ask(cx));
     let answers = ask_answer_frames(cx, &f.rx, "custom answer");
@@ -5098,7 +5317,7 @@ fn multi_select_supplements_and_a_second_question_skips_independently(
     ws.update(&mut visual, |ws, cx| {
         ws.toggle_ask_option(0, 0, cx); // X
         ws.toggle_ask_option(0, 1, cx); // Y (multi → both stay)
-        ws.diagnostic_set_ask_custom(0, "plus one more");
+        ws.diagnostic_set_ask_custom(0, "plus one more", cx);
         // question 1 deliberately untouched → skip
     });
     ws.update(&mut visual, |ws, cx| ws.resolve_ask(cx));
@@ -5265,10 +5484,19 @@ fn a_stopped_follow_shares_a_dismissible_notice(cx: &mut gpui::TestAppContext) {
     let leaf = ws.update(cx, |ws, cx| {
         let leaf = cx
             .new(|cx| crate::client_store_handle::ClientStoreHandle::leaf("follow-stop-test", cx));
-        ws.store = Some(leaf.clone());
+        ws.chat.update(cx, |chat, cc| {
+            chat.store = Some(leaf.clone());
+            cc.notify();
+        });
         let (thread_events, store_changes) = ws.subscribe_thread(cx);
-        ws.thread_sub = Some(thread_events);
-        ws.store_observe = Some(store_changes);
+        ws.chat.update(cx, |chat, cc| {
+            chat.thread_sub = Some(thread_events);
+            cc.notify();
+        });
+        ws.chat.update(cx, |chat, cc| {
+            chat.store_observe = Some(store_changes);
+            cc.notify();
+        });
         leaf
     });
     // Draw one frame: gpui re-renders only entities marked dirty, and
@@ -5391,10 +5619,19 @@ fn a_dismissed_stop_keeps_a_permanent_retry_entry(cx: &mut gpui::TestAppContext)
         let leaf = cx.new(|cx| {
             crate::client_store_handle::ClientStoreHandle::leaf("follow-projection-test", cx)
         });
-        ws.store = Some(leaf.clone());
+        ws.chat.update(cx, |chat, cc| {
+            chat.store = Some(leaf.clone());
+            cc.notify();
+        });
         let (thread_events, store_changes) = ws.subscribe_thread(cx);
-        ws.thread_sub = Some(thread_events);
-        ws.store_observe = Some(store_changes);
+        ws.chat.update(cx, |chat, cc| {
+            chat.thread_sub = Some(thread_events);
+            cc.notify();
+        });
+        ws.chat.update(cx, |chat, cc| {
+            chat.store_observe = Some(store_changes);
+            cc.notify();
+        });
         leaf
     });
     let draw = |visual: &mut gpui::VisualTestContext| {
@@ -5558,10 +5795,19 @@ fn a_healthy_follow_shows_no_stop_surfaces(cx: &mut gpui::TestAppContext) {
         let leaf = cx.new(|cx| {
             crate::client_store_handle::ClientStoreHandle::leaf("follow-healthy-test", cx)
         });
-        ws.store = Some(leaf.clone());
+        ws.chat.update(cx, |chat, cc| {
+            chat.store = Some(leaf.clone());
+            cc.notify();
+        });
         let (thread_events, store_changes) = ws.subscribe_thread(cx);
-        ws.thread_sub = Some(thread_events);
-        ws.store_observe = Some(store_changes);
+        ws.chat.update(cx, |chat, cc| {
+            chat.thread_sub = Some(thread_events);
+            cc.notify();
+        });
+        ws.chat.update(cx, |chat, cc| {
+            chat.store_observe = Some(store_changes);
+            cc.notify();
+        });
         leaf
     });
     let draw = |visual: &mut gpui::VisualTestContext| {
@@ -5674,9 +5920,9 @@ fn decide_ask_option_replies_with_the_clicked_option(cx: &mut gpui::TestAppConte
         vec![serde_json::json!({ "id": "q0", "selected": ["Request changes"] })],
         "the clicked option IS the verdict row; no `custom` key rides along"
     );
-    ws.read_with(&visual, |ws, _| {
+    ws.read_with(&visual, |ws, cx| {
         assert!(
-            ws.pending_ask.is_none(),
+            ws.chat.read(cx).pending_ask.is_none(),
             "the decision click settles the card in the same activation"
         );
     });
@@ -5709,9 +5955,16 @@ fn skip_advances_mid_card_and_settles_on_the_last_question(cx: &mut gpui::TestAp
             ws.skip_ask_question(0, window, cx);
         });
     });
-    ws.read_with(&visual, |ws, _| {
-        assert!(ws.pending_ask.is_some(), "a mid-card skip never settles");
-        assert_eq!(ws.ask_step, 1, "the skip advances to the next question");
+    ws.read_with(&visual, |ws, cx| {
+        assert!(
+            ws.chat.read(cx).pending_ask.is_some(),
+            "a mid-card skip never settles"
+        );
+        assert_eq!(
+            ws.chat.read(cx).ask_step,
+            1,
+            "the skip advances to the next question"
+        );
     });
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| ws.skip_ask_question(1, window, cx));
@@ -5757,22 +6010,23 @@ fn an_untouched_question_blocks_the_submit_and_jumps_back(cx: &mut gpui::TestApp
     // Enter-semantics submit with supplement text in the composer.
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| {
-            ws.input_state
-                .update(cx, |s, cx| s.replace("supplement", window, cx));
+            let input = ws.chat_input(cx);
+            input.update(cx, |s, cx| s.replace("supplement", window, cx));
             ws.submit_input(window, cx);
         });
     });
     ws.read_with(&visual, |ws, cx| {
         assert!(
-            ws.pending_ask.is_some(),
+            ws.chat.read(cx).pending_ask.is_some(),
             "the untouched question blocks the settle"
         );
         assert_eq!(
-            ws.ask_step, 0,
+            ws.chat.read(cx).ask_step,
+            0,
             "the walk jumps back to the incomplete question"
         );
         assert_eq!(
-            ws.input_state.read(cx).value().trim(),
+            ws.chat_input(cx).read(cx).value().trim(),
             "supplement",
             "the blocked submit never consumes the composer text"
         );
@@ -5836,7 +6090,9 @@ fn plan_body_wheel_scrolls_the_plan_not_the_message_column(cx: &mut gpui::TestAp
     cx.run_until_parked();
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     let ws = captured.borrow().clone().expect("workspace captured");
-    let tid = ws.read_with(&visual.cx, |ws, _| ws.thread.read(|t| t.id.0.clone()));
+    let tid = ws.read_with(&visual.cx, |ws, cx| {
+        ws.chat.read(cx).thread.read(|t| t.id.0.clone())
+    });
 
     // Earlier transcript, so the column itself can scroll toward the start —
     // otherwise "the column did not move" would be vacuous.
@@ -5889,9 +6145,9 @@ fn plan_body_wheel_scrolls_the_plan_not_the_message_column(cx: &mut gpui::TestAp
         .expect("the synthesized plan-review card paints its body");
     let at = gpui::point(body.center().x, body.bottom() - gpui::px(10.));
 
-    let list_state = ws.read_with(&visual.cx, |ws, _| ws.diagnostic_list_state());
+    let list_state = ws.read_with(&visual.cx, |ws, cx| ws.diagnostic_list_state(cx));
     let plan_scroll = ws
-        .read_with(&visual.cx, |ws, _| ws.ask_body_scroll(0))
+        .read_with(&visual.cx, |ws, cx| ws.ask_body_scroll(cx, 0))
         .expect("the live card tracks its body scroll handle");
     assert!(
         plan_scroll.max_offset().y > gpui::px(0.),

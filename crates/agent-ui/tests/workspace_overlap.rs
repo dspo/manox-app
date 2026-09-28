@@ -117,7 +117,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
         .cloned()
         .map(manox_agent::db::HistoryEntry::Message)
         .collect();
-    let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+    let _weak = gpui::WeakEntity::<Workspace>::new_invalid();
     let conversation = cx.new(|cx| {
         agent_ui::conversation::ConversationState::rebuild_from_display(
             &display,
@@ -126,7 +126,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
             manox_agent::MessageAuthor::Lead,
             true,
             agent_ui::conversation::ApplyCtx {
-                weak,
+                host: manox_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },
@@ -159,8 +159,9 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
     // threshold while parked at several scroll offsets, then rebuild the
     // conversation mid-scroll (thread switch / HistoryRestored shape).
     let workspace = workspace_cell.borrow().clone().expect("workspace captured");
-    let list_state =
-        workspace.read_with(&visual.cx, |workspace, _| workspace.diagnostic_list_state());
+    let list_state = workspace.read_with(&visual.cx, |workspace, cx| {
+        workspace.diagnostic_list_state(cx)
+    });
     let draw = |visual: &mut VisualTestContext| {
         for _ in 0..2 {
             visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -202,7 +203,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
             manox_agent::MessageAuthor::Lead,
             true,
             agent_ui::conversation::ApplyCtx {
-                weak: gpui::WeakEntity::<Workspace>::new_invalid(),
+                host: manox_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },

@@ -483,7 +483,7 @@ impl Render for MessageItemListProbe {
 async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     let prefix = "# Plan\n\nInitial paragraph.\n".to_string();
-    let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+    let _weak = gpui::WeakEntity::<Workspace>::new_invalid();
     let plan = cx.new(|_| {
         MessageItem::new(
             ConvItem::Assistant {
@@ -496,7 +496,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
             },
             "DeepSeek".into(),
             0,
-            weak.clone(),
+            manox_agent_chat_ui::host::noop_host(),
         )
     });
     let tail = cx.new(|_| {
@@ -511,7 +511,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
             },
             "DeepSeek".into(),
             1,
-            weak,
+            manox_agent_chat_ui::host::noop_host(),
         )
     });
     let state = ListState::new(2, ListAlignment::Bottom, px(2048.));
@@ -556,7 +556,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
 }
 
 fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
-    let weak = gpui::WeakEntity::<Workspace>::new_invalid();
+    let _weak = gpui::WeakEntity::<Workspace>::new_invalid();
     let mut activity = ThinkingContainer::new();
     activity.accepting_entries = false;
     activity.streaming = false;
@@ -615,7 +615,14 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
     .into_iter()
     .enumerate()
     .map(|(ix, kind)| {
-        let item = cx.new(|_| MessageItem::new(kind, "deepseek-v4-flash".into(), ix, weak.clone()));
+        let item = cx.new(|_| {
+            MessageItem::new(
+                kind,
+                "deepseek-v4-flash".into(),
+                ix,
+                manox_agent_chat_ui::host::noop_host(),
+            )
+        });
         item.update(cx, |item, cx| {
             item.rebuild_activity_reasoning(cx);
             item.rebuild_tool_panels(None, cx);

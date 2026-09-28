@@ -14,15 +14,17 @@ use super::*;
 impl Workspace {
     /// Plan mode active on the current thread (drives the composer chip).
     pub(crate) fn thread_plan_mode(&self, cx: &mut Context<Self>) -> bool {
-        self.store
+        self.chat
+            .read(cx)
+            .store
             .as_ref()
             .map(|s| s.read(cx).store.plan_mode)
             .expect("foreground store present")
     }
 
     /// Toggle plan mode on the current thread (persisted by the engine).
-    pub(crate) fn set_thread_plan_mode(&mut self, enabled: bool, _cx: &mut Context<Self>) {
-        let _ = self.send_note(|sid| manox_protocol::ClientNote::SetPlanMode {
+    pub(crate) fn set_thread_plan_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::SetPlanMode {
             session_id: sid.into(),
             enabled,
         });

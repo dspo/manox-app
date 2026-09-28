@@ -19,7 +19,7 @@ async fn escalation_authorization_surfaces_as_generic_card(cx: &mut TestAppConte
 
     // The GateEscalationApprover payload: no `questions` key, so the ask
     // card cannot parse it.
-    let before = workspace.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_auth());
+    let before = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_auth(cx));
     assert!(before.is_none(), "no pending card before the event");
 
     workspace.update(&mut visual.cx, |ws, cx| {
@@ -32,13 +32,14 @@ async fn escalation_authorization_surfaces_as_generic_card(cx: &mut TestAppConte
     });
 
     let pending = workspace
-        .read_with(&visual.cx, |ws, _| ws.diagnostic_pending_auth())
+        .read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_auth(cx))
         .expect("escalation surfaces as the generic card");
     assert_eq!(pending.0, "call_1");
     assert_eq!(pending.1, "Edit");
     assert!(pending.2.contains("danger-full-access"));
     assert!(
-        workspace.read_with(&visual.cx, |ws, _| ws.diagnostic_blocking_overlay_active()),
+        workspace.read_with(&visual.cx, |ws, cx| ws
+            .diagnostic_blocking_overlay_active(cx)),
         "the card blocks the workspace like the ask card does"
     );
 
@@ -47,10 +48,11 @@ async fn escalation_authorization_surfaces_as_generic_card(cx: &mut TestAppConte
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.resolve_auth_for_test(PermissionDecision::AllowOnce, cx);
     });
-    let after = workspace.read_with(&visual.cx, |ws, _| ws.diagnostic_pending_auth());
+    let after = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_auth(cx));
     assert!(after.is_none(), "card cleared by the verdict");
     assert!(
-        !workspace.read_with(&visual.cx, |ws, _| ws.diagnostic_blocking_overlay_active()),
+        !workspace.read_with(&visual.cx, |ws, cx| ws
+            .diagnostic_blocking_overlay_active(cx)),
         "overlay gone with the card"
     );
     manox_agent::thread_store::drop_global_for_test();

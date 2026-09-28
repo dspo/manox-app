@@ -835,7 +835,7 @@ impl WorkspaceBrowserHost {
                 Err(format!("browser host: no browser tab with id {id}"))
             });
         }
-        // Surface the yield banner so the user knows control is theirs (e.g.
+        // Surface the yield banner so the user knows control is theirs (e.g
         // to complete a login) and that clicking "Done" resumes the agent.
         if let Some(ws) = self.weak_ws.upgrade() {
             ws.update(cx, |ws, cx| {

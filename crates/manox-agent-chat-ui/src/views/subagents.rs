@@ -13,7 +13,7 @@ use manox_agent::ToolCallStatus;
 use ai_elements::BrailleSpinner;
 
 #[derive(Clone, Debug)]
-pub(crate) struct SubagentInfo {
+pub struct SubagentInfo {
     pub id: String,
     pub subagent_type: String,
     pub description: String,
@@ -23,13 +23,13 @@ pub(crate) struct SubagentInfo {
     pub health: Option<String>,
 }
 
-pub(crate) fn subagent_display_title(info: &SubagentInfo) -> String {
+pub fn subagent_display_title(info: &SubagentInfo) -> String {
     task_display_title(&info.subagent_type, &info.description).unwrap_or_default()
 }
 
 /// `{type} · {topic}` with graceful one-sided fallbacks; `None` when both
 /// sides are empty (callers pick their own last resort, e.g. the call id).
-pub(crate) fn task_display_title(subagent_type: &str, description: &str) -> Option<String> {
+pub fn task_display_title(subagent_type: &str, description: &str) -> Option<String> {
     if description.is_empty() {
         (!subagent_type.is_empty()).then(|| subagent_type.to_string())
     } else if subagent_type.is_empty() {
@@ -39,7 +39,7 @@ pub(crate) fn task_display_title(subagent_type: &str, description: &str) -> Opti
     }
 }
 
-pub(crate) fn status_indicator(status: ToolCallStatus, theme: &Theme) -> AnyElement {
+pub fn status_indicator(status: ToolCallStatus, theme: &Theme) -> AnyElement {
     match status {
         ToolCallStatus::PendingApproval | ToolCallStatus::Running => BrailleSpinner::new()
             .xsmall()
