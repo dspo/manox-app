@@ -2661,7 +2661,11 @@ fn parked_adjudication_round_trip(f: &mut ParkedFix, auth_id: &str, input: serde
     let request = f.ask_request(auth_id, input);
     f.deliver_parked(request.clone());
     assert!(
-        f.ws.read_with(&f.visual, |this, cx| this.chat.read(cx).pending_ask.is_none()),
+        f.ws.read_with(&f.visual, |this, cx| this
+            .chat
+            .read(cx)
+            .pending_ask
+            .is_none()),
         "the parked subscription drops the card while the thread is in the background"
     );
 
@@ -3188,7 +3192,8 @@ fn attach_rearms_the_goal_ticker_from_the_projection(cx: &mut gpui::TestAppConte
     leaf.update(&mut f.visual, |h, _| {
         h.store.merge_projection("goal", value, 1);
     });
-    let before = f.ws.read_with(&f.visual, |this, cx| this.chat.read(cx).goal_ticker_gen);
+    let before =
+        f.ws.read_with(&f.visual, |this, cx| this.chat.read(cx).goal_ticker_gen);
     let a_id = f.a_id.clone();
     f.switch_to(&a_id);
     assert!(
@@ -6085,7 +6090,9 @@ fn plan_body_wheel_scrolls_the_plan_not_the_message_column(cx: &mut gpui::TestAp
     cx.run_until_parked();
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     let ws = captured.borrow().clone().expect("workspace captured");
-    let tid = ws.read_with(&visual.cx, |ws, cx| ws.chat.read(cx).thread.read(|t| t.id.0.clone()));
+    let tid = ws.read_with(&visual.cx, |ws, cx| {
+        ws.chat.read(cx).thread.read(|t| t.id.0.clone())
+    });
 
     // Earlier transcript, so the column itself can scroll toward the start —
     // otherwise "the column did not move" would be vacuous.
