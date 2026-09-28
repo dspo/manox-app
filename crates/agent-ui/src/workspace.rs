@@ -42,7 +42,7 @@ use crate::ToggleTurnNavigator;
 use crate::cockpit::format_elapsed;
 #[cfg(feature = "test-support")]
 use crate::conversation::ConvItem;
-use crate::conversation::{ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
+use crate::conversation::{ApplyOutcome, ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
 use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
@@ -454,6 +454,30 @@ enum RecallStep {
 }
 
 impl Workspace {
+    fn apply_list_outcome(&mut self, outcome: ApplyOutcome, cx: &mut App) {
+        let count_changed = self.sync_list_count(cx);
+        match outcome {
+            ApplyOutcome::Remeasure(ix) => {
+                self.chat.read(cx).list_state.remeasure_items(ix..ix + 1)
+            }
+            ApplyOutcome::RemeasureAll => self.chat.read(cx).list_state.remeasure(),
+            ApplyOutcome::RemeasureAndAppend { remeasure_ix } => {
+                self.chat
+                    .read(cx)
+                    .list_state
+                    .remeasure_items(remeasure_ix..remeasure_ix + 1);
+                if !count_changed {
+                    let tail = self.chat.read(cx).list_count.saturating_sub(1);
+                    self.chat
+                        .read(cx)
+                        .list_state
+                        .remeasure_items(tail..tail + 1);
+                }
+            }
+            ApplyOutcome::Unchanged | ApplyOutcome::Appended | ApplyOutcome::RemovedTail => {}
+        }
+    }
+
     pub(crate) fn with_foreground_store<R>(
         &self,
         cx: &mut gpui::Context<Self>,
@@ -985,7 +1009,76 @@ impl Workspace {
             let b = cx.observe(&self.multiplexer, |_, _, _| {});
             return (a, b);
         };
-        let repaint = cx.observe(&store, |_, _, cx| cx.notify());
+        let repaint = cx.observe(&store, |this, store, cx| {
+            // Live streaming leg: the pump folded chat actions into the book;
+            // drain the display events they derived and run the conversation
+            // applier over them (the v2 ThreadEvent pump's transcript role).
+            let events = store.update(cx, |s, _| s.drain_chat_events());
+            if events.is_empty() {
+                return;
+            }
+            let role = this.model_label(cx);
+            for event in events {
+                match &event {
+                    crate::chat_fold::ChatEvent::Notice { text } => {
+                        let host = this.chat.read(cx).host.clone();
+                        this.chat.update(cx, |chat, cx| {
+                            chat.conversation.update(cx, |c, cx| {
+                                c.push_notice(
+                                    text.clone(),
+                                    crate::conversation::NoticeAnchor::TurnEnd,
+                                    host.clone(),
+                                    cx,
+                                );
+                            });
+                            cx.notify();
+                        });
+                        continue;
+                    }
+                    crate::chat_fold::ChatEvent::Usage { .. } => {
+                        // The rail's metrics fold carries usage; nothing in
+                        // the transcript.
+                        continue;
+                    }
+                    crate::chat_fold::ChatEvent::TurnStarted => {
+                        this.chat.update(cx, |chat, cx| {
+                            chat.turn_active = true;
+                            cx.notify();
+                        });
+                        this.spawn_thinking_ticker(cx);
+                    }
+                    crate::chat_fold::ChatEvent::TurnFinished => {
+                        this.chat.update(cx, |chat, cx| {
+                            chat.turn_active = false;
+                            cx.notify();
+                        });
+                        this.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
+                        this.spawn_git_status_refresh(cx);
+                    }
+                    _ => {}
+                }
+                let thread_event = crate::chat_fold::to_thread_event(event);
+                let Some(thread_event) = thread_event else {
+                    continue;
+                };
+                let cwd = thread_cwd(&this.chat.read(cx).thread, &this.chat.read(cx).store, cx);
+                let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
+                    c.apply(
+                        &thread_event,
+                        &role,
+                        None,
+                        crate::conversation::ApplyCtx {
+                            host: this.chat.read(cx).host.clone(),
+                            cwd,
+                            fork_source: None,
+                        },
+                        cx,
+                    )
+                });
+                this.apply_list_outcome(outcome, cx);
+            }
+            cx.notify();
+        });
         let successor = cx.observe(&store, |this, store, cx| {
             // Identity hand-off: a disposed session records its successor;
             // the foreground moves onto it at the next render (the switch

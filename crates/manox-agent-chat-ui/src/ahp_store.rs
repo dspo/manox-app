@@ -426,6 +426,9 @@ pub struct AhpStore {
     /// True while the pre-connect queue is being replayed; writes issued in
     /// that window queue behind the replay instead of racing it.
     replay_pending: bool,
+    /// Display events derived from chat-channel folds since the last drain —
+    /// the live-streaming leg the conversation applier consumes.
+    chat_events: Vec<crate::chat_fold::ChatEvent>,
     /// Writes issued before the handshake completed, replayed in order on
     /// connect. The landing session's create/subscribe rides this: the
     /// workspace constructs the store and binds the chat column in the same
@@ -450,6 +453,7 @@ impl AhpStore {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
+            chat_events: Vec::new(),
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
@@ -567,8 +571,9 @@ impl AhpStore {
                         let _ = reply.send(result).await;
                     }
                     PendingWrite::Subscribe(uri) => {
-                        let _ = tokio_wait({
+                        let folded = tokio_wait({
                             let client = client.clone();
+                            let uri = uri.clone();
                             move || async move {
                                 client
                                     .request::<_, Value>(
@@ -577,9 +582,28 @@ impl AhpStore {
                                     )
                                     .await
                                     .map_err(|err| err.to_string())
+                                    .and_then(|v| {
+                                        serde_json::from_value::<SubscribeResult>(v)
+                                            .map_err(|err| err.to_string())
+                                    })
                             }
                         })
                         .await;
+                        // Fold the snapshot the same way the direct path does:
+                        // without it a fresh landing session runs on the
+                        // empty-session fallback whose `config` seat is None,
+                        // and every configChanged merge no-ops (the chip's
+                        // picked model never lands).
+                        if let Ok(result) = folded
+                            && let Some(snapshot) = result.snapshot
+                        {
+                            let _ = this.update(cx, |store, cx| {
+                                let uri = snapshot.resource.clone();
+                                if store.book.apply_snapshot(&uri, snapshot.state) {
+                                    cx.notify();
+                                }
+                            });
+                        }
                     }
                     PendingWrite::Unsubscribe(uri) => {
                         let _ = tokio_wait({
@@ -705,8 +729,24 @@ impl AhpStore {
         match event.event {
             ahp::SubscriptionEvent::Action(envelope) => {
                 self.book.server_seq = self.book.server_seq.max(envelope.server_seq);
+                let chat_id = if envelope.channel.starts_with("ahp-chat:/") {
+                    Some(id_of(&envelope.channel).to_string())
+                } else {
+                    None
+                };
                 match self.book.apply(&envelope.channel, &envelope.action) {
-                    FoldEffect::Changed => cx.notify(),
+                    FoldEffect::Changed => {
+                        if let Some(chat_id) = chat_id
+                            && let Some(chat) = self.book.chats.get(&chat_id)
+                            && let Some(event) = crate::chat_fold::ChatEvent::from_action(
+                                &envelope.action,
+                                Some(chat),
+                            )
+                        {
+                            self.chat_events.push(event);
+                        }
+                        cx.notify();
+                    }
                     FoldEffect::Ignored => {}
                     FoldEffect::Rejected(reason) => {
                         tracing::warn!(channel = %envelope.channel, reason = %reason,
@@ -926,6 +966,12 @@ impl AhpStore {
                 cursor,
             },
         )
+    }
+
+    /// Drain the chat display events derived since the last drain (the live
+    /// streaming leg into the conversation applier).
+    pub fn drain_chat_events(&mut self) -> Vec<crate::chat_fold::ChatEvent> {
+        std::mem::take(&mut self.chat_events)
     }
 
     /// Recent dispatch rejections, oldest first.

@@ -521,6 +521,57 @@ fn push_input_request(request: &InputRequestResponsePart, entries: &mut Vec<Hist
     }));
 }
 
+/// Lower a display event onto the `ThreadEvent` vocabulary the live
+/// conversation applier consumes (the mechanical transcription layer: same
+/// shapes the v2 pump emitted, now derived from AHP actions).
+pub fn to_thread_event(ev: ChatEvent) -> Option<manox_agent::ThreadEvent> {
+    use manox_agent::ThreadEvent as T;
+    // Notice renders via `ConversationState::push_notice` (no ThreadEvent
+    // shape); Usage feeds the rail's metrics fold, not the transcript.
+    let t = match ev {
+        ChatEvent::Notice { .. } | ChatEvent::Usage { .. } => return None,
+        ChatEvent::AgentText(delta) => T::AgentText(delta),
+        ChatEvent::AgentThinking(delta) => T::AgentThinking(delta),
+        ChatEvent::ToolCall {
+            id,
+            name,
+            title,
+            status,
+            input,
+        } => T::ToolCall {
+            id,
+            name,
+            title,
+            status,
+            input,
+        },
+        ChatEvent::ToolOutput { id, chunk } => T::ToolOutput { id, chunk },
+        ChatEvent::ToolResult {
+            id,
+            output,
+            is_error,
+        } => T::ToolResult {
+            id,
+            output,
+            is_error,
+        },
+        ChatEvent::TurnStarted => T::TurnStarted,
+        ChatEvent::TurnFinished => T::TurnFinished {
+            cancelled: false,
+            failed: false,
+            stranded_steer_ids: Vec::new(),
+        },
+        ChatEvent::Compaction { summary } => T::Compaction {
+            summary,
+            messages_compacted: 0,
+            tokens_before: 0,
+            retained_tail: Vec::new(),
+        },
+        ChatEvent::Error { text } => T::Error(anyhow::anyhow!(text)),
+    };
+    Some(t)
+}
+
 /// Whether an AHP message is user-authored (drives turn-boundary detection).
 pub fn is_user(message: &AhpMessage) -> bool {
     message.origin.kind == MessageKind::User
