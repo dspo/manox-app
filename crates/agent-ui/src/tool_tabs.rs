@@ -81,7 +81,7 @@ impl ToolTab for TerminalTab {
         &self.id
     }
 
-    fn title(&self) -> SharedString {
+    fn title(&self, _cx: &App) -> SharedString {
         manox_i18n::t("chrome-tab-terminal").into()
     }
 
@@ -89,7 +89,13 @@ impl ToolTab for TerminalTab {
         icon(icons::TERMINAL, 15.).into_any_element()
     }
 
-    fn open(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
+    fn open(
+        &self,
+        _window: &mut Window,
+        cx: &mut App,
+        store: &mut TabStore,
+        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
         match spawn_standalone_terminal(&thread_cwd_or_home(), cx) {
             Ok(view) => store.put(&self.id, view),
             Err(e) => store.set_error(
@@ -141,7 +147,30 @@ impl ToolTabFactory for BrowserTool {
             id: next_instance_id("browser"),
             ws: self.ws.clone(),
             tab_id: std::sync::Mutex::new(None),
+            url: Arc::new(std::sync::Mutex::new(String::new())),
+            title: Arc::new(std::sync::Mutex::new(String::new())),
+            ticker_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ticker_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         })
+    }
+
+    /// Restore from the persisted payload (`{"url": "..."}`); a malformed
+    /// payload skips the entry rather than minting a blank tab.
+    fn restore(&self, spec: &str) -> Option<Arc<dyn ToolTab>> {
+        let url = serde_json::from_str::<serde_json::Value>(spec)
+            .ok()?
+            .get("url")?
+            .as_str()?
+            .to_string();
+        Some(Arc::new(BrowserTab {
+            id: next_instance_id("browser"),
+            ws: self.ws.clone(),
+            tab_id: std::sync::Mutex::new(None),
+            url: Arc::new(std::sync::Mutex::new(url)),
+            title: Arc::new(std::sync::Mutex::new(String::new())),
+            ticker_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ticker_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }))
     }
 
     fn quick_action(&self) -> Option<SharedString> {
@@ -159,6 +188,15 @@ struct BrowserTab {
     /// The app-side browser tab id (allocated at open; the host routes by
     /// it).
     tab_id: std::sync::Mutex<Option<manox_agent::thread_engine::BrowserTabId>>,
+    /// The tab URL at construction (persisted for the next launch's
+    /// restore); updated by the title ticker as navigation happens.
+    url: Arc<std::sync::Mutex<String>>,
+    /// The live tab label (the page's `<title>`, mirrored by the ticker).
+    title: Arc<std::sync::Mutex<String>>,
+    /// Ticker lifecycle: cleared on close; `visible` follows `on_active`
+    /// (hidden tabs idle, like the legacy ticker).
+    ticker_alive: Arc<std::sync::atomic::AtomicBool>,
+    ticker_visible: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ToolTab for BrowserTab {
@@ -170,22 +208,40 @@ impl ToolTab for BrowserTab {
         &self.id
     }
 
-    fn title(&self) -> SharedString {
-        manox_i18n::t("chrome-tab-browser").into()
+    fn title(&self, _cx: &App) -> SharedString {
+        let live = self.title.lock().expect("browser title lock").clone();
+        if live.is_empty() {
+            manox_i18n::t("chrome-tab-browser").into()
+        } else {
+            live.into()
+        }
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
         icon(icons::GLOBE, 15.).into_any_element()
     }
 
-    fn open(&self, window: &mut Window, cx: &mut App, store: &mut TabStore) {
+    fn open(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+        store: &mut TabStore,
+        pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
         // The production browser-tab path on the embedded workspace: the
         // view registers with the browser host (IPC routing) and lives in
         // the workspace's own `browser_views` map — the host's routing
         // reaches it exactly as it reaches legacy tabs.
-        let url = crate::views::browser_view::DEFAULT_URL;
+        let url = {
+            let persisted = self.url.lock().expect("browser url lock").clone();
+            if persisted.is_empty() {
+                crate::views::browser_view::DEFAULT_URL.to_string()
+            } else {
+                persisted
+            }
+        };
         let (tab_id, view) = self.ws.update(cx, |ws, cx| {
-            let tab_id = ws.restore_browser_tab(url, window, cx);
+            let tab_id = ws.restore_browser_tab(&url, window, cx);
             let view = ws
                 .browser_views
                 .get(&tab_id)
@@ -194,15 +250,73 @@ impl ToolTab for BrowserTab {
             (tab_id, view)
         });
         *self.tab_id.lock().expect("browser tab id lock") = Some(tab_id);
+        *self.url.lock().expect("browser url lock") = url;
         store.put(&self.id, view);
+        // Mirror the page's `<title>` onto the tab label (the legacy 2s
+        // ticker): hidden tabs idle, the loop dies with the tab.
+        let alive = self.ticker_alive.clone();
+        let visible = self.ticker_visible.clone();
+        let title_slot = self.title.clone();
+        let url_slot = self.url.clone();
+        let pane = pane.clone();
+        let ws = self.ws.clone();
+        cx.spawn(async move |cx| {
+            while alive.load(std::sync::atomic::Ordering::Relaxed) {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(2))
+                    .await;
+                if !alive.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                if !visible.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+                let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() else {
+                    continue;
+                };
+                // The host needs a live `&mut App`; hop through the async
+                // context.
+                let task = cx.update(|cx| host.page_title(tab_id, cx));
+                let Ok(title) = task.await else { continue };
+                let changed = {
+                    let mut slot = title_slot.lock().expect("browser title lock");
+                    if *slot == title {
+                        false
+                    } else {
+                        *slot = title;
+                        true
+                    }
+                };
+                // Keep the persisted URL in step with navigation.
+                if let Some(url) = ws.read_with(cx, |ws, cx| {
+                    ws.browser_views
+                        .get(&tab_id)
+                        .map(|v| v.read(cx).url().to_string())
+                }) {
+                    *url_slot.lock().expect("browser url lock") = url;
+                }
+                if changed && let Some(pane) = pane.upgrade() {
+                    // The pane entity's own notify is the repaint signal.
+                    pane.update(cx, |_, cx| cx.notify());
+                }
+            }
+        })
+        .detach();
     }
 
     fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
+        self.ticker_alive
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if let Some(tab_id) = self.tab_id.lock().expect("browser tab id lock").take() {
             self.ws
                 .update(cx, |ws, cx| ws.close_browser_tab(tab_id, cx));
         }
         store.reset(&self.id);
+    }
+
+    fn persist(&self, _cx: &App, _store: &TabStore) -> Option<String> {
+        let url = self.url.lock().expect("browser url lock").clone();
+        (!url.is_empty()).then(|| serde_json::json!({ "url": url }).to_string())
     }
 
     fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
@@ -220,6 +334,8 @@ impl ToolTab for BrowserTab {
     }
 
     fn on_active(&self, visible: bool, cx: &mut App, store: &TabStore) {
+        self.ticker_visible
+            .store(visible, std::sync::atomic::Ordering::Relaxed);
         // The wry subview is an OS-level child window: without a hide it
         // floats above every other tab (and thread).
         if let Some(view) = store.get::<crate::views::browser_view::BrowserView>(&self.id) {
@@ -303,7 +419,7 @@ impl ToolTab for AgentTab {
         &self.id
     }
 
-    fn title(&self) -> SharedString {
+    fn title(&self, _cx: &App) -> SharedString {
         self.display.into()
     }
 
@@ -311,7 +427,13 @@ impl ToolTab for AgentTab {
         brand_icon(self.svg)
     }
 
-    fn open(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
+    fn open(
+        &self,
+        _window: &mut Window,
+        cx: &mut App,
+        store: &mut TabStore,
+        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
         // The tab opens on the MODEL PICKER (the legacy `+` menu's cascade
         // reborn); picking one spawns the agent under that endpoint and the
         // picker renders the TUI from then on — one entity for the tab's
@@ -551,6 +673,14 @@ impl ToolTabFactory for EditorTool {
         })
     }
 
+    /// The editor restores as a fresh (empty) editor — its text is a live
+    /// draft, not a durable document.
+    fn restore(&self, _spec: &str) -> Option<Arc<dyn ToolTab>> {
+        Some(Arc::new(EditorTab {
+            id: next_instance_id("editor"),
+        }))
+    }
+
     fn quick_action(&self) -> Option<SharedString> {
         Some(manox_i18n::t("chrome-quick-editor").into())
     }
@@ -573,7 +703,7 @@ impl ToolTab for EditorTab {
         &self.id
     }
 
-    fn title(&self) -> SharedString {
+    fn title(&self, _cx: &App) -> SharedString {
         manox_i18n::t("chrome-tab-editor").into()
     }
 
@@ -581,7 +711,13 @@ impl ToolTab for EditorTab {
         icon(icons::SYMBOL_FILE, 15.).into_any_element()
     }
 
-    fn open(&self, window: &mut Window, cx: &mut App, store: &mut TabStore) {
+    fn open(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+        store: &mut TabStore,
+        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
         let view = cx.new(|cx| {
             gpui_component::input::EditorState::new(window, cx)
                 .language("markdown")

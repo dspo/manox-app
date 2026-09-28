@@ -85,13 +85,22 @@ pub trait ToolTab: 'static {
     /// Stable instance id — the open-set key and the store key. Minted by
     /// the factory, unique among open tabs.
     fn id(&self) -> &str;
-    fn title(&self) -> SharedString;
+    /// The tab label at frame time (takes `cx` so a tab may mirror live
+    /// state — the browser mirrors the page's `<title>`).
+    fn title(&self, cx: &App) -> SharedString;
     /// Tab-strip / quick-action glyph (~15px box).
     fn icon(&self, cx: &App) -> AnyElement;
     /// First open: create the entity / spawn the process. The shell
     /// guarantees idempotence — if the store already holds an entity or an
-    /// error for this id, `open` is not called.
-    fn open(&self, window: &mut Window, cx: &mut App, store: &mut TabStore);
+    /// error for this id, `open` is not called. `pane` is the shell handle a
+    /// tab may hold for async repaints (the browser title ticker).
+    fn open(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+        store: &mut TabStore,
+        pane: &gpui::WeakEntity<RightPane>,
+    );
     /// Render the tab body (reads the store only). When `open` failed the
     /// shell takes over (error bar + retry) and never calls this.
     fn render(&self, _window: &mut Window, cx: &App, store: &TabStore) -> AnyElement;
@@ -104,6 +113,13 @@ pub trait ToolTab: 'static {
     /// Tab-activation / pane-visibility notification (e.g. the browser's OS
     /// subview must hide or it floats above the other tabs).
     fn on_active(&self, _visible: bool, _cx: &mut App, _store: &TabStore) {}
+
+    /// Opaque persistence payload for this instance (the host owns the
+    /// schema; `None` = not persistable, the tab is dropped on restore —
+    /// the live-session kinds, whose process cannot be resurrected).
+    fn persist(&self, _cx: &App, _store: &TabStore) -> Option<String> {
+        None
+    }
 }
 
 /// A registered tool **kind** — the source of the new-tab page's quick
@@ -113,6 +129,11 @@ pub trait ToolTabFactory: 'static {
     /// Stable kind id (registry lookup key, e.g. `"browser"`).
     fn kind(&self) -> &'static str;
     fn create(&self) -> Arc<dyn ToolTab>;
+    /// Rebuild an instance from a persisted payload (see
+    /// [`ToolTab::persist`]); `None` skips the entry.
+    fn restore(&self, _spec: &str) -> Option<Arc<dyn ToolTab>> {
+        None
+    }
     /// Quick-action label on the new-tab page; `None` keeps the kind off the
     /// quick-action list (registry-only).
     fn quick_action(&self) -> Option<SharedString>;
@@ -175,8 +196,9 @@ impl RightPane {
         };
         let tab = factory.create();
         let id = tab.id().to_string();
+        let pane = cx.entity().downgrade();
         if !self.open.iter().any(|t| t.id() == id) {
-            tab.open(window, cx, &mut self.store);
+            tab.open(window, cx, &mut self.store, &pane);
             self.open.push(tab.clone());
         }
         self.activate(tab, cx);
@@ -186,10 +208,62 @@ impl RightPane {
     pub fn open_tab(&mut self, tab: Arc<dyn ToolTab>, window: &mut Window, cx: &mut Context<Self>) {
         let id = tab.id().to_string();
         if !self.open.iter().any(|t| t.id() == id) {
-            tab.open(window, cx, &mut self.store);
+            let pane = cx.entity().downgrade();
+            tab.open(window, cx, &mut self.store, &pane);
             self.open.push(tab.clone());
         }
         self.activate(tab, cx);
+    }
+
+    /// The pane's persistable shape: tab kinds + their payloads, in order,
+    /// with the active index (mirrors the legacy `PersistedRightPane`; the
+    /// host owns the final on-disk schema).
+    pub fn persisted(&self, cx: &App) -> (bool, usize, Vec<(String, String)>) {
+        let mut tabs = Vec::new();
+        let mut active = 0usize;
+        for tab in self.open.iter() {
+            if let Some(spec) = tab.persist(cx, &self.store) {
+                if self.active.as_ref().is_some_and(|a| a.id() == tab.id()) {
+                    active = tabs.len();
+                }
+                tabs.push((tab.kind().to_string(), spec));
+            }
+        }
+        (self.visible, active, tabs)
+    }
+
+    /// Rebuild a pane from a persisted shape (host-driven, on thread entry):
+    /// restorable kinds are re-created through their factories; kinds
+    /// without a payload are dropped (a dead session cannot be
+    /// resurrected). Ignored when the host already holds a live in-session
+    /// session for the thread.
+    pub fn restore_persisted(
+        &mut self,
+        tabs: Vec<(String, String)>,
+        visible: bool,
+        active: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (kind, spec) in tabs {
+            let Some(factory) = self.find_kind(&kind) else {
+                continue;
+            };
+            if let Some(tab) = factory.restore(&spec) {
+                let id = tab.id().to_string();
+                if !self.open.iter().any(|t| t.id() == id) {
+                    let pane = cx.entity().downgrade();
+                    tab.open(window, cx, &mut self.store, &pane);
+                    self.open.push(tab);
+                }
+            }
+        }
+        self.active = self.open.get(active).cloned();
+        self.visible = visible && !self.open.is_empty();
+        if let Some(tab) = self.active.clone() {
+            tab.on_active(self.visible, cx, &self.store);
+        }
+        cx.notify();
     }
 
     /// Activate an already-open tab (no re-open).
@@ -317,6 +391,7 @@ impl gpui::Render for RightPane {
                 };
                 tab_pill(
                     tab,
+                    cx,
                     active.as_ref().map(|a| a.id()) == Some(tab.id()),
                     tab.icon(cx),
                     activate,
@@ -464,7 +539,8 @@ impl RightPane {
                     let retry = cx.listener(move |this, _e: &ClickEvent, w, cx| {
                         let id = t.id().to_string();
                         this.store.reset(&id);
-                        t.open(w, cx, &mut this.store);
+                        let pane = cx.entity().downgrade();
+                        t.open(w, cx, &mut this.store, &pane);
                         cx.notify();
                     });
                     return error_body(&err, retry);
@@ -510,6 +586,7 @@ fn error_body(
 /// joins the body (no bottom border); inactive pills are ghosted.
 fn tab_pill(
     tab: &Arc<dyn ToolTab>,
+    cx: &App,
     active: bool,
     icon_el: AnyElement,
     activate: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -543,7 +620,7 @@ fn tab_pill(
                 .max_w(px(120.))
                 .truncate()
                 .text_size(px(12.))
-                .child(tab.title()),
+                .child(tab.title(cx)),
         )
         .child(small_icon_button(
             SharedString::from(format!("tool-tab-close-{}", tab.id())),

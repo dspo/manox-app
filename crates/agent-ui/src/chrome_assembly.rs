@@ -56,10 +56,25 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     let mut dock_thread: Option<String> = None;
     // Per-thread right-pane sessions: the open tab set + content store +
     // active tab + visibility move with the foreground thread (stash on
-    // switch-out, restore on switch-in; a thread with no stash starts on
-    // the fresh new-tab page).
+    // switch-out, restore on switch-in; a thread with no in-session stash
+    // falls back to its `threads.db` snapshot — the same durable account the
+    // legacy shell keeps — and starts on the fresh new-tab page only when
+    // neither exists).
     let mut right_stash: HashMap<String, manox_agent_chrome_ui::right_pane::RightPaneSession> =
         HashMap::new();
+    // Persist the pane on every change: the shell's own notify is the
+    // change signal (tab open/close/activate, visibility, dock), so an
+    // upsert here keeps the durable row in step without the pane knowing
+    // about persistence.
+    {
+        let ws = ws.clone();
+        let shell_watch = shell.clone();
+        let observed = shell_watch.clone();
+        cx.observe(&observed, move |_shell, cx| {
+            persist_right_pane(&shell_watch, &ws, cx);
+        })
+        .detach();
+    }
     cx.observe(&ws, move |ws, cx| {
         let Some(shell) = shell_weak.upgrade() else {
             return;
@@ -99,6 +114,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .map(|s| s.read(cx).store.id.0.clone());
         if fg != dock_thread && fg.is_some() {
             let old_id = dock_thread.take();
+            let shell_entity = shell.clone();
             shell.update(cx, |shell, cx| {
                 let taken = shell.take_panel_view(cx);
                 if let (Some(old_id), Some(view)) = (&old_id, taken) {
@@ -120,9 +136,48 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                 match fg.as_ref().and_then(|id| right_stash.remove(id)) {
                     Some(session) => shell.restore_right_session(session, cx),
                     None => {
-                        // Fresh thread: drop any lingering pane state to the
-                        // empty page without touching the stash.
-                        shell.right.update(cx, |pane, cx| pane.new_tab_page(cx));
+                        // No in-session stash: rebuild from the thread's
+                        // durable snapshot (browser/editor restore; live
+                        // session kinds are dropped — a dead process cannot
+                        // be resurrected). The window handle comes from the
+                        // dispatch slot (the restore builds webviews).
+                        let restored = fg.as_ref().and_then(|id| {
+                            let json = load_right_pane(id)?;
+                            let shape: serde_json::Value = serde_json::from_str(&json).ok()?;
+                            let visible = shape.get("visible")?.as_bool()?;
+                            let active = shape.get("active")?.as_u64()? as usize;
+                            let tabs = shape
+                                .get("tabs")?
+                                .as_array()?
+                                .iter()
+                                .filter_map(|t| {
+                                    let kind = t.get("kind")?.as_str()?.to_string();
+                                    let spec = t.get("spec")?.as_str()?.to_string();
+                                    Some((kind, spec))
+                                })
+                                .collect::<Vec<_>>();
+                            Some((tabs, visible, active))
+                        });
+                        match restored {
+                            Some((tabs, visible, active)) => {
+                                if let Some(handle) = crate::dispatch::window_global() {
+                                    let _ = handle.update(cx, |_, w, cx| {
+                                        shell_entity.update(cx, |shell, cx| {
+                                            shell.right.update(cx, |pane, cx| {
+                                                pane.restore_persisted(
+                                                    tabs, visible, active, w, cx,
+                                                );
+                                            });
+                                        });
+                                    });
+                                }
+                            }
+                            None => {
+                                // Fresh thread: drop any lingering pane state
+                                // to the empty page without touching the stash.
+                                shell.right.update(cx, |pane, cx| pane.new_tab_page(cx));
+                            }
+                        }
                     }
                 }
             });
@@ -245,6 +300,41 @@ static FOREGROUND_CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync:
 /// The dock surface's read face of the foreground cwd.
 pub fn foreground_cwd() -> Option<std::path::PathBuf> {
     FOREGROUND_CWD.lock().expect("foreground cwd lock").clone()
+}
+
+/// Upsert the current foreground thread's right-pane snapshot into
+/// `threads.db` (the legacy `thread_right_pane` shape, in the chrome pane's
+/// own kind/spec encoding).
+fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
+    let Some(thread_id) = ws
+        .read(cx)
+        .chat
+        .read(cx)
+        .store
+        .as_ref()
+        .map(|s| s.read(cx).store.id.0.clone())
+    else {
+        return;
+    };
+    let (visible, active, tabs) = shell.read(cx).right.read(cx).persisted(cx);
+    let payload = serde_json::json!({
+        "visible": visible,
+        "active": active,
+        "tabs": tabs
+            .iter()
+            .map(|(kind, spec)| serde_json::json!({ "kind": kind, "spec": spec }))
+            .collect::<Vec<_>>(),
+    });
+    let db = manox_agent::thread_store_global().read(|s| s.db().clone());
+    if let Err(e) = db.upsert_right_pane(&thread_id, &payload.to_string()) {
+        tracing::warn!(error = %e, thread_id = %thread_id, "persist chrome right pane failed");
+    }
+}
+
+/// Load a thread's persisted right-pane snapshot (the chrome encoding).
+fn load_right_pane(thread_id: &str) -> Option<String> {
+    let db = manox_agent::thread_store_global().read(|s| s.db().clone());
+    db.load_right_pane(thread_id).ok().flatten()
 }
 
 fn refresh_foreground_cwd(

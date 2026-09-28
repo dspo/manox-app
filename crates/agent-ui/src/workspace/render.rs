@@ -43,6 +43,14 @@ impl Render for Workspace {
         // the legacy title-bar inset (the chrome card starts the column at
         // its top edge).
         if self.embedded {
+            // Settings is a main-column swap in the chrome shell too: the
+            // card hosts the settings nav + panel until the back control
+            // exits (the state machine and its subscription are the legacy
+            // ones; only the layout differs — the nav lives inside the card
+            // because the chrome sidebar slot is the session list).
+            if matches!(self.view_mode, ViewMode::Settings) && !self.exiting_settings {
+                return self.render_embedded_settings(window, cx);
+            }
             return self.render_embedded_column(window, cx);
         }
         // gpui cancels a drag on any mouse-up that doesn't land inside a
@@ -1047,6 +1055,39 @@ impl Workspace {
             },
         ))
         .into_any_element()
+    }
+
+    /// Settings inside the chrome card: the settings nav column + the
+    /// selected panel, side by side (the legacy shell put the nav in the
+    /// window's sidebar slot; the chrome slot belongs to the session list).
+    fn render_embedded_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use gpui::{ParentElement as _, Styled as _, div};
+        use gpui_component::{h_flex, v_flex};
+        let settings = self
+            .settings_view
+            .as_ref()
+            .expect("enter_settings must have created the SettingsView")
+            .clone();
+        let nav = settings.update(cx, |s, cx| s.render_nav(window, cx));
+        let main = settings.update(cx, |s, cx| s.render_main(window, cx));
+        let root = h_flex()
+            .id("embedded-settings")
+            .size_full()
+            .min_w_0()
+            .child(v_flex().w(px(240.)).h_full().flex_shrink_0().child(nav))
+            .child(
+                div()
+                    .w(px(1.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .bg(cx.theme().border),
+            )
+            .child(v_flex().flex_1().min_w_0().h_full().child(main));
+        self.apply_chat_actions(root, window, cx)
     }
 
     /// The chrome-embed render: the conversation column bare of the legacy

@@ -79,7 +79,10 @@ mod tests {
                 STORE_WRITE,
                 0,
             ),
-            ("chrome_assembly.rs", "store reads (U2)", STORE_GLOBAL, 2),
+            // Phase 4: the pin/archive HostHooks (the legacy sidebar's own
+            // seam) plus the right-pane durable snapshot's upsert/load —
+            // the same two call shapes the legacy workspace carries.
+            ("chrome_assembly.rs", "store reads (U2)", STORE_GLOBAL, 4),
             ("chrome_assembly.rs", "wire sends", SENDS, 0),
             ("workspace.rs", "store mirror writes (U3)", STORE_WRITE, 3),
             (

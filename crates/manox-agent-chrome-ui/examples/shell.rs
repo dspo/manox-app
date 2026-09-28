@@ -405,7 +405,7 @@ impl ToolTab for TerminalTab {
         &self.id
     }
 
-    fn title(&self) -> SharedString {
+    fn title(&self, _cx: &gpui::App) -> SharedString {
         self.title.clone()
     }
 
@@ -413,7 +413,13 @@ impl ToolTab for TerminalTab {
         icon_el(self.icon_svg, icons::TERMINAL, 15.)
     }
 
-    fn open(&self, _window: &mut Window, cx: &mut gpui::App, store: &mut TabStore) {
+    fn open(
+        &self,
+        _window: &mut Window,
+        cx: &mut gpui::App,
+        store: &mut TabStore,
+        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
         let cwd = home_cwd();
         match spawn_terminal(self.binary, &cwd, cx) {
             Ok(view) => store.put(&self.id, view),
@@ -511,7 +517,7 @@ impl ToolTab for BrowserTab {
         &self.id
     }
 
-    fn title(&self) -> SharedString {
+    fn title(&self, _cx: &gpui::App) -> SharedString {
         manox_i18n::t("chrome-tab-browser").into()
     }
 
@@ -519,7 +525,13 @@ impl ToolTab for BrowserTab {
         icon_el(None, icons::GLOBE, 15.)
     }
 
-    fn open(&self, window: &mut Window, cx: &mut gpui::App, store: &mut TabStore) {
+    fn open(
+        &self,
+        window: &mut Window,
+        cx: &mut gpui::App,
+        store: &mut TabStore,
+        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
         let view = cx.new(|cx| BrowserTabView::new("https://example.com", window, cx));
         store.put(&self.id, view);
     }

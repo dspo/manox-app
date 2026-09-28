@@ -321,7 +321,7 @@ impl ToolTab for DummyTab {
         "dummy-0"
     }
 
-    fn title(&self) -> gpui::SharedString {
+    fn title(&self, _cx: &gpui::App) -> gpui::SharedString {
         "Dummy".into()
     }
 
@@ -329,7 +329,14 @@ impl ToolTab for DummyTab {
         manox_agent_chrome_ui::theme::icon(icons::TOOLS, 15.).into_any_element()
     }
 
-    fn open(&self, _window: &mut gpui::Window, _cx: &mut gpui::App, _store: &mut TabStore) {}
+    fn open(
+        &self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::App,
+        _store: &mut TabStore,
+        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
+    }
 
     fn render(
         &self,
