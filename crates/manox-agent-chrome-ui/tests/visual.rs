@@ -139,7 +139,15 @@ mod macos {
     fn shell_config(main: AnyView) -> ShellConfig {
         ShellConfig {
             main: Arc::new(MainSeat { view: main }),
-            tool_kinds: vec![Arc::new(DummyKind), Arc::new(SecondKind)],
+            tool_kinds: {
+                let mut kinds: Vec<Arc<dyn ToolTabFactory>> = vec![Arc::new(DummyKind)];
+                // Only under CHROME_SWITCH, so the baseline shot's quick-action
+                // list is unchanged by a diagnostic-only kind.
+                if std::env::var("CHROME_SWITCH").is_ok() {
+                    kinds.push(Arc::new(SecondKind));
+                }
+                kinds
+            },
             panel_surface: Some(Arc::new(DummyPanel)),
             fixed_rows: vec![
                 FixedRow {

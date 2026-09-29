@@ -18,11 +18,10 @@
 //! Per-session tab sets (suspend/resume across a session switch) are a
 //! deliberate gap at this stage — the assembly stage owns that contract.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::primitives::{icon_button, small_icon_button};
@@ -43,6 +42,12 @@ use gpui_component::ElementExt as _;
 const TAB_STRIP_H: f32 = 34.;
 /// Thickness of the active tab's underline.
 const TAB_INDICATOR_H: f32 = 2.;
+/// Left padding inside a tab. Named because the indicator's geometry is
+/// measured through `on_prepaint`, which reports a padded element's CONTENT
+/// box origin — so rebasing a tab's bounds must subtract exactly this.
+const TAB_PL: f32 = 10.;
+/// Right padding inside a tab.
+const TAB_PR: f32 = 8.;
 /// How long the underline takes to travel between tabs.
 ///
 /// Deliberately unhurried: at 180ms the travel read as a blink rather than
@@ -177,7 +182,7 @@ pub struct RightPaneSession {
 /// Left edge and width of one tab, in the strip's coordinate space. Captured
 /// during prepaint so the sliding indicator knows where each tab actually
 /// landed — the labels vary in width, so these cannot be derived from an index.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct TabBounds {
     left: Pixels,
     width: Pixels,
@@ -196,16 +201,26 @@ pub struct RightPane {
     /// painting) and read by the indicator on the next frame.
     tab_bounds: Rc<RefCell<HashMap<String, TabBounds>>>,
     /// The tab row's own origin, captured the same way. `Bounds` are reported
-    /// in WINDOW space, while the indicator is positioned inside the strip, so
-    /// the tab's absolute x has to be rebased against this before use.
+    /// in WINDOW space, while the indicator is positioned inside that row, so
+    /// a tab's absolute x has to be rebased against this before use.
     strip_origin: Rc<RefCell<Pixels>>,
-    /// The indicator's geometry as of the last rendered frame, plus the tab id
-    /// it was travelling to. Read as the animation's START point.
+    /// The indicator's last TARGET geometry, plus the tab id it belongs to.
+    ///
+    /// This is the destination, not the in-flight position: while a run is
+    /// animating, the painted left is an interpolation between
+    /// `indicator_from` and this. The two coincide only once a run settles.
     indicator: (Pixels, Pixels, Option<String>),
-    /// Where the in-flight animation started. Captured once per switch, then
-    /// held for the whole run: `indicator` is overwritten with the target as
-    /// soon as the switch happens, so reading the start from it would make the
-    /// animation lerp target→target and jump with no travel.
+    /// Where the in-flight animation started, captured once per switch.
+    ///
+    /// Held for the whole run because `indicator` is overwritten with the new
+    /// target the moment a switch is observed; reading the start from it would
+    /// make every run lerp target→target and jump with no travel.
+    ///
+    /// Known limit: a second switch mid-flight re-seeds this from the previous
+    /// TARGET rather than from the position currently painted, so a rapid
+    /// A→B→C double switch sends the line to B first and only then slides on
+    /// to C. Fixing it needs the interpolated position read back out of the
+    /// animation.
     indicator_from: (Pixels, Pixels),
 }
 
@@ -568,7 +583,6 @@ impl gpui::Render for RightPane {
             // sliding indicator overlays that line.
             .child(
                 div()
-                    .relative()
                     .w_full()
                     .h(px(TAB_STRIP_H))
                     .flex_shrink_0()
@@ -578,13 +592,16 @@ impl gpui::Render for RightPane {
                     .items_end()
                     .border_b_1()
                     .border_color(BORDER)
-                    .when_some(indicator, |this, ind| this.child(ind))
                     .child({
-                        // The tab row reports its own origin so tab bounds
-                        // (window space) can be rebased into the strip's
-                        // coordinate space before positioning the indicator.
+                        // The indicator lives INSIDE the tab row, not the
+                        // strip, so its containing block is the row's border
+                        // box — the same space the tab bounds are rebased
+                        // into. Positioned against the strip instead, the
+                        // strip's own `pl(4)` was never subtracted and the
+                        // line sat `tab.pl - strip.pl` = 6px to the right.
                         let origin = self.strip_origin.clone();
                         div()
+                            .relative()
                             .flex_1()
                             .min_w_0()
                             .flex()
@@ -595,6 +612,10 @@ impl gpui::Render for RightPane {
                             })
                             .children(pills)
                             .child(new_tab_pill(active.is_none(), on_new_tab))
+                            // Painted LAST so it sits above the tabs: an
+                            // earlier position let the active tab's hover wash
+                            // cover the underline.
+                            .when_some(indicator, |this, ind| this.child(ind))
                     })
                     .child(
                         div()
@@ -737,7 +758,8 @@ fn error_body(
 /// label is ACCENT and semibold; inactive labels are FG_DIM.
 ///
 /// The underline itself is NOT drawn here — the strip renders one shared
-/// indicator that slides between tabs (see `render_indicator`). This function
+/// indicator that slides between tabs (built inline in `Render::render`,
+/// just above the strip). This function
 /// only reports where the tab landed, from `on_prepaint`, so the indicator
 /// knows its travel target. Bounds are layout output, so they exist only after
 /// painting; `on_prepaint` is the hook that runs with the final geometry.
@@ -756,18 +778,22 @@ fn tab_pill(
         .id(SharedString::from(format!("tool-tab-{id}")))
         .on_click(move |e, w, cx| activate(e, w, cx))
         .on_prepaint(move |b, _w, _cx| {
+            // `on_prepaint` hangs a `canvas().absolute().size_full()` child on
+            // this element, so the reported origin is the CONTENT box (the
+            // padding is already applied) while the width is the border box.
+            // Subtract the left padding to recover the tab's own left edge.
             bounds.borrow_mut().insert(
                 bounds_id.clone(),
                 TabBounds {
-                    left: b.origin.x,
+                    left: b.origin.x - px(TAB_PL),
                     width: b.size.width,
                 },
             );
         })
         .relative()
         .h(px(TAB_STRIP_H))
-        .pl(px(10.))
-        .pr(px(8.))
+        .pl(px(TAB_PL))
+        .pr(px(TAB_PR))
         .gap(px(6.))
         .items_center()
         .flex_shrink_0()
