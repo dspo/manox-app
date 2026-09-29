@@ -435,6 +435,10 @@ pub struct AhpStore {
     /// Display events derived from chat-channel folds since the last drain —
     /// the live-streaming leg the conversation applier consumes.
     chat_events: Vec<crate::chat_fold::ChatEvent>,
+    /// Optimistic writes the host has not confirmed yet, oldest first:
+    /// (session id, config key, the value the key had before). A rejection
+    /// restores the remembered values so a refused pick does not linger.
+    optimistic_undo: Vec<(String, String, Option<Value>)>,
     /// Writes issued before the handshake completed, replayed in order on
     /// connect. The landing session's create/subscribe rides this: the
     /// workspace constructs the store and binds the chat column in the same
@@ -460,6 +464,7 @@ impl AhpStore {
             client: None,
             replay_pending: false,
             chat_events: Vec::new(),
+            optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
@@ -793,20 +798,15 @@ impl AhpStore {
                         // host refused must not linger on the UI: roll the
                         // keys it touched out of the fold, and surface the
                         // refusal on the transcript.
-                        if let Some(keys) = rejected_config_keys(&envelope.action)
-                            && let Some(state) =
-                                self.book.sessions.get_mut(id_of(&envelope.channel))
-                            && let Some(config) = &mut state.config
-                        {
-                            for key in &keys {
-                                config.values.remove(key.as_str());
-                            }
-                        }
-                        if let Some(session_id) = envelope.channel.strip_prefix("ahp-session:/") {
+                        if let Some(keys) = rejected_config_keys(&envelope.action) {
+                            let session_id = id_of(&envelope.channel).to_string();
+                            self.rollback_optimistic(&session_id, &keys);
                             self.chat_events.push(crate::chat_fold::ChatEvent::Notice {
-                                text: format!("更改未生效（宿主拒绝）：{reason}"),
+                                text: format!(
+                                    "{}: {reason}",
+                                    manox_i18n::t("workspace-change-rejected")
+                                ),
                             });
-                            let _ = session_id;
                         }
                         cx.notify();
                     }
@@ -1053,8 +1053,44 @@ impl AhpStore {
             values: Default::default(),
         });
         for (k, v) in config {
+            // Remember what the key had before the optimistic write: a host
+            // rejection restores it, so a refused pick does not linger on the
+            // UI as an adopted value.
+            self.optimistic_undo.push((
+                session_id.to_string(),
+                k.clone(),
+                seat.values.get(k).cloned(),
+            ));
             seat.values.insert(k.clone(), v.clone());
         }
+    }
+
+    /// Roll back optimistic writes: every remembered (session, key) touched by
+    /// a REJECTED action restores its pre-optimistic value (removing the key
+    /// when there was none — the host does not re-broadcast authority for a
+    /// write it refused).
+    fn rollback_optimistic(&mut self, session_id: &str, keys: &[String]) {
+        for key in keys {
+            for (sid, k, old) in self.optimistic_undo.iter().rev() {
+                if sid == session_id && k == key {
+                    if let Some(state) = self.book.sessions.get_mut(session_id)
+                        && let Some(config) = &mut state.config
+                    {
+                        match old {
+                            Some(v) => {
+                                config.values.insert(k.clone(), v.clone());
+                            }
+                            None => {
+                                config.values.remove(k);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        self.optimistic_undo
+            .retain(|(sid, k, _)| !(sid == session_id && keys.contains(k)));
     }
 
     /// Drain the chat display events derived since the last drain (the live
@@ -1693,6 +1729,8 @@ fn rejected_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<
         A::SessionConfigChanged(changed) => {
             Some(changed.config.keys().map(|k| k.to_string()).collect())
         }
+        // The cwd write is a dedicated action, not a config change.
+        A::SessionWorkingDirectorySet(_) => Some(vec![config_keys::WORKING_DIRECTORY.to_string()]),
         _ => None,
     }
 }

@@ -154,11 +154,32 @@ impl Workspace {
         let allow = matches!(decision, PermissionDecision::AllowOnce);
         if let Some((store, sid)) = self.chat.read(cx).store.clone() {
             let view = store.read(cx);
+            // Family 1: a tool confirmation (Edit/Write sandbox escalations).
             if let Some((chat_id, turn_id, tool_call_id)) =
                 crate::ahp_store::leaf(&view.book, &sid).confirmation(&id)
             {
                 store.update(cx, |store, _| {
                     store.confirm_tool_call(&chat_id, &turn_id, &tool_call_id, allow);
+                });
+                cx.notify();
+                return;
+            }
+            // Family 2: a BARE ask (an elicitation with no structured
+            // questions) armed the generic card — its id lives in the ChatInput
+            // family, and an Allow simply accepts the ask so the model
+            // proceeds; a Deny declines it. Without this fallback the card was
+            // taken, nothing was sent, and the same request re-armed on the
+            // next notify.
+            if let Some((chat_id, request)) =
+                crate::ahp_store::leaf(&view.book, &sid).chat_input(&id)
+            {
+                let request_id = request.id.clone();
+                store.update(cx, |store, _| {
+                    if allow {
+                        store.complete_input(&chat_id, &request_id, Default::default());
+                    } else {
+                        store.decline_input(&chat_id, &request_id);
+                    }
                 });
                 cx.notify();
                 return;
