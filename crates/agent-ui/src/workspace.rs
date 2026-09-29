@@ -865,7 +865,23 @@ impl Workspace {
                 .and_then(|(chat_id, req)| {
                     let _ = chat_id;
                     match crate::ahp_store::pending_ask_from_ahp(req.id.clone(), req) {
-                        Some(ask) => Some((req.id.clone(), ask)),
+                        Some(mut ask) => {
+                            // A plan-review elicitation renders the plan itself:
+                            // pull the proposal's markdown from the plan channel
+                            // into the question's support text.
+                            if req.id.starts_with("plan-review:") {
+                                let plan =
+                                    crate::ahp_store::plan_review_of(&view.book, &sid, &req.id);
+                                if let Some(q) = ask.questions.first_mut()
+                                    && let Some(content) = plan.and_then(|p| {
+                                        p.get("content").and_then(serde_json::Value::as_str)
+                                    })
+                                {
+                                    q.detail = content.to_string();
+                                }
+                            }
+                            Some((req.id.clone(), ask))
+                        }
                         None => {
                             // The one diagnosis this edge can't recover from:
                             // the fold carries the request but its question

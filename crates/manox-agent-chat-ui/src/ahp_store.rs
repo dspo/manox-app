@@ -1352,6 +1352,26 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
     }
 }
 
+/// The plan-review payload (`{requestId, title, content, planFile}`) from the
+/// session's plan channel, when it belongs to `request_id` — the plan content
+/// the review card renders beneath the verdict question.
+pub fn plan_review_of<'a>(
+    book: &'a ChannelBook,
+    session_id: &str,
+    request_id: &str,
+) -> Option<&'a Value> {
+    let chat_id = book
+        .default_chat(session_id)
+        .map(|uri| id_of(&uri).to_string())
+        .unwrap_or_else(|| session_id.to_string());
+    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
+    book.ext
+        .get(&channel)?
+        .plan_review
+        .as_ref()
+        .filter(|payload| payload.get("requestId").and_then(Value::as_str) == Some(request_id))
+}
+
 /// The call id of a confirmation-state tool call (pending / pending-result).
 fn confirmation_tool_call_id(call: &ahp_types::state::ToolCallConfirmationState) -> &str {
     match call {
@@ -1585,12 +1605,21 @@ pub fn pending_ask_from_ahp(
             Q::Unknown(_) => continue,
         };
         selections.push(vec![false; options.len()]);
+        // A plan-review elicitation (request id `plan-review:<entry>`) renders
+        // the verdict card: the affirmative option is highlighted by label
+        // (the render matches `intent.approve` against the option labels).
+        let intent = id
+            .starts_with("plan-review:")
+            .then(|| crate::column::AskIntent {
+                kind: "plan-review".to_string(),
+                approve: "Approve".to_string(),
+            });
         parsed.push(crate::column::AskQuestion {
             id,
             question,
             header,
             detail: String::new(),
-            intent: None,
+            intent,
             multi_select: multi,
             options,
         });
