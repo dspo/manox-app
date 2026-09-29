@@ -655,10 +655,10 @@ impl gpui::Render for RightPane {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    // Pills are flex_shrink_0 (their widths feed the
-                                    // indicator's geometry), so an over-full row would
-                                    // otherwise paint into the action group's slots
-                                    // and steal its clicks.
+                                    // The new-tab pill cannot shrink, so an
+                                    // over-full row would otherwise paint
+                                    // into the action group's slots and
+                                    // steal its clicks.
                                     .overflow_hidden()
                                     .flex()
                                     .items_end()

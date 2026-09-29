@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::theme::{
     ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, BORDER, CARD_BG, CARD_BORDER, ERR_RED, FG, FG_FAINT,
-    FG_STRONG, FONT_UI, IconAsset, LIST_HOVER, OK_GREEN, SHELL_BG, icon, icons,
+    FG_STRONG, FONT_UI, IconAsset, LIST_HOVER, SHELL_BG, icon, icons,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
