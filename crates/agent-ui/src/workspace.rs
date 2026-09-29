@@ -2141,9 +2141,22 @@ impl Workspace {
             let turn_id = manox_agent_chat_ui::ahp_store::leaf(&view.book, &sid)
                 .chat
                 .and_then(|c| c.active_turn.as_ref().map(|t| t.id.clone()));
+            tracing::info!(
+                session_id = %sid,
+                turn_id = ?turn_id,
+                "cancel: sending the turn-cancel dispatch"
+            );
             store.update(cx, |store, _| {
                 if let Some(turn_id) = turn_id {
                     store.cancel_turn(&sid, &turn_id);
+                } else {
+                    // No active turn in the fold yet the UI reads running —
+                    // say so loudly; this is the composer-locked repro.
+                    // Tracked with the rest of the dead-lock surface in #88.
+                    tracing::warn!(
+                        session_id = %sid,
+                        "cancel: fold has no active turn (client/host desync); see #88"
+                    );
                 }
             });
         } else {
