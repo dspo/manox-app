@@ -391,7 +391,9 @@ impl Workspace {
             .map(|_| {
                 // The plan snapshot and the sub-agent tree ride the x-manox
                 // channels (unmodelled on this pass), so the restore starts
-                // from an empty message set.
+                // from an empty message set. KNOWN DOWNGRADE: switching to a
+                // thread with a proposed plan or live sub-agents rebuilds
+                // those panels empty until their channels repopulate.
                 let msgs: Vec<manox_agent::Message> = Vec::new();
                 (
                     manox_agent::plan::rebuild_from_messages(&msgs),
