@@ -71,8 +71,12 @@ fn sample_row(id: &str) -> SessionRow {
     }
 }
 
-/// Mount a shell with one row; returns (visual, shell).
-fn mount(cx: &mut TestAppContext, set_tag_log: TagLog) -> (VisualTestContext, gpui::Entity<Shell>) {
+/// Mount a shell with the given rows; returns (visual, shell).
+fn mount(
+    cx: &mut TestAppContext,
+    set_tag_log: TagLog,
+    rows: Vec<SessionRow>,
+) -> (VisualTestContext, gpui::Entity<Shell>) {
     cx.update(gpui_component::init);
     let slot: Rc<RefCell<Option<gpui::Entity<Shell>>>> = Rc::new(RefCell::new(None));
     let slot_for_build = slot.clone();
@@ -81,7 +85,7 @@ fn mount(cx: &mut TestAppContext, set_tag_log: TagLog) -> (VisualTestContext, gp
         register_fonts(cx);
         let main: gpui::AnyView = cx.new(|_| StubView).into();
         let shell = cx.new(|cx| Shell::new(shell_config(main, set_tag_log), window, cx));
-        shell.update(cx, |s, _| s.set_sessions(vec![sample_row("thread-1")]));
+        shell.update(cx, |s, _| s.set_sessions(rows));
         *slot_for_build.borrow_mut() = Some(shell.clone());
         Root::new(shell, window, cx)
     });
@@ -96,7 +100,11 @@ fn mount(cx: &mut TestAppContext, set_tag_log: TagLog) -> (VisualTestContext, gp
 /// the trigger permanently dead).
 #[gpui::test]
 fn row_menu_opens_on_the_first_right_click(cx: &mut TestAppContext) {
-    let (mut visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())));
+    let (mut visual, shell) = mount(
+        cx,
+        Rc::new(RefCell::new(Vec::new())),
+        vec![sample_row("thread-1")],
+    );
 
     let row_bounds = visual
         .debug_bounds("chrome-session-row-thread-1")
@@ -134,7 +142,7 @@ fn row_menu_opens_on_the_first_right_click(cx: &mut TestAppContext) {
 #[gpui::test]
 fn tag_edit_commit_cancel_and_empty_semantics(cx: &mut TestAppContext) {
     let log: TagLog = Rc::new(RefCell::new(Vec::new()));
-    let (mut visual, shell) = mount(cx, log.clone());
+    let (mut visual, shell) = mount(cx, log.clone(), vec![sample_row("thread-1")]);
 
     // Begin (add mode) + commit a value: trimmed, rides the hook, lands on
     // the local row, editor unmounts.
@@ -209,4 +217,94 @@ fn tag_edit_commit_cancel_and_empty_semantics(cx: &mut TestAppContext) {
     });
     assert!(shell.read_with(cx, |s, _| s.tag_edit_input().is_none()));
     assert_eq!(log.borrow().len(), 1, "cancel writes nothing");
+}
+
+/// Hover must fire regardless of the approach direction: entering a row from
+/// ABOVE (out of the group header) and from BELOW (out of the next row) both
+/// flip the shell's hovered-row state.
+#[gpui::test]
+fn hover_fires_from_any_direction(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount(
+        cx,
+        Rc::new(RefCell::new(Vec::new())),
+        vec![sample_row("thread-1")],
+    );
+    let row = visual
+        .debug_bounds("chrome-session-row-thread-1")
+        .expect("the row paints");
+
+    // Park OUTSIDE the row, then enter from above.
+    let above = gpui::point(row.center().x, row.top() - px(12.));
+    visual.simulate_mouse_move(above, None, Modifiers::default());
+    visual.run_until_parked();
+    visual.simulate_mouse_move(row.center(), None, Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.hovered_row().map(str::to_string)),
+        Some("thread-1".to_string()),
+        "entering from above must hover the row"
+    );
+
+    // Park below the row (still inside the window), then enter from below.
+    let below = gpui::point(row.center().x, row.bottom() + px(12.));
+    visual.simulate_mouse_move(below, None, Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.hovered_row().map(str::to_string)),
+        None,
+        "leaving downward must clear the hover"
+    );
+    visual.simulate_mouse_move(row.center(), None, Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.hovered_row().map(str::to_string)),
+        Some("thread-1".to_string()),
+        "entering from below must hover the row"
+    );
+}
+
+/// Crossing DIRECTLY from one row into the next must land the hover on the
+/// row the pointer is in. One mouse-move dispatches the old row's leave AND
+/// the new row's enter; whichever order they arrive in, a stale leave must
+/// not clobber the fresh enter (the real-window crossing used to strand the
+/// hover on None — no marquee until the pointer moved again).
+#[gpui::test]
+fn crossing_rows_lands_the_hover_on_the_row_under_the_pointer(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount(
+        cx,
+        Rc::new(RefCell::new(Vec::new())),
+        vec![sample_row("thread-1"), sample_row("thread-2")],
+    );
+    let row1 = visual
+        .debug_bounds("chrome-session-row-thread-1")
+        .expect("row 1 paints");
+    let row2 = visual
+        .debug_bounds("chrome-session-row-thread-2")
+        .expect("row 2 paints");
+
+    visual.simulate_mouse_move(row1.center(), None, Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.hovered_row().map(str::to_string)),
+        Some("thread-1".to_string()),
+        "sanity: the first row hovers"
+    );
+
+    // THE crossing under test: row 1 -> row 2 in one move.
+    visual.simulate_mouse_move(row2.center(), None, Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.hovered_row().map(str::to_string)),
+        Some("thread-2".to_string()),
+        "crossing into row 2 must hover row 2"
+    );
+
+    // And back up: row 2 -> row 1.
+    visual.simulate_mouse_move(row1.center(), None, Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.hovered_row().map(str::to_string)),
+        Some("thread-1".to_string()),
+        "crossing back into row 1 must hover row 1"
+    );
 }

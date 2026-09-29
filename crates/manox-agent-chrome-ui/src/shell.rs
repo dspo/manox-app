@@ -433,6 +433,11 @@ impl Shell {
         self.row_menu.is_some()
     }
 
+    /// The hovered row id, if any (read face for hosts/tests).
+    pub fn hovered_row(&self) -> Option<&str> {
+        self.hovered_row.as_deref()
+    }
+
     /// The in-flight inline tag editor, if any — the row id and its input
     /// (read face for hosts/tests that need to drive the value).
     pub fn tag_edit_input(&self) -> Option<(String, Entity<gpui_component::input::InputState>)> {
@@ -1000,7 +1005,18 @@ impl Shell {
             cx.notify();
         });
         let on_hover_row = cx.listener(|this, (id, entered): &(String, bool), _w, cx| {
-            let next = entered.then(|| id.clone());
+            // A leave retracts only its OWN row: crossing directly from one
+            // row into the next delivers the new row's enter and the old
+            // row's leave within one mouse-move dispatch (either order), and
+            // a stale leave must not strand the hover on None — the marquee
+            // would never start until the pointer moved again.
+            let next = if *entered {
+                Some(id.clone())
+            } else if this.hovered_row.as_deref() == Some(id.as_str()) {
+                None
+            } else {
+                return;
+            };
             if this.hovered_row != next {
                 this.hovered_row = next;
                 cx.notify();
