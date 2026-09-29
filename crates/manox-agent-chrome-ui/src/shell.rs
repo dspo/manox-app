@@ -1021,6 +1021,10 @@ impl Shell {
         let on_row_menu = cx.listener(|this, (id, pos): &(String, gpui::Point<Pixels>), w, cx| {
             this.open_row_menu(id, *pos, w, cx);
         });
+        let on_tag_rename = cx.listener(|this, id: &String, w, cx| {
+            let id = id.clone();
+            this.begin_tag_edit(id, true, w, cx);
+        });
         let this = cx.entity();
         let on_tag_edit_cancel: crate::session_list::OnWindowApp = Rc::new(move |_w, cx| {
             this.update(cx, |this, cx| this.cancel_tag_edit(cx));
@@ -1065,6 +1069,7 @@ impl Shell {
                     on_row_menu(&(id.clone(), pos), w, cx)
                 }),
                 on_tag_edit_cancel: Some(on_tag_edit_cancel),
+                on_tag_rename: std::rc::Rc::new(move |id, w, cx| on_tag_rename(id, w, cx)),
                 on_move_group: std::rc::Rc::new(move |dragged, target, before, w, cx| {
                     on_move_group(&(dragged.clone(), target.clone(), before), w, cx)
                 }),

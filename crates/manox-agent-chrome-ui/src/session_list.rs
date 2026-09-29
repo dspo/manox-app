@@ -190,6 +190,9 @@ pub struct SessionList {
     pub on_row_menu: OnRowMenu,
     /// Escape inside the inline tag editor.
     pub on_tag_edit_cancel: Option<OnWindowApp>,
+    /// Double-click on a row's user tag chip: begin the RENAME editor (the
+    /// old shell's chip double-click semantics).
+    pub on_tag_rename: OnId,
     /// Group reorder commit (dragged → before/after edge of target).
     pub on_move_group: OnGroupMove,
     /// Drag-over-group: update the drop marker (insertion-line position).
@@ -633,7 +636,10 @@ fn session_row(
                     (Some((edit_id, input)), _) if edit_id == &data.id => Some(
                         tag_edit_input(input, list.on_tag_edit_cancel.clone()).into_any_element(),
                     ),
-                    (_, Some(tag)) => Some(user_tag(tag.clone()).into_any_element()),
+                    (_, Some(tag)) => Some(
+                        user_tag(&data.id, tag.clone(), list.on_tag_rename.clone())
+                            .into_any_element(),
+                    ),
                     _ => None,
                 }),
         )
@@ -668,8 +674,19 @@ fn session_row(
 
 /// The user tag chip on the tag line — the same visual language as the
 /// short-id chip (outlined mini-pill, truncated at 90px).
-fn user_tag(tag: String) -> impl IntoElement {
+fn user_tag(id: &str, tag: String, on_rename: OnId) -> impl IntoElement {
+    let id = id.to_string();
     div()
+        .id(SharedString::from(format!("usertag-{id}")))
+        .on_click(move |ev, w, cx| {
+            // Swallow every click (the row's open-click must not fire from
+            // chip work) and start the rename editor on the second click of
+            // a double-click — the old shell's chip semantics.
+            cx.stop_propagation();
+            if ev.click_count() >= 2 {
+                (on_rename)(&id, w, cx);
+            }
+        })
         .px(px(4.))
         .rounded(px(3.))
         .border_1()
