@@ -75,6 +75,11 @@ jobs:
       - name: Chat-crate dependency guard
         run: ./script/check-chat-crate-deps.sh
 
+      # v3 wire-vocabulary guard: view-layer crates read the AhpStore only
+      # (no v2 wire/store vocabulary in agent-ui & friends).
+      - name: v2 wire vocabulary guard
+        run: ./script/check-no-v2-wire.sh
+
       # The tab indicator's alignment guard needs the offscreen visual harness,
       # which is macOS-only (Metal readback), so on this Linux runner it skips
       # itself. It is listed here for visibility: run it locally on macOS after

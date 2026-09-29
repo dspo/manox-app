@@ -22,15 +22,6 @@ pub(crate) struct ModelRow {
     pub name: String,
     /// Wire api (`anthropic` / `openai_responses` / `openai_completions`).
     pub api: String,
-    /// The cx config key a pick resolves against (falls back to the id).
-    /// Consumed by the external-launch cascade's config-key column.
-    #[allow(dead_code)]
-    pub config_id: String,
-    /// The effective agent list (`None` = visible to all; a present list
-    /// must contain the agent — an empty list hides). Consumed by the
-    /// external-launch cascade's visibility filter.
-    #[allow(dead_code)]
-    pub agents: Option<Vec<String>>,
 }
 
 /// Every registered model row, sorted by provider then id (registry order).
@@ -41,16 +32,6 @@ pub(crate) fn rows() -> Vec<ModelRow> {
         .map(|m| ModelRow {
             provider_display: provider_glue::display_provider_name(&m),
             name: provider_glue::display_name(&m),
-            config_id: provider_glue::config_id(&m),
-            agents: m
-                .metadata
-                .get("agents")
-                .and_then(|v| v.as_array())
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                }),
             provider: m.provider.clone(),
             id: m.id.clone(),
             api: m.api.clone(),

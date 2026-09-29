@@ -404,6 +404,18 @@ impl Workspace {
                     ahp_types::state::ChatInputTextAnswerValue { value: text },
                 )
             } else {
+                // An untouched question is a SKIPPED answer, not a missing
+                // key: the host distinguishes "the user skipped this" from
+                // "the client never sent it", and the model must see the
+                // skip. Record it and move on without a Submitted row.
+                answers.insert(
+                    q.id.clone(),
+                    ahp_types::state::ChatInputAnswer::Skipped(
+                        ahp_types::state::ChatInputSkipped {
+                            freeform_values: None,
+                        },
+                    ),
+                );
                 continue;
             };
             answers.insert(

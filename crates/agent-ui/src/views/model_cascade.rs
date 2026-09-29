@@ -1,13 +1,27 @@
 //! Provider→model cascade shared by every external-agent launch surface.
 //!
-//! Models are the multiplexer's wire `ModelInfo` rows (U2 cross-domain #4 —
-//! the former `provider_glue` direct read retired): filtered by the agent id
-//! (the registration's `agents` column, absent = visible to all); grouped by
-//! provider display name. A config model registered through several wire
-//! apis appears once per wire endpoint (exact duplicates collapse). The
-//! emitted model id is the raw cx config key (`config_id`, falling back to
-//! the model id), which cx matches verbatim; `wire` pins the endpoint variant
-//! at launch resolution.
+//! Models are AHP's root-catalogue `AgentInfo` rows: one group per agent
+//! registration (display name, falling back to the provider id), each
+//! model an entry. The entry id is the canonical `provider/model` string
+//! the pick dispatches verbatim; the wire api rides the model's
+//! `x-manox.api` meta and is mapped to the launch pin's vocabulary
+//! ("anthropic" / "responses" / "completions"). KNOWN DOWNGRADE: the v2
+//! registry's per-agent visibility column has no AHP successor — every
+//! agent's picker lists every provider's models.
+
+use serde_json::Value;
+
+/// The host's meta api vocabulary ("anthropic" / "openai_responses" /
+/// "openai_completions") mapped onto the launch pin's ("anthropic" /
+/// "responses" / "completions"); an unknown api carries no pin.
+fn launch_wire_key(meta_api: &str) -> Option<String> {
+    match meta_api {
+        "anthropic" => Some("anthropic".to_string()),
+        "openai_responses" => Some("responses".to_string()),
+        "openai_completions" => Some("completions".to_string()),
+        _ => None,
+    }
+}
 
 /// One cascade entry: the raw cx config key, its display name, the wire api
 /// (the row tag's source), and the wire key for the launch pin.
@@ -23,7 +37,6 @@ pub(crate) struct CascadeEntry {
 /// wire list flattened, so the dedupe and the visible-agents filter are
 /// structural now); each agent's models become entries.
 pub(crate) fn cascade_provider_groups(
-    _agent_id: &str,
     agents: &[ahp_types::state::AgentInfo],
 ) -> Vec<(String, Vec<CascadeEntry>)> {
     let mut providers: Vec<(String, Vec<CascadeEntry>)> = Vec::new();
@@ -34,7 +47,13 @@ pub(crate) fn cascade_provider_groups(
             .map(|m| CascadeEntry {
                 config_id: m.id.clone(),
                 display: m.name.clone(),
-                wire: None,
+                wire: m
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("x-manox"))
+                    .and_then(|x| x.get("api"))
+                    .and_then(Value::as_str)
+                    .and_then(launch_wire_key),
             })
             .collect();
         let prov = if agent.display_name.is_empty() {
@@ -78,7 +97,7 @@ mod tests {
             // Same display name merges (lookup grouping, not adjacency).
             agent("prov-c", "Provider A"),
         ];
-        let groups = cascade_provider_groups("pi", &agents);
+        let groups = cascade_provider_groups(&agents);
         assert_eq!(groups.len(), 2, "{groups:?}");
         assert_eq!(groups[0].0, "Provider A");
         assert_eq!(groups[0].1.len(), 4, "two agents' models merge");

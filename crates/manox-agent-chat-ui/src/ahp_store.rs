@@ -486,7 +486,10 @@ impl AhpStore {
         self.book.seed_summaries(vec![SessionSummary {
             provider: String::new(),
             title: title.to_string(),
-            status: 0,
+            // The host's own rows always carry Idle|IsRead; a zeroed status
+            // would render the placeholder as an UNREAD conversation.
+            status: ahp_types::state::SessionStatus::Idle.bits()
+                | ahp_types::state::SessionStatus::IsRead.bits(),
             activity: None,
             origin: None,
             project: None,
@@ -786,6 +789,25 @@ impl AhpStore {
                         while self.rejections.len() > 32 {
                             self.rejections.pop_front();
                         }
+                        // An optimistic write (model pick, cwd, …) that the
+                        // host refused must not linger on the UI: roll the
+                        // keys it touched out of the fold, and surface the
+                        // refusal on the transcript.
+                        if let Some(keys) = rejected_config_keys(&envelope.action)
+                            && let Some(state) =
+                                self.book.sessions.get_mut(id_of(&envelope.channel))
+                            && let Some(config) = &mut state.config
+                        {
+                            for key in &keys {
+                                config.values.remove(key.as_str());
+                            }
+                        }
+                        if let Some(session_id) = envelope.channel.strip_prefix("ahp-session:/") {
+                            self.chat_events.push(crate::chat_fold::ChatEvent::Notice {
+                                text: format!("更改未生效（宿主拒绝）：{reason}"),
+                            });
+                            let _ = session_id;
+                        }
                         cx.notify();
                     }
                 }
@@ -826,10 +848,15 @@ impl AhpStore {
     /// into the book when the host answers.
     pub fn subscribe(&mut self, uri: impl Into<String>, cx: &mut gpui::Context<Self>) {
         let uri: String = uri.into();
-        let Some(client) = self.client.clone() else {
+        // A write issued while the pre-connect replay is running queues behind
+        // it: racing the landing createSession/subscribe silently loses the
+        // first message (the host answers not-found for a session still
+        // being created).
+        if self.client.is_none() || self.replay_pending {
             self.pending_writes.push(PendingWrite::Subscribe(uri));
             return;
-        };
+        }
+        let client = self.client.clone().expect("guard above");
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             let value = tokio_wait(move || async move {
                 client
@@ -861,12 +888,16 @@ impl AhpStore {
 
     /// Unsubscribe one channel.
     pub fn unsubscribe(&mut self, uri: impl Into<String>) {
-        let Some(client) = self.client.clone() else {
-            self.pending_writes
-                .push(PendingWrite::Unsubscribe(uri.into()));
-            return;
-        };
         let uri = uri.into();
+        // A write issued while the pre-connect replay is running queues behind
+        // it: racing the landing createSession/subscribe silently loses the
+        // first message (the host answers not-found for a session still
+        // being created).
+        if self.client.is_none() || self.replay_pending {
+            self.pending_writes.push(PendingWrite::Unsubscribe(uri));
+            return;
+        }
+        let client = self.client.clone().expect("guard above");
         manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client
                 .request::<_, Value>("unsubscribe", serde_json::json!({ "channel": uri }))
@@ -880,12 +911,17 @@ impl AhpStore {
     /// Dispatch one action (write-ahead; the echo folds it). Fire-and-forget:
     /// rejections come back as envelopes and are logged/recorded by the pump.
     pub fn dispatch(&mut self, channel: impl Into<String>, action: StateAction) {
-        let Some(client) = self.client.clone() else {
-            self.pending_writes
-                .push(PendingWrite::Dispatch(channel.into(), Box::new(action)));
-            return;
-        };
         let channel = channel.into();
+        // A write issued while the pre-connect replay is running queues behind
+        // it: racing the landing createSession/subscribe silently loses the
+        // first message (the host answers not-found for a session still
+        // being created).
+        if self.client.is_none() || self.replay_pending {
+            self.pending_writes
+                .push(PendingWrite::Dispatch(channel, Box::new(action)));
+            return;
+        }
+        let client = self.client.clone().expect("guard above");
         manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client.dispatch(channel, action).await {
                 tracing::warn!(error = %err, "dispatch failed");
@@ -1482,6 +1518,20 @@ impl<'a> LeafView<'a> {
         self.fold_input_request(None)
     }
 
+    /// The first open tool-confirmation request, if any — the generic
+    /// authorization card's source of truth (Edit/Write sandbox
+    /// escalations park the model here).
+    pub fn open_tool_confirmation(
+        &self,
+    ) -> Option<(String, &ahp_types::state::SessionToolConfirmationRequest)> {
+        self.requests().iter().find_map(|r| match r {
+            ahp_types::state::SessionInputRequest::ToolConfirmation(c) => {
+                Some((crate::ahp_store::id_of(&c.chat).to_string(), c))
+            }
+            _ => None,
+        })
+    }
+
     /// Scan the fold for an unanswered chat-input request. The host folds
     /// `chat/inputRequested` into the active turn's response parts — the
     /// session channel's input-needed list is NOT maintained on this path —
@@ -1632,6 +1682,19 @@ pub fn pending_ask_from_ahp(
         questions: parsed,
         selections,
     })
+}
+
+/// The config keys an optimistic write touched, when the action is one the
+/// host can refuse per-key (a session config change). A rejection rolls
+/// these out of the client fold so a refused pick does not linger on the UI.
+fn rejected_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<String>> {
+    use ahp_types::actions::StateAction as A;
+    match action {
+        A::SessionConfigChanged(changed) => {
+            Some(changed.config.keys().map(|k| k.to_string()).collect())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -333,6 +333,10 @@ pub struct ChatColumn {
     /// leaves the fold — a diagnostic-seeded one belongs to the test, not to
     /// the wire.
     pub pending_ask_live: bool,
+    /// Same liveness marker for the generic authorization card (tool
+    /// confirmations and bare asks): only a live-seeded card is retired when
+    /// its request leaves the fold.
+    pub pending_auth_live: bool,
     pub pending_auth: Option<PendingAuth>,
     /// Whether the CURRENT pending interaction's id has been observed in the
     /// leaf store's `pending_auth` projection set. Arms the remote-settle
