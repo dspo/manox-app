@@ -107,7 +107,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 - **禁止抄袭第三方 crate 代码**：可参考架构思想，禁止复制粘贴后修改。`git2` 被禁（plugin marketplace shell out 系统 `git`）。
 - **注释一律英文，面向终态**（描述不变量/意图）而非过程流水账，非必要不注释。详见 `~/.claude/rules/code-comments.md`。
 - **零构建告警**：CI 以 `-D warnings` 编译。提交前本地 `cargo clippy --all-targets -- -D warnings` 全绿。新增 `#[allow(...)]` 视为逃避而非修复，除非 lint 本身与项目设计冲突（如 GPUI 派生宏假阳性），且必须英文注释说明。`Result` 必须 `let _ =` 或 `?` 处理；test 模块在文件末尾。
-- **重构 UI 后及时修订 `UI-MAP.md`**：任何 UI 组件层级、命名、增删重组的变更，必须在同一 PR 更新 `UI-MAP.md`。
+- **UI 原型的唯一表达是 `design/svg/`**：UI 组件层级、命名、增删重组的变更，在同一 PR 更新对应 SVG（生成器与校验脚本见 `design/README.md`）。UI-MAP.md 已退役删除，不再维护 Markdown 组件清单。
 - **勿以善小而不为**：对正面有效的 review 意见，即便不构成阻塞也应尽量遵从。
 
 ## 激进开发纪律

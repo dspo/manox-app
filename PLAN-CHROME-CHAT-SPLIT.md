@@ -262,7 +262,7 @@ pub trait ChatHost: 'static {
 | 1b | ask 簇 + composer 簇迁入（含 chips/completion/queue） | 同上 |
 | 1c | 消息列表虚拟化簇 + 转录管线（thread_sub/store_observe/conversation_sub） | 同上 |
 | 1d | ContextRail + turn_navigator + goal/thinking ticker | 同上 |
-| 1e | `ChatHost` 立面（X 类字段清账）+ UI-MAP 同步 | 同上 + UI-MAP 更新 |
+| 1e | `ChatHost` 立面（X 类字段清账）+ 原型图同步 | 同上 + `design/svg/` 更新 |
 
 ---
 
@@ -333,7 +333,7 @@ chat-ui 定义自己的 `test-support` feature（diagnostic 钩子随 ChatColumn
   `--features test-support`）+ `cargo fmt`；
 - 依赖不变量检查（§1 推论）落地为 CI 或 script 检查（可用
   `cargo tree -p manox-agent-chat-ui -i terminal-ui` 断言 not found）；
-- UI-MAP 同 PR 更新（组件 Source 路径全部改指）。
+- 原型图同 PR 更新（`design/svg/` 的生成器与 Source 路径改指；UI-MAP.md 已退役）。
 
 ---
 
@@ -518,7 +518,7 @@ chrome.no-chats
 
 - 离屏视觉 harness（`chrome-ui/tests/visual.rs`）产出基线 PNG（主窗/右栏开/
   面板开三变体），与 agents-window-gpui 现基线比对（允许 chat 槽差异）；
-- clippy/test/fmt/UI-MAP 四件套；
+- clippy/test/fmt/原型图 四件套；
 - chrome crate 依赖不变量断言（§1 推论）进 CI。
 
 ---
@@ -548,13 +548,15 @@ chrome.no-chats
 - `ViewMode::Terminal` / `ViewMode::ExternalSession` 全窗路径（按 §2.2 映射）；
 - 旧 TitleBar/SidebarDivider/RightPaneToggleBtn 等旧壳组件。
 
-### 6.3 UI-MAP 重写大纲
+### 6.3 组件清单的归属（原 UI-MAP 重写大纲，已退役）
 
-按新层级重组：`Window(原生交通灯+38px 工具栏) > Shell > [SessionList |
-MainArea[ ChatColumn | RightPane ] / Panel]`；ChatColumn 以下沿用现有
-MessageColumn 族条目改挂；RightPane 族按 ToolTab 实例页签重写；旧
-WorkspaceShell/ViewMode 条目删除。**每个 Phase 的 PR 都同步改 UI-MAP**
-（仓库规则：UI 变更同 PR 更新），Phase 4 做最终重组。
+原计划按新层级重组 `UI-MAP.md`：`Window(原生交通灯+38px 工具栏) > Shell >
+[SessionList | MainArea[ ChatColumn | RightPane ] / Panel]`，ChatColumn 以下沿用
+MessageColumn 族条目改挂，RightPane 族按 ToolTab 实例页签重写，旧
+WorkspaceShell/ViewMode 条目删除。
+
+**该文件已删除**：组件层级的表达改为 `design/svg/` 的 SVG 原型（生成器与校验见
+`design/README.md`），不再维护 Markdown 组件清单。本节仅作历史记录保留。
 
 ---
 
@@ -567,7 +569,7 @@ WorkspaceShell/ViewMode 条目删除。**每个 Phase 的 PR 都同步改 UI-MAP
 2. **`cargo test -p agent-ui --features test-support`**，Phase 2 起加
    **`cargo test -p manox-agent-chat-ui --features test-support`**——
    test-support 编译单元两次被默认门禁漏掉（#52、#56 教训），双 crate 显式跑；
-3. UI-MAP 同 PR；ftl 双语 parity 键扫描（follow-stop 教训的 key-scan gate）；
+3. 原型图同 PR（`design/svg/`）；ftl 双语 parity 键扫描（follow-stop 教训的 key-scan gate）；
 4. 提交信息无 Co-Authored-By；合并前 `script/local-manox.sh off` 形态下
    `cargo update -p manox-agent` bump + 全门禁重跑 + Cargo.lock 随合并提交。
 
@@ -615,4 +617,4 @@ WorkspaceShell/ViewMode 条目删除。**每个 Phase 的 PR 都同步改 UI-MAP
   （与本仓同轨）；主栏为占位卡，消息 UI 于 freya 版已拆。
 - manox-app agent-ui：45 文件 / ~19k 行（workspace.rs 3132 + workspace/* ~10k
   + views/* ~9k）；`Workspace` 字段区间 workspace.rs:622-950。
-- 本计划文件：`PLAN-CHROME-CHAT-SPLIT.md`（仓库根，与 AGENTS/UI-MAP 同级）。
+- 本计划文件：`PLAN-CHROME-CHAT-SPLIT.md`（仓库根，与 AGENTS.md 同级）。

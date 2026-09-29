@@ -48,7 +48,11 @@ against them:
 - `crates/manox-agent-chrome-ui/src/theme/palette.rs` — the 2026-Light tokens
 - `.../src/{shell,titlebar,session_list,right_pane,divider}.rs` — layout sizes
 - `crates/manox-agent-chat-ui/src/views/context_rail.rs` — rail geometry
-- `UI-MAP.md` — component names and containment
+
+These sheets are the repo's UI reference: `UI-MAP.md` was retired when this
+directory landed, so component names and containment live here now. Component
+names in the figures follow the source identifiers (`Shell`, `SessionList`,
+`RightPane`, `MessageColumn`, …) rather than a separate glossary.
 
 Icons are the app's own assets, inlined as `<symbol>`s and referenced with
 `<use>`:
