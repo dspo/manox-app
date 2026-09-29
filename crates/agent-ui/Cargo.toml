@@ -32,6 +32,9 @@ uuid.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 gpui-kit-assets.workspace = true
+# LineCap::Round for the composer context ring's stroked arcs — the type must
+# be the same copy gpui's StrokeOptions re-exports, hence the workspace pin.
+lyon.workspace = true
 rust-embed.workspace = true
 
 manox-agent.workspace = true

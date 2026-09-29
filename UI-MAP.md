@@ -114,7 +114,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Footer / Composer
 
-- [Footer](#footer) · [Composer](#composer) · [QueuedFollowUps](#queuedfollowups) · [ComposerDivider](#composerdivider) · [AttachmentChips](#attachmentchips) · [AttachmentChip](#attachmentchip) · [BrowserSuiteChip](#browsersuitechip) · [ComposerInputRow](#composerinputrow) · [InputField](#inputfield) · [SendBtn](#sendbtn) · [ModelChip](#modelchip) · [AccessChip](#accesschip) · [ProjectChip](#projectchip) · [FollowStopProjection](#followstapprojection)
+- [Footer](#footer) · [Composer](#composer) · [QueuedFollowUps](#queuedfollowups) · [ComposerDivider](#composerdivider) · [AttachmentChips](#attachmentchips) · [AttachmentChip](#attachmentchip) · [BrowserSuiteChip](#browsersuitechip) · [ComposerInputRow](#composerinputrow) · [InputField](#inputfield) · [SendBtn](#sendbtn) · [ModelChip](#modelchip) · [ContextUsagePill](#contextusagepill) · [AccessChip](#accesschip) · [ProjectChip](#projectchip) · [FollowStopProjection](#followstapprojection)
 
 ### AskDrawer
 
@@ -493,6 +493,12 @@ was retired by B2-PR-1 in favour of the per-question custom input.
 Dropdown chip showing `provider · model · effort` (the reasoning-effort wire value, `high`/`max`) → [ModelMenu](#modelmenu) popup.
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
+
+#### ContextUsagePill
+
+Compact context-occupancy pill in the footer's right control cluster, between [ModelChip](#modelchip) and [SendBtn](#sendbtn) (the dsh ContextMeter port): a 14px stroke ring + the integer percent, no click action (the breakdown face stays in the [ContextRail](#contextrail); the tooltip carries the absolute figures, `composer-context-usage-tooltip`). Data: the foreground leaf's `last_token_usage` — the latest request's input-side tokens (`input + cache_creation + cache_read`, the same active-token formula as the rail's budget row) — against the foreground model's `context_window` resolved through the shared provider registry. Renders nothing until a usage row has landed AND the window resolves (no capacity → no meter); fill + percent flip to `warning` at ≥90% (the rail's near-full threshold). The ring is a GPUI `canvas`: a `border`-tone full-circle stroke plus a `muted_foreground` arc sweeping clockwise from 12 o'clock, replicating the reference SVG verbatim (r 5.5, 2px round-capped stroke, `r + stroke/2 = 6.5` filling the 7px half-box); a full turn redraws the closed circle, 0% strokes nothing. Live updates ride the leaf's `TokenUsageUpdated` notify.
+
+> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_context_usage_ring`, `context_usage_ring`, `occupancy_arc_end`, the `CONTEXT_RING_*` constants)
 
 #### AccessChip
 

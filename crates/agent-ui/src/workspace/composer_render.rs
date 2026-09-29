@@ -8,7 +8,25 @@
 //! parent's render face and the `tests` child.
 
 use super::*;
+use crate::cockpit::{context_budget_pct, format_tokens_pi};
+use gpui::{Hsla, PathBuilder, PathStyle, Point, StrokeOptions, canvas, point};
+use lyon::tessellation::LineCap;
 pub use manox_agent_chat_ui::column::{QueueDragEdge, QueueRowDrag};
+
+// ── Context-usage ring geometry ───────────────────────────────────────────
+// The dsh ContextMeter's numbers verbatim: a 14px box, r 5.5, 2px stroke —
+// `r + stroke/2 = 6.5` exactly fills the 7px half-box, so the ring kisses
+// the canvas edge like the reference SVG.
+
+/// Canvas (and ring) box edge, in px.
+const CONTEXT_RING_SIZE: f32 = 14.0;
+/// Stroke centerline radius inside the 14px box.
+const CONTEXT_RING_RADIUS: f32 = 5.5;
+/// Ring stroke width; round-capped like the reference's `stroke-linecap`.
+const CONTEXT_RING_STROKE: f32 = 2.0;
+/// Occupancy at which the fill/percent flip to the warning color — the
+/// context rail's budget row uses the same threshold.
+const CONTEXT_NEAR_FULL_PCT: f64 = 90.0;
 
 /// Drag payload for a queued follow-up row. The index is all the gesture
 /// needs: rows are transient session state, so the live queue position is
@@ -115,6 +133,10 @@ impl Workspace {
         // the user most needed to interrupt). Ask supplement input keeps
         // its own path: Enter.
         let send = self.render_send_button(running, cx);
+        // Context-occupancy pill (ring + percent) sits between the model and
+        // the action it quantifies: session-state cluster, then the send
+        // control. Hidden entirely until usage + a resolvable window exist.
+        let context_ring = self.render_context_usage_ring(theme, cx);
         // The completion popover overlays the composer; anchoring it on the
         // composer's own v_flex keeps it glued to the input bar in both hero
         // and footer, with a single mount point and ElementId.
@@ -226,6 +248,7 @@ impl Workspace {
                             .gap_1()
                             .flex_shrink_0()
                             .child(model)
+                            .when_some(context_ring, |el, ring| el.child(ring))
                             .child(send),
                     ),
             )
@@ -947,6 +970,81 @@ impl Workspace {
         } else {
             self.submit_input(window, cx);
         }
+    }
+
+    /// Composer context-occupancy pill (the dsh ContextMeter port): a 14px
+    /// stroke ring plus the integer percent, fed by the latest request's
+    /// input-side tokens against the foreground model's context window —
+    /// the same active-token formula (input + cache write + cache read) the
+    /// context rail's budget row uses. Renders nothing until a usage row has
+    /// landed AND the model's window resolves against the registry (the dsh
+    /// meter's contract: no capacity → no meter). The fill and the percent
+    /// flip to the warning color past the rail's ≥90% near-full line. The
+    /// breakdown face stays in the context rail, so the pill carries no
+    /// click action; the tooltip carries the absolute figures instead.
+    pub(super) fn render_context_usage_ring(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let usage = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()?
+            .read(cx)
+            .store
+            .last_token_usage
+            .clone()?;
+        let (provider, id) = self.foreground_model_identity(cx)?;
+        let window = manox_agent::provider_glue::global()
+            .resolve_model(&provider, &id)
+            .map(|m| m.context_window as u64)?;
+        let active = usage
+            .input
+            .saturating_add(usage.cache_creation)
+            .saturating_add(usage.cache_read);
+        let budget = context_budget_pct(window, active)?;
+
+        let near_full = budget.used_pct >= CONTEXT_NEAR_FULL_PCT;
+        let fill_color = if near_full {
+            theme.warning
+        } else {
+            theme.muted_foreground
+        };
+        let percent = format!("{:.0}", budget.used_pct);
+        let tooltip = i18n::t_str(
+            "composer-context-usage-tooltip",
+            &[
+                ("pct", percent.as_str()),
+                ("used", &format_tokens_pi(budget.active_tokens)),
+                ("cap", &format_tokens_pi(budget.cap_tokens)),
+            ],
+        );
+
+        Some(
+            h_flex()
+                .id("context-usage-pill")
+                .flex_shrink_0()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded(theme.radius)
+                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .child(context_usage_ring(
+                    theme.border,
+                    fill_color,
+                    budget.used_pct / 100.0,
+                ))
+                .child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(fill_color)
+                        .child(SharedString::from(format!("{percent}%"))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Circular icon-only send/stop button.
@@ -1704,5 +1802,158 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+/// The 14×14 occupancy ring canvas: a border-tone track circle plus the
+/// occupancy arc sweeping clockwise from 12 o'clock (muted, warning when
+/// near full). The stroke treatment replicates the reference SVG: 2px
+/// round-capped circle strokes, dash origin rotated to the top.
+fn context_usage_ring(track: Hsla, fill: Hsla, pct: f64) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let center = bounds.center();
+            let radius = px(CONTEXT_RING_RADIUS);
+            if let Ok(track_path) = ring_circle_path(center, radius) {
+                window.paint_path(track_path, track);
+            }
+            // A full turn redraws the closed circle (a 360° endpoint arc
+            // collapses to nothing); a zero turn strokes nothing at all.
+            let clamped = pct.clamp(0.0, 1.0);
+            let fill_path = if clamped >= 1.0 {
+                ring_circle_path(center, radius).ok()
+            } else {
+                occupancy_arc_end(CONTEXT_RING_RADIUS, clamped).and_then(|(dx, dy, large)| {
+                    ring_arc_path(center, radius, px(dx), px(dy), large)
+                })
+            };
+            if let Some(fill_path) = fill_path {
+                window.paint_path(fill_path, fill);
+            }
+        },
+    )
+    .size(px(CONTEXT_RING_SIZE))
+}
+
+/// Stroke builder shared by every ring path: the reference SVG's 2px
+/// round-capped line treatment.
+fn ring_path_builder() -> PathBuilder {
+    PathBuilder::default().with_style(PathStyle::Stroke(
+        StrokeOptions::default()
+            .with_line_width(CONTEXT_RING_STROKE)
+            .with_line_cap(LineCap::Round),
+    ))
+}
+
+/// Full circle centered at `center`: two half arcs, since the SVG endpoint
+/// parameterization collapses a 360° arc into a zero-length segment.
+fn ring_circle_path(
+    center: Point<Pixels>,
+    radius: Pixels,
+) -> Result<gpui::Path<Pixels>, anyhow::Error> {
+    let mut builder = ring_path_builder();
+    builder.move_to(point(center.x + radius, center.y));
+    builder.arc_to(
+        point(radius, radius),
+        px(0.),
+        true,
+        true,
+        point(center.x - radius, center.y),
+    );
+    builder.arc_to(
+        point(radius, radius),
+        px(0.),
+        true,
+        true,
+        point(center.x + radius, center.y),
+    );
+    builder.build()
+}
+
+/// Open occupancy arc: from 12 o'clock clockwise to the point at offset
+/// (`dx`, `dy`) from the center.
+fn ring_arc_path(
+    center: Point<Pixels>,
+    radius: Pixels,
+    dx: Pixels,
+    dy: Pixels,
+    large_arc: bool,
+) -> Option<gpui::Path<Pixels>> {
+    let mut builder = ring_path_builder();
+    builder.move_to(point(center.x, center.y - radius));
+    builder.arc_to(
+        point(radius, radius),
+        px(0.),
+        large_arc,
+        true,
+        point(center.x + dx, center.y + dy),
+    );
+    builder.build().ok()
+}
+
+/// Endpoint of the occupancy sweep, relative to the ring center, plus the
+/// SVG large-arc flag. The sweep starts at 12 o'clock (0, −r) and runs
+/// clockwise — the `rotate(-90 7 7)` dash origin of the reference SVG;
+/// screen y grows downward, so the positive-angle direction is clockwise.
+/// Degenerate sweeps return `None`: 0% has nothing to stroke, and 100%
+/// belongs to the closed-circle path.
+fn occupancy_arc_end(radius: f32, pct: f64) -> Option<(f32, f32, bool)> {
+    let alpha = pct.clamp(0.0, 1.0) * std::f64::consts::TAU;
+    if alpha <= 0.0 || alpha >= std::f64::consts::TAU {
+        return None;
+    }
+    let phi = -std::f64::consts::FRAC_PI_2 + alpha;
+    Some((
+        (radius as f64 * phi.cos()) as f32,
+        (radius as f64 * phi.sin()) as f32,
+        alpha > std::f64::consts::PI,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::occupancy_arc_end;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn occupancy_arc_quarters() {
+        // 25%: 12 o'clock → 3 o'clock.
+        let (dx, dy, large) = occupancy_arc_end(5.5, 0.25).expect("quarter arc");
+        assert_close(dx, 5.5);
+        assert_close(dy, 0.0);
+        assert!(!large);
+        // 50%: → 6 o'clock; exactly half is still the small-arc flag.
+        let (dx, dy, large) = occupancy_arc_end(5.5, 0.5).expect("half arc");
+        assert_close(dx, 0.0);
+        assert_close(dy, 5.5);
+        assert!(!large);
+        // 75%: → 9 o'clock, first sweep past the halfway mark.
+        let (dx, dy, large) = occupancy_arc_end(5.5, 0.75).expect("three-quarter arc");
+        assert_close(dx, -5.5);
+        assert_close(dy, 0.0);
+        assert!(large);
+    }
+
+    #[test]
+    fn occupancy_arc_degenerate_sweeps() {
+        assert_eq!(occupancy_arc_end(5.5, 0.0), None);
+        assert_eq!(occupancy_arc_end(5.5, 1.0), None);
+        // Out-of-range percents clamp before the degeneracy check.
+        assert_eq!(occupancy_arc_end(5.5, -0.5), None);
+        assert_eq!(occupancy_arc_end(5.5, 1.5), None);
+    }
+
+    #[test]
+    fn occupancy_arc_intermediate_point() {
+        // 1/12 of the circle: 12 o'clock rotated 30° clockwise lands at
+        // screen angle φ = −60°: (r·cos60°, −r·sin60°).
+        let (dx, dy, large) = occupancy_arc_end(5.5, 1.0 / 12.0).expect("30° arc");
+        assert_close(dx, 2.75);
+        assert_close(dy, -4.7631);
+        assert!(!large);
     }
 }

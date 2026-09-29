@@ -918,6 +918,8 @@ cockpit-plan-all-done = 全部完成
 
 composer-pasted-image = 粘贴的图片
 
+composer-context-usage-tooltip = 上下文已用 { $pct }%（约 { $used } / { $cap }）
+
 composer-image-process-failed = 部分粘贴的图片无法发送（格式不支持或过大）
 
 composer-placeholder-followup = 要求后续变更…

@@ -938,6 +938,8 @@ cockpit-plan-all-done = All done
 
 composer-pasted-image = Pasted image
 
+composer-context-usage-tooltip = Context { $pct }% used (~{ $used } / { $cap })
+
 composer-image-process-failed = Some pasted images could not be sent (unsupported format or too large)
 
 composer-placeholder-followup = Request a follow-up change…

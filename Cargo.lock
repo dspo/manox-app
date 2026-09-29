@@ -122,6 +122,7 @@ dependencies = [
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
+ "lyon",
  "manox-agent",
  "manox-agent-chat-ui",
  "manox-agent-chrome-ui",
