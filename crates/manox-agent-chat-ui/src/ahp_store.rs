@@ -36,6 +36,7 @@ use ahp_types::state::{ChatInputAnswer, ChatInputResponseKind, PendingMessageKin
 use ahp_types::state::{ChatState, RootState, SessionState, SessionSummary, SnapshotState};
 use manox_ahp::ext;
 use manox_ahp::ext::reducer::{Outcome as ExtOutcome, XManoxState, apply as apply_ext};
+use manox_ahp::translate::actions::config_keys;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -1113,8 +1114,16 @@ impl AhpStore {
         self.dispatch(session_uri(session_id), action);
     }
 
-    /// Replace the session's (single) working directory.
+    /// Replace the session's (single) working directory. The chip echoes
+    /// optimistically — the host's `configChanged` confirmation only lands
+    /// after the engine journals the change (the model picker's trade-off).
     pub fn set_cwd(&mut self, session_id: &str, path: &str) {
+        let mut config = serde_json::Map::new();
+        config.insert(
+            config_keys::WORKING_DIRECTORY.to_string(),
+            Value::String(path.to_string()),
+        );
+        self.optimistic_config(session_id, &config);
         let action = StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
             directory: format!("file://{path}"),
         });
@@ -1342,11 +1351,23 @@ impl LeafView<'_> {
             .and_then(Value::as_str)
     }
 
-    /// The working directory (first granted, file:// form stripped).
+    /// The effective working directory: the config value the host publishes
+    /// on every cwd change. AHP's working-directories set is a grant ledger
+    /// in grant order — its first entry is the session's creation directory,
+    /// not the current one — so only the config read is the echo; the newest
+    /// grant is the fallback for folds without the config seat yet.
     pub fn cwd(&self) -> Option<String> {
+        if let Some(configured) = self
+            .session
+            .and_then(|s| s.config.as_ref())
+            .and_then(|c| c.values.get(config_keys::WORKING_DIRECTORY))
+            .and_then(Value::as_str)
+        {
+            return Some(configured.to_string());
+        }
         self.session
             .and_then(|s| s.working_directories.as_ref())
-            .and_then(|dirs| dirs.first())
+            .and_then(|dirs| dirs.last())
             .map(|uri| uri.trim_start_matches("file://").to_string())
     }
 
@@ -1415,6 +1436,67 @@ mod tests {
         );
         assert_eq!(effect, FoldEffect::Changed);
         assert_eq!(book.sessions["s-1"].title, "renamed");
+    }
+
+    #[test]
+    fn the_configured_working_directory_is_the_echo_not_the_grant_order() {
+        let mut book = ChannelBook::default();
+        for path in ["/old", "/new"] {
+            book.apply(
+                &session_uri("s-1"),
+                &StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
+                    directory: format!("file://{path}"),
+                }),
+            );
+        }
+        // The engine journals a revert to the first directory: the grant set
+        // stays [/old, /new] (the re-grant dedupes), only the config flips.
+        // The host's snapshot seats the config container before any echo can
+        // merge (the reducer NoOps into a missing seat).
+        let seat = book
+            .sessions
+            .get_mut("s-1")
+            .expect("the grants seeded the session");
+        seat.config
+            .get_or_insert_with(|| ahp_types::state::SessionConfigState {
+                schema: ahp_types::state::SessionConfigSchema {
+                    r#type: "object".to_string(),
+                    properties: Default::default(),
+                    required: None,
+                },
+                values: Default::default(),
+            });
+        let mut config = serde_json::Map::new();
+        config.insert(
+            config_keys::WORKING_DIRECTORY.to_string(),
+            Value::String("/old".into()),
+        );
+        book.apply(
+            &session_uri("s-1"),
+            &StateAction::SessionConfigChanged(SessionConfigChangedAction {
+                config,
+                replace: None,
+            }),
+        );
+        assert_eq!(
+            leaf(&book, "s-1").cwd().as_deref(),
+            Some("/old"),
+            "the effective value rides the config, not the grant ledger"
+        );
+    }
+
+    #[test]
+    fn without_a_config_seat_the_newest_grant_is_the_echo() {
+        let mut book = ChannelBook::default();
+        for path in ["/old", "/new"] {
+            book.apply(
+                &session_uri("s-1"),
+                &StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
+                    directory: format!("file://{path}"),
+                }),
+            );
+        }
+        assert_eq!(leaf(&book, "s-1").cwd().as_deref(), Some("/new"));
     }
 
     #[test]
