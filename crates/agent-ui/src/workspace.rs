@@ -2089,6 +2089,24 @@ impl Workspace {
         };
         tracing::info!(session_id = %sid, "submit sent (ahp)");
         let _ = images;
+        // Sidebar optimism: the host's store row (what `listSessions` serves)
+        // lands with the first persistence, which can lag a whole turn — a
+        // brand-new conversation would run invisibly in the sidebar. Seed a
+        // placeholder row when absent; the host's summary upserts over it.
+        let missing = !store.read(cx).book.summaries.contains_key(&sid);
+        if missing {
+            let title = text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or_default()
+                .to_string();
+            store.update(cx, |store, cx| {
+                if store.seed_local_summary(&sid, &title) {
+                    cx.notify();
+                }
+            });
+        }
         let turn_id = uuid::Uuid::new_v4().to_string();
         store.update(cx, |store, _| {
             store.submit_turn(&sid, &turn_id, text, None);

@@ -476,6 +476,30 @@ impl AhpStore {
         self.client.is_some()
     }
 
+    /// Seed a placeholder summary for a session this client just created, so
+    /// the sidebar row exists the moment the conversation starts: the host's
+    /// store row (what `listSessions` serves) lands with the first
+    /// persistence, which can lag a whole turn. The host's summary upserts
+    /// over the placeholder (`seed_summaries` keys by id).
+    pub fn seed_local_summary(&mut self, session_id: &str, title: &str) -> bool {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.book.seed_summaries(vec![SessionSummary {
+            provider: String::new(),
+            title: title.to_string(),
+            status: 0,
+            activity: None,
+            origin: None,
+            project: None,
+            working_directories: None,
+            annotations: None,
+            resource: session_uri(session_id),
+            created_at: now.clone(),
+            modified_at: now,
+            changes: None,
+            meta: None,
+        }])
+    }
+
     /// Pop the next queued write, if any and if the replay may proceed.
     fn next_pending(&mut self) -> Option<PendingWrite> {
         if !self.replay_pending {
