@@ -136,8 +136,13 @@ impl ChannelBook {
             }
             // Terminal actions have no fold here: the desktop's terminal UI
             // reads the kernel-side PTY registry directly, so an AHP terminal
-            // action is tolerated rather than folded.
-            Channel::Terminal(_) | Channel::Extension(_) => false,
+            // action is tolerated rather than folded. MCP / changeset channels
+            // are host-managed state the desktop reads through its own
+            // surfaces, not client folds.
+            Channel::Terminal(_)
+            | Channel::Extension(_)
+            | Channel::Mcp(_)
+            | Channel::Changeset(_) => false,
         };
         if changed {
             FoldEffect::Changed

@@ -103,6 +103,9 @@ impl SessionMultiplexer {
     }
 
     /// Detach (unsubscribe) a session — the park leg of a thread switch.
+    /// Only the session channel is unsubscribed; the chat channel's
+    /// subscription is deliberately retained so a parked thread keeps
+    /// folding (a re-attach re-seeds an open ask card from it).
     pub fn forget(&mut self, session_id: &str) {
         self.attached.retain(|id| id != session_id);
         self.unread.remove(session_id);
@@ -217,14 +220,6 @@ impl SessionMultiplexer {
             .book
             .catalogues
             .get(manox_ahp::ext::channels::WORKSPACES)
-    }
-
-    /// The workspace row accounting a session: the catalogue channel no
-    /// longer carries per-session ownership, so there is none — callers
-    /// fall back to the row's own project path.
-    pub fn workspace_of_session(&self, _session_id: &str, cx: &App) -> Option<()> {
-        let _ = cx;
-        None
     }
 
     /// Refresh the sidebar catalogue from the host.
