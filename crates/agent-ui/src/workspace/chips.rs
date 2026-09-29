@@ -154,11 +154,32 @@ impl Workspace {
         let allow = matches!(decision, PermissionDecision::AllowOnce);
         if let Some((store, sid)) = self.chat.read(cx).store.clone() {
             let view = store.read(cx);
+            // Family 1: a tool confirmation (Edit/Write sandbox escalations).
             if let Some((chat_id, turn_id, tool_call_id)) =
                 crate::ahp_store::leaf(&view.book, &sid).confirmation(&id)
             {
                 store.update(cx, |store, _| {
                     store.confirm_tool_call(&chat_id, &turn_id, &tool_call_id, allow);
+                });
+                cx.notify();
+                return;
+            }
+            // Family 2: a BARE ask (an elicitation with no structured
+            // questions) armed the generic card — its id lives in the ChatInput
+            // family, and an Allow simply accepts the ask so the model
+            // proceeds; a Deny declines it. Without this fallback the card was
+            // taken, nothing was sent, and the same request re-armed on the
+            // next notify.
+            if let Some((chat_id, request)) =
+                crate::ahp_store::leaf(&view.book, &sid).chat_input(&id)
+            {
+                let request_id = request.id.clone();
+                store.update(cx, |store, _| {
+                    if allow {
+                        store.complete_input(&chat_id, &request_id, Default::default());
+                    } else {
+                        store.decline_input(&chat_id, &request_id);
+                    }
                 });
                 cx.notify();
                 return;
@@ -239,8 +260,12 @@ impl Workspace {
                 crate::ahp_store::leaf(&view.book, &sid).chat_input(&ask.id)
             {
                 let request_id = _request.id.clone();
+                // A close is "the user left to speak", never a rejection —
+                // on the wire it is a Decline, which the engine journals as
+                // the question's `dismissed` verdict (the fold maps that
+                // verdict right back to Decline).
                 store.update(cx, |store, _| {
-                    store.complete_input(&chat_id, &request_id, Default::default());
+                    store.decline_input(&chat_id, &request_id);
                 });
                 cx.notify();
                 return;
@@ -364,8 +389,11 @@ impl Workspace {
             (Some(a), t) => (a, t),
             (None, _) => return,
         };
-        let mut canonical: Vec<manox_agent::AskAnswer> = Vec::with_capacity(ask.questions.len());
-        let mut wire: Vec<serde_json::Value> = Vec::with_capacity(ask.questions.len());
+        // The wire answer per question: the selected option(s) (a select
+        // question), the free-form text (a text question or a select's
+        // freeform input). A question with neither carries no answer.
+        let mut answers: std::collections::HashMap<String, ahp_types::state::ChatInputAnswer> =
+            std::collections::HashMap::new();
         for (i, q) in ask.questions.iter().enumerate() {
             let sel = ask.selections.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
             let selected: Vec<String> = q
@@ -378,18 +406,45 @@ impl Workspace {
                 .get(i)
                 .filter(|s| !s.trim().is_empty())
                 .cloned();
-            let answer = manox_agent::AskAnswer::new(q.id.clone(), selected, custom);
-            // Canonical reply row: `{id, selected, custom?}`. `custom` is
-            // omitted (not an empty string) on a skip so it matches the
-            // server's canonical parser field-for-field.
-            let mut row = serde_json::Map::new();
-            row.insert("id".into(), serde_json::Value::String(answer.id.clone()));
-            row.insert("selected".into(), serde_json::json!(answer.selected));
-            if let Some(custom) = &answer.custom {
-                row.insert("custom".into(), serde_json::Value::String(custom.clone()));
-            }
-            wire.push(serde_json::Value::Object(row));
-            canonical.push(answer);
+            let value = if q.multi_select {
+                ahp_types::state::ChatInputAnswerValue::SelectedMany(
+                    ahp_types::state::ChatInputSelectedManyAnswerValue {
+                        value: selected,
+                        freeform_values: custom.map(|c| vec![c]),
+                    },
+                )
+            } else if let Some(first) = selected.first() {
+                ahp_types::state::ChatInputAnswerValue::Selected(
+                    ahp_types::state::ChatInputSelectedAnswerValue {
+                        value: first.clone(),
+                        freeform_values: custom.map(|c| vec![c]),
+                    },
+                )
+            } else if let Some(text) = custom {
+                ahp_types::state::ChatInputAnswerValue::Text(
+                    ahp_types::state::ChatInputTextAnswerValue { value: text },
+                )
+            } else {
+                // An untouched question is a SKIPPED answer, not a missing
+                // key: the host distinguishes "the user skipped this" from
+                // "the client never sent it", and the model must see the
+                // skip. Record it and move on without a Submitted row.
+                answers.insert(
+                    q.id.clone(),
+                    ahp_types::state::ChatInputAnswer::Skipped(
+                        ahp_types::state::ChatInputSkipped {
+                            freeform_values: None,
+                        },
+                    ),
+                );
+                continue;
+            };
+            answers.insert(
+                q.id.clone(),
+                ahp_types::state::ChatInputAnswer::Submitted(ahp_types::state::ChatInputAnswered {
+                    value,
+                }),
+            );
         }
         let id = ask.id.clone();
         self.chat.update(cx, |chat, cx| {
@@ -404,12 +459,19 @@ impl Workspace {
             {
                 let request_id = request.id.clone();
                 store.update(cx, |store, _| {
-                    store.complete_input(&chat_id, &request_id, Default::default());
+                    store.complete_input(&chat_id, &request_id, answers);
                 });
                 cx.notify();
                 return;
             }
         }
+        // The fold no longer carries the request (settled elsewhere, or the
+        // answer raced its own decision row). Answering nothing here is the
+        // right wire behavior — but silently it is a dead end to debug.
+        tracing::warn!(
+            request_id = %id,
+            "ask answer dropped: no matching open request in the fold"
+        );
         cx.notify();
     }
 

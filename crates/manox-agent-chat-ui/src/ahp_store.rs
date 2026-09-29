@@ -36,6 +36,7 @@ use ahp_types::state::{ChatInputAnswer, ChatInputResponseKind, PendingMessageKin
 use ahp_types::state::{ChatState, RootState, SessionState, SessionSummary, SnapshotState};
 use manox_ahp::ext;
 use manox_ahp::ext::reducer::{Outcome as ExtOutcome, XManoxState, apply as apply_ext};
+use manox_ahp::translate::actions::config_keys;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -434,6 +435,10 @@ pub struct AhpStore {
     /// Display events derived from chat-channel folds since the last drain —
     /// the live-streaming leg the conversation applier consumes.
     chat_events: Vec<crate::chat_fold::ChatEvent>,
+    /// Optimistic writes the host has not confirmed yet, oldest first:
+    /// (session id, config key, the value the key had before). A rejection
+    /// restores the remembered values so a refused pick does not linger.
+    optimistic_undo: Vec<(String, String, Option<Value>)>,
     /// Writes issued before the handshake completed, replayed in order on
     /// connect. The landing session's create/subscribe rides this: the
     /// workspace constructs the store and binds the chat column in the same
@@ -459,6 +464,7 @@ impl AhpStore {
             client: None,
             replay_pending: false,
             chat_events: Vec::new(),
+            optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
@@ -473,6 +479,33 @@ impl AhpStore {
     /// Whether the handshake completed (writes before this are queued).
     pub fn is_connected(&self) -> bool {
         self.client.is_some()
+    }
+
+    /// Seed a placeholder summary for a session this client just created, so
+    /// the sidebar row exists the moment the conversation starts: the host's
+    /// store row (what `listSessions` serves) lands with the first
+    /// persistence, which can lag a whole turn. The host's summary upserts
+    /// over the placeholder (`seed_summaries` keys by id).
+    pub fn seed_local_summary(&mut self, session_id: &str, title: &str) -> bool {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.book.seed_summaries(vec![SessionSummary {
+            provider: String::new(),
+            title: title.to_string(),
+            // The host's own rows always carry Idle|IsRead; a zeroed status
+            // would render the placeholder as an UNREAD conversation.
+            status: ahp_types::state::SessionStatus::Idle.bits()
+                | ahp_types::state::SessionStatus::IsRead.bits(),
+            activity: None,
+            origin: None,
+            project: None,
+            working_directories: None,
+            annotations: None,
+            resource: session_uri(session_id),
+            created_at: now.clone(),
+            modified_at: now,
+            changes: None,
+            meta: None,
+        }])
     }
 
     /// Pop the next queued write, if any and if the replay may proceed.
@@ -761,6 +794,20 @@ impl AhpStore {
                         while self.rejections.len() > 32 {
                             self.rejections.pop_front();
                         }
+                        // An optimistic write (model pick, cwd, …) that the
+                        // host refused must not linger on the UI: roll the
+                        // keys it touched out of the fold, and surface the
+                        // refusal on the transcript.
+                        if let Some(keys) = rejected_config_keys(&envelope.action) {
+                            let session_id = id_of(&envelope.channel).to_string();
+                            self.rollback_optimistic(&session_id, &keys);
+                            self.chat_events.push(crate::chat_fold::ChatEvent::Notice {
+                                text: format!(
+                                    "{}: {reason}",
+                                    manox_i18n::t("workspace-change-rejected")
+                                ),
+                            });
+                        }
                         cx.notify();
                     }
                 }
@@ -1006,8 +1053,44 @@ impl AhpStore {
             values: Default::default(),
         });
         for (k, v) in config {
+            // Remember what the key had before the optimistic write: a host
+            // rejection restores it, so a refused pick does not linger on the
+            // UI as an adopted value.
+            self.optimistic_undo.push((
+                session_id.to_string(),
+                k.clone(),
+                seat.values.get(k).cloned(),
+            ));
             seat.values.insert(k.clone(), v.clone());
         }
+    }
+
+    /// Roll back optimistic writes: every remembered (session, key) touched by
+    /// a REJECTED action restores its pre-optimistic value (removing the key
+    /// when there was none — the host does not re-broadcast authority for a
+    /// write it refused).
+    fn rollback_optimistic(&mut self, session_id: &str, keys: &[String]) {
+        for key in keys {
+            for (sid, k, old) in self.optimistic_undo.iter().rev() {
+                if sid == session_id && k == key {
+                    if let Some(state) = self.book.sessions.get_mut(session_id)
+                        && let Some(config) = &mut state.config
+                    {
+                        match old {
+                            Some(v) => {
+                                config.values.insert(k.clone(), v.clone());
+                            }
+                            None => {
+                                config.values.remove(k);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        self.optimistic_undo
+            .retain(|(sid, k, _)| !(sid == session_id && keys.contains(k)));
     }
 
     /// Drain the chat display events derived since the last drain (the live
@@ -1109,10 +1192,28 @@ impl AhpStore {
         request_id: &str,
         answers: std::collections::HashMap<String, ChatInputAnswer>,
     ) {
+        tracing::info!(
+            request_id = %request_id,
+            answers = answers.len(),
+            "chat input: submitting answers"
+        );
         let action = StateAction::ChatInputCompleted(ChatInputCompletedAction {
             request_id: request_id.to_string(),
             response: ChatInputResponseKind::Accept,
             answers: Some(answers),
+        });
+        self.dispatch(chat_uri(chat_id), action);
+    }
+
+    /// Decline an elicitation without answering (the ask card's close: the
+    /// user left to speak, never a rejection — the engine journals the
+    /// question's `dismissed` verdict).
+    pub fn decline_input(&mut self, chat_id: &str, request_id: &str) {
+        tracing::info!(request_id = %request_id, "chat input: declining (dismissed)");
+        let action = StateAction::ChatInputCompleted(ChatInputCompletedAction {
+            request_id: request_id.to_string(),
+            response: ChatInputResponseKind::Decline,
+            answers: None,
         });
         self.dispatch(chat_uri(chat_id), action);
     }
@@ -1132,8 +1233,16 @@ impl AhpStore {
         self.dispatch(session_uri(session_id), action);
     }
 
-    /// Replace the session's (single) working directory.
+    /// Replace the session's (single) working directory. The chip echoes
+    /// optimistically — the host's `configChanged` confirmation only lands
+    /// after the engine journals the change (the model picker's trade-off).
     pub fn set_cwd(&mut self, session_id: &str, path: &str) {
+        let mut config = serde_json::Map::new();
+        config.insert(
+            config_keys::WORKING_DIRECTORY.to_string(),
+            Value::String(path.to_string()),
+        );
+        self.optimistic_config(session_id, &config);
         let action = StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
             directory: format!("file://{path}"),
         });
@@ -1315,6 +1424,26 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
     }
 }
 
+/// The plan-review payload (`{requestId, title, content, planFile}`) from the
+/// session's plan channel, when it belongs to `request_id` — the plan content
+/// the review card renders beneath the verdict question.
+pub fn plan_review_of<'a>(
+    book: &'a ChannelBook,
+    session_id: &str,
+    request_id: &str,
+) -> Option<&'a Value> {
+    let chat_id = book
+        .default_chat(session_id)
+        .map(|uri| id_of(&uri).to_string())
+        .unwrap_or_else(|| session_id.to_string());
+    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
+    book.ext
+        .get(&channel)?
+        .plan_review
+        .as_ref()
+        .filter(|payload| payload.get("requestId").and_then(Value::as_str) == Some(request_id))
+}
+
 /// The call id of a confirmation-state tool call (pending / pending-result).
 fn confirmation_tool_call_id(call: &ahp_types::state::ToolCallConfirmationState) -> &str {
     match call {
@@ -1326,7 +1455,7 @@ fn confirmation_tool_call_id(call: &ahp_types::state::ToolCallConfirmationState)
     }
 }
 
-impl LeafView<'_> {
+impl<'a> LeafView<'a> {
     /// The session's display title (AHP keeps it on both channel states).
     pub fn display_title(&self) -> Option<&str> {
         self.session.map(|s| s.title.as_str())
@@ -1361,11 +1490,23 @@ impl LeafView<'_> {
             .and_then(Value::as_str)
     }
 
-    /// The working directory (first granted, file:// form stripped).
+    /// The effective working directory: the config value the host publishes
+    /// on every cwd change. AHP's working-directories set is a grant ledger
+    /// in grant order — its first entry is the session's creation directory,
+    /// not the current one — so only the config read is the echo; the newest
+    /// grant is the fallback for folds without the config seat yet.
     pub fn cwd(&self) -> Option<String> {
+        if let Some(configured) = self
+            .session
+            .and_then(|s| s.config.as_ref())
+            .and_then(|c| c.values.get(config_keys::WORKING_DIRECTORY))
+            .and_then(Value::as_str)
+        {
+            return Some(configured.to_string());
+        }
         self.session
             .and_then(|s| s.working_directories.as_ref())
-            .and_then(|dirs| dirs.first())
+            .and_then(|dirs| dirs.last())
             .map(|uri| uri.trim_start_matches("file://").to_string())
     }
 
@@ -1404,17 +1545,193 @@ impl LeafView<'_> {
     /// The chat-input (elicitation) request whose id is `id`:
     /// `(chat id, request)`.
     pub fn chat_input(&self, id: &str) -> Option<(String, &ahp_types::state::ChatInputRequest)> {
+        self.fold_input_request(Some(id))
+    }
+
+    /// The first open chat-input (elicitation) request, if any — the live
+    /// ask edge's source of truth.
+    pub fn open_chat_input(&self) -> Option<(String, &ahp_types::state::ChatInputRequest)> {
+        self.fold_input_request(None)
+    }
+
+    /// The first open tool-confirmation request, if any — the generic
+    /// authorization card's source of truth (Edit/Write sandbox
+    /// escalations park the model here).
+    pub fn open_tool_confirmation(
+        &self,
+    ) -> Option<(String, &ahp_types::state::SessionToolConfirmationRequest)> {
         self.requests().iter().find_map(|r| match r {
-            ahp_types::state::SessionInputRequest::ChatInput(c) if c.id == id => {
-                Some((crate::ahp_store::id_of(&c.chat).to_string(), &c.request))
+            ahp_types::state::SessionInputRequest::ToolConfirmation(c) => {
+                Some((crate::ahp_store::id_of(&c.chat).to_string(), c))
             }
             _ => None,
         })
     }
 
+    /// Scan the fold for an unanswered chat-input request. The host folds
+    /// `chat/inputRequested` into the active turn's response parts — the
+    /// session channel's input-needed list is NOT maintained on this path —
+    /// so the fold is the only home for both surfacing and answering an ask.
+    fn fold_input_request(
+        &self,
+        id: Option<&str>,
+    ) -> Option<(String, &ahp_types::state::ChatInputRequest)> {
+        fn scan<'a>(
+            parts: &'a [ahp_types::state::ResponsePart],
+            id: Option<&str>,
+            latest: &mut Option<&'a ahp_types::state::InputRequestResponsePart>,
+        ) {
+            for part in parts {
+                if let ahp_types::state::ResponsePart::InputRequest(input) = part {
+                    if input.response.is_some() {
+                        continue;
+                    }
+                    if let Some(want) = id
+                        && input.request.id != want
+                    {
+                        continue;
+                    }
+                    // Journal order: the latest unanswered request wins.
+                    *latest = Some(input);
+                }
+            }
+        }
+        let chat = self.chat?;
+        let mut latest: Option<&ahp_types::state::InputRequestResponsePart> = None;
+        if let Some(active) = &chat.active_turn {
+            scan(&active.response_parts, id, &mut latest);
+        }
+        for turn in chat.turns.iter().rev() {
+            scan(&turn.response_parts, id, &mut latest);
+        }
+        latest.map(|input| (id_of(&chat.resource).to_string(), &input.request))
+    }
+
     /// The session goal (verbatim payload).
     pub fn goal(&self) -> Option<&Value> {
         self.ext.and_then(|x| x.goal.as_ref())
+    }
+}
+
+/// Lower an AHP chat-input request into the pending ask the interactive
+/// card renders. Mirrors the fold's question translation: a select
+/// question carries its options; a text/number question renders as the
+/// card's custom-input step. A request with no structured questions (an
+/// old journal's bare ask) yields `None` — there is nothing to answer
+/// with, and the generic authorization card is the wrong surface.
+pub fn pending_ask_from_ahp(
+    id: String,
+    request: &ahp_types::state::ChatInputRequest,
+) -> Option<crate::column::PendingAsk> {
+    use ahp_types::state::ChatInputQuestion as Q;
+    let questions = request.questions.as_ref()?;
+    if questions.is_empty() {
+        return None;
+    }
+    let mut parsed = Vec::with_capacity(questions.len());
+    let mut selections = Vec::with_capacity(questions.len());
+    for q in questions {
+        let (id, question, header, multi, options) = match q {
+            Q::SingleSelect(s) => (
+                s.id.clone(),
+                s.message.clone(),
+                s.title.clone().unwrap_or_default(),
+                false,
+                s.options
+                    .iter()
+                    .map(|o| crate::column::AskOption {
+                        label: o.label.clone(),
+                        description: o.description.clone().unwrap_or_default(),
+                        recommended: o.recommended.unwrap_or(false),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Q::MultiSelect(m) => (
+                m.id.clone(),
+                m.message.clone(),
+                m.title.clone().unwrap_or_default(),
+                true,
+                m.options
+                    .iter()
+                    .map(|o| crate::column::AskOption {
+                        label: o.label.clone(),
+                        description: o.description.clone().unwrap_or_default(),
+                        recommended: o.recommended.unwrap_or(false),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Q::Text(t) => (
+                t.id.clone(),
+                t.message.clone(),
+                t.title.clone().unwrap_or_default(),
+                false,
+                Vec::new(),
+            ),
+            Q::Number(n) => (
+                n.id.clone(),
+                n.message.clone(),
+                n.title.clone().unwrap_or_default(),
+                false,
+                Vec::new(),
+            ),
+            Q::Integer(n) => (
+                n.id.clone(),
+                n.message.clone(),
+                n.title.clone().unwrap_or_default(),
+                false,
+                Vec::new(),
+            ),
+            Q::Boolean(b) => (
+                b.id.clone(),
+                b.message.clone(),
+                b.title.clone().unwrap_or_default(),
+                false,
+                Vec::new(),
+            ),
+            Q::Unknown(_) => continue,
+        };
+        selections.push(vec![false; options.len()]);
+        // A plan-review elicitation (request id `plan-review:<entry>`) renders
+        // the verdict card: the affirmative option is highlighted by label
+        // (the render matches `intent.approve` against the option labels).
+        let intent = id
+            .starts_with("plan-review:")
+            .then(|| crate::column::AskIntent {
+                kind: "plan-review".to_string(),
+                approve: "Approve".to_string(),
+            });
+        parsed.push(crate::column::AskQuestion {
+            id,
+            question,
+            header,
+            detail: String::new(),
+            intent,
+            multi_select: multi,
+            options,
+        });
+    }
+    if parsed.is_empty() {
+        return None;
+    }
+    Some(crate::column::PendingAsk {
+        id,
+        questions: parsed,
+        selections,
+    })
+}
+
+/// The config keys an optimistic write touched, when the action is one the
+/// host can refuse per-key (a session config change). A rejection rolls
+/// these out of the client fold so a refused pick does not linger on the UI.
+fn rejected_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<String>> {
+    use ahp_types::actions::StateAction as A;
+    match action {
+        A::SessionConfigChanged(changed) => {
+            Some(changed.config.keys().map(|k| k.to_string()).collect())
+        }
+        // The cwd write is a dedicated action, not a config change.
+        A::SessionWorkingDirectorySet(_) => Some(vec![config_keys::WORKING_DIRECTORY.to_string()]),
+        _ => None,
     }
 }
 
@@ -1434,6 +1751,67 @@ mod tests {
         );
         assert_eq!(effect, FoldEffect::Changed);
         assert_eq!(book.sessions["s-1"].title, "renamed");
+    }
+
+    #[test]
+    fn the_configured_working_directory_is_the_echo_not_the_grant_order() {
+        let mut book = ChannelBook::default();
+        for path in ["/old", "/new"] {
+            book.apply(
+                &session_uri("s-1"),
+                &StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
+                    directory: format!("file://{path}"),
+                }),
+            );
+        }
+        // The engine journals a revert to the first directory: the grant set
+        // stays [/old, /new] (the re-grant dedupes), only the config flips.
+        // The host's snapshot seats the config container before any echo can
+        // merge (the reducer NoOps into a missing seat).
+        let seat = book
+            .sessions
+            .get_mut("s-1")
+            .expect("the grants seeded the session");
+        seat.config
+            .get_or_insert_with(|| ahp_types::state::SessionConfigState {
+                schema: ahp_types::state::SessionConfigSchema {
+                    r#type: "object".to_string(),
+                    properties: Default::default(),
+                    required: None,
+                },
+                values: Default::default(),
+            });
+        let mut config = serde_json::Map::new();
+        config.insert(
+            config_keys::WORKING_DIRECTORY.to_string(),
+            Value::String("/old".into()),
+        );
+        book.apply(
+            &session_uri("s-1"),
+            &StateAction::SessionConfigChanged(SessionConfigChangedAction {
+                config,
+                replace: None,
+            }),
+        );
+        assert_eq!(
+            leaf(&book, "s-1").cwd().as_deref(),
+            Some("/old"),
+            "the effective value rides the config, not the grant ledger"
+        );
+    }
+
+    #[test]
+    fn without_a_config_seat_the_newest_grant_is_the_echo() {
+        let mut book = ChannelBook::default();
+        for path in ["/old", "/new"] {
+            book.apply(
+                &session_uri("s-1"),
+                &StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
+                    directory: format!("file://{path}"),
+                }),
+            );
+        }
+        assert_eq!(leaf(&book, "s-1").cwd().as_deref(), Some("/new"));
     }
 
     #[test]

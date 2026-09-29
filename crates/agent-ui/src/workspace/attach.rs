@@ -510,6 +510,14 @@ impl Workspace {
             chat.store_observe = Some(store_changes);
             cc.notify();
         });
+        // The attach cleared the pending ask/auth above; the fold's open
+        // elicitation (an ask raised while this thread sat in the background)
+        // must re-seed NOW — the store will not notify again until something
+        // new lands, and nothing new may land while the model waits for the
+        // very answer this card asks for.
+        if let Some((store, _)) = self.chat.read(cx).store.clone() {
+            self.sync_live_ask(&store, cx);
+        }
         // The thinking ticker belongs to the outgoing thread: bump its
         // generation so the old ticker self-terminates, then mirror the incoming
         // thread's running state. A parked thread resumed mid-turn keeps the
