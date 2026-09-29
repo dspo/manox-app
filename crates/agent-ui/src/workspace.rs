@@ -704,36 +704,6 @@ impl Workspace {
     ) {
         self.attach_thread(thread, false, window, cx);
     }
-    /// Emit a `ThreadEvent` on the store bound to `thread_id` — the foreground
-    /// store when the id is the active thread, otherwise the parked
-    /// background thread's store. Lets tests drive the workspace's subscription
-    /// handler without a live AgentServer round-trip.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_emit_event(
-        &self,
-        thread_id: &str,
-        event: ThreadEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let fg = self.chat.read(cx).store.clone();
-        let store = if self
-            .chat
-            .read(cx)
-            .thread
-            .read(|t| t.id.0.as_str() == thread_id)
-        {
-            fg.as_ref()
-        } else {
-            self.background_threads
-                .iter()
-                .find(|b| b.id == thread_id)
-                .and_then(|bg| bg.store.as_ref())
-        };
-        if let Some(store) = store {
-            store.update(cx, |_, cx| cx.emit(event));
-        }
-    }
-
     /// Seed a parsed `AskUserQuestion` as the pending ask. Diagnostic-only:
     /// bypasses the engine gate so the synthesis path can be tested with a
     /// fake engine (whose `pending_auth_entries` is empty).
@@ -835,8 +805,14 @@ impl Workspace {
         self.resolve_auth(decision, cx);
     }
 
-    /// Run the missing-card synthesis. Diagnostic-only wrapper around the
-    /// private `ensure_ask_tool_item`.
+    /// Run the missing-card synthesis (the resurface loop's per-gate-entry
+    /// step): when the conversation lacks the `ToolCall` item an interactive
+    /// ask card renders on, synthesize it. A resurfaced interaction whose
+    /// underlying ToolUse folded into an activity segment (or whose rebuild
+    /// missed the live gate) leaves no card for the ask snapshot to attach
+    /// to, and the interactive UI never renders without it. The live ask
+    /// edge is not yet wired in the AHP client, so this entry is the
+    /// synthesis's only caller.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_ensure_ask_tool_item(
         &mut self,
@@ -845,7 +821,39 @@ impl Workspace {
         input: serde_json::Value,
         cx: &mut Context<Self>,
     ) {
-        self.ensure_ask_tool_item(id, summary, input, cx);
+        let conversation = self.chat_conversation(cx);
+        if conversation.read(cx).find_tool(id, cx).is_some() {
+            return;
+        }
+        // The runtime always supplies a non-empty English summary for its own
+        // tool call, and runtime-supplied values are never re-localized here;
+        // the card's own empty-header fallback lives at the render site.
+        let role = self.model_label(cx);
+        let host = self.chat.read(cx).host.clone();
+        conversation.update(cx, |conversation, cx| {
+            conversation.push_tool_call(
+                crate::conversation::ToolCallItem {
+                    id: id.to_string(),
+                    name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
+                    title: summary.to_string(),
+                    status: manox_agent::ToolCallStatus::PendingApproval,
+                    output: String::new(),
+                    is_error: false,
+                    input,
+                    streaming: false,
+                    collapsed: false,
+                    user_toggled: false,
+                    panel: None,
+                },
+                role,
+                host,
+                cx,
+            );
+        });
+        self.sync_list_count(cx);
+        self.chat.update(cx, |chat, _| {
+            chat.list_state.set_follow_mode(FollowMode::Tail);
+        });
     }
 
     /// Sync the ask snapshots (render-time path). Diagnostic-only.
@@ -930,39 +938,6 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_ask_transition_gen(&self, cx: &App) -> u64 {
         self.chat.read(cx).ask_transition_gen
-    }
-
-    /// The leaf store's pending-auth MsgId keys. Diagnostic-only.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_store_pending_auth_ids(&self, cx: &App) -> Vec<String> {
-        self.chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.pending_auth.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// Register an auth id → MsgId mapping in the bound leaf store, mirroring
-    /// what the live `Request` frame does. Diagnostic-only: lets tests drive
-    /// the reply-leg bookkeeping without a wire round-trip.
-    #[cfg(feature = "test-support")]
-    /// Merge a projection into the bound leaf store. Diagnostic-only: stands
-    /// in for the gateway's `Projections` stream without a wire round-trip.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_merge_projection(
-        &mut self,
-        key: &str,
-        value: serde_json::Value,
-        seq: u64,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(store) = self.chat.read(cx).store.clone() {
-            store.update(cx, |h, cx| {
-                h.store.merge_projection(key, value, seq);
-                cx.notify();
-            });
-        }
     }
 
     /// Run the render-time projection reconcile. Diagnostic-only wrapper
