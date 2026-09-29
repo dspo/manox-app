@@ -282,8 +282,15 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                             }
                             None => {
                                 // Fresh thread: drop any lingering pane state
-                                // to the empty page without touching the stash.
-                                shell.right.update(cx, |pane, cx| pane.new_tab_page(cx));
+                                // to the empty page, COLLAPSED — the pane's
+                                // per-thread memory (stash/durable snapshot)
+                                // restores the thread's own visibility when it
+                                // has one; a thread without one starts with the
+                                // transcript full-width.
+                                shell.right.update(cx, |pane, cx| {
+                                    pane.new_tab_page(cx);
+                                    pane.collapse(cx);
+                                });
                             }
                         }
                     }

@@ -271,7 +271,21 @@ pub fn synth_display(chat: &ChatState, usage: &mut UsageTable) -> Vec<HistoryEnt
     entries
 }
 
+/// The AHP turn's RFC 3339 `started_at` as the epoch-seconds timestamp the
+/// display messages render; `None`/unparseable degrades to epoch 0.
+fn epoch_of(started_at: &Option<String>) -> i64 {
+    started_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.timestamp())
+        .unwrap_or(0)
+}
+
 fn push_turn(turn: &Turn, entries: &mut Vec<HistoryEntry>, usage: &mut UsageTable) {
+    // The turn's wall-clock start is the only time the fold carries; parts
+    // have no times of their own, so every message lowered from this turn
+    // stamps it (a missing/unparseable `started_at` degrades to epoch 0).
+    let timestamp = epoch_of(&turn.started_at);
     let user_id = format!("u-{}", turn.id);
     let mut user_content = Vec::new();
     for attachment in turn.message.attachments.iter().flatten() {
@@ -283,7 +297,7 @@ fn push_turn(turn: &Turn, entries: &mut Vec<HistoryEntry>, usage: &mut UsageTabl
     user_content.push(MessageContent::Text(turn.message.text.clone()));
     entries.push(HistoryEntry::Message(Message {
         id: user_id.clone(),
-        timestamp: 0,
+        timestamp,
         parent_id: None,
         provenance: manox_agent::MessageProvenance::User,
         role: Role::User,
@@ -303,11 +317,21 @@ fn push_turn(turn: &Turn, entries: &mut Vec<HistoryEntry>, usage: &mut UsageTabl
     for part in &turn.response_parts {
         match part {
             ResponsePart::Markdown(md) => {
-                flush_assistant(&mut assistant_content, &mut pending_results, entries);
+                flush_assistant(
+                    &mut assistant_content,
+                    &mut pending_results,
+                    entries,
+                    timestamp,
+                );
                 assistant_content.push(MessageContent::Text(md.content.clone()));
             }
             ResponsePart::Reasoning(reasoning) => {
-                flush_assistant(&mut assistant_content, &mut pending_results, entries);
+                flush_assistant(
+                    &mut assistant_content,
+                    &mut pending_results,
+                    entries,
+                    timestamp,
+                );
                 assistant_content.push(MessageContent::Thinking {
                     text: reasoning.content.clone(),
                     signature: None,
@@ -319,22 +343,37 @@ fn push_turn(turn: &Turn, entries: &mut Vec<HistoryEntry>, usage: &mut UsageTabl
                 pending_results.push(MessageContent::ToolResult(result_block));
             }
             ResponsePart::SystemNotification(note) => {
-                flush_assistant(&mut assistant_content, &mut pending_results, entries);
+                flush_assistant(
+                    &mut assistant_content,
+                    &mut pending_results,
+                    entries,
+                    timestamp,
+                );
                 entries.push(HistoryEntry::Note(UiNoteRecord {
                     kind: UiNoteKind::Notice,
                     data: serde_json::json!({ "text": note.content.as_text() }),
                 }));
             }
             ResponsePart::Error(error) => {
-                flush_assistant(&mut assistant_content, &mut pending_results, entries);
+                flush_assistant(
+                    &mut assistant_content,
+                    &mut pending_results,
+                    entries,
+                    timestamp,
+                );
                 entries.push(HistoryEntry::Note(UiNoteRecord {
                     kind: UiNoteKind::Error,
                     data: serde_json::json!({ "text": error.error.message }),
                 }));
             }
             ResponsePart::InputRequest(request) => {
-                flush_assistant(&mut assistant_content, &mut pending_results, entries);
-                push_input_request(request, entries);
+                flush_assistant(
+                    &mut assistant_content,
+                    &mut pending_results,
+                    entries,
+                    timestamp,
+                );
+                push_input_request(request, entries, timestamp);
             }
             ResponsePart::ContentRef(_) | ResponsePart::Unknown(_) => {
                 // Large content refs and unmodelled parts have no transcript
@@ -342,7 +381,12 @@ fn push_turn(turn: &Turn, entries: &mut Vec<HistoryEntry>, usage: &mut UsageTabl
             }
         }
     }
-    flush_assistant(&mut assistant_content, &mut pending_results, entries);
+    flush_assistant(
+        &mut assistant_content,
+        &mut pending_results,
+        entries,
+        timestamp,
+    );
 }
 
 /// Emit the accumulated assistant message (with its paired tool results as a
@@ -351,6 +395,7 @@ fn flush_assistant(
     assistant: &mut Vec<MessageContent>,
     results: &mut Vec<MessageContent>,
     entries: &mut Vec<HistoryEntry>,
+    timestamp: i64,
 ) {
     if assistant.is_empty() {
         results.clear();
@@ -359,7 +404,7 @@ fn flush_assistant(
     let content = std::mem::take(assistant);
     entries.push(HistoryEntry::Message(Message {
         id: format!("a-{}", entries.len()),
-        timestamp: 0,
+        timestamp,
         parent_id: None,
         provenance: manox_agent::MessageProvenance::Assistant,
         role: Role::Assistant,
@@ -370,7 +415,7 @@ fn flush_assistant(
         let results = std::mem::take(results);
         entries.push(HistoryEntry::Message(Message {
             id: format!("r-{}", entries.len()),
-            timestamp: 0,
+            timestamp,
             parent_id: None,
             provenance: manox_agent::MessageProvenance::Tool,
             role: Role::User,
@@ -430,7 +475,11 @@ fn tool_input_inline(input: &Option<ahp_types::state::ToolInput>) -> String {
 
 /// An elicitation becomes an `AskUserQuestion`-shaped ToolUse/ToolResult pair,
 /// the shape the conversation renders as an inline clarify card.
-fn push_input_request(request: &InputRequestResponsePart, entries: &mut Vec<HistoryEntry>) {
+fn push_input_request(
+    request: &InputRequestResponsePart,
+    entries: &mut Vec<HistoryEntry>,
+    timestamp: i64,
+) {
     let req = &request.request;
     let mut options: Vec<serde_json::Value> = Vec::new();
     let mut questions: Vec<serde_json::Value> = Vec::new();
@@ -491,7 +540,7 @@ fn push_input_request(request: &InputRequestResponsePart, entries: &mut Vec<Hist
         .unwrap_or_default();
     entries.push(HistoryEntry::Message(Message {
         id: format!("a-{}", entries.len()),
-        timestamp: 0,
+        timestamp,
         parent_id: None,
         provenance: manox_agent::MessageProvenance::Assistant,
         role: Role::Assistant,
@@ -507,7 +556,7 @@ fn push_input_request(request: &InputRequestResponsePart, entries: &mut Vec<Hist
     }));
     entries.push(HistoryEntry::Message(Message {
         id: format!("r-{}", entries.len()),
-        timestamp: 0,
+        timestamp,
         parent_id: None,
         provenance: manox_agent::MessageProvenance::Tool,
         role: Role::User,
@@ -615,6 +664,36 @@ mod tests {
             &entries[1],
             HistoryEntry::Message(m) if m.role == Role::Assistant
         ));
+    }
+
+    #[test]
+    fn the_turns_started_at_stamps_the_synthesized_rows() {
+        let turn: Turn = serde_json::from_value(serde_json::json!({
+            "id": "t-1",
+            "startedAt": "2026-09-29T01:02:03Z",
+            "message": { "text": "hello", "origin": { "kind": "user" } },
+            "responseParts": [
+                { "kind": "markdown", "id": "p-1", "content": "hi" },
+            ],
+            "state": "complete",
+        }))
+        .expect("turn parses");
+        let chat = chat_with_turn(turn);
+        let mut usage = UsageTable::new();
+        let entries = synth_display(&chat, &mut usage);
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-09-29T01:02:03Z")
+            .expect("test instant parses")
+            .timestamp();
+        assert_eq!(entries.len(), 2, "user bubble + assistant reply");
+        for entry in &entries {
+            match entry {
+                HistoryEntry::Message(m) => assert_eq!(
+                    m.timestamp, expected,
+                    "rows stamp the turn's start, not epoch 0"
+                ),
+                other => panic!("unexpected entry {other:?}"),
+            }
+        }
     }
 
     #[test]

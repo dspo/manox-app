@@ -1163,3 +1163,5 @@ chrome-quick-editor = Open the editor
 chrome-editor-placeholder = Write markdown here…
 
 chrome-agent-pick-model = Choose a model for { $agent }
+
+workspace-change-rejected = Change not applied (rejected by the host)

@@ -341,7 +341,10 @@ impl RightPane {
             }
         }
         self.active = self.open.get(active).cloned();
-        self.visible = visible && !self.open.is_empty();
+        // The persisted `visible` is the thread's own memory: a user collapse
+        // with zero tabs survives a restart as a collapsed pane (rendering
+        // the new-tab page), not as a forced expand.
+        self.visible = visible;
         if let Some(tab) = self.active.clone() {
             tab.on_active(self.visible, cx, &self.store);
         }
@@ -411,6 +414,17 @@ impl RightPane {
             prev.on_active(false, cx, &self.store);
         }
         self.visible = true;
+        cx.notify();
+    }
+
+    /// Collapse the pane without touching the open tabs: the thread's tab set
+    /// is remembered for the next expand, and a fresh thread starts collapsed
+    /// instead of expanded over the transcript.
+    pub fn collapse(&mut self, cx: &mut Context<Self>) {
+        self.visible = false;
+        if let Some(prev) = self.active.take() {
+            prev.on_active(false, cx, &self.store);
+        }
         cx.notify();
     }
 

@@ -510,6 +510,28 @@ impl Workspace {
             chat.store_observe = Some(store_changes);
             cc.notify();
         });
+        // The attach cleared the pending ask/auth above; the fold's open
+        // elicitation (an ask raised while this thread sat in the background)
+        // must re-seed NOW — the store will not notify again until something
+        // new lands, and nothing new may land while the model waits for the
+        // very answer this card asks for.
+        if let Some((store, _)) = self.chat.read(cx).store.clone() {
+            self.sync_live_ask(&store, cx);
+            // Visibility for the switch-back case: if the fold holds an open
+            // elicitation and the card still did not seed, this line is the
+            // first place to look.
+            let view = store.read(cx);
+            if let Some((_, sid)) = self.chat.read(cx).store.clone()
+                && let Some((_, req)) = crate::ahp_store::leaf(&view.book, &sid).open_chat_input()
+            {
+                tracing::info!(
+                    session_id = %sid,
+                    request_id = %req.id,
+                    questions = ?req.questions.as_ref().map(|q| q.len()),
+                    "attach: fold holds an open elicitation"
+                );
+            }
+        }
         // The thinking ticker belongs to the outgoing thread: bump its
         // generation so the old ticker self-terminates, then mirror the incoming
         // thread's running state. A parked thread resumed mid-turn keeps the

@@ -1143,3 +1143,5 @@ chrome-quick-editor = 打开编辑器
 chrome-editor-placeholder = 在此书写 markdown…
 
 chrome-agent-pick-model = 为 { $agent } 选择模型
+
+workspace-change-rejected = 更改未生效（宿主拒绝）

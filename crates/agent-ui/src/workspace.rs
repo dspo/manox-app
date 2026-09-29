@@ -116,6 +116,28 @@ fn thread_cwd(
     }
 }
 
+/// The synthesized ask card's `ToolUse` input: the same shape the fold's
+/// elicitation lowering and the rebuild path parse, so every path to the
+/// card agrees on one input contract.
+fn ask_input_json(
+    ask: &manox_agent_chat_ui::column::PendingAsk,
+    request_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requestId": request_id,
+        "questions": ask.questions.iter().map(|q| serde_json::json!({
+            "id": q.id,
+            "question": q.question,
+            "header": q.header,
+            "multiSelect": q.multi_select,
+            "options": q.options.iter().map(|o| serde_json::json!({
+                "label": o.label,
+                "description": o.description,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// Map a `PermissionMode` to the chip's (label, accent color, icon) triple.
 ///
 /// Colors are theme tokens, not raw hsla values, so the chip follows the
@@ -594,6 +616,8 @@ impl Workspace {
                 input_state,
                 drafts: HashMap::new(),
                 pending_ask: None,
+                pending_auth_live: false,
+                pending_ask_live: false,
                 pending_auth: None,
                 pending_projection_confirmed: false,
                 ask_snapshot_item: None,
@@ -805,16 +829,200 @@ impl Workspace {
         self.resolve_auth(decision, cx);
     }
 
-    /// Run the missing-card synthesis (the resurface loop's per-gate-entry
-    /// step): when the conversation lacks the `ToolCall` item an interactive
-    /// ask card renders on, synthesize it. A resurfaced interaction whose
-    /// underlying ToolUse folded into an activity segment (or whose rebuild
-    /// missed the live gate) leaves no card for the ask snapshot to attach
-    /// to, and the interactive UI never renders without it. The live ask
-    /// edge is not yet wired in the AHP client, so this entry is the
-    /// synthesis's only caller.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_ensure_ask_tool_item(
+    /// The live ask edge: reconcile the pending ask with the fold's open
+    /// elicitation (the session's input-needed list). A new request id seeds
+    /// the interactive card — synthesizing its `ToolCall` item, since the v2
+    /// gate event that created the card has no AHP successor — and a request
+    /// that left the fold (answered, dismissed, settled remotely) retires a
+    /// live-seeded card. Diagnostic seeds are not the wire's and are left
+    /// alone. Runs on every store notify, ahead of the drain.
+    fn sync_live_ask(
+        &mut self,
+        store: &Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        cx: &mut Context<Self>,
+    ) {
+        // A stale observer (the outgoing thread's, before its rebind) must
+        // not drive the foreground ask.
+        let bound = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .is_some_and(|(s, _)| s.entity_id() == store.entity_id());
+        if !bound {
+            return;
+        }
+        let live = {
+            let view = store.read(cx);
+            let sid = self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|(_, sid)| sid.clone())
+                .expect("bound above");
+            crate::ahp_store::leaf(&view.book, &sid)
+                .open_chat_input()
+                .and_then(|(chat_id, req)| {
+                    let _ = chat_id;
+                    match crate::ahp_store::pending_ask_from_ahp(req.id.clone(), req) {
+                        Some(mut ask) => {
+                            // A plan-review elicitation renders the plan itself:
+                            // pull the proposal's markdown from the plan channel
+                            // into the question's support text.
+                            if req.id.starts_with("plan-review:") {
+                                let plan =
+                                    crate::ahp_store::plan_review_of(&view.book, &sid, &req.id);
+                                if let Some(q) = ask.questions.first_mut()
+                                    && let Some(content) = plan.and_then(|p| {
+                                        p.get("content").and_then(serde_json::Value::as_str)
+                                    })
+                                {
+                                    q.detail = content.to_string();
+                                }
+                            }
+                            Some((req.id.clone(), ask))
+                        }
+                        None => {
+                            // The one diagnosis this edge can't recover from:
+                            // the fold carries the request but its question
+                            // list is empty/unparseable.
+                            tracing::warn!(
+                                request_id = %req.id,
+                                questions = ?req.questions.as_ref().map(|q| q.len()),
+                                "live ask: fold elicitation parsed to no questions"
+                            );
+                            None
+                        }
+                    }
+                })
+        };
+        match live {
+            Some((request_id, ask)) => {
+                let stale = self
+                    .chat
+                    .read(cx)
+                    .pending_ask
+                    .as_ref()
+                    .is_none_or(|a| a.id != ask.id);
+                if stale {
+                    let input = ask_input_json(&ask, &request_id);
+                    let summary = ask
+                        .questions
+                        .first()
+                        .map(|q| q.header.clone())
+                        .unwrap_or_default();
+                    tracing::info!(
+                        request_id = %request_id,
+                        questions = ask.questions.len(),
+                        summary = %summary,
+                        "live ask: seeding the interactive card"
+                    );
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_ask = Some(ask);
+                        chat.pending_ask_live = true;
+                        chat.ask_step = 0;
+                        chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+                        cx.notify();
+                    });
+                    self.reset_ask_custom(cx);
+                    self.ensure_ask_tool_item(&request_id, &summary, input, cx);
+                }
+            }
+            None => {
+                let live_seeded = self.chat.read(cx).pending_ask_live;
+                let has_ask = self.chat.read(cx).pending_ask.is_some();
+                if live_seeded && has_ask {
+                    tracing::info!("live ask: request left the fold, retiring the card");
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_ask = None;
+                        chat.pending_ask_live = false;
+                        chat.ask_step = 0;
+                        cx.notify();
+                    });
+                    self.reset_ask_custom(cx);
+                }
+            }
+        }
+        // Generic authorization card: a tool confirmation (Edit/Write sandbox
+        // escalations) or a BARE ask (an elicitation whose payload carried no
+        // structured questions) parks the model on an answer the generic card
+        // delivers — the v2 ToolCallAuthorization mount's successor.
+        let live_auth = {
+            let view = store.read(cx);
+            let sid = self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|(_, sid)| sid.clone())
+                .expect("bound above");
+            let leaf = crate::ahp_store::leaf(&view.book, &sid);
+            let from_confirmation = leaf.open_tool_confirmation().map(|(_, confirmation)| {
+                let tool_name = match &confirmation.tool_call {
+                    ahp_types::state::ToolCallConfirmationState::PendingConfirmation(c) => {
+                        c.tool_name.to_string()
+                    }
+                    ahp_types::state::ToolCallConfirmationState::PendingResultConfirmation(c) => {
+                        c.tool_name.to_string()
+                    }
+                    _ => String::new(),
+                };
+                (confirmation.id.clone(), tool_name, String::new())
+            });
+            let from_bare_ask = leaf
+                .open_chat_input()
+                .filter(|(_, req)| req.questions.as_ref().is_none_or(|q| q.is_empty()))
+                .map(|(_, req)| (req.id.clone(), "AskUserQuestion".to_string(), String::new()));
+            from_confirmation.or(from_bare_ask)
+        };
+        match live_auth {
+            Some((auth_id, tool_name, summary)) => {
+                let armed = self
+                    .chat
+                    .read(cx)
+                    .pending_auth
+                    .as_ref()
+                    .is_none_or(|a| a.id != auth_id);
+                if armed {
+                    tracing::info!(
+                        request_id = %auth_id,
+                        tool = %tool_name,
+                        "live auth: arming the generic authorization card"
+                    );
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_auth = Some(manox_agent_chat_ui::column::PendingAuth {
+                            id: auth_id,
+                            tool_name,
+                            summary,
+                        });
+                        chat.pending_auth_live = true;
+                        cx.notify();
+                    });
+                }
+            }
+            None => {
+                let live_seeded = self.chat.read(cx).pending_auth_live;
+                let has_auth = self.chat.read(cx).pending_auth.is_some();
+                if live_seeded && has_auth {
+                    tracing::info!("live auth: request left the fold, retiring the card");
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_auth = None;
+                        chat.pending_auth_live = false;
+                        cx.notify();
+                    });
+                }
+            }
+        }
+    }
+
+    /// Synthesize the top-level AskUserQuestion card when the conversation
+    /// lacks the `ToolCall` item the interactive ask card renders on: the
+    /// live ask edge seeds it for a freshly arrived elicitation, the
+    /// resurface loop for one whose underlying ToolUse folded into an
+    /// activity segment. Without the item the ask snapshot cannot attach and
+    /// the interactive UI never renders.
+    fn ensure_ask_tool_item(
         &mut self,
         id: &str,
         summary: &str,
@@ -854,6 +1062,18 @@ impl Workspace {
         self.chat.update(cx, |chat, _| {
             chat.list_state.set_follow_mode(FollowMode::Tail);
         });
+    }
+
+    /// Diagnostic-only wrapper around `ensure_ask_tool_item`.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ensure_ask_tool_item(
+        &mut self,
+        id: &str,
+        summary: &str,
+        input: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_ask_tool_item(id, summary, input, cx);
     }
 
     /// Sync the ask snapshots (render-time path). Diagnostic-only.
@@ -1049,9 +1269,11 @@ impl Workspace {
             // Snapshot → transcript transition: the attach-time rebuild ran
             // against an empty fold (the chat snapshot lands asynchronously
             // after subscribe), so the hero screen would stick forever. The
-            // moment the foreground chat has turns and the conversation is
-            // still empty, rebuild from the snapshot — and discard the
-            // drained deltas (they are already inside it).
+            // moment the fold holds anything displayable — settled turns, or
+            // a first turn still in flight (`active_turn`, whose content
+            // synth_display lowers the same way) — and the conversation is
+            // still empty, rebuild from the snapshot. The drained deltas are
+            // already inside it, so the drain skips one round.
             let snapshot_ready = this
                 .chat
                 .read(cx)
@@ -1061,11 +1283,21 @@ impl Workspace {
                     let view = store.read(cx);
                     crate::ahp_store::leaf(&view.book, &sid)
                         .chat
-                        .map(|c| !c.turns.is_empty())
+                        .map(|c| !c.turns.is_empty() || c.active_turn.is_some())
                 })
                 .unwrap_or(false);
+            let mut rebuilt = false;
             if snapshot_ready && this.chat_conversation(cx).read(cx).is_empty(cx) {
                 this.rebuild_conversation_from_book(cx);
+                rebuilt = true;
+            }
+            // Live ask edge: the fold's open elicitation IS the pending ask.
+            // Runs AFTER the rebuild so a freshly seeded card lands on the
+            // rebuilt conversation instead of the empty skeleton it replaces
+            // (seeding first would make the skeleton non-empty and starve
+            // the rebuild forever).
+            this.sync_live_ask(&store, cx);
+            if rebuilt {
                 return;
             }
             // Live streaming leg: the pump folded chat actions into the book;
@@ -1909,9 +2141,22 @@ impl Workspace {
             let turn_id = manox_agent_chat_ui::ahp_store::leaf(&view.book, &sid)
                 .chat
                 .and_then(|c| c.active_turn.as_ref().map(|t| t.id.clone()));
+            tracing::info!(
+                session_id = %sid,
+                turn_id = ?turn_id,
+                "cancel: sending the turn-cancel dispatch"
+            );
             store.update(cx, |store, _| {
                 if let Some(turn_id) = turn_id {
                     store.cancel_turn(&sid, &turn_id);
+                } else {
+                    // No active turn in the fold yet the UI reads running —
+                    // say so loudly; this is the composer-locked repro.
+                    // Tracked with the rest of the dead-lock surface in #88.
+                    tracing::warn!(
+                        session_id = %sid,
+                        "cancel: fold has no active turn (client/host desync); see #88"
+                    );
                 }
             });
         } else {
@@ -1944,6 +2189,24 @@ impl Workspace {
         };
         tracing::info!(session_id = %sid, "submit sent (ahp)");
         let _ = images;
+        // Sidebar optimism: the host's store row (what `listSessions` serves)
+        // lands with the first persistence, which can lag a whole turn — a
+        // brand-new conversation would run invisibly in the sidebar. Seed a
+        // placeholder row when absent; the host's summary upserts over it.
+        let missing = !store.read(cx).book.summaries.contains_key(&sid);
+        if missing {
+            let title = text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or_default()
+                .to_string();
+            store.update(cx, |store, cx| {
+                if store.seed_local_summary(&sid, &title) {
+                    cx.notify();
+                }
+            });
+        }
         let turn_id = uuid::Uuid::new_v4().to_string();
         store.update(cx, |store, _| {
             store.submit_turn(&sid, &turn_id, text, None);

@@ -180,7 +180,18 @@ impl SessionMultiplexer {
                     .and_then(|r| r.get("state"))
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|s| s == "proposed");
-                ThreadRow::from_summary(summary, pinned, pending_plan)
+                let mut row = ThreadRow::from_summary(summary, pinned, pending_plan);
+                // The host's project field trails a brand-new session (its
+                // store row lands with the first persistence), but the fold's
+                // effective cwd is already live — and it is exactly what the
+                // composer's project chip shows. Group by it so the row never
+                // falls into "Chats" beside a chip naming a project.
+                if row.project.is_none()
+                    && let Some(cwd) = crate::ahp_store::leaf(book, sid).cwd()
+                {
+                    row.project = Some(cwd);
+                }
+                row
             })
             .collect();
         rows.sort_by(|a, b| {
