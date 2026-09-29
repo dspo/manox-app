@@ -1,18 +1,31 @@
 //! Provider→model cascade shared by every external-agent launch surface.
 //!
-//! Models are the multiplexer's wire `ModelInfo` rows (U2 cross-domain #4 —
-//! the former `provider_glue` direct read retired): filtered by the agent id
-//! (the registration's `agents` column, absent = visible to all); grouped by
-//! provider display name. A config model registered through several wire
-//! apis appears once per wire endpoint (exact duplicates collapse). The
-//! emitted model id is the raw cx config key (`config_id`, falling back to
-//! the model id), which cx matches verbatim; `wire` pins the endpoint variant
-//! at launch resolution.
+//! Models are AHP's root-catalogue `AgentInfo` rows: one group per agent
+//! registration (display name, falling back to the provider id), each
+//! model an entry. The entry id is the canonical `provider/model` string
+//! the pick dispatches verbatim; the wire api rides the model's
+//! `x-manox.api` meta and is mapped to the launch pin's vocabulary
+//! ("anthropic" / "responses" / "completions"). KNOWN DOWNGRADE: the v2
+//! registry's per-agent visibility column has no AHP successor — every
+//! agent's picker lists every provider's models.
 
-use std::collections::HashSet;
+use serde_json::Value;
 
-/// One cascade entry: the raw cx config key, its display name, the wire api
-/// (the row tag's source), and the wire key for the launch pin.
+/// The host's meta api vocabulary ("anthropic" / "openai_responses" /
+/// "openai_completions") mapped onto the launch pin's ("anthropic" /
+/// "responses" / "completions"); an unknown api carries no pin.
+fn launch_wire_key(meta_api: &str) -> Option<String> {
+    match meta_api {
+        "anthropic" => Some("anthropic".to_string()),
+        "openai_responses" => Some("responses".to_string()),
+        "openai_completions" => Some("completions".to_string()),
+        _ => None,
+    }
+}
+
+/// One cascade entry: the canonical `provider/model` pick (dispatched
+/// verbatim), its display name, and the wire api mapped onto the launch
+/// pin's vocabulary ("anthropic" / "responses" / "completions").
 #[derive(Debug)]
 pub(crate) struct CascadeEntry {
     pub config_id: String,
@@ -20,50 +33,39 @@ pub(crate) struct CascadeEntry {
     pub wire: Option<String>,
 }
 
-/// The pure cascade projection (U2 cross-domain #4): the agents-visibility
-/// filter (an absent list is visible to all; a present list must contain the
-/// agent — an empty list hides), the (provider, config_id) dedupe (wire
-/// variants of one config stay separate, exact duplicates collapse), and the
-/// lookup-based grouping by provider display name (the wire list is not
-/// display-name-sorted, so equal names must merge).
+/// The pure cascade projection over AHP's root catalogue: one group per
+/// agent registration (the catalogue carries the provider identity the v2
+/// wire list flattened); each agent's models become entries. KNOWN
+/// DOWNGRADE: the v2 registry's per-agent visibility column has no AHP
+/// successor — every agent's picker lists every provider's models.
 pub(crate) fn cascade_provider_groups(
-    agent_id: &str,
-    models: &[manox_protocol::ModelInfo],
+    agents: &[ahp_types::state::AgentInfo],
 ) -> Vec<(String, Vec<CascadeEntry>)> {
     let mut providers: Vec<(String, Vec<CascadeEntry>)> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    for m in models {
-        // Missing agents column = non-cx registration (visible); otherwise
-        // the effective agent list must contain the cascade's agent (parity
-        // with the retired manox `visible_agents` filter).
-        let visible = m
-            .agents
-            .as_ref()
-            .map(|list| list.iter().any(|a| a == agent_id))
-            .unwrap_or(true);
-        if !visible {
-            continue;
-        }
-        let prov = m
-            .provider_name
-            .clone()
-            .unwrap_or_else(|| m.provider.clone());
-        let config_id = m.config_id.clone().unwrap_or_else(|| m.id.clone());
-        // Identity is the registration name (unique per wire endpoint), so
-        // wire variants of one provider stay separate; only exact
-        // duplicates collapse (parity with the composer model menu).
-        if !seen.insert((m.provider.clone(), config_id.clone())) {
-            continue;
-        }
-        let entry = CascadeEntry {
-            config_id,
-            display: m.name.clone(),
-            wire: manox_agent::provider_glue::wire_key_from_api(&m.api).map(str::to_string),
+    for agent in agents {
+        let entries = agent
+            .models
+            .iter()
+            .map(|m| CascadeEntry {
+                config_id: m.id.clone(),
+                display: m.name.clone(),
+                wire: m
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("x-manox"))
+                    .and_then(|x| x.get("api"))
+                    .and_then(Value::as_str)
+                    .and_then(launch_wire_key),
+            })
+            .collect();
+        let prov = if agent.display_name.is_empty() {
+            agent.provider.clone()
+        } else {
+            agent.display_name.clone()
         };
-        // Lookup-based grouping (not adjacency): equal display names merge.
         match providers.iter_mut().find(|(name, _)| *name == prov) {
-            Some((_, entries)) => entries.push(entry),
-            None => providers.push((prov, vec![entry])),
+            Some((_, existing)) => existing.extend(entries),
+            None => providers.push((prov, entries)),
         }
     }
     providers
@@ -73,69 +75,35 @@ pub(crate) fn cascade_provider_groups(
 mod tests {
     use super::*;
 
-    fn wire_model(
-        id: &str,
-        provider_name: Option<&str>,
-        api: &str,
-        config_id: Option<&str>,
-        agents: Option<Vec<&str>>,
-    ) -> manox_protocol::ModelInfo {
-        manox_protocol::ModelInfo {
-            id: id.into(),
-            name: format!("Model {id}"),
-            provider: "prov-a".into(),
-            provider_name: provider_name.map(str::to_string),
-            api: api.into(),
-            context_window: 100,
-            max_tokens: None,
-            config_id: config_id.map(str::to_string),
-            agents: agents.map(|list| list.into_iter().map(str::to_string).collect()),
-        }
+    fn agent(id: &str, display: &str) -> ahp_types::state::AgentInfo {
+        serde_json::from_value(serde_json::json!({
+            "provider": id,
+            "displayName": display,
+            "description": "",
+            "models": [
+                { "id": "m1", "provider": id, "name": "Model m1" },
+                { "id": "m2", "provider": id, "name": "Model m2" },
+            ],
+        }))
+        .expect("agent parses")
     }
 
-    /// U2 cross-domain #4: the cascade projects the WIRE models — the
-    /// agents-visibility filter (absent = visible; a present list must
-    /// contain the agent), the exact-duplicate collapse, the display-name
-    /// grouping, the config-key fallback, and the api-derived wire key.
+    /// The cascade groups one submenu per agent registration, with each
+    /// agent's models as entries (AHP's root catalogue carries the provider
+    /// identity the v2 wire list flattened).
     #[test]
-    fn cascade_projects_the_wire_models() {
-        let models = vec![
-            wire_model("m1", Some("Provider A"), "anthropic", Some("cfg-1"), None),
-            // The exact duplicate (same provider + config key) collapses.
-            wire_model("m2", Some("Provider A"), "anthropic", Some("cfg-1"), None),
-            wire_model(
-                "m3",
-                Some("Provider B"),
-                "anthropic",
-                None,
-                Some(vec!["pi"]),
-            ),
-            // Visible to another agent only — filtered out.
-            wire_model(
-                "m4",
-                Some("Provider B"),
-                "anthropic",
-                Some("cfg-4"),
-                Some(vec!["other"]),
-            ),
+    fn cascade_groups_one_submenu_per_agent() {
+        let agents = vec![
+            agent("prov-a", "Provider A"),
+            agent("prov-b", "Provider B"),
+            // Same display name merges (lookup grouping, not adjacency).
+            agent("prov-c", "Provider A"),
         ];
-        let groups = cascade_provider_groups("pi", &models);
+        let groups = cascade_provider_groups(&agents);
         assert_eq!(groups.len(), 2, "{groups:?}");
-        let (a_name, a_entries) = &groups[0];
-        assert_eq!(a_name, "Provider A");
-        assert_eq!(a_entries.len(), 1, "the exact duplicate collapses");
-        assert_eq!(a_entries[0].config_id, "cfg-1");
-        assert_eq!(
-            a_entries[0].wire.as_deref(),
-            Some("anthropic"),
-            "the wire key derives from the api column"
-        );
-        let (b_name, b_entries) = &groups[1];
-        assert_eq!(b_name, "Provider B");
-        assert_eq!(b_entries.len(), 1, "the other-agent model is filtered out");
-        assert_eq!(
-            b_entries[0].config_id, "m3",
-            "the config key falls back to the model id"
-        );
+        assert_eq!(groups[0].0, "Provider A");
+        assert_eq!(groups[0].1.len(), 4, "two agents' models merge");
+        assert_eq!(groups[1].0, "Provider B");
+        assert_eq!(groups[0].1[0].config_id, "m1");
     }
 }

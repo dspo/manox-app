@@ -17,19 +17,16 @@
 //! The multiplexer (agent-ui) constructs the store handles through its
 //! agent-ui → chat-crate dependency.
 
+pub mod ahp_store;
 pub mod ask_card;
-pub mod client_store;
-pub mod client_store_handle;
+pub mod chat_fold;
 pub mod cockpit;
 pub mod column;
 pub mod conversation;
 pub mod git_status;
 pub mod host;
 pub mod i18n;
-pub mod journal_fold;
-pub mod journal_translate;
 pub mod overlap_diag;
-pub mod server_note_translate;
 pub mod views;
 
 gpui::actions!(

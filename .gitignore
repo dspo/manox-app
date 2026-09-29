@@ -15,3 +15,5 @@ cx-stats.svg
 
 # 项目级 skill 与本地 agent 配置：本地保留、不托管进 git
 .claude/
+.DS_Store
+.zcodeignore

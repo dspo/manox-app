@@ -41,7 +41,10 @@ open.workspace = true
 
 manox-agent.workspace = true
 manox-harness.workspace = true
-manox-protocol.workspace = true
+ahp.workspace = true
+ahp-types.workspace = true
+manox-ahp.workspace = true
+manox-ahp-runtime.workspace = true
 manox-session-core.workspace = true
 
 [dev-dependencies]

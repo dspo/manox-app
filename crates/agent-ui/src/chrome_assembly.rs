@@ -200,8 +200,8 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             })
             .detach();
         }
-        let rows = mux.read(cx).thread_list().to_vec();
-        let unread = mux.read(cx).unread_map(cx);
+        let rows = mux.read(cx).thread_list(cx);
+        let unread = mux.read(cx).unread_map();
         let sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
             crate::sidebar_projection::project_groups(&rows, &unread)
                 .into_iter()
@@ -220,7 +220,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.id.0.clone());
+            .map(|(_, sid)| sid.clone());
         if fg != dock_thread && fg.is_some() {
             let old_id = dock_thread.take();
             shell.update(cx, |shell, cx| {
@@ -282,8 +282,15 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                             }
                             None => {
                                 // Fresh thread: drop any lingering pane state
-                                // to the empty page without touching the stash.
-                                shell.right.update(cx, |pane, cx| pane.new_tab_page(cx));
+                                // to the empty page, COLLAPSED — the pane's
+                                // per-thread memory (stash/durable snapshot)
+                                // restores the thread's own visibility when it
+                                // has one; a thread without one starts with the
+                                // transcript full-width.
+                                shell.right.update(cx, |pane, cx| {
+                                    pane.new_tab_page(cx);
+                                    pane.collapse(cx);
+                                });
                             }
                         }
                     }
@@ -416,7 +423,12 @@ impl MainSurface for PendingMain {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.display_title.clone()))
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid)
+                    .display_title()
+                    .map(str::to_string)
+            })
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "Manox".to_string())
             .into()
@@ -443,14 +455,7 @@ fn pane_db() -> std::sync::Arc<manox_agent::db::ThreadsDatabase> {
 /// Upsert the current foreground thread's right-pane snapshot into
 /// `threads.db` (the pane's own kind/spec encoding, one row per thread).
 fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
-    let Some(thread_id) = ws
-        .read(cx)
-        .chat
-        .read(cx)
-        .store
-        .as_ref()
-        .map(|s| s.read(cx).store.id.0.clone())
-    else {
+    let Some(thread_id) = ws.read(cx).chat.read(cx).store.clone().map(|(_, sid)| sid) else {
         return;
     };
     let (visible, active, tabs) = shell.read(cx).right.read(cx).persisted(cx);
@@ -474,7 +479,7 @@ fn load_right_pane(thread_id: &str) -> Option<String> {
 
 fn refresh_foreground_cwd(
     ws: &Entity<Workspace>,
-    rows: &[manox_protocol::ThreadListItem],
+    rows: &[crate::sidebar_projection::ThreadRow],
     cx: &App,
 ) {
     // The thread's working directory is its PROJECT path — the wire row's
@@ -487,7 +492,7 @@ fn refresh_foreground_cwd(
         .read(cx)
         .store
         .as_ref()
-        .map(|s| s.read(cx).store.id.0.clone());
+        .map(|(_, sid)| sid.clone());
     let project = fg
         .as_ref()
         .and_then(|id| rows.iter().find(|r| &r.id == id))
