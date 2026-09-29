@@ -61,6 +61,28 @@ cargo fmt --all
 
 Rust **1.95.0**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单）。
 
+### 出 UI 图（chrome 壳）
+
+UI 静态图**从真实渲染出**，不要另画一套：`crates/manox-agent-chrome-ui/tests/visual.rs`
+用 gpui 官方离屏渲染（`VisualTestAppContext` + Metal 回读）把**真实的 `Shell`** 截成 PNG，
+不需要录屏权限，窗口在 (-10000,-10000) 渲染、不会闪屏。
+
+```bash
+CHROME_SHOT=/tmp/shell.png cargo test -p manox-agent-chrome-ui --test visual
+CHROME_SHOT=/tmp/right.png CHROME_RIGHT=1 cargo test -p manox-agent-chrome-ui --test visual   # 展开右栏 + 一个 dummy 页签
+CHROME_SHOT=/tmp/panel.png CHROME_PANEL=1 cargo test -p manox-agent-chrome-ui --test visual   # 展开底部 dock
+CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p manox-agent-chrome-ui --test visual  # 两个不同宽度的页签 + 切回第一个
+```
+
+- 诊断开关 `CHROME_SWITCH=1`：开第二个（更宽的）页签、等布局稳定后切回第一个——**这是唯一能触达页签指示器滑动动画的路径**，单页签出图看不到「从哪来」。
+- **动画类改动注意**：离屏测试**没有平台帧循环**，`request_animation_frame` 排的回调只有经 `Window::simulate_next_frame` 才会送达；只 `run_until_parked` 的话动画永远停在第一帧（`delta=0`）。settle 循环已补一帧，但**要看中间帧必须自己 pump**；出图只反映终态。
+- 页签指示器的对齐由 `script/check-tab-indicator.sh` 把关（量**左端**而非宽度——曾经宽度/高度全对却整体右偏 6px，任何宽度或 y 断言都看不见）。它依赖 macOS 离屏 harness，CI 上自动跳过。
+- 产物是 **1280×820 @2x = 2560×1640** 的 PNG（约 300KB）。
+- **macOS only**：Metal 纹理回读，其它平台打印一行跳过；**未设 `CHROME_SHOT` 时同样跳过**，所以在 CI 里安全（门禁不受影响）。
+- 侧栏铺的是真实 thread store（`refresh_thread_list` 一次同步扫描），所以图里是**真实会话数据**，不是占位。
+- 页签内容用 dummy tab：PTY 会触发 gpui 的泄漏检测，wry subview 在离屏下读不回来——需要终端/webview 真内容时改用 `cargo run` 看。
+- 改 UI 后**重跑截图**比描述更可信；图与代码不会漂移，因为图就是代码画的。**不接受**用脚本手绘 SVG 复刻一套 UI（已退役，见 git 历史）：那是同一套 UI 的第二种表达，必然与真实渲染分叉。
+
 ## 工具链 & Skills
 
 涉及 GPUI/UI 开发时，先通过 Skill 工具加载 `.claude/skills/` 下的 skill（该目录不托管进 git，只在本地存在）：
