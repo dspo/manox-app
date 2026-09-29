@@ -9,6 +9,7 @@
 //! propagation themselves.
 
 use crate::primitives::icon_button;
+use crate::session_list::SessionStatus;
 use crate::shell::Shell;
 use crate::theme::{
     ACCENT, BORDER, CARD_BG, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, icon, icons,
@@ -239,7 +240,14 @@ pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement
                 || s.workspace.to_lowercase().contains(&q)
         })
         .take(PICKER_LIMIT)
-        .map(|s| (s.id.clone(), s.title.clone(), s.workspace.clone(), s.unread))
+        .map(|s| {
+            (
+                s.id.clone(),
+                s.title.clone(),
+                s.workspace.clone(),
+                matches!(s.status, SessionStatus::Unread),
+            )
+        })
         .collect();
 
     // Closures in the loop go through the entity handle (a `cx.listener`

@@ -20,6 +20,8 @@ gpui-component.workspace = true
 # Chrome text is app chrome by definition, so the crate resolves its own
 # labels through the shared bundles (zh-CN primary, en fallback).
 manox-i18n.workspace = true
+# The info line's absolute branch (72h+ → local MM-DD HH:MM stamp).
+chrono.workspace = true
 
 [dev-dependencies]
 # Example + visual harness wire real content: the manox thread store for the

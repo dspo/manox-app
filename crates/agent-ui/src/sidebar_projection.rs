@@ -7,14 +7,15 @@
 //! own `SidebarThreadItem::from_wire`, whose semantics this mirrors:
 //!
 //! - five-state machine: `errored` (danger triangle) → `pending_auth` /
-//!   `pending_plan` (attention pulse) → `running` (blocks) → the client-owned
-//!   unread mirror (static dot) → idle; the leaf's unread mirror wins over
-//!   the deprecated wire flag (GW5);
+//!   `pending_plan` (filled blue dot) → `running` (pixel grid) → the
+//!   client-owned unread mirror (hollow dot) → idle; the leaf's unread
+//!   mirror wins over the deprecated wire flag (GW5);
 //! - team forest: `parent_id`/`depth` rows nest under their leader
-//!   (recency-ordered leaders, members trailing, `indent`/`team_leader`
-//!   columns), rows whose parent is missing or archived flatten to
-//!   top-level;
-//! - the tag chip and pinned flag ride the row verbatim.
+//!   (recency-ordered leaders, members trailing), rows whose parent is
+//!   missing or archived flatten to top-level; rows never indent — the
+//!   hierarchy shows via the group header and the leader chevron only;
+//! - `updated_at` / `archived` / the tag chip / the pinned flag ride the row
+//!   verbatim.
 
 use std::collections::HashMap;
 
@@ -30,12 +31,11 @@ pub fn project_row(item: &ThreadListItem, unread_override: Option<bool>) -> Sess
     SessionRowData {
         id: item.id.clone(),
         title: item.title.clone(),
-        time: String::new(),
+        updated_at: i64::from(item.updated_at),
         status: five_state(item, unread_override),
         pinned: item.pinned,
-        unread: unread_override.unwrap_or(item.unread),
+        archived: item.archived,
         tag: item.tag.clone(),
-        indent: 0,
         team_leader: false,
     }
 }
@@ -59,10 +59,10 @@ pub fn five_state(item: &ThreadListItem, unread_override: Option<bool>) -> Sessi
 
 /// Project a partition's rows into the chrome group shape with the team
 /// forest materialized: leaders in list order, each followed by its member
-/// rows (indent 1, guide rail), one level deep — the wire's team nesting is
-/// never deeper (pi sub-agents), so no recursion is needed. Orphans (a
-/// parent that is missing, archived, or outside the partition) flatten to
-/// top-level rather than vanishing.
+/// rows (the wire's team nesting is never deeper — pi sub-agents — so no
+/// recursion is needed). Members no longer indent: the leader's chevron is
+/// the only nesting marker. Orphans (a parent that is missing, archived, or
+/// outside the partition) flatten to top-level rather than vanishing.
 pub fn project_forest(rows: &[ThreadListItem], unread: &UnreadMirrors) -> Vec<SessionRowData> {
     let by_id: HashMap<&str, &ThreadListItem> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
     let mut out = Vec::with_capacity(rows.len());
@@ -76,9 +76,7 @@ pub fn project_forest(rows: &[ThreadListItem], unread: &UnreadMirrors) -> Vec<Se
             leader.team_leader = !members.is_empty();
             out.push(leader);
             for m in members {
-                let mut member = project_row(m, unread.get(&m.id).copied());
-                member.indent = 1;
-                out.push(member);
+                out.push(project_row(m, unread.get(&m.id).copied()));
             }
         } else {
             // A member whose leader is absent from this partition flattens.
@@ -88,9 +86,7 @@ pub fn project_forest(rows: &[ThreadListItem], unread: &UnreadMirrors) -> Vec<Se
                 .and_then(|p| by_id.get(p))
                 .is_some_and(|l| l.depth == 0);
             if !leader_present {
-                let mut flat = project_row(row, unread.get(&row.id).copied());
-                flat.indent = 0;
-                out.push(flat);
+                out.push(project_row(row, unread.get(&row.id).copied()));
             }
         }
     }
@@ -191,19 +187,18 @@ mod tests {
             row("top", 0, None),
         ];
         let out = project_forest(&rows, &UnreadMirrors::new());
-        let ids: Vec<(&str, u8, bool)> = out
-            .iter()
-            .map(|r| (r.id.as_str(), r.indent, r.team_leader))
-            .collect();
+        let ids: Vec<(&str, bool)> = out.iter().map(|r| (r.id.as_str(), r.team_leader)).collect();
         assert_eq!(
             ids,
             vec![
-                ("leader", 0, true),
-                ("member", 1, false),
-                ("orphan", 0, false),
-                ("top", 0, false),
+                ("leader", true),
+                ("member", false),
+                ("orphan", false),
+                ("top", false),
             ]
         );
+        // Rows never indent (the group header + chevron carry hierarchy).
+        assert!(out.iter().all(|r| r.updated_at == 0 && !r.archived));
     }
 
     #[test]

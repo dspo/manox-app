@@ -335,8 +335,8 @@ fn shell_config(
             },
         ],
         hooks: HostHooks {
-            // Pin/archive ride the thread store; the next wire snapshot
-            // reconciles.
+            // Pin/archive/tag ride the thread store — the same seam the
+            // sidebar's row actions use; the next wire snapshot reconciles.
             on_pin: Some(Box::new(|id, _w, _cx| {
                 let loaded = manox_agent::thread_store::global().with_mut(|st| st.load_thread(id));
                 if let Ok(Some(handle)) = loaded {
@@ -344,8 +344,24 @@ fn shell_config(
                     handle.with_mut(|t| t.set_pinned(!was));
                 }
             })),
+            // The menu's 归档/取消归档 toggle: flip the CURRENT partition flag
+            // (the store partitions active/archived, so whichever list holds
+            // the id names the state; an unknown id stays a no-op).
             on_archive: Some(Box::new(|id, _w, _cx| {
-                manox_agent::thread_store::global().with_mut(|st| st.archive_thread(id, true));
+                let store = manox_agent::thread_store_global();
+                let archived = store.read(|st| {
+                    if st.summaries().iter().any(|s| s.id.as_str() == id) {
+                        false
+                    } else {
+                        st.archived_summaries().iter().any(|s| s.id.as_str() == id)
+                    }
+                });
+                store.with_mut(|st| st.archive_thread(id, !archived));
+            })),
+            // Thread-tag write-back (`None` clears) — the same store write
+            // the sidebar's SetThreadTag event lands on.
+            on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
+                manox_agent::thread_store_global().with_mut(|st| st.set_thread_tag(id, tag));
             })),
             // The workspace's own new-thread path (park + fresh landing).
             on_new_session: Some(Box::new({
@@ -409,6 +425,12 @@ pub fn foreground_cwd() -> Option<std::path::PathBuf> {
     FOREGROUND_CWD.lock().expect("foreground cwd lock").clone()
 }
 
+/// The threads database behind the store global — the pane snapshot's
+/// upsert/load face (one acquisition site shared by both directions).
+fn pane_db() -> std::sync::Arc<manox_agent::db::ThreadsDatabase> {
+    manox_agent::thread_store_global().read(|s| s.db().clone())
+}
+
 /// Upsert the current foreground thread's right-pane snapshot into
 /// `threads.db` (the pane's own kind/spec encoding, one row per thread).
 fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
@@ -431,16 +453,14 @@ fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
             .map(|(kind, spec)| serde_json::json!({ "kind": kind, "spec": spec }))
             .collect::<Vec<_>>(),
     });
-    let db = manox_agent::thread_store_global().read(|s| s.db().clone());
-    if let Err(e) = db.upsert_right_pane(&thread_id, &payload.to_string()) {
+    if let Err(e) = pane_db().upsert_right_pane(&thread_id, &payload.to_string()) {
         tracing::warn!(error = %e, thread_id = %thread_id, "persist chrome right pane failed");
     }
 }
 
 /// Load a thread's persisted right-pane snapshot (the chrome encoding).
 fn load_right_pane(thread_id: &str) -> Option<String> {
-    let db = manox_agent::thread_store_global().read(|s| s.db().clone());
-    db.load_right_pane(thread_id).ok().flatten()
+    pane_db().load_right_pane(thread_id).ok().flatten()
 }
 
 fn refresh_foreground_cwd(
