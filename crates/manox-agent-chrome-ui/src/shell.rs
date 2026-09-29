@@ -299,7 +299,7 @@ impl Shell {
         self.group_order = order;
     }
 
-    /// Row menu (right-click on a row): the ONLY action surface — open,
+    /// Row menu (right-click on a row): the ONLY action surface —
     /// pin/unpin, archive/unarchive, tag add/rename/remove, copy id. Every
     /// action closes the menu; toggles read the row's current flags so the
     /// label names the action it will perform.
@@ -320,7 +320,6 @@ impl Shell {
         let has_tag = sess.tag.is_some();
         let this = cx.entity();
 
-        let id_open = id.to_string();
         let id_pin = id.to_string();
         let id_pin2 = id_pin.clone();
         let id_archive = id.to_string();
@@ -328,7 +327,6 @@ impl Shell {
         let id_tag_edit = id.to_string();
         let id_tag_clear = id.to_string();
         let id_copy = id.to_string();
-        let this_open = this.clone();
         let this_pin = this.clone();
         let this_archive = this.clone();
         let this_tag = this.clone();
@@ -337,16 +335,6 @@ impl Shell {
         let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
             let menu = menu
                 .max_w(gpui::px(220.))
-                .item(
-                    PopupMenuItem::new(manox_i18n::t("chrome-row-open"))
-                        .icon(menu_icon("icons/arrow-right.svg"))
-                        .on_click(move |_, window, cx| {
-                            this_open.update(cx, |this, cx| {
-                                this.select(&id_open, window, cx);
-                                this.close_row_menu(cx);
-                            });
-                        }),
-                )
                 .item(
                     PopupMenuItem::new(if pinned {
                         manox_i18n::t("chrome-row-unpin")

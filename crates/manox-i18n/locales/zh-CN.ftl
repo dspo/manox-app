@@ -1107,7 +1107,6 @@ chrome-sessions-title = 会话
 chrome-new = 新建
 chrome-no-chats = 暂无会话
 chrome-customizations = 自定义
-chrome-row-open = 打开
 chrome-row-copy-id = 复制 Thread ID
 chrome-row-pin = 置顶
 chrome-row-unpin = 取消置顶

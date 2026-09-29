@@ -1127,7 +1127,6 @@ chrome-sessions-title = Sessions
 chrome-new = New
 chrome-no-chats = No chats
 chrome-customizations = Customizations
-chrome-row-open = Open
 chrome-row-copy-id = Copy Thread ID
 chrome-row-pin = Pin
 chrome-row-unpin = Unpin
