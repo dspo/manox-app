@@ -33,7 +33,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, ElementId, Entity,
     InteractiveElement, IntoElement, ParentElement, Pixels, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, ease_in_out, px,
+    StatefulInteractiveElement, Styled, Window, div, ease_out_quint, px,
 };
 use gpui_component::ElementExt as _;
 
@@ -43,10 +43,14 @@ use gpui_component::ElementExt as _;
 const TAB_STRIP_H: f32 = 34.;
 /// Thickness of the active tab's underline.
 const TAB_INDICATOR_H: f32 = 2.;
-/// How long the underline takes to travel between tabs. Short enough to feel
-/// attached to the click; long enough that the travel reads as motion rather
-/// than a jump when the two tabs are far apart.
-const TAB_INDICATOR_SLIDE: Duration = Duration::from_millis(180);
+/// How long the underline takes to travel between tabs.
+///
+/// Deliberately unhurried: at 180ms the travel read as a blink rather than
+/// motion. This is a decorative glide, not feedback on a latency-sensitive
+/// action — the tab's own content swaps immediately, so nothing is waiting on
+/// it. Frames are not capped (no `with_max_fps`), so the animation re-renders
+/// every vsync and the longer run simply has more of them.
+const TAB_INDICATOR_SLIDE: Duration = Duration::from_millis(380);
 
 /// Tab content store: `open` writes entities (or failure text), `render`
 /// only reads. Dropping the entity is the resource teardown (e.g. PTY).
@@ -516,7 +520,7 @@ impl gpui::Render for RightPane {
                     .bg(ACCENT)
                     .with_animation(
                         ElementId::Name(SharedString::from(format!("tab-indicator-{anim_id}"))),
-                        Animation::new(TAB_INDICATOR_SLIDE).with_easing(ease_in_out),
+                        Animation::new(TAB_INDICATOR_SLIDE).with_easing(ease_out_quint()),
                         move |this, delta| {
                             let lerp = |a: Pixels, b: Pixels| {
                                 px(f32::from(a) + (f32::from(b) - f32::from(a)) * delta)
