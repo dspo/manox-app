@@ -151,15 +151,20 @@ impl Workspace {
             return;
         };
         let id = auth.id;
+        let tool_name = auth.tool_name;
         let allow = matches!(decision, PermissionDecision::AllowOnce);
         if let Some((store, sid)) = self.chat.read(cx).store.clone() {
             let view = store.read(cx);
             // Family 1: a tool confirmation (Edit/Write sandbox escalations).
+            // The fold request's id IS the auth id the host settles by, so it
+            // rides the verdict's `_meta` stamp (see `AhpStore::
+            // confirm_tool_call`): without it the host silently ignores the
+            // verdict and the card re-arms on the next fold event.
             if let Some((chat_id, turn_id, tool_call_id)) =
                 crate::ahp_store::leaf(&view.book, &sid).confirmation(&id)
             {
                 store.update(cx, |store, _| {
-                    store.confirm_tool_call(&chat_id, &turn_id, &tool_call_id, allow);
+                    store.confirm_tool_call(&chat_id, &turn_id, &tool_call_id, &id, allow);
                 });
                 cx.notify();
                 return;
@@ -185,6 +190,16 @@ impl Workspace {
                 return;
             }
         }
+        // Neither family carries the id any more: nothing was sent on the
+        // wire and the card only cleared locally (the live edge re-arms it).
+        // Answering nothing here is the right wire behavior — but silently it
+        // is a dead end to debug.
+        tracing::warn!(
+            request_id = %id,
+            tool = %tool_name,
+            approved = allow,
+            "auth verdict dropped: no matching open request in the fold"
+        );
         cx.notify();
     }
 
