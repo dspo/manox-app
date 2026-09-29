@@ -338,6 +338,17 @@ impl RightPane {
         cx.notify();
     }
 
+    /// Collapse the pane without touching the open tabs: the thread's tab set
+    /// is remembered for the next expand, and a fresh thread starts collapsed
+    /// instead of expanded over the transcript.
+    pub fn collapse(&mut self, cx: &mut Context<Self>) {
+        self.visible = false;
+        if let Some(prev) = self.active.take() {
+            prev.on_active(false, cx, &self.store);
+        }
+        cx.notify();
+    }
+
     /// Detach the whole session (per-thread stashing): the active tab gets
     /// `on_active(false)` (a browser subview hides), the open set / store /
     /// visibility move out, and the pane resets to a fresh empty state.
