@@ -124,4 +124,29 @@ async fn turn_rail_marks_render_and_a_click_lands_on_the_turn(cx: &mut TestAppCo
         top.item_ix, 0,
         "the click landed the list on the first turn's anchor"
     );
+
+    // After the jump row 0 is on screen: the rail hugs the band's left edge
+    // and clears the transcript — the gutter pads the list wrapper, not the
+    // band the rail anchors to, so the ticks sit at the card edge while the
+    // text starts a full gutter in. Row geometry comes from the list state
+    // itself (`gpui::list` rows do not register debug selectors).
+    visual.cx.run_until_parked();
+    let list_state = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_list_state(cx));
+    let strip = visual
+        .debug_bounds("turn-rail")
+        .expect("rail still mounted");
+    let row = list_state
+        .bounds_for_item(0)
+        .expect("the jumped-to row is laid out");
+    assert!(
+        strip.origin.x <= px(8.),
+        "the rail hugs the band's left edge, got x={:?}",
+        strip.origin.x
+    );
+    assert!(
+        strip.origin.x + strip.size.width <= row.origin.x,
+        "the rail must clear the transcript (rail {:?} vs row {:?})",
+        strip.origin.x + strip.size.width,
+        row.origin.x
+    );
 }

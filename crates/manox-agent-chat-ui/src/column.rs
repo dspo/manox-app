@@ -422,6 +422,15 @@ pub struct ChatColumn {
     pub turn_rail_active_from: Option<usize>,
     pub turn_rail_active_gen: u64,
     pub turn_rail_hover: Option<usize>,
+    /// The hover wave's from-snapshots (dsh's indicator_from discipline for
+    /// ticks): the mark that just gained hover tweens up from rest while the
+    /// mark in `turn_rail_hover_prev` tweens back down, both under the id
+    /// keyed by `turn_rail_hover_gen`. `turn_rail_hover_painted` is what the
+    /// last render saw — the change detector, so one pointer sweep across
+    /// several marks runs exactly one tween pair, not one per frame.
+    pub turn_rail_hover_prev: Option<usize>,
+    pub turn_rail_hover_gen: u64,
+    pub turn_rail_hover_painted: Option<usize>,
     pub turn_rail_pointer_inside: bool,
     pub turn_rail_followed: Option<(usize, usize)>,
     pub turn_rail_scroll: gpui::UniformListScrollHandle,

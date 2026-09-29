@@ -330,9 +330,6 @@ impl Workspace {
                     .when(show_rail, |this| {
                         this.pr(px(crate::views::context_rail::ENV_CONTENT_INSET))
                     })
-                    .when(show_turn_rail, |this| {
-                        this.pl(px(crate::views::turn_rail::GUTTER))
-                    })
                     .children(self.render_follow_stop_banner(&theme, cx))
                     .children(hero)
                     .children({
@@ -407,7 +404,24 @@ impl Workspace {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .relative()
-                                .child(list_wrap)
+                                // The gutter pads the list itself, not this
+                                // band: the rail's absolute anchor is the
+                                // band, so padding the band would drag the
+                                // rail right along with the text it must
+                                // clear (the ticks would land ON the
+                                // transcript instead of hugging the edge).
+                                .child(
+                                    h_flex()
+                                        .flex_1()
+                                        .w_full()
+                                        .min_h_0()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .when(show_turn_rail, |this| {
+                                            this.pl(px(crate::views::turn_rail::GUTTER))
+                                        })
+                                        .child(list_wrap),
+                                )
                                 // The rail paints after the list so its marks
                                 // and preview float over the transcript band.
                                 .children(turn_rail)

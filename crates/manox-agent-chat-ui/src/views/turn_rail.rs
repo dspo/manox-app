@@ -249,6 +249,15 @@ pub fn render_turn_rail(
         } else {
             chat.turn_rail_preview_top = new_preview_top;
         }
+        // Hover wave: a change snapshots the vacated mark and keys one tween
+        // pair — the new target grows from rest, the vacated mark shrinks
+        // back — so a pointer sweep ripples down the rail (dsh's 140ms
+        // hover transition).
+        if chat.turn_rail_hover != chat.turn_rail_hover_painted {
+            chat.turn_rail_hover_prev = chat.turn_rail_hover_painted;
+            chat.turn_rail_hover_painted = chat.turn_rail_hover;
+            chat.turn_rail_hover_gen += 1;
+        }
     });
 
     let enter_gen = chat.read(cx).turn_rail_preview_gen;
@@ -266,6 +275,8 @@ pub fn render_turn_rail(
             let from_active = state.turn_rail_active_from;
             let active_gen = state.turn_rail_active_gen;
             let hover = state.turn_rail_hover;
+            let hover_prev = state.turn_rail_hover_prev;
+            let hover_gen = state.turn_rail_hover_gen;
             visible_range
                 .map(|ix| {
                     render_mark_row(
@@ -275,6 +286,8 @@ pub fn render_turn_rail(
                         from_active,
                         active_gen,
                         hover,
+                        hover_prev,
+                        hover_gen,
                         &theme_for_marks,
                         chat_for_marks.clone(),
                         on_jump.clone(),
@@ -327,6 +340,13 @@ pub fn render_turn_rail(
 /// One 10px hit row with its tick visual. The row is the click/hover target;
 /// the tick is purely visual, left-anchored (the mirrored image of dsh's
 /// right-anchored marks).
+///
+/// Every state change tweens between the tick's own previous and current
+/// style (dsh's 140ms CSS-transition semantics): the hovered mark rises from
+/// rest, the vacated mark sinks back — a pointer sweep down the ladder reads
+/// as a wave — and the active hand-off grows one mark while shrinking the
+/// other. Each change runs under a fresh id keyed by its generation, so it
+/// starts from the resting style instead of resuming.
 #[allow(clippy::too_many_arguments)]
 fn render_mark_row(
     ix: usize,
@@ -335,6 +355,8 @@ fn render_mark_row(
     from_active: Option<usize>,
     active_gen: u64,
     hover: Option<usize>,
+    hover_prev: Option<usize>,
+    hover_gen: u64,
     theme: &Theme,
     chat: Entity<ChatColumn>,
     on_jump: JumpFn,
@@ -349,15 +371,12 @@ fn render_mark_row(
         (px(TICK_REST_W), theme.border)
     };
 
-    // The previous active mark tweens back to rest while the new one tweens
-    // up (dsh's 140ms pair). Each change runs under a fresh id keyed by the
-    // generation, so it starts from the resting style instead of resuming.
-    let (rest_color, active_color) = (theme.border, theme.foreground);
+    let (rest_color, hover_color, active_color) =
+        (theme.border, theme.muted_foreground, theme.foreground);
+    let base = move |el: gpui::Div| el.w(target_w).h(px(TICK_H)).rounded_full();
     let tick: AnyElement = if is_active && from_active.is_some() {
-        div()
-            .w(target_w)
-            .h(px(TICK_H))
-            .rounded_full()
+        // The new active mark grows from rest.
+        base(div())
             .with_animation(
                 format!("turn-rail-tick-{ix}-{active_gen}"),
                 Animation::new(Duration::from_millis(TICK_TWEEN_MS)).with_easing(ease_out_quint()),
@@ -367,11 +386,10 @@ fn render_mark_row(
                 },
             )
             .into_any_element()
-    } else if !is_active && from_active == Some(ix) {
-        div()
-            .w(target_w)
-            .h(px(TICK_H))
-            .rounded_full()
+    } else if !is_active && from_active == Some(ix) && !is_hover {
+        // The mark that lost active sinks back (unless the pointer took it —
+        // the hover wave owns the animation slot then).
+        base(div())
             .with_animation(
                 format!("turn-rail-tick-{ix}-{active_gen}"),
                 Animation::new(Duration::from_millis(TICK_TWEEN_MS)).with_easing(ease_out_quint()),
@@ -381,13 +399,32 @@ fn render_mark_row(
                 },
             )
             .into_any_element()
-    } else {
-        div()
-            .w(target_w)
-            .h(px(TICK_H))
-            .rounded_full()
-            .bg(target_color)
+    } else if is_hover && hover_prev != Some(ix) {
+        // Just hovered: rise from rest (the wave's leading crest).
+        base(div())
+            .with_animation(
+                format!("turn-rail-hover-{ix}-{hover_gen}"),
+                Animation::new(Duration::from_millis(TICK_TWEEN_MS)).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    el.w(lerp_px(px(TICK_REST_W), target_w, delta))
+                        .bg(lerp_hsla(rest_color, hover_color, delta))
+                },
+            )
             .into_any_element()
+    } else if hover_prev == Some(ix) && !is_hover && !is_active {
+        // Just vacated: sink back to rest (the wave's trailing edge).
+        base(div())
+            .with_animation(
+                format!("turn-rail-hover-{ix}-{hover_gen}"),
+                Animation::new(Duration::from_millis(TICK_TWEEN_MS)).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    el.w(lerp_px(px(TICK_HOVER_W), target_w, delta))
+                        .bg(lerp_hsla(hover_color, rest_color, delta))
+                },
+            )
+            .into_any_element()
+    } else {
+        base(div()).bg(target_color).into_any_element()
     };
 
     let chat_for_enter = chat.clone();
