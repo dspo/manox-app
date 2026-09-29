@@ -21,14 +21,32 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+
 use crate::primitives::{icon_button, small_icon_button};
 use crate::theme::{
-    BORDER, CARD_BG, CARD_BORDER, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, icon, icons,
+    ACCENT, BORDER, CARD_BG, CARD_BORDER, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, icon, icons,
 };
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, ElementId, Entity,
+    InteractiveElement, IntoElement, ParentElement, Pixels, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Window, div, ease_in_out, px,
 };
+use gpui_component::ElementExt as _;
+
+/// Tab strip height. One height for every tab: the active state is carried by
+/// the indicator overlay and the label colour, not by a size change, so
+/// switching tabs never shifts the strip.
+const TAB_STRIP_H: f32 = 34.;
+/// Thickness of the active tab's underline.
+const TAB_INDICATOR_H: f32 = 2.;
+/// How long the underline takes to travel between tabs. Short enough to feel
+/// attached to the click; long enough that the travel reads as motion rather
+/// than a jump when the two tabs are far apart.
+const TAB_INDICATOR_SLIDE: Duration = Duration::from_millis(180);
 
 /// Tab content store: `open` writes entities (or failure text), `render`
 /// only reads. Dropping the entity is the resource teardown (e.g. PTY).
@@ -152,6 +170,15 @@ pub struct RightPaneSession {
     pub visible: bool,
 }
 
+/// Left edge and width of one tab, in the strip's coordinate space. Captured
+/// during prepaint so the sliding indicator knows where each tab actually
+/// landed — the labels vary in width, so these cannot be derived from an index.
+#[derive(Clone, Copy, Default)]
+struct TabBounds {
+    left: Pixels,
+    width: Pixels,
+}
+
 /// The right pane view: a registry-driven shell.
 pub struct RightPane {
     registry: Vec<Arc<dyn ToolTabFactory>>,
@@ -160,6 +187,18 @@ pub struct RightPane {
     pub visible: bool,
     pub width: Pixels,
     store: TabStore,
+    /// Where each open tab was painted last frame, keyed by tab id. Written
+    /// from `on_prepaint` (bounds are layout output, so they only exist after
+    /// painting) and read by the indicator on the next frame.
+    tab_bounds: Rc<RefCell<HashMap<String, TabBounds>>>,
+    /// The tab row's own origin, captured the same way. `Bounds` are reported
+    /// in WINDOW space, while the indicator is positioned inside the strip, so
+    /// the tab's absolute x has to be rebased against this before use.
+    strip_origin: Rc<RefCell<Pixels>>,
+    /// The indicator's target geometry, plus the id it belongs to. Held across
+    /// frames so the spring animates from the previous tab to the new one
+    /// rather than jumping.
+    indicator: (Pixels, Pixels, Option<String>),
 }
 
 impl RightPane {
@@ -173,6 +212,9 @@ impl RightPane {
             visible: false,
             width: px(460.),
             store: TabStore::default(),
+            tab_bounds: Rc::new(RefCell::new(HashMap::new())),
+            strip_origin: Rc::new(RefCell::new(px(0.))),
+            indicator: (px(0.), px(0.), None),
         }
     }
 
@@ -418,12 +460,34 @@ impl gpui::Render for RightPane {
                     cx,
                     active.as_ref().map(|a| a.id()) == Some(tab.id()),
                     tab.icon(cx),
+                    self.tab_bounds.clone(),
                     activate,
                     close,
                 )
                 .into_any_element()
             })
             .collect();
+
+        // The sliding underline's target: the active tab's captured geometry.
+        // The bounds arrive from `on_prepaint`, which runs AFTER this render
+        // body — so on the first frame (and the frame right after a tab opens)
+        // they are still empty and `target` is None. The pane therefore asks
+        // for one more frame to pick them up; without that, a single-frame
+        // capture such as `visual.rs` shows no indicator at all.
+        let active_id = active.as_ref().map(|a| a.id().to_string());
+        let strip_x = *self.strip_origin.borrow();
+        let target = active_id.as_ref().and_then(|id| {
+            self.tab_bounds.borrow().get(id).map(|t| TabBounds {
+                left: t.left - strip_x,
+                width: t.width,
+            })
+        });
+        if target.is_none() && active_id.is_some() {
+            cx.notify();
+        }
+        if let Some(t) = target {
+            self.indicator = (t.left, t.width, active_id.clone());
+        }
 
         let on_new_tab = cx.listener(|this, _: &ClickEvent, _w, cx| {
             this.new_tab_page(cx);
@@ -435,6 +499,34 @@ impl gpui::Render for RightPane {
                 this.open_kind(kind, w, cx);
             }
         });
+
+        // The sliding underline. Keyed on the active tab's id so switching
+        // starts a fresh run whose start value is the indicator's PREVIOUS
+        // target — that is what makes the line travel from the old tab to the
+        // new one instead of appearing under it.
+        let indicator = {
+            let (from_left, from_width, _) = self.indicator;
+            let (to_left, to_width) = target.map_or((from_left, from_width), |t| (t.left, t.width));
+            (target.is_some() && to_width > px(0.)).then(|| {
+                let anim_id = active_id.clone().unwrap_or_default();
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .h(px(TAB_INDICATOR_H))
+                    .bg(ACCENT)
+                    .with_animation(
+                        ElementId::Name(SharedString::from(format!("tab-indicator-{anim_id}"))),
+                        Animation::new(TAB_INDICATOR_SLIDE).with_easing(ease_in_out),
+                        move |this, delta| {
+                            let lerp = |a: Pixels, b: Pixels| {
+                                px(f32::from(a) + (f32::from(b) - f32::from(a)) * delta)
+                            };
+                            this.left(lerp(from_left, to_left))
+                                .w(lerp(from_width, to_width))
+                        },
+                    )
+            })
+        };
 
         div()
             .w(width)
@@ -450,26 +542,38 @@ impl gpui::Render for RightPane {
             .flex()
             .flex_col()
             // Tab strip: tool tabs + the new-tab tab + right-side
-            // +/split/external.
+            // +/split/external. Tabs sit ON the strip's bottom hairline; the
+            // sliding indicator overlays that line.
             .child(
                 div()
+                    .relative()
                     .w_full()
-                    .h(px(36.))
+                    .h(px(TAB_STRIP_H))
                     .flex_shrink_0()
                     .pl(px(4.))
                     .pr(px(6.))
                     .gap(px(2.))
                     .items_end()
-                    .child(
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .when_some(indicator, |this, ind| this.child(ind))
+                    .child({
+                        // The tab row reports its own origin so tab bounds
+                        // (window space) can be rebased into the strip's
+                        // coordinate space before positioning the indicator.
+                        let origin = self.strip_origin.clone();
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .items_end()
                             .gap(px(2.))
+                            .on_prepaint(move |b, _w, _cx| {
+                                *origin.borrow_mut() = b.origin.x;
+                            })
                             .children(pills)
-                            .child(new_tab_pill(active.is_none(), on_new_tab)),
-                    )
+                            .child(new_tab_pill(active.is_none(), on_new_tab))
+                    })
                     .child(
                         div()
                             .h_full()
@@ -499,7 +603,8 @@ impl gpui::Render for RightPane {
                             )),
                     ),
             )
-            .child(div().w_full().h(px(1.)).bg(BORDER).flex_shrink_0())
+            // The strip's own bottom border is the shared rail the tab
+            // indicators sit on, so there is no separate hairline here.
             .child(
                 div()
                     .w_full()
@@ -606,37 +711,47 @@ fn error_body(
         .into_any_element()
 }
 
-/// Top-corner tab pill: the active state is 31px tall with a stroke and
-/// joins the body (no bottom border); inactive pills are ghosted.
+/// Underline tab: a flat label over the strip's shared hairline. The active
+/// label is ACCENT and semibold; inactive labels are FG_DIM.
+///
+/// The underline itself is NOT drawn here — the strip renders one shared
+/// indicator that slides between tabs (see `render_indicator`). This function
+/// only reports where the tab landed, from `on_prepaint`, so the indicator
+/// knows its travel target. Bounds are layout output, so they exist only after
+/// painting; `on_prepaint` is the hook that runs with the final geometry.
 fn tab_pill(
     tab: &Arc<dyn ToolTab>,
     cx: &App,
     active: bool,
     icon_el: AnyElement,
+    bounds: Rc<RefCell<HashMap<String, TabBounds>>>,
     activate: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<gpui::Div> {
+    let id = tab.id().to_string();
+    let bounds_id = id.clone();
     let pill = div()
-        .id(SharedString::from(format!("tool-tab-{}", tab.id())))
+        .id(SharedString::from(format!("tool-tab-{id}")))
         .on_click(move |e, w, cx| activate(e, w, cx))
-        .h(px(if active { 31. } else { 28. }))
+        .on_prepaint(move |b, _w, _cx| {
+            bounds.borrow_mut().insert(
+                bounds_id.clone(),
+                TabBounds {
+                    left: b.origin.x,
+                    width: b.size.width,
+                },
+            );
+        })
+        .relative()
+        .h(px(TAB_STRIP_H))
         .pl(px(10.))
         .pr(px(8.))
         .gap(px(6.))
         .items_center()
         .flex_shrink_0()
-        .rounded_tl(px(7.))
-        .rounded_tr(px(7.))
         .flex()
-        .text_color(if active { FG_STRONG } else { FG_DIM });
-    let pill = if active {
-        pill.bg(CARD_BG)
-            .border_1()
-            .border_color(BORDER)
-            .border_b_0()
-    } else {
-        pill.hover(|style| style.bg(LIST_HOVER))
-    };
+        .text_color(if active { ACCENT } else { FG_DIM })
+        .hover(|style| style.bg(LIST_HOVER));
     pill.child(icon_el)
         .child(
             div()
@@ -644,6 +759,11 @@ fn tab_pill(
                 .max_w(px(120.))
                 .truncate()
                 .text_size(px(12.))
+                .font_weight(if active {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
                 .child(tab.title(cx)),
         )
         .child(small_icon_button(
@@ -660,33 +780,26 @@ fn new_tab_pill(
     active: bool,
     on_new_tab: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<gpui::Div> {
-    let pill = div()
+    div()
         .id("tool-new-tab")
         .on_click(move |e, w, cx| on_new_tab(e, w, cx))
-        .h(px(if active { 31. } else { 28. }))
+        .h(px(TAB_STRIP_H))
         .pl(px(10.))
         .pr(px(8.))
         .gap(px(6.))
         .items_center()
         .flex_shrink_0()
-        .rounded_tl(px(7.))
-        .rounded_tr(px(7.))
+        .rounded(px(5.))
         .flex()
-        .text_color(if active { FG_STRONG } else { FG_DIM });
-    let pill = if active {
-        pill.bg(CARD_BG)
-            .border_1()
-            .border_color(BORDER)
-            .border_b_0()
-    } else {
-        pill.hover(|style| style.bg(LIST_HOVER))
-    };
-    pill.child(icon(icons::ADD, 12.)).child(
-        div()
-            .truncate()
-            .text_size(px(12.))
-            .child(manox_i18n::t("chrome-tab-new-tab")),
-    )
+        .text_color(if active { FG_STRONG } else { FG_DIM })
+        .hover(|style| style.bg(LIST_HOVER))
+        .child(icon(icons::ADD, 12.))
+        .child(
+            div()
+                .truncate()
+                .text_size(px(12.))
+                .child(manox_i18n::t("chrome-tab-new-tab")),
+        )
 }
 
 /// Quick-action row: icon + label, whole row clickable, hover wash.
