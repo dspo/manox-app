@@ -7,6 +7,10 @@
 
 use super::*;
 
+/// The visited-thread history cap (the ←/→ stack): past this, the front
+/// drains so the stack stays a moving window.
+const NAV_STACK_CAP: usize = 100;
+
 impl Workspace {
     /// Minimal subscription for a thread parked in `background_threads`. Unlike
     /// `subscribe_thread`, this only coordinates running state and the parked
@@ -793,6 +797,86 @@ impl Workspace {
     }
 
     pub fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_thread_inner(id, true, window, cx);
+    }
+    /// Open a thread WITHOUT recording a history entry — the programmatic
+    /// identity moves (the successor hand-off) that are not user navigation.
+    pub(crate) fn open_thread_unrecorded(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_thread_inner(id, false, window, cx);
+    }
+
+    /// One step back through the visited-thread history; returns the thread
+    /// landed on (`None` at the stack's front).
+    pub(crate) fn nav_back(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let idx = self.nav_index?;
+        if idx == 0 {
+            return None;
+        }
+        self.nav_index = Some(idx - 1);
+        let id = self.nav_stack[idx - 1].clone();
+        self.open_thread_inner(id.clone(), false, window, cx);
+        Some(id)
+    }
+
+    /// One step forward through the visited-thread history (`None` at the
+    /// tail).
+    pub(crate) fn nav_forward(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let idx = self.nav_index?;
+        if idx + 1 >= self.nav_stack.len() {
+            return None;
+        }
+        self.nav_index = Some(idx + 1);
+        let id = self.nav_stack[idx + 1].clone();
+        self.open_thread_inner(id.clone(), false, window, cx);
+        Some(id)
+    }
+
+    /// The ←/→ moves' availability (the stack's edges).
+    pub(crate) fn nav_avail(&self) -> (bool, bool) {
+        match self.nav_index {
+            None => (false, false),
+            Some(i) => (i > 0, i + 1 < self.nav_stack.len()),
+        }
+    }
+
+    /// Record a user-initiated open: truncate the forward tail, skip a
+    /// no-op re-open of the current entry, push and cap.
+    fn record_nav(&mut self, id: &str) {
+        if self.nav_stack.last().map(String::as_str) == Some(id) {
+            self.nav_index = Some(self.nav_stack.len() - 1);
+            return;
+        }
+        if let Some(i) = self.nav_index {
+            self.nav_stack.truncate(i + 1);
+        }
+        self.nav_stack.push(id.to_string());
+        if self.nav_stack.len() > NAV_STACK_CAP {
+            let drop = self.nav_stack.len() - NAV_STACK_CAP;
+            self.nav_stack.drain(..drop);
+        }
+        self.nav_index = Some(self.nav_stack.len() - 1);
+    }
+
+    fn open_thread_inner(
+        &mut self,
+        id: String,
+        record: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // If the thread is already running in the background, reclaim it
         // instead of loading a stale snapshot from the db.
         // U6b⑤: the reclaim re-attaches a fresh landing mirror for the
@@ -802,6 +886,9 @@ impl Workspace {
         // the session (`OpenSession`, §D.6) so a parked adjudication card
         // re-arms on the way back in.
         if self.background_threads.iter().any(|b| b.id == id) {
+            if record {
+                self.record_nav(&id);
+            }
             let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
             self.attach_thread(thread, true, window, cx);
             return;
@@ -813,6 +900,9 @@ impl Workspace {
         // U6 dual source: a db-restored facade racing the live wire state)
         // is gone; the row this click came from is itself a wire item, so
         // the id is server-known by construction.
+        if record {
+            self.record_nav(&id);
+        }
         let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
         self.attach_thread(thread, true, window, cx);
     }

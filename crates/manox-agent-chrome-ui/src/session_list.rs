@@ -19,8 +19,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::theme::{
-    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, BORDER, CARD_BG, CARD_BORDER, ERR_RED, FG, FG_FAINT,
-    FG_STRONG, FONT_UI, Icon, LIST_HOVER, SHELL_BG, icon, icons,
+    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, BORDER, CARD_BG, CARD_BORDER, ERR_RED, FG, FG_DIM,
+    FG_FAINT, FG_STRONG, FONT_UI, Icon, LIST_HOVER, SHELL_BG, icon, icons,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -31,7 +31,8 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ElementExt as _, Sizable as _};
 
-use crate::primitives::{icon_button, kbd_chip};
+use crate::primitives::{icon_button, kbd_chip, small_icon_button};
+use crate::shell::SidebarGrouping;
 
 /// Action callback taking a row id (select / toggle group / menu target).
 pub type OnId = Rc<dyn Fn(&String, &mut Window, &mut App)>;
@@ -183,6 +184,21 @@ pub struct SessionList {
     /// The inline tag editor (row id + input), mounted on that row's tag
     /// line. At most one edit in flight.
     pub tag_edit: Option<(String, Entity<InputState>)>,
+    /// The sidebar grouping mode (the sort button's state).
+    pub grouping: SidebarGrouping,
+    /// The sort button: workspace grouping ↔ time buckets.
+    pub on_toggle_grouping: OnUnit,
+    /// The search button: expand/collapse the filter row.
+    pub on_toggle_search: OnUnit,
+    /// Whether the filter input row is expanded.
+    pub filter_open: bool,
+    /// Whether a filter term is active (non-empty) — with zero surviving
+    /// groups the list shows the no-match hint.
+    pub filter_active: bool,
+    /// The filter input (mounted inside the filter row while open).
+    pub filter_input: Option<Entity<InputState>>,
+    /// The filter row's clear (×) control: collapse and reset.
+    pub on_filter_clear: Option<OnWindowApp>,
     /// Per-row title clip-box width, written unguarded by each row's
     /// `on_prepaint` every frame; the marquee reads the last painted value.
     pub title_box_w: Rc<RefCell<HashMap<String, Pixels>>>,
@@ -228,7 +244,19 @@ impl RenderOnce for SessionList {
             .px(px(8.))
             .gap(px(1.))
             .text_color(FG)
-            .child(header(self.on_new.clone()))
+            .child(header(
+                self.on_new.clone(),
+                self.grouping,
+                self.on_toggle_grouping.clone(),
+                self.on_toggle_search.clone(),
+                self.filter_open,
+            ))
+            .when(self.filter_open, |this| {
+                this.child(filter_row(
+                    self.filter_input.clone(),
+                    self.on_filter_clear.clone(),
+                ))
+            })
             .child(
                 div()
                     .id("sessions-scroll")
@@ -252,18 +280,43 @@ impl RenderOnce for SessionList {
                                 .child(manox_i18n::t("chrome-no-chats")),
                         )
                     })
-                    .children(self.groups.iter().map(|g| group(&self, g, &order, window))),
+                    .children(self.groups.iter().map(|g| group(&self, g, &order, window)))
+                    // A filter active on a fully-filtered-out list: an empty
+                    // state of its own, distinct from "no chats yet".
+                    .when(self.filter_active && self.groups.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .mx(px(20.))
+                                .py(px(3.))
+                                .px(px(6.))
+                                .text_size(px(12.))
+                                .text_color(FG_FAINT)
+                                .child(manox_i18n::t("chrome-sidebar-no-match")),
+                        )
+                    }),
             )
             .child(customizations(&self.customizations))
     }
 }
 
+/// A localized hover tooltip view (gpui-component Tooltip over the Root).
+fn hover_tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    move |window, cx| gpui_component::tooltip::Tooltip::new(manox_i18n::t(text)).build(window, cx)
+}
+
 /// Header: the Sessions title + New button (⌘N kbd chip) + sort/search.
-/// Overlap rule: the title layer fills the width underneath, the controls
-/// float above it with an opaque background — a narrow sidebar occludes the
-/// title (the reference screenshot's "Se…" truncation) instead of squeezing
-/// the controls.
-fn header(on_new: OnUnit) -> impl IntoElement {
+/// The sort button toggles workspace ↔ time grouping (lit in time mode); the
+/// search button expands the filter row (lit while open). Overlap rule: the
+/// title layer fills the width underneath, the controls float above it with
+/// an opaque background — a narrow sidebar occludes the title (the reference
+/// screenshot's "Se…" truncation) instead of squeezing the controls.
+fn header(
+    on_new: OnUnit,
+    grouping: SidebarGrouping,
+    on_toggle_grouping: OnUnit,
+    on_toggle_search: OnUnit,
+    filter_open: bool,
+) -> impl IntoElement {
     div()
         .relative()
         .w_full()
@@ -319,26 +372,73 @@ fn header(on_new: OnUnit) -> impl IntoElement {
                         .child(manox_i18n::t("chrome-new"))
                         .child(kbd_chip("⌘N")),
                 )
-                .child(icon_button(
-                    "sort",
-                    icons::SORT_PRECEDENCE,
-                    14.,
-                    false,
-                    |_, _, _| {},
-                ))
-                .child(icon_button(
-                    "search",
-                    icons::SEARCH,
-                    14.,
-                    false,
-                    |_, _, _| {},
-                )),
+                .child(
+                    icon_button(
+                        "sort",
+                        icons::SORT_PRECEDENCE,
+                        14.,
+                        grouping == SidebarGrouping::Time,
+                        move |e, w, cx| on_toggle_grouping(e, w, cx),
+                    )
+                    .tooltip(hover_tooltip("chrome-sidebar-grouping")),
+                )
+                .child(
+                    icon_button(
+                        "search",
+                        icons::SEARCH,
+                        14.,
+                        filter_open,
+                        move |e, w, cx| on_toggle_search(e, w, cx),
+                    )
+                    .tooltip(hover_tooltip("chrome-sidebar-search")),
+                ),
         )
 }
 
-/// Fixed row: icon + label + badge (the badge hugs the label; no flex fill).
+/// The expanded filter row (under the header): search glyph + input + clear.
+/// Typing narrows the list live; × collapses the row and resets the term.
+fn filter_row(
+    filter_input: Option<Entity<InputState>>,
+    on_clear: Option<OnWindowApp>,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .h(px(26.))
+        .px(px(6.))
+        .rounded(px(5.))
+        .border_1()
+        .border_color(BORDER)
+        .bg(CARD_BG)
+        .flex_shrink_0()
+        .text_color(FG_DIM)
+        .child(icon(icons::SEARCH, 13.))
+        .child(div().flex_1().min_w_0().children(filter_input.map(|input| {
+            Input::new(&input)
+                .appearance(false)
+                .h_full()
+                .w_full()
+                .text_size(px(12.))
+        })))
+        .children(on_clear.map(|cb| {
+            small_icon_button(
+                "sidebar-filter-clear",
+                icons::CLOSE,
+                10.,
+                FG_FAINT,
+                FG,
+                move |_, w, cx| cb(w, cx),
+            )
+        }))
+}
+
+/// Fixed row: icon + label + badge. Not implemented yet — the row renders
+/// dimmed and says so on hover; it stays inert until a real surface exists.
 fn fixed_row(row: &FixedRow) -> impl IntoElement {
     div()
+        .id(SharedString::from(format!("fixed-{}", row.label)))
         .w_full()
         .flex()
         .items_center()
@@ -347,6 +447,8 @@ fn fixed_row(row: &FixedRow) -> impl IntoElement {
         .px(px(8.))
         .rounded(px(4.))
         .flex_shrink_0()
+        .text_color(FG_FAINT)
+        .tooltip(hover_tooltip("chrome-unimplemented"))
         .child(icon(row.icon, 15.))
         .child(
             div()
@@ -1047,6 +1149,7 @@ fn customizations(rows: &[CustomizationRow]) -> impl IntoElement {
         )
         .children(rows.iter().map(|r| {
             div()
+                .id(SharedString::from(format!("custom-{}", r.label)))
                 .w_full()
                 .mx(px(14.))
                 .flex()
@@ -1056,6 +1159,8 @@ fn customizations(rows: &[CustomizationRow]) -> impl IntoElement {
                 .px(px(6.))
                 .text_size(px(12.))
                 .flex_shrink_0()
+                .text_color(FG_FAINT)
+                .tooltip(hover_tooltip("chrome-unimplemented"))
                 .child(icon(r.icon, 13.))
                 .child(div().min_w_0().flex_1().truncate().child(r.label.clone()))
                 .when_some(r.count, |this, c| {

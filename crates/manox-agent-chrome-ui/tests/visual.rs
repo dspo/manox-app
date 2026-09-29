@@ -149,11 +149,12 @@ mod macos {
                 kinds
             },
             panel_surface: Some(Arc::new(DummyPanel)),
+            brand: None,
             fixed_rows: vec![
                 FixedRow {
                     icon: icons::CALENDAR,
                     label: manox_i18n::t("chrome-sidebar-automations"),
-                    badge: Some("NEW".into()),
+                    badge: None,
                 },
                 FixedRow {
                     icon: icons::COMMENT_DISCUSSION,
@@ -176,12 +177,12 @@ mod macos {
                 CustomizationRow {
                     icon: icons::SETTINGS_GEAR,
                     label: manox_i18n::t("chrome-sidebar-mcp"),
-                    count: Some(1),
+                    count: None,
                 },
                 CustomizationRow {
                     icon: icons::WAND,
                     label: manox_i18n::t("chrome-sidebar-skills"),
-                    count: Some(13),
+                    count: None,
                 },
             ],
             hooks: HostHooks::default(),

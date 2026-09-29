@@ -321,6 +321,11 @@ pub use manox_agent_chat_ui::column::{
 
 pub struct Workspace {
     pub(crate) cwd: PathBuf,
+    /// Visited-thread history for the titlebar ←/→ moves: user-initiated
+    /// opens append here (truncating the forward tail), nav moves walk it
+    /// without recording. Capped — the front drains, the index shifts.
+    pub(crate) nav_stack: Vec<String>,
+    pub(crate) nav_index: Option<usize>,
     /// The chat column's state (thread face, conversation, composer, ask
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
@@ -593,6 +598,8 @@ impl Workspace {
 
         let mut ws = Self {
             cwd: cwd.clone(),
+            nav_stack: Vec::new(),
+            nav_index: None,
             multiplexer,
             client: (),
             background_threads: Vec::new(),

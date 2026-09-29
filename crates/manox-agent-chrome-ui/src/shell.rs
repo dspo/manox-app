@@ -102,6 +102,11 @@ pub type HookOnId = Box<dyn Fn(&str, &mut Window, &mut App)>;
 pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
 /// Host tag write (row id, `Some(tag)` to set / `None` to clear).
 pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>;
+/// Host nav move: opens the previous/next thread in the host's history and
+/// returns the thread id it landed on (`None` when there is nowhere to go).
+pub type HookOnNav = Box<dyn Fn(&mut Window, &mut App) -> Option<String>>;
+/// Host state query (render-time read face, no mutation).
+pub type HookQuery<T> = Box<dyn Fn(&App) -> T>;
 
 /// Host-side actions the shell mirrors to. All optional; an absent hook
 /// leaves the shell's local behavior only (e.g. `on_pin` flips the local row
@@ -119,6 +124,26 @@ pub struct HostHooks {
     /// Selection-change notification — also the row menu's 打开 action (the
     /// full production switch path).
     pub on_select: Option<HookOnId>,
+    /// ←/→ session-history navigation. The hook performs the host-side move
+    /// and reports the landed thread id so the shell can move its own
+    /// selection without re-deriving host state.
+    pub on_nav_back: Option<HookOnNav>,
+    pub on_nav_forward: Option<HookOnNav>,
+    /// Availability of the two nav moves, queried at render time (the host
+    /// owns the history stack; the shell only paints its edges).
+    pub nav_avail: Option<HookQuery<(bool, bool)>>,
+    /// Open the foreground session's workspace in the user's editor.
+    pub on_open_editor: Option<HookOnUnit>,
+}
+
+/// The sidebar's two grouping modes: by workspace (project) — the default,
+/// drag-reorderable — or by last-activity time buckets (today / yesterday /
+/// last 7 days / earlier).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SidebarGrouping {
+    #[default]
+    Workspace,
+    Time,
 }
 
 /// Everything the shell needs from its host at construction.
@@ -131,6 +156,10 @@ pub struct ShellConfig {
     pub fixed_rows: Vec<FixedRow>,
     /// Customizations-block rows (Overview / Plugins / MCP / Skills).
     pub customizations: Vec<CustomizationRow>,
+    /// The app brand mark for the titlebar's avatar slot (a per-call element
+    /// factory — elements rebuild each frame). `None` falls back to the
+    /// generic account glyph.
+    pub brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
     pub hooks: HostHooks,
 }
 
@@ -188,6 +217,17 @@ pub struct Shell {
     pub right: Entity<RightPane>,
     /// Sidebar width (invisible-handle drag, 180–460, double-click reset).
     pub sidebar_width: Pixels,
+    /// The app brand mark factory (the titlebar avatar slot's content).
+    brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
+    /// Sidebar grouping mode (the sort button's toggle).
+    grouping: SidebarGrouping,
+    // ── sidebar filter ──
+    /// Whether the filter input row is expanded (the search button's toggle).
+    pub sidebar_filter_open: bool,
+    /// The filter term (created on open; an InputState needs a Window, so it
+    /// is built on the event path).
+    filter_query: Option<Entity<gpui_component::input::InputState>>,
+    _filter_sub: Option<gpui::Subscription>,
     // ── bottom dock ──
     panel: Option<PanelSlot>,
     // ── titlebar session picker ──
@@ -229,6 +269,11 @@ impl Shell {
             show_sidebar: true,
             show_panel: false,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
+            brand: config.brand,
+            grouping: SidebarGrouping::default(),
+            sidebar_filter_open: false,
+            filter_query: None,
+            _filter_sub: None,
             panel,
             session_picker_open: false,
             picker_anchor: gpui::Point::default(),
@@ -264,6 +309,112 @@ impl Shell {
         }
     }
 
+    /// ←: one step back through the host's session history. The hook lands
+    /// the move and reports the thread; the shell follows with its selection.
+    pub fn nav_back(&mut self, window: &mut Window, cx: &mut App) {
+        let Some(hook) = &self.hooks.on_nav_back else {
+            return;
+        };
+        if let Some(id) = hook(window, cx) {
+            self.active = Some(id);
+        }
+    }
+
+    /// →: one step forward through the host's session history.
+    pub fn nav_forward(&mut self, window: &mut Window, cx: &mut App) {
+        let Some(hook) = &self.hooks.on_nav_forward else {
+            return;
+        };
+        if let Some(id) = hook(window, cx) {
+            self.active = Some(id);
+        }
+    }
+
+    /// Whether the two nav moves can fire right now (the host's history
+    /// edges; `(false, false)` with no host face).
+    pub fn nav_avail(&self, cx: &App) -> (bool, bool) {
+        self.hooks
+            .nav_avail
+            .as_ref()
+            .map(|q| q(cx))
+            .unwrap_or((false, false))
+    }
+
+    /// The titlebar's editor button: open the foreground session's workspace
+    /// in the user's editor. No-op without a host face.
+    pub fn open_editor(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(hook) = &self.hooks.on_open_editor {
+            hook(window, cx);
+        }
+    }
+
+    /// The brand-mark element for the titlebar's avatar slot, rebuilt for
+    /// this frame (`None` → the caller renders its fallback).
+    pub fn brand_element(&self) -> Option<gpui::AnyElement> {
+        self.brand.as_ref().map(|f| f())
+    }
+
+    /// The sidebar sort button: workspace grouping ↔ time buckets.
+    pub fn toggle_grouping(&mut self) {
+        self.grouping = match self.grouping {
+            SidebarGrouping::Workspace => SidebarGrouping::Time,
+            SidebarGrouping::Time => SidebarGrouping::Workspace,
+        };
+    }
+
+    pub fn grouping(&self) -> SidebarGrouping {
+        self.grouping
+    }
+
+    /// The sidebar search button: expand/collapse the filter row. Expanding
+    /// builds the input on this event path (an InputState needs a Window),
+    /// clears the term and focuses it; collapsing drops both.
+    pub fn toggle_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_filter_open = !self.sidebar_filter_open;
+        if self.sidebar_filter_open {
+            if self.filter_query.is_none() {
+                let query = cx.new(|cx| {
+                    gpui_component::input::InputState::new(window, cx)
+                        .placeholder(manox_i18n::t("chrome-sidebar-search-placeholder"))
+                });
+                let sub = cx.subscribe_in(
+                    &query,
+                    window,
+                    |_, _, _: &gpui_component::input::InputEvent, _w, cx| cx.notify(),
+                );
+                self._filter_sub = Some(sub);
+                self.filter_query = Some(query);
+            }
+            if let Some(query) = self.filter_query.clone() {
+                query.update(cx, |s, cx| {
+                    s.set_value("", window, cx);
+                    let handle = s.presentation().focus_handle().clone();
+                    window.focus(&handle, cx);
+                });
+            }
+        } else {
+            self._filter_sub = None;
+            self.filter_query = None;
+        }
+        cx.notify();
+    }
+
+    /// The current filter term (lowercased; `None` while the row is closed
+    /// or the term is empty — an empty term means no filtering).
+    pub fn sidebar_filter(&self, cx: &App) -> Option<String> {
+        if !self.sidebar_filter_open {
+            return None;
+        }
+        let value = self
+            .filter_query
+            .as_ref()?
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        (!value.is_empty()).then(|| value.to_lowercase())
+    }
+
     /// Group-drag marker update (drag-move path; the insertion line follows
     /// the pointer).
     pub fn set_group_drag_marker(&mut self, dragged: String, target: String, before: bool) {
@@ -275,16 +426,22 @@ impl Shell {
 
     /// Group reorder: insert `dragged` before/after `target`'s edge
     /// (same-name / same-place drops are ignored). Committing clears the
-    /// marker.
+    /// marker. A no-op in time grouping — drag order is a workspace-mode
+    /// concept only.
     pub fn move_group(&mut self, dragged: &str, target: &str, before: bool) {
         self.group_drag_marker = None;
-        if dragged == target {
+        if dragged == target || self.grouping == SidebarGrouping::Time {
             return;
         }
         // Materialize the current display order into `group_order` first
         // (unrecorded groups trail in default order), then move, so a first
         // drag never loses the existing relative order.
-        let current: Vec<String> = self.sidebar_props().1.into_iter().map(|g| g.name).collect();
+        let all: Vec<&SessionRow> = self.sessions.iter().collect();
+        let current: Vec<String> = self
+            .workspace_groups(&all)
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
         if self.group_order.is_empty() {
             self.group_order = current.clone();
         }
@@ -589,10 +746,47 @@ impl Shell {
         });
     }
 
-    /// Sidebar props (fixed rows + workspace groups + Customizations).
-    pub fn sidebar_props(&self) -> (Vec<FixedRow>, Vec<SessionGroup>, Vec<CustomizationRow>) {
+    /// Sidebar props (fixed rows + groups + Customizations). Groups follow
+    /// the sidebar's grouping mode; the filter term (the expanded search
+    /// row's input) narrows the rows and force-expands every surviving group.
+    pub fn sidebar_props(
+        &self,
+        cx: &App,
+    ) -> (Vec<FixedRow>, Vec<SessionGroup>, Vec<CustomizationRow>) {
+        let filter = self.sidebar_filter(cx);
+        let visible: Vec<&SessionRow> = self
+            .sessions
+            .iter()
+            .filter(|s| match &filter {
+                None => true,
+                Some(f) => {
+                    s.title.to_lowercase().contains(f)
+                        || s.workspace.to_lowercase().contains(f)
+                        || s.tag
+                            .as_deref()
+                            .is_some_and(|t| t.to_lowercase().contains(f))
+                }
+            })
+            .collect();
+        let mut groups: Vec<SessionGroup> = match self.grouping {
+            SidebarGrouping::Workspace => self.workspace_groups(&visible),
+            SidebarGrouping::Time => self.time_groups(&visible),
+        };
+        // While filtering, a group that matched hides nothing: the term is
+        // the visible structure, not the collapse toggles.
+        if filter.is_some() {
+            for g in &mut groups {
+                g.collapsed = false;
+            }
+        }
+        (self.fixed_rows.clone(), groups, self.customizations.clone())
+    }
+
+    /// Workspace grouping (the default): one group per project display name,
+    /// ordered by the recorded drag order, unrecorded groups trailing.
+    fn workspace_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
         let mut groups: Vec<SessionGroup> = Vec::new();
-        for s in &self.sessions {
+        for s in sessions {
             let collapsed = self.collapsed.iter().any(|k| k == &s.workspace);
             if let Some(g) = groups.iter_mut().find(|g| g.name == s.workspace) {
                 g.rows.push(s.row_data());
@@ -623,7 +817,40 @@ impl Shell {
                 (None, None) => std::cmp::Ordering::Equal,
             }
         });
-        (self.fixed_rows.clone(), groups, self.customizations.clone())
+        groups
+    }
+
+    /// Time grouping: four recency buckets by local natural day (today /
+    /// yesterday / last 7 days / earlier); unknown stamps (0) fall into
+    /// "earlier". Pinned rows lead each bucket, then the team sort stamp.
+    fn time_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
+        const BUCKET_KEYS: [&str; 4] = [
+            "chrome-group-today",
+            "chrome-group-yesterday",
+            "chrome-group-week",
+            "chrome-group-earlier",
+        ];
+        let mut groups: Vec<SessionGroup> = BUCKET_KEYS
+            .iter()
+            .map(|key| SessionGroup {
+                name: manox_i18n::t(key).to_string(),
+                collapsed: self.collapsed.iter().any(|k| *k == *key),
+                rows: Vec::new(),
+            })
+            .collect();
+        for s in sessions {
+            groups[time_bucket(s.updated_at)].rows.push(s.row_data());
+        }
+        for g in &mut groups {
+            g.rows.sort_by(|a, b| {
+                b.pinned
+                    .cmp(&a.pinned)
+                    .then(b.sort_stamp.cmp(&a.sort_stamp))
+                    .then(b.updated_at.cmp(&a.updated_at))
+            });
+        }
+        groups.retain(|g| !g.rows.is_empty());
+        groups
     }
 
     /// Session-picker open/close: records the anchor (the triggering click
@@ -974,11 +1201,15 @@ impl Shell {
 
     /// The sidebar view: shell session state → SessionList props.
     fn render_sidebar(&mut self, cx: &mut Context<Shell>) -> impl IntoElement {
-        let (fixed, groups, customizations) = self.sidebar_props();
+        let (fixed, groups, customizations) = self.sidebar_props(cx);
         let selected = self.active.clone();
         let hovered = self.hovered_row.clone();
         let has_chats = !self.sessions.is_empty();
         let marker = self.group_drag_marker.clone();
+        let grouping = self.grouping;
+        let filter_open = self.sidebar_filter_open;
+        let filter_active = self.sidebar_filter(cx).is_some();
+        let filter_input = self.filter_query.clone();
         let tag_edit = self
             .tag_edit
             .as_ref()
@@ -1059,6 +1290,19 @@ impl Shell {
                 cx.notify();
             },
         );
+        let on_toggle_grouping = cx.listener(|this, _: &ClickEvent, _w, cx| {
+            this.toggle_grouping();
+            cx.notify();
+        });
+        let on_toggle_search = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.toggle_sidebar_search(window, cx);
+        });
+        let on_filter_clear: crate::session_list::OnWindowApp = {
+            let this = cx.entity();
+            Rc::new(move |window, cx| {
+                this.update(cx, |this, cx| this.toggle_sidebar_search(window, cx));
+            })
+        };
 
         let width = self.sidebar_width;
 
@@ -1077,6 +1321,10 @@ impl Shell {
                 tag_edit,
                 title_box_w,
                 row_focus,
+                grouping,
+                filter_open,
+                filter_active,
+                filter_input,
                 on_select: std::rc::Rc::new(move |id, w, cx| on_select(id, w, cx)),
                 on_toggle_group: std::rc::Rc::new(move |name, w, cx| on_toggle_group(name, w, cx)),
                 on_new: std::rc::Rc::new(move |e, w, cx| on_new(e, w, cx)),
@@ -1088,6 +1336,9 @@ impl Shell {
                 }),
                 on_tag_edit_cancel: Some(on_tag_edit_cancel),
                 on_tag_rename: std::rc::Rc::new(move |id, w, cx| on_tag_rename(id, w, cx)),
+                on_toggle_grouping: std::rc::Rc::new(move |e, w, cx| on_toggle_grouping(e, w, cx)),
+                on_toggle_search: std::rc::Rc::new(move |e, w, cx| on_toggle_search(e, w, cx)),
+                on_filter_clear: Some(on_filter_clear),
                 on_move_group: std::rc::Rc::new(move |dragged, target, before, w, cx| {
                     on_move_group(&(dragged.clone(), target.clone(), before), w, cx)
                 }),
@@ -1222,4 +1473,25 @@ fn menu_icon(path: &'static str) -> gpui_component::Icon {
         .path(path)
         .small()
         .text_color(gpui::Hsla::from(FG_FAINT))
+}
+
+/// The time-grouping bucket for a last-active stamp, by local natural day:
+/// 0 = today, 1 = yesterday, 2 = last 7 days, 3 = earlier. Unknown stamps
+/// (0 unix secs) land in "earlier".
+fn time_bucket(updated_at: i64) -> usize {
+    use chrono::TimeZone as _;
+    if updated_at <= 0 {
+        return 3;
+    }
+    let Some(t) = chrono::Local.timestamp_opt(updated_at, 0).single() else {
+        return 3;
+    };
+    let today = chrono::Local::now().date_naive();
+    let day = t.date_naive();
+    match today.signed_duration_since(day).num_days() {
+        d if d <= 0 => 0,
+        1 => 1,
+        d if d < 7 => 2,
+        _ => 3,
+    }
 }

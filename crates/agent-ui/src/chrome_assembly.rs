@@ -19,7 +19,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use gpui::{App, AppContext as _, Context, Entity, WeakEntity, Window};
+use gpui::{
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Styled as _,
+    WeakEntity, Window,
+};
 use gpui_component::Root;
 use manox_agent_chrome_ui::right_pane::ToolTab;
 use manox_agent_chrome_ui::{
@@ -317,11 +320,15 @@ fn shell_config(
         }),
 
         panel_surface: Some(Arc::new(ThreadTerminalPanelSurface)),
+        // The fixed sidebar rows / Customizations block are still fake
+        // surfaces (Automations scheduling, plugin/MCP management pages
+        // don't exist here yet) — no fabricated badge/count, the chrome
+        // marks the rows unimplemented on its own.
         fixed_rows: vec![
             FixedRow {
                 icon: icons::CALENDAR,
                 label: manox_i18n::t("chrome-sidebar-automations"),
-                badge: Some("NEW".into()),
+                badge: None,
             },
             FixedRow {
                 icon: icons::COMMENT_DISCUSSION,
@@ -400,7 +407,58 @@ fn shell_config(
                     });
                 }
             })),
+            // ←/→ session history: the workspace owns the visited-thread
+            // stack; the hook reports the landed id so the shell's selection
+            // follows without re-deriving host state.
+            on_nav_back: Some(Box::new({
+                let ws = ws.clone();
+                move |w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        let landed = ws.nav_back(w, cx);
+                        cx.notify();
+                        landed
+                    })
+                }
+            })),
+            on_nav_forward: Some(Box::new({
+                let ws = ws.clone();
+                move |w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        let landed = ws.nav_forward(w, cx);
+                        cx.notify();
+                        landed
+                    })
+                }
+            })),
+            nav_avail: Some(Box::new({
+                let ws = ws.clone();
+                move |cx| ws.read(cx).nav_avail()
+            })),
+            // "Open in editor": hand the foreground thread's workspace to the
+            // plain VS Code launch (no injection, no restart prompts) — the
+            // same open -a semantics as the tools menu's 「打开」.
+            on_open_editor: Some(Box::new(|_w, _cx| {
+                let Some(cwd) = foreground_cwd() else {
+                    tracing::warn!("open-in-editor: no foreground workspace yet");
+                    return;
+                };
+                if let Err(e) = manox_ext_agents::vscode_app::launch_plain(Some(&cwd)) {
+                    tracing::warn!("open-in-editor failed: {e:#}");
+                }
+            })),
         },
+        // The titlebar's avatar slot wears the app's own mark.
+        brand: Some(Arc::new(|| {
+            gpui::div()
+                .size(gpui::px(13.))
+                .child(
+                    gpui::svg()
+                        .path("icons/manox.svg")
+                        .size_full()
+                        .text_color(manox_agent_chrome_ui::theme::BADGE_BLUE_FG),
+                )
+                .into_any_element()
+        })),
     }
 }
 

@@ -961,13 +961,17 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### ChromeShell
 
-应用壳根视图（`crates/manox-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px、侧栏开关、session 下拉选择器、VS 徽标、Sync 胶囊、面板/右栏开关、头像）+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为隐形 absolute 层（挂在根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（选中、分组折叠、分组拖排、下拉/行菜单）。
+应用壳根视图（`crates/manox-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px、侧栏开关、**←/→ 会话历史导航**（可用性由宿主经 `nav_avail` 查询钩子渲染期提供，无边可走时置灰惯性）、session 下拉选择器、**「在编辑器中打开」**（`on_open_editor` → 宿主 `launch_plain(前台 cwd)`）、面板/右栏开关、**品牌位**（`ShellConfig.brand` 注入的 app logo 元素工厂，None 回退通用字形；刻意非交互，留在窗口拖拽面））+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为隐形 absolute 层（挂在根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行、品牌位与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（选中、分组折叠、分组拖排、下拉/行菜单、**侧栏分组模式与过滤词**）。固定行（Automations/Chats）与 Customizations 块（Overview/MCP）**尚未实现**：整行 `FG_FAINT` 化 + hover「尚未实现」tooltip，保持 inert（2026-09-30 假控件清理：Run/split/右栏 split·external 已删——原版 Run 是 split-button、manox 无任务系统；Sync Changes 胶囊已删——git pull/push 集成另立特性）。
 
-> Source: `crates/manox-agent-chrome-ui/src/shell.rs`, `crates/manox-agent-chrome-ui/src/titlebar.rs`, `crates/manox-agent-chrome-ui/src/divider.rs`
+会话历史的权威栈在 `Workspace`（`nav_stack`/`nav_index`，cap 100）：用户发起的 `open_thread`（侧栏点击/下拉/菜单打开）追加并截断前进尾，fork 落地同样入栈；←/→ 移动指针不重复记录；successor 换代走 `open_thread_unrecorded` 不入栈。
+
+> Source: `crates/manox-agent-chrome-ui/src/shell.rs`, `crates/manox-agent-chrome-ui/src/titlebar.rs`, `crates/manox-agent-chrome-ui/src/divider.rs`, `crates/agent-ui/src/workspace/attach.rs`
 
 #### ChromeSessionList
 
 侧栏会话树（props 驱动，`crates/manox-agent-chrome-ui/src/session_list.rs`）：**三行 66px 行卡（2026-09-29 thread-item 设计稿）**——标题行（16px 状态槽 + 6px 间距 + 标题）、tag 行（短 id chip 恒首位 + 用户 tag chip）、info 行（仅最后活跃时间：72h 内相对、之外本地 `MM-DD HH:MM`），三行共用一条左基线、无任何右对齐内容、**不随项目层级缩进**（层级只由分组头与 leader chevron 表达）。行面上**零控件**：pin/archive/标签/复制 ID 全部收进右键菜单（`Shell::open_row_menu` 五项：置顶 toggle／归档 toggle／添加·重命名标签／移除标签／复制 ID；tag 内联编辑挂在 tag 行，Escape 取消、Enter/blur 提交、空值丢弃、10 字上限；双击用户 tag 芯片 = 老壳同款进入重命名编辑，短 id 芯片单击复制完整 id）。五态字形（`Errored` 红三角／`PendingAuth`·`PendingPlan` 实心 8px 蓝点／`Running` 像素积木 2×3 点阵 1820ms 阶梯循环（VS Code pixelSpinner grid 变体移植）／`Unread` 空心 6.5px 蓝点／`Idle` 空槽）。四态表面：未选中无背景、悬浮 `LIST_HOVER` + 标题转 500 字重 + **截断标题跑马灯**（双份标题 + 24px 间隔的无缝循环轨道：24px/s、每循环停 600ms、回绕点像素级相同无闪跳；仅 `is_hovered && title_truncated` 启动，移开复位；截断判定 = 与渲染器省略号同一套 `shape_text` 实测宽 vs `on_prepaint` 逐帧记录的剪裁盒宽）、选中白卡 + 15% 描边、键盘焦点 = `track_focus` + `focus_visible` 1.5px accent 环（↑/↓ 在可见行间移动焦点，行高四态一致不 reflow）；分组头可折叠并作为拖拽源/放置目标（2px accent 插入线）。
+
+头部右侧控件（2026-09-30 起为真控件）：**sort**（workspace ↔ 时间分组切换，时间模式下点亮；时间分组 = 本地自然日四桶「今天/昨天/最近 7 天/更早」，桶内置顶优先 + sort_stamp 降序；拖拽排序仅 workspace 模式有效）与 **search**（展开 header 下过滤行：InputState 过滤输入 + × 清空；title/project/tag 不区分大小写包含，无匹配组隐藏、过滤中强制展开，全滤空时显示「无匹配会话」提示；纯壳内显示态，不持久化）。
 
 > Source: `crates/manox-agent-chrome-ui/src/session_list.rs`, `crates/manox-agent-chrome-ui/src/shell.rs`
 
@@ -979,7 +983,7 @@ wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar
 
 #### ChromeRightPane
 
-右栏外壳（`crates/manox-agent-chrome-ui/src/right_pane.rs`）：圆角卡 + 页签条（**下划线式页签**：平面标签压在条带自身的 `border_b_1` 共享轨道上，激活项为 `ACCENT` + 半粗；一条**共享的下划线指示器**按激活 id 播放滑动动画，从旧页签横移到新页签）+ 新标签页空态（快捷操作由注册表生成）+ 打开/激活/关闭生命周期（最后一个页签关闭即收起）。
+右栏外壳（`crates/manox-agent-chrome-ui/src/right_pane.rs`）：圆角卡 + 页签条（**下划线式页签**：平面标签压在条带自身的 `border_b_1` 共享轨道上，激活项为 `ACCENT` + 半粗；一条**共享的下划线指示器**按激活 id 播放滑动动画，从旧页签横移到新页签；条右端仅「+」一个动作——再开一个激活 kind 的实例，2026-09-30 删除无语义的 split/external 假钮；**条行容器必须显式 `.flex()`**——gpui div 默认 block，缺了动作组会换行压进正文）+ 新标签页空态（快捷操作由注册表生成）+ 打开/激活/关闭生命周期（最后一个页签关闭即收起）。
 
 页签几何由 `on_prepaint` 实测上报（`TabBounds`，键为页签 id），指示器据此定位——标签宽度不一，无法由序号推出。注意 `on_prepaint` 上报的是**内容盒原点**（它挂的是 `canvas().absolute().size_full()` 子元素，padding 已计入），故记录时减去 `TAB_PL` 还原页签左边界；指示器与条带是**兄弟**（同在 relative wrapper 内）而非父子——gpui 的 `Style::paint` 先画子元素、**后画自身 border**，所以子元素永远压不住条带的 `border_b_1`，会只剩半截可见。wrapper 即指示器的包含块，其原点也就是 tab 几何的反基准坐标系。内容经 `ToolTab` 注入、kind 经 `ToolTabFactory` 注册；**实例级 id**（一种 kind 可多开）。**per-thread 会话**：`RightPaneSession{open, store, active_id, visible}` 整体 stash/restore（挂起走 `on_active(false)`——浏览器子视图隐藏、终端保活；仅显式关页签才拆内容）。快照经 `ToolTab::persist` / `ToolTabFactory::restore`（浏览器 `{"url"}`、编辑器空稿可恢复；终端与 CLI 会话不可复活，恢复时丢弃）落 `threads.db` 的 `thread_right_pane`。
 

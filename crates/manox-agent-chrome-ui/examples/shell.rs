@@ -113,7 +113,7 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             FixedRow {
                 icon: icons::CALENDAR,
                 label: manox_i18n::t("chrome-sidebar-automations"),
-                badge: Some("NEW".into()),
+                badge: None,
             },
             FixedRow {
                 icon: icons::COMMENT_DISCUSSION,
@@ -121,7 +121,6 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                 badge: None,
             },
         ],
-        // Count badges are visual fixtures of the replica, not live data.
         customizations: vec![
             CustomizationRow {
                 icon: icons::HOME,
@@ -136,12 +135,12 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             CustomizationRow {
                 icon: icons::SETTINGS_GEAR,
                 label: manox_i18n::t("chrome-sidebar-mcp"),
-                count: Some(1),
+                count: None,
             },
             CustomizationRow {
                 icon: icons::WAND,
                 label: manox_i18n::t("chrome-sidebar-skills"),
-                count: Some(13),
+                count: None,
             },
         ],
         hooks: HostHooks {
@@ -169,7 +168,12 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                     });
                 }
             })),
+            on_nav_back: None,
+            on_nav_forward: None,
+            nav_avail: None,
+            on_open_editor: None,
         },
+        brand: None,
     }
 }
 

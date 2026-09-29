@@ -643,6 +643,7 @@ impl gpui::Render for RightPane {
                         div()
                             .w_full()
                             .h(px(TAB_STRIP_H))
+                            .flex()
                             .flex_shrink_0()
                             .pl(px(STRIP_PL))
                             .pr(px(STRIP_PR))
@@ -660,34 +661,11 @@ impl gpui::Render for RightPane {
                                     .children(pills)
                                     .child(new_tab_pill(active.is_none(), on_new_tab)),
                             )
-                            .child(
-                                div()
-                                    .h_full()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(2.))
-                                    .child(icon_button(
-                                        "rp-add",
-                                        icons::ADD,
-                                        14.,
-                                        false,
-                                        move |e, w, cx| on_plus(e, w, cx),
-                                    ))
-                                    .child(icon_button(
-                                        "rp-split",
-                                        icons::SPLIT_HORIZONTAL,
-                                        14.,
-                                        false,
-                                        |_, _, _| {},
-                                    ))
-                                    .child(icon_button(
-                                        "rp-external",
-                                        icons::LINK_EXTERNAL,
-                                        14.,
-                                        false,
-                                        |_, _, _| {},
-                                    )),
-                            ),
+                            .child(div().h_full().flex().items_center().gap(px(2.)).child(
+                                icon_button("rp-add", icons::ADD, 14., false, move |e, w, cx| {
+                                    on_plus(e, w, cx)
+                                }),
+                            )),
                     )
                     // Sibling of the strip, inside the relative wrapper, so it
                     // paints over the strip's own bottom border.

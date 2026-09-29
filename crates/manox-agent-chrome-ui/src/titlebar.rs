@@ -1,7 +1,7 @@
 //! The single-row toolbar (38px) — [native traffic-light slot | sidebar
-//! toggle | ←/→ | session picker (fills the middle; opens the
-//! "search + 10 most recent" selector) | run/split | VS logo | the
-//! "Sync Changes 1↑" pill | layout toggles ×2 | account avatar].
+//! toggle | ←/→ session-history nav | session picker (fills the middle;
+//! opens the "search + 10 most recent" selector) | "open in editor" | layout
+//! toggles ×2 | app brand mark].
 //!
 //! Window dragging is carried by the toolbar's empty space
 //! (`app_owns_titlebar_drag = true`): a row-level mouse-down moves the
@@ -44,6 +44,19 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
         this.right.update(cx, |pane, cx| pane.toggle_visible(cx));
         cx.notify();
     });
+    let nav_back = cx.listener(|this, _: &ClickEvent, window, cx| {
+        this.nav_back(window, cx);
+        cx.notify();
+    });
+    let nav_forward = cx.listener(|this, _: &ClickEvent, window, cx| {
+        this.nav_forward(window, cx);
+        cx.notify();
+    });
+    let open_editor = cx.listener(|this, _: &ClickEvent, window, cx| {
+        this.open_editor(window, cx);
+        cx.notify();
+    });
+    let (can_back, can_forward) = shell.nav_avail(cx);
 
     div()
         .id("titlebar")
@@ -74,71 +87,35 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
             shell.show_sidebar,
             move |e, w, cx| toggle_sidebar(e, w, cx),
         ))
-        .child(icon_button(
+        // Session-history navigation: a move with no edge behind/ahead stays
+        // inert and paints dimmed (the host's history stack owns the edges).
+        .child(nav_button(
             "tb-back",
             icons::ARROW_LEFT,
-            14.,
-            false,
-            |_, _, _| {},
+            can_back,
+            "chrome-titlebar-back",
+            move |e, w, cx| nav_back(e, w, cx),
         ))
-        .child(icon_button(
+        .child(nav_button(
             "tb-fwd",
             icons::ARROW_RIGHT,
-            14.,
-            false,
-            |_, _, _| {},
+            can_forward,
+            "chrome-titlebar-forward",
+            move |e, w, cx| nav_forward(e, w, cx),
         ))
         // The session picker: fills the middle span, click opens the
         // selector.
         .child(session_picker(shell, cx))
-        .child(icon_button("tb-run", icons::PLAY, 14., false, |_, _, _| {}))
-        .child(icon_button(
-            "tb-split",
-            icons::SPLIT_HORIZONTAL,
-            14.,
-            false,
-            |_, _, _| {},
-        ))
-        // The VS logo block stays non-interactive: it remains part of the
-        // window-drag surface.
+        // "Open in editor": hands the foreground session's workspace to the
+        // host (which launches the user's editor against it).
         .child(
-            div()
-                .size(px(18.))
-                .rounded(px(4.))
-                .bg(ACCENT)
-                .text_color(crate::theme::BADGE_BLUE_FG)
-                .flex()
-                .items_center()
-                .justify_center()
-                .flex_shrink_0()
-                .child(icon(icons::CODE, 12.)),
-        )
-        // The "Sync Changes" + 1↑ pill.
-        .child(
-            div()
-                .id("tb-sync")
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .h(px(24.))
-                .px(px(8.))
-                .gap(px(5.))
-                .rounded(px(5.))
-                .bg(ACCENT)
-                .text_color(crate::theme::BADGE_BLUE_FG)
-                .flex()
-                .items_center()
-                .flex_shrink_0()
-                .child(icon(icons::SYNC, 13.))
-                .child(div().child(manox_i18n::t("chrome-titlebar-sync")))
-                .child(
-                    div()
-                        .px(px(4.))
-                        .rounded(px(6.))
-                        .bg(rgba(0xFFFFFF40))
-                        .text_size(px(10.5))
-                        .flex()
-                        .items_center()
-                        .child("1↑"),
-                ),
+            icon_button("tb-editor", icons::CODE, 13., false, move |e, w, cx| {
+                open_editor(e, w, cx)
+            })
+            .tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new(manox_i18n::t("chrome-titlebar-open-editor"))
+                    .build(window, cx)
+            }),
         )
         .child(icon_button(
             "tb-panel",
@@ -155,22 +132,66 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
             shell.right.read(cx).visible,
             move |e, w, cx| toggle_right(e, w, cx),
         ))
-        // Account avatar.
+        // The app brand mark: a deliberate non-interactive slot (part of the
+        // window-drag surface); the host injects the mark, the shell keeps a
+        // generic glyph as the fallback.
         .child(
             div()
-                .id("tb-avatar")
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .size(px(22.))
                 .rounded_full()
-                .bg(rgba(0x7099D8FF))
+                .bg(ACCENT)
                 .text_color(crate::theme::BADGE_BLUE_FG)
                 .flex()
                 .items_center()
                 .justify_center()
                 .flex_shrink_0()
-                .child(icon(icons::ACCOUNT, 13.)),
+                .children(match shell.brand_element() {
+                    Some(el) => vec![el],
+                    None => vec![
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon(icons::CODE, 12.))
+                            .into_any_element(),
+                    ],
+                }),
         )
         .into_any_element()
+}
+
+/// A session-history nav button: live when the move has an edge to land on,
+/// a dimmed inert glyph otherwise (still explaining itself on hover).
+fn nav_button(
+    id: &'static str,
+    glyph: crate::theme::Icon,
+    enabled: bool,
+    tooltip_key: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    if enabled {
+        icon_button(id, glyph, 14., false, on_click)
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(manox_i18n::t(tooltip_key)).build(window, cx)
+            })
+            .into_any_element()
+    } else {
+        div()
+            .id(id)
+            .py(px(6.))
+            .px(px(12.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(FG_FAINT)
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(manox_i18n::t(tooltip_key)).build(window, cx)
+            })
+            .child(icon(glyph, 14.))
+            .into_any_element()
+    }
 }
 
 /// The session picker (trigger + dropdown panel). The trigger row: a folder

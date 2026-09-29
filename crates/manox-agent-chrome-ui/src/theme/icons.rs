@@ -8,7 +8,6 @@ use gpui::{IntoElement, ParentElement, Styled, div, px};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Icon(pub &'static str);
 
-pub const ACCOUNT: Icon = Icon("\u{eb99}");
 pub const ACTIVATE_BREAKPOINTS: Icon = Icon("\u{ea97}");
 pub const ADD: Icon = Icon("\u{ea60}");
 pub const ARCHIVE: Icon = Icon("\u{ea98}");
@@ -105,7 +104,6 @@ pub const NEW_FOLDER: Icon = Icon("\u{ea80}");
 pub const OPEN_PREVIEW: Icon = Icon("\u{eb28}");
 pub const OUTPUT: Icon = Icon("\u{eb9d}");
 pub const PIN: Icon = Icon("\u{eb2b}");
-pub const PLAY: Icon = Icon("\u{eb2c}");
 pub const PLUG: Icon = Icon("\u{eb2d}");
 pub const PREVIEW: Icon = Icon("\u{eb2f}");
 pub const PRIMITIVE_SQUARE: Icon = Icon("\u{ea72}");
@@ -126,12 +124,10 @@ pub const SEND: Icon = Icon("\u{ec0f}");
 pub const SORT_PRECEDENCE: Icon = Icon("\u{eb55}");
 pub const SOURCE_CONTROL: Icon = Icon("\u{ea68}");
 pub const SPARKLE: Icon = Icon("\u{ec10}");
-pub const SPLIT_HORIZONTAL: Icon = Icon("\u{eb56}");
 pub const STAR_FULL: Icon = Icon("\u{eb59}");
 pub const STOP_CIRCLE: Icon = Icon("\u{eba5}");
 pub const SYMBOL_FILE: Icon = Icon("\u{eb60}");
 pub const SYMBOL_METHOD: Icon = Icon("\u{ea8c}");
-pub const SYNC: Icon = Icon("\u{ea77}");
 pub const TERMINAL: Icon = Icon("\u{ea85}");
 pub const THREE_BARS: Icon = Icon("\u{eb6a}");
 pub const THUMBSDOWN: Icon = Icon("\u{eb6b}");
