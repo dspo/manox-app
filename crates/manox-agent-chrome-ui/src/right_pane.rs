@@ -643,6 +643,7 @@ impl gpui::Render for RightPane {
                         div()
                             .w_full()
                             .h(px(TAB_STRIP_H))
+                            .flex()
                             .flex_shrink_0()
                             .pl(px(STRIP_PL))
                             .pr(px(STRIP_PR))
