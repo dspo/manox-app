@@ -761,13 +761,17 @@ fn title_line(
     } else {
         FontWeight::NORMAL
     };
-    let text_w = measure_line(window, &data.title, px(TITLE_SIZE), weight);
+    let text_w = natural_title_width(window, &data.title, weight);
     let box_w = list
         .title_box_w
         .borrow()
         .get(&data.id)
         .copied()
         .unwrap_or(px(0.));
+    // The same comparison the text element runs before eliding (shape the
+    // natural line, compare against the clip width) — see
+    // `natural_title_width`; the marquee therefore triggers exactly when the
+    // "…" suffix does.
     let truncated = box_w > px(0.) && text_w > box_w;
     let color = if selected { FG_STRONG } else { FG };
 
@@ -852,9 +856,21 @@ fn title_line(
     }
 }
 
-/// Natural (unclipped) width of one line of the UI font — the marquee's
-/// truncation probe.
-fn measure_line(window: &Window, text: &str, font_size: Pixels, weight: FontWeight) -> Pixels {
+/// Natural (unclipped) width of the title line — the marquee's truncation
+/// probe, and the SAME expression the text element runs before eliding
+/// (`elements/text.rs`: shape the natural line via `shape_text`, then
+/// compare `line.size(line_height).width` against the clip width). Reusing
+/// the renderer's own shaping entry point and width accessor keeps the
+/// marquee trigger and the "…" suffix one decision; the run mirrors the
+/// title div's resolved style (root font family + state weight + size), the
+/// one piece gpui does not expose from an element-build context. A shaping
+/// failure degrades to width 0 (marquee off, the rendered ellipsis stays
+/// authoritative).
+fn natural_title_width(window: &Window, text: &str, weight: FontWeight) -> Pixels {
+    let font_size = px(TITLE_SIZE);
+    // Only feeds WrappedLine::size's height; width is line-height
+    // independent. 1.28 is the shell root's relative line height.
+    let line_height = px(TITLE_SIZE * 1.28);
     let run = gpui::TextRun {
         len: text.len(),
         font: gpui::Font {
@@ -869,8 +885,10 @@ fn measure_line(window: &Window, text: &str, font_size: Pixels, weight: FontWeig
     };
     window
         .text_system()
-        .layout_line(text, font_size, &[run], None)
-        .width
+        .shape_text(text.into(), font_size, &[run], None, None)
+        .ok()
+        .and_then(|lines| lines.first().map(|line| line.size(line_height).width))
+        .unwrap_or(px(0.))
 }
 
 /// The running pixel grid: 2×3 dots inside a 16×16 clipped container. The
