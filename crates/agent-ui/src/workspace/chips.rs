@@ -432,6 +432,13 @@ impl Workspace {
                 return;
             }
         }
+        // The fold no longer carries the request (settled elsewhere, or the
+        // answer raced its own decision row). Answering nothing here is the
+        // right wire behavior — but silently it is a dead end to debug.
+        tracing::warn!(
+            request_id = %id,
+            "ask answer dropped: no matching open request in the fold"
+        );
         cx.notify();
     }
 
