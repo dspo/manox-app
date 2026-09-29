@@ -1179,20 +1179,14 @@ impl Workspace {
             return (a, b);
         };
         let repaint = cx.observe(&store, |this, store, cx| {
-            // Live ask edge: the fold's open elicitation IS the pending ask —
-            // v2 learned of asks from the ThreadEvent stream, and here the
-            // session's input-needed list is the source of truth. A new
-            // request id seeds the interactive card (synthesizing its
-            // ToolCall item); a request that left the fold retires a
-            // live-seeded card. Runs before the drain so the rebuild's
-            // early return can never starve it.
-            this.sync_live_ask(&store, cx);
             // Snapshot → transcript transition: the attach-time rebuild ran
             // against an empty fold (the chat snapshot lands asynchronously
             // after subscribe), so the hero screen would stick forever. The
-            // moment the foreground chat has turns and the conversation is
-            // still empty, rebuild from the snapshot — and discard the
-            // drained deltas (they are already inside it).
+            // moment the fold holds anything displayable — settled turns, or
+            // a first turn still in flight (`active_turn`, whose content
+            // synth_display lowers the same way) — and the conversation is
+            // still empty, rebuild from the snapshot. The drained deltas are
+            // already inside it, so the drain skips one round.
             let snapshot_ready = this
                 .chat
                 .read(cx)
@@ -1202,11 +1196,21 @@ impl Workspace {
                     let view = store.read(cx);
                     crate::ahp_store::leaf(&view.book, &sid)
                         .chat
-                        .map(|c| !c.turns.is_empty())
+                        .map(|c| !c.turns.is_empty() || c.active_turn.is_some())
                 })
                 .unwrap_or(false);
+            let mut rebuilt = false;
             if snapshot_ready && this.chat_conversation(cx).read(cx).is_empty(cx) {
                 this.rebuild_conversation_from_book(cx);
+                rebuilt = true;
+            }
+            // Live ask edge: the fold's open elicitation IS the pending ask.
+            // Runs AFTER the rebuild so a freshly seeded card lands on the
+            // rebuilt conversation instead of the empty skeleton it replaces
+            // (seeding first would make the skeleton non-empty and starve
+            // the rebuild forever).
+            this.sync_live_ask(&store, cx);
+            if rebuilt {
                 return;
             }
             // Live streaming leg: the pump folded chat actions into the book;
