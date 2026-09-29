@@ -164,75 +164,59 @@ def main():
         src = open(os.path.join(DIR, "a-static.svg")).read()
         check("terminal tab body rendered in static sheet", "cargo run" in src)
 
-        # ── 5b. underline tabs (design proposal) ───────────────────────────
-        print("\n[g/h-underline] underline tab strip")
-        for f, expect in (("g-underline-terminal.svg", "cargo run"),
-                          ("h-underline-browser.svg", "example.com")):
-            load(pg, f)
-            src = open(os.path.join(DIR, f)).read()
-            check(f"{f} body matches its active tab", expect in src)
-            # exactly one indicator rect, sitting on the rail
-            ind = pg.evaluate("""() => {
-                const r = document.querySelector('.ind');
-                if (!r) return null;
-                const b = r.getBBox();
-                return {x: b.x, y: b.y, w: b.width, h: b.height};
-            }""")
-            check(f"{f} has one indicator", ind is not None, str(ind))
-            if ind:
-                check(f"{f} indicator is a thin bar",
-                      ind["h"] <= 3.5 and ind["w"] > 40,
-                      f"w={ind['w']:.0f} h={ind['h']:.0f}")
-            # tabs are focusable links, so the strip is keyboard-reachable
-            n_links = pg.evaluate(
-                "() => document.querySelectorAll('a.tab-btn').length")
-            check(f"{f} tabs are links", n_links == 2, f"{n_links} links")
-            # exactly one tab painted active (accent) per sheet
-            actives = pg.evaluate("""() => {
-                const out = [];
-                document.querySelectorAll('a.tab-btn text').forEach(t => {
-                    if (getComputedStyle(t).fill.replace(/ /g,'') === 'rgb(0,105,204)')
-                        out.push(t.textContent);
-                });
-                return out;
-            }""")
-            check(f"{f} exactly one active tab", len(actives) == 1, str(actives))
-            # clicking really switches state (indicator + tint + body)
-            pg.query_selector_all("a.tab-btn")[1].click()
-            pg.wait_for_timeout(250)
-            sw = pg.evaluate("""() => {
-                const t = n => document.querySelector('.u-strip .t-' + n + ' text');
-                const v = [...document.querySelectorAll('g.u-state')]
-                    .filter(x => getComputedStyle(x).display !== 'none')
-                    .map(x => x.getAttribute('class').replace('u-state ', ''));
-                return {states: v,
-                        term: getComputedStyle(t('terminal')).fill.replace(/ /g,''),
-                        brow: getComputedStyle(t('browser')).fill.replace(/ /g,'')};
-            }""")
-            check(f"{f} click shows Browser state",
-                  sw["states"] == ["u-browser"], str(sw["states"]))
-            check(f"{f} click retints labels",
-                  sw["brow"] == "rgb(0,105,204)" and sw["term"] == "rgb(96,96,96)",
-                  f"browser={sw['brow']} terminal={sw['term']}")
-            pg.query_selector_all("a.tab-btn")[0].click()
-            pg.wait_for_timeout(250)
-            back = pg.evaluate("""() => [...document.querySelectorAll('g.u-state')]
-                .filter(x => getComputedStyle(x).display !== 'none')
-                .map(x => x.getAttribute('class').replace('u-state ', ''))""")
-            check(f"{f} click returns to Terminal state",
-                  back == ["u-terminal"], str(back))
+        # ── 5c. consolidated sheet: every interaction in one file ─────────
+        print("\n[i-interactive] consolidated single-file sheet")
+        load(pg, "i-interactive.svg")
 
-            # close affordance hidden at rest (revealed on hover).
-            # Move the pointer off the strip first — the click above leaves the
-            # mouse over the tab, which correctly reveals the close button.
-            pg.mouse.move(60, 700)
+        def vis(sel):
+            return pg.evaluate("""(sel) => [...document.querySelectorAll(sel)]
+                .filter(x => getComputedStyle(x).display !== 'none')
+                .map(x => x.getAttribute('data-name'))""", sel)
+
+        check("tab default is terminal", vis('[data-group=tab]') == ['terminal'],
+              str(vis('[data-group=tab]')))
+        check("no group fold at rest", vis('[data-group=grp]') == [],
+              str(vis('[data-group=grp]')))
+
+        tabs = pg.query_selector_all(".strip a")
+        check("two clickable tab links", len(tabs) == 2, str(len(tabs)))
+        tabs[1].click(); pg.wait_for_timeout(250)
+        check("click -> browser tab", vis('[data-group=tab]') == ['browser'],
+              str(vis('[data-group=tab]')))
+        check("browser label tinted accent",
+              pg.eval_on_selector(".t-browser text", "e=>getComputedStyle(e).fill")
+                .replace(" ", "") == "rgb(0,105,204)")
+        check("terminal label dimmed",
+              pg.eval_on_selector(".t-terminal text", "e=>getComputedStyle(e).fill")
+                .replace(" ", "") == "rgb(96,96,96)")
+        tabs[0].click(); pg.wait_for_timeout(250)
+        check("click -> back to terminal", vis('[data-group=tab]') == ['terminal'],
+              str(vis('[data-group=tab]')))
+
+        # group folds
+        for anc, key in (("#a-g-manox", "manox"), ("#a-g-chen", "chen"),
+                         ("#a-g-cust", "cust")):
+            pg.goto("file://" + os.path.join(DIR, "i-interactive.svg") + anc)
             pg.wait_for_timeout(200)
-            op = pg.evaluate("""() => {
-                const c = document.querySelector('.tab-close');
-                return c ? getComputedStyle(c).opacity : null;
-            }""")
-            check(f"{f} close hidden at rest", op is not None and float(op) < 0.1,
-                  f"opacity={op}")
+            check(f"{anc} folds only its group", vis('[data-group=grp]') == [key],
+                  str(vis('[data-group=grp]')))
+
+        # Regression: the base header must show the EXPANDED chevron at rest.
+        # Both chevrons were once painted because the `.chev-closed` hiding
+        # rule was dropped when group collapse moved to overpainting.
+        load(pg, "i-interactive.svg")
+        chev = pg.evaluate("""() => ({
+            open:   [...document.querySelectorAll('.grp-head .chev-open')]
+                      .filter(e => getComputedStyle(e).display !== 'none').length,
+            closed: [...document.querySelectorAll('.grp-head .chev-closed')]
+                      .filter(e => getComputedStyle(e).display !== 'none').length,
+        })""")
+        check("one expanded chevron per header at rest",
+              chev["closed"] == 0 and chev["open"] >= 3, str(chev))
+
+        check("consolidated sheet has css + smil",
+              "<style" in open(os.path.join(DIR, "i-interactive.svg")).read()
+              and pg.evaluate("() => document.querySelectorAll('animate').length") > 0)
 
         # ── 6. no <script> anywhere (the <img> constraint) ─────────────────
         print("\n[all] declarative-only constraint")

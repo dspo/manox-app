@@ -259,31 +259,61 @@ INTERACTION_CSS = """
 
     .ind { transition: all .25s cubic-bezier(.4,0,.2,1); }
 
-    /* Tab state switching, CSS-only. The anchors must be SIBLINGS of the
-       switching groups (a `:target` nested in a wrapper cannot reach out of
-       it), so the generator emits the anchors immediately before them.
-       Only the INDICATOR and the BODY switch — the strip is drawn once above,
-       so every tab link stays clickable in every state. Duplicating the strip
-       per state made the hidden copies render as extra "active" labels and
-       left the visible one unreachable after a switch. */
-    .u-state { display: none; }
-    .u-default { display: inline; }
-    #u-terminal:target ~ .u-default,
-    #u-browser:target  ~ .u-default { display: none; }
-    #u-terminal:target ~ .u-terminal { display: inline; }
-    #u-browser:target  ~ .u-browser  { display: inline; }
+    /* ── CSS-only state switching ────────────────────────────────────────
+       A switchable element is `.state[data-group][data-name]`, revealed by
+       the matching `#anchor:target`. The anchor MUST be a sibling of the
+       element it reveals, because `#id:target ~ .x` cannot reach out of a
+       wrapper — so the generator emits all anchors together, then all states.
 
-    /* The active tab's tint follows the same anchors. A presentation
-       attribute (`fill="#606060"`) is weaker than any CSS declaration, so
-       these rules win without needing !important. */
-    #u-terminal:target ~ .u-strip .t-browser text,
-    #u-browser:target  ~ .u-strip .t-terminal text { fill: #606060; font-weight: 400; }
-    #u-terminal:target ~ .u-strip .t-terminal text,
-    #u-browser:target  ~ .u-strip .t-browser text { fill: #0069CC; font-weight: 600; }
-    #u-terminal:target ~ .u-strip .t-browser use,
-    #u-browser:target  ~ .u-strip .t-terminal use { fill: #606060; }
-    #u-terminal:target ~ .u-strip .t-terminal use,
-    #u-browser:target  ~ .u-strip .t-browser use { fill: #0069CC; }
+       Grouping by data attribute (not by id) keeps the CSS fixed as states
+       are added: only the generator grows. */
+
+    .state { display: none; }                      /* hidden until targeted */
+    .state-default { display: inline; }            /* the group's resting state */
+
+    /* A group's default hides as soon as ANY member of that group is
+       targeted, so exactly one state of each group is ever visible. */
+    #a-tab-terminal:target ~ .state-default[data-group="tab"],
+    #a-tab-browser:target  ~ .state-default[data-group="tab"],
+    #a-g-manox:target      ~ .state-default[data-group="grp"],
+    #a-g-chen:target       ~ .state-default[data-group="grp"],
+    #a-g-cust:target       ~ .state-default[data-group="grp"],
+    #a-dock-open:target    ~ .state-default[data-group="dock"],
+    #a-dock-closed:target  ~ .state-default[data-group="dock"] { display: none; }
+
+    /* Each named state appears only for its own anchor. */
+    #a-tab-terminal:target ~ [data-group="tab"][data-name="terminal"],
+    #a-tab-browser:target  ~ [data-group="tab"][data-name="browser"],
+    #a-g-manox:target      ~ [data-group="grp"][data-name="manox"],
+    #a-g-chen:target       ~ [data-group="grp"][data-name="chen"],
+    #a-g-cust:target       ~ [data-group="grp"][data-name="cust"],
+    #a-dock-open:target    ~ [data-group="dock"][data-name="open"],
+    #a-dock-closed:target  ~ [data-group="dock"][data-name="closed"] {
+      display: inline;
+    }
+
+    /* Active tab tint follows the same anchors. A presentation attribute
+       (`fill="#606060"`) is weaker than any CSS declaration, so these win
+       without !important. */
+    #a-tab-terminal:target ~ .strip .t-terminal text,
+    #a-tab-browser:target  ~ .strip .t-browser text { fill: #0069CC; font-weight: 600; }
+    #a-tab-terminal:target ~ .strip .t-browser text,
+    #a-tab-browser:target  ~ .strip .t-terminal text { fill: #606060; font-weight: 400; }
+    #a-tab-terminal:target ~ .strip .t-terminal use,
+    #a-tab-browser:target  ~ .strip .t-browser use { fill: #0069CC; }
+    #a-tab-terminal:target ~ .strip .t-browser use,
+    #a-tab-browser:target  ~ .strip .t-terminal use { fill: #606060; }
+
+    /* Collapsed sidebar groups: the state group paints over the expanded
+       header chevron and the group's rows with the shell colour, then draws
+       the collapsed chevron. Overpainting (rather than hiding the originals)
+       is deliberate: the originals sit EARLIER in the document than the
+       anchors, so no `~` selector can reach them, while the state group is a
+       following sibling.
+
+       The base header therefore draws the expanded chevron ONLY; the
+       collapsed one is drawn by the state group. */
+    .chev-closed { display: none; }
 """
 
 

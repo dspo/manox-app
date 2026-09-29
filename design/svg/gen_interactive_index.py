@@ -27,8 +27,8 @@ figs_ = [
     ("d-collapsed.svg", "分组折叠", "manox 组收起（:target 状态）"),
     ("e-running.svg", "运行态动画", "呼吸点 + 三格跳动 + 8 帧 braille spinner"),
     ("f-tab-browser.svg", "页签切换", "出厂药丸页签：Browser 激活，终端转非激活"),
-    ("g-underline-terminal.svg", "下划线页签 · Terminal", "设计提案：扁平文字 + 2px 强调下划线"),
-    ("h-underline-browser.svg", "下划线页签 · Browser", "点页签可真切换（:target，零脚本）"),
+    ("i-interactive.svg", "★ 单文件交互版（推荐）",
+     "一个文件里同时有：页签切换 / 分组折叠 / 全部 hover / 三个动画"),
 ]
 for name, title, desc in figs_:
     add(rect(fx, fy - 13, 20, 18, fill=ICON_ON_BG, rx=4))

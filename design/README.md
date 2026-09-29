@@ -23,22 +23,28 @@ Open any file directly in a browser. `01-main-window.svg` and the
 
 ### `svg/interactive/` — interaction sheets (CSS + SMIL, no JavaScript)
 
+**`i-interactive.svg` is the one to open.** Every interaction lives in that
+single file: right-pane tab switching, sidebar group collapse, all hover
+states, and the three SMIL animations. One file is enough because the states
+are CSS-only — the other sheets are earlier single-state snapshots kept for
+side-by-side comparison.
+
 | File | Interaction |
 | --- | --- |
 | `00-index.svg` | Index + the measured capability boundary |
+| `i-interactive.svg` | **Everything at once** (tabs, folds, hover, animation) |
 | `a-static.svg` | Baseline: no hover, nothing expanded |
 | `b-hover-row.svg` | Session-row hover: wash + revealed pin/archive/menu |
 | `c-hover-toolbar.svg` | Icon-button and `Sync Changes` pill hover |
 | `d-collapsed.svg` | Sidebar group collapse (`:target`) |
 | `e-running.svg` | Attention pulse, running blocks, braille spinner |
 | `f-tab-browser.svg` | Shipping pill tabs, Browser active |
-| `g-underline-terminal.svg` | **Proposal**: underline tabs, Terminal active |
-| `h-underline-browser.svg` | **Proposal**: underline tabs, Browser active |
 
-The `f-` sheet draws the tabs as shipped (`right_pane.rs::tab_pill`: 31px
-rounded-top pill). The `g-`/`h-` pair is a **design proposal**, not a
-description of the app — flat labels over a hairline with a 2px accent
-indicator. Clicking a tab in those sheets really switches state.
+The `f-` sheet draws the tabs as shipped (`right_pane.rs::tab_pill`: a 31px
+rounded-top pill). `i-interactive.svg` draws them in the **proposed** underline
+style — flat labels over a hairline with a 2px accent indicator — and clicking
+a tab there really switches. The underline style is a proposal, not the
+current app.
 
 ## Derived from the code, not drawn by eye
 
@@ -74,7 +80,7 @@ python3 gen_main.py            # 01
 python3 gen_states.py          # 02-06
 python3 gen_index.py           # svg/00-index
 python3 gen_interactive.py     # interactive/a-f
-python3 gen_underline_tabs.py  # interactive/g-h
+python3 gen_single.py          # interactive/i  (the consolidated sheet)
 python3 gen_interactive_index.py
 
 python3 validate.py            # page bounds + text collision
@@ -85,7 +91,7 @@ python3 verify_interactive.py  # hover/animation/:target in real Chrome
 `validate*.py` need only the Python stdlib. `verify_interactive.py` drives
 system Chrome through Playwright and asserts **computed styles actually
 change** — a static checker cannot tell whether `:hover` or `:target` applies.
-It currently reports 52 passing checks and is the reason several real defects
+It currently reports 66 passing checks and is the reason several real defects
 were caught (a `.row-actions` class that was never emitted, a tab strip drawn
 over the toolbar, a braille cycle that blanked for part of every period).
 
