@@ -344,19 +344,28 @@ fn shell_config(
                     handle.with_mut(|t| t.set_pinned(!was));
                 }
             })),
-            // The menu's 归档/取消归档 toggle: flip the CURRENT partition flag
-            // (the store partitions active/archived, so whichever list holds
-            // the id names the state; an unknown id stays a no-op).
+            // The menu's archive toggle flips the CURRENT partition.
+            // Premise: the wire snapshot rides the ACTIVE partition only, so
+            // every row the shell sees is unarchived and the unarchive half
+            // is for the archived-partition rows the wire will grow. The
+            // store journals a decision (and fires SessionEnd) even for a
+            // missing id, so an unknown id is refused here instead of
+            // written — callers pass live rows only.
             on_archive: Some(Box::new(|id, _w, _cx| {
                 let store = manox_agent::thread_store_global();
                 let archived = store.read(|st| {
                     if st.summaries().iter().any(|s| s.id.as_str() == id) {
-                        false
+                        Some(false)
                     } else {
-                        st.archived_summaries().iter().any(|s| s.id.as_str() == id)
+                        st.archived_summaries()
+                            .iter()
+                            .any(|s| s.id.as_str() == id)
+                            .then_some(true)
                     }
                 });
-                store.with_mut(|st| st.archive_thread(id, !archived));
+                if let Some(archived) = archived {
+                    store.with_mut(|st| st.archive_thread(id, !archived));
+                }
             })),
             // Thread-tag write-back (`None` clears) — the same store write
             // the sidebar's SetThreadTag event lands on.

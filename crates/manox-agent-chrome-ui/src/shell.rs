@@ -39,9 +39,13 @@ pub struct SessionRow {
     /// Workspace (project) display name — the grouping key.
     pub workspace: String,
     pub status: SessionStatus,
-    /// Last-active unix seconds — the info line's display source AND the
-    /// local re-sort stamp after a pin flip (one field, one truth).
+    /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
+    /// The re-sort stamp: the row's own `updated_at`, except team members
+    /// inherit their leader's, so a team sorts as one unit and stays
+    /// contiguous through the pinned-first re-order (the chevron keeps
+    /// pointing at its members).
+    pub sort_stamp: i64,
     pub pinned: bool,
     /// The store-partition flag the archive/unarchive menu toggle reads.
     pub archived: bool,
@@ -56,21 +60,31 @@ impl SessionRow {
     /// the shell's row carrier. The projection emits wire order (recency)
     /// already and every row carries its real `updated_at`.
     pub fn from_group(group: crate::session_list::SessionGroup) -> Vec<SessionRow> {
-        group
-            .rows
-            .into_iter()
-            .map(|r| SessionRow {
+        // The projection trails each leader with its members; stamping
+        // members with their leader's stamp keeps the team contiguous
+        // through the pinned-first re-sort. (A flattened orphan trailing a
+        // team inherits that team's stamp — transient only, the next wire
+        // snapshot re-establishes the projection order.)
+        let mut rows = Vec::with_capacity(group.rows.len());
+        let mut unit_stamp = None;
+        for r in group.rows {
+            if r.team_leader {
+                unit_stamp = Some(r.updated_at);
+            }
+            rows.push(SessionRow {
                 id: r.id,
                 title: r.title,
                 workspace: group.name.clone(),
                 status: r.status,
                 updated_at: r.updated_at,
+                sort_stamp: unit_stamp.unwrap_or(r.updated_at),
                 pinned: r.pinned,
                 archived: r.archived,
                 tag: r.tag,
                 team_leader: r.team_leader,
-            })
-            .collect()
+            });
+        }
+        rows
     }
 
     fn row_data(&self) -> SessionRowData {
@@ -570,12 +584,13 @@ impl Shell {
         }
     }
 
-    /// Pinned first, then by update time descending.
+    /// Pinned first, then by the team-unit sort stamp descending (see
+    /// `SessionRow::sort_stamp`).
     fn sort_sessions(&mut self) {
         self.sessions.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)
-                .then(b.updated_at.cmp(&a.updated_at))
+                .then(b.sort_stamp.cmp(&a.sort_stamp))
         });
     }
 
@@ -978,7 +993,7 @@ impl Shell {
         // Focus handles track the VISIBLE row set: prune the stale ids, then
         // create on demand so every painted row is focusable and the
         // up/down walk has stable handles across frames.
-        let visible: Vec<String> = groups
+        let visible: std::collections::HashSet<String> = groups
             .iter()
             .flat_map(|g| (!g.collapsed).then(|| g.rows.iter().map(|r| r.id.clone())))
             .flatten()
@@ -990,6 +1005,10 @@ impl Shell {
         }
         self.row_focus = focus;
         let row_focus = Rc::new(self.row_focus.clone());
+        // Title clip widths of rows that left the list stop accumulating.
+        self.title_box_w
+            .borrow_mut()
+            .retain(|k, _| visible.contains(k));
 
         let on_select = cx.listener(|this, id: &String, w, cx| {
             let id = id.clone();

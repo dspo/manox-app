@@ -121,6 +121,13 @@ mod tests {
             "icons/grip-vertical.svg",
             "icons/image.svg",
             "icons/pencil.svg",
+            // The row-menu glyphs: not in the gpui-kit-assets default
+            // bundle, so the local layer is the only provider.
+            "icons/pin.svg",
+            "icons/archive.svg",
+            "icons/archive-restore.svg",
+            "icons/tag.svg",
+            "icons/trash-2.svg",
         ] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
         }

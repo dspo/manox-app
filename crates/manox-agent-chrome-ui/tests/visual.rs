@@ -227,6 +227,7 @@ mod macos {
                 tag: None,
                 team_leader: false,
                 updated_at: t.updated_at,
+                sort_stamp: t.updated_at,
                 pinned: t.pinned,
                 archived: t.archived,
             })

@@ -1,8 +1,7 @@
 //! The sidebar session tree — SessionList (fixed rows + workspace groups +
 //! session rows + the bottom Customizations block).
 //!
-//! Pixel-calibrated against the agents-window reference and the thread-item
-//! design boards (`design/svg/thread-item-*.svg`): every session row is a
+//! Pixel-calibrated against the agents-window reference: every session row is a
 //! fixed-height 66px three-line card — title (16px status slot + 6px gap) /
 //! tag line (short-id chip + user chip) / info line (last-active time) — all
 //! three lines sharing one left baseline with no right-aligned content and no
@@ -61,8 +60,11 @@ pub struct SessionRowData {
     pub updated_at: i64,
     pub status: SessionStatus,
     pub pinned: bool,
-    /// Whether the thread sits in the store's archived partition (the menu's
-    /// archive/unarchive toggle label and its local reconciliation read this).
+    /// The store-partition flag behind the menu's archive/unarchive toggle.
+    /// Premise: the wire snapshot rides the ACTIVE partition only, so this
+    /// reads false on every row the shell is fed today — the unarchive half
+    /// is for the archived-partition rows the wire will grow; until then the
+    /// menu always offers archive.
     pub archived: bool,
     /// The persisted user tag chip on the tag line.
     pub tag: Option<String>,
@@ -109,7 +111,7 @@ pub struct CustomizationRow {
     pub count: Option<u32>,
 }
 
-// ---- thread-item geometry (design/svg/thread-item-anatomy.svg) ------------
+// ---- thread-item geometry -------------------------------------------------
 
 /// Uniform three-line row height (identical across the four states so a state
 /// change never reflows the list). 66 = pad_y(5) + 20 + 2 + 17 + 2 + 15 + 5.
@@ -129,8 +131,8 @@ const LINE_GAP: f32 = 2.;
 const ROW_R: f32 = 6.;
 const TITLE_SIZE: f32 = 12.5;
 
-/// Marquee parameters (design/svg/thread-item-marquee.svg): 24px/s, a 600ms
-/// hold once per cycle, a 24px gap separating the two track copies; runs
+/// Marquee parameters: 24px/s, a 600ms hold once per cycle, a 24px gap
+/// separating the two track copies; runs
 /// only while hovered and the title is actually truncated. The track is
 /// [copy][gap][copy] and every cycle scrolls exactly one period, so the
 /// wrap-around lands on pixel-identical content — a seamless loop.
@@ -139,8 +141,9 @@ const MARQUEE_PAUSE: f32 = 0.6;
 const MARQUEE_GAP: f32 = 24.;
 const MARQUEE_FADE_W: f32 = 14.;
 
-/// The running pixel grid (VS Code agents-window `pixelSpinner`, grid
-/// variant): a 2×3 dot matrix, 2px dots, 2px gaps, one 1820ms stepped cycle.
+/// The running pixel grid: a 2×3 dot matrix, 2px dots, 2px gaps, one
+/// 1820ms stepped cycle; the long/short variants stretch or shrink the
+/// middle hold so the cascade reads as a wave.
 const PIXEL_GRID_MS: f32 = 1820.;
 /// Per-dot keyframe variants: dots 1-4 the standard cycle, dot 5 long, dot 6
 /// short (delays in ms — the calibration's values).
@@ -888,14 +891,14 @@ fn title_line(
 }
 
 /// Natural (unclipped) width of the title line — the marquee's truncation
-/// probe, and the SAME expression the text element runs before eliding
-/// (`elements/text.rs`: shape the natural line via `shape_text`, then
-/// compare `line.size(line_height).width` against the clip width). Reusing
-/// the renderer's own shaping entry point and width accessor keeps the
-/// marquee trigger and the "…" suffix one decision; the run mirrors the
-/// title div's resolved style (root font family + state weight + size), the
-/// one piece gpui does not expose from an element-build context. A shaping
-/// failure degrades to width 0 (marquee off, the rendered ellipsis stays
+/// probe, and the SAME expression the text element runs before eliding:
+/// shape the natural line via `shape_text`, then compare
+/// `line.size(line_height).width` against the clip width. Sharing the
+/// renderer's shaping entry point and width accessor keeps the marquee
+/// trigger and the "…" suffix one decision; the run mirrors the title div's
+/// resolved style (root font family + state weight + size), the one piece
+/// gpui does not expose from an element-build context. A shaping failure
+/// degrades to width 0 (marquee off, the rendered ellipsis stays
 /// authoritative).
 fn natural_title_width(window: &Window, text: &str, weight: FontWeight) -> Pixels {
     let font_size = px(TITLE_SIZE);
@@ -923,9 +926,8 @@ fn natural_title_width(window: &Window, text: &str, weight: FontWeight) -> Pixel
 }
 
 /// The running pixel grid: 2×3 dots inside a 16×16 clipped container. The
-/// timeline is quantized into six steps (`steps(6, jump-none)`), each dot's
-/// phase shifted by its delay; the fall is clipped at the container edge
-/// exactly like the CSS `contain: paint` original.
+/// timeline is quantized into six discrete steps, each dot's phase shifted
+/// by its delay; the container clips the fall.
 fn pixel_grid(id: &str) -> impl IntoElement {
     div()
         .size(px(16.))
@@ -958,7 +960,7 @@ fn pixel_grid(id: &str) -> impl IntoElement {
 
 /// One dot's keyframes: rise from -4px (invisible), hold at 0 (opaque), fall
 /// to +7px fading out. The long/short variants stretch or shrink the hold so
-/// the cascade reads as a wave (the CSS percentages, verbatim).
+/// the cascade reads as a wave.
 fn spin_phase(u: f32, variant: SpinVariant) -> (f32, f32) {
     let (hold, fall) = match variant {
         SpinVariant::Cycle => (0.5714, 0.6648),

@@ -64,6 +64,7 @@ fn sample_row(id: &str) -> SessionRow {
         workspace: "Chats".into(),
         status: SessionStatus::Idle,
         updated_at: 0,
+        sort_stamp: 0,
         pinned: false,
         archived: false,
         tag: None,
@@ -307,4 +308,83 @@ fn crossing_rows_lands_the_hover_on_the_row_under_the_pointer(cx: &mut TestAppCo
         Some("thread-1".to_string()),
         "crossing back into row 1 must hover row 1"
     );
+}
+
+/// Pinning a team leader must keep the team contiguous: members carry their
+/// leader's sort stamp, so the pinned-first re-order cannot strand a member
+/// behind the next team (the chevron is the only hierarchy marker).
+#[gpui::test]
+fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount(
+        cx,
+        Rc::new(RefCell::new(Vec::new())),
+        vec![
+            SessionRow {
+                id: "leader-1".into(),
+                team_leader: true,
+                updated_at: 300,
+                sort_stamp: 300,
+                ..sample_row("leader-1")
+            },
+            SessionRow {
+                id: "member-1".into(),
+                updated_at: 150,
+                sort_stamp: 300,
+                ..sample_row("member-1")
+            },
+            SessionRow {
+                id: "leader-2".into(),
+                updated_at: 200,
+                sort_stamp: 200,
+                ..sample_row("leader-2")
+            },
+        ],
+    );
+    let _ = &mut visual;
+
+    shell.update(cx, |s, cx| s.toggle_pin("leader-1", cx));
+    let order: Vec<String> =
+        shell.read_with(cx, |s, _| s.sessions.iter().map(|r| r.id.clone()).collect());
+    assert_eq!(
+        order,
+        ["leader-1", "member-1", "leader-2"],
+        "the pinned team stays a unit; a member must not sink behind leader-2"
+    );
+}
+
+/// The REAL editor wiring: typing + Enter reaches the commit subscription,
+/// Escape reaches the cancel action through the input's propagation — not
+/// just the shell methods called directly.
+#[gpui::test]
+fn tag_edit_wires_enter_and_escape_keystrokes(cx: &mut TestAppContext) {
+    let log: TagLog = Rc::new(RefCell::new(Vec::new()));
+    let (mut visual, shell) = mount(cx, log.clone(), vec![sample_row("thread-1")]);
+
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.begin_tag_edit("thread-1".into(), false, window, cx)
+        });
+    });
+    visual.simulate_input("typed");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    assert_eq!(
+        log.borrow().as_slice(),
+        [("thread-1".to_string(), Some("typed".to_string()))],
+        "enter commits through the input subscription"
+    );
+    assert!(shell.read_with(cx, |s, _| s.tag_edit_input().is_none()));
+
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.begin_tag_edit("thread-1".into(), false, window, cx)
+        });
+    });
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    assert!(
+        shell.read_with(cx, |s, _| s.tag_edit_input().is_none()),
+        "escape cancels through the propagated action"
+    );
+    assert_eq!(log.borrow().len(), 1, "escape writes nothing");
 }
