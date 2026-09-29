@@ -1104,6 +1104,18 @@ impl AhpStore {
         self.dispatch(chat_uri(chat_id), action);
     }
 
+    /// Decline an elicitation without answering (the ask card's close: the
+    /// user left to speak, never a rejection — the engine journals the
+    /// question's `dismissed` verdict).
+    pub fn decline_input(&mut self, chat_id: &str, request_id: &str) {
+        let action = StateAction::ChatInputCompleted(ChatInputCompletedAction {
+            request_id: request_id.to_string(),
+            response: ChatInputResponseKind::Decline,
+            answers: None,
+        });
+        self.dispatch(chat_uri(chat_id), action);
+    }
+
     /// Merge session config keys (model / reasoningEffort / approvalMode).
     pub fn set_config(&mut self, session_id: &str, config: serde_json::Map<String, Value>) {
         let action = StateAction::SessionConfigChanged(SessionConfigChangedAction {
@@ -1419,10 +1431,119 @@ impl LeafView<'_> {
         })
     }
 
+    /// The first open chat-input (elicitation) request, if any — the live
+    /// ask edge's source of truth.
+    pub fn open_chat_input(&self) -> Option<(String, &ahp_types::state::ChatInputRequest)> {
+        self.requests().iter().find_map(|r| match r {
+            ahp_types::state::SessionInputRequest::ChatInput(c) => {
+                Some((crate::ahp_store::id_of(&c.chat).to_string(), &c.request))
+            }
+            _ => None,
+        })
+    }
+
     /// The session goal (verbatim payload).
     pub fn goal(&self) -> Option<&Value> {
         self.ext.and_then(|x| x.goal.as_ref())
     }
+}
+
+/// Lower an AHP chat-input request into the pending ask the interactive
+/// card renders. Mirrors the fold's question translation: a select
+/// question carries its options; a text/number question renders as the
+/// card's custom-input step. A request with no structured questions (an
+/// old journal's bare ask) yields `None` — there is nothing to answer
+/// with, and the generic authorization card is the wrong surface.
+pub fn pending_ask_from_ahp(
+    id: String,
+    request: &ahp_types::state::ChatInputRequest,
+) -> Option<crate::column::PendingAsk> {
+    use ahp_types::state::ChatInputQuestion as Q;
+    let questions = request.questions.as_ref()?;
+    if questions.is_empty() {
+        return None;
+    }
+    let mut parsed = Vec::with_capacity(questions.len());
+    let mut selections = Vec::with_capacity(questions.len());
+    for q in questions {
+        let (id, question, header, multi, options) = match q {
+            Q::SingleSelect(s) => (
+                s.id.clone(),
+                s.message.clone(),
+                s.title.clone().unwrap_or_default(),
+                false,
+                s.options
+                    .iter()
+                    .map(|o| crate::column::AskOption {
+                        label: o.label.clone(),
+                        description: o.description.clone().unwrap_or_default(),
+                        recommended: o.recommended.unwrap_or(false),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Q::MultiSelect(m) => (
+                m.id.clone(),
+                m.message.clone(),
+                m.title.clone().unwrap_or_default(),
+                true,
+                m.options
+                    .iter()
+                    .map(|o| crate::column::AskOption {
+                        label: o.label.clone(),
+                        description: o.description.clone().unwrap_or_default(),
+                        recommended: o.recommended.unwrap_or(false),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Q::Text(t) => (
+                t.id.clone(),
+                t.message.clone(),
+                t.title.clone().unwrap_or_default(),
+                false,
+                Vec::new(),
+            ),
+            Q::Number(n) => (
+                n.id.clone(),
+                n.message.clone(),
+                n.title.clone().unwrap_or_default(),
+                false,
+                Vec::new(),
+            ),
+            Q::Integer(n) => (
+                n.id.clone(),
+                n.message.clone(),
+                n.title.clone().unwrap_or_default(),
+                false,
+                Vec::new(),
+            ),
+            Q::Boolean(b) => (
+                b.id.clone(),
+                b.message.clone(),
+                b.title.clone().unwrap_or_default(),
+                false,
+                Vec::new(),
+            ),
+            Q::Unknown(_) => continue,
+        };
+        selections.push(vec![false; options.len()]);
+        parsed.push(crate::column::AskQuestion {
+            id,
+            question,
+            header,
+            detail: String::new(),
+            intent: None,
+            multi_select: multi,
+            options,
+        });
+    }
+    if parsed.is_empty() {
+        return None;
+    }
+    Some(crate::column::PendingAsk {
+        id,
+        questions: parsed,
+        selections,
+    })
 }
 
 #[cfg(test)]

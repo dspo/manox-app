@@ -239,8 +239,12 @@ impl Workspace {
                 crate::ahp_store::leaf(&view.book, &sid).chat_input(&ask.id)
             {
                 let request_id = _request.id.clone();
+                // A close is "the user left to speak", never a rejection —
+                // on the wire it is a Decline, which the engine journals as
+                // the question's `dismissed` verdict (the fold maps that
+                // verdict right back to Decline).
                 store.update(cx, |store, _| {
-                    store.complete_input(&chat_id, &request_id, Default::default());
+                    store.decline_input(&chat_id, &request_id);
                 });
                 cx.notify();
                 return;
@@ -364,8 +368,11 @@ impl Workspace {
             (Some(a), t) => (a, t),
             (None, _) => return,
         };
-        let mut canonical: Vec<manox_agent::AskAnswer> = Vec::with_capacity(ask.questions.len());
-        let mut wire: Vec<serde_json::Value> = Vec::with_capacity(ask.questions.len());
+        // The wire answer per question: the selected option(s) (a select
+        // question), the free-form text (a text question or a select's
+        // freeform input). A question with neither carries no answer.
+        let mut answers: std::collections::HashMap<String, ahp_types::state::ChatInputAnswer> =
+            std::collections::HashMap::new();
         for (i, q) in ask.questions.iter().enumerate() {
             let sel = ask.selections.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
             let selected: Vec<String> = q
@@ -378,18 +385,33 @@ impl Workspace {
                 .get(i)
                 .filter(|s| !s.trim().is_empty())
                 .cloned();
-            let answer = manox_agent::AskAnswer::new(q.id.clone(), selected, custom);
-            // Canonical reply row: `{id, selected, custom?}`. `custom` is
-            // omitted (not an empty string) on a skip so it matches the
-            // server's canonical parser field-for-field.
-            let mut row = serde_json::Map::new();
-            row.insert("id".into(), serde_json::Value::String(answer.id.clone()));
-            row.insert("selected".into(), serde_json::json!(answer.selected));
-            if let Some(custom) = &answer.custom {
-                row.insert("custom".into(), serde_json::Value::String(custom.clone()));
-            }
-            wire.push(serde_json::Value::Object(row));
-            canonical.push(answer);
+            let value = if q.multi_select {
+                ahp_types::state::ChatInputAnswerValue::SelectedMany(
+                    ahp_types::state::ChatInputSelectedManyAnswerValue {
+                        value: selected,
+                        freeform_values: custom.map(|c| vec![c]),
+                    },
+                )
+            } else if let Some(first) = selected.first() {
+                ahp_types::state::ChatInputAnswerValue::Selected(
+                    ahp_types::state::ChatInputSelectedAnswerValue {
+                        value: first.clone(),
+                        freeform_values: custom.map(|c| vec![c]),
+                    },
+                )
+            } else if let Some(text) = custom {
+                ahp_types::state::ChatInputAnswerValue::Text(
+                    ahp_types::state::ChatInputTextAnswerValue { value: text },
+                )
+            } else {
+                continue;
+            };
+            answers.insert(
+                q.id.clone(),
+                ahp_types::state::ChatInputAnswer::Submitted(ahp_types::state::ChatInputAnswered {
+                    value,
+                }),
+            );
         }
         let id = ask.id.clone();
         self.chat.update(cx, |chat, cx| {
@@ -404,7 +426,7 @@ impl Workspace {
             {
                 let request_id = request.id.clone();
                 store.update(cx, |store, _| {
-                    store.complete_input(&chat_id, &request_id, Default::default());
+                    store.complete_input(&chat_id, &request_id, answers);
                 });
                 cx.notify();
                 return;

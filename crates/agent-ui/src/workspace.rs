@@ -116,6 +116,28 @@ fn thread_cwd(
     }
 }
 
+/// The synthesized ask card's `ToolUse` input: the same shape the fold's
+/// elicitation lowering and the rebuild path parse, so every path to the
+/// card agrees on one input contract.
+fn ask_input_json(
+    ask: &manox_agent_chat_ui::column::PendingAsk,
+    request_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requestId": request_id,
+        "questions": ask.questions.iter().map(|q| serde_json::json!({
+            "id": q.id,
+            "question": q.question,
+            "header": q.header,
+            "multiSelect": q.multi_select,
+            "options": q.options.iter().map(|o| serde_json::json!({
+                "label": o.label,
+                "description": o.description,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// Map a `PermissionMode` to the chip's (label, accent color, icon) triple.
 ///
 /// Colors are theme tokens, not raw hsla values, so the chip follows the
@@ -594,6 +616,7 @@ impl Workspace {
                 input_state,
                 drafts: HashMap::new(),
                 pending_ask: None,
+                pending_ask_live: false,
                 pending_auth: None,
                 pending_projection_confirmed: false,
                 ask_snapshot_item: None,
@@ -805,16 +828,95 @@ impl Workspace {
         self.resolve_auth(decision, cx);
     }
 
-    /// Run the missing-card synthesis (the resurface loop's per-gate-entry
-    /// step): when the conversation lacks the `ToolCall` item an interactive
-    /// ask card renders on, synthesize it. A resurfaced interaction whose
-    /// underlying ToolUse folded into an activity segment (or whose rebuild
-    /// missed the live gate) leaves no card for the ask snapshot to attach
-    /// to, and the interactive UI never renders without it. The live ask
-    /// edge is not yet wired in the AHP client, so this entry is the
-    /// synthesis's only caller.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_ensure_ask_tool_item(
+    /// The live ask edge: reconcile the pending ask with the fold's open
+    /// elicitation (the session's input-needed list). A new request id seeds
+    /// the interactive card — synthesizing its `ToolCall` item, since the v2
+    /// gate event that created the card has no AHP successor — and a request
+    /// that left the fold (answered, dismissed, settled remotely) retires a
+    /// live-seeded card. Diagnostic seeds are not the wire's and are left
+    /// alone. Runs on every store notify, ahead of the drain.
+    fn sync_live_ask(
+        &mut self,
+        store: &Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        cx: &mut Context<Self>,
+    ) {
+        // A stale observer (the outgoing thread's, before its rebind) must
+        // not drive the foreground ask.
+        let bound = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .is_some_and(|(s, _)| s.entity_id() == store.entity_id());
+        if !bound {
+            return;
+        }
+        let live = {
+            let view = store.read(cx);
+            let sid = self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|(_, sid)| sid.clone())
+                .expect("bound above");
+            crate::ahp_store::leaf(&view.book, &sid)
+                .open_chat_input()
+                .and_then(|(chat_id, req)| {
+                    let _ = chat_id;
+                    crate::ahp_store::pending_ask_from_ahp(req.id.clone(), req)
+                        .map(|ask| (req.id.clone(), ask))
+                })
+        };
+        match live {
+            Some((request_id, ask)) => {
+                let stale = self
+                    .chat
+                    .read(cx)
+                    .pending_ask
+                    .as_ref()
+                    .is_none_or(|a| a.id != ask.id);
+                if stale {
+                    let input = ask_input_json(&ask, &request_id);
+                    let summary = ask
+                        .questions
+                        .first()
+                        .map(|q| q.header.clone())
+                        .unwrap_or_default();
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_ask = Some(ask);
+                        chat.pending_ask_live = true;
+                        chat.ask_step = 0;
+                        chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+                        cx.notify();
+                    });
+                    self.reset_ask_custom(cx);
+                    self.ensure_ask_tool_item(&request_id, &summary, input, cx);
+                }
+            }
+            None => {
+                let live_seeded = self.chat.read(cx).pending_ask_live;
+                let has_ask = self.chat.read(cx).pending_ask.is_some();
+                if live_seeded && has_ask {
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_ask = None;
+                        chat.pending_ask_live = false;
+                        chat.ask_step = 0;
+                        cx.notify();
+                    });
+                    self.reset_ask_custom(cx);
+                }
+            }
+        }
+    }
+
+    /// Synthesize the top-level AskUserQuestion card when the conversation
+    /// lacks the `ToolCall` item the interactive ask card renders on: the
+    /// live ask edge seeds it for a freshly arrived elicitation, the
+    /// resurface loop for one whose underlying ToolUse folded into an
+    /// activity segment. Without the item the ask snapshot cannot attach and
+    /// the interactive UI never renders.
+    fn ensure_ask_tool_item(
         &mut self,
         id: &str,
         summary: &str,
@@ -854,6 +956,18 @@ impl Workspace {
         self.chat.update(cx, |chat, _| {
             chat.list_state.set_follow_mode(FollowMode::Tail);
         });
+    }
+
+    /// Diagnostic-only wrapper around `ensure_ask_tool_item`.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ensure_ask_tool_item(
+        &mut self,
+        id: &str,
+        summary: &str,
+        input: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_ask_tool_item(id, summary, input, cx);
     }
 
     /// Sync the ask snapshots (render-time path). Diagnostic-only.
@@ -1046,6 +1160,14 @@ impl Workspace {
             return (a, b);
         };
         let repaint = cx.observe(&store, |this, store, cx| {
+            // Live ask edge: the fold's open elicitation IS the pending ask —
+            // v2 learned of asks from the ThreadEvent stream, and here the
+            // session's input-needed list is the source of truth. A new
+            // request id seeds the interactive card (synthesizing its
+            // ToolCall item); a request that left the fold retires a
+            // live-seeded card. Runs before the drain so the rebuild's
+            // early return can never starve it.
+            this.sync_live_ask(&store, cx);
             // Snapshot → transcript transition: the attach-time rebuild ran
             // against an empty fold (the chat snapshot lands asynchronously
             // after subscribe), so the hero screen would stick forever. The
