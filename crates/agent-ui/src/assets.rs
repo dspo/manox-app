@@ -5,14 +5,17 @@
 //! cannot carry manox's own brand icons (the Manox / Claude / Codex / GitHub Copilot
 //! marks used in the sidebar and the new-session menu). `ExtrasAssetSource`
 //! layers those on top: a `rust-embed` lookup of `assets/icons/**` wins, then
-//! it falls through to `gpui-kit-assets` for everything else. The manox
+//! it falls through to `gpui-kit-assets` for everything else. The fallback is
+//! `AllAssets` — the full Lucide catalog — not the default 101-icon subset,
+//! so every `IconName` variant resolves at runtime (the chrome icon table
+//! relies on names outside the subset). The manox
 //! bin registers it via `with_assets`, so any `gpui::svg().path("icons/…")`
 //! call site resolves through here.
 
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
-use gpui_kit_assets::Assets as ComponentAssets;
+use gpui_kit_assets::AllAssets as ComponentAssets;
 use rust_embed::RustEmbed;
 
 /// Embedded manox-local SVG assets (brand icons not in gpui-component).

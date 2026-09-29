@@ -5800,6 +5800,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-macos",
  "gpui-pre-platform",

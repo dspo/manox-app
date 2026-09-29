@@ -920,8 +920,9 @@ fn install_light_theme(cx: &mut gpui::App) {
 
 // ── assets ────────────────────────────────────────────────────────────────
 
-/// SVG asset layer: the brand icons embedded via rust-embed; `gpui::svg()`
-/// resolves through this source.
+/// SVG asset layer: the example's brand icons embedded via rust-embed win,
+/// then the full `gpui-kit-assets` catalog (chrome's icon table lives there);
+/// `gpui::svg()` resolves through this source.
 use gpui::{AssetSource, Result as AssetResult};
 
 #[derive(rust_embed::RustEmbed)]
@@ -933,14 +934,23 @@ struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> AssetResult<Option<Cow<'static, [u8]>>> {
-        Ok(EmbeddedAssets::get(path).map(|f| f.data))
+        if let Some(file) = EmbeddedAssets::get(path) {
+            return Ok(Some(file.data));
+        }
+        gpui_kit_assets::AllAssets.load(path)
     }
 
     fn list(&self, path: &str) -> AssetResult<Vec<SharedString>> {
         let prefix = format!("{}/", path.trim_matches('/'));
-        Ok(EmbeddedAssets::iter()
+        let mut names: Vec<SharedString> = EmbeddedAssets::iter()
             .filter(|p| p.starts_with(&prefix))
             .map(|p| SharedString::from(p.to_string()))
-            .collect())
+            .collect();
+        for name in gpui_kit_assets::AllAssets.list(path)? {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        Ok(names)
     }
 }
