@@ -667,6 +667,7 @@ impl Workspace {
                 goal_ticker_gen: 0,
                 turn_active: false,
                 thinking_ticker_gen: 0,
+                awaiting_history: false,
                 context_rail,
             }),
         };
@@ -1248,6 +1249,9 @@ impl Workspace {
         });
         self.chat.update(cx, |chat, cx| {
             chat.conversation = new_conv;
+            // The snapshot landed with displayable history: the loading gate's
+            // job is done.
+            chat.awaiting_history = false;
             cx.notify();
         });
         self.sync_list_count(cx);
@@ -1274,7 +1278,7 @@ impl Workspace {
             // synth_display lowers the same way) — and the conversation is
             // still empty, rebuild from the snapshot. The drained deltas are
             // already inside it, so the drain skips one round.
-            let snapshot_ready = this
+            let (snapshot_ready, chat_landed) = this
                 .chat
                 .read(cx)
                 .store
@@ -1283,13 +1287,22 @@ impl Workspace {
                     let view = store.read(cx);
                     crate::ahp_store::leaf(&view.book, &sid)
                         .chat
-                        .map(|c| !c.turns.is_empty() || c.active_turn.is_some())
+                        .map(|c| (!c.turns.is_empty() || c.active_turn.is_some(), true))
                 })
-                .unwrap_or(false);
+                .unwrap_or((false, false));
             let mut rebuilt = false;
             if snapshot_ready && this.chat_conversation(cx).read(cx).is_empty(cx) {
                 this.rebuild_conversation_from_book(cx);
                 rebuilt = true;
+            } else if chat_landed && this.chat.read(cx).awaiting_history {
+                // The chat snapshot landed but holds no displayable turn: the
+                // reopened session is genuinely empty. Drop the loading gate so
+                // the hero screen returns (without this the loading view would
+                // stick forever on an empty history).
+                this.chat.update(cx, |chat, cx| {
+                    chat.awaiting_history = false;
+                    cx.notify();
+                });
             }
             // Live ask edge: the fold's open elicitation IS the pending ask.
             // Runs AFTER the rebuild so a freshly seeded card lands on the

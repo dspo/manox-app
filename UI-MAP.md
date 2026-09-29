@@ -250,7 +250,7 @@ Vertical flex container, fills remaining width.
 
 #### Body
 
-Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNotice](#followstoppednotice) (only while the follow stream has stopped) and then [Hero](#hero) (with the [LoadingIndicator](#loadingindicator) while an empty session restores) or [MessageArea](#messagearea) + [Footer](#footer).
+Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNotice](#followstoppednotice) (only while the follow stream has stopped) and then [Hero](#hero) or [HistoryLoading](#historyloading) (while a reopened thread's snapshot is in flight) or [MessageArea](#messagearea) + [Footer](#footer).
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 
@@ -282,6 +282,12 @@ Vertically centered welcome area: logo/heading + inline [Composer](#composer).
 Centered BrailleSpinner + "Loading conversation…" (`workspace-loading-history`), shown inside the [Hero](#hero) while a sidebar-opened session's history is still restoring. The composer mounts immediately below it and accepts draft edits; send remains disabled and keyboard submission is gated on the thread's `HistoryPhase` until `Ready`. Preview batches stream into the [MessageArea](#messagearea) incrementally (`ThreadEvent::HistoryProgress`); once the first preview content lands, the composer moves to the [Footer](#footer) without waiting for the authoritative restore.
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
+
+#### HistoryLoading
+
+Full-viewport pixel-tetromino loading page that REPLACES the hero, message list, and footer while a reopened thread's chat snapshot is still in flight: `ChatColumn.awaiting_history` is set at reopen attach (the fold holds no chat channel), cleared by the snapshot rebuild (history present) or by the store observe (genuinely empty session → hero returns). Render re-checks the fold, so a stale flag cannot pin the page. Layout: 8 falling tetrominoes at 22% opacity (deterministic per-thread layout from an FNV-seeded LCG, fall quantized to the 20px cell grid), a settled terrain row along the bottom edge, and a centered four-cell pixel spinner (90°-step discrete rotation) + heading (`history-loading-heading`) + monospace thread id. No composer — the thread is not ready. All geometry is flat pixel cells (solid fill + dark outline, no bevel).
+
+> Source: `crates/agent-ui/src/views/history_loading.rs`; gate: `crates/agent-ui/src/workspace/attach.rs` (`attach_thread`), `crates/agent-ui/src/workspace/render.rs` (`render_column`), `crates/manox-agent-chat-ui/src/column.rs` (`awaiting_history`)
 
 #### 3.2.2 MessageArea
 

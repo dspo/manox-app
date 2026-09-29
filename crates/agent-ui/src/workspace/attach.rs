@@ -325,6 +325,26 @@ impl Workspace {
                 cc.notify();
             });
         }
+        // History-loading gate (reopened threads only): the landing mirror
+        // renders empty until the fold's chat snapshot arrives, so a reopen
+        // whose leaf has no chat channel yet swaps the hero screen for the
+        // history-loading view. A reclaimed background leaf already holds its
+        // chat, and a fresh create never sees this flag.
+        let snapshot_landed = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(store, sid)| {
+                crate::ahp_store::leaf(&store.read(cx).book, sid.as_str())
+                    .chat
+                    .is_some()
+            })
+            .unwrap_or(false);
+        self.chat.update(cx, |chat, cx| {
+            chat.awaiting_history = reopen && !snapshot_landed;
+            cx.notify();
+        });
         // GW5: focus follows the attach on BOTH legs — the newly attached
         // session's leaf goes active (clearing its unread/errored mirrors) and
         // the outgoing one inert. The reclaimed leg skips the `open_or_create`
