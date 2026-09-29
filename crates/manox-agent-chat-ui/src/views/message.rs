@@ -2270,7 +2270,7 @@ fn render_plan_review_card(
             Button::new(format!("plan-review-discuss-{ix}"))
                 .ghost()
                 .small()
-                .icon(gpui_kit_assets::IconName::SquarePen)
+                .icon(gpui_kit_assets::IconName::PenLine)
                 .label(i18n::t("workspace-ask-discuss"))
                 .on_click(move |_, _, cx: &mut App| {
                     host_discuss.dismiss_ask(cx);
