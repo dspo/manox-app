@@ -62,10 +62,12 @@ mod macos {
             manox_agent::thread_store::refresh_thread_list();
         });
 
+        let mut shell_slot = None;
         let handle = cx
             .open_offscreen_window(size(px(1280.), px(820.)), |window, cx| {
                 let main: AnyView = cx.new(ChatPreviewStub::new).into();
                 let shell = cx.new(|cx| Shell::new(shell_config(main), window, cx));
+                shell_slot = Some(shell.clone());
                 shell.update(cx, |shell, _cx| {
                     shell.set_sessions(snapshot_rows());
                 });
@@ -73,6 +75,9 @@ mod macos {
                     shell.update(cx, |shell, cx| {
                         if right {
                             shell.open_right("dummy", window, cx);
+                            if std::env::var("CHROME_SWITCH").is_ok() {
+                                shell.open_right("second", window, cx);
+                            }
                         }
                         if panel {
                             shell.toggle_panel(window, cx);
@@ -84,10 +89,44 @@ mod macos {
             })
             .expect("offscreen window");
 
-        // Let the font/layout pass settle before the capture.
-        for _ in 0..5 {
+        // Let the font/layout pass settle before the capture. The extra
+        // `simulate_next_frame` calls matter: tests have no platform frame
+        // loop, so a component that asks for one more frame (the tab
+        // indicator does, to read its prepaint bounds) would otherwise never
+        // get it and the capture would show a half-resolved first frame.
+        for i in 0..5 {
+            if i > 0 {
+                let _ = cx.update_window(handle.into(), |_view, window, cx| {
+                    window.simulate_next_frame(cx);
+                });
+            }
             cx.run_until_parked();
             std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        if std::env::var("CHROME_SWITCH").is_ok() {
+            // Now that the layout has settled, switch back to the FIRST tab —
+            // the long travel the animation exists for.
+            let shell = shell_slot.clone().expect("shell");
+            cx.update(|cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.right.update(cx, |pane, cx| {
+                        pane.activate_tab("dummy-0", cx);
+                    });
+                    cx.notify();
+                });
+            });
+            // Tests have no platform frame loop: `request_animation_frame`
+            // schedules via on_next_frame, which only fires through
+            // `simulate_next_frame`. Sleeping alone advances no animation.
+            for _ in 0..40 {
+                cx.update_window(handle.into(), |_view, window, cx| {
+                    window.simulate_next_frame(cx);
+                })
+                .expect("window");
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(12));
+            }
         }
 
         let shot = cx
@@ -100,7 +139,7 @@ mod macos {
     fn shell_config(main: AnyView) -> ShellConfig {
         ShellConfig {
             main: Arc::new(MainSeat { view: main }),
-            tool_kinds: vec![Arc::new(DummyKind)],
+            tool_kinds: vec![Arc::new(DummyKind), Arc::new(SecondKind)],
             panel_surface: Some(Arc::new(DummyPanel)),
             fixed_rows: vec![
                 FixedRow {
@@ -365,6 +404,58 @@ mod macos {
                 .p(px(12.))
                 .child("dummy tab body")
                 .into_any_element()
+        }
+    }
+
+    /// Diagnostic-only: a second tab kind, so `CHROME_SWITCH=1` can switch
+    /// between two tabs of different widths and exercise the indicator slide.
+    struct SecondKind;
+
+    impl ToolTabFactory for SecondKind {
+        fn kind(&self) -> &'static str {
+            "second"
+        }
+        fn create(&self) -> Arc<dyn ToolTab> {
+            Arc::new(SecondTab)
+        }
+        fn quick_action(&self) -> Option<gpui::SharedString> {
+            Some("Second".into())
+        }
+        fn icon(&self, cx: &gpui::App) -> gpui::AnyElement {
+            SecondTab.icon(cx)
+        }
+    }
+
+    struct SecondTab;
+
+    impl ToolTab for SecondTab {
+        fn kind(&self) -> &'static str {
+            "second"
+        }
+        fn id(&self) -> &str {
+            "second-0"
+        }
+        fn title(&self, _cx: &gpui::App) -> gpui::SharedString {
+            "A wider second tab".into()
+        }
+        fn icon(&self, _cx: &gpui::App) -> gpui::AnyElement {
+            manox_agent_chrome_ui::theme::icon(icons::GLOBE, 15.).into_any_element()
+        }
+        fn open(
+            &self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::App,
+            _store: &mut TabStore,
+            _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+        ) {
+        }
+        fn render(
+            &self,
+            _window: &mut gpui::Window,
+            _cx: &gpui::App,
+            _store: &TabStore,
+        ) -> gpui::AnyElement {
+            gpui::div().into_any_element()
         }
     }
 

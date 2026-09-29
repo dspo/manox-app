@@ -199,10 +199,14 @@ pub struct RightPane {
     /// in WINDOW space, while the indicator is positioned inside the strip, so
     /// the tab's absolute x has to be rebased against this before use.
     strip_origin: Rc<RefCell<Pixels>>,
-    /// The indicator's target geometry, plus the id it belongs to. Held across
-    /// frames so the spring animates from the previous tab to the new one
-    /// rather than jumping.
+    /// The indicator's geometry as of the last rendered frame, plus the tab id
+    /// it was travelling to. Read as the animation's START point.
     indicator: (Pixels, Pixels, Option<String>),
+    /// Where the in-flight animation started. Captured once per switch, then
+    /// held for the whole run: `indicator` is overwritten with the target as
+    /// soon as the switch happens, so reading the start from it would make the
+    /// animation lerp target→target and jump with no travel.
+    indicator_from: (Pixels, Pixels),
 }
 
 impl RightPane {
@@ -219,6 +223,7 @@ impl RightPane {
             tab_bounds: Rc::new(RefCell::new(HashMap::new())),
             strip_origin: Rc::new(RefCell::new(px(0.))),
             indicator: (px(0.), px(0.), None),
+            indicator_from: (px(0.), px(0.)),
         }
     }
 
@@ -489,9 +494,22 @@ impl gpui::Render for RightPane {
         if target.is_none() && active_id.is_some() {
             cx.notify();
         }
+        // On a switch, freeze where the indicator is NOW as the animation's
+        // origin, then re-aim. The origin is captured only when the target
+        // changes, so it survives the whole run: re-reading it every frame
+        // would make the animation lerp target→target and jump with no travel
+        // (which is exactly what an earlier version did).
         if let Some(t) = target {
+            // A new origin ONLY when the active tab actually changes. Keying
+            // this on "the target moved" instead re-fires on sub-pixel width
+            // jitter from the capture pass, which resets the origin mid-flight
+            // and leaves the line parked at the destination.
+            if self.indicator.2.as_deref() != active_id.as_deref() {
+                self.indicator_from = (self.indicator.0, self.indicator.1);
+            }
             self.indicator = (t.left, t.width, active_id.clone());
         }
+        let from = self.indicator_from;
 
         let on_new_tab = cx.listener(|this, _: &ClickEvent, _w, cx| {
             this.new_tab_page(cx);
@@ -509,8 +527,8 @@ impl gpui::Render for RightPane {
         // target — that is what makes the line travel from the old tab to the
         // new one instead of appearing under it.
         let indicator = {
-            let (from_left, from_width, _) = self.indicator;
-            let (to_left, to_width) = target.map_or((from_left, from_width), |t| (t.left, t.width));
+            let (from_left, from_width) = from;
+            let (to_left, to_width) = target.map_or(from, |t| (t.left, t.width));
             (target.is_some() && to_width > px(0.)).then(|| {
                 let anim_id = active_id.clone().unwrap_or_default();
                 div()
