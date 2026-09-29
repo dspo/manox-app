@@ -130,8 +130,10 @@ const ROW_R: f32 = 6.;
 const TITLE_SIZE: f32 = 12.5;
 
 /// Marquee parameters (design/svg/thread-item-marquee.svg): 24px/s, a 600ms
-/// hold at each end, a 24px gap between passes; runs only while hovered and
-/// the title is actually truncated.
+/// hold once per cycle, a 24px gap separating the two track copies; runs
+/// only while hovered and the title is actually truncated. The track is
+/// [copy][gap][copy] and every cycle scrolls exactly one period, so the
+/// wrap-around lands on pixel-identical content — a seamless loop.
 const MARQUEE_SPEED: f32 = 24.;
 const MARQUEE_PAUSE: f32 = 0.6;
 const MARQUEE_GAP: f32 = 24.;
@@ -790,10 +792,16 @@ fn title_line(
         });
 
     if hovered && truncated {
-        // Scroll distance: the overflow plus the 24px between-pass gap.
-        let scroll = f32::from(text_w - box_w).max(0.) + MARQUEE_GAP;
-        let secs = scroll / MARQUEE_SPEED;
-        let total = MARQUEE_PAUSE * 2. + secs;
+        // Seamless loop: the track carries the title TWICE separated by the
+        // 24px between-pass gap, so the period is exactly one copy + gap.
+        // Each cycle holds 600ms at x=0, then scrolls one full period — the
+        // wrap back to x=0 lands on pixel-identical content (copy B where
+        // copy A was), so there is no visible snap. Two copies always
+        // suffice: the truncation condition gives text_w > box_w, so the
+        // period alone already overshoots the clip width.
+        let period = f32::from(text_w) + MARQUEE_GAP;
+        let secs = period / MARQUEE_SPEED;
+        let total = MARQUEE_PAUSE + secs;
         let fade: Hsla = if selected {
             CARD_BG.into()
         } else {
@@ -813,19 +821,25 @@ fn title_line(
                         let tt = t * total;
                         let x = if tt < MARQUEE_PAUSE {
                             0.
-                        } else if tt < MARQUEE_PAUSE + secs {
-                            -(tt - MARQUEE_PAUSE) * MARQUEE_SPEED
                         } else {
-                            -scroll
+                            -((tt - MARQUEE_PAUSE) * MARQUEE_SPEED).min(period)
                         };
-                        el.left(px(x)).child(
+                        let copy = || {
                             div()
                                 .whitespace_nowrap()
+                                .flex_shrink_0()
                                 .text_size(px(TITLE_SIZE))
                                 .font_weight(weight)
                                 .text_color(color)
-                                .child(title.clone()),
-                        )
+                                .child(title.clone())
+                        };
+                        el.left(px(x))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .child(copy())
+                            .child(div().w(px(MARQUEE_GAP)).flex_shrink_0())
+                            .child(copy())
                     },
                 )
                 .child(
