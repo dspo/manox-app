@@ -24,7 +24,7 @@ use crate::session_list::{
     CustomizationRow, FixedRow, SessionGroup, SessionList, SessionRowData, SessionStatus,
 };
 use crate::theme::{
-    CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
+    CARD_BG, CARD_BORDER, FG_DIM, FG_FAINT, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
 };
 use crate::{divider, titlebar};
 
@@ -338,14 +338,14 @@ impl Shell {
             let menu = menu
                 .max_w(gpui::px(220.))
                 .item(
-                    PopupMenuItem::new(manox_i18n::t("chrome-row-open")).on_click(
-                        move |_, window, cx| {
+                    PopupMenuItem::new(manox_i18n::t("chrome-row-open"))
+                        .icon(menu_icon("icons/arrow-right.svg"))
+                        .on_click(move |_, window, cx| {
                             this_open.update(cx, |this, cx| {
                                 this.select(&id_open, window, cx);
                                 this.close_row_menu(cx);
                             });
-                        },
-                    ),
+                        }),
                 )
                 .item(
                     PopupMenuItem::new(if pinned {
@@ -353,6 +353,7 @@ impl Shell {
                     } else {
                         manox_i18n::t("chrome-row-pin")
                     })
+                    .icon(menu_icon("icons/pin.svg"))
                     .on_click(move |_, window, cx| {
                         this_pin.update(cx, |this, cx| {
                             if let Some(hook) = &this.hooks.on_pin {
@@ -369,6 +370,11 @@ impl Shell {
                     } else {
                         manox_i18n::t("sidebar-archive")
                     })
+                    .icon(menu_icon(if archived {
+                        "icons/archive-restore.svg"
+                    } else {
+                        "icons/archive.svg"
+                    }))
                     .on_click(move |_, window, cx| {
                         this_archive.update(cx, |this, cx| {
                             if let Some(hook) = &this.hooks.on_archive {
@@ -386,6 +392,7 @@ impl Shell {
                     } else {
                         manox_i18n::t("sidebar-thread-tag-add")
                     })
+                    .icon(menu_icon("icons/tag.svg"))
                     .on_click(move |_, window, cx| {
                         this_tag.update(cx, |this, cx| {
                             this.close_row_menu(cx);
@@ -396,24 +403,24 @@ impl Shell {
             // 移除标签 only exists while a tag does.
             let menu = if has_tag {
                 menu.item(
-                    PopupMenuItem::new(manox_i18n::t("sidebar-thread-tag-clear")).on_click(
-                        move |_, window, cx| {
+                    PopupMenuItem::new(manox_i18n::t("sidebar-thread-tag-clear"))
+                        .icon(menu_icon("icons/trash-2.svg"))
+                        .on_click(move |_, window, cx| {
                             this_tag2.update(cx, |this, cx| {
                                 this.set_tag(&id_tag_clear, None, window, cx);
                                 this.close_row_menu(cx);
                             });
-                        },
-                    ),
+                        }),
                 )
             } else {
                 menu
             };
             menu.separator().item(
-                PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id")).on_click(
-                    move |_, _, cx| {
+                PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id"))
+                    .icon(menu_icon("icons/copy.svg"))
+                    .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
-                    },
-                ),
+                    }),
             )
         });
         // DismissEvent → the host closes (the menu handles outside clicks
@@ -1183,3 +1190,13 @@ impl Shell {
 
 /// sidebar|main seam width (the left handle is absolutely centered on it).
 const PANE_GAP: f32 = 6.;
+
+/// A small muted menu-item icon (svg paths resolve through the host's asset
+/// source — the agent-ui override layer plus the default bundle).
+fn menu_icon(path: &'static str) -> gpui_component::Icon {
+    use gpui_component::Sizable as _;
+    gpui_component::Icon::default()
+        .path(path)
+        .small()
+        .text_color(gpui::Hsla::from(FG_FAINT))
+}
