@@ -5,12 +5,16 @@
 //! and every state-changing action is mirrored to the host through
 //! [`HostHooks`] — the chrome never touches a data source.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Pixels, StatefulInteractiveElement, Styled, Window, actions, div, px,
+    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, InteractiveElement,
+    IntoElement, ParentElement, Pixels, StatefulInteractiveElement, Styled, Window, actions, div,
+    px,
 };
 
 use crate::main_surface::MainSurfaceHandle;
@@ -20,7 +24,7 @@ use crate::session_list::{
     CustomizationRow, FixedRow, SessionGroup, SessionList, SessionRowData, SessionStatus,
 };
 use crate::theme::{
-    CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
+    CARD_BG, CARD_BORDER, FG_DIM, FG_FAINT, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
 };
 use crate::{divider, titlebar};
 
@@ -34,39 +38,44 @@ pub struct SessionRow {
     pub title: String,
     /// Workspace (project) display name — the grouping key.
     pub workspace: String,
-    pub time: String,
     pub status: SessionStatus,
-    /// `ThreadStore`-style update stamp (unix seconds) for local re-sorting
-    /// after a pin flip.
+    /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
+    /// The re-sort stamp: the row's own `updated_at`, except team members
+    /// arrive with their leader's (the projection owns the team structure),
+    /// so a team sorts as one unit and stays contiguous through the
+    /// pinned-first re-order. Note the store pins per thread: pinning a
+    /// member floats that member alone — unit-wide pinning is the store's
+    /// concern when teams land.
+    pub sort_stamp: i64,
     pub pinned: bool,
-    pub unread: bool,
-    /// D2 columns: the user tag chip, team-nesting depth, leader mark.
+    /// See [`SessionRowData::archived`] — always false on today's wire.
+    pub archived: bool,
+    /// D2 columns: the user tag chip and the team-leader mark (rows do not
+    /// indent — hierarchy lives in the group header and the leader chevron).
     pub tag: Option<String>,
-    pub indent: u8,
     pub team_leader: bool,
 }
 
 impl SessionRow {
     /// Lift one projected group (see agent-ui's `sidebar_projection`) into
-    /// the shell's row carrier, deriving each row's sort stamp from its
-    /// position (the projection emits recency order already).
+    /// the shell's row carrier. The projection emits wire order (recency)
+    /// already, carries each row's real `updated_at`, and owns the team
+    /// structure: members arrive with their leader's `sort_stamp`.
     pub fn from_group(group: crate::session_list::SessionGroup) -> Vec<SessionRow> {
         group
             .rows
             .into_iter()
-            .enumerate()
-            .map(|(ix, r)| SessionRow {
+            .map(|r| SessionRow {
                 id: r.id,
                 title: r.title,
                 workspace: group.name.clone(),
-                time: r.time,
                 status: r.status,
-                updated_at: -(ix as i64),
+                updated_at: r.updated_at,
+                sort_stamp: r.sort_stamp,
                 pinned: r.pinned,
-                unread: r.unread,
+                archived: r.archived,
                 tag: r.tag,
-                indent: r.indent,
                 team_leader: r.team_leader,
             })
             .collect()
@@ -76,12 +85,12 @@ impl SessionRow {
         SessionRowData {
             id: self.id.clone(),
             title: self.title.clone(),
-            time: self.time.clone(),
+            updated_at: self.updated_at,
+            sort_stamp: self.sort_stamp,
             status: self.status,
             pinned: self.pinned,
-            unread: self.unread,
+            archived: self.archived,
             tag: self.tag.clone(),
-            indent: self.indent,
             team_leader: self.team_leader,
         }
     }
@@ -91,6 +100,8 @@ impl SessionRow {
 pub type HookOnId = Box<dyn Fn(&str, &mut Window, &mut App)>;
 /// Host action with no payload.
 pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
+/// Host tag write (row id, `Some(tag)` to set / `None` to clear).
+pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>;
 
 /// Host-side actions the shell mirrors to. All optional; an absent hook
 /// leaves the shell's local behavior only (e.g. `on_pin` flips the local row
@@ -99,11 +110,14 @@ pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
 pub struct HostHooks {
     pub on_pin: Option<HookOnId>,
     pub on_archive: Option<HookOnId>,
+    /// Thread-tag write-back (the same store seam the sidebar's
+    /// `SetThreadTag` uses). `None` clears the tag.
+    pub on_set_tag: Option<HookOnSetTag>,
     /// New-session request (the New button / ⌘N). Absent → the shell just
     /// clears the active session.
     pub on_new_session: Option<HookOnUnit>,
-    /// Selection-change notification (the future chat-column swap hooks
-    /// here).
+    /// Selection-change notification — also the row menu's 打开 action (the
+    /// full production switch path).
     pub on_select: Option<HookOnId>,
 }
 
@@ -120,6 +134,17 @@ pub struct ShellConfig {
     pub hooks: HostHooks,
 }
 
+/// Thread-tag character ceiling (the sidebar editor's rule).
+const MAX_THREAD_TAG_CHARS: usize = 10;
+
+/// The inline tag editor in flight (one at a time); the subscription commits
+/// on Enter/blur and clamps on Change.
+struct TagEdit {
+    id: String,
+    input: Entity<gpui_component::input::InputState>,
+    _sub: gpui::Subscription,
+}
+
 /// The app-shell root view.
 pub struct Shell {
     // ── sessions (host-pushed) ──
@@ -132,6 +157,15 @@ pub struct Shell {
     /// Live group-drag drop marker (dragged, target, before-edge?); drives
     /// the insertion line, cleared when the drag ends.
     group_drag_marker: Option<(String, String, bool)>,
+    /// The hovered row id (marquee + title-weight trigger), mirrored from
+    /// the list's hover events.
+    hovered_row: Option<String>,
+    /// Per-row focus handles, rebuilt against the visible id set on every
+    /// sidebar render (keyboard focus ring + up/down row navigation).
+    row_focus: HashMap<String, FocusHandle>,
+    /// Per-row title clip-box width, written by the rows' `on_prepaint` and
+    /// read by the marquee's truncation test (last painted frame's value).
+    title_box_w: Rc<RefCell<HashMap<String, Pixels>>>,
     fixed_rows: Vec<FixedRow>,
     customizations: Vec<CustomizationRow>,
     /// The open row menu (id, anchor, the PopupMenu entity).
@@ -143,6 +177,9 @@ pub struct Shell {
     /// Row-menu DismissEvent subscription (the menu closes itself on outside
     /// click; the event drives the host side shut).
     row_menu_sub: Option<gpui::Subscription>,
+    /// The inline tag editor (row + input); Escape cancels, Enter/blur
+    /// commits, an empty value is silently discarded.
+    tag_edit: Option<TagEdit>,
     // ── layout ──
     pub show_sidebar: bool,
     pub show_panel: bool,
@@ -181,10 +218,14 @@ impl Shell {
             collapsed: Vec::new(),
             group_order: Vec::new(),
             group_drag_marker: None,
+            hovered_row: None,
+            row_focus: HashMap::new(),
+            title_box_w: Rc::new(RefCell::new(HashMap::new())),
             fixed_rows: config.fixed_rows,
             customizations: config.customizations,
             row_menu: None,
             row_menu_sub: None,
+            tag_edit: None,
             show_sidebar: true,
             show_panel: false,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
@@ -267,7 +308,10 @@ impl Shell {
         self.group_order = order;
     }
 
-    /// Row menu (kebab / right-click): copy Thread ID, pin/unpin, archive.
+    /// Row menu (right-click on a row): the ONLY action surface —
+    /// pin/unpin, archive/unarchive, tag add/rename/remove, copy id. Every
+    /// action closes the menu; toggles read the row's current flags so the
+    /// label names the action it will perform.
     pub fn open_row_menu(
         &mut self,
         id: &str,
@@ -281,51 +325,100 @@ impl Shell {
             return;
         };
         let pinned = sess.pinned;
+        let archived = sess.archived;
+        let has_tag = sess.tag.is_some();
         let this = cx.entity();
 
-        let id_copy = id.to_string();
         let id_pin = id.to_string();
-        let id_archive = id.to_string();
         let id_pin2 = id_pin.clone();
+        let id_archive = id.to_string();
+        let id_arch2 = id_archive.clone();
+        let id_tag_edit = id.to_string();
+        let id_tag_clear = id.to_string();
+        let id_copy = id.to_string();
         let this_pin = this.clone();
         let this_archive = this.clone();
+        let this_tag = this.clone();
+        let this_tag2 = this.clone();
 
         let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
-            menu.max_w(gpui::px(220.))
-                .item(
-                    PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id")).on_click(
-                        move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
-                        },
-                    ),
-                )
+            let menu = menu
+                .max_w(gpui::px(220.))
                 .item(
                     PopupMenuItem::new(if pinned {
                         manox_i18n::t("chrome-row-unpin")
                     } else {
                         manox_i18n::t("chrome-row-pin")
                     })
-                    .on_click(move |_, _, cx| {
-                        let id = id_pin2.clone();
+                    .icon(menu_icon("icons/pin.svg"))
+                    .on_click(move |_, window, cx| {
                         this_pin.update(cx, |this, cx| {
-                            this.toggle_pin(&id, cx);
-                            this.row_menu = None;
-                            cx.notify();
+                            if let Some(hook) = &this.hooks.on_pin {
+                                hook(&id_pin2, window, cx);
+                            }
+                            this.toggle_pin(&id_pin2, cx);
+                            this.close_row_menu(cx);
                         });
                     }),
                 )
                 .item(
-                    PopupMenuItem::new(manox_i18n::t("chrome-row-archive")).on_click(
-                        move |_, _, cx| {
-                            let id = id_archive.clone();
-                            this_archive.update(cx, |this, cx| {
-                                this.archive_session(&id, cx);
-                                this.row_menu = None;
-                                cx.notify();
-                            });
-                        },
-                    ),
+                    PopupMenuItem::new(if archived {
+                        manox_i18n::t("sidebar-unarchive")
+                    } else {
+                        manox_i18n::t("sidebar-archive")
+                    })
+                    .icon(menu_icon(if archived {
+                        "icons/archive-restore.svg"
+                    } else {
+                        "icons/archive.svg"
+                    }))
+                    .on_click(move |_, window, cx| {
+                        this_archive.update(cx, |this, cx| {
+                            if let Some(hook) = &this.hooks.on_archive {
+                                hook(&id_arch2, window, cx);
+                            }
+                            this.set_archived(&id_arch2, !archived, cx);
+                            this.close_row_menu(cx);
+                        });
+                    }),
                 )
+                .separator()
+                .item(
+                    PopupMenuItem::new(if has_tag {
+                        manox_i18n::t("sidebar-thread-tag-rename")
+                    } else {
+                        manox_i18n::t("sidebar-thread-tag-add")
+                    })
+                    .icon(menu_icon("icons/tag.svg"))
+                    .on_click(move |_, window, cx| {
+                        this_tag.update(cx, |this, cx| {
+                            this.close_row_menu(cx);
+                            this.begin_tag_edit(id_tag_edit.clone(), has_tag, window, cx);
+                        });
+                    }),
+                );
+            // 移除标签 only exists while a tag does.
+            let menu = if has_tag {
+                menu.item(
+                    PopupMenuItem::new(manox_i18n::t("sidebar-thread-tag-clear"))
+                        .icon(menu_icon("icons/trash-2.svg"))
+                        .on_click(move |_, window, cx| {
+                            this_tag2.update(cx, |this, cx| {
+                                this.set_tag(&id_tag_clear, None, window, cx);
+                                this.close_row_menu(cx);
+                            });
+                        }),
+                )
+            } else {
+                menu
+            };
+            menu.separator().item(
+                PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id"))
+                    .icon(menu_icon("icons/copy.svg"))
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
+                    }),
+            )
         });
         // DismissEvent → the host closes (the menu handles outside clicks
         // itself).
@@ -342,6 +435,24 @@ impl Shell {
         if self.row_menu.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// Whether the row menu is open (read face for hosts/tests).
+    pub fn row_menu_open(&self) -> bool {
+        self.row_menu.is_some()
+    }
+
+    /// The hovered row id, if any (read face for hosts/tests).
+    pub fn hovered_row(&self) -> Option<&str> {
+        self.hovered_row.as_deref()
+    }
+
+    /// The in-flight inline tag editor, if any — the row id and its input
+    /// (read face for hosts/tests that need to drive the value).
+    pub fn tag_edit_input(&self) -> Option<(String, Entity<gpui_component::input::InputState>)> {
+        self.tag_edit
+            .as_ref()
+            .map(|e| (e.id.clone(), e.input.clone()))
     }
 
     pub fn toggle_group(&mut self, name: &str) {
@@ -362,22 +473,119 @@ impl Shell {
         let _ = cx;
     }
 
-    /// Archive: the hook performs the store write; the local row disappears
-    /// (and the active selection clears if it was archived).
-    pub fn archive_session(&mut self, id: &str, cx: &mut App) {
-        self.sessions.retain(|s| s.id != id);
-        if self.active.as_deref() == Some(id) {
-            self.active = None;
+    /// Archive/unarchive local reconciliation (the hook performs the store
+    /// write): archiving drops the row (and clears the selection if it was
+    /// active); unarchiving flips the row's partition flag so the next
+    /// snapshot only confirms it.
+    pub fn set_archived(&mut self, id: &str, archived: bool, cx: &mut App) {
+        if archived {
+            self.sessions.retain(|s| s.id != id);
+            if self.active.as_deref() == Some(id) {
+                self.active = None;
+            }
+        } else if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+            s.archived = false;
         }
         let _ = cx;
     }
 
-    /// Pinned first, then by update time descending.
+    /// Thread-tag write-back: the hook (the store seam) then the local row,
+    /// so the chip updates without waiting for the next snapshot.
+    pub fn set_tag(&mut self, id: &str, tag: Option<String>, window: &mut Window, cx: &mut App) {
+        if let Some(hook) = &self.hooks.on_set_tag {
+            hook(id, tag.clone(), window, cx);
+        }
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+            s.tag = tag;
+        }
+    }
+
+    /// The inline tag editor on a row's tag line. Rename mode prefills the
+    /// current tag; the input is focused immediately and clamped to
+    /// [`MAX_THREAD_TAG_CHARS`] on every edit.
+    pub fn begin_tag_edit(
+        &mut self,
+        id: String,
+        rename: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = rename.then(|| {
+            self.sessions
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.tag.clone())
+        });
+        let placeholder = manox_i18n::t("sidebar-thread-tag-placeholder");
+        let input = cx.new(|cx| {
+            let mut state =
+                gpui_component::input::InputState::new(window, cx).placeholder(placeholder);
+            if let Some(Some(value)) = prefill {
+                state.set_value(value, window, cx);
+            }
+            state
+        });
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &gpui_component::input::InputEvent, window, cx| match event {
+                // The pinned gpui-component input has no max-length support;
+                // clamp every edit down to the tag ceiling.
+                gpui_component::input::InputEvent::Change => {
+                    input.update(cx, |state, cx| {
+                        let value = state.value();
+                        if value.chars().count() > MAX_THREAD_TAG_CHARS {
+                            let truncated: String =
+                                value.chars().take(MAX_THREAD_TAG_CHARS).collect();
+                            state.set_value(truncated, window, cx);
+                        }
+                    });
+                }
+                gpui_component::input::InputEvent::PressEnter { .. }
+                | gpui_component::input::InputEvent::Blur => {
+                    this.commit_tag_edit(window, cx);
+                }
+                _ => {}
+            },
+        );
+        self.tag_edit = Some(TagEdit {
+            id,
+            input: input.clone(),
+            _sub: sub,
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Commit the in-flight tag edit: a non-empty value rides
+    /// [`Self::set_tag`] (hook + local row), an empty one is discarded
+    /// silently. Either way the editor unmounts. Idempotent — a blur may
+    /// race in after an Enter commit.
+    pub fn commit_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.tag_edit.take() else {
+            return;
+        };
+        let value = edit.input.read(cx).value().trim().to_string();
+        if !value.is_empty() {
+            self.set_tag(&edit.id, Some(value), window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Escape in the editor: unmount without writing.
+    pub fn cancel_tag_edit(&mut self, cx: &mut Context<Self>) {
+        if self.tag_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Pinned first, then by the team-unit sort stamp descending (see
+    /// `SessionRow::sort_stamp`).
     fn sort_sessions(&mut self) {
         self.sessions.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)
-                .then(b.updated_at.cmp(&a.updated_at))
+                .then(b.sort_stamp.cmp(&a.sort_stamp))
         });
     }
 
@@ -679,6 +887,7 @@ impl gpui::Render for Shell {
                             .child(
                                 div()
                                     .id(gpui::SharedString::from(format!("row-menu-{id}")))
+                                    .debug_selector(|| "chrome-row-menu".into())
                                     .occlude()
                                     .child(menu),
                             ),
@@ -767,8 +976,34 @@ impl Shell {
     fn render_sidebar(&mut self, cx: &mut Context<Shell>) -> impl IntoElement {
         let (fixed, groups, customizations) = self.sidebar_props();
         let selected = self.active.clone();
+        let hovered = self.hovered_row.clone();
         let has_chats = !self.sessions.is_empty();
         let marker = self.group_drag_marker.clone();
+        let tag_edit = self
+            .tag_edit
+            .as_ref()
+            .map(|e| (e.id.clone(), e.input.clone()));
+        let title_box_w = Rc::clone(&self.title_box_w);
+
+        // Focus handles track the VISIBLE row set: prune the stale ids, then
+        // create on demand so every painted row is focusable and the
+        // up/down walk has stable handles across frames.
+        let visible: std::collections::HashSet<String> = groups
+            .iter()
+            .flat_map(|g| (!g.collapsed).then(|| g.rows.iter().map(|r| r.id.clone())))
+            .flatten()
+            .collect();
+        let mut focus = std::mem::take(&mut self.row_focus);
+        focus.retain(|k, _| visible.contains(k));
+        for id in &visible {
+            focus.entry(id.clone()).or_insert_with(|| cx.focus_handle());
+        }
+        self.row_focus = focus;
+        let row_focus = Rc::new(self.row_focus.clone());
+        // Title clip widths of rows that left the list stop accumulating.
+        self.title_box_w
+            .borrow_mut()
+            .retain(|k, _| visible.contains(k));
 
         let on_select = cx.listener(|this, id: &String, w, cx| {
             let id = id.clone();
@@ -783,28 +1018,34 @@ impl Shell {
             this.new_session(w, cx);
             cx.notify();
         });
-        // Pin/archive: run the host hook (the real store write) first, then
-        // flip the local row — the next snapshot push reconciles.
-        let on_pin = cx.listener(|this, id: &String, w, cx| {
-            if let Some(hook) = &this.hooks.on_pin {
-                let id = id.clone();
-                hook(&id, w, cx);
+        let on_hover_row = cx.listener(|this, (id, entered): &(String, bool), _w, cx| {
+            // A leave retracts only its OWN row: crossing directly from one
+            // row into the next delivers the new row's enter and the old
+            // row's leave within one mouse-move dispatch (either order), and
+            // a stale leave must not strand the hover on None — the marquee
+            // would never start until the pointer moved again.
+            let next = if *entered {
+                Some(id.clone())
+            } else if this.hovered_row.as_deref() == Some(id.as_str()) {
+                None
+            } else {
+                return;
+            };
+            if this.hovered_row != next {
+                this.hovered_row = next;
+                cx.notify();
             }
-            let id = id.clone();
-            this.toggle_pin(&id, cx);
-            cx.notify();
-        });
-        let on_archive = cx.listener(|this, id: &String, w, cx| {
-            if let Some(hook) = &this.hooks.on_archive {
-                let id = id.clone();
-                hook(&id, w, cx);
-            }
-            let id = id.clone();
-            this.archive_session(&id, cx);
-            cx.notify();
         });
         let on_row_menu = cx.listener(|this, (id, pos): &(String, gpui::Point<Pixels>), w, cx| {
             this.open_row_menu(id, *pos, w, cx);
+        });
+        let on_tag_rename = cx.listener(|this, id: &String, w, cx| {
+            let id = id.clone();
+            this.begin_tag_edit(id, true, w, cx);
+        });
+        let this = cx.entity();
+        let on_tag_edit_cancel: crate::session_list::OnWindowApp = Rc::new(move |_w, cx| {
+            this.update(cx, |this, cx| this.cancel_tag_edit(cx));
         });
         let on_move_group = cx.listener(
             |this, (dragged, target, before): &(String, String, bool), _w, cx| {
@@ -832,14 +1073,21 @@ impl Shell {
                 customizations,
                 selected,
                 no_chats_hint: !has_chats,
+                hovered,
+                tag_edit,
+                title_box_w,
+                row_focus,
                 on_select: std::rc::Rc::new(move |id, w, cx| on_select(id, w, cx)),
                 on_toggle_group: std::rc::Rc::new(move |name, w, cx| on_toggle_group(name, w, cx)),
                 on_new: std::rc::Rc::new(move |e, w, cx| on_new(e, w, cx)),
-                on_pin: Some(std::rc::Rc::new(move |id, w, cx| on_pin(id, w, cx))),
-                on_archive: Some(std::rc::Rc::new(move |id, w, cx| on_archive(id, w, cx))),
+                on_hover_row: std::rc::Rc::new(move |id, entered, w, cx| {
+                    on_hover_row(&(id.clone(), entered), w, cx)
+                }),
                 on_row_menu: std::rc::Rc::new(move |id, pos, w, cx| {
                     on_row_menu(&(id.clone(), pos), w, cx)
                 }),
+                on_tag_edit_cancel: Some(on_tag_edit_cancel),
+                on_tag_rename: std::rc::Rc::new(move |id, w, cx| on_tag_rename(id, w, cx)),
                 on_move_group: std::rc::Rc::new(move |dragged, target, before, w, cx| {
                     on_move_group(&(dragged.clone(), target.clone(), before), w, cx)
                 }),
@@ -965,3 +1213,13 @@ impl Shell {
 
 /// sidebar|main seam width (the left handle is absolutely centered on it).
 const PANE_GAP: f32 = 6.;
+
+/// A small muted menu-item icon (svg paths resolve through the host's asset
+/// source — the agent-ui override layer plus the default bundle).
+fn menu_icon(path: &'static str) -> gpui_component::Icon {
+    use gpui_component::Sizable as _;
+    gpui_component::Icon::default()
+        .path(path)
+        .small()
+        .text_color(gpui::Hsla::from(FG_FAINT))
+}

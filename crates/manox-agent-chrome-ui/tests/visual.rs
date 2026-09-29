@@ -215,7 +215,6 @@ mod macos {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Chats")
                     .to_string(),
-                time: "now".into(),
                 status: if t.errored {
                     SessionStatus::Errored
                 } else if running {
@@ -226,11 +225,13 @@ mod macos {
                     SessionStatus::Idle
                 },
                 tag: None,
-                indent: t.depth.min(3) as u8,
                 team_leader: false,
                 updated_at: t.updated_at,
+                // Team rows are filtered out above, so every row is its own
+                // sort unit (production stamping lives in project_forest).
+                sort_stamp: t.updated_at,
                 pinned: t.pinned,
-                unread: t.has_unread,
+                archived: t.archived,
             })
             .take(12)
             .collect()

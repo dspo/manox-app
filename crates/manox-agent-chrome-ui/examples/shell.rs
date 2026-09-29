@@ -146,7 +146,10 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
         ],
         hooks: HostHooks {
             on_pin: Some(Box::new(|id, _w, _cx| store_toggle_pin(id))),
-            on_archive: Some(Box::new(|id, _w, _cx| store_set_archived(id))),
+            on_archive: Some(Box::new(|id, _w, _cx| store_toggle_archived(id))),
+            on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
+                manox_agent::thread_store::global().with_mut(|s| s.set_thread_tag(id, tag));
+            })),
             on_new_session: None,
             on_select: Some(Box::new({
                 let titles = titles.clone();
@@ -248,14 +251,15 @@ fn load_rows() -> Vec<SessionRow> {
                 .or_else(|| t.title.clone())
                 .unwrap_or_else(|| t.summary.clone()),
             workspace: project_label(&t.project),
-            time: relative_time(t.updated_at),
             status: five_state(t.errored, running, t.has_unread),
             tag: None,
-            indent: t.depth.min(3) as u8,
             team_leader: false,
             updated_at: t.updated_at,
+            // Team rows are filtered out above, so every row is its own
+            // sort unit (production stamping lives in project_forest).
+            sort_stamp: t.updated_at,
             pinned: t.pinned,
-            unread: t.has_unread,
+            archived: t.archived,
         })
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
@@ -274,22 +278,6 @@ fn project_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// unix seconds → relative time (the sidebar's time column).
-fn relative_time(unix_secs: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let delta = (now - unix_secs).max(0);
-    match delta {
-        0..=59 => "now".into(),
-        60..=3599 => format!("{}m", delta / 60),
-        3600..=86_399 => format!("{}h", delta / 3600),
-        86_400..=1_209_599 => format!("{}d", delta / 86_400),
-        _ => format!("{}w", delta / 604_800),
-    }
-}
-
 fn store_toggle_pin(id: &str) {
     let loaded = manox_agent::thread_store::global().with_mut(|st| st.load_thread(id));
     if let Ok(Some(handle)) = loaded {
@@ -298,11 +286,19 @@ fn store_toggle_pin(id: &str) {
     }
 }
 
-fn store_set_archived(id: &str) {
-    let loaded = manox_agent::thread_store::global().with_mut(|st| st.load_thread(id));
-    if let Ok(Some(handle)) = loaded {
-        handle.with_mut(|t| t.set_archived(true));
-    }
+/// The menu's archive toggle: flip the thread's CURRENT archived state (the
+/// store partitions active/archived, so whichever list holds the id names
+/// the state).
+fn store_toggle_archived(id: &str) {
+    let store = manox_agent::thread_store::global();
+    let archived = store.read(|st| {
+        if st.summaries().iter().any(|s| s.id.as_str() == id) {
+            false
+        } else {
+            st.archived_summaries().iter().any(|s| s.id.as_str() == id)
+        }
+    });
+    store.with_mut(|st| st.archive_thread(id, !archived));
 }
 
 // ── right-pane tool kinds ─────────────────────────────────────────────────
