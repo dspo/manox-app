@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Toggle the local manox [patch] override for this repo's git dependencies.
 #
-# ON  (default): rewrite .cargo/config.toml so the nine dspo/manox git deps
-#     (agent/harness/protocol/session-core/providers/supervisor/lsp +
-#     manox-terminal + hyperlinks) resolve from a local manox checkout
+# ON  (default): rewrite .cargo/config.toml so the dspo/manox git deps
+#     (agent/harness/session-core/providers/supervisor/lsp + manox-ahp +
+#     manox-ahp-runtime + manox-terminal + hyperlinks) resolve from a local
+#     manox checkout
 #     instead of GitHub — daily two-repo workflow: edits in ../manox are
 #     picked up by the next cargo build, no push needed.
 # OFF: remove the override (falls back to pure git deps pinned by Cargo.lock —
@@ -32,11 +33,12 @@ case "${1:-}" in
 [patch."https://github.com/dspo/manox"]
 manox-agent = { path = "$MANOX_DIR/crates/manox-agent" }
 manox-harness = { path = "$MANOX_DIR/crates/manox-harness" }
-manox-protocol = { path = "$MANOX_DIR/crates/manox-protocol" }
 manox-session-core = { path = "$MANOX_DIR/crates/manox-session-core" }
 manox-providers = { path = "$MANOX_DIR/crates/manox-providers" }
 supervisor = { path = "$MANOX_DIR/crates/supervisor" }
 lsp = { path = "$MANOX_DIR/crates/lsp" }
+manox-ahp = { path = "$MANOX_DIR/crates/manox-ahp" }
+manox-ahp-runtime = { path = "$MANOX_DIR/crates/manox-ahp-runtime" }
 manox-terminal = { path = "$MANOX_DIR/crates/manox-terminal" }
 hyperlinks = { path = "$MANOX_DIR/crates/hyperlinks" }
 EOF

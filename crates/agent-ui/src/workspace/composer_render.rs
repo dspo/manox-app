@@ -8,6 +8,8 @@
 //! parent's render face and the `tests` child.
 
 use super::*;
+use gpui_component::ThemeStyled as _;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 pub use manox_agent_chat_ui::column::{QueueDragEdge, QueueRowDrag};
 
 /// Drag payload for a queued follow-up row. The index is all the gesture
@@ -477,11 +479,15 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| {
-                let store = s.read(cx);
-                (store.store.plan_mode, store.store.plan_mode_pending)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                let plan_mode = crate::ahp_store::leaf(&view.book, sid)
+                    .ext
+                    .and_then(|x| x.plan_mode)
+                    .unwrap_or(false);
+                (plan_mode, false)
             })
-            .expect("foreground store present");
+            .unwrap_or((false, false));
         if !active && !pending {
             return None;
         }
@@ -571,56 +577,16 @@ impl Workspace {
     /// the chip's arrival or departure can never squeeze or shift the
     /// pinned model/send controls. Copy is keyed per reason via
     /// `indicator_key()`.
-    fn render_follow_stop_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let stop = self.chat.read(cx).store.as_ref()?.read(cx).follow_stop()?;
-        Some(
-            h_flex()
-                .id("follow-stop-projection")
-                .debug_selector(|| "follow-stop-projection".into())
-                .flex_shrink_0()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded(theme.radius)
-                .bg(theme.danger.opacity(0.12))
-                .hover(|s| s.bg(theme.danger.opacity(0.22)))
-                .cursor_pointer()
-                .tooltip(move |window, cx| {
-                    Tooltip::new(i18n::t("follow-stop-indicator-retry")).build(window, cx)
-                })
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    let Some(store) = this.chat.read(cx).store.clone() else {
-                        return;
-                    };
-                    store.update(cx, |handle, cx| handle.retry_follow(cx));
-                }))
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .xsmall()
-                        .text_color(theme.danger),
-                )
-                .child(
-                    gpui::div()
-                        .text_xs()
-                        .text_color(theme.danger)
-                        .child(i18n::t(stop.reason.indicator_key())),
-                )
-                .into_any_element(),
-        )
+    fn render_follow_stop_chip(
+        &self,
+        _theme: &Theme,
+        _cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // The retry chip retired with the v2 follow stream: a failed turn
+        // surfaces as the chat's error part now.
+        None
     }
 
-    /// Access chip + permission-mode popover.
-    ///
-    /// The chip is a mode-aware pill rendered next to the composer send button.
-    /// Each `PermissionMode` gets its own icon + accent color (amber eye for
-    /// Read Only, green folder for Workspace Access, red triangle for Full
-    /// Access) so the current permission posture is legible at a glance — a
-    /// 1-line summary of what the model is allowed to do.
-    ///
-    /// Clicking the chip opens the popover: three title-only selectable rows
-    /// (icon + title, check on the right) — no header, no per-mode
-    /// descriptions.
     pub(super) fn render_access_placeholder(
         &mut self,
         theme: &Theme,
@@ -634,8 +600,13 @@ impl Workspace {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.permission_mode))
-            .expect("foreground store present");
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid)
+                    .approval_mode()
+                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
+            })
+            .unwrap_or(PermissionMode::ReadOnly);
         let open = self.chat.read(cx).access_open;
         // Pre-extract chip visuals so the click handler closure doesn't
         // capture `theme` (which only lives for the method body) — closures
@@ -846,19 +817,10 @@ impl Workspace {
         // SetPlanMode/SetModel) — the server arm lands it on the session's
         // facade, whose BrowserSuitesChanged echo drives the chip exactly
         // as the retired direct facade write did.
-        if !self.send_note(cx, |sid| manox_protocol::ClientNote::SetBrowserSuite {
-            session_id: sid.to_string(),
-            suite: suite.wire().to_string(),
-            enable: true,
-        }) {
-            // Landing thread (no session yet): park the toggle in the
-            // facade mirror — `ensure_engine` replays it on materialization
-            // (the designed landing-park path, not a dual-source write).
-            self.chat
-                .read(cx)
-                .thread
-                .with_mut(|t| t.set_browser_suite(suite, true));
-        }
+        self.chat
+            .read(cx)
+            .thread
+            .with_mut(|t| t.set_browser_suite(suite, true));
     }
 
     /// Deactivate a browser tool suite on the bound thread; the chip follows
@@ -870,16 +832,10 @@ impl Workspace {
     ) {
         // U6b①: the gateway leg (see `activate_browser_tool_suite`); the
         // landing fallback parks in the facade mirror.
-        if !self.send_note(cx, |sid| manox_protocol::ClientNote::SetBrowserSuite {
-            session_id: sid.to_string(),
-            suite: suite.wire().to_string(),
-            enable: false,
-        }) {
-            self.chat
-                .read(cx)
-                .thread
-                .with_mut(|t| t.set_browser_suite(suite, false));
-        }
+        self.chat
+            .read(cx)
+            .thread
+            .with_mut(|t| t.set_browser_suite(suite, false));
     }
 
     /// Open the native file picker and add chosen paths as pending
@@ -932,13 +888,10 @@ impl Workspace {
     pub(crate) fn send_button_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A click with no foreground store is the teardown window: leave a
         // trace and drop the note, never a panic on the click path.
-        let Some(running) = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.running)
-        else {
+        let Some(running) = self.chat.read(cx).store.clone().map(|(store, sid)| {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, &sid).running()
+        }) else {
             tracing::warn!("send/stop dropped: no foreground store bound");
             return;
         };
@@ -1095,11 +1048,10 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let project = self.chat.read(cx).store.as_ref().and_then(|s| {
-            s.read(cx)
-                .store
-                .project
-                .clone()
+        let project = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, &sid)
+                .cwd()
                 .map(std::path::PathBuf::from)
         });
         let open = self.chat.read(cx).project_chip_open;
@@ -1108,16 +1060,8 @@ impl Workspace {
         // The directory identity is the workspace row accounting this
         // session (dsh parity); the session's own project mirror is the
         // fallback for sessions no row accounts (loose).
-        let row = self.chat.read(cx).store.as_ref().and_then(|s| {
-            let session_id = s.read(cx).session_id().to_string();
-            self.multiplexer
-                .read(cx)
-                .workspace_of_session(&session_id)
-                .cloned()
-        });
-        let (icon, label): (Option<IconName>, SharedString) = match (row, &project) {
-            (Some(row), _) => (Some(IconName::FolderOpen), row.title.clone().into()),
-            (None, Some(dir)) => {
+        let (icon, label): (Option<IconName>, SharedString) = match &project {
+            Some(dir) => {
                 let name = dir
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -1125,7 +1069,7 @@ impl Workspace {
                     .to_string();
                 (Some(IconName::FolderOpen), name.into())
             }
-            (None, None) => (
+            None => (
                 Some(IconName::FolderOpen),
                 i18n::t("workspace-project-choose"),
             ),
@@ -1170,8 +1114,13 @@ impl Workspace {
                     .read(cx)
                     .store
                     .as_ref()
-                    .map(|s| s.read(cx).store.derived_messages().is_empty())
-                    .expect("foreground store present");
+                    .map(|(store, sid)| {
+                        let view = store.read(cx);
+                        crate::ahp_store::leaf(&view.book, sid)
+                            .chat
+                            .is_none_or(|c| c.turns.is_empty())
+                    })
+                    .unwrap_or(true);
                 if !can_set {
                     return;
                 }
@@ -1189,10 +1138,19 @@ impl Workspace {
                 let rows: Vec<(String, String)> = this
                     .multiplexer
                     .read(cx)
-                    .workspaces()
-                    .iter()
-                    .map(|row| (row.path.clone(), row.title.clone()))
-                    .collect();
+                    .workspaces(cx)
+                    .and_then(|state| {
+                        state
+                            .get("workspaces")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|rows| {
+                                rows.iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(|p| (p.to_string(), String::new()))
+                                    .collect()
+                            })
+                    })
+                    .unwrap_or_default();
 
                 let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
                     let mut menu = menu.max_w(gpui::px(320.)).scrollable(true);
@@ -1242,11 +1200,8 @@ impl Workspace {
                                     let p = std::path::PathBuf::from(&click_path);
                                     let _ = ws_sel.update(cx, |this, cx| {
                                         this.close_project_chip_menu(cx);
-                                        let _ = this.send_note(cx, |sid| {
-                                            manox_protocol::ClientNote::SetCwd {
-                                                session_id: sid.into(),
-                                                cwd: p.to_str().unwrap_or_default().into(),
-                                            }
+                                        this.with_foreground_store(cx, |store, sid| {
+                                            store.set_cwd(&sid, p.to_str().unwrap_or_default());
                                         });
                                         Self::register_project_in_store(&p, cx);
                                         cx.notify();
@@ -1457,9 +1412,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let _ = self.send_note(cx, |sid| manox_protocol::ClientNote::SetCwd {
-            session_id: sid.into(),
-            cwd: new_path.to_str().unwrap_or_default().into(),
+        self.with_foreground_store(cx, |store, sid| {
+            store.set_cwd(&sid, new_path.to_str().unwrap_or_default());
         });
         Self::register_project_in_store(&new_path, cx);
         self.chat.update(cx, |chat, cx| {
@@ -1508,11 +1462,10 @@ impl Workspace {
                 if let Ok(Ok(Some(paths))) = result
                     && let Some(path) = paths.into_iter().next()
                 {
-                    let sent = this.send_note(cx, |sid| manox_protocol::ClientNote::SetCwd {
-                        session_id: sid.into(),
-                        cwd: path.to_str().unwrap_or_default().into(),
+                    this.with_foreground_store(cx, |store, sid| {
+                        store.set_cwd(&sid, path.to_str().unwrap_or_default());
                     });
-                    tracing::info!(sent, path = %path.display(), "project pick SetCwd note");
+                    tracing::info!(path = %path.display(), "project pick SetCwd");
                     Self::register_project_in_store(&path, cx);
                 }
                 cx.notify();

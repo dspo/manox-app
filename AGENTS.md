@@ -38,6 +38,15 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
 
 上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真核心（manox-terminal）与 hyperlinks 已回流 dspo/manox（同经 git 依赖消费），`CxSessionSource` 桥留在本仓 manox-ext-agents。
 
+### 交互协议 v3 = AHP（2026-09-28 切换）
+
+manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（dspo/manox#818 删除 manox-protocol）：journal 仍是唯一 durable 权威，宿主把 journal 折叠成 AHP 通道状态，本仓退化为纯 AHP 客户端。规范与映射表唯一事实源在 dspo/manox 的 `docs/ahp-v3-architecture.md`（§G.W3 = 本仓切换、§F.2 = 本仓删除清单）。
+
+- **数据面**：`crates/manox-agent-chat-ui/src/ahp_store.rs`（`AhpStore`：一个 `ahp::Client` 挂宿主进程单例的 in-proc 腿，折叠 root/session/chat/extension 通道，类型化写面）+ `chat_fold.rs`（`ChatState` → 显示词汇）。视图只许读 AhpStore（grep 门禁 `script/check-no-v2-wire.sh` 冻结 v2 词汇）。
+- **生命周期**：`agent-ui/src/multiplexer.rs` 只管 attach（订阅）/focus（GW5）/unread/create-fork 命令缝；不再有 per-session 线程泵。
+- **客户端 SDK**：crates.io `ahp`/`ahp-types` `=0.9.0` 精确 pin（与上游 workspace 一致）；x-manox 扩展通道的 fold 与声明常量经上游 `manox-ahp::ext`。
+- 已知降级（接 x-manox 通道未建模的部分）：sub-agent 树、UI 本地注释卡不持久、终端走内核 PTY 直连不走 AHP terminal 通道。
+
 ### 与 manox 仓的联动开发
 
 ```bash

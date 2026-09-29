@@ -15,7 +15,6 @@ use agent_ui::Workspace;
 use gpui::{AppContext as _, Entity, TestAppContext, px, size};
 use gpui_component::Theme;
 use manox_agent::Thread;
-use manox_agent::ThreadEvent;
 use manox_agent::db::ThreadSummary;
 use manox_agent::language_model::{LanguageModelToolUse, MessageContent, TokenUsage};
 use manox_agent::message::Message;
@@ -141,19 +140,6 @@ pub fn fake_thread(
         });
         thread
     })
-}
-
-/// Emit a `ThreadEvent` on the store bound to `thread_id` (foreground or a
-/// parked background thread), driving the workspace's subscription handler.
-pub fn emit(
-    workspace: &Entity<Workspace>,
-    cx: &mut TestAppContext,
-    thread_id: &str,
-    event: ThreadEvent,
-) {
-    cx.update(|cx| {
-        workspace.update(cx, |ws, cx| ws.diagnostic_emit_event(thread_id, event, cx));
-    });
 }
 
 /// A real plan file on disk, as `ProposePlan` leaves one.

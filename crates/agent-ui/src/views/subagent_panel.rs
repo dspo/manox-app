@@ -90,8 +90,14 @@ pub struct SubagentPanel {
     final_note: bool,
     /// The model the child runs: every turn header's `{model}` segment and the
     /// activity rows' model name. The recipient (the sub-agent definition)
-    /// lives with the conversation, which owns the turn headers.
+    /// lives with the conversation, which owns the turn headers. Carried for
+    /// the panel's future per-row attribution (the tree itself is a known
+    /// downgrade — AGENTS.md), so the field survives the switch unused.
+    #[allow(dead_code)]
     role: String,
+    /// The chat host handle the panel's future interaction rows will need
+    /// (notice pushes, answer routing); unused while the panel is read-only.
+    #[allow(dead_code)]
     host: manox_agent_chat_ui::host::ChatHostHandle,
     scroll_handle: ScrollHandle,
     stick_to_bottom: bool,
@@ -172,6 +178,7 @@ impl SubagentPanel {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn push(&mut self, child: &SubagentChildEvent, cx: &mut Context<Self>) {
         if let SubagentChildEvent::Model(model) = child {
             // The child's resolved model arrives once, at dispatch: later turn
@@ -204,6 +211,7 @@ impl SubagentPanel {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_status(&mut self, status: ToolCallStatus, cx: &mut Context<Self>) {
         self.status = status;
         cx.notify();
