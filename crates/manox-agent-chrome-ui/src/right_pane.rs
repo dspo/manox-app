@@ -23,12 +23,20 @@ use std::sync::Arc;
 
 use crate::primitives::{icon_button, small_icon_button};
 use crate::theme::{
-    BORDER, CARD_BG, CARD_BORDER, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, icon, icons,
+    ACCENT, BORDER, CARD_BG, CARD_BORDER, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, icon, icons,
 };
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px,
 };
+
+/// Tab strip height. One height for every tab: the active state is carried by
+/// the indicator overlay and the label colour, not by a size change, so
+/// switching tabs never shifts the strip.
+const TAB_STRIP_H: f32 = 34.;
+/// Thickness of the active tab's underline.
+const TAB_INDICATOR_H: f32 = 2.;
 
 /// Tab content store: `open` writes entities (or failure text), `render`
 /// only reads. Dropping the entity is the resource teardown (e.g. PTY).
@@ -450,16 +458,19 @@ impl gpui::Render for RightPane {
             .flex()
             .flex_col()
             // Tab strip: tool tabs + the new-tab tab + right-side
-            // +/split/external.
+            // +/split/external. Tabs sit ON the strip's bottom hairline, and
+            // each tab's indicator overlays that line when active.
             .child(
                 div()
                     .w_full()
-                    .h(px(36.))
+                    .h(px(TAB_STRIP_H))
                     .flex_shrink_0()
                     .pl(px(4.))
                     .pr(px(6.))
                     .gap(px(2.))
                     .items_end()
+                    .border_b_1()
+                    .border_color(BORDER)
                     .child(
                         div()
                             .flex_1()
@@ -499,7 +510,8 @@ impl gpui::Render for RightPane {
                             )),
                     ),
             )
-            .child(div().w_full().h(px(1.)).bg(BORDER).flex_shrink_0())
+            // The strip's own bottom border is the shared rail the tab
+            // indicators sit on, so there is no separate hairline here.
             .child(
                 div()
                     .w_full()
@@ -606,8 +618,13 @@ fn error_body(
         .into_any_element()
 }
 
-/// Top-corner tab pill: the active state is 31px tall with a stroke and
-/// joins the body (no bottom border); inactive pills are ghosted.
+/// Underline tab: a flat label over the strip's shared hairline, with a 2px
+/// accent indicator beneath the active one. The active label is ACCENT and
+/// semibold; inactive labels are FG_DIM.
+///
+/// The indicator is an absolutely-positioned overlay rather than a bottom
+/// border, so it never perturbs the label's layout and every tab keeps one
+/// identical height.
 fn tab_pill(
     tab: &Arc<dyn ToolTab>,
     cx: &App,
@@ -619,24 +636,27 @@ fn tab_pill(
     let pill = div()
         .id(SharedString::from(format!("tool-tab-{}", tab.id())))
         .on_click(move |e, w, cx| activate(e, w, cx))
-        .h(px(if active { 31. } else { 28. }))
+        .relative()
+        .h(px(TAB_STRIP_H))
         .pl(px(10.))
         .pr(px(8.))
         .gap(px(6.))
         .items_center()
         .flex_shrink_0()
-        .rounded_tl(px(7.))
-        .rounded_tr(px(7.))
         .flex()
-        .text_color(if active { FG_STRONG } else { FG_DIM });
-    let pill = if active {
-        pill.bg(CARD_BG)
-            .border_1()
-            .border_color(BORDER)
-            .border_b_0()
-    } else {
-        pill.hover(|style| style.bg(LIST_HOVER))
-    };
+        .text_color(if active { ACCENT } else { FG_DIM })
+        .hover(|style| style.bg(LIST_HOVER))
+        .when(active, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(TAB_INDICATOR_H))
+                    .bg(ACCENT),
+            )
+        });
     pill.child(icon_el)
         .child(
             div()
@@ -644,6 +664,11 @@ fn tab_pill(
                 .max_w(px(120.))
                 .truncate()
                 .text_size(px(12.))
+                .font_weight(if active {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
                 .child(tab.title(cx)),
         )
         .child(small_icon_button(
@@ -660,33 +685,26 @@ fn new_tab_pill(
     active: bool,
     on_new_tab: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<gpui::Div> {
-    let pill = div()
+    div()
         .id("tool-new-tab")
         .on_click(move |e, w, cx| on_new_tab(e, w, cx))
-        .h(px(if active { 31. } else { 28. }))
+        .h(px(TAB_STRIP_H))
         .pl(px(10.))
         .pr(px(8.))
         .gap(px(6.))
         .items_center()
         .flex_shrink_0()
-        .rounded_tl(px(7.))
-        .rounded_tr(px(7.))
+        .rounded(px(5.))
         .flex()
-        .text_color(if active { FG_STRONG } else { FG_DIM });
-    let pill = if active {
-        pill.bg(CARD_BG)
-            .border_1()
-            .border_color(BORDER)
-            .border_b_0()
-    } else {
-        pill.hover(|style| style.bg(LIST_HOVER))
-    };
-    pill.child(icon(icons::ADD, 12.)).child(
-        div()
-            .truncate()
-            .text_size(px(12.))
-            .child(manox_i18n::t("chrome-tab-new-tab")),
-    )
+        .text_color(if active { FG_STRONG } else { FG_DIM })
+        .hover(|style| style.bg(LIST_HOVER))
+        .child(icon(icons::ADD, 12.))
+        .child(
+            div()
+                .truncate()
+                .text_size(px(12.))
+                .child(manox_i18n::t("chrome-tab-new-tab")),
+        )
 }
 
 /// Quick-action row: icon + label, whole row clickable, hover wash.
