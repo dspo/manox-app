@@ -1096,6 +1096,11 @@ impl AhpStore {
         request_id: &str,
         answers: std::collections::HashMap<String, ChatInputAnswer>,
     ) {
+        tracing::info!(
+            request_id = %request_id,
+            answers = answers.len(),
+            "chat input: submitting answers"
+        );
         let action = StateAction::ChatInputCompleted(ChatInputCompletedAction {
             request_id: request_id.to_string(),
             response: ChatInputResponseKind::Accept,
@@ -1108,6 +1113,7 @@ impl AhpStore {
     /// user left to speak, never a rejection — the engine journals the
     /// question's `dismissed` verdict).
     pub fn decline_input(&mut self, chat_id: &str, request_id: &str) {
+        tracing::info!(request_id = %request_id, "chat input: declining (dismissed)");
         let action = StateAction::ChatInputCompleted(ChatInputCompletedAction {
             request_id: request_id.to_string(),
             response: ChatInputResponseKind::Decline,
@@ -1333,7 +1339,7 @@ fn confirmation_tool_call_id(call: &ahp_types::state::ToolCallConfirmationState)
     }
 }
 
-impl LeafView<'_> {
+impl<'a> LeafView<'a> {
     /// The session's display title (AHP keeps it on both channel states).
     pub fn display_title(&self) -> Option<&str> {
         self.session.map(|s| s.title.as_str())
@@ -1423,23 +1429,52 @@ impl LeafView<'_> {
     /// The chat-input (elicitation) request whose id is `id`:
     /// `(chat id, request)`.
     pub fn chat_input(&self, id: &str) -> Option<(String, &ahp_types::state::ChatInputRequest)> {
-        self.requests().iter().find_map(|r| match r {
-            ahp_types::state::SessionInputRequest::ChatInput(c) if c.id == id => {
-                Some((crate::ahp_store::id_of(&c.chat).to_string(), &c.request))
-            }
-            _ => None,
-        })
+        self.fold_input_request(Some(id))
     }
 
     /// The first open chat-input (elicitation) request, if any — the live
     /// ask edge's source of truth.
     pub fn open_chat_input(&self) -> Option<(String, &ahp_types::state::ChatInputRequest)> {
-        self.requests().iter().find_map(|r| match r {
-            ahp_types::state::SessionInputRequest::ChatInput(c) => {
-                Some((crate::ahp_store::id_of(&c.chat).to_string(), &c.request))
+        self.fold_input_request(None)
+    }
+
+    /// Scan the fold for an unanswered chat-input request. The host folds
+    /// `chat/inputRequested` into the active turn's response parts — the
+    /// session channel's input-needed list is NOT maintained on this path —
+    /// so the fold is the only home for both surfacing and answering an ask.
+    fn fold_input_request(
+        &self,
+        id: Option<&str>,
+    ) -> Option<(String, &ahp_types::state::ChatInputRequest)> {
+        fn scan<'a>(
+            parts: &'a [ahp_types::state::ResponsePart],
+            id: Option<&str>,
+            latest: &mut Option<&'a ahp_types::state::InputRequestResponsePart>,
+        ) {
+            for part in parts {
+                if let ahp_types::state::ResponsePart::InputRequest(input) = part {
+                    if input.response.is_some() {
+                        continue;
+                    }
+                    if let Some(want) = id
+                        && input.request.id != want
+                    {
+                        continue;
+                    }
+                    // Journal order: the latest unanswered request wins.
+                    *latest = Some(input);
+                }
             }
-            _ => None,
-        })
+        }
+        let chat = self.chat?;
+        let mut latest: Option<&ahp_types::state::InputRequestResponsePart> = None;
+        if let Some(active) = &chat.active_turn {
+            scan(&active.response_parts, id, &mut latest);
+        }
+        for turn in chat.turns.iter().rev() {
+            scan(&turn.response_parts, id, &mut latest);
+        }
+        latest.map(|input| (id_of(&chat.resource).to_string(), &input.request))
     }
 
     /// The session goal (verbatim payload).

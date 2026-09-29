@@ -864,8 +864,20 @@ impl Workspace {
                 .open_chat_input()
                 .and_then(|(chat_id, req)| {
                     let _ = chat_id;
-                    crate::ahp_store::pending_ask_from_ahp(req.id.clone(), req)
-                        .map(|ask| (req.id.clone(), ask))
+                    match crate::ahp_store::pending_ask_from_ahp(req.id.clone(), req) {
+                        Some(ask) => Some((req.id.clone(), ask)),
+                        None => {
+                            // The one diagnosis this edge can't recover from:
+                            // the fold carries the request but its question
+                            // list is empty/unparseable.
+                            tracing::warn!(
+                                request_id = %req.id,
+                                questions = ?req.questions.as_ref().map(|q| q.len()),
+                                "live ask: fold elicitation parsed to no questions"
+                            );
+                            None
+                        }
+                    }
                 })
         };
         match live {
@@ -883,6 +895,12 @@ impl Workspace {
                         .first()
                         .map(|q| q.header.clone())
                         .unwrap_or_default();
+                    tracing::info!(
+                        request_id = %request_id,
+                        questions = ask.questions.len(),
+                        summary = %summary,
+                        "live ask: seeding the interactive card"
+                    );
                     self.chat.update(cx, |chat, cx| {
                         chat.pending_ask = Some(ask);
                         chat.pending_ask_live = true;
@@ -898,6 +916,7 @@ impl Workspace {
                 let live_seeded = self.chat.read(cx).pending_ask_live;
                 let has_ask = self.chat.read(cx).pending_ask.is_some();
                 if live_seeded && has_ask {
+                    tracing::info!("live ask: request left the fold, retiring the card");
                     self.chat.update(cx, |chat, cx| {
                         chat.pending_ask = None;
                         chat.pending_ask_live = false;
