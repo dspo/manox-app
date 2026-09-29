@@ -481,6 +481,24 @@ impl AhpStore {
         self.client.is_some()
     }
 
+    /// A store that never dials the host: the folded book is a plain struct
+    /// tests seed directly, and every write queues as a pending write.
+    /// Diagnostic-only — the production constructor is [`Self::connect`].
+    #[cfg(feature = "test-support")]
+    pub fn detached() -> Self {
+        Self {
+            book: ChannelBook::default(),
+            client: None,
+            replay_pending: false,
+            chat_events: Vec::new(),
+            optimistic_undo: Vec::new(),
+            pending_writes: Vec::new(),
+            request_hook: None,
+            rejections: std::collections::VecDeque::new(),
+            _tasks: Vec::new(),
+        }
+    }
+
     /// Seed a placeholder summary for a session this client just created, so
     /// the sidebar row exists the moment the conversation starts: the host's
     /// store row (what `listSessions` serves) lands with the first

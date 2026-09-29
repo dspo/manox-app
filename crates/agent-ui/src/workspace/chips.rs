@@ -467,10 +467,17 @@ impl Workspace {
         }
         // The fold no longer carries the request (settled elsewhere, or the
         // answer raced its own decision row). Answering nothing here is the
-        // right wire behavior — but silently it is a dead end to debug.
+        // right wire behavior — but silently it is a dead end to debug. The
+        // card is already taken (`take_pending_ask` above), so the composer
+        // leaves ask-supplement mode with this call: say so, or a submit that
+        // answered nothing reads as the #88 dead-lock.
         tracing::warn!(
             request_id = %id,
             "ask answer dropped: no matching open request in the fold"
+        );
+        tracing::info!(
+            request_id = %id,
+            "ask card retired without an answer; composer back to plain submit"
         );
         cx.notify();
     }
