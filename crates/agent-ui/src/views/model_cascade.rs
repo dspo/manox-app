@@ -23,8 +23,9 @@ fn launch_wire_key(meta_api: &str) -> Option<String> {
     }
 }
 
-/// One cascade entry: the raw cx config key, its display name, the wire api
-/// (the row tag's source), and the wire key for the launch pin.
+/// One cascade entry: the canonical `provider/model` pick (dispatched
+/// verbatim), its display name, and the wire api mapped onto the launch
+/// pin's vocabulary ("anthropic" / "responses" / "completions").
 #[derive(Debug)]
 pub(crate) struct CascadeEntry {
     pub config_id: String,
@@ -34,8 +35,9 @@ pub(crate) struct CascadeEntry {
 
 /// The pure cascade projection over AHP's root catalogue: one group per
 /// agent registration (the catalogue carries the provider identity the v2
-/// wire list flattened, so the dedupe and the visible-agents filter are
-/// structural now); each agent's models become entries.
+/// wire list flattened); each agent's models become entries. KNOWN
+/// DOWNGRADE: the v2 registry's per-agent visibility column has no AHP
+/// successor — every agent's picker lists every provider's models.
 pub(crate) fn cascade_provider_groups(
     agents: &[ahp_types::state::AgentInfo],
 ) -> Vec<(String, Vec<CascadeEntry>)> {
