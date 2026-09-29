@@ -12,7 +12,7 @@ use gpui::{
     VisualTestContext, div, px, size,
 };
 use gpui_component::Root;
-use manox_agent_chrome_ui::session_list::SessionStatus;
+use manox_agent_chrome_ui::session_list::{SessionGroup, SessionRowData, SessionStatus};
 use manox_agent_chrome_ui::shell::SessionRow;
 use manox_agent_chrome_ui::{HostHooks, MainSurface, Shell, ShellConfig, register_fonts};
 
@@ -69,6 +69,22 @@ fn sample_row(id: &str) -> SessionRow {
         archived: false,
         tag: None,
         team_leader: false,
+    }
+}
+
+/// A projection-shaped row (post-`project_forest`: members carry their
+/// leader's stamp, everyone else their own clock).
+fn row_data(id: &str, updated_at: i64, sort_stamp: i64, team_leader: bool) -> SessionRowData {
+    SessionRowData {
+        id: id.into(),
+        title: "把 sidebar 的 thread 行改成三行布局".into(),
+        updated_at,
+        sort_stamp,
+        status: SessionStatus::Idle,
+        pinned: false,
+        archived: false,
+        tag: None,
+        team_leader,
     }
 }
 
@@ -315,40 +331,38 @@ fn crossing_rows_lands_the_hover_on_the_row_under_the_pointer(cx: &mut TestAppCo
 /// behind the next team (the chevron is the only hierarchy marker).
 #[gpui::test]
 fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
-    let (mut visual, shell) = mount(
-        cx,
-        Rc::new(RefCell::new(Vec::new())),
-        vec![
-            SessionRow {
-                id: "leader-1".into(),
-                team_leader: true,
-                updated_at: 300,
-                sort_stamp: 300,
-                ..sample_row("leader-1")
-            },
-            SessionRow {
-                id: "member-1".into(),
-                updated_at: 150,
-                sort_stamp: 300,
-                ..sample_row("member-1")
-            },
-            SessionRow {
-                id: "leader-2".into(),
-                updated_at: 200,
-                sort_stamp: 200,
-                ..sample_row("leader-2")
-            },
+    // Built through `from_group` — the stamping under test lives there (via
+    // the projection's `sort_stamp`), not in hand-written rows.
+    let rows = SessionRow::from_group(SessionGroup {
+        name: "Chats".into(),
+        collapsed: false,
+        rows: vec![
+            row_data("leader-1", 300, 300, true),
+            // Post-projection shape: the member carries its leader's stamp
+            // (project_forest re-stamps it).
+            row_data("member-1", 150, 300, false),
+            // A standalone session trailing the team: it must keep its OWN
+            // stamp, not inherit the team's.
+            row_data("standalone", 200, 200, false),
         ],
+    });
+    // The projection stamps the member with its leader; the standalone
+    // stays on its own clock.
+    assert_eq!(
+        rows.iter().map(|r| r.sort_stamp).collect::<Vec<_>>(),
+        [300, 300, 200],
+        "from_group must not leak the team stamp onto the standalone row"
     );
-    let _ = &mut visual;
+
+    let (_visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
 
     shell.update(cx, |s, cx| s.toggle_pin("leader-1", cx));
     let order: Vec<String> =
         shell.read_with(cx, |s, _| s.sessions.iter().map(|r| r.id.clone()).collect());
     assert_eq!(
         order,
-        ["leader-1", "member-1", "leader-2"],
-        "the pinned team stays a unit; a member must not sink behind leader-2"
+        ["leader-1", "member-1", "standalone"],
+        "the pinned team stays a unit; the standalone keeps its own recency"
     );
 }
 

@@ -55,9 +55,12 @@ pub type OnGroupMove = Rc<dyn Fn(&String, &String, bool, &mut Window, &mut App)>
 pub struct SessionRowData {
     pub id: String,
     pub title: String,
-    /// Last-active unix seconds — the info line's display source and the
-    /// host's sort stamp, one field so ordering and rendering agree.
+    /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
+    /// The re-sort stamp: the row's own `updated_at`, except team members,
+    /// which the projection stamps with their leader's — a team sorts (and
+    /// survives a pin re-order) as one unit, contiguous under its chevron.
+    pub sort_stamp: i64,
     pub status: SessionStatus,
     pub pinned: bool,
     /// The store-partition flag behind the menu's archive/unarchive toggle.

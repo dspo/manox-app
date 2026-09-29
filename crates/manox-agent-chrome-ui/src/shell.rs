@@ -42,12 +42,14 @@ pub struct SessionRow {
     /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
     /// The re-sort stamp: the row's own `updated_at`, except team members
-    /// inherit their leader's, so a team sorts as one unit and stays
-    /// contiguous through the pinned-first re-order (the chevron keeps
-    /// pointing at its members).
+    /// arrive with their leader's (the projection owns the team structure),
+    /// so a team sorts as one unit and stays contiguous through the
+    /// pinned-first re-order. Note the store pins per thread: pinning a
+    /// member floats that member alone — unit-wide pinning is the store's
+    /// concern when teams land.
     pub sort_stamp: i64,
     pub pinned: bool,
-    /// The store-partition flag the archive/unarchive menu toggle reads.
+    /// See [`SessionRowData::archived`] — always false on today's wire.
     pub archived: bool,
     /// D2 columns: the user tag chip and the team-leader mark (rows do not
     /// indent — hierarchy lives in the group header and the leader chevron).
@@ -58,33 +60,25 @@ pub struct SessionRow {
 impl SessionRow {
     /// Lift one projected group (see agent-ui's `sidebar_projection`) into
     /// the shell's row carrier. The projection emits wire order (recency)
-    /// already and every row carries its real `updated_at`.
+    /// already, carries each row's real `updated_at`, and owns the team
+    /// structure: members arrive with their leader's `sort_stamp`.
     pub fn from_group(group: crate::session_list::SessionGroup) -> Vec<SessionRow> {
-        // The projection trails each leader with its members; stamping
-        // members with their leader's stamp keeps the team contiguous
-        // through the pinned-first re-sort. (A flattened orphan trailing a
-        // team inherits that team's stamp — transient only, the next wire
-        // snapshot re-establishes the projection order.)
-        let mut rows = Vec::with_capacity(group.rows.len());
-        let mut unit_stamp = None;
-        for r in group.rows {
-            if r.team_leader {
-                unit_stamp = Some(r.updated_at);
-            }
-            rows.push(SessionRow {
+        group
+            .rows
+            .into_iter()
+            .map(|r| SessionRow {
                 id: r.id,
                 title: r.title,
                 workspace: group.name.clone(),
                 status: r.status,
                 updated_at: r.updated_at,
-                sort_stamp: unit_stamp.unwrap_or(r.updated_at),
+                sort_stamp: r.sort_stamp,
                 pinned: r.pinned,
                 archived: r.archived,
                 tag: r.tag,
                 team_leader: r.team_leader,
-            });
-        }
-        rows
+            })
+            .collect()
     }
 
     fn row_data(&self) -> SessionRowData {
@@ -92,6 +86,7 @@ impl SessionRow {
             id: self.id.clone(),
             title: self.title.clone(),
             updated_at: self.updated_at,
+            sort_stamp: self.sort_stamp,
             status: self.status,
             pinned: self.pinned,
             archived: self.archived,

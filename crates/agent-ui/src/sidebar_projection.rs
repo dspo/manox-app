@@ -27,11 +27,14 @@ use manox_protocol::ThreadListItem;
 pub type UnreadMirrors = HashMap<String, bool>;
 
 /// Project one wire row (GW5: `unread_override` from the live leaf wins).
+/// The sort stamp defaults to the row's own last-active time; a team's
+/// members are re-stamped to their leader's by [`project_forest`].
 pub fn project_row(item: &ThreadListItem, unread_override: Option<bool>) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),
         title: item.title.clone(),
         updated_at: i64::from(item.updated_at),
+        sort_stamp: i64::from(item.updated_at),
         status: five_state(item, unread_override),
         pinned: item.pinned,
         archived: item.archived,
@@ -60,9 +63,12 @@ pub fn five_state(item: &ThreadListItem, unread_override: Option<bool>) -> Sessi
 /// Project a partition's rows into the chrome group shape with the team
 /// forest materialized: leaders in list order, each followed by its member
 /// rows (the wire's team nesting is never deeper — pi sub-agents — so no
-/// recursion is needed). Members no longer indent: the leader's chevron is
-/// the only nesting marker. Orphans (a parent that is missing, archived, or
-/// outside the partition) flatten to top-level rather than vanishing.
+/// recursion is needed). Members no longer indent — the leader's chevron is
+/// the only nesting marker, and the projection re-stamps each member's
+/// `sort_stamp` to its leader's `updated_at` so the team sorts (and survives
+/// a pin re-order) as one unit. Orphans (a parent that is missing,
+/// archived, or outside the partition) flatten to top-level rather than
+/// vanishing, keeping their own stamp.
 pub fn project_forest(rows: &[ThreadListItem], unread: &UnreadMirrors) -> Vec<SessionRowData> {
     let by_id: HashMap<&str, &ThreadListItem> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
     let mut out = Vec::with_capacity(rows.len());
@@ -74,9 +80,12 @@ pub fn project_forest(rows: &[ThreadListItem], unread: &UnreadMirrors) -> Vec<Se
                 .filter(|r| r.depth > 0 && r.parent_id.as_deref() == Some(row.id.as_str()))
                 .collect();
             leader.team_leader = !members.is_empty();
+            let unit_stamp = leader.sort_stamp;
             out.push(leader);
             for m in members {
-                out.push(project_row(m, unread.get(&m.id).copied()));
+                let mut member = project_row(m, unread.get(&m.id).copied());
+                member.sort_stamp = unit_stamp;
+                out.push(member);
             }
         } else {
             // A member whose leader is absent from this partition flattens.
@@ -180,12 +189,16 @@ mod tests {
 
     #[test]
     fn forest_nests_members_under_leaders_and_flattens_orphans() {
-        let rows = vec![
+        let mut rows = vec![
             row("leader", 0, None),
             row("member", 1, Some("leader")),
             row("orphan", 1, Some("gone")),
             row("top", 0, None),
         ];
+        // Wire columns ride the projection verbatim.
+        rows[0].updated_at = 300;
+        rows[1].updated_at = 150;
+        rows[2].archived = true;
         let out = project_forest(&rows, &UnreadMirrors::new());
         let ids: Vec<(&str, bool)> = out.iter().map(|r| (r.id.as_str(), r.team_leader)).collect();
         assert_eq!(
@@ -197,8 +210,16 @@ mod tests {
                 ("top", false),
             ]
         );
-        // Rows never indent (the group header + chevron carry hierarchy).
-        assert!(out.iter().all(|r| r.updated_at == 0 && !r.archived));
+        assert_eq!(out[0].updated_at, 300);
+        assert_eq!(out[1].updated_at, 150);
+        assert!(out[2].archived);
+        assert!(!out[0].archived);
+        // The team shares one sort stamp (the leader's); a flattened orphan
+        // keeps its own.
+        assert_eq!(out[0].sort_stamp, 300);
+        assert_eq!(out[1].sort_stamp, 300);
+        assert_eq!(out[2].sort_stamp, 0);
+        assert_eq!(out[3].sort_stamp, 0);
     }
 
     #[test]
