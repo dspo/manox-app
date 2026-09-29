@@ -12,13 +12,13 @@ use std::sync::Arc;
 
 use gpui::{AnyView, App, SharedString, Window};
 
-use crate::theme::Icon;
+use crate::theme::IconAsset;
 
 /// Bottom-dock content. The chrome never interprets the view — it mounts it
 /// full-bleed under the tab strip.
 pub trait PanelSurface: 'static {
     fn title(&self) -> SharedString;
-    fn icon(&self) -> Icon;
+    fn icon(&self) -> IconAsset;
     /// Expand: create the view (side effects allowed — this is the event
     /// path). An `Err` renders the shell's error body with a retry.
     fn open(&self, window: &mut Window, cx: &mut App) -> Result<AnyView, String>;

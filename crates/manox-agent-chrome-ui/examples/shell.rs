@@ -29,7 +29,7 @@ use manox_agent_chat_ui::views::message::MessageItem;
 use manox_agent_chrome_ui::right_pane::TabStore;
 use manox_agent_chrome_ui::session_list::SessionStatus;
 use manox_agent_chrome_ui::shell::SessionRow;
-use manox_agent_chrome_ui::theme::{self, Icon, icon};
+use manox_agent_chrome_ui::theme::{self, IconAsset, icon};
 use manox_agent_chrome_ui::{
     CustomizationRow, FixedRow, HostHooks, MainSurface, PanelSurface, Shell, ShellConfig, ToolTab,
     ToolTabFactory, icons, register_fonts, window_options,
@@ -309,15 +309,18 @@ fn next_instance_id(kind: &str) -> String {
     format!("{kind}-{}", INSTANCE.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Glyph: brand SVG asset first, codicon fallback.
-fn icon_el(svg_path: Option<&'static str>, codicon: Icon, size: f32) -> gpui::AnyElement {
+/// Glyph: brand SVG asset first, chrome table fallback.
+fn icon_el(svg_path: Option<&'static str>, glyph: IconAsset, size: f32) -> gpui::AnyElement {
     match svg_path {
+        // A bare `svg()` paints nothing without an explicit color (its style
+        // does not inherit the ancestor's text color).
         Some(path) => svg()
             .path(path)
             .size(px(size))
             .flex_shrink_0()
+            .text_color(theme::FG)
             .into_any_element(),
-        None => icon(codicon, size).into_any_element(),
+        None => icon(glyph, size).into_any_element(),
     }
 }
 
@@ -704,7 +707,7 @@ impl PanelSurface for TerminalPanel {
         manox_i18n::t("chrome-tab-terminal").into()
     }
 
-    fn icon(&self) -> Icon {
+    fn icon(&self) -> IconAsset {
         icons::TERMINAL
     }
 

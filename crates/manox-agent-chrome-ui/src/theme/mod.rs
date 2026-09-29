@@ -5,7 +5,7 @@
 pub mod icons;
 pub mod palette;
 
-pub use icons::{Icon, icon, menu_icon};
+pub use icons::{IconAsset, icon};
 pub use palette::*;
 
 /// UI font family. gpui's platform alias `.SystemUIFont` resolves to the
@@ -17,9 +17,13 @@ pub const FONT_UI: &str = ".SystemUIFont";
 pub const FONT_MONO: &str = ".SF NS Mono";
 
 /// Register the chrome fonts (SF Mono; icons are SVG assets and need no
-/// font). Idempotent at the text-system level; call once during app init,
-/// before the first chrome frame renders, so the first paint already resolves
-/// to this face.
+/// font). Call once during app init, before the first chrome frame renders,
+/// so the first paint already resolves to this face.
+///
+/// Embedded-font trap: the macOS text system silently refuses to load a font
+/// with no `m` glyph (returns `Ok`, every glyph renders as tofu) — the
+/// retired codicon.ttf needed an empty-`m` patch for exactly this. Any
+/// replacement embedded font must carry an `m` glyph.
 pub fn register_fonts(cx: &mut gpui::App) {
     cx.text_system()
         .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(

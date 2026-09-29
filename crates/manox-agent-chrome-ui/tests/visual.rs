@@ -33,7 +33,7 @@ mod macos {
     use manox_agent_chrome_ui::right_pane::TabStore;
     use manox_agent_chrome_ui::session_list::SessionStatus;
     use manox_agent_chrome_ui::shell::SessionRow;
-    use manox_agent_chrome_ui::theme::Icon;
+    use manox_agent_chrome_ui::theme::IconAsset;
     use manox_agent_chrome_ui::{
         CustomizationRow, FixedRow, HostHooks, MainSurface, PanelSurface, Shell, ShellConfig,
         ToolTab, ToolTabFactory, icons, register_fonts,
@@ -492,7 +492,7 @@ mod macos {
             "Dummy".into()
         }
 
-        fn icon(&self) -> Icon {
+        fn icon(&self) -> IconAsset {
             icons::TOOLS
         }
 

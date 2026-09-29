@@ -2,7 +2,7 @@
 //! agents-window calibration value for value (sizes, radii, colors).
 
 use crate::theme::{
-    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, FG_DIM, ICON_ON_BG, Icon, SURFACE_ACTIVE,
+    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, FG_DIM, ICON_ON_BG, IconAsset, SURFACE_ACTIVE,
     SURFACE_TERTIARY, TOOLBAR_HOVER, icon,
 };
 use gpui::{
@@ -16,7 +16,7 @@ use gpui::{
 /// the active state (accent glyph + accent 10% background).
 pub fn icon_button(
     id: impl Into<ElementId> + Clone,
-    glyph: Icon,
+    glyph: IconAsset,
     size: f32,
     on: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -62,7 +62,7 @@ pub fn icon_button(
 /// hover wash. The caller sets colors through `.text_color` on an ancestor.
 pub fn small_icon_button(
     id: impl Into<ElementId>,
-    glyph: Icon,
+    glyph: IconAsset,
     size: f32,
     color: gpui::Rgba,
     hover_color: gpui::Rgba,

@@ -1067,7 +1067,7 @@ Shared framed text container (`manox-components::turn_frame::TurnFrame`) used fo
 
 Named icon from the icon set (e.g., `IconName::Folder`, `IconName::Search`). 全部图标统一走 SVG 方案：组件层用 gpui-component 的 `Icon`（`IconName` 枚举或 `Icon::default().path("icons/…")`），运行时经 `ExtrasAssetSource`（manox 本地 svg 优先 → `gpui-kit-assets::AllAssets` 全量 Lucide）解析。
 
-chrome 壳自有图标表在 `manox-agent-chrome-ui/src/theme/icons.rs`：`Icon(pub &'static str)` 常量即 svg 资产路径（Lucide 名），`theme::icon(glyph, size)` / `theme::menu_icon(glyph)` 返回 `gpui_component::Icon`，可直接喂 `PopupMenuItem::icon` / `Button::icon`；颜色继承祖先 `text_color`。守护测试锁每个常量在嵌入 bundle 内可解析（上游改名测试即红）。旧 codicon 字体方案（codicon.ttf + `FONT_ICON`）已退役。
+chrome 壳自有图标表在 `manox-agent-chrome-ui/src/theme/icons.rs`：`IconAsset(pub &'static str)` 常量即 svg 资产路径（Lucide 名），宏同时生成常量与 `ALL` 列表；`theme::icon(glyph, size)` 返回 `gpui_component::Icon`，且 `IconAsset` 实现了 `IconNamed`（常量可直喂 `PopupMenuItem::icon` / `Button::icon`）；颜色继承祖先 `text_color`。守护测试遍历 `ALL` 断言每条路径在嵌入 bundle 内可解析 + 路径两两不重复（上游改名测试即红）。旧 codicon 字体方案（codicon.ttf + `FONT_ICON`）已退役。
 
 #### BrailleSpinner
 

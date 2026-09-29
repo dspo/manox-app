@@ -350,7 +350,7 @@ impl Shell {
                     } else {
                         manox_i18n::t("chrome-row-pin")
                     })
-                    .icon(crate::theme::menu_icon(crate::theme::icons::PIN))
+                    .icon(crate::theme::icons::PIN)
                     .on_click(move |_, window, cx| {
                         this_pin.update(cx, |this, cx| {
                             if let Some(hook) = &this.hooks.on_pin {
@@ -367,11 +367,11 @@ impl Shell {
                     } else {
                         manox_i18n::t("sidebar-archive")
                     })
-                    .icon(crate::theme::menu_icon(if archived {
+                    .icon(if archived {
                         crate::theme::icons::ARCHIVE_RESTORE
                     } else {
                         crate::theme::icons::ARCHIVE
-                    }))
+                    })
                     .on_click(move |_, window, cx| {
                         this_archive.update(cx, |this, cx| {
                             if let Some(hook) = &this.hooks.on_archive {
@@ -389,7 +389,7 @@ impl Shell {
                     } else {
                         manox_i18n::t("sidebar-thread-tag-add")
                     })
-                    .icon(crate::theme::menu_icon(crate::theme::icons::TAG))
+                    .icon(crate::theme::icons::TAG)
                     .on_click(move |_, window, cx| {
                         this_tag.update(cx, |this, cx| {
                             this.close_row_menu(cx);
@@ -401,7 +401,7 @@ impl Shell {
             let menu = if has_tag {
                 menu.item(
                     PopupMenuItem::new(manox_i18n::t("sidebar-thread-tag-clear"))
-                        .icon(crate::theme::menu_icon(crate::theme::icons::TRASH))
+                        .icon(crate::theme::icons::TRASH)
                         .on_click(move |_, window, cx| {
                             this_tag2.update(cx, |this, cx| {
                                 this.set_tag(&id_tag_clear, None, window, cx);
@@ -414,7 +414,7 @@ impl Shell {
             };
             menu.separator().item(
                 PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id"))
-                    .icon(crate::theme::menu_icon(crate::theme::icons::COPY))
+                    .icon(crate::theme::icons::COPY)
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
                     }),

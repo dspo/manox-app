@@ -457,8 +457,7 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             window.set_window_title("Manox Pi");
             Theme::change(ThemeMode::Light, Some(window), cx);
 
-            // Register the chrome fonts (SF Mono; icons are SVG assets)
-            // before the first chrome frame paints.
+            // Must precede the first chrome frame (see register_fonts).
             manox_agent_chrome_ui::register_fonts(cx);
             // The chrome assembly is the window root: its own multiplexer,
             // projected sidebar, tool tabs, and dock.
