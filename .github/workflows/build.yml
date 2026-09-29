@@ -79,7 +79,7 @@ jobs:
       # which is macOS-only (Metal readback), so on this Linux runner it skips
       # itself. It is listed here for visibility: run it locally on macOS after
       # touching right_pane.rs.
-      - name: Tab indicator alignment guard
+      - name: Tab indicator alignment guard (macOS-only; skips on this runner)
         run: ./script/check-tab-indicator.sh
 
       - name: Fmt check

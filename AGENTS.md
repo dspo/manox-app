@@ -76,7 +76,7 @@ CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p manox-agent
 
 - 诊断开关 `CHROME_SWITCH=1`：开第二个（更宽的）页签、等布局稳定后切回第一个——**这是唯一能触达页签指示器滑动动画的路径**，单页签出图看不到「从哪来」。
 - **动画类改动注意**：离屏测试**没有平台帧循环**，`request_animation_frame` 排的回调只有经 `Window::simulate_next_frame` 才会送达；只 `run_until_parked` 的话动画永远停在第一帧（`delta=0`）。settle 循环已补一帧，但**要看中间帧必须自己 pump**；出图只反映终态。
-- 页签指示器的对齐由 `script/check-tab-indicator.sh` 把关（量**左端**而非宽度——曾经宽度/高度全对却整体右偏 6px，任何宽度或 y 断言都看不见）。它依赖 macOS 离屏harness，CI 上自动跳过。
+- 页签指示器的对齐由 `script/check-tab-indicator.sh` 把关（量**左端**而非宽度——曾经宽度/高度全对却整体右偏 6px，任何宽度或 y 断言都看不见）。它依赖 macOS 离屏 harness，CI 上自动跳过。
 - 产物是 **1280×820 @2x = 2560×1640** 的 PNG（约 300KB）。
 - **macOS only**：Metal 纹理回读，其它平台打印一行跳过；**未设 `CHROME_SHOT` 时同样跳过**，所以在 CI 里安全（门禁不受影响）。
 - 侧栏铺的是真实 thread store（`refresh_thread_list` 一次同步扫描），所以图里是**真实会话数据**，不是占位。
