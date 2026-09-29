@@ -130,7 +130,7 @@ add(rect(cx, y - 12, 44, 18, fill="rgba(0,0,0,0.05)", rx=4))
 add(text(cx + 8, y + 1, "范围", size=10.5, fill=FG_DIM))
 add(text(cx + 54, y + 1, "这次重构要覆盖哪些 crate？", size=13.5, fill=FG, weight="600"))
 y += 20
-add(text(cx, y + 4, "勾选后会在同一个 PR 内改动；跨 crate 的改动需要同步更新 UI-MAP.md。",
+add(text(cx, y + 4, "勾选后会在同一个 PR 内改动；跨 crate 的改动需要同步更新 design/svg/ 原型。",
          size=11.5, fill=FG_DIM))
 y += 26
 # options: checkbox list with labels + descriptions

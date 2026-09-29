@@ -1,5 +1,5 @@
-//! The chat column's state types (PLAN-CHROME-CHAT-SPLIT Phase 2 tail):
-//! the `ChatColumn` entity's fields, the ask/queue/recall state families it
+//! The chat column's state types: the `ChatColumn` entity's fields, the
+//! ask/queue/recall state families it
 //! carries, and the `AskUserQuestion` payload parser. The struct lives here;
 //! the workspace (agent-ui) embeds it as an `Entity<ChatColumn>` and
 //! orchestrates the wire-facing halves.

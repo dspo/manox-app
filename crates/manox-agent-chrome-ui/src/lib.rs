@@ -26,7 +26,7 @@
 //! cargo run -p manox-agent-chrome-ui --example shell
 //! ```
 //!
-//! Known gaps at this stage (tracked in PLAN-CHROME-CHAT-SPLIT.md): the
+//! Known gaps at this stage: the
 //! session-row props model still carries the replica's three-state status
 //! (the manox five-state semantics extend it at the assembly stage);
 //! per-session right-pane tab sets are not yet modeled; the toolbar's

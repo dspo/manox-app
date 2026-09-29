@@ -1,5 +1,5 @@
-//! ToolTab assembly adapters (PLAN-CHROME-CHAT-SPLIT Phase 4): wrap the
-//! app's real surfaces as chrome-shell right-pane tabs.
+//! ToolTab assembly adapters: wrap the app's real surfaces as chrome-shell
+//! right-pane tabs.
 //!
 //! Kinds shipped here:
 //! - integrated terminal ($SHELL, standalone PTY);

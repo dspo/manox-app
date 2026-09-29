@@ -9,9 +9,9 @@ name = "manox_agent_chat_ui"
 path = "src/lib.rs"
 
 # The chat crate is conversation-state only: no terminals, no webviews, no
-# external-agent wiring (PLAN-CHROME-CHAT-SPLIT §1 — the dependency invariant
-# is the executable definition of the chrome/chat decoupling; enforced by
-# script/check-chat-crate-deps.sh in CI).
+# external-agent wiring. That dependency invariant is the executable
+# definition of the chrome/chat decoupling; enforced by
+# script/check-chat-crate-deps.sh in CI.
 [features]
 default = []
 # Diagnostic hooks for the message-rendering overlap walk — enabled by

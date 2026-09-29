@@ -1,6 +1,5 @@
-//! The chrome-shell assembly for the real app (PLAN-CHROME-CHAT-SPLIT
-//! Phase 4; the sole shell since the legacy workspace shell retired). This
-//! module owns everything the app mounts:
+//! The chrome-shell assembly for the real app — the sole shell since the
+//! legacy workspace shell retired. This module owns everything the app mounts:
 //!
 //! - the session list fed by the REAL multiplexer (the server wire rows
 //!   projected through `sidebar_projection` — five states, team forest,

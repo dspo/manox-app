@@ -1,5 +1,4 @@
-//! manox-agent-chat-ui — the chat column's state foundation
-//! (PLAN-CHROME-CHAT-SPLIT Phase 2, first tranche).
+//! manox-agent-chat-ui — the chat column's state foundation.
 //!
 //! What lives here today: the journal→UI projection pipeline
 //! (`journal_translate` / `journal_fold` / `server_note_translate`), the

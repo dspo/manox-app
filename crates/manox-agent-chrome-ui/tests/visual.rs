@@ -218,7 +218,7 @@ mod macos {
                 ConvItem::ToolCall(ToolCallItem {
                     id: "seed-read".into(),
                     name: "read_file".into(),
-                    title: "read_file(PLAN-CHROME-CHAT-SPLIT.md)".into(),
+                    title: "read_file(AGENTS.md)".into(),
                     status: manox_agent::ToolCallStatus::Success,
                     output: "# 拆分计划…".into(),
                     is_error: false,

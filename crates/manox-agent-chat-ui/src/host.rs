@@ -1,5 +1,5 @@
-//! The chat column's port to its host (PLAN-CHROME-CHAT-SPLIT §3.2 — the
-//! dependency-inversion face that lets chat views live outside the shell).
+//! The chat column's port to its host — the dependency-inversion face that
+//! lets chat views live outside the shell.
 //!
 //! The chat crate's views and state must never hold a shell entity. Instead
 //! they hold a [`ChatHost`] and call through it; the host side (agent-ui's

@@ -263,7 +263,7 @@ def sheet(kind):
                  ("   Compiling agent-ui v0.1.0", FG_DIM),
                  ("    Finished `dev` profile in 42.18s", OK_GREEN),
                  ("", FG), ("~ ", FG_DIM), ("git status --short", FG),
-                 (" M UI-MAP.md", WARN_ORANGE), ("?? design/svg/", FG_FAINT),
+                 (" M AGENTS.md", WARN_ORANGE), ("?? design/svg/", FG_FAINT),
                  ("", FG), ("~ ", FG_DIM)]
         ly = rail_y + 105
         for txt, colr in lines:

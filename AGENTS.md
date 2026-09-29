@@ -91,7 +91,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 - **唯一壳（2026-09-28 旧壳退役）**：窗口只有 `agent-ui::chrome_assembly` 这一个装配
   （chrome crate 的 Shell + 投影侧栏 + 右栏 ToolTab 注册表 + 会话列作为主区卡内容）。
   双壳构建开关（`--features chrome-shell`）与 `agent-ui::Workspace` 的旧全壳渲染已删净；
-  上一个双壳形态留在 tag `dual-shell-final`。计划与历史见 `PLAN-CHROME-CHAT-SPLIT.md`。
+  上一个双壳形态留在 tag `dual-shell-final`（拆分计划文档已随完成退役删除，历史见该 tag）。
 - 每 PR 门禁：`cargo clippy -D warnings --all-targets` + 全量
   `cargo test` + `cargo test -p agent-ui --features test-support` + `cargo fmt`；
   PR 写清 Test Plan 与 Assumptions。
