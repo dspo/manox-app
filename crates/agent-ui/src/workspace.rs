@@ -2081,9 +2081,10 @@ impl Workspace {
                 } else {
                     // No active turn in the fold yet the UI reads running —
                     // say so loudly; this is the composer-locked repro.
+                    // Tracked with the rest of the dead-lock surface in #88.
                     tracing::warn!(
                         session_id = %sid,
-                        "cancel: fold has no active turn (client/host desync)"
+                        "cancel: fold has no active turn (client/host desync); see #88"
                     );
                 }
             });

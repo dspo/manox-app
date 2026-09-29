@@ -341,7 +341,10 @@ impl RightPane {
             }
         }
         self.active = self.open.get(active).cloned();
-        self.visible = visible && !self.open.is_empty();
+        // The persisted `visible` is the thread's own memory: a user collapse
+        // with zero tabs survives a restart as a collapsed pane (rendering
+        // the new-tab page), not as a forced expand.
+        self.visible = visible;
         if let Some(tab) = self.active.clone() {
             tab.on_active(self.visible, cx, &self.store);
         }
