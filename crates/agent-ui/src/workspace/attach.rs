@@ -297,7 +297,6 @@ impl Workspace {
         // connection, so the reclaim reuses the same leaf and follow stream —
         // but it must still re-own the session (see the §D.6 send below): the
         // gateway only re-delivers unsettled adjudications to a joining owner.
-        let mut reclaimed = false;
         if let Some(pos) = self.background_threads.iter().position(|b| b.id == new_id) {
             let bg = self.background_threads.remove(pos);
             self.chat.update(cx, |chat, cc| {
@@ -305,7 +304,6 @@ impl Workspace {
                 chat.session_id = bg.session_id;
                 cc.notify();
             });
-            reclaimed = true;
         }
 
         // A brand-new foreground thread gets its own session on the shared
@@ -329,10 +327,10 @@ impl Workspace {
         }
         // GW5: focus follows the attach on BOTH legs — the newly attached
         // session's leaf goes active (clearing its unread/errored mirrors) and
-        // the outgoing one inert. The reclaimed leg skips the
-        // `open_or_create` branch, so keeping this inside it stranded the
-        // multiplexer's focus on the thread just left: the thread being viewed
-        // kept raising unread while the one just left never lit up.
+        // the outgoing one inert. The reclaimed leg skips the `open_or_create`
+        // branch, so keeping this inside it stranded the multiplexer's focus
+        // on the thread just left: the thread being viewed kept raising
+        // unread while the one just left never lit up.
         self.multiplexer
             .update(cx, |m, cx| m.set_focused(Some(&new_id), cx));
 
@@ -501,16 +499,10 @@ impl Workspace {
             cx.notify();
         });
         let (thread_events, store_changes) = self.subscribe_thread(cx);
-        // §D.6: the reclaimed parked session never detached, so this reclaim is
-        // in place (same leaf, same follow stream) — but the gateway only
-        // re-delivers a session's unsettled adjudications to an owner that
-        // joins it (`replay_pending_adjudications`, the "thread-switch-back
-        // path"). Re-own explicitly, and only after the subscription above so
-        // the replayed frame cannot outrun it: this send is what re-arms the
-        // ask / tool-approval / plan-review card whose `ToolCallAuthorization`
-        // the parked subscription dropped while this thread was in the
-        // background.
-        let _ = reclaimed;
+        // v3 semantics: subscribing IS joining — the fold (seeded snapshot +
+        // the always-on bridge) carries every unsettled adjudication, so the
+        // switch-back re-own of v2 has no successor here. The open ask is
+        // re-seeded from the fold right below (`sync_live_ask`).
         self.chat.update(cx, |chat, cc| {
             chat.thread_sub = Some(thread_events);
             chat.store_observe = Some(store_changes);

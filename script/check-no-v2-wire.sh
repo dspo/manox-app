@@ -9,10 +9,13 @@ cd "$(dirname "$0")/.."
 banned=('manox_protocol' 'FromClient' 'FromServer' 'ClientCall' 'ClientNote' 'ServerCall' 'ServerNote' 'PROTOCOL_EPOCH' 'StreamFrame')
 status=0
 for word in "${banned[@]}"; do
-    hits=$(grep -rn --include='*.rs' "$word" crates/ | grep -v '^crates/.*#.*' | grep -cv '^\s*//' || true)
+    # A hit is a CODE line: `path:line:content` where the content does not
+    # start with a comment. (The old two-stage filter was a no-op — grep
+    # output lines start with the path, so `^\s*//` never matched.)
+    hits=$(grep -rn --include='*.rs' "$word" crates/ | grep -cvE ':[0-9]+: *//' || true)
     if [ "$hits" -gt 0 ]; then
         echo "violation: $word appears $hits time(s) in production code:"
-        grep -rn --include='*.rs' "$word" crates/ | grep -v '^\s*//' | head -5
+        grep -rn --include='*.rs' "$word" crates/ | grep -vE ':[0-9]+: *//' | head -5
         status=1
     fi
 done

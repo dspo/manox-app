@@ -826,10 +826,15 @@ impl AhpStore {
     /// into the book when the host answers.
     pub fn subscribe(&mut self, uri: impl Into<String>, cx: &mut gpui::Context<Self>) {
         let uri: String = uri.into();
-        let Some(client) = self.client.clone() else {
+        // A write issued while the pre-connect replay is running queues behind
+        // it: racing the landing createSession/subscribe silently loses the
+        // first message (the host answers not-found for a session still
+        // being created).
+        if self.client.is_none() || self.replay_pending {
             self.pending_writes.push(PendingWrite::Subscribe(uri));
             return;
-        };
+        }
+        let client = self.client.clone().expect("guard above");
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             let value = tokio_wait(move || async move {
                 client
@@ -861,12 +866,16 @@ impl AhpStore {
 
     /// Unsubscribe one channel.
     pub fn unsubscribe(&mut self, uri: impl Into<String>) {
-        let Some(client) = self.client.clone() else {
-            self.pending_writes
-                .push(PendingWrite::Unsubscribe(uri.into()));
-            return;
-        };
         let uri = uri.into();
+        // A write issued while the pre-connect replay is running queues behind
+        // it: racing the landing createSession/subscribe silently loses the
+        // first message (the host answers not-found for a session still
+        // being created).
+        if self.client.is_none() || self.replay_pending {
+            self.pending_writes.push(PendingWrite::Unsubscribe(uri));
+            return;
+        }
+        let client = self.client.clone().expect("guard above");
         manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client
                 .request::<_, Value>("unsubscribe", serde_json::json!({ "channel": uri }))
@@ -880,12 +889,17 @@ impl AhpStore {
     /// Dispatch one action (write-ahead; the echo folds it). Fire-and-forget:
     /// rejections come back as envelopes and are logged/recorded by the pump.
     pub fn dispatch(&mut self, channel: impl Into<String>, action: StateAction) {
-        let Some(client) = self.client.clone() else {
-            self.pending_writes
-                .push(PendingWrite::Dispatch(channel.into(), Box::new(action)));
-            return;
-        };
         let channel = channel.into();
+        // A write issued while the pre-connect replay is running queues behind
+        // it: racing the landing createSession/subscribe silently loses the
+        // first message (the host answers not-found for a session still
+        // being created).
+        if self.client.is_none() || self.replay_pending {
+            self.pending_writes
+                .push(PendingWrite::Dispatch(channel, Box::new(action)));
+            return;
+        }
+        let client = self.client.clone().expect("guard above");
         manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client.dispatch(channel, action).await {
                 tracing::warn!(error = %err, "dispatch failed");

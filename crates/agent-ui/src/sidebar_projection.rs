@@ -48,8 +48,6 @@ impl ThreadRow {
     /// work channel carries the tree.
     pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_plan: bool) -> Self {
         let bits = summary.status;
-        let flags = WireStatus(bits);
-        let _ = &flags;
         Self {
             id: crate::ahp_store::id_of(&summary.resource).to_string(),
             title: summary.title.clone(),
