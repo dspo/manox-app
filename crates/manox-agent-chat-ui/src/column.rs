@@ -404,6 +404,31 @@ pub struct ChatColumn {
     pub turn_navigator: Option<Entity<TurnNavigator>>,
     pub turn_navigator_sub: Option<Subscription>,
     pub turn_navigator_previous_focus: Option<FocusHandle>,
+    /// Left-edge turn rail state (`views::turn_rail`). Marks are re-derived
+    /// from the conversation every frame; these fields carry only the
+    /// interaction and tween bookkeeping. `turn_rail_active` is the mark the
+    /// list's scroll position resolves to, with `turn_rail_active_from`
+    /// snapshotting the previous active mark (only when it changes) and
+    /// `turn_rail_active_gen` keying the tick tween so each change starts a
+    /// fresh run. The hover preview mirrors that discipline through
+    /// `turn_rail_preview_{mark,top,gen}`: the last painted top is the next
+    /// travel origin, `top` cleared when the pointer leaves.
+    /// `turn_rail_pointer_inside` pauses active-follow so the marks never
+    /// travel under the hand; `turn_rail_followed` records the last
+    /// auto-followed `(active, count)` pair so the render-time follow cannot
+    /// loop. `turn_rail_box_h` is the rail strip's height, captured at
+    /// prepaint for the preview's clamp.
+    pub turn_rail_active: Option<usize>,
+    pub turn_rail_active_from: Option<usize>,
+    pub turn_rail_active_gen: u64,
+    pub turn_rail_hover: Option<usize>,
+    pub turn_rail_pointer_inside: bool,
+    pub turn_rail_followed: Option<(usize, usize)>,
+    pub turn_rail_scroll: gpui::UniformListScrollHandle,
+    pub turn_rail_preview_mark: Option<usize>,
+    pub turn_rail_preview_top: Option<gpui::Pixels>,
+    pub turn_rail_preview_gen: u64,
+    pub turn_rail_box_h: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
     /// Follow-ups submitted while a turn is running. Steer items are injected
     /// into the running turn at the next safe join point; queue items flush as
     /// the next user turn at `TurnFinished`.
