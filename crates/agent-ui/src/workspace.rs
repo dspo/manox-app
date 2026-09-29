@@ -616,6 +616,7 @@ impl Workspace {
                 input_state,
                 drafts: HashMap::new(),
                 pending_ask: None,
+                pending_auth_live: false,
                 pending_ask_live: false,
                 pending_auth: None,
                 pending_projection_confirmed: false,
@@ -940,6 +941,76 @@ impl Workspace {
                         cx.notify();
                     });
                     self.reset_ask_custom(cx);
+                }
+            }
+        }
+        // Generic authorization card: a tool confirmation (Edit/Write sandbox
+        // escalations) or a BARE ask (an elicitation whose payload carried no
+        // structured questions) parks the model on an answer the generic card
+        // delivers — the v2 ToolCallAuthorization mount's successor.
+        let live_auth = {
+            let view = store.read(cx);
+            let sid = self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|(_, sid)| sid.clone())
+                .expect("bound above");
+            let leaf = crate::ahp_store::leaf(&view.book, &sid);
+            let from_confirmation = leaf.open_tool_confirmation().map(|(_, confirmation)| {
+                let tool_name = match &confirmation.tool_call {
+                    ahp_types::state::ToolCallConfirmationState::PendingConfirmation(c) => {
+                        c.tool_name.to_string()
+                    }
+                    ahp_types::state::ToolCallConfirmationState::PendingResultConfirmation(c) => {
+                        c.tool_name.to_string()
+                    }
+                    _ => String::new(),
+                };
+                (confirmation.id.clone(), tool_name, String::new())
+            });
+            let from_bare_ask = leaf
+                .open_chat_input()
+                .filter(|(_, req)| req.questions.as_ref().is_none_or(|q| q.is_empty()))
+                .map(|(_, req)| (req.id.clone(), "AskUserQuestion".to_string(), String::new()));
+            from_confirmation.or(from_bare_ask)
+        };
+        match live_auth {
+            Some((auth_id, tool_name, summary)) => {
+                let armed = self
+                    .chat
+                    .read(cx)
+                    .pending_auth
+                    .as_ref()
+                    .is_none_or(|a| a.id != auth_id);
+                if armed {
+                    tracing::info!(
+                        request_id = %auth_id,
+                        tool = %tool_name,
+                        "live auth: arming the generic authorization card"
+                    );
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_auth = Some(manox_agent_chat_ui::column::PendingAuth {
+                            id: auth_id,
+                            tool_name,
+                            summary,
+                        });
+                        chat.pending_auth_live = true;
+                        cx.notify();
+                    });
+                }
+            }
+            None => {
+                let live_seeded = self.chat.read(cx).pending_auth_live;
+                let has_auth = self.chat.read(cx).pending_auth.is_some();
+                if live_seeded && has_auth {
+                    tracing::info!("live auth: request left the fold, retiring the card");
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_auth = None;
+                        chat.pending_auth_live = false;
+                        cx.notify();
+                    });
                 }
             }
         }

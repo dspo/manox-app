@@ -486,7 +486,10 @@ impl AhpStore {
         self.book.seed_summaries(vec![SessionSummary {
             provider: String::new(),
             title: title.to_string(),
-            status: 0,
+            // The host's own rows always carry Idle|IsRead; a zeroed status
+            // would render the placeholder as an UNREAD conversation.
+            status: ahp_types::state::SessionStatus::Idle.bits()
+                | ahp_types::state::SessionStatus::IsRead.bits(),
             activity: None,
             origin: None,
             project: None,
@@ -785,6 +788,25 @@ impl AhpStore {
                             .push_back(format!("{}: {reason}", envelope.channel));
                         while self.rejections.len() > 32 {
                             self.rejections.pop_front();
+                        }
+                        // An optimistic write (model pick, cwd, …) that the
+                        // host refused must not linger on the UI: roll the
+                        // keys it touched out of the fold, and surface the
+                        // refusal on the transcript.
+                        if let Some(keys) = rejected_config_keys(&envelope.action)
+                            && let Some(state) =
+                                self.book.sessions.get_mut(id_of(&envelope.channel))
+                            && let Some(config) = &mut state.config
+                        {
+                            for key in &keys {
+                                config.values.remove(key.as_str());
+                            }
+                        }
+                        if let Some(session_id) = envelope.channel.strip_prefix("ahp-session:/") {
+                            self.chat_events.push(crate::chat_fold::ChatEvent::Notice {
+                                text: format!("更改未生效（宿主拒绝）：{reason}"),
+                            });
+                            let _ = session_id;
                         }
                         cx.notify();
                     }
@@ -1496,6 +1518,20 @@ impl<'a> LeafView<'a> {
         self.fold_input_request(None)
     }
 
+    /// The first open tool-confirmation request, if any — the generic
+    /// authorization card's source of truth (Edit/Write sandbox
+    /// escalations park the model here).
+    pub fn open_tool_confirmation(
+        &self,
+    ) -> Option<(String, &ahp_types::state::SessionToolConfirmationRequest)> {
+        self.requests().iter().find_map(|r| match r {
+            ahp_types::state::SessionInputRequest::ToolConfirmation(c) => {
+                Some((crate::ahp_store::id_of(&c.chat).to_string(), c))
+            }
+            _ => None,
+        })
+    }
+
     /// Scan the fold for an unanswered chat-input request. The host folds
     /// `chat/inputRequested` into the active turn's response parts — the
     /// session channel's input-needed list is NOT maintained on this path —
@@ -1646,6 +1682,19 @@ pub fn pending_ask_from_ahp(
         questions: parsed,
         selections,
     })
+}
+
+/// The config keys an optimistic write touched, when the action is one the
+/// host can refuse per-key (a session config change). A rejection rolls
+/// these out of the client fold so a refused pick does not linger on the UI.
+fn rejected_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<String>> {
+    use ahp_types::actions::StateAction as A;
+    match action {
+        A::SessionConfigChanged(changed) => {
+            Some(changed.config.keys().map(|k| k.to_string()).collect())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

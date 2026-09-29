@@ -1080,6 +1080,11 @@ fn approval_mode_color(mode: PermissionMode, theme: &Theme) -> gpui::Hsla {
 }
 
 fn format_user_turn_time(timestamp: i64) -> String {
+    // A missing timestamp (the fold carries `Option`, degraded to 0) renders
+    // as no time at all — a bare "1970-01-01" is worse than nothing.
+    if timestamp <= 0 {
+        return String::new();
+    }
     let Some(sent) = Local.timestamp_opt(timestamp, 0).single() else {
         return String::new();
     };
