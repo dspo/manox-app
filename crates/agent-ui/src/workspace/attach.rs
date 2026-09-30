@@ -474,54 +474,14 @@ impl Workspace {
                 tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
                 Default::default()
             });
-        // A folded active turn older than this process is the previous run's
-        // unsettled turn, not a live one (the host is in-process). Left alone
-        // it parks the composer in the stop/running form forever; cancel it
-        // once here — the same dispatch the stop button sends — and let the
-        // cancelled echo clear the fold.
-        let running = if running {
-            let stale = self
-                .chat
-                .read(cx)
-                .store
-                .as_ref()
-                .is_some_and(|(store, sid)| {
-                    let view = store.read(cx);
-                    crate::ahp_store::leaf(&view.book, sid)
-                        .chat
-                        .is_some_and(|c| {
-                            crate::chat_fold::active_turn_predates(
-                                c,
-                                crate::workspace::process_start(),
-                            )
-                        })
-                });
-            if stale {
-                if let Some((store, sid)) = self.chat.read(cx).store.clone() {
-                    let turn_id = {
-                        let view = store.read(cx);
-                        crate::ahp_store::leaf(&view.book, &sid)
-                            .chat
-                            .and_then(|c| c.active_turn.as_ref().map(|t| t.id.clone()))
-                    };
-                    tracing::info!(
-                        session_id = %sid,
-                        turn_id = ?turn_id,
-                        "attach: auto-cancelling a stale open turn from a previous process"
-                    );
-                    store.update(cx, |s, _| {
-                        if let Some(turn_id) = turn_id {
-                            s.cancel_turn(&sid, &turn_id);
-                        }
-                    });
-                }
-                false
-            } else {
-                running
-            }
-        } else {
-            running
-        };
+        // NOTE: an active turn folded from the journal is NOT auto-cancelled
+        // here even when it predates this process. The `~/.manox` journal is
+        // shared across processes (the cx CLI runs turns against it), so
+        // "older than this process" cannot distinguish a dead turn from one
+        // another process is executing right now — a cancel dispatch here
+        // would kill a live turn in cx. A genuinely dead turn shows the stop
+        // button; cancelling it is one deliberate click, and the cancelled
+        // echo clears the fold.
         let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
         let new_conv = cx.new(|cx| {
             let mut conversation = ConversationState::rebuild_from_display(
