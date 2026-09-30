@@ -150,11 +150,12 @@ mod macos {
                 kinds
             },
             panel_surface: Some(Arc::new(DummyPanel)),
+            brand: None,
             fixed_rows: vec![
                 FixedRow {
                     icon: icons::CALENDAR,
                     label: manox_i18n::t("chrome-sidebar-automations"),
-                    badge: Some("NEW".into()),
+                    badge: None,
                 },
                 FixedRow {
                     icon: icons::COMMENT_DISCUSSION,
@@ -162,7 +163,6 @@ mod macos {
                     badge: None,
                 },
             ],
-            // Count badges are visual fixtures of the replica, not live data.
             customizations: vec![
                 CustomizationRow {
                     icon: icons::HOME,
@@ -177,15 +177,23 @@ mod macos {
                 CustomizationRow {
                     icon: icons::SETTINGS_GEAR,
                     label: manox_i18n::t("chrome-sidebar-mcp"),
-                    count: Some(1),
+                    count: None,
                 },
                 CustomizationRow {
                     icon: icons::WAND,
                     label: manox_i18n::t("chrome-sidebar-skills"),
-                    count: Some(13),
+                    count: None,
                 },
             ],
-            hooks: HostHooks::default(),
+            hooks: HostHooks {
+                // Live nav edges: the screenshot is the only acceptance face
+                // for the titlebar's enabled-arrow state.
+                nav_avail: Some(Box::new(|_| manox_agent_chrome_ui::shell::NavAvail {
+                    back: true,
+                    forward: false,
+                })),
+                ..Default::default()
+            },
         }
     }
 

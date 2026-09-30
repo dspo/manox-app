@@ -319,8 +319,96 @@ pub use manox_agent_chat_ui::column::{
     PendingAsk, PendingAuth, QueuedFollowUp, parse_pending_ask,
 };
 
+/// The visited-thread history behind the titlebar ←/→ moves. Invariants
+/// live here, not at the call sites: `index` is `Some` exactly when
+/// `entries` is non-empty and always points inside it; a record equal to
+/// the CURRENT entry is a no-op (comparing against the pointer, not the
+/// tail — the pointer may sit mid-stack after a back step); a new record
+/// truncates the forward tail; the front drains past the cap with the
+/// index shifting to stay pinned at the tail.
+#[derive(Default)]
+pub(crate) struct NavHistory {
+    entries: Vec<String>,
+    index: Option<usize>,
+}
+
+impl NavHistory {
+    fn record(&mut self, id: &str) {
+        if self.current() == Some(id) {
+            return;
+        }
+        if let Some(i) = self.index {
+            self.entries.truncate(i + 1);
+        }
+        self.entries.push(id.to_string());
+        if self.entries.len() > NAV_STACK_CAP {
+            let drop = self.entries.len() - NAV_STACK_CAP;
+            self.entries.drain(..drop);
+        }
+        self.index = Some(self.entries.len() - 1);
+    }
+
+    /// The successor hand-off: the current entry IS the same conversation
+    /// under a new id, so it is rewritten in place (a plain record would
+    /// strand the predecessor in the stack and a ← would land on the
+    /// retired id).
+    fn replace_current(&mut self, id: &str) {
+        match self.index {
+            Some(i) => self.entries[i] = id.to_string(),
+            None => self.record(id),
+        }
+    }
+
+    /// One step back; `None` at (or outside) the front.
+    fn step_back(&mut self) -> Option<String> {
+        let i = self.index?;
+        if i == 0 || i >= self.entries.len() {
+            return None;
+        }
+        self.index = Some(i - 1);
+        Some(self.entries[i - 1].clone())
+    }
+
+    /// One step forward; `None` at (or outside) the tail.
+    fn step_forward(&mut self) -> Option<String> {
+        let i = self.index?;
+        if i + 1 >= self.entries.len() {
+            return None;
+        }
+        self.index = Some(i + 1);
+        Some(self.entries[i + 1].clone())
+    }
+
+    fn avail(&self) -> manox_agent_chrome_ui::shell::NavAvail {
+        let (back, forward) = match self.index {
+            None => (false, false),
+            Some(i) => (i > 0 && i < self.entries.len(), i + 1 < self.entries.len()),
+        };
+        manox_agent_chrome_ui::shell::NavAvail { back, forward }
+    }
+
+    fn current(&self) -> Option<&str> {
+        self.index
+            .and_then(|i| self.entries.get(i).map(String::as_str))
+    }
+
+    /// Test read face: the raw entries + pointer, for shape assertions
+    /// (cap size, front id) the move API cannot express.
+    #[cfg(test)]
+    fn state(&self) -> (&[String], Option<usize>) {
+        (&self.entries, self.index)
+    }
+}
+
+/// The visited-thread history cap: past this, the front drains so the
+/// stack stays a moving window.
+const NAV_STACK_CAP: usize = 100;
+
 pub struct Workspace {
     pub(crate) cwd: PathBuf,
+    /// Visited-thread history for the titlebar ←/→ moves (see
+    /// [`NavHistory`]).
+    pub(crate) nav: NavHistory,
     /// The chat column's state (thread face, conversation, composer, ask
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
@@ -593,6 +681,7 @@ impl Workspace {
 
         let mut ws = Self {
             cwd: cwd.clone(),
+            nav: NavHistory::default(),
             multiplexer,
             client: (),
             background_threads: Vec::new(),
@@ -1478,14 +1567,23 @@ impl Workspace {
         let successor = cx.observe(&store, |this, store, cx| {
             // Identity hand-off: a disposed session records its successor;
             // the foreground moves onto it at the next render (the switch
-            // needs a window).
-            let next = store.read(cx).book.sessions.values().find_map(|s| {
-                s.meta
-                    .as_ref()
-                    .and_then(|m| m.get("replacedBy"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            });
+            // needs a window). Only the FOREGROUND session's own
+            // `replacedBy` counts — a book-wide find_map could hit some
+            // unrelated disposed session and, through
+            // `replace_nav_current`, overwrite the user's history entry.
+            let next = this
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .and_then(|(_, sid)| store.read(cx).book.sessions.get(sid))
+                .and_then(|s| {
+                    s.meta
+                        .as_ref()
+                        .and_then(|m| m.get("replacedBy"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
             if let Some(next) = next
                 && this
                     .chat

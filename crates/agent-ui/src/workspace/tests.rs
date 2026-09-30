@@ -376,3 +376,86 @@ mod suite {
         );
     }
 }
+
+/// The ←/→ history invariants (see `NavHistory`): these pin the state
+/// machine's dedup / truncation / cap / edge semantics without a Window.
+#[cfg(test)]
+mod nav_history {
+    use super::super::NavHistory;
+
+    fn recorded(ids: &[&str]) -> NavHistory {
+        let mut nav = NavHistory::default();
+        for id in ids {
+            nav.record(id);
+        }
+        nav
+    }
+
+    #[test]
+    fn reopening_the_current_entry_after_a_back_step_is_a_noop() {
+        let mut nav = recorded(&["a", "b", "c"]);
+        nav.step_back();
+        // The pointer sits on b; clicking b's row again must not duplicate
+        // it (an entry dup here made ← land on the same b twice).
+        nav.record("b");
+        assert_eq!(nav.step_back().as_deref(), Some("a"));
+        assert_eq!(nav.step_forward().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_new_open_truncates_the_forward_tail() {
+        let mut nav = recorded(&["a", "b", "c"]);
+        nav.step_back();
+        nav.record("d");
+        assert_eq!(nav.step_forward(), None, "the tail after d must be gone");
+        assert_eq!(nav.step_back().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn the_cap_drains_the_front_and_keeps_the_index_at_the_tail() {
+        let mut nav = NavHistory::default();
+        for i in 0..110 {
+            nav.record(&format!("t{i}"));
+        }
+        // Exactly the last CAP entries survive, the front drained, and the
+        // pointer sits on the tail — without the index reset a drain would
+        // leave the pointer out of bounds and the moves would go dead.
+        let (entries, index) = nav.state();
+        assert_eq!(entries.len(), 100);
+        assert_eq!(entries.first().map(String::as_str), Some("t10"));
+        assert_eq!(entries.last().map(String::as_str), Some("t109"));
+        assert_eq!(index, Some(99));
+        assert_eq!(nav.step_back().as_deref(), Some("t108"));
+    }
+
+    #[test]
+    fn edges_report_no_move_and_the_front_is_not_a_panic() {
+        let mut nav = recorded(&["a", "b"]);
+        assert_eq!(nav.step_back().as_deref(), Some("a"));
+        assert_eq!(nav.step_back(), None, "the front is inert");
+        assert!(!nav.avail().back);
+        assert!(nav.avail().forward);
+        assert_eq!(nav.step_forward().as_deref(), Some("b"));
+        assert_eq!(nav.step_forward(), None, "the tail is inert");
+    }
+
+    #[test]
+    fn an_empty_history_is_unavailable_in_both_directions() {
+        let nav = NavHistory::default();
+        assert!(!nav.avail().back);
+        assert!(!nav.avail().forward);
+    }
+
+    #[test]
+    fn the_successor_handoff_rewrites_the_current_entry_in_place() {
+        let mut nav = recorded(&["a"]);
+        nav.replace_current("a2");
+        assert_eq!(nav.step_back(), None, "rewrite must not grow the stack");
+        nav.record("b");
+        assert_eq!(
+            nav.step_back().as_deref(),
+            Some("a2"),
+            "← lands on the SUCCESSOR id, never the retired predecessor"
+        );
+    }
+}

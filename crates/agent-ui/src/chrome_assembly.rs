@@ -19,8 +19,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use gpui::{App, AppContext as _, Context, Entity, WeakEntity, Window};
-use gpui_component::Root;
+use gpui::{
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Styled as _,
+    WeakEntity, Window,
+};
+use gpui_component::{Root, WindowExt as _, notification::Notification};
 use manox_agent_chrome_ui::right_pane::ToolTab;
 use manox_agent_chrome_ui::{
     CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, icons,
@@ -207,8 +210,22 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                 .into_iter()
                 .flat_map(manox_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
+        // The sidebar highlight follows the FOREGROUND thread, not the last
+        // click: new-thread landings, /exit replacements and successor
+        // hand-offs all switch without a sidebar click, and a stale
+        // highlight would advertise the wrong session as active.
+        let fg = ws
+            .read(cx)
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone());
         shell.update(cx, |shell, cx| {
             shell.set_sessions(sessions);
+            if shell.active != fg {
+                shell.active = fg;
+            }
             cx.notify();
         });
         refresh_foreground_cwd(&ws, &rows, cx);
@@ -317,11 +334,15 @@ fn shell_config(
         }),
 
         panel_surface: Some(Arc::new(ThreadTerminalPanelSurface)),
+        // The fixed sidebar rows / Customizations block are still fake
+        // surfaces (Automations scheduling, plugin/MCP management pages
+        // don't exist here yet) — no fabricated badge/count, the chrome
+        // marks the rows unimplemented on its own.
         fixed_rows: vec![
             FixedRow {
                 icon: icons::CALENDAR,
                 label: manox_i18n::t("chrome-sidebar-automations"),
-                badge: Some("NEW".into()),
+                badge: None,
             },
             FixedRow {
                 icon: icons::COMMENT_DISCUSSION,
@@ -400,7 +421,98 @@ fn shell_config(
                     });
                 }
             })),
+            // ←/→ session history: the workspace owns the visited-thread
+            // stack; the hook reports the landed id so the shell's selection
+            // follows without re-deriving host state.
+            on_nav_back: Some(Box::new({
+                let ws = ws.clone();
+                move |w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        let landed = ws.nav_back(w, cx);
+                        cx.notify();
+                        landed
+                    })
+                }
+            })),
+            on_nav_forward: Some(Box::new({
+                let ws = ws.clone();
+                move |w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        let landed = ws.nav_forward(w, cx);
+                        cx.notify();
+                        landed
+                    })
+                }
+            })),
+            nav_avail: Some(Box::new({
+                let ws = ws.clone();
+                move |cx| ws.read(cx).nav_avail()
+            })),
+            // "Open in VS Code": hand the foreground thread's project to the
+            // plain VS Code launch (no injection, no restart prompts). The
+            // launch blocks on `open`'s exit, so it runs on the BACKGROUND
+            // executor (`cx.spawn` alone would stay on the main thread and
+            // freeze the run loop); only a failure notifies — a success
+            // announces itself by VS Code opening.
+            on_open_editor: Some(Box::new(|window, cx| {
+                let Some(project) = FOREGROUND_PROJECT
+                    .lock()
+                    .expect("foreground project lock")
+                    .clone()
+                else {
+                    window.push_notification(
+                        Notification::error(manox_i18n::t("vscode-open-no-project")),
+                        cx,
+                    );
+                    return;
+                };
+                let handle = crate::dispatch::window_global();
+                cx.spawn(async move |cx| {
+                    let launch_err = cx
+                        .background_spawn(async move {
+                            manox_ext_agents::vscode_app::launch_plain(Some(&project)).err()
+                        })
+                        .await;
+                    if let Some(handle) = handle
+                        && let Err(update_err) = handle.update(cx, |_, window, cx| {
+                            if let Some(e) = &launch_err {
+                                tracing::error!(error = %e, "open-in-VS-Code failed");
+                                window.push_notification(
+                                    Notification::error(format!(
+                                        "{}: {e}",
+                                        manox_i18n::t("vscode-open-failed")
+                                    )),
+                                    cx,
+                                );
+                            }
+                        })
+                    {
+                        // The window closed before the launch settled: the
+                        // notification had no surface left. Log BOTH errors —
+                        // the update failure alone would hide what actually
+                        // went wrong with the launch.
+                        tracing::warn!(
+                            launch = ?launch_err,
+                            update = ?update_err,
+                            "open-in-VS-Code result unreported (window gone)"
+                        );
+                    }
+                })
+                .detach();
+            })),
         },
+        // The titlebar's avatar slot wears the app's own mark.
+        brand: Some(Arc::new(|| {
+            gpui::div()
+                .size(gpui::px(13.))
+                .child(
+                    gpui::svg()
+                        .path("icons/manox.svg")
+                        .size_full()
+                        .text_color(manox_agent_chrome_ui::theme::BADGE_BLUE_FG),
+                )
+                .into_any_element()
+        })),
     }
 }
 
@@ -438,8 +550,14 @@ impl MainSurface for PendingMain {
 /// The foreground thread's cwd, refreshed by the assembly's observer on
 /// every thread switch — the dock surface reads it at open time (a static
 /// because the surface must stay entity-free to ride an `Arc`; the same
-/// pattern as the badge pump's LAST_COUNT).
+/// pattern as the badge pump's LAST_COUNT). Falls back to $HOME: a terminal
+/// has to spawn SOMEWHERE.
 static FOREGROUND_CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+/// The foreground thread's PROJECT path, or `None` when there is no
+/// foreground row / no project — "open in editor" must not silently open
+/// `$HOME`, so it reads this rather than the cwd fallback above.
+static FOREGROUND_PROJECT: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 
 /// The dock surface's read face of the foreground cwd.
 pub fn foreground_cwd() -> Option<std::path::PathBuf> {
@@ -498,12 +616,17 @@ fn refresh_foreground_cwd(
         .and_then(|id| rows.iter().find(|r| &r.id == id))
         .and_then(|r| r.project.clone())
         .filter(|p| !p.is_empty());
-    let cwd = project.map(std::path::PathBuf::from).unwrap_or_else(|| {
-        std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| ".".into())
-    });
+    let cwd = project
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| ".".into())
+        });
     *FOREGROUND_CWD.lock().expect("foreground cwd lock") = Some(cwd);
+    *FOREGROUND_PROJECT.lock().expect("foreground project lock") =
+        project.map(std::path::PathBuf::from);
 }
 
 /// Wrap a chrome Shell into the window's Root view (the bin mounts this).

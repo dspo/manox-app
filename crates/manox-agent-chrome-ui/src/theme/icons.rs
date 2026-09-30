@@ -32,7 +32,6 @@ macro_rules! icon_table {
 }
 
 icon_table! {
-    ACCOUNT => "icons/circle-user.svg",
     ADD => "icons/plus.svg",
     ARCHIVE => "icons/archive.svg",
     ARCHIVE_RESTORE => "icons/archive-restore.svg",
@@ -56,15 +55,12 @@ icon_table! {
     LINK_EXTERNAL => "icons/external-link.svg",
     MORE => "icons/ellipsis.svg",
     PIN => "icons/pin.svg",
-    PLAY => "icons/play.svg",
     ROBOT => "icons/bot.svg",
     SEARCH => "icons/search.svg",
     SETTINGS_GEAR => "icons/settings.svg",
     SORT_PRECEDENCE => "icons/arrow-down-wide-narrow.svg",
-    SPLIT_HORIZONTAL => "icons/columns-2.svg",
     SYMBOL_FILE => "icons/file-text.svg",
     TAG => "icons/tag.svg",
-    SYNC => "icons/refresh-cw.svg",
     TERMINAL => "icons/terminal.svg",
     TOOLS => "icons/wrench.svg",
     TRASH => "icons/trash.svg",

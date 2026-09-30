@@ -46,6 +46,7 @@ fn shell_config(main: gpui::AnyView, set_tag_log: TagLog) -> ShellConfig {
         main: Arc::new(StubMain { view: main }),
         tool_kinds: vec![],
         panel_surface: None,
+        brand: None,
         fixed_rows: vec![],
         customizations: vec![],
         hooks: HostHooks {
@@ -335,6 +336,7 @@ fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
     // the projection's `sort_stamp`), not in hand-written rows.
     let rows = SessionRow::from_group(SessionGroup {
         name: "Chats".into(),
+        key: "Chats".into(),
         collapsed: false,
         rows: vec![
             row_data("leader-1", 300, 300, true),
@@ -401,4 +403,243 @@ fn tag_edit_wires_enter_and_escape_keystrokes(cx: &mut TestAppContext) {
         "escape cancels through the propagated action"
     );
     assert_eq!(log.borrow().len(), 1, "escape writes nothing");
+}
+
+/// Time grouping: rows bucket by sort_stamp, collapse rides the STABLE
+/// state key (not the translated display name — the P0 regression where a
+/// collapsed bucket re-expanded the very next frame), and drag reorder is
+/// inert in time mode.
+#[gpui::test]
+fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
+    let rows = SessionRow::from_group(SessionGroup {
+        name: "Chats".into(),
+        key: "Chats".into(),
+        collapsed: false,
+        rows: vec![
+            // Team sharing the leader's stamp; the member is NEWER on its
+            // own clock (the classic "member just finished, leader idle")
+            // — the shared sort_stamp must keep it below the leader in the
+            // bucket order, not float it above the chevron. And a member
+            // with a much OLDER own-clock stamp must still land in the
+            // leader's bucket (bucketing by per-row updated_at was the
+            // first-round defect this second row pins).
+            row_data("leader", stamp_days_ago(0), stamp_days_ago(0), true),
+            row_data("member", stamp_days_ago(0) + 60, stamp_days_ago(0), false),
+            row_data("member-old", stamp_days_ago(40), stamp_days_ago(0), false),
+            row_data("old", stamp_days_ago(30), stamp_days_ago(30), false),
+        ],
+    });
+    let (mut visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
+
+    shell.update(cx, |s, _cx| s.toggle_grouping());
+    visual.run_until_parked();
+    shell.update(cx, |s, cx| {
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert_eq!(groups.len(), 2, "today + earlier");
+        let today = &groups[0];
+        assert_eq!(
+            today.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["leader", "member", "member-old"],
+            "the team buckets together regardless of each row's own clock, and the newer member stays under the chevron"
+        );
+    });
+
+    // Collapse through a REAL CLICK on the rendered header — the write side
+    // (which identity the header's on_click passes) is the defect this test
+    // pins; calling toggle_group directly would bypass it.
+    // The mode flip notified the shell; give the window its redraw so the
+    // time-mode headers exist in the rendered frame.
+    visual.update(|window, _| window.refresh());
+    visual.run_until_parked();
+    let header_bounds = visual
+        .debug_bounds("chrome-group-header-chrome-group-today")
+        .expect("the today header paints");
+    visual.simulate_click(header_bounds.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    shell.update(cx, |s, cx| {
+        let (_, groups, _) = s.sidebar_props(cx);
+        let today = groups
+            .iter()
+            .find(|g| g.key == "chrome-group-today")
+            .expect("today bucket survives");
+        assert!(
+            today.collapsed,
+            "a clicked-header collapse must survive the next props build"
+        );
+        // The other bucket is untouched.
+        assert!(!groups[1].collapsed);
+    });
+
+    // Reorder is inert in time mode: not only does the display order stay
+    // (trivially true — time_groups never reads group_order), the RECORDING
+    // must come out untouched — a dropped edge (the mode early-return) must
+    // not leak the pseudo name into the persisted drag order.
+    shell.update(cx, |s, _cx| {
+        s.move_group("chrome-group-earlier", "chrome-group-today", true);
+        assert!(
+            s.group_order().is_empty(),
+            "a time-mode drag must not record any order"
+        );
+        s.toggle_grouping();
+    });
+    shell.update(cx, |s, cx| {
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert_eq!(
+            groups.iter().map(|g| g.key.as_str()).collect::<Vec<_>>(),
+            ["Chats"],
+            "the workspace order is exactly as it was before the time-mode drag"
+        );
+    });
+}
+
+/// The sidebar filter narrows rows case-insensitively over title / tag,
+/// force-expands surviving groups, and its empty result reads as no groups.
+#[gpui::test]
+fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
+    let titled = |id: &str, title: &str, stamp: i64| SessionRowData {
+        id: id.into(),
+        title: title.into(),
+        updated_at: stamp,
+        sort_stamp: stamp,
+        status: SessionStatus::Idle,
+        pinned: false,
+        archived: false,
+        tag: None,
+        team_leader: false,
+    };
+    let rows = SessionRow::from_group(SessionGroup {
+        name: "proj".into(),
+        key: "proj".into(),
+        collapsed: false,
+        rows: vec![
+            titled("hit", "alpha design", stamp_days_ago(0)),
+            titled("miss", "unrelated", stamp_days_ago(1)),
+        ],
+    });
+    let (mut visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
+    // Pre-collapse the group: an active filter must force it open.
+    shell.update(cx, |s, _cx| s.toggle_group("proj"));
+
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.toggle_sidebar_search(window, cx));
+    });
+    let input = shell
+        .read_with(cx, |s, _| s.filter_input())
+        .expect("the filter row mounts an input");
+    visual.update(|window, cx| {
+        input.update(cx, |state, cx| state.set_value("ALPHA", window, cx));
+    });
+    shell.update(cx, |s, cx| {
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].rows.len(), 1);
+        assert_eq!(groups[0].rows[0].id, "hit");
+        assert!(
+            !groups[0].collapsed,
+            "a matching group is force-expanded while filtering"
+        );
+    });
+    // A term matching nothing leaves no groups.
+    visual.update(|window, cx| {
+        input.update(cx, |state, cx| state.set_value("zzz", window, cx));
+    });
+    shell.update(cx, |s, cx| {
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert!(groups.is_empty());
+    });
+}
+
+/// The shell's nav moves call the host hooks only when the move has an
+/// edge (the dimmed-inert contract), and the landed id drives the
+/// selection.
+#[gpui::test]
+fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
+    use manox_agent_chrome_ui::shell::NavAvail;
+    let back_log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let fwd_log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let log = back_log.clone();
+    let fwd = fwd_log.clone();
+    let slot: Rc<RefCell<Option<gpui::Entity<Shell>>>> = Rc::new(RefCell::new(None));
+    let slot_for_build = slot.clone();
+    cx.update(gpui_component::init);
+    let window = cx.open_window(size(px(900.), px(600.)), move |window, cx| {
+        manox_i18n::init();
+        register_fonts(cx);
+        let main: gpui::AnyView = cx.new(|_| StubView).into();
+        let mut config = shell_config(main, Rc::new(RefCell::new(Vec::new())));
+        config.hooks.nav_avail = Some(Box::new(move |_| NavAvail {
+            back: true,
+            forward: false,
+        }));
+        let log = log.clone();
+        config.hooks.on_nav_back = Some(Box::new(move |_w, _cx| {
+            log.borrow_mut().push("back".into());
+            Some("landed".into())
+        }));
+        config.hooks.on_nav_forward = Some(Box::new(move |_w, _cx| {
+            fwd.borrow_mut().push("fwd".into());
+            Some("fwd-landed".into())
+        }));
+        let shell = cx.new(|cx| Shell::new(config, window, cx));
+        *slot_for_build.borrow_mut() = Some(shell.clone());
+        Root::new(shell, window, cx)
+    });
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let shell = slot.borrow().clone().expect("shell captured");
+
+    // forward has no edge (nav_avail says so, and the hook would log):
+    // the move must not fire it.
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.nav_forward(window, cx));
+    });
+    assert!(back_log.borrow().is_empty());
+    assert!(
+        fwd_log.borrow().is_empty(),
+        "an edge-less forward must not call its hook"
+    );
+    // back is live: the hook fires and the landed id becomes the selection.
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.nav_back(window, cx));
+    });
+    assert_eq!(back_log.borrow().len(), 1);
+    shell.read_with(cx, |s, _| assert_eq!(s.active.as_deref(), Some("landed")));
+
+    // The RENDERED buttons carry their glyphs in BOTH tones at the same
+    // geometry (the round-two regression: the enabled branch dropped the
+    // inner element, so live arrows were empty boxes). The glyph underlay
+    // has its own debug selector — the outer box exists in both tones, so
+    // its bounds alone cannot see the difference.
+    let back_glyph = visual
+        .debug_bounds("tb-back-glyph")
+        .expect("the enabled arrow draws its glyph");
+    let fwd_glyph = visual
+        .debug_bounds("tb-fwd-glyph")
+        .expect("the disabled arrow still draws its glyph");
+    assert_eq!(
+        [back_glyph.size.width, back_glyph.size.height],
+        [fwd_glyph.size.width, fwd_glyph.size.height],
+        "both tones share the flat-button geometry"
+    );
+
+    // And the Disabled tone is inert at the click surface too: clicking the
+    // rendered forward button must not dispatch its hook.
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.nav_forward(window, cx));
+    });
+    assert!(
+        fwd_log.borrow().is_empty(),
+        "an edge-less forward stays inert through the rendered path"
+    );
+}
+
+/// Unix seconds for local noon N days ago (noon survives DST shifts).
+fn stamp_days_ago(days: usize) -> i64 {
+    use chrono::TimeZone as _;
+    let day = chrono::Local::now().date_naive() - chrono::Duration::days(days as i64);
+    chrono::Local
+        .from_local_datetime(&day.and_hms_opt(12, 0, 0).expect("noon exists"))
+        .single()
+        .expect("local noon resolves")
+        .timestamp()
 }

@@ -113,7 +113,7 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             FixedRow {
                 icon: icons::CALENDAR,
                 label: manox_i18n::t("chrome-sidebar-automations"),
-                badge: Some("NEW".into()),
+                badge: None,
             },
             FixedRow {
                 icon: icons::COMMENT_DISCUSSION,
@@ -121,7 +121,6 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                 badge: None,
             },
         ],
-        // Count badges are visual fixtures of the replica, not live data.
         customizations: vec![
             CustomizationRow {
                 icon: icons::HOME,
@@ -136,12 +135,12 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             CustomizationRow {
                 icon: icons::SETTINGS_GEAR,
                 label: manox_i18n::t("chrome-sidebar-mcp"),
-                count: Some(1),
+                count: None,
             },
             CustomizationRow {
                 icon: icons::WAND,
                 label: manox_i18n::t("chrome-sidebar-skills"),
-                count: Some(13),
+                count: None,
             },
         ],
         hooks: HostHooks {
@@ -169,11 +168,88 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                     });
                 }
             })),
+            // Fixture history: the arrows actually step the selection
+            // through the loaded sessions (`nav_step`), and their lit state
+            // tracks the fixture's real edges — no lit-but-inert arrows.
+            on_nav_back: Some(Box::new(|_, _| nav_step(-1))),
+            on_nav_forward: Some(Box::new(|_, _| nav_step(1))),
+            nav_avail: Some(Box::new(|_| nav_avail_fixture())),
+            on_open_editor: None,
         },
+        brand: None,
     }
 }
 
 // ── session source (real ~/.manox threads) ────────────────────────────────
+
+thread_local! {
+    /// The fixture's nav state: an id snapshot + pointer + live edges.
+    /// The hooks run inside the titlebar's `cx.listener`, which holds the
+    /// Shell lease for the whole listener call — a hook that touched the
+    /// Shell entity would double-lease (hard panic). The snapshot pump
+    /// below refreshes this on every push.
+    static NAV_FIXTURE: std::cell::RefCell<NavFixture> =
+        const { std::cell::RefCell::new(NavFixture::EMPTY) };
+}
+
+/// The example's stand-in for the real history stack.
+struct NavFixture {
+    ids: Vec<String>,
+    index: Option<usize>,
+    back: bool,
+    forward: bool,
+}
+
+impl NavFixture {
+    const EMPTY: Self = Self {
+        ids: Vec::new(),
+        index: None,
+        back: false,
+        forward: false,
+    };
+}
+
+/// Step the fixture pointer by `delta`; returns the landed id (`None` at an
+/// edge or with nothing loaded — never a no-op move).
+fn nav_step(delta: i32) -> Option<String> {
+    NAV_FIXTURE.with(|cell| {
+        let mut f = cell.borrow_mut();
+        let i = f.index?;
+        let j = i as i64 + delta as i64;
+        if j < 0 || j as usize >= f.ids.len() {
+            return None;
+        }
+        let j = j as usize;
+        f.index = Some(j);
+        f.back = j > 0;
+        f.forward = j + 1 < f.ids.len();
+        Some(f.ids[j].clone())
+    })
+}
+
+fn nav_avail_fixture() -> manox_agent_chrome_ui::shell::NavAvail {
+    NAV_FIXTURE.with(|cell| {
+        let f = cell.borrow();
+        manox_agent_chrome_ui::shell::NavAvail {
+            back: f.back,
+            forward: f.forward,
+        }
+    })
+}
+
+/// Re-sync the fixture nav state from the freshly pushed rows.
+fn nav_fixture_sync(shell: &Shell) {
+    NAV_FIXTURE.with(|cell| {
+        let mut f = cell.borrow_mut();
+        f.ids = shell.sessions.iter().map(|s| s.id.clone()).collect();
+        f.index = shell
+            .active
+            .as_ref()
+            .and_then(|a| f.ids.iter().position(|i| i == a));
+        f.back = f.index.is_some_and(|i| i > 0);
+        f.forward = f.index.is_some_and(|i| i + 1 < f.ids.len());
+    });
+}
 
 /// Push thread snapshots into the shell. The one active scan happens here
 /// (off the first frame); afterwards the store's change events drive
@@ -202,6 +278,7 @@ fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
                     titles.borrow_mut().insert(r.id.clone(), r.title.clone());
                 }
                 shell.set_sessions(rows);
+                nav_fixture_sync(shell);
                 cx.notify();
             });
             anyhow::Ok(())

@@ -153,6 +153,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A created session is a user-initiated switch (⌘N, /exit's
+        // replacement) — it lands in the history like a sidebar open, so ←
+        // from the fresh thread returns to where the user actually came
+        // from.
+        self.nav.record(session_id);
         let thread = Thread::landing_with_id(ThreadId(session_id.to_string()), self.cwd.clone());
         // A server-minted fresh id has no history to wait for; arming the
         // gate here would flash the loading page on a race with the create
@@ -830,6 +835,59 @@ impl Workspace {
     }
 
     pub fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_thread_inner(id, true, window, cx);
+    }
+
+    /// The successor hand-off: the foreground conversation continues under a
+    /// NEW id while the user is looking at it. The current history entry is
+    /// rewritten in place (the same conversation under its new identity) and
+    /// the landing itself records nothing — this is not user navigation.
+    pub(crate) fn replace_nav_current(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.nav.replace_current(&id);
+        self.open_thread_inner(id, false, window, cx);
+    }
+
+    /// One step back through the visited-thread history; returns the thread
+    /// landed on (`None` when the move has no edge).
+    pub(crate) fn nav_back(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let id = self.nav.step_back()?;
+        self.open_thread_inner(id.clone(), false, window, cx);
+        Some(id)
+    }
+
+    /// One step forward through the visited-thread history (`None` at the
+    /// tail).
+    pub(crate) fn nav_forward(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let id = self.nav.step_forward()?;
+        self.open_thread_inner(id.clone(), false, window, cx);
+        Some(id)
+    }
+
+    /// The ←/→ moves' availability (the history's edges).
+    pub(crate) fn nav_avail(&self) -> manox_agent_chrome_ui::shell::NavAvail {
+        self.nav.avail()
+    }
+
+    fn open_thread_inner(
+        &mut self,
+        id: String,
+        record: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // If the thread is already running in the background, reclaim it
         // instead of loading a stale snapshot from the db.
         // U6b⑤: the reclaim re-attaches a fresh landing mirror for the
@@ -838,6 +896,9 @@ impl Workspace {
         // detached, so no stream is re-opened; `attach_thread` still re-owns
         // the session (`OpenSession`, §D.6) so a parked adjudication card
         // re-arms on the way back in.
+        if record {
+            self.nav.record(&id);
+        }
         if self.background_threads.iter().any(|b| b.id == id) {
             let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
             self.attach_thread(thread, true, true, window, cx);
@@ -846,10 +907,10 @@ impl Workspace {
         // U6b②: the attach read is the landing mirror — the SERVER owns
         // the session and the restore rides the wire reopen flow
         // (OpenSession + the follow stream's Snapshot + the §D.5 mirrors),
-        // exactly like the create path. The kernel-side `load_thread` (the
-        // U6 dual source: a db-restored facade racing the live wire state)
-        // is gone; the row this click came from is itself a wire item, so
-        // the id is server-known by construction.
+        // exactly like the create path. Nav-replayed ids carry the same
+        // premise only while the thread still exists; a history entry whose
+        // thread was archived/replaced meanwhile degrades to the landing
+        // attach (the accepted semantics — see UI-MAP ChromeShell).
         let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
         self.attach_thread(thread, true, true, window, cx);
     }
