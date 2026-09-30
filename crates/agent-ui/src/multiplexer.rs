@@ -34,26 +34,29 @@ pub struct SessionMultiplexer {
     unsubscribe_queue: Vec<String>,
 }
 
-/// The sidebar row's pin read: the subscribed thread channel's fold wins once
-/// it speaks (live, backed by the thread-scoped baseline); a row whose
-/// channel has not spoken yet falls back to the list snapshot's
-/// `_meta.x-manox.pinned` (upstream #863) — the store row's pin authority
-/// reached the client with the list itself.
-fn ext_and_meta_pinned(
+/// The ONE sidebar row pin read (write faces included — `on_pin` flips
+/// against this, never against the fold alone): the subscribed thread
+/// channel's fold wins once it speaks (live, backed by the thread-scoped
+/// baseline); a row whose channel has not spoken yet falls back to the list
+/// snapshot's `_meta.x-manox.pinned` (upstream #863) — the store row's pin
+/// authority reached the client with the list itself.
+pub(crate) fn ext_and_meta_pinned(
     book: &manox_agent_chat_ui::ahp_store::ChannelBook,
-    summary: &ahp_types::state::SessionSummary,
+    summary: Option<&ahp_types::state::SessionSummary>,
     thread_channel: &str,
 ) -> bool {
     book.ext
         .get(thread_channel)
         .and_then(|x| x.pinned)
         .or_else(|| {
-            summary
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("x-manox"))
-                .and_then(|x| x.get("pinned"))
-                .and_then(serde_json::Value::as_bool)
+            summary.and_then(|summary| {
+                summary
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("x-manox"))
+                    .and_then(|x| x.get("pinned"))
+                    .and_then(serde_json::Value::as_bool)
+            })
         })
         .unwrap_or(false)
 }
@@ -210,13 +213,8 @@ impl SessionMultiplexer {
             .values()
             .map(|summary| {
                 let sid = manox_agent_chat_ui::ahp_store::id_of(&summary.resource);
-                // The row state rides the `x-manox-thread` extension channel
-                // (upstream #842); the session channel's ext face carries
-                // nothing since then. The list snapshot's `_meta` (upstream
-                // #863) is the baseline for rows whose channel baseline has
-                // not landed (or failed to) — the subscribed fold wins once
-                // it speaks.
-                let pinned = ext_and_meta_pinned(book, summary, &thread_uri(sid));
+                // The row pin read: see `ext_and_meta_pinned`.
+                let pinned = ext_and_meta_pinned(book, Some(summary), &thread_uri(sid));
                 let pending_plan = manox_agent_chat_ui::ahp_store::plan_review_proposed(book, sid);
                 let mut row = ThreadRow::from_summary(summary, pinned, pending_plan);
                 // The host's project field trails a brand-new session (its
@@ -321,7 +319,7 @@ mod pin_read_tests {
 
         // No fold yet (the row's thread baseline has not landed): the list
         // snapshot's _meta speaks.
-        assert!(ext_and_meta_pinned(&book, &summary, channel));
+        assert!(ext_and_meta_pinned(&book, Some(&summary), channel));
 
         // The subscribed fold wins once it speaks — even when it disagrees
         // with the (possibly stale) snapshot.
@@ -332,7 +330,23 @@ mod pin_read_tests {
                 ..Default::default()
             },
         );
-        assert!(!ext_and_meta_pinned(&book, &summary, channel));
+        assert!(!ext_and_meta_pinned(&book, Some(&summary), channel));
+
+        // The steady state for a never-pinned row: the fold entry exists but
+        // its baseline omitted `pinned` (XManoxState skips None), so the
+        // fold carries no opinion and the _meta fallback stays in charge —
+        // pinning the "entry exists ⇒ authoritative" shortcut.
+        book.ext.insert(
+            channel.to_string(),
+            manox_ahp::ext::reducer::XManoxState {
+                pinned: None,
+                ..Default::default()
+            },
+        );
+        assert!(
+            ext_and_meta_pinned(&book, Some(&summary), channel),
+            "a fold entry without a pin opinion defers to the _meta baseline"
+        );
 
         // A row the list shipped without _meta reads unpinned, not panicked.
         let bare: ahp_types::state::SessionSummary = serde_json::from_value(serde_json::json!({
@@ -344,6 +358,10 @@ mod pin_read_tests {
             "modifiedAt": "2026-01-01T00:00:00Z",
         }))
         .expect("a bare summary parses");
-        assert!(!ext_and_meta_pinned(&book, &bare, "x-manox-thread:/s-2"));
+        assert!(!ext_and_meta_pinned(
+            &book,
+            Some(&bare),
+            "x-manox-thread:/s-2"
+        ));
     }
 }
