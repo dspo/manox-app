@@ -171,6 +171,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.close_turn_navigator(window, cx);
+        // The turn rail's hover/preview state belongs to the outgoing
+        // conversation: a stale mark index must not mount a preview card on
+        // the freshly attached thread.
+        self.chat.update(cx, |chat, cc| {
+            chat.reset_turn_rail_interaction();
+            cc.notify();
+        });
         let old_thread = self.chat.read(cx).thread.clone();
         let old_id = old_thread.read(|t| t.id.0.clone());
         let new_id = new_thread.read(|t| t.id.0.clone());

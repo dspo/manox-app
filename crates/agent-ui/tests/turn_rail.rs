@@ -128,8 +128,8 @@ async fn turn_rail_marks_render_and_a_click_lands_on_the_turn(cx: &mut TestAppCo
     // After the jump row 0 is on screen: the rail hugs the band's left edge
     // and clears the transcript — the gutter pads the list wrapper, not the
     // band the rail anchors to, so the ticks sit at the card edge while the
-    // text starts a full gutter in. Row geometry comes from the list state
-    // itself (`gpui::list` rows do not register debug selectors).
+    // text starts a full gutter in. Row geometry comes straight from the
+    // list state, which is more direct than element bounds.
     visual.cx.run_until_parked();
     let list_state = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_list_state(cx));
     let strip = visual
@@ -148,5 +148,95 @@ async fn turn_rail_marks_render_and_a_click_lands_on_the_turn(cx: &mut TestAppCo
         "the rail must clear the transcript (rail {:?} vs row {:?})",
         strip.origin.x + strip.size.width,
         row.origin.x
+    );
+}
+
+/// Regression for the ladder's internal-scroll path: once the marks exceed
+/// `MAX_RAIL_HEIGHT` (60 turns × 10px > 420px), the ladder scrolls and
+/// `ScrollHandle::offset().y` runs NEGATIVE — the preview's top must consume
+/// that offset sign-corrected, or the card pins to the rail's bottom
+/// instead of the hovered mark (review round 1, C1).
+#[gpui::test]
+async fn preview_tracks_the_hovered_mark_when_the_ladder_scrolls(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+
+    let conversation = cx.new(|cx| {
+        ConversationState::rebuild_from_display(
+            &tall_history(60),
+            &std::collections::HashMap::new(),
+            "test-model",
+            manox_agent::MessageAuthor::Lead,
+            true,
+            ApplyCtx {
+                host: manox_agent_chat_ui::host::noop_host(),
+                cwd: None,
+                fork_source: None,
+            },
+            cx,
+        )
+    });
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_replace_conversation(conversation, cx);
+    });
+    visual.refresh().unwrap();
+
+    // Turn 39 anchors at item 78. Tail-follow puts active on the newest
+    // turn, so the ladder is scrolled to its tail (offset.y ≈ -180) and
+    // mark 39 sits mid-ladder, on screen.
+    let mark = visual
+        .debug_bounds("turn-rail-mark-78")
+        .expect("the mid-ladder mark renders while the ladder is scrolled");
+    visual.simulate_event(gpui::MouseMoveEvent {
+        position: mark.center(),
+        pressed_button: None,
+        modifiers: Modifiers::default(),
+    });
+    visual.cx.run_until_parked();
+    visual.refresh().unwrap();
+    let preview = visual
+        .debug_bounds("turn-rail-preview")
+        .expect("the hovered mark's preview renders");
+    assert!(
+        (f32::from(preview.center().y) - f32::from(mark.center().y)).abs() <= 1.0,
+        "the preview must sit at the hovered mark, not the rail's bottom \
+         (preview center y={:?} vs mark center y={:?})",
+        preview.center().y,
+        mark.center().y
+    );
+
+    // Re-projecting to a short conversation resets the rail's interaction
+    // state: the stale hover must not survive the switch (no preview card
+    // for a pointer that is not on the rail, and no stale guard feeding
+    // `&turns[ix]`).
+    let short = cx.new(|cx| {
+        ConversationState::rebuild_from_display(
+            &tall_history(1),
+            &std::collections::HashMap::new(),
+            "test-model",
+            manox_agent::MessageAuthor::Lead,
+            true,
+            ApplyCtx {
+                host: manox_agent_chat_ui::host::noop_host(),
+                cwd: None,
+                fork_source: None,
+            },
+            cx,
+        )
+    });
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_replace_conversation(short, cx);
+    });
+    visual.cx.run_until_parked();
+    visual.refresh().unwrap();
+    let hover = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_turn_rail_hover(cx));
+    assert_eq!(
+        hover, None,
+        "the rail's hover state resets on re-projection"
+    );
+    assert!(
+        visual.debug_bounds("turn-rail").is_none(),
+        "the rail unmounts below two turns"
     );
 }

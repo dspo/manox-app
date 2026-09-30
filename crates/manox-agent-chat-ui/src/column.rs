@@ -543,6 +543,26 @@ pub struct ChatColumn {
 // workspace; these are the pure state machines the card renders against.
 
 impl ChatColumn {
+    /// Reset the turn rail's interaction and tween state. Called when the
+    /// conversation is re-projected (thread switch, diagnostic replace): a
+    /// stale hover index would otherwise mount a preview card the pointer is
+    /// not on, a stale `pointer_inside` would keep active-follow paused
+    /// forever, and a stale `hover_painted` would fire a spurious tween pair
+    /// on the first remounted frame. The `_gen` counters are deliberately
+    /// kept — they only key animation ids, and fresh runs are what a
+    /// remount wants anyway.
+    pub fn reset_turn_rail_interaction(&mut self) {
+        self.turn_rail_hover = None;
+        self.turn_rail_hover_prev = None;
+        self.turn_rail_hover_painted = None;
+        self.turn_rail_preview_mark = None;
+        self.turn_rail_preview_top = None;
+        self.turn_rail_pointer_inside = false;
+        self.turn_rail_active = None;
+        self.turn_rail_active_from = None;
+        self.turn_rail_followed = None;
+    }
+
     /// The snapshot for the pending ask card at its current step.
     pub fn ask_card_snapshot(&self, id: &str) -> Option<crate::ask_card::AskCardSnapshot> {
         let ask = self.pending_ask.as_ref()?;

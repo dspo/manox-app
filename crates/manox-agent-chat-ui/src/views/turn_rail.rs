@@ -59,17 +59,19 @@ pub struct RailTurn {
 }
 
 /// Project the conversation into ascending rail turns. The prompt is the
-/// user bubble's text; the response is the turn's last non-empty assistant
-/// reply (dsh's `findLast` rule). Both are collapsed and capped so the
-/// preview stays bounded on huge turns. Assistant rows before the first user
-/// bubble belong to no turn and are dropped.
+/// user bubble's text — collapsed and capped, or the ⌘M navigator's
+/// attachment-only / empty-message copy for bubbles with no text; the
+/// response is the turn's last non-empty assistant reply (dsh's `findLast`
+/// rule), collapsed and capped. Assistant rows before the first user bubble
+/// belong to no turn and are dropped. Both caps run on a prefix slice first
+/// (`cap_preview`), so a huge turn costs O(limit) per row, not O(全文).
 pub fn collect_rail_turns<'a>(items: impl Iterator<Item = (usize, &'a ConvItem)>) -> Vec<RailTurn> {
     let mut turns: Vec<RailTurn> = Vec::new();
     for (ix, item) in items {
         match item {
-            ConvItem::User { text, .. } => turns.push(RailTurn {
+            ConvItem::User { text, images, .. } => turns.push(RailTurn {
                 item_ix: ix,
-                prompt: cap_preview(text, PROMPT_PREVIEW_CHARS),
+                prompt: prompt_preview(text, !images.is_empty()),
                 response: String::new(),
             }),
             ConvItem::Assistant { text, .. } => {
@@ -77,6 +79,9 @@ pub fn collect_rail_turns<'a>(items: impl Iterator<Item = (usize, &'a ConvItem)>
                     continue;
                 }
                 if let Some(last) = turns.last_mut() {
+                    // Every non-empty reply overwrites the previous one, so
+                    // the last one wins; each overwrite only costs O(limit)
+                    // thanks to the prefix slice in `cap_preview`.
                     last.response = cap_preview(text, RESPONSE_PREVIEW_CHARS);
                 }
             }
@@ -86,10 +91,32 @@ pub fn collect_rail_turns<'a>(items: impl Iterator<Item = (usize, &'a ConvItem)>
     turns
 }
 
+/// The prompt line's display text: the collapsed, capped bubble text — or,
+/// for a textless bubble, the ⌘M navigator's attachment-only / empty-message
+/// copy (the same distinction `TurnEntry::new` draws, so both surfaces name
+/// the same turn the same way).
+fn prompt_preview(text: &str, has_images: bool) -> String {
+    let collapsed = collapse_whitespace(text);
+    if !collapsed.is_empty() {
+        cap_preview(&collapsed, PROMPT_PREVIEW_CHARS)
+    } else if has_images {
+        i18n::t("turn-navigator-attachment-only").to_string()
+    } else {
+        i18n::t("turn-navigator-empty-message").to_string()
+    }
+}
+
 /// Collapse whitespace and cap at `limit` characters with a trailing
-/// ellipsis when clipped.
+/// ellipsis when clipped. A prefix slice bounds the work before the
+/// collapse: whitespace folds at worst 2:1, so `2 * limit` characters yield
+/// at least `limit - 1` visible ones for any text with content (a giant
+/// leading whitespace run collapses to empty — the same degenerate result
+/// dsh's per-part rule produces). The `limit - 1` threshold, and the
+/// resulting "exactly `limit` characters also folds" edge, is dsh's
+/// `preview()` rule, kept for parity.
 fn cap_preview(text: &str, limit: usize) -> String {
-    let normalized = collapse_whitespace(text);
+    let prefix: String = text.chars().take(limit * 2).collect();
+    let normalized = collapse_whitespace(&prefix);
     if normalized.chars().count() > limit - 1 {
         let head: String = normalized.chars().take(limit - 1).collect();
         let head = head.trim_end();
@@ -138,7 +165,10 @@ fn ladder_top(mark_count: usize, box_h: Option<Pixels>) -> Pixels {
     }
 }
 
-/// A mark's center y inside the rail box, from the ladder's scroll offset.
+/// A mark's center y inside the rail box. `scroll_top` is the ladder's
+/// scrolled amount, already sign-corrected to positive-down
+/// (`-ScrollHandle::offset().y` — gpui's raw offset runs negative while
+/// scrolling down, the same convention `uniform_list` itself uses).
 fn mark_center_y(mark_ix: usize, ladder_top: Pixels, scroll_top: Pixels) -> Pixels {
     ladder_top + px(mark_ix as f32 * MARK_PITCH + MARK_PITCH / 2.) - scroll_top
 }
@@ -191,7 +221,11 @@ pub fn render_turn_rail(
 
     let box_h_raw = chat.read(cx).turn_rail_box_h.get();
     let box_h = (box_h_raw > px(0.)).then_some(box_h_raw);
-    let scroll_top = chat
+    // Sign-corrected to positive-down: gpui's ScrollHandle offset runs
+    // NEGATIVE while scrolling down (clamped to [-max_offset, 0]), so the
+    // raw value must be negated before feeding the geometry (the same
+    // `let scroll_top = -offset.y` convention uniform_list itself uses).
+    let scroll_top = -chat
         .read(cx)
         .turn_rail_scroll
         .0
@@ -346,7 +380,15 @@ pub fn render_turn_rail(
 /// rest, the vacated mark sinks back — a pointer sweep down the ladder reads
 /// as a wave — and the active hand-off grows one mark while shrinking the
 /// other. Each change runs under a fresh id keyed by its generation, so it
-/// starts from the resting style instead of resuming.
+/// starts from the resting style instead of resuming. Known design limit:
+/// `turn_rail_hover_prev` holds a single slot, so when the pointer crosses a
+/// third mark within the 140ms window the earliest vacated mark is already
+/// off the tree and snaps back to rest instead of tweening — fast sweeps
+/// truncate the wave's tail by design.
+// Eleven parameters, but they are the row's whole world: the frame state
+// snapshot (active/from/gen, hover/prev/gen), the mark's identity, and the
+// theme + state/callback handles. A parameters struct would just move the
+// same names one indent deeper.
 #[allow(clippy::too_many_arguments)]
 fn render_mark_row(
     ix: usize,
@@ -462,7 +504,8 @@ fn render_mark_row(
 
 /// The hover card: prompt line over response excerpt, fading in with a 4px
 /// slide from the marks and traveling between marks without replaying the
-/// enter run.
+/// enter run. The prompt arrives pre-shaped (`collect_rail_turns` already
+/// picked the attachment-only / empty-message copy), so it renders as-is.
 fn render_preview(
     theme: &Theme,
     turn: &RailTurn,
@@ -471,12 +514,9 @@ fn render_preview(
     travel_from: Option<Pixels>,
     top: Pixels,
 ) -> AnyElement {
-    let prompt: SharedString = if turn.prompt.is_empty() {
-        i18n::t("turn-navigator-attachment-only")
-    } else {
-        SharedString::from(turn.prompt.clone())
-    };
+    let prompt = SharedString::from(turn.prompt.clone());
     let mut card = v_flex()
+        .debug_selector(|| "turn-rail-preview".into())
         .w(px(PREVIEW_WIDTH))
         .max_h(px(PREVIEW_HEIGHT))
         .overflow_hidden()
@@ -595,9 +635,28 @@ mod tests {
     }
 
     #[test]
-    fn attachment_only_turn_has_empty_prompt() {
-        let turns = collect_rail_turns([(0, &user(" "))].into_iter());
-        assert_eq!(turns[0].prompt, "");
+    fn textless_bubbles_use_the_navigator_copy_by_attachment_presence() {
+        // Textless with images → the attachment-only copy.
+        assert_eq!(
+            prompt_preview("", true),
+            i18n::t("turn-navigator-attachment-only")
+        );
+        // Textless without images → the empty-message copy, not the
+        // attachment-only one (the ⌘M navigator's distinction).
+        assert_eq!(
+            prompt_preview(" ", false),
+            i18n::t("turn-navigator-empty-message")
+        );
+        // Texted bubbles carry the capped text either way.
+        assert_eq!(prompt_preview("hello", true), "hello");
+    }
+
+    #[test]
+    fn cap_preview_bounds_its_work_to_a_prefix_slice() {
+        // A prefix-bounded collapse must agree with collapsing the whole
+        // text (whitespace folds at worst 2:1, so 2*limit chars suffice).
+        let huge = format!("{}tail", "word ".repeat(5_000));
+        assert_eq!(cap_preview(&huge, 20), cap_preview(&huge[..400], 20));
     }
 
     #[test]

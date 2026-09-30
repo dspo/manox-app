@@ -719,6 +719,7 @@ impl Workspace {
             chat.list_state.reset(count);
             chat.list_count = count;
             chat.list_state.set_follow_mode(FollowMode::Tail);
+            chat.reset_turn_rail_interaction();
             cx.notify();
         });
         self.observe_conversation(cx);
