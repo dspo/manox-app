@@ -138,15 +138,42 @@ pub fn strip_recommended_suffix(label: String) -> (String, bool) {
     (label, false)
 }
 
-/// A non-question authorization parked on the user's decision — a
-/// `sandbox_permissions` escalation from Edit/Write/Bash, or an
-/// `AskUserQuestion` whose payload failed to parse. The ask card only
-/// renders question payloads, so without this surface the pending call
-/// blocks invisibly until the turn is cancelled.
-pub struct PendingAuth {
-    pub id: String,
-    pub tool_name: String,
-    pub summary: String,
+/// A tool confirmation parked on the user's decision — a sandbox
+/// escalation or any gate the runtime raises before a call runs. The
+/// verdict rides the conversation's own tool row (the unified
+/// confirmation card); this state only names the live park so the
+/// workspace can attach the decision snapshot to the right row.
+pub struct PendingConfirmation {
+    /// The confirmation's auth id — the identity the verdict must carry
+    /// in its `_meta` stamp for the host to settle it.
+    pub auth_id: String,
+    /// The parked call's tool-call id — the conversation row the decision
+    /// snapshot attaches to (usually equal to `auth_id`, but the journal
+    /// may name them separately).
+    pub tool_call_id: String,
+}
+
+/// One decision button on the unified confirmation card. The fold's own
+/// `ConfirmationOption`, reduced to what the row renders: the label is
+/// runtime data and renders verbatim (never re-localized), `approve`
+/// picks the primary vs outline presentation and the verdict bool, and
+/// `option_id` rides the verdict so the host learns WHICH option the user
+/// chose — a label may promise semantics ("Always allow") a bare
+/// approve/deny bool would silently break.
+#[derive(Clone, PartialEq)]
+pub struct ConfirmationAction {
+    pub option_id: String,
+    pub label: String,
+    pub approve: bool,
+}
+
+/// The decision surface the workspace budgets onto the parked call's
+/// conversation row before the list measures, so the row's render stays a
+/// read-only projection (the ask snapshot's same contract).
+#[derive(Clone, PartialEq)]
+pub struct ConfirmationSnapshot {
+    pub auth_id: String,
+    pub actions: Vec<ConfirmationAction>,
 }
 
 /// A parsed `AskUserQuestion` prompt awaiting the user's selections.
@@ -333,20 +360,31 @@ pub struct ChatColumn {
     /// leaves the fold — a diagnostic-seeded one belongs to the test, not to
     /// the wire.
     pub pending_ask_live: bool,
-    /// Same liveness marker for the generic authorization card (tool
-    /// confirmations and bare asks): only a live-seeded card is retired when
-    /// its request leaves the fold.
-    pub pending_auth_live: bool,
-    pub pending_auth: Option<PendingAuth>,
-    /// Whether the CURRENT pending interaction's id has been observed in the
-    /// leaf store's `pending_auth` projection set. Arms the remote-settle
-    /// reconcile (chips.rs) so the startup race — Request landing before the
-    /// projection frame — can never clear a freshly surfaced card.
-    pub pending_projection_confirmed: bool,
+    /// Same liveness marker for the tool confirmation: only a live-seeded
+    /// card is retired when its request leaves the fold.
+    pub pending_confirmation_live: bool,
+    pub pending_confirmation: Option<PendingConfirmation>,
+    /// Whether the CURRENT pending ASK's id has been observed in the leaf's
+    /// input-needed list. Arms the remote-settle reconciliation for the ASK
+    /// card only (the confirmation card keeps its own flag — one park
+    /// settling remotely must never retire the other card).
+    pub ask_projection_confirmed: bool,
+    /// Same arm for the unified confirmation card, tracked independently:
+    /// the two parks are separate interactions and settle separately.
+    pub confirmation_projection_confirmed: bool,
     /// Tool row currently carrying the Workspace-derived ask snapshot. This is
     /// synchronized before list construction; the row factory itself remains
     /// a read-only projection during measurement and prepaint.
     pub ask_snapshot_item: Option<Entity<MessageItem>>,
+    /// Tool row currently carrying the Workspace-derived confirmation
+    /// snapshot (the unified card's decision buttons), under the same
+    /// pre-measure contract as `ask_snapshot_item`.
+    pub confirmation_snapshot_item: Option<Entity<MessageItem>>,
+    /// The tool-call id of the row this workspace PROMOTED for the
+    /// confirmation card (the ask snapshot's synthesis leg). Set only when
+    /// the row was minted by the sync — a park's retirement removes the
+    /// promoted row, while a row that already existed stays.
+    pub confirmation_row_synthesized: Option<String>,
     /// Current question index in the ask drawer (0-based).
     pub ask_step: usize,
     /// Animation generation counter for the ask drawer slide, bumped on every

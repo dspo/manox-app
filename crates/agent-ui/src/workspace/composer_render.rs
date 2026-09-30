@@ -2,8 +2,7 @@
 //! element (and its queued-follow-ups / plan-chip / access-placeholder /
 //! plus-menu / send-button / completion-overlay / attachments /
 //! project-chip faces), the browser-suite toggles, the file picker, the
-//! blank-project family, the pending-auth overlay, and the project
-//! registration leg. Split from `workspace.rs` — `super` is the
+//! blank-project family, and the project registration leg. Split from `workspace.rs` — `super` is the
 //! workspace module; the bare-private methods lift `pub(super)` for the
 //! parent's render face and the `tests` child.
 
@@ -97,7 +96,7 @@ impl Workspace {
         // doesn't churn the InputState every frame.
         let followup_mode = running
             && self.chat.read(cx).pending_ask.is_none()
-            && self.chat.read(cx).pending_auth.is_none();
+            && self.chat.read(cx).pending_confirmation.is_none();
         let placeholder_mode = if self.chat.read(cx).pending_ask.is_some() {
             ComposerPlaceholderMode::Ask
         } else if followup_mode {
@@ -1733,99 +1732,15 @@ impl Workspace {
         .detach();
     }
 
-    /// Overlay prompting for the blank-project folder name.
-    /// The generic approval card: a non-question authorization (a
-    /// `sandbox_permissions` escalation, or an ask whose payload failed to
-    /// parse) parked on the user's decision. Without it the pending call
-    /// blocks the thread invisibly — the user sees a stuck tool, not a
-    /// decision that belongs to them.
-    pub(super) fn render_pending_auth_overlay(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let auth = self.chat.read(cx).pending_auth.as_ref()?;
-        let detail = if auth.summary.trim().is_empty() {
-            format!("{} · {}", auth.tool_name, i18n::t("pending-auth-waiting"))
-        } else {
-            format!("{} · {}", auth.tool_name, auth.summary)
-        };
-        Some(
-            gpui::div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(theme.foreground.opacity(0.6))
-                .child(
-                    v_flex()
-                        .w(px(480.))
-                        .p_4()
-                        .gap_3()
-                        .rounded(theme.radius)
-                        .bg(theme.background)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_lg()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    Icon::new(IconName::Eye)
-                                        .small()
-                                        .text_color(theme.accent_foreground),
-                                )
-                                .child(
-                                    gpui::div()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(i18n::t("pending-auth-title")),
-                                ),
-                        )
-                        .child(
-                            gpui::div()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(detail),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .justify_end()
-                                .child(
-                                    Button::new("pending-auth-deny")
-                                        .ghost()
-                                        .small()
-                                        .label(i18n::t("pending-auth-deny"))
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            this.resolve_auth(PermissionDecision::Deny, cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("pending-auth-allow")
-                                        .primary()
-                                        .small()
-                                        .label(i18n::t("pending-auth-allow"))
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            this.resolve_auth(PermissionDecision::AllowOnce, cx);
-                                        })),
-                                ),
-                        ),
-                )
-                .into_any_element(),
-        )
-    }
-
     pub(super) fn render_blank_project_overlay(
         &self,
         _window: &mut Window,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.chat.read(cx).pending_ask.is_some() || self.chat.read(cx).pending_auth.is_some() {
+        if self.chat.read(cx).pending_ask.is_some()
+            || self.chat.read(cx).pending_confirmation.is_some()
+        {
             return None;
         }
         self.chat.read(cx).blank_project_parent.as_ref()?;

@@ -315,7 +315,7 @@ enum RegistryTurnKind {
 // the workspace family resolving unchanged.
 pub use manox_agent_chat_ui::column::{
     AskIntent, AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState,
-    PendingAsk, PendingAuth, QueuedFollowUp, parse_pending_ask,
+    PendingAsk, PendingConfirmation, QueuedFollowUp, parse_pending_ask,
 };
 
 /// The visited-thread history behind the titlebar ←/→ moves. Invariants
@@ -750,11 +750,14 @@ impl Workspace {
                 input_state,
                 drafts: HashMap::new(),
                 pending_ask: None,
-                pending_auth_live: false,
                 pending_ask_live: false,
-                pending_auth: None,
-                pending_projection_confirmed: false,
+                pending_confirmation_live: false,
+                pending_confirmation: None,
+                ask_projection_confirmed: false,
+                confirmation_projection_confirmed: false,
                 ask_snapshot_item: None,
+                confirmation_row_synthesized: None,
+                confirmation_snapshot_item: None,
                 ask_step: 0,
                 ask_transition_gen: 0,
                 ask_custom_inputs: Vec::new(),
@@ -996,15 +999,6 @@ impl Workspace {
     ) {
         self.chat.update(cx, |chat, cc| {
             chat.pending_ask = parse_pending_ask(id.to_string(), input);
-            // Only AskUserQuestion payloads reach this seeder (the live event
-            // path is `ToolCallAuthorization`, which carries the real tool
-            // name); the fallback exists solely for a malformed ask payload,
-            // so the constant names the tool that actually fired.
-            chat.pending_auth = chat.pending_ask.is_none().then(|| PendingAuth {
-                id: id.to_string(),
-                tool_name: "AskUserQuestion".to_string(),
-                summary: String::new(),
-            });
             chat.ask_step = 0;
             chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
             cc.notify();
@@ -1037,23 +1031,24 @@ impl Workspace {
         self.chat.read(cx).ask_custom_text.clone()
     }
 
-    /// Seed a non-question authorization (a sandbox escalation, or an ask
-    /// whose payload failed to parse) as the pending generic card.
+    /// Seed a tool confirmation as the pending state, WITHOUT the row: the
+    /// surface (row promotion + snapshot) is `sync_confirmation_snapshot`'s
+    /// job — the same production path — so tests drive exactly what the
+    /// live edge drives.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_seed_auth(
+    pub fn diagnostic_seed_pending_confirmation(
         &mut self,
-        id: &str,
-        tool_name: &str,
-        summary: &str,
+        auth_id: &str,
+        tool_call_id: &str,
         cx: &mut Context<Self>,
     ) {
         self.chat.update(cx, |chat, cc| {
             chat.pending_ask = None;
-            chat.pending_auth = Some(PendingAuth {
-                id: id.to_string(),
-                tool_name: tool_name.to_string(),
-                summary: summary.to_string(),
+            chat.pending_confirmation = Some(PendingConfirmation {
+                auth_id: auth_id.to_string(),
+                tool_call_id: tool_call_id.to_string(),
             });
+            chat.pending_confirmation_live = false;
             chat.ask_step = 0;
             cc.notify();
         });
@@ -1061,14 +1056,32 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The pending generic-approval card as (id, tool_name, summary).
+    /// Diagnostic entry to the confirmation snapshot sync.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_pending_auth(&self, cx: &App) -> Option<(String, String, String)> {
+    pub fn diagnostic_sync_confirmation_snapshot(&mut self, cx: &mut App) {
+        self.sync_confirmation_snapshot(cx);
+    }
+
+    /// The confirmation snapshot's auth id attached to the parked row, if
+    /// the sync has budgeted it.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_confirmation_snapshot(&self, cx: &App) -> Option<String> {
         self.chat
             .read(cx)
-            .pending_auth
+            .confirmation_snapshot_item
             .as_ref()
-            .map(|a| (a.id.clone(), a.tool_name.clone(), a.summary.clone()))
+            .and_then(|item| item.read(cx).confirmation.as_ref())
+            .map(|c| c.auth_id.clone())
+    }
+
+    /// The pending confirmation as (auth_id, tool_call_id).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_pending_confirmation(&self, cx: &App) -> Option<(String, String)> {
+        self.chat
+            .read(cx)
+            .pending_confirmation
+            .as_ref()
+            .map(|a| (a.auth_id.clone(), a.tool_call_id.clone()))
     }
 
     /// Whether any blocking overlay (plan review, ask, generic approval,
@@ -1081,8 +1094,13 @@ impl Workspace {
     /// Resolve the pending generic-approval card. Diagnostic-only wrapper
     /// around `resolve_auth`; the fake engine accepts the id.
     #[cfg(feature = "test-support")]
-    pub fn resolve_auth_for_test(&mut self, decision: PermissionDecision, cx: &mut Context<Self>) {
-        self.resolve_auth(decision, cx);
+    pub fn resolve_auth_for_test(
+        &mut self,
+        auth_id: &str,
+        decision: PermissionDecision,
+        cx: &mut Context<Self>,
+    ) {
+        self.resolve_auth(auth_id, None, decision, cx);
     }
 
     /// The live ask edge: reconcile the pending ask with the fold's open
@@ -1245,10 +1263,13 @@ impl Workspace {
                 }
             }
         }
-        // Generic authorization card: a tool confirmation (Edit/Write sandbox
-        // escalations) or a BARE ask (an elicitation whose payload carried no
-        // structured questions) parks the model on an answer the generic card
-        // delivers — the v2 ToolCallAuthorization mount's successor.
+        // The unified confirmation card: a tool confirmation (a sandbox
+        // escalation or any pre-run gate) parks the model on a decision the
+        // conversation card delivers. A question-less elicitation has NO
+        // surface by design — the current runtime cannot mint one (the
+        // translator always emits structured questions; plan-review rides
+        // its own single-select), and the arm below warns if that ever
+        // changes.
         let live_auth = {
             let view = store.read(cx);
             let sid = self
@@ -1259,57 +1280,48 @@ impl Workspace {
                 .map(|(_, sid)| sid.clone())
                 .expect("bound above");
             let leaf = crate::ahp_store::leaf(&view.book, &sid);
-            let from_confirmation = leaf.open_tool_confirmation().map(|(_, confirmation)| {
-                let tool_name = match &confirmation.tool_call {
-                    ahp_types::state::ToolCallConfirmationState::PendingConfirmation(c) => {
-                        c.tool_name.to_string()
-                    }
-                    ahp_types::state::ToolCallConfirmationState::PendingResultConfirmation(c) => {
-                        c.tool_name.to_string()
-                    }
-                    _ => String::new(),
-                };
-                (confirmation.id.clone(), tool_name, String::new())
-            });
-            let from_bare_ask = leaf
-                .open_chat_input()
-                .filter(|(_, req)| req.questions.as_ref().is_none_or(|q| q.is_empty()))
-                .map(|(_, req)| (req.id.clone(), "AskUserQuestion".to_string(), String::new()));
-            from_confirmation.or(from_bare_ask)
+            leaf.open_tool_confirmation()
+                .map(|(chat_id, confirmation)| {
+                    let (_, _, tool_call_id) =
+                        leaf.confirmation(&confirmation.id).unwrap_or_else(|| {
+                            (chat_id.clone(), String::new(), confirmation.id.clone())
+                        });
+                    (confirmation.id.clone(), tool_call_id)
+                })
         };
         match live_auth {
-            Some((auth_id, tool_name, summary)) => {
+            Some((auth_id, tool_call_id)) => {
                 let armed = self
                     .chat
                     .read(cx)
-                    .pending_auth
+                    .pending_confirmation
                     .as_ref()
-                    .is_none_or(|a| a.id != auth_id);
+                    .is_none_or(|a| a.auth_id != auth_id);
                 if armed {
                     tracing::info!(
                         request_id = %auth_id,
-                        tool = %tool_name,
-                        "live auth: arming the generic authorization card"
+                        tool_call = %tool_call_id,
+                        "live confirmation: arming the conversation card"
                     );
                     self.chat.update(cx, |chat, cx| {
-                        chat.pending_auth = Some(manox_agent_chat_ui::column::PendingAuth {
-                            id: auth_id,
-                            tool_name,
-                            summary,
-                        });
-                        chat.pending_auth_live = true;
+                        chat.pending_confirmation =
+                            Some(manox_agent_chat_ui::column::PendingConfirmation {
+                                auth_id: auth_id.clone(),
+                                tool_call_id,
+                            });
+                        chat.pending_confirmation_live = true;
                         cx.notify();
                     });
                 }
             }
             None => {
-                let live_seeded = self.chat.read(cx).pending_auth_live;
-                let has_auth = self.chat.read(cx).pending_auth.is_some();
+                let live_seeded = self.chat.read(cx).pending_confirmation_live;
+                let has_auth = self.chat.read(cx).pending_confirmation.is_some();
                 if live_seeded && has_auth {
-                    tracing::info!("live auth: request left the fold, retiring the card");
+                    tracing::info!("live confirmation: request left the fold, retiring the card");
                     self.chat.update(cx, |chat, cx| {
-                        chat.pending_auth = None;
-                        chat.pending_auth_live = false;
+                        chat.pending_confirmation = None;
+                        chat.pending_confirmation_live = false;
                         cx.notify();
                     });
                 }
@@ -1977,7 +1989,7 @@ impl Workspace {
     fn blocking_overlay_active(&self, cx: &App) -> bool {
         let chat = self.chat.read(cx);
         chat.pending_ask.is_some()
-            || chat.pending_auth.is_some()
+            || chat.pending_confirmation.is_some()
             || chat.blank_project_parent.is_some()
     }
 
@@ -2331,7 +2343,7 @@ impl Workspace {
         )
     }
 
-    pub(crate) fn model_label(&self, cx: &mut Context<Self>) -> String {
+    pub(crate) fn model_label(&self, cx: &App) -> String {
         {
             // Selector read face (§J11): the composer model chip derives from
             // the store's projection-materialized model, falling back to the

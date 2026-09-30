@@ -48,157 +48,364 @@ impl Workspace {
     /// absent. Re-surfacing after a thread switch needs no local memory
     /// either — the gateway replays unsettled adjudications to every joining
     /// owner (manox §D.6), so the wire itself is the restore path.
+    /// Remote-settle reconcile for the surfaced interaction cards. The
+    /// leaf's input-needed list is the gateway's authoritative pending view:
+    /// an id that was confirmed in it and then vanished settled elsewhere
+    /// (timeout expiry, another owner's answer, a cancel discard) and the
+    /// local card must not latch onto the dead interaction.
+    ///
+    /// The ask card and the confirmation card reconcile INDEPENDENTLY —
+    /// each with its own confirmed-membership arm, each clearing only its
+    /// own state — because they are separate interactions that settle
+    /// separately. Arming on the FIRST confirmed membership keeps the
+    /// startup race safe: the request frame can land before the fold
+    /// reflects the park, and an id never yet confirmed must never be
+    /// cleared for being absent. Re-surfacing after a thread switch needs no
+    /// local memory either — the gateway replays unsettled adjudications to
+    /// every joining owner (manox §D.6), so the wire itself is the restore
+    /// path.
     pub(crate) fn reconcile_pending_with_projections(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self
-            .chat
-            .read(cx)
-            .pending_ask
-            .as_ref()
-            .map(|a| a.id.clone())
-            .or_else(|| {
-                self.chat
-                    .read(cx)
-                    .pending_auth
-                    .as_ref()
-                    .map(|a| a.id.clone())
-            })
-        else {
-            self.chat.update(cx, |chat, cx| {
-                chat.pending_projection_confirmed = false;
-                cx.notify();
-            });
-            return;
-        };
         // No leaf yet (attach in flight): nothing to reconcile against.
         if self.chat.read(cx).store.is_none() {
             return;
         }
-        let live = self
+        // ── ask leg ────────────────────────────────────────────────────
+        let ask_id = self
             .chat
+            .read(cx)
+            .pending_ask
+            .as_ref()
+            .map(|a| a.id.clone());
+        match ask_id {
+            None => {
+                self.chat.update(cx, |chat, cx| {
+                    chat.ask_projection_confirmed = false;
+                    cx.notify();
+                });
+            }
+            Some(id) => {
+                let live = self.id_pending_in_fold(&id, cx);
+                if live {
+                    self.chat.update(cx, |chat, cx| {
+                        chat.ask_projection_confirmed = true;
+                        cx.notify();
+                    });
+                } else if self.chat.read(cx).ask_projection_confirmed {
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_ask = None;
+                        chat.ask_step = 0;
+                        chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+                        cx.notify();
+                    });
+                    self.reset_ask_custom(cx);
+                    cx.notify();
+                }
+            }
+        }
+        // ── confirmation leg ───────────────────────────────────────────
+        let auth_id = self
+            .chat
+            .read(cx)
+            .pending_confirmation
+            .as_ref()
+            .map(|a| a.auth_id.clone());
+        match auth_id {
+            None => {
+                self.chat.update(cx, |chat, cx| {
+                    chat.confirmation_projection_confirmed = false;
+                    cx.notify();
+                });
+            }
+            Some(id) => {
+                let live = self.id_pending_in_fold(&id, cx);
+                if live {
+                    self.chat.update(cx, |chat, cx| {
+                        chat.confirmation_projection_confirmed = true;
+                        cx.notify();
+                    });
+                } else if self.chat.read(cx).confirmation_projection_confirmed {
+                    self.chat.update(cx, |chat, cx| {
+                        chat.pending_confirmation = None;
+                        cx.notify();
+                    });
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Whether `id` is still pending in the leaf's input-needed list.
+    fn id_pending_in_fold(&self, id: &str, cx: &App) -> bool {
+        self.chat
             .read(cx)
             .store
             .as_ref()
             .is_some_and(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid)
+                crate::ahp_store::leaf(&store.read(cx).book, sid)
                     .requests()
                     .iter()
                     .any(|r| request_id(r) == id)
-            });
-        if live {
-            self.chat.update(cx, |chat, cx| {
-                chat.pending_projection_confirmed = true;
-                cx.notify();
-            });
-            return;
-        }
-        if !self.chat.read(cx).pending_projection_confirmed {
-            return;
-        }
-        self.chat.update(cx, |chat, cx| {
-            chat.pending_ask = None;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.pending_auth = None;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.pending_projection_confirmed = false;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.ask_step = 0;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
-            cx.notify();
-        });
-        self.reset_ask_custom(cx);
-        // The settled call's MsgId has no live waiter left; dropping the
-        // mapping keeps a stale card click from replying to a dead call.
-        cx.notify();
+            })
     }
 
-    /// PR-4: surface a transient "answered on another client" notice for any
-    /// card the leaf retired via a `DeliveryCancelled` since the last frame,
-    /// then drain the marker set (so the notice fires exactly once per remote
-    /// settle). Runs on the render path where a `Window` is available for the
-    /// notification surface; the card itself is cleared by
-    /// [`Self::reconcile_pending_with_projections`] (the leaf dropped the id
-    /// from the projection set).
-    pub(crate) fn notice_settled_elsewhere(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let drained: Vec<String> = Vec::new();
-        if !drained.is_empty() {
-            window.push_notification(
-                Notification::info(i18n::t("workspace-ask-settled-elsewhere")),
-                cx,
-            );
+    /// Budget the live confirmation's decision surface onto the parked
+    /// call's conversation row, and strip it the moment the fold stops
+    /// carrying the park — a settle anywhere retires the row's action
+    /// buttons on the next sync.
+    ///
+    /// The row is PROMOTED: an ordinary tool call nests inside the active
+    /// activity segment, and only interaction cards sit at the top level —
+    /// so when the fold's call has no top-level row, one is synthesized
+    /// here (the ask card's same rule) and flagged as synthesized: the
+    /// park's retirement REMOVES a promoted row (it carries no history of
+    /// its own), while a row that already existed stays. Either way the
+    /// fold re-owns the id while the park lives — later lifecycle rows
+    /// absorb into the card in place, renaming it to the actual tool and
+    /// flipping its status on the echo.
+    pub(crate) fn sync_confirmation_snapshot(&mut self, cx: &mut App) {
+        // The fold's live park, lowered to the row's decision surface:
+        // `None` when the park is gone — a settle anywhere retires the
+        // buttons on this pass.
+        let live: Option<(
+            String,
+            String,
+            Option<String>,
+            manox_agent_chat_ui::column::ConfirmationSnapshot,
+        )> = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                let leaf = crate::ahp_store::leaf(&view.book, sid);
+                leaf.open_tool_confirmation()
+                    .map(|(chat_id, confirmation)| {
+                        let (_, _, tool_call_id) = leaf
+                            .confirmation(&confirmation.id)
+                            .unwrap_or_else(|| (chat_id, String::new(), confirmation.id.clone()));
+                        // Only the pre-run confirmation carries options; a
+                        // result confirmation settles with a plain confirm.
+                        let options = match &confirmation.tool_call {
+                            ahp_types::state::ToolCallConfirmationState::PendingConfirmation(c) => {
+                                c.options.as_deref()
+                            }
+                            _ => None,
+                        };
+                        let actions = options
+                            .unwrap_or(&[])
+                            .iter()
+                            .map(|option| manox_agent_chat_ui::column::ConfirmationAction {
+                                option_id: option.id.clone(),
+                                label: option.label.clone(),
+                                approve: matches!(
+                                    option.kind,
+                                    ahp_types::state::ConfirmationOptionKind::Approve
+                                ),
+                            })
+                            .collect();
+                        // The promoted row renders the fold's own name and
+                        // intention so the decision is readable without the
+                        // call's (nested) argument row.
+                        let (tool_name, title) = match &confirmation.tool_call {
+                            ahp_types::state::ToolCallConfirmationState::PendingConfirmation(c) => {
+                                (
+                                    c.tool_name.clone(),
+                                    c.intention.clone().map(|t| t.to_string()),
+                                )
+                            }
+                            _ => (String::new(), None),
+                        };
+                        (
+                            tool_call_id,
+                            tool_name,
+                            title,
+                            manox_agent_chat_ui::column::ConfirmationSnapshot {
+                                auth_id: confirmation.id.clone(),
+                                actions,
+                            },
+                        )
+                    })
+            })
+            // No store (a diagnostic seed, or a detached column): the parked
+            // state still names the park; its options live in the fold, so
+            // the promoted card renders without buttons until a fold lands.
+            .or_else(|| {
+                self.chat
+                    .read(cx)
+                    .pending_confirmation
+                    .as_ref()
+                    .map(|parked| {
+                        (
+                            parked.tool_call_id.clone(),
+                            parked.auth_id.clone(),
+                            None,
+                            manox_agent_chat_ui::column::ConfirmationSnapshot {
+                                auth_id: parked.auth_id.clone(),
+                                actions: Vec::new(),
+                            },
+                        )
+                    })
+            });
+        // The parked call's conversation row, promoted to a top-level card
+        // when the fold has it nested in an activity segment. The promoted
+        // row carries the fold's own name and intention so the decision is
+        // readable; the list count is re-synced — the promotion adds a row
+        // to a virtual list that otherwise never learns about it.
+        let target = live.and_then(|(tool_call_id, tool_name, title, snapshot)| {
+            let conversation = self.chat.read(cx).conversation.clone();
+            if conversation.read(cx).find_tool(&tool_call_id, cx).is_none() {
+                let role = self.model_label(cx);
+                let host = self.chat.read(cx).host.clone();
+                conversation.update(cx, |conversation, cx| {
+                    conversation.push_tool_call(
+                        crate::conversation::ToolCallItem {
+                            id: tool_call_id.clone(),
+                            name: tool_name,
+                            title: title.unwrap_or_default(),
+                            status: manox_agent::ToolCallStatus::PendingApproval,
+                            output: String::new(),
+                            is_error: false,
+                            input: serde_json::Value::Null,
+                            streaming: false,
+                            collapsed: false,
+                            user_toggled: false,
+                            panel: None,
+                        },
+                        role,
+                        host,
+                        cx,
+                    );
+                });
+                self.sync_list_count(cx);
+            }
+            let ix = conversation.read(cx).find_tool(&tool_call_id, cx)?;
+            let item = conversation.read(cx).items().get(ix)?.clone();
+            Some((tool_call_id, item, snapshot))
+        });
+
+        // Ask-shaped reconcile: strip the previous owner when it is no
+        // longer the current row, then set the current surface (unchanged
+        // surfaces skip the write).
+        let next = target;
+        if let Some(previous) = self.chat.update(cx, |chat, cc| {
+            let v = chat.confirmation_snapshot_item.take();
+            cc.notify();
+            v
+        }) {
+            let still_current = next.as_ref().is_some_and(|(_, item, _)| item == &previous);
+            if !still_current {
+                previous.update(cx, |item, cx| {
+                    if item.confirmation.take().is_some() {
+                        cx.notify();
+                    }
+                });
+                // A promoted row carries no history of its own: once the
+                // park leaves it while the row is STILL waiting, it is an
+                // empty shell — retire it. (A row that already existed
+                // stays, and a settled row has already flipped its status
+                // on the echo, so neither matches this criterion.)
+                let shell = matches!(
+                    previous.read(cx).kind(),
+                    manox_agent_chat_ui::conversation::ConvItem::ToolCall(t)
+                        if t.status == manox_agent::ToolCallStatus::PendingApproval
+                );
+                if shell {
+                    let row_id = match previous.read(cx).kind() {
+                        manox_agent_chat_ui::conversation::ConvItem::ToolCall(t) => t.id.clone(),
+                        _ => unreachable!("shell checked above"),
+                    };
+                    let un_parked = next.as_ref().is_none_or(|(id, _, _)| id != &row_id);
+                    if un_parked {
+                        let conversation = self.chat.read(cx).conversation.clone();
+                        conversation.update(cx, |conversation, cx| {
+                            conversation.remove_tool(&row_id, cx);
+                        });
+                        self.sync_list_count(cx);
+                    }
+                }
+            }
+        }
+        if let Some((_, item, snapshot)) = next {
+            if item.read(cx).confirmation.as_ref() != Some(&snapshot) {
+                item.update(cx, |item, cx| {
+                    item.confirmation = Some(snapshot);
+                    cx.notify();
+                });
+            }
+            self.chat.update(cx, |chat, cc| {
+                chat.confirmation_snapshot_item = Some(item);
+                cc.notify();
+            });
         }
     }
 
-    pub(crate) fn resolve_auth(&mut self, decision: PermissionDecision, cx: &mut Context<Self>) {
-        // The generic approval card's allow/deny leg. The question card's
+    pub(crate) fn resolve_auth(
+        &mut self,
+        auth_id: &str,
+        selected_option_id: Option<String>,
+        decision: PermissionDecision,
+        cx: &mut Context<Self>,
+    ) {
+        // The unified confirmation card's allow/deny leg. The question card's
         // close is NOT this path — it is `dismiss_ask` (B2-PR-3): a close is
         // "the user left to speak", never a rejection, and the two must not
         // share an exit (they used to both render `WrapperToolDenied`).
+        //
+        // The verdict names the park it was minted for: a click landing
+        // after the armed park changed (the first park settled elsewhere
+        // while a second escalation armed) must no-op, never settle the new
+        // park with a decision it was never shown.
         let Some(auth) = self.chat.update(cx, |chat, cc| {
-            let v = chat.pending_auth.take();
+            let matches = chat
+                .pending_confirmation
+                .as_ref()
+                .is_some_and(|parked| parked.auth_id == auth_id);
+            let v = matches.then(|| chat.pending_confirmation.take()).flatten();
             cc.notify();
             v
         }) else {
+            tracing::warn!(
+                request_id = %auth_id,
+                "confirmation verdict ignored: a different park is armed"
+            );
             return;
         };
-        let id = auth.id;
-        let tool_name = auth.tool_name;
+        let id = auth.auth_id;
         let allow = matches!(decision, PermissionDecision::AllowOnce);
         if let Some((store, sid)) = self.chat.read(cx).store.clone() {
             let view = store.read(cx);
-            // Family 1: a tool confirmation (Edit/Write sandbox escalations).
             // The fold request's id IS the auth id the host settles by, so it
             // rides the verdict's `_meta` stamp (see `AhpStore::
             // confirm_tool_call`): without it the host silently ignores the
-            // verdict and the card re-arms on the next fold event.
+            // verdict and the card re-arms on the next fold event. The
+            // clicked option rides along — its label may promise semantics
+            // ("Always allow") the bare bool alone would break.
             if let Some((chat_id, turn_id, tool_call_id)) =
                 crate::ahp_store::leaf(&view.book, &sid).confirmation(&id)
             {
                 store.update(cx, |store, _| {
-                    store.confirm_tool_call(&chat_id, &turn_id, &tool_call_id, &id, allow);
-                });
-                cx.notify();
-                return;
-            }
-            // Family 2: a BARE ask (an elicitation with no structured
-            // questions) armed the generic card — its id lives in the ChatInput
-            // family, and an Allow simply accepts the ask so the model
-            // proceeds; a Deny declines it. Without this fallback the card was
-            // taken, nothing was sent, and the same request re-armed on the
-            // next notify.
-            if let Some((chat_id, request)) =
-                crate::ahp_store::leaf(&view.book, &sid).chat_input(&id)
-            {
-                let request_id = request.id.clone();
-                store.update(cx, |store, _| {
-                    if allow {
-                        store.complete_input(&chat_id, &request_id, Default::default());
-                    } else {
-                        store.decline_input(&chat_id, &request_id);
-                    }
+                    store.confirm_tool_call(
+                        &chat_id,
+                        &turn_id,
+                        &tool_call_id,
+                        &id,
+                        selected_option_id,
+                        allow,
+                    );
                 });
                 cx.notify();
                 return;
             }
         }
-        // Neither family carries the id any more: nothing was sent on the
-        // wire and the card only cleared locally (the live edge re-arms it).
-        // Answering nothing here is the right wire behavior — but silently it
-        // is a dead end to debug.
+        // The fold no longer carries the id: nothing was sent on the wire and
+        // the card only cleared locally (the live edge re-arms it). Answering
+        // nothing here is the right wire behavior — but silently it is a dead
+        // end to debug.
         tracing::warn!(
             request_id = %id,
-            tool = %tool_name,
             approved = allow,
-            "auth verdict dropped: no matching open request in the fold"
+            "confirmation verdict dropped: no matching open request in the fold"
         );
         cx.notify();
     }
@@ -325,6 +532,7 @@ impl Workspace {
             Some(&crate::views::message::ToolCallCtx {
                 host,
                 ask: Some(snapshot),
+                confirmation: None,
             }),
             &crate::views::message::CopyFeedback::inert(&copy_registry),
             cx,

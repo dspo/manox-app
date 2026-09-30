@@ -41,6 +41,19 @@ pub trait ChatHost: Send + Sync + 'static {
     fn skip_ask_question(&self, qi: usize, window: &mut Window, cx: &mut App);
     /// Submit the composer's current input.
     fn submit_input(&self, window: &mut Window, cx: &mut App);
+    /// Settle the tool confirmation parked under `auth_id` — the unified
+    /// confirmation card's button verdict. `approved` is the verdict bool;
+    /// `option_id` names the fold option the user clicked (it rides the
+    /// wire verdict so the host learns which option's semantics apply);
+    /// the auth id rides the verdict's `_meta` stamp, the identity the
+    /// host settles by.
+    fn resolve_tool_confirmation(
+        &self,
+        auth_id: &str,
+        option_id: &str,
+        approved: bool,
+        cx: &mut App,
+    );
     /// The ask card body's tracked scroll handle for step `qi` — `None`
     /// before the ask scratch is allocated (the render path allocates it), in
     /// which case the card keeps gpui's untracked element-state scroll and
@@ -85,6 +98,14 @@ impl ChatHost for NoopHost {
     fn ask_next(&self, _cx: &mut App) {}
     fn skip_ask_question(&self, _qi: usize, _window: &mut Window, _cx: &mut App) {}
     fn submit_input(&self, _window: &mut Window, _cx: &mut App) {}
+    fn resolve_tool_confirmation(
+        &self,
+        _auth_id: &str,
+        _option_id: &str,
+        _approved: bool,
+        _cx: &mut App,
+    ) {
+    }
     fn ask_custom_state(
         &self,
         _qi: usize,

@@ -539,7 +539,7 @@ impl Workspace {
             cx.notify();
         });
         self.chat.update(cx, |chat, cx| {
-            chat.pending_auth = None;
+            chat.pending_confirmation = None;
             cx.notify();
         });
         let (thread_events, store_changes) = self.subscribe_thread(cx);

@@ -37,7 +37,7 @@ slash_command / Settings 视图）、`manox-agent-chat-ui`（聊天状态机与�
 宿主（agent 的浏览器打开、会话列/rail 上的子代理点击）经它把页签落到活着的右上栏。
 依赖不变量：chat crate 不得依赖 terminal-ui/manox-webview/manox-ext-agents
 （`script/check-chat-crate-deps.sh` 门禁）；chrome crate 不依赖 manox-agent。
-计划与后续见 `PLAN-CHROME-CHAT-SPLIT.md`。
+拆分与旧壳退役的历史见 git log（计划文档已随退役删除）。
 
 ---
 
@@ -119,7 +119,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### AskDrawer
 
-- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerCustomInput](#askdrawercustominput) · [AskDrawerFooter](#askdrawerfooter) · [AskDrawerSkipButton](#askdrawerskipbutton) · [AskDrawerNav](#askdrawernav) · [PlanReviewDecisionCard](#planreviewdecisioncard) · [AskSettledElsewhereNotice](#asksettledelsewherenotice)
+- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerCustomInput](#askdrawercustominput) · [AskDrawerFooter](#askdrawerfooter) · [AskDrawerSkipButton](#askdrawerskipbutton) · [AskDrawerNav](#askdrawernav) · [PlanReviewDecisionCard](#planreviewdecisioncard) · [ConfirmationCard](#confirmationcard)
 
 ### Popups & Dropdowns
 
@@ -525,16 +525,33 @@ accounts; the menu's recency list is the same registry.
 
 ##### AskDrawer
 
-Inline transcript card, not a footer swap. Every
-`ThreadEvent::ToolCallAuthorization` — `AskUserQuestion` calls and bubbled
-team-member questions — sets the pending state AND synthesizes the matching
-`ToolCall` row (same-frame guarantee); the payload's options carry the
-decision. A parked thread's subscription drops that event by design, so the
-card re-surfaces on switch-back by an explicit re-own: the reclaim sends
-`OpenSession` (same leaf and follow stream — the parked session never
-detached) and the gateway replays the unsettled adjudications to the joining
-owner (manox §D.6). A card whose id leaves the leaf's `pending_auth` projection
-after having been confirmed in it settled remotely and is reconciled away.
+Inline transcript card, not a footer swap. The live edge (`sync_live_ask`,
+`crates/agent-ui/src/workspace/chips.rs`) arms the card from the fold: an open
+elicitation (`chat/inputRequested`) seeds the pending ask AND synthesizes the
+matching `ToolCall` row (same-frame guarantee). A parked thread's subscription
+drops that event by design, so the card re-surfaces on switch-back by an
+explicit re-own: the reclaim sends `OpenSession` (same leaf and follow stream
+— the parked session never detached) and the gateway replays the unsettled
+adjudications to the joining owner (manox §D.6). A card whose id leaves the
+fold's input-needed list after having been confirmed in it settled remotely
+and is reconciled away (`reconcile_pending_with_projections`).
+
+##### ConfirmationCard
+
+The tool confirmation's unified surface: the parked call's OWN conversation
+row (`ToolCallStatus::PendingApproval`) carrying a decision footer — the
+fold's `ConfirmationOption`s rendered verbatim (approve kind primary, the
+rest outline; runtime labels are never re-localized), each click settling the
+verdict through `ChatHost::resolve_tool_confirmation` →
+`Workspace::resolve_auth` (the auth id rides the verdict's `_meta` stamp).
+The workspace budgets the `ConfirmationSnapshot` onto the row per frame
+(`sync_confirmation_snapshot`, `crates/agent-ui/src/workspace/chips.rs`):
+present only while the fold still carries the park (`session.inputNeeded`),
+so a settle anywhere — here, another client, a cancel — retires the buttons
+on the next sync. The park state (`Workspace::pending_confirmation`) arms
+from `sync_live_ask`'s confirmation edge; the composer stays live while a
+card is up (steering is a parallel input, not a competing decision). The
+retired full-column `render_pending_auth_overlay` modal is gone.
 
 #### AskDrawer
 
@@ -666,24 +683,6 @@ a multi-select question, unmatched `approve`) renders the generic stepper flow
 instead.
 
 > Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/manox-agent-chat-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`decide_ask_option`)
-
-#### AskSettledElsewhereNotice
-
-PR-4 first-claim-wins: when an ask/approve delivery is settled on ANOTHER
-client (or the approve quorum fails remotely), the server sends a session-less
-`ServerNote::DeliveryCancelled { delivery_id }`. The multiplexer broadcasts it to
-every leaf (keyed by delivery id, not session); the owning leaf's
-`ClientStore::handle_delivery_cancelled` reverse-looks the delivery to its auth
-id, drops the reply (`pending_auth`) + withdrawal (`pending_auth_delivery`)
-correlations and the projection-set membership (so
-`reconcile_pending_with_projections` retires the card — under the
-`pending_projection_confirmed` guard), and arms the auth id in
-`settled_elsewhere`. The workspace's `notice_settled_elsewhere` then drains the
-set and surfaces one transient `Notification::info` ("handled on another
-client"). A local settle (`resolve_ask` / `dismiss_ask` / `resolve_auth`) calls
-`retire_auth` so a later note for the same delivery cannot mis-fire the notice.
-
-> Source: `crates/manox-agent-chat-ui/src/client_store.rs` (`handle_delivery_cancelled`, `retire_auth`) + `crates/manox-agent-chat-ui/src/client_store_handle.rs` + `crates/agent-ui/src/multiplexer.rs` (broadcast) + `crates/agent-ui/src/workspace/chips.rs` (`notice_settled_elsewhere`)
 
 #### 3.2.4 Popups & Dropdowns
 
