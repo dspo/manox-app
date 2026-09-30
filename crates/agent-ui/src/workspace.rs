@@ -733,6 +733,20 @@ impl Workspace {
                 turn_navigator: None,
                 turn_navigator_sub: None,
                 turn_navigator_previous_focus: None,
+                turn_rail_active: None,
+                turn_rail_active_from: None,
+                turn_rail_active_gen: 0,
+                turn_rail_hover: None,
+                turn_rail_hover_prev: None,
+                turn_rail_hover_gen: 0,
+                turn_rail_hover_painted: None,
+                turn_rail_pointer_inside: false,
+                turn_rail_followed: None,
+                turn_rail_scroll: gpui::UniformListScrollHandle::new(),
+                turn_rail_preview_mark: None,
+                turn_rail_preview_top: None,
+                turn_rail_preview_gen: 0,
+                turn_rail_box_h: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
                 queued_follow_ups: std::collections::VecDeque::new(),
                 queued_follow_ups_by_thread: HashMap::new(),
                 queue_drag: None,
@@ -756,6 +770,7 @@ impl Workspace {
                 goal_ticker_gen: 0,
                 turn_active: false,
                 thinking_ticker_gen: 0,
+                awaiting_history: None,
                 context_rail,
             }),
         };
@@ -794,6 +809,7 @@ impl Workspace {
             chat.list_state.reset(count);
             chat.list_count = count;
             chat.list_state.set_follow_mode(FollowMode::Tail);
+            chat.reset_turn_rail_interaction();
             cx.notify();
         });
         self.observe_conversation(cx);
@@ -805,17 +821,95 @@ impl Workspace {
         self.chat.read(cx).list_state.clone()
     }
 
+    /// The turn rail's hovered mark, for interaction tests.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_turn_rail_hover(&self, cx: &App) -> Option<usize> {
+        self.chat.read(cx).turn_rail_hover
+    }
+
     /// Attach a thread through the production switch path. Diagnostic-only
     /// entry point so integration tests can exercise parking + re-surface
-    /// without simulating the sidebar click.
+    /// without simulating the sidebar click. `expect_history` passes through
+    /// to the history-loading gate.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_attach_thread(
         &mut self,
         thread: manox_agent::thread::ThreadHandle,
+        expect_history: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.attach_thread(thread, false, window, cx);
+        self.attach_thread(thread, false, expect_history, window, cx);
+    }
+
+    /// Diagnostic read of the history-loading gate.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_awaiting_history(&self, cx: &App) -> Option<std::time::Instant> {
+        self.chat.read(cx).awaiting_history
+    }
+
+    /// Fold an empty chat snapshot for the foreground session into the book
+    /// and notify the store — the wire shape of "the reopen's chat snapshot
+    /// landed, and the session is genuinely empty". Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_apply_empty_chat_snapshot(&self, cx: &mut App) {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            return;
+        };
+        let chat: ahp_types::state::ChatState = serde_json::from_value(serde_json::json!({
+            "resource": crate::ahp_store::chat_uri(&sid),
+            "title": "gate-test",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [],
+        }))
+        .expect("empty chat snapshot parses");
+        store.update(cx, |s, cx| {
+            s.book.apply_snapshot(
+                &crate::ahp_store::chat_uri(&sid),
+                ahp_types::state::SnapshotState::Chat(Box::new(chat)),
+            );
+            cx.notify();
+        });
+    }
+
+    /// Backdate the history-loading gate past its timeout, so the prune path
+    /// is testable without a real 10-second wait. Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_backdate_history_gate(&self, cx: &mut App) {
+        self.chat.update(cx, |chat, cx| {
+            chat.awaiting_history = chat.awaiting_history.and_then(|since| {
+                // `Instant` has no lower bound; a panicking subtraction could
+                // fire on a machine with seconds of uptime.
+                since.checked_sub(2 * crate::views::history_loading::HISTORY_TIMEOUT)
+            });
+            cx.notify();
+        });
+    }
+
+    /// Diagnostic entry to the gate's timeout prune ([`Self::prune_history_gate`]).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_prune_history_gate(&mut self, cx: &mut Context<Self>) {
+        self.prune_history_gate(cx);
+    }
+
+    /// Drop the history-loading gate once it has outlived
+    /// [`crate::views::history_loading::HISTORY_TIMEOUT`]: the chat snapshot
+    /// never landed (host error, missing session), and a permanent
+    /// full-column loading page with no composer and no transcript is worse
+    /// than the hero screen. Render calls this every frame; tests call it
+    /// directly.
+    fn prune_history_gate(&mut self, cx: &mut Context<Self>) {
+        let expired =
+            self.chat.read(cx).awaiting_history.is_some_and(|since| {
+                since.elapsed() > crate::views::history_loading::HISTORY_TIMEOUT
+            });
+        if expired {
+            self.chat.update(cx, |chat, cx| {
+                chat.awaiting_history = None;
+                cx.notify();
+            });
+        }
     }
     /// Seed a parsed `AskUserQuestion` as the pending ask. Diagnostic-only:
     /// bypasses the engine gate so the synthesis path can be tested with a
@@ -1337,6 +1431,9 @@ impl Workspace {
         });
         self.chat.update(cx, |chat, cx| {
             chat.conversation = new_conv;
+            // The snapshot landed with displayable history: the loading gate's
+            // job is done.
+            chat.awaiting_history = None;
             cx.notify();
         });
         self.sync_list_count(cx);
@@ -1363,7 +1460,7 @@ impl Workspace {
             // synth_display lowers the same way) — and the conversation is
             // still empty, rebuild from the snapshot. The drained deltas are
             // already inside it, so the drain skips one round.
-            let snapshot_ready = this
+            let (snapshot_ready, chat_landed) = this
                 .chat
                 .read(cx)
                 .store
@@ -1372,13 +1469,22 @@ impl Workspace {
                     let view = store.read(cx);
                     crate::ahp_store::leaf(&view.book, &sid)
                         .chat
-                        .map(|c| !c.turns.is_empty() || c.active_turn.is_some())
+                        .map(|c| (!c.turns.is_empty() || c.active_turn.is_some(), true))
                 })
-                .unwrap_or(false);
+                .unwrap_or((false, false));
             let mut rebuilt = false;
             if snapshot_ready && this.chat_conversation(cx).read(cx).is_empty(cx) {
                 this.rebuild_conversation_from_book(cx);
                 rebuilt = true;
+            } else if chat_landed && this.chat.read(cx).awaiting_history.is_some() {
+                // The chat snapshot landed but holds no displayable turn: the
+                // reopened session is genuinely empty. Drop the loading gate so
+                // the hero screen returns (without this the loading view would
+                // stick forever on an empty history).
+                this.chat.update(cx, |chat, cx| {
+                    chat.awaiting_history = None;
+                    cx.notify();
+                });
             }
             // Live ask edge: the fold's open elicitation IS the pending ask.
             // Runs AFTER the rebuild so a freshly seeded card lands on the
@@ -1785,7 +1891,7 @@ impl Workspace {
                 TurnNavigatorEvent::Navigate { item_ix } => {
                     let target = *item_ix;
                     this.close_turn_navigator(window, cx);
-                    this.reveal_message(target, window, cx);
+                    this.reveal_message(target, cx);
                 }
                 TurnNavigatorEvent::FillComposer { text } => {
                     let text = text.clone();
@@ -1872,7 +1978,7 @@ impl Workspace {
     /// Jump the viewport so the given conversation item is at the top. Native
     /// `scroll_to` is a single atomic state change, so no frame protection is
     /// needed against a stale tail re-pin.
-    fn reveal_message(&mut self, item_ix: usize, _window: &mut Window, cx: &mut Context<Self>) {
+    fn reveal_message(&mut self, item_ix: usize, cx: &mut Context<Self>) {
         self.chat
             .read(cx)
             .list_state

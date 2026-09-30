@@ -159,7 +159,10 @@ impl Workspace {
         // from.
         self.nav.record(session_id);
         let thread = Thread::landing_with_id(ThreadId(session_id.to_string()), self.cwd.clone());
-        self.attach_thread(thread, true, window, cx);
+        // A server-minted fresh id has no history to wait for; arming the
+        // gate here would flash the loading page on a race with the create
+        // subscription.
+        self.attach_thread(thread, true, false, window, cx);
     }
 
     /// Switch to a new thread: persist the current one, build/load the new
@@ -167,15 +170,27 @@ impl Workspace {
     /// its own AgentServer session (`reopen` = `OpenSession` on an existing
     /// thread, else `CreateSession` on a fresh one); parking a running thread
     /// keeps its store/connection so the session stays alive and is never
-    /// cancelled.
+    /// cancelled. `expect_history` is the history-loading gate's own input —
+    /// whether this attach is allowed to wait for a chat snapshot before
+    /// showing content. It deliberately does NOT ride `reopen`: the
+    /// created-session path also re-opens, and `open_or_create`'s reopen
+    /// flag is wire-dead anyway.
     pub(super) fn attach_thread(
         &mut self,
         new_thread: manox_agent::thread::ThreadHandle,
         reopen: bool,
+        expect_history: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_turn_navigator(window, cx);
+        // The turn rail's hover/preview state belongs to the outgoing
+        // conversation: a stale mark index must not mount a preview card on
+        // the freshly attached thread.
+        self.chat.update(cx, |chat, cc| {
+            chat.reset_turn_rail_interaction();
+            cc.notify();
+        });
         let old_thread = self.chat.read(cx).thread.clone();
         let old_id = old_thread.read(|t| t.id.0.clone());
         let new_id = new_thread.read(|t| t.id.0.clone());
@@ -330,6 +345,28 @@ impl Workspace {
                 cc.notify();
             });
         }
+        // History-loading gate (only for attaches that expect a history):
+        // the landing mirror renders empty until the fold's chat snapshot
+        // arrives, so a reopen whose leaf has no chat channel yet swaps the
+        // hero screen for the history-loading view. A reclaimed background
+        // leaf already holds its chat, and a fresh create passes
+        // `expect_history = false` — the gate is never armed for it.
+        let snapshot_landed = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(store, sid)| {
+                crate::ahp_store::leaf(&store.read(cx).book, sid.as_str())
+                    .chat
+                    .is_some()
+            })
+            .unwrap_or(false);
+        self.chat.update(cx, |chat, cx| {
+            chat.awaiting_history =
+                (expect_history && !snapshot_landed).then(std::time::Instant::now);
+            cx.notify();
+        });
         // GW5: focus follows the attach on BOTH legs — the newly attached
         // session's leaf goes active (clearing its unread/errored mirrors) and
         // the outgoing one inert. The reclaimed leg skips the `open_or_create`
@@ -864,7 +901,7 @@ impl Workspace {
         }
         if self.background_threads.iter().any(|b| b.id == id) {
             let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
-            self.attach_thread(thread, true, window, cx);
+            self.attach_thread(thread, true, true, window, cx);
             return;
         }
         // U6b②: the attach read is the landing mirror — the SERVER owns
@@ -875,7 +912,7 @@ impl Workspace {
         // thread was archived/replaced meanwhile degrades to the landing
         // attach (the accepted semantics — see UI-MAP ChromeShell).
         let thread = Thread::landing_with_id(ThreadId(id), self.cwd.clone());
-        self.attach_thread(thread, true, window, cx);
+        self.attach_thread(thread, true, true, window, cx);
     }
 
     /// Fork the current session at a durable entry, then open the child

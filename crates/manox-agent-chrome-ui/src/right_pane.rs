@@ -658,6 +658,11 @@ impl gpui::Render for RightPane {
                                 div()
                                     .flex_1()
                                     .min_w_0()
+                                    // The new-tab pill cannot shrink, so an
+                                    // over-full row would otherwise paint
+                                    // into the action group's slots and
+                                    // steal its clicks.
+                                    .overflow_hidden()
                                     .flex()
                                     .items_end()
                                     .gap(px(2.))
@@ -822,7 +827,10 @@ fn tab_pill(
         .pr(px(TAB_PR))
         .gap(px(6.))
         .items_center()
-        .flex_shrink_0()
+        // Shrinkable (unlike the new-tab pill): when the strip runs out of
+        // room the tab's label truncates and the close button stays intact —
+        // nothing overflows into the action group's slots.
+        .min_w_0()
         .flex()
         .text_color(if active { ACCENT } else { FG_DIM })
         .hover(|style| style.bg(LIST_HOVER));

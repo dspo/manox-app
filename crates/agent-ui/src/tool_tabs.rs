@@ -23,7 +23,7 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, SharedString, Window, px,
 };
 use manox_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
-use manox_agent_chrome_ui::theme::{Icon, icon, icons};
+use manox_agent_chrome_ui::theme::{IconAsset, icon, icons};
 use manox_ext_agents::cx_session::CxSessionSource;
 
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
@@ -892,7 +892,7 @@ impl manox_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
         manox_i18n::t("chrome-tab-terminal").into()
     }
 
-    fn icon(&self) -> Icon {
+    fn icon(&self) -> IconAsset {
         icons::TERMINAL
     }
 

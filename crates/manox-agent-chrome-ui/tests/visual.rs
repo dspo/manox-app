@@ -33,7 +33,7 @@ mod macos {
     use manox_agent_chrome_ui::right_pane::TabStore;
     use manox_agent_chrome_ui::session_list::SessionStatus;
     use manox_agent_chrome_ui::shell::SessionRow;
-    use manox_agent_chrome_ui::theme::Icon;
+    use manox_agent_chrome_ui::theme::IconAsset;
     use manox_agent_chrome_ui::{
         CustomizationRow, FixedRow, HostHooks, MainSurface, PanelSurface, Shell, ShellConfig,
         ToolTab, ToolTabFactory, icons, register_fonts,
@@ -52,7 +52,8 @@ mod macos {
         // readback); the window renders offscreen at (-10000,-10000), never
         // flashing on any display.
         let platform = gpui_platform::current_platform(false);
-        let mut cx = VisualTestAppContext::with_asset_source(platform, Arc::new(EmptyAssets));
+        let mut cx =
+            VisualTestAppContext::with_asset_source(platform, Arc::new(gpui_kit_assets::AllAssets));
         cx.update(|cx| {
             gpui_component::init(cx);
             manox_i18n::init();
@@ -499,26 +500,12 @@ mod macos {
             "Dummy".into()
         }
 
-        fn icon(&self) -> Icon {
+        fn icon(&self) -> IconAsset {
             icons::TOOLS
         }
 
         fn open(&self, _window: &mut gpui::Window, cx: &mut gpui::App) -> Result<AnyView, String> {
             Ok(AnyView::from(cx.new(|_| DummyPanelView)))
-        }
-    }
-
-    // ── assets ────────────────────────────────────────────────────────────────
-
-    struct EmptyAssets;
-
-    impl gpui::AssetSource for EmptyAssets {
-        fn load(&self, _path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-            Ok(None)
-        }
-
-        fn list(&self, _path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-            Ok(Vec::new())
         }
     }
 }

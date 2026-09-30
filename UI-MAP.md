@@ -65,6 +65,7 @@ slash_command / Settings 视图）、`manox-agent-chat-ui`（聊天状态机与�
 | 集成终端 / VS Code 注入 / ChatGPT.app 注入 | ✅ | 右栏终端页签（$SHELL，独立 PTY）+ 工具菜单的 VS Code / ChatGPT.app 注入启动（后台线程 + 通知，应用独立存活） |
 | Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface |
 | TurnNavigator | ✅ | cmd-m 打开；↑/↓ 选条、enter 定位、⌘↵ 回填 composer、⌘C 复制；历史回溯另有 ⌥↑/⌥↓ |
+| TurnRail（左缘轮次导航） | ✅ | 常驻左缘刻度 rail（dsh TurnNavigator 移植，≥2 轮且卡宽 ≥640px 显示）；悬停预览、点击定位、active 随滚动追踪 |
 | 图片附件 | ✅ | 剪贴板粘贴 / plus 选择 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
@@ -94,15 +95,15 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### MessageColumn
 
-- [MessageColumn](#messagecolumn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice) · [FollowStopProjection](#followstapprojection)
+- [MessageColumn](#messagecolumn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice) · [FollowStopProjection](#followstapprojection) · [TurnRail](#turnrail)
 
 ### ContextRail
 
 - [ContextRail](#contextrail) · [ContextRailPanel](#contextrailpanel) · [ContextRailCollapseBtn](#contextrailcollapsebtn) · [ContextRailChangesRow](#contextrailchangesrow) · [ContextRailBranchRow](#contextrailbranchrow) · [ContextRailBranchMenu](#contextrailbranchmenu)
 
-### Hero / LoadingIndicator
+### Hero / HistoryLoading
 
-- [Hero](#hero) · [LoadingIndicator](#loadingindicator)
+- [Hero](#hero) · [HistoryLoading](#historyloading)
 
 ### MessageArea
 
@@ -221,15 +222,16 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 列宽口径：浮动的 [ContextRail](#contextrail) 不是 flex 兄弟列，而是绝对浮层
 （`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`，内容高度），
 会话正文预留 `ENV_CONTENT_INSET` 右内边距；窄于 `RAIL_NARROW_BREAK`（消息列 900px）时卡片折叠、
-消息列吃满。TurnNavigator 浮层锚定卡片内边距盒（左右各 `CARD_BORDER / 2`，显示 rail 时右侧再加
-其内容内边距）。
+消息列吃满。[TurnRail](#turnrail) 可见时正文另预留 `GUTTER`（40px）左内边距。TurnNavigator 浮层
+锚定卡片内边距盒（左右各 `CARD_BORDER / 2`，显示 rail 时右侧再加其内容内边距）。
 
 ```
 ┌ 壳主区卡（圆角 + 边框）──────────────────────┐
 │ ╭─────────────────────────────┬──────────╮ │
 │ │ 会话列                      │ 右栏     │ │
-│ │  消息列表 / hero            │ ToolTab  │ │
-│ │  浮动 ContextRail           │ 页签体   │ │
+│ │ 刻度│ 消息列表 / hero       │ ToolTab  │ │
+│ │ TurnRail（≥2 轮）│          │ 页签体   │ │
+│ │  浮动 ContextRail           │          │ │
 │ │  composer footer            │          │ │
 │ ╰─────────────────────────────┴──────────╯ │
 └────────────────────────────────────────────┘
@@ -250,7 +252,7 @@ Vertical flex container, fills remaining width.
 
 #### Body
 
-Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNotice](#followstoppednotice) (only while the follow stream has stopped) and then [Hero](#hero) (with the [LoadingIndicator](#loadingindicator) while an empty session restores) or [MessageArea](#messagearea) + [Footer](#footer).
+Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNotice](#followstoppednotice) (only while the follow stream has stopped) and then [Hero](#hero) or [HistoryLoading](#historyloading) (while a reopened thread's snapshot is in flight) or [MessageArea](#messagearea) + [Footer](#footer).
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 
@@ -277,11 +279,11 @@ Vertically centered welcome area: logo/heading + inline [Composer](#composer).
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 
-#### LoadingIndicator
+#### HistoryLoading
 
-Centered BrailleSpinner + "Loading conversation…" (`workspace-loading-history`), shown inside the [Hero](#hero) while a sidebar-opened session's history is still restoring. The composer mounts immediately below it and accepts draft edits; send remains disabled and keyboard submission is gated on the thread's `HistoryPhase` until `Ready`. Preview batches stream into the [MessageArea](#messagearea) incrementally (`ThreadEvent::HistoryProgress`); once the first preview content lands, the composer moves to the [Footer](#footer) without waiting for the authoritative restore.
+Full-column pixel loading page that suppresses the hero, message list, and footer while a reopened thread's chat snapshot is still in flight: `ChatColumn.awaiting_history` is set at reopen attach when the caller declares it expects history (`expect_history`, not the wire-side `reopen` flag — a created session re-opens too) and the fold holds no chat channel. Cleared by the snapshot rebuild (history present), by the store observe (genuinely empty session → hero returns), or by the render-time timeout (`HISTORY_TIMEOUT`, 10s) so a failed reopen cannot pin the page. Render re-checks the fold, so a stale flag cannot pin it either. Layout: a 12×14-cell pixel meerkat sprite played as a 6-slot loop at 3 slots/sec (4 distinct frames: idle, bob, blink, tail flick — each cell a flat solid block, no bevel), centered above the heading (`workspace-history-loading-heading`) and the monospace thread id. No composer while it shows.
 
-> Source: `crates/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/views/history_loading.rs`; gate: `crates/agent-ui/src/workspace/attach.rs` (`attach_thread`), `crates/agent-ui/src/workspace/render.rs` (`render_column`), `crates/manox-agent-chat-ui/src/column.rs` (`awaiting_history`)
 
 #### 3.2.2 MessageArea
 
@@ -299,6 +301,14 @@ Wraps [MessageList](#messagelist).
 Virtual list backed by native `gpui::list` (`gpui::list(list_state, render_item)`, `ListState` held directly on `Workspace`). GPUI owns virtualization, scroll, the per-item height cache, and tail-follow; `ListAlignment::Bottom` gives native chat-log semantics — short histories sit at the viewport bottom, long ones scroll — and `FollowMode::Tail` pins to the live end on each layout while following (disengaging on upward scroll, re-arming at the bottom). The row factory captures `Conversation` directly and is strictly read-only during list measurement/prepaint; Workspace-derived ask-card snapshots are synchronized before list construction. `MSG_LIST_OVERDRAW` pre-measures rows below the viewport. Visible rows re-measure every frame, but the pinned official GPUI revision retains off-screen row heights across width changes, so `MessageListWidthInvalidator` observes the final positive list width after layout, invalidates the complete cache with `remeasure_items`, and requests a settling frame while preserving the logical item/offset anchor. Count changes are reconciled via `splice` and in-place mutations via `remeasure_items`, both driven from the `ThreadEvent` handler's `ApplyOutcome`. Only the visible items render. Markdown text rows use Manox's public-API `RichText` leaf rather than GPUI `StyledText`: every width constraint is shaped independently, widths narrower than one em are treated as intrinsic probes, and prepaint reconciles shaping with the final allocated width. This prevents zero-width explosion from entering the list cache and makes painted glyph height match the row allocation without a Zed fork.
 
 > Source: `crates/agent-ui/src/workspace/render.rs` (`ListState` wiring, `MSG_LIST_OVERDRAW`), `crates/manox-components/src/markdown/rich_text.rs` (constraint-safe shaping and paint geometry)
+
+#### TurnRail
+
+Left-edge turn navigation: the dsh TurnNavigator mirrored onto the conversation column's leading edge. An absolute strip (`absolute().top_0().bottom_0().left(RAIL_LEFT_INSET=4).w(RAIL_WIDTH=28)`), vertically centered inside the message band's `h_flex` (mounted as a sibling painted after [MessageList](#messagelist), so it floats over the transcript but never over the composer — the band excludes the footer). One 2px tick per user turn at a fixed 10px pitch; from two turns up, and only when the card interior is at least `MIN_CARD_WIDTH` (640px) — independent of the [ContextRail](#contextrail)'s own gate, either side can float alone. While visible, the `GUTTER` (40px) left padding goes on the **list wrapper inside the band, never on the band itself**: the rail's absolute anchor is the band, so padding the band would drag the rail right along with the text it must clear (the ticks would sit on the transcript instead of hugging the edge — acceptance-round-1 regression).
+
+Marks are re-derived from the conversation every frame — but only past the width gate, which short-circuits before the projection, and `render_turn_rail`'s `Some`/`None` is the single gate for both the rail and the gutter (`collect_rail_turns`: prompt = the user bubble's text collapsed and capped at 50 chars, or the ⌘M navigator's attachment-only / empty-message copy for a textless bubble — the same distinction `TurnEntry::new` draws; response = the turn's last non-empty assistant reply capped at 120 — dsh's `findLast` rule; both caps word-accumulate up to the budget (`split_whitespace` skips whitespace runs of any length, so indented blocks fill it like prose), so a huge turn costs O(limit), not O(全文)). The active mark is `active_rail_turn`: the last turn whose anchor item is at or above the list's `logical_scroll_top` item (the tail-follow floor reports `count`, resolving to the newest mark). Interactions: hover grows the tick 12→18px with a border→muted 140ms tween and the vacated mark sinks back in the same run — a pointer sweep reads as a wave down the ladder (dsh's CSS-transition semantics; each change keys one tween pair under `turn_rail_hover_gen`, with `turn_rail_hover_prev`/`_painted` snapshotting only on change; fast sweeps within the 140ms window truncate the wave's tail by design — the prev slot is single); hover opens a 300px preview card beside the rail (prompt line + response excerpt), fading in over 120ms with a 4px slide and traveling between marks over 140ms `ease_out_quint` (the from-top snapshots only when the hovered mark changes — the tab-indicator `indicator_from` discipline); click jumps through `Workspace::reveal_message` (the ⌘M navigator's own path). The active tick tweens width+color over 140ms on change (previous mark shrinks, new mark grows, keyed per generation; a tick that loses active while hovered hands the animation slot to the hover wave); active-follow scrolls the ladder (`scroll_to_item(Nearest)`) whenever the pointer is outside the strip (`turn_rail_pointer_inside` pauses it so marks never travel under the hand). An over-420px ladder scrolls inside the strip (`uniform_list` + `ListSizingBehavior::Infer` + `max_h`); the preview's geometry consumes the ladder's `ScrollHandle` offset **sign-corrected to positive-down** (gpui's raw offset runs negative scrolling down — the `-offset.y` convention `uniform_list` itself uses; round-1 C1). Thread re-projection (`attach_thread`, diagnostic replace) resets the interaction state via `ChatColumn::reset_turn_rail_interaction` — a stale hover index must not mount a preview on the new conversation. Tick rows follow the gpui hover-crossing rule: a row's leave retracts only its own mark.
+
+> Source: `crates/manox-agent-chat-ui/src/views/turn_rail.rs` (rail + state contract), state fields on `ChatColumn` (`crates/manox-agent-chat-ui/src/column.rs`), mounted in `crates/agent-ui/src/workspace/render.rs` (`render_column`)
 
 #### MessageItem
 
@@ -1069,7 +1079,9 @@ Shared framed text container (`manox-components::turn_frame::TurnFrame`) used fo
 
 #### Icon
 
-Named icon from the icon set (e.g., `IconName::Folder`, `IconName::Search`).
+Named icon from the icon set (e.g., `IconName::Folder`, `IconName::Search`). 全部图标统一走 SVG 方案：组件层用 gpui-component 的 `Icon`（`IconName` 枚举或 `Icon::default().path("icons/…")`），运行时经 `ExtrasAssetSource`（manox 本地 svg 优先 → `gpui-kit-assets::AllAssets` 全量 Lucide）解析。
+
+chrome 壳自有图标表在 `manox-agent-chrome-ui/src/theme/icons.rs`：`IconAsset(pub &'static str)` 常量即 svg 资产路径（Lucide 名），宏同时生成常量与 `ALL` 列表；`theme::icon(glyph, size)` 返回 `gpui_component::Icon`，且 `IconAsset` 实现了 `IconNamed`（常量可直喂 `PopupMenuItem::icon` / `Button::icon`）；颜色继承祖先 `text_color`。守护测试遍历 `ALL` 断言每条路径在嵌入 bundle 内可解析 + 路径两两不重复（上游改名测试即红）。旧 codicon 字体方案（codicon.ttf + `FONT_ICON`）已退役。
 
 #### BrailleSpinner
 

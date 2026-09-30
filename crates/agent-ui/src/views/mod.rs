@@ -6,6 +6,7 @@
 
 pub mod browser_view;
 pub mod composer_menu;
+pub mod history_loading;
 pub mod management_shell;
 pub mod model_cascade;
 pub mod plugin_manager;
@@ -14,5 +15,5 @@ pub mod subagent_panel;
 
 pub use manox_agent_chat_ui::views::{
     CardWidth, MessageListWidthInvalidator, centered, completion, context_rail, message,
-    popup_menu, subagents, turn_navigator,
+    popup_menu, subagents, turn_navigator, turn_rail,
 };

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::theme::{
     ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, BORDER, CARD_BG, CARD_BORDER, ERR_RED, FG, FG_DIM,
-    FG_FAINT, FG_STRONG, FONT_UI, Icon, LIST_HOVER, SHELL_BG, icon, icons,
+    FG_FAINT, FG_STRONG, FONT_UI, IconAsset, LIST_HOVER, SHELL_BG, icon, icons,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -122,7 +122,7 @@ pub struct SessionGroup {
 /// A fixed sidebar row (Automations / Chats …) — labels come from the host.
 #[derive(Clone, PartialEq)]
 pub struct FixedRow {
-    pub icon: Icon,
+    pub icon: IconAsset,
     pub label: String,
     pub badge: Option<String>,
 }
@@ -130,7 +130,7 @@ pub struct FixedRow {
 /// A Customizations block row.
 #[derive(Clone, PartialEq)]
 pub struct CustomizationRow {
-    pub icon: Icon,
+    pub icon: IconAsset,
     pub label: String,
     pub count: Option<u32>,
 }

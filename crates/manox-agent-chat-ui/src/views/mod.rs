@@ -6,6 +6,7 @@ pub mod message;
 pub mod popup_menu;
 pub mod subagents;
 pub mod turn_navigator;
+pub mod turn_rail;
 
 use gpui::prelude::*;
 use std::{cell::Cell, rc::Rc};

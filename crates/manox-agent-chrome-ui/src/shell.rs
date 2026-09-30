@@ -25,7 +25,7 @@ use crate::session_list::{
     SidebarGrouping,
 };
 use crate::theme::{
-    CARD_BG, CARD_BORDER, FG_DIM, FG_FAINT, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
+    CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
 };
 use crate::{divider, titlebar};
 
@@ -530,7 +530,7 @@ impl Shell {
                     } else {
                         manox_i18n::t("chrome-row-pin")
                     })
-                    .icon(menu_icon("icons/pin.svg"))
+                    .icon(crate::theme::icons::PIN)
                     .on_click(move |_, window, cx| {
                         this_pin.update(cx, |this, cx| {
                             if let Some(hook) = &this.hooks.on_pin {
@@ -547,11 +547,11 @@ impl Shell {
                     } else {
                         manox_i18n::t("sidebar-archive")
                     })
-                    .icon(menu_icon(if archived {
-                        "icons/archive-restore.svg"
+                    .icon(if archived {
+                        crate::theme::icons::ARCHIVE_RESTORE
                     } else {
-                        "icons/archive.svg"
-                    }))
+                        crate::theme::icons::ARCHIVE
+                    })
                     .on_click(move |_, window, cx| {
                         this_archive.update(cx, |this, cx| {
                             if let Some(hook) = &this.hooks.on_archive {
@@ -569,7 +569,7 @@ impl Shell {
                     } else {
                         manox_i18n::t("sidebar-thread-tag-add")
                     })
-                    .icon(menu_icon("icons/tag.svg"))
+                    .icon(crate::theme::icons::TAG)
                     .on_click(move |_, window, cx| {
                         this_tag.update(cx, |this, cx| {
                             this.close_row_menu(cx);
@@ -581,7 +581,7 @@ impl Shell {
             let menu = if has_tag {
                 menu.item(
                     PopupMenuItem::new(manox_i18n::t("sidebar-thread-tag-clear"))
-                        .icon(menu_icon("icons/trash-2.svg"))
+                        .icon(crate::theme::icons::TRASH)
                         .on_click(move |_, window, cx| {
                             this_tag2.update(cx, |this, cx| {
                                 this.set_tag(&id_tag_clear, None, window, cx);
@@ -594,7 +594,7 @@ impl Shell {
             };
             menu.separator().item(
                 PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id"))
-                    .icon(menu_icon("icons/copy.svg"))
+                    .icon(crate::theme::icons::COPY)
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
                     }),
@@ -1624,3 +1624,4 @@ mod tests {
         assert_eq!(keys.len(), sorted.len(), "bucket state keys must be unique");
     }
 }
+
