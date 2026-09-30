@@ -15,10 +15,11 @@
 #   - crates/manox-ext-agents:        ext-agent 启动 API、会话管理、IPC relay、
 #                                     cx_session 桥（SessionHandle → PtySource）
 #
-# agent runtime（harness/agent/session-core/protocol/providers/supervisor/lsp，
+# agent runtime（harness/agent/session-core/providers/supervisor，
 # 以及已回流的 manox-terminal 与 hyperlinks）来自 dspo/manox，经 git 依赖 +
-# Cargo.lock 锁 rev 消费；上游侧注明 CxSessionSource 桥留在本仓。本地联动开发用
-# .cargo/config.toml 的 [patch] 覆盖（见 script/local-manox.sh，勿提交）。
+# tag 锁发布消费（v0.1.x 修复轨 / v0.2.x 特性轨）；上游侧注明 CxSessionSource 桥
+# 留在本仓。本地联动开发用 .cargo/config.toml 的 [patch] 覆盖
+# （见 script/local-manox.sh，勿提交）。
 #
 # GPUI 栈整体走 longbridge/gpui-kit 轨：gpui 本体是 crates.io 上的 gpui-pre 快照，
 # 组件是 gpui-component 0.6；本仓不直接依赖 zed-industries/zed（防回潮见
@@ -47,7 +48,7 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
-# —— agent runtime（dspo/manox，git 依赖 + lock 锁定；lsp 经 manox-agent 传递解析）——
+# —— agent runtime（dspo/manox，tag 锁发布；9 依赖共用同一 tag 声明）——
 manox-agent = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
 manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
 manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }

@@ -2,7 +2,7 @@
 # Toggle the local manox [patch] override for this repo's git dependencies.
 #
 # ON  (default): rewrite .cargo/config.toml so the dspo/manox git deps
-#     (agent/harness/session-core/providers/supervisor/lsp + manox-ahp +
+#     (agent/harness/session-core/providers/supervisor + manox-ahp +
 #     manox-ahp-runtime + manox-terminal + hyperlinks) resolve from a local
 #     manox checkout
 #     instead of GitHub — daily two-repo workflow: edits in ../manox are
@@ -36,7 +36,6 @@ manox-harness = { path = "$MANOX_DIR/crates/manox-harness" }
 manox-session-core = { path = "$MANOX_DIR/crates/manox-session-core" }
 manox-providers = { path = "$MANOX_DIR/crates/manox-providers" }
 supervisor = { path = "$MANOX_DIR/crates/supervisor" }
-lsp = { path = "$MANOX_DIR/crates/lsp" }
 manox-ahp = { path = "$MANOX_DIR/crates/manox-ahp" }
 manox-ahp-runtime = { path = "$MANOX_DIR/crates/manox-ahp-runtime" }
 manox-terminal = { path = "$MANOX_DIR/crates/manox-terminal" }
