@@ -142,6 +142,15 @@ pub fn fake_thread(
     })
 }
 
+/// A landing thread facade with a pinned id, as the history-gate tests attach
+/// one (defers engine creation, so no host is needed to observe the gate).
+pub fn landing_thread(id: &str) -> manox_agent::thread::ThreadHandle {
+    manox_agent::thread::Thread::landing_with_id(
+        manox_agent::ThreadId(id.to_string()),
+        PathBuf::from("/tmp"),
+    )
+}
+
 /// A real plan file on disk, as `ProposePlan` leaves one.
 pub fn write_plan_file() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
