@@ -194,7 +194,7 @@ async fn live_ask_edge_retires_a_card_the_fold_cannot_route(cx: &mut TestAppCont
         s.book.apply(
             &plan_channel,
             &StateAction::Unknown(serde_json::json!({
-                "type": manox_ahp::ext::actions::PLAN_VERDICT,
+                "type": manox_ahp::ext::actions::PLAN_REVIEW_SETTLED,
                 "requestId": "plan-review:e-3",
             })),
         );

@@ -1093,7 +1093,7 @@ impl Workspace {
                                 // #88 device repro.
                                 if plan.is_some_and(|p| {
                                     p.get("type").and_then(serde_json::Value::as_str)
-                                        == Some(manox_ahp::ext::actions::PLAN_VERDICT)
+                                        == Some(manox_ahp::ext::actions::PLAN_REVIEW_SETTLED)
                                 }) {
                                     tracing::info!(
                                         request_id = %req.id,
