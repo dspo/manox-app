@@ -16,7 +16,7 @@ use crate::i18n;
 use gpui::ClickEvent;
 use gpui::DismissEvent;
 use gpui::{
-    Anchor, AnyElement, App, Context, Entity, FollowMode, ListAlignment, ListOffset, ListState,
+    AnyElement, App, Context, Entity, FollowMode, ListAlignment, ListOffset, ListState,
     MouseButton, Pixels, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
     anchored, deferred, prelude::*, px,
 };
@@ -814,7 +814,6 @@ impl Workspace {
                 list_state: ListState::new(0, ListAlignment::Bottom, MSG_LIST_OVERDRAW),
                 message_list_width: crate::views::MessageListWidthInvalidator::default(),
                 card_width: crate::views::CardWidth::default(),
-                bubble_clearance: crate::views::BubbleClearance::default(),
                 list_count: 0,
                 goal_popover_open: false,
                 goal_ticker_gen: 0,
