@@ -14,6 +14,6 @@ pub mod settings;
 pub mod subagent_panel;
 
 pub use manox_agent_chat_ui::views::{
-    CardWidth, MessageListWidthInvalidator, centered, completion, context_rail, message,
-    popup_menu, subagents, turn_navigator, turn_rail,
+    BubbleClearance, CardWidth, MessageListWidthInvalidator, centered, completion, context_rail,
+    message, popup_menu, subagents, turn_navigator, turn_rail,
 };

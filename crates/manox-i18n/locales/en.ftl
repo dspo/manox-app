@@ -165,8 +165,6 @@ status-cancelled = Cancelled
 
 ### views/message.rs — Thinking status row
 
-context-agents-title = Agents
-
 context-agents-captain = Captain
 
 ### views/subagent_panel.rs
@@ -881,12 +879,6 @@ titlebar-schedule = Add scheduled task...
 titlebar-new-window = Open in new window
 # ── Environment info panel ──────────────────────────────────────────────
 
-workspace-env-no-project = No project
-
-workspace-env-usage = Usage
-
-workspace-env-sources = Sources
-
 workspace-env-no-sources = No sources yet
 
 workspace-env-git-unavailable = git unavailable
@@ -895,21 +887,8 @@ workspace-env-git-not-a-repo = Not a git repo
 
 workspace-env-git-detached = detached
 
-workspace-env-git-copied-branch = Branch name copied to clipboard.
-
-workspace-env-git-copied-worktree-name = Directory name copied to clipboard.
-
-workspace-env-git-copied-worktree-path = Directory path copied to clipboard.
-
 # ── Context rail (right sidecar) ────────────────────────────────────────
 
-context-rail-title = Conversation Info
-
-context-tooltip-main-calls = Main calls
-
-context-tooltip-side-calls = Side calls
-
-context-tooltip-calls-unit = calls
 # ── Cockpit (run status / milestones / context budget) ──────────────────
 # Phase labels for the run-status row (three-tag pill: generating / reasoning /
 # user-turn).
@@ -917,20 +896,17 @@ context-tooltip-calls-unit = calls
 # awaiting-approval).
 # Plan section header.
 
-cockpit-milestones-header = Plan
 # Plan progress count shown at the right of the header. {$done}/{$total} are
 # completed/total step counts.
 
-cockpit-plan-progress = {$done}/{$total}
 # Remaining tasks beyond the current one, shown when collapsed. {$count} is a
 # number.
 
-cockpit-plan-remaining = +{$count} to do
 # Collapsed-state note when every step is completed.
 
-cockpit-plan-all-done = All done
-
 composer-pasted-image = Pasted image
+
+composer-context-usage-tooltip = Context { $pct }% used (~{ $used } / { $cap })
 
 composer-image-process-failed = Some pasted images could not be sent (unsupported format or too large)
 

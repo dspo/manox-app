@@ -135,6 +135,7 @@ mod tests {
             "icons/archive-restore.svg",
             "icons/tag.svg",
             "icons/trash-2.svg",
+            "icons/context-bubble-tail.svg",
         ] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
         }

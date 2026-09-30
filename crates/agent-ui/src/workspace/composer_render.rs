@@ -8,9 +8,26 @@
 //! parent's render face and the `tests` child.
 
 use super::*;
+use crate::DismissContextBubble;
+use crate::cockpit::{context_budget_pct, format_tokens_pi};
+use crate::views::context_rail::{BUBBLE_MAX_W, BUBBLE_MIN_W, CONTEXT_NEAR_FULL_PCT, ContextRail};
+use gpui::{Hsla, PathBuilder, PathStyle, Point, StrokeOptions, canvas, point};
 use gpui_component::ThemeStyled as _;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use lyon::tessellation::LineCap;
 pub use manox_agent_chat_ui::column::{QueueDragEdge, QueueRowDrag};
+
+// ── Context-usage ring geometry ───────────────────────────────────────────
+// The dsh ContextMeter's numbers verbatim: a 14px box, r 5.5, 2px stroke —
+// `r + stroke/2 = 6.5` exactly fills the 7px half-box, so the ring kisses
+// the canvas edge like the reference SVG.
+
+/// Canvas (and ring) box edge, in px.
+const CONTEXT_RING_SIZE: f32 = 14.0;
+/// Stroke centerline radius inside the 14px box.
+const CONTEXT_RING_RADIUS: f32 = 5.5;
+/// Ring stroke width; round-capped like the reference's `stroke-linecap`.
+const CONTEXT_RING_STROKE: f32 = 2.0;
 
 /// Drag payload for a queued follow-up row. The index is all the gesture
 /// needs: rows are transient session state, so the live queue position is
@@ -117,6 +134,10 @@ impl Workspace {
         // the user most needed to interrupt). Ask supplement input keeps
         // its own path: Enter.
         let send = self.render_send_button(running, cx);
+        // Context-occupancy pill (ring + percent) sits between the model and
+        // the action it quantifies: session-state cluster, then the send
+        // control. Hidden entirely until usage + a resolvable window exist.
+        let context_ring = self.render_context_usage_ring(theme, window, cx);
         // The completion popover overlays the composer; anchoring it on the
         // composer's own v_flex keeps it glued to the input bar in both hero
         // and footer, with a single mount point and ElementId.
@@ -228,6 +249,7 @@ impl Workspace {
                             .gap_1()
                             .flex_shrink_0()
                             .child(model)
+                            .when_some(context_ring, |el, ring| el.child(ring))
                             .child(send),
                     ),
             )
@@ -900,6 +922,242 @@ impl Workspace {
         } else {
             self.submit_input(window, cx);
         }
+    }
+
+    /// Composer context-occupancy pill (the dsh ContextMeter port): a 14px
+    /// stroke ring plus the integer percent, fed by the latest request's
+    /// input-side tokens against the foreground model's context window —
+    /// the same active-token formula (input + cache write + cache read) the
+    /// context rail's budget row uses. Renders nothing until a usage row has
+    /// landed AND the model's window resolves against the registry (the dsh
+    /// meter's contract: no capacity → no meter). The fill and the percent
+    /// flip to the warning color past the rail's ≥90% near-full line.
+    ///
+    /// The pill is the conversation info bubble's trigger: click toggles,
+    /// hover only tints — never opens. While open, the bubble floats above
+    /// the pill on a plain relative/absolute mount: the zero-height slot
+    /// below pins the surface's bottom a fixed apron above the pill top,
+    /// right-aligns it to the pill, and the tail bridges the rest of the
+    /// gap down to the ring. Outside click and Escape are wired by hand:
+    /// `on_mouse_down_out` records the dismissal (the ring's click fires
+    /// right after and must not re-open), and the surface takes focus so
+    /// `Escape` lands on its `ContextBubble` key context. Thread switches
+    /// close via the rail's reset.
+    pub(super) fn render_context_usage_ring(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (store, sid) = self.chat.read(cx).store.clone()?;
+        let usage = {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, &sid)
+                .last_usage()
+                .map(|u| crate::ahp_store::UsageSnapshot {
+                    input: u.input_tokens.unwrap_or(0).max(0) as u64,
+                    output: u.output_tokens.unwrap_or(0).max(0) as u64,
+                    cache_creation: 0,
+                    cache_read: u.cache_read_tokens.unwrap_or(0).max(0) as u64,
+                })?
+        };
+        let (provider, id) = self.foreground_model_identity(cx)?;
+        let window_tokens = manox_agent::provider_glue::global()
+            .resolve_model(&provider, &id)
+            .map(|m| m.context_window as u64)?;
+        let active = usage
+            .input
+            .saturating_add(usage.cache_creation)
+            .saturating_add(usage.cache_read);
+        let budget = context_budget_pct(window_tokens, active)?;
+
+        let near_full = budget.used_pct >= CONTEXT_NEAR_FULL_PCT;
+        let fill_color = if near_full {
+            theme.warning
+        } else {
+            theme.muted_foreground
+        };
+        let percent = format!("{:.0}", budget.used_pct);
+        let tooltip = i18n::t_str(
+            "composer-context-usage-tooltip",
+            &[
+                ("pct", percent.as_str()),
+                ("used", &format_tokens_pi(budget.active_tokens)),
+                ("cap", &format_tokens_pi(budget.cap_tokens)),
+            ],
+        );
+
+        let rail = self.chat_rail(cx);
+        let bubble_open = rail.read(cx).bubble_open;
+        // Only the open bubble pays for the plan-file scan.
+        let plan_files = if bubble_open {
+            self.collect_plan_files(cx)
+        } else {
+            Vec::new()
+        };
+
+        let pill = h_flex()
+            .id("context-usage-pill")
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.accent.opacity(0.08)))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            // The toggle guard: an outside `mouse_down` dismisses the open
+            // bubble and the ring's `click` fires right after — a toggle in
+            // the suppression window is the same closing gesture, not a
+            // fresh open (otherwise clicking the ring to close would
+            // close-then-reopen).
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                let rail = this.chat_rail(cx);
+                let ClickEvent::Mouse(mouse) = event else {
+                    return;
+                };
+                let suppressed = rail.update(cx, |rail, cx| {
+                    let _ = cx;
+                    rail.toggle_suppressed(mouse.down.position)
+                });
+                if suppressed {
+                    return;
+                }
+                let opening = !rail.read(cx).bubble_open;
+                rail.update(cx, |rail, cx| rail.toggle_bubble(cx));
+                // The surface takes focus while open so `Escape` reaches its
+                // key context; opening came from a click, so stealing focus
+                // from whatever the click already blurred is expected.
+                if opening {
+                    rail.read(cx).bubble_focus.clone().focus(window, cx);
+                }
+            }))
+            // The ring sits in its own relative wrapper so the open-state
+            // tail can anchor to the RING's box: its horizontal center IS
+            // the ring center, no text-width measurement involved.
+            .child(gpui::div().relative().flex_none().child(context_usage_ring(
+                theme.border,
+                fill_color,
+                budget.used_pct / 100.0,
+            )))
+            .child(
+                gpui::div()
+                    .text_xs()
+                    .text_color(fill_color)
+                    .child(SharedString::from(format!("{percent}%"))),
+            );
+
+        if !bubble_open {
+            return Some(pill.into_any_element());
+        }
+        // Width/height clamps are window-derived: the bubble never stretches
+        // past 360 (or a narrow window's own width) and caps at the space
+        // above the composer.
+        let viewport = window.viewport_size();
+        let avail_w = f32::from(viewport.width) - 32.0;
+        let max_w = px(BUBBLE_MAX_W.min(avail_w.max(BUBBLE_MIN_W)));
+        // Height is MEASURED, not a window-height magic number: the pill's
+        // prepaint records its top and the column's root records its own,
+        // so the bubble can never outgrow the visible band between the
+        // column top and the pill — the failure mode the turn navigator's
+        // budget comment warns about (`window.rs`-sized panels get cut off
+        // by the clipping column). One-frame convergence via `refresh()`,
+        // same as the card width.
+        let max_h = self.chat.read(cx).bubble_clearance.max_height(px(640.));
+        let focus = rail.read(cx).bubble_focus.clone();
+        let bubble = v_flex()
+            .absolute()
+            .right(px(0.))
+            .bottom(px(0.))
+            .id("conversation-info-bubble")
+            .occlude()
+            .key_context("ContextBubble")
+            .track_focus(&focus)
+            .on_action(cx.listener(|this, _: &DismissContextBubble, window, cx| {
+                this.chat_rail(cx)
+                    .update(cx, |rail, cx| rail.set_bubble_open(false, cx));
+                this.chat_input(cx)
+                    .update(cx, |state, cx| state.focus(window, cx));
+            }))
+            .on_mouse_down_out(
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    let rail = this.chat_rail(cx);
+                    let held = rail.read(cx).bubble_focus.is_focused(window);
+                    rail.update(cx, |rail, cx| rail.dismiss_outside(event.position, cx));
+                    // Hand the keyboard back ONLY when the bubble held it — a
+                    // click on some other focusable target keeps its own focus.
+                    if held {
+                        this.chat_input(cx)
+                            .update(cx, |state, cx| state.focus(window, cx));
+                    }
+                    cx.notify();
+                }),
+            )
+            .popover_style(cx)
+            .p_3()
+            .child(ContextRail::render_bubble(
+                &rail,
+                &plan_files,
+                max_w,
+                max_h,
+                cx,
+            ));
+
+        // The bubble slot: a zero-height full-width row pulled up over the
+        // pill by a fixed apron, so the surface's bottom edge lands a fixed
+        // distance above the pill top and its right edge aligns with the
+        // pill's — plain relative/absolute, no deferred pass needed (the
+        // footer paints after the message list, so the bubble is on top).
+        // The tail under the surface bridges the remaining gap to the ring.
+        let pill_clearance = self.chat.read(cx).bubble_clearance.clone();
+        Some(
+            gpui::div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .flex_none()
+                .relative()
+                .child(
+                    gpui::div()
+                        .flex_none()
+                        .on_prepaint(move |bounds, window, _cx| {
+                            if pill_clearance.set_pill_top(bounds.origin.y) {
+                                window.refresh();
+                            }
+                        })
+                        .child(pill),
+                )
+                .child(
+                    gpui::div()
+                        .relative()
+                        .w_full()
+                        .h(px(0.))
+                        .mt(px(-38.))
+                        .child(bubble)
+                        // The tail hangs from the bubble's own bottom edge
+                        // (negative inset — one stroke below the surface)
+                        // and paints AFTER it as a sibling, so it shows
+                        // instead of hiding under the surface. The slot
+                        // spans the wrapper, so left(9) puts the 12px tail's
+                        // center exactly on the ring center (pill px_2 8 +
+                        // ring half 7) without measuring text.
+                        .children(bubble_open.then(|| {
+                            gpui::div()
+                                .absolute()
+                                .left(px(9.))
+                                .bottom(px(-6.))
+                                .size(px(12.))
+                                .child(
+                                    Icon::default()
+                                        .path("icons/context-bubble-tail.svg")
+                                        .with_size(gpui_component::Size::Size(px(12.)))
+                                        .text_color(theme.border),
+                                )
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Circular icon-only send/stop button.
@@ -1657,5 +1915,158 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+/// The 14×14 occupancy ring canvas: a border-tone track circle plus the
+/// occupancy arc sweeping clockwise from 12 o'clock (muted, warning when
+/// near full). The stroke treatment replicates the reference SVG: 2px
+/// round-capped circle strokes, dash origin rotated to the top.
+fn context_usage_ring(track: Hsla, fill: Hsla, pct: f64) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let center = bounds.center();
+            let radius = px(CONTEXT_RING_RADIUS);
+            if let Ok(track_path) = ring_circle_path(center, radius) {
+                window.paint_path(track_path, track);
+            }
+            // A full turn redraws the closed circle (a 360° endpoint arc
+            // collapses to nothing); a zero turn strokes nothing at all.
+            let clamped = pct.clamp(0.0, 1.0);
+            let fill_path = if clamped >= 1.0 {
+                ring_circle_path(center, radius).ok()
+            } else {
+                occupancy_arc_end(CONTEXT_RING_RADIUS, clamped).and_then(|(dx, dy, large)| {
+                    ring_arc_path(center, radius, px(dx), px(dy), large)
+                })
+            };
+            if let Some(fill_path) = fill_path {
+                window.paint_path(fill_path, fill);
+            }
+        },
+    )
+    .size(px(CONTEXT_RING_SIZE))
+}
+
+/// Stroke builder shared by every ring path: the reference SVG's 2px
+/// round-capped line treatment.
+fn ring_path_builder() -> PathBuilder {
+    PathBuilder::default().with_style(PathStyle::Stroke(
+        StrokeOptions::default()
+            .with_line_width(CONTEXT_RING_STROKE)
+            .with_line_cap(LineCap::Round),
+    ))
+}
+
+/// Full circle centered at `center`: two half arcs, since the SVG endpoint
+/// parameterization collapses a 360° arc into a zero-length segment.
+fn ring_circle_path(
+    center: Point<Pixels>,
+    radius: Pixels,
+) -> Result<gpui::Path<Pixels>, anyhow::Error> {
+    let mut builder = ring_path_builder();
+    builder.move_to(point(center.x + radius, center.y));
+    builder.arc_to(
+        point(radius, radius),
+        px(0.),
+        true,
+        true,
+        point(center.x - radius, center.y),
+    );
+    builder.arc_to(
+        point(radius, radius),
+        px(0.),
+        true,
+        true,
+        point(center.x + radius, center.y),
+    );
+    builder.build()
+}
+
+/// Open occupancy arc: from 12 o'clock clockwise to the point at offset
+/// (`dx`, `dy`) from the center.
+fn ring_arc_path(
+    center: Point<Pixels>,
+    radius: Pixels,
+    dx: Pixels,
+    dy: Pixels,
+    large_arc: bool,
+) -> Option<gpui::Path<Pixels>> {
+    let mut builder = ring_path_builder();
+    builder.move_to(point(center.x, center.y - radius));
+    builder.arc_to(
+        point(radius, radius),
+        px(0.),
+        large_arc,
+        true,
+        point(center.x + dx, center.y + dy),
+    );
+    builder.build().ok()
+}
+
+/// Endpoint of the occupancy sweep, relative to the ring center, plus the
+/// SVG large-arc flag. The sweep starts at 12 o'clock (0, −r) and runs
+/// clockwise — the `rotate(-90 7 7)` dash origin of the reference SVG;
+/// screen y grows downward, so the positive-angle direction is clockwise.
+/// Degenerate sweeps return `None`: 0% has nothing to stroke, and 100%
+/// belongs to the closed-circle path.
+fn occupancy_arc_end(radius: f32, pct: f64) -> Option<(f32, f32, bool)> {
+    let alpha = pct.clamp(0.0, 1.0) * std::f64::consts::TAU;
+    if alpha <= 0.0 || alpha >= std::f64::consts::TAU {
+        return None;
+    }
+    let phi = -std::f64::consts::FRAC_PI_2 + alpha;
+    Some((
+        (radius as f64 * phi.cos()) as f32,
+        (radius as f64 * phi.sin()) as f32,
+        alpha > std::f64::consts::PI,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::occupancy_arc_end;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn occupancy_arc_quarters() {
+        // 25%: 12 o'clock → 3 o'clock.
+        let (dx, dy, large) = occupancy_arc_end(5.5, 0.25).expect("quarter arc");
+        assert_close(dx, 5.5);
+        assert_close(dy, 0.0);
+        assert!(!large);
+        // 50%: → 6 o'clock; exactly half is still the small-arc flag.
+        let (dx, dy, large) = occupancy_arc_end(5.5, 0.5).expect("half arc");
+        assert_close(dx, 0.0);
+        assert_close(dy, 5.5);
+        assert!(!large);
+        // 75%: → 9 o'clock, first sweep past the halfway mark.
+        let (dx, dy, large) = occupancy_arc_end(5.5, 0.75).expect("three-quarter arc");
+        assert_close(dx, -5.5);
+        assert_close(dy, 0.0);
+        assert!(large);
+    }
+
+    #[test]
+    fn occupancy_arc_degenerate_sweeps() {
+        assert_eq!(occupancy_arc_end(5.5, 0.0), None);
+        assert_eq!(occupancy_arc_end(5.5, 1.0), None);
+        // Out-of-range percents clamp before the degeneracy check.
+        assert_eq!(occupancy_arc_end(5.5, -0.5), None);
+        assert_eq!(occupancy_arc_end(5.5, 1.5), None);
+    }
+
+    #[test]
+    fn occupancy_arc_intermediate_point() {
+        // 1/12 of the circle: 12 o'clock rotated 30° clockwise lands at
+        // screen angle φ = −60°: (r·cos60°, −r·sin60°).
+        let (dx, dy, large) = occupancy_arc_end(5.5, 1.0 / 12.0).expect("30° arc");
+        assert_close(dx, 2.75);
+        assert_close(dy, -4.7631);
+        assert!(!large);
     }
 }

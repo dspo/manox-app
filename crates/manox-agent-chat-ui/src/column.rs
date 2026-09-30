@@ -519,6 +519,9 @@ pub struct ChatColumn {
     /// width every card-relative budget (the rail's fit gate, the turn
     /// navigator's panel) is computed from, never the window's.
     pub card_width: crate::views::CardWidth,
+    /// The conversation info bubble's measured vertical budget (see
+    /// [`crate::views::BubbleClearance`]).
+    pub bubble_clearance: crate::views::BubbleClearance,
     /// Cached `items().len()`; the event handler reconciles the list count via
     /// `splice` whenever the conversation grows or shrinks.
     pub list_count: usize,

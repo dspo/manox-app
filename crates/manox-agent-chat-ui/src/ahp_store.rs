@@ -1445,7 +1445,12 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
         session: book.sessions.get(session_id),
         chat: book.chats.get(&chat_id),
         ext: book.ext.get(&session_uri(session_id)),
-        metrics: book.metrics.get(&chat_uri(&chat_id)),
+        // The fold keys the metrics map by the channel the delta rode
+        // (`x-manox-metrics:/<chat-id>`), not by the chat channel — reading
+        // the chat URI here would miss every entry the fold ever wrote.
+        metrics: book
+            .metrics
+            .get(&format!("{}{chat_id}", manox_ahp::ext::channels::METRICS)),
     }
 }
 
@@ -1513,6 +1518,19 @@ impl<'a> LeafView<'a> {
             .and_then(|s| s.config.as_ref())
             .and_then(|c| c.values.get("approvalMode"))
             .and_then(Value::as_str)
+    }
+
+    /// The most recent request's token usage: the in-flight turn's report
+    /// while streaming, else the last completed turn's (the `chat/usage`
+    /// action rides the channel, so this replays on attach). Cache-write
+    /// tokens are not modeled on the AHP turn usage. `None` before the first
+    /// usage report lands.
+    pub fn last_usage(&self) -> Option<ahp_types::state::UsageInfo> {
+        let chat = self.chat?;
+        chat.active_turn
+            .as_ref()
+            .and_then(|t| t.usage.clone())
+            .or_else(|| chat.turns.last().and_then(|t| t.usage.clone()))
     }
 
     /// The effective working directory: the config value the host publishes

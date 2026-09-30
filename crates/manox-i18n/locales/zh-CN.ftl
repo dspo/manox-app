@@ -153,8 +153,6 @@ status-cancelled = 已取消
 
 ### views/message.rs — Thinking 状态行
 
-context-agents-title = 智能体
-
 context-agents-captain = 船长
 
 ### views/subagent_panel.rs
@@ -865,12 +863,6 @@ titlebar-schedule = 添加计划任务...
 titlebar-new-window = 在新窗口中打开
 # ── 环境信息面板 ──────────────────────────────────────────────────────
 
-workspace-env-no-project = 暂无项目
-
-workspace-env-usage = 消费
-
-workspace-env-sources = 来源
-
 workspace-env-no-sources = 暂无来源
 
 workspace-env-git-unavailable = git 不可用
@@ -879,38 +871,22 @@ workspace-env-git-not-a-repo = 非 git 仓库
 
 workspace-env-git-detached = 分离头指针
 
-workspace-env-git-copied-branch = 已复制分支名到剪贴板。
-
-workspace-env-git-copied-worktree-name = 已复制目录名到剪贴板。
-
-workspace-env-git-copied-worktree-path = 已复制目录路径到剪贴板。
-
 # ── 上下文栏（右侧边栏）────────────────────────────────────────────────
 
-context-rail-title = 对话信息
-
-context-tooltip-main-calls = 主调用
-
-context-tooltip-side-calls = 辅助调用
-
-context-tooltip-calls-unit = 次
 # ── Cockpit（运行状态 / 里程碑 / 上下文预算）──────────────────────────
 # 运行状态行的阶段标签（三状态 tag：生成中 / 思考中 / 待输入）。
 # "待输入"标签归并 idle / stopped / failed / awaiting approval。
 # 计划区段标题。
 
-cockpit-milestones-header = 计划
 # 计划进度计数，显示在标题栏右侧。{$done}/{$total} 为已完成/总数。
 
-cockpit-plan-progress = {$done}/{$total}
 # 折叠态下当前任务之外的剩余任务数。{$count} 为数字。
 
-cockpit-plan-remaining = +{$count} 项待办
 # 折叠态下全部任务完成的提示。
 
-cockpit-plan-all-done = 全部完成
-
 composer-pasted-image = 粘贴的图片
+
+composer-context-usage-tooltip = 上下文已用 { $pct }%（约 { $used } / { $cap }）
 
 composer-image-process-failed = 部分粘贴的图片无法发送（格式不支持或过大）
 

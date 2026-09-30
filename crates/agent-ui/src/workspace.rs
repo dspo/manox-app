@@ -40,7 +40,6 @@ use manox_agent::{Thread, ThreadId};
 use crate::OpenSettings;
 use crate::ToggleTurnNavigator;
 use crate::cockpit::format_elapsed;
-#[cfg(feature = "test-support")]
 use crate::conversation::ConvItem;
 use crate::conversation::{ApplyOutcome, ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
 use crate::views::browser_view::BrowserView;
@@ -434,6 +433,7 @@ pub struct Workspace {
     /// Repaint observer on the multiplexer's list/registry state (U2): its
     /// notify drives the sidebar rows and the workspace's model surfaces.
     _mux_lists: gpui::Subscription,
+    _rail_updates: gpui::Subscription,
     /// Accumulated child-session events per Agent tool-call id, so a panel
     /// opened mid-run backfills from the start.
     subagent_transcripts: HashMap<String, Vec<manox_agent::SubagentChildEvent>>,
@@ -511,7 +511,7 @@ struct TurnNavigatorLayout {
     panel_width: Pixels,
 }
 
-fn turn_navigator_layout(card_width: Pixels, show_context_rail: bool) -> TurnNavigatorLayout {
+fn turn_navigator_layout(card_width: Pixels) -> TurnNavigatorLayout {
     // The overlay anchors to the conversation card's padding box (gpui
     // absolute positioning is CSS-style), and it must fit INSIDE it: the card
     // clips its children, so a panel sized from the window would be cut off on
@@ -520,12 +520,7 @@ fn turn_navigator_layout(card_width: Pixels, show_context_rail: bool) -> TurnNav
     // shell's sidebar and right pane live OUTSIDE the card, which is exactly
     // why the caller passes the measured card width and never the window's.
     let left_inset = px(CARD_BORDER / 2.);
-    let context_inset = if show_context_rail {
-        px(crate::views::context_rail::ENV_CONTENT_INSET)
-    } else {
-        px(0.)
-    };
-    let right_inset = px(CARD_BORDER / 2.) + context_inset;
+    let right_inset = px(CARD_BORDER / 2.);
     let available = card_width - left_inset - right_inset - px(24.);
     let panel_width = if available <= px(0.) {
         px(0.)
@@ -620,6 +615,50 @@ impl Workspace {
         self.chat.read(cx).context_rail.clone()
     }
 
+    /// Plan files this conversation wrote, for the bubble's plan segment:
+    /// the session's `ProposePlan` tool rows — the model's only
+    /// plan-approval channel, whose arguments carry the slug/title pair
+    /// verbatim — collected in arrival order, deduped by slug (a
+    /// re-proposal supersedes its predecessor and takes the newest slot),
+    /// returned newest first. Zero-copy: the scan walks `kind()` references.
+    pub(crate) fn collect_plan_files(
+        &self,
+        cx: &App,
+    ) -> Vec<crate::views::context_rail::PlanFileEntry> {
+        type PlanProposal = (String, crate::views::context_rail::PlanFileEntry);
+        let mut found: Vec<PlanProposal> = Vec::new();
+        for item in self.chat.read(cx).conversation.read(cx).items() {
+            let calls: Vec<&crate::conversation::ToolCallItem> = match item.read(cx).kind() {
+                ConvItem::ToolCall(call) => vec![call],
+                ConvItem::Thinking(container) => container
+                    .entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        crate::conversation::ActivityEntry::Tool(call) => Some(call),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for call in calls {
+                if call.name != manox_agent::plan_mode::PROPOSE_PLAN
+                    || call.status != manox_agent::ToolCallStatus::Success
+                {
+                    // A failed proposal never wrote the plan file (the tool
+                    // rejects missing/empty files before anything lands).
+                    continue;
+                }
+                if let Some((slug, entry)) =
+                    crate::views::context_rail::PlanFileEntry::from_proposal(&call.input)
+                {
+                    found.retain(|(existing, _)| existing != &slug);
+                    found.push((slug, entry));
+                }
+            }
+        }
+        found.into_iter().rev().map(|(_, entry)| entry).collect()
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         // An unbound conversation must not inherit the launch terminal's
@@ -672,12 +711,17 @@ impl Workspace {
         let conversation = cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead));
         let context_rail = {
             let rail_store = (store.clone(), session_id.clone());
-            cx.new(|_| crate::views::context_rail::ContextRail::new(Some(rail_store)))
+            cx.new(|cx| crate::views::context_rail::ContextRail::new(Some(rail_store), cx))
         };
+        // The rail's background writers (git refresh, subagent progress,
+        // plan snapshots) notify only the rail entity; without this
+        // observer those notifies never schedule a frame — the changes
+        // surface on the next unrelated repaint (silent, self-healing
+        // lag).
+        let rail_updates = cx.observe(&context_rail, |_, _, cx| cx.notify());
         let weak_ws = cx.weak_entity();
         let chat_host: manox_agent_chat_ui::host::ChatHostHandle =
             std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
-        context_rail.update(cx, |r, _| r.set_host(chat_host.clone()));
 
         let mut ws = Self {
             cwd: cwd.clone(),
@@ -686,6 +730,7 @@ impl Workspace {
             client: (),
             background_threads: Vec::new(),
             _mux_lists,
+            _rail_updates: rail_updates,
             subagent_transcripts: HashMap::new(),
             subagent_final_text: HashMap::new(),
             subagent_prompts: HashMap::new(),
@@ -765,6 +810,7 @@ impl Workspace {
                 list_state: ListState::new(0, ListAlignment::Bottom, MSG_LIST_OVERDRAW),
                 message_list_width: crate::views::MessageListWidthInvalidator::default(),
                 card_width: crate::views::CardWidth::default(),
+                bubble_clearance: crate::views::BubbleClearance::default(),
                 list_count: 0,
                 goal_popover_open: false,
                 goal_ticker_gen: 0,
@@ -2113,12 +2159,11 @@ impl Workspace {
     fn render_turn_navigator_overlay(
         &self,
         theme: &Theme,
-        show_context_rail: bool,
         card_width: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let navigator = self.chat.read(cx).turn_navigator.clone()?;
-        let layout = turn_navigator_layout(card_width, show_context_rail);
+        let layout = turn_navigator_layout(card_width);
         let panel_height = navigator.read(cx).panel_height(cx);
 
         Some(
@@ -2241,11 +2286,7 @@ impl Workspace {
             if !still_current {
                 return;
             }
-            let (stats, display) = match result {
-                Some(v) => (Some(v.0), Some(v.1)),
-                None => (None, None),
-            };
-            rail.update(cx, |r, cx| r.set_git_status(stats, display, cx));
+            rail.update(cx, |r, cx| r.set_git_branch(result, cx));
         })
         .detach();
     }

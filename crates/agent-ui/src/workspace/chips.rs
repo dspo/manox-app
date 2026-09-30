@@ -604,7 +604,6 @@ impl Workspace {
         }
     }
 
-    /// Wire api string → Tag variant + label for the pi model menu.
     /// Wire api string → text color for the pi composer model label and the
     /// context rail's per-model usage rows. Tinted directly from theme tokens
     /// (matching `mode_chip_visual` and the settings panel) so both surfaces

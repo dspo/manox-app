@@ -203,6 +203,11 @@ gpui-kit-assets = { version = "=0.6.6" }
 # （旧栈的 `[patch.crates-io] psm = stacker` 已随 zed gpui 退出删除：gpui-pre
 # 0.3.6 依赖闭包不含 psm/stacker，kit lock 同样零命中。）
 
+# lyon —— gpui PathBuilder 的描边/填充曲面引擎（gpui-pre 自身依赖）。精确 pin 到
+# lock 既有版本，让 composer context ring 的 LineCap::Round 复用 gpui 栈里同一份
+# 类型，不引入重复版本。
+lyon = "=1.0.19"
+
 # Full DWARF makes the largest test targets (`cx` integration tests and `cx-cli`
 # bin tests) large enough to crash `ld.lld` on GitHub-hosted Linux runners.
 # Keep file/line backtraces while shrinking debug sections across dev/test links.
