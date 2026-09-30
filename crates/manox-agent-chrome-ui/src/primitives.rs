@@ -25,18 +25,23 @@ pub enum IconButtonState {
 }
 
 /// Icon button — the flat-button + inner-underlay pair from the calibration:
-/// outer box 6/12 padding (the 47×33 hit points), whole-box hover
-/// `surface_tertiary #F0F0F2`, radius 6; inner (3,4) radius-4 underlay carries
-/// the active state (accent glyph + accent 10% background).
+/// outer box 6/12 padding (the 47×33 hit points), radius 6; inner (3,4)
+/// radius-4 underlay. Geometry is shared by all three tones; the tone
+/// ([`IconButtonState`]) decides hover/pressed/click — hover
+/// `surface_tertiary` and the accent underlay belong to `On`/`Off` only.
+/// The inner glyph carries a `<id>-glyph` debug selector for render tests.
 pub fn icon_button(
-    id: impl Into<ElementId> + Clone,
+    id: impl Into<ElementId>,
     glyph: Icon,
     size: f32,
     state: IconButtonState,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<gpui::Div> {
+    let id: ElementId = id.into();
+    let glyph_selector = format!("{id}-glyph");
     let mut inner = div()
         .id(id.clone())
+        .debug_selector(move || glyph_selector.clone())
         .py(px(3.))
         .px(px(4.))
         .rounded(px(4.))

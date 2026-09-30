@@ -621,8 +621,8 @@ impl gpui::Render for RightPane {
             .text_size(px(13.))
             .flex()
             .flex_col()
-            // Tab strip: tool tabs + the new-tab tab + right-side
-            // +/split/external. Tabs sit ON the strip's bottom hairline; the
+            // Tab strip: tool tabs + the new-tab tab + the right-side "+"
+            // action. Tabs sit ON the strip's bottom hairline; the
             // sliding indicator covers that line.
             //
             // The wrapper exists so the indicator can be a SIBLING of the

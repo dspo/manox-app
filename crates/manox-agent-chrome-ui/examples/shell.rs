@@ -168,15 +168,12 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                     });
                 }
             })),
-            // Fixture history: the arrows light up and actually step the
-            // selection through the loaded sessions (`nav_step`), so the
-            // enabled state is drawn AND visibly functional.
-            on_nav_back: Some(Box::new(|_, cx| nav_step(-1, cx))),
-            on_nav_forward: Some(Box::new(|_, cx| nav_step(1, cx))),
-            nav_avail: Some(Box::new(|_| manox_agent_chrome_ui::shell::NavAvail {
-                back: true,
-                forward: true,
-            })),
+            // Fixture history: the arrows actually step the selection
+            // through the loaded sessions (`nav_step`), and their lit state
+            // tracks the fixture's real edges — no lit-but-inert arrows.
+            on_nav_back: Some(Box::new(|_, _| nav_step(-1))),
+            on_nav_forward: Some(Box::new(|_, _| nav_step(1))),
+            nav_avail: Some(Box::new(|_| nav_avail_fixture())),
             on_open_editor: None,
         },
         brand: None,
@@ -186,28 +183,72 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
 // ── session source (real ~/.manox threads) ────────────────────────────────
 
 thread_local! {
-    /// The example shell, for the nav hooks (they carry no entity handle).
-    static NAV_SHELL: std::cell::RefCell<Option<gpui::WeakEntity<Shell>>> =
-        const { std::cell::RefCell::new(None) };
+    /// The fixture's nav state: an id snapshot + pointer + live edges.
+    /// The hooks run inside the titlebar's `cx.listener`, which holds the
+    /// Shell lease for the whole listener call — a hook that touched the
+    /// Shell entity would double-lease (hard panic). The snapshot pump
+    /// below refreshes this on every push.
+    static NAV_FIXTURE: std::cell::RefCell<NavFixture> =
+        const { std::cell::RefCell::new(NavFixture::EMPTY) };
 }
 
-/// Step the fixture selection by `delta` through the loaded sessions; the
-/// example's stand-in for the real history stack.
-fn nav_step(delta: i32, cx: &mut gpui::App) -> Option<String> {
-    let shell = NAV_SHELL.with(|slot| slot.borrow().as_ref()?.upgrade())?;
-    shell.update(cx, |shell, _| {
-        let ids: Vec<String> = shell.sessions.iter().map(|s| s.id.clone()).collect();
-        let cur = shell
+/// The example's stand-in for the real history stack.
+struct NavFixture {
+    ids: Vec<String>,
+    index: Option<usize>,
+    back: bool,
+    forward: bool,
+}
+
+impl NavFixture {
+    const EMPTY: Self = Self {
+        ids: Vec::new(),
+        index: None,
+        back: false,
+        forward: false,
+    };
+}
+
+/// Step the fixture pointer by `delta`; returns the landed id (`None` at an
+/// edge or with nothing loaded — never a no-op move).
+fn nav_step(delta: i32) -> Option<String> {
+    NAV_FIXTURE.with(|cell| {
+        let mut f = cell.borrow_mut();
+        let i = f.index?;
+        let j = i as i64 + delta as i64;
+        if j < 0 || j as usize >= f.ids.len() {
+            return None;
+        }
+        let j = j as usize;
+        f.index = Some(j);
+        f.back = j > 0;
+        f.forward = j + 1 < f.ids.len();
+        Some(f.ids[j].clone())
+    })
+}
+
+fn nav_avail_fixture() -> manox_agent_chrome_ui::shell::NavAvail {
+    NAV_FIXTURE.with(|cell| {
+        let f = cell.borrow();
+        manox_agent_chrome_ui::shell::NavAvail {
+            back: f.back,
+            forward: f.forward,
+        }
+    })
+}
+
+/// Re-sync the fixture nav state from the freshly pushed rows.
+fn nav_fixture_sync(shell: &Shell) {
+    NAV_FIXTURE.with(|cell| {
+        let mut f = cell.borrow_mut();
+        f.ids = shell.sessions.iter().map(|s| s.id.clone()).collect();
+        f.index = shell
             .active
             .as_ref()
-            .and_then(|a| ids.iter().position(|i| i == a));
-        let next = match cur {
-            Some(i) => (i as i64 + delta as i64).clamp(0, ids.len() as i64 - 1) as usize,
-            None => 0,
-        };
-        shell.active = Some(ids[next].clone());
-        Some(ids[next].clone())
-    })
+            .and_then(|a| f.ids.iter().position(|i| i == a));
+        f.back = f.index.is_some_and(|i| i > 0);
+        f.forward = f.index.is_some_and(|i| i + 1 < f.ids.len());
+    });
 }
 
 /// Push thread snapshots into the shell. The one active scan happens here
@@ -215,7 +256,6 @@ fn nav_step(delta: i32, cx: &mut gpui::App) -> Option<String> {
 /// snapshot-only reads — calling `refresh_thread_list` from an event
 /// callback would loop (refresh is an async scan that re-emits the event).
 fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
-    NAV_SHELL.with(|slot| *slot.borrow_mut() = Some(shell.downgrade()));
     manox_agent::thread_store::refresh_thread_list();
     let rx = manox_agent::thread_store::global().subscribe();
     cx.spawn(async move |cx| {
@@ -238,6 +278,7 @@ fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
                     titles.borrow_mut().insert(r.id.clone(), r.title.clone());
                 }
                 shell.set_sessions(rows);
+                nav_fixture_sync(shell);
                 cx.notify();
             });
             anyhow::Ok(())

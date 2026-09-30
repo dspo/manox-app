@@ -119,7 +119,11 @@ pub struct NavAvail {
 
 /// Host-side actions the shell mirrors to. All optional; an absent hook
 /// leaves the shell's local behavior only (e.g. `on_pin` flips the local row
-/// and the next `set_sessions` snapshot reconciles).
+/// and the next `set_sessions` snapshot reconciles). One asymmetry: the nav
+/// moves REQUIRE their `nav_avail` face — an absent face reads as "no edge
+/// in either direction", so `on_nav_back`/`on_nav_forward` without it are
+/// inert by design.
+
 #[derive(Default)]
 pub struct HostHooks {
     pub on_pin: Option<HookOnId>,
@@ -139,8 +143,11 @@ pub struct HostHooks {
     /// selection without re-deriving host state.
     pub on_nav_back: Option<HookOnNav>,
     pub on_nav_forward: Option<HookOnNav>,
-    /// Availability of the two nav moves, queried at render time (the host
-    /// owns the history stack; the shell only paints its edges).
+    /// Availability of the two nav moves, queried at render time AND
+    /// enforced by [`Shell::nav_back`] / [`Shell::nav_forward`]. ABSENT =
+    /// neither move may fire: a host that ships `on_nav_back` without this
+    /// face gets permanently dead arrows BY CONTRACT (the shell cannot
+    /// invent the history edges it does not own). Provide the face.
     pub nav_avail: Option<HookQuery<NavAvail>>,
     /// Open the foreground session's workspace in the user's editor.
     pub on_open_editor: Option<HookOnUnit>,
@@ -750,6 +757,15 @@ impl Shell {
         if self.tag_edit.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// The recorded drag order (read face for hosts/tests): a test can
+    /// assert the RECORDING was not polluted — the display order alone
+    /// cannot show it (time grouping ignores `group_order`, and a
+    /// workspace relist only surfaces recorded names that match real
+    /// groups).
+    pub fn group_order(&self) -> &[String] {
+        &self.group_order
     }
 
     /// Pinned first, then by the team-unit sort stamp descending (see
@@ -1505,9 +1521,11 @@ fn menu_icon(path: &'static str) -> gpui_component::Icon {
         .text_color(gpui::Hsla::from(FG_FAINT))
 }
 
-/// The four recency buckets, in display order. The enum closes the loop
-/// between the bucket index and its state key / label key — swapping or
-/// inserting a bucket cannot silently shift the other two.
+/// The four recency buckets, in display order. `state_key` supplies BOTH
+/// the collapse-state key and the ftl label key (one string, so they cannot
+/// drift); the explicit discriminant is the index into the render-order
+/// array — reordering `BUCKETS` without renumbering these is the one
+/// mismatch the compiler cannot catch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TimeBucket {
     Today = 0,
@@ -1588,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn time_bucket_cannot_be_index_shifted_by_key_edits() {
+    fn time_bucket_state_keys_are_unique() {
         // The enum's state keys are one-per-bucket: a duplicate or missing
         // key breaks the collapse mapping long before a user sees it.
         let keys: Vec<&'static str> = [

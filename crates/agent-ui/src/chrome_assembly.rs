@@ -468,14 +468,14 @@ fn shell_config(
                 };
                 let handle = crate::dispatch::window_global();
                 cx.spawn(async move |cx| {
-                    let result = cx
+                    let launch_err = cx
                         .background_spawn(async move {
-                            manox_ext_agents::vscode_app::launch_plain(Some(&project))
+                            manox_ext_agents::vscode_app::launch_plain(Some(&project)).err()
                         })
                         .await;
                     if let Some(handle) = handle
-                        && let Err(err) = handle.update(cx, |_, window, cx| {
-                            if let Err(e) = result {
+                        && let Err(update_err) = handle.update(cx, |_, window, cx| {
+                            if let Some(e) = &launch_err {
                                 tracing::error!(error = %e, "open-in-VS-Code failed");
                                 window.push_notification(
                                     Notification::error(format!(
@@ -488,10 +488,12 @@ fn shell_config(
                         })
                     {
                         // The window closed before the launch settled: the
-                        // result had no surface left, log it so the failure
-                        // is not fully invisible.
+                        // notification had no surface left. Log BOTH errors —
+                        // the update failure alone would hide what actually
+                        // went wrong with the launch.
                         tracing::warn!(
-                            error = ?err,
+                            launch = ?launch_err,
+                            update = ?update_err,
                             "open-in-VS-Code result unreported (window gone)"
                         );
                     }

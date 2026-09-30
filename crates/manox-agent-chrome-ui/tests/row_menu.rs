@@ -419,9 +419,13 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
             // Team sharing the leader's stamp; the member is NEWER on its
             // own clock (the classic "member just finished, leader idle")
             // — the shared sort_stamp must keep it below the leader in the
-            // bucket order, not float it above the chevron.
+            // bucket order, not float it above the chevron. And a member
+            // with a much OLDER own-clock stamp must still land in the
+            // leader's bucket (bucketing by per-row updated_at was the
+            // first-round defect this second row pins).
             row_data("leader", stamp_days_ago(0), stamp_days_ago(0), true),
             row_data("member", stamp_days_ago(0) + 60, stamp_days_ago(0), false),
+            row_data("member-old", stamp_days_ago(40), stamp_days_ago(0), false),
             row_data("old", stamp_days_ago(30), stamp_days_ago(30), false),
         ],
     });
@@ -435,8 +439,8 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
         let today = &groups[0];
         assert_eq!(
             today.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["leader", "member"],
-            "the team buckets together; the newer member stays under the chevron"
+            ["leader", "member", "member-old"],
+            "the team buckets together regardless of each row's own clock, and the newer member stays under the chevron"
         );
     });
 
@@ -467,10 +471,15 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
     });
 
     // Reorder is inert in time mode: not only does the display order stay
-    // (trivially true — time_groups never reads group_order), the recorded
-    // drag ORDER must come out unpolluted when the user switches back.
+    // (trivially true — time_groups never reads group_order), the RECORDING
+    // must come out untouched — a dropped edge (the mode early-return) must
+    // not leak the pseudo name into the persisted drag order.
     shell.update(cx, |s, _cx| {
         s.move_group("chrome-group-earlier", "chrome-group-today", true);
+        assert!(
+            s.group_order().is_empty(),
+            "a time-mode drag must not record any order"
+        );
         s.toggle_grouping();
     });
     shell.update(cx, |s, cx| {
@@ -595,6 +604,33 @@ fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
     });
     assert_eq!(back_log.borrow().len(), 1);
     shell.read_with(cx, |s, _| assert_eq!(s.active.as_deref(), Some("landed")));
+
+    // The RENDERED buttons carry their glyphs in BOTH tones at the same
+    // geometry (the round-two regression: the enabled branch dropped the
+    // inner element, so live arrows were empty boxes). The glyph underlay
+    // has its own debug selector — the outer box exists in both tones, so
+    // its bounds alone cannot see the difference.
+    let back_glyph = visual
+        .debug_bounds("tb-back-glyph")
+        .expect("the enabled arrow draws its glyph");
+    let fwd_glyph = visual
+        .debug_bounds("tb-fwd-glyph")
+        .expect("the disabled arrow still draws its glyph");
+    assert_eq!(
+        [back_glyph.size.width, back_glyph.size.height],
+        [fwd_glyph.size.width, fwd_glyph.size.height],
+        "both tones share the flat-button geometry"
+    );
+
+    // And the Disabled tone is inert at the click surface too: clicking the
+    // rendered forward button must not dispatch its hook.
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.nav_forward(window, cx));
+    });
+    assert!(
+        fwd_log.borrow().is_empty(),
+        "an edge-less forward stays inert through the rendered path"
+    );
 }
 
 /// Unix seconds for local noon N days ago (noon survives DST shifts).

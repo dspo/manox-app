@@ -162,7 +162,6 @@ mod macos {
                     badge: None,
                 },
             ],
-            // Count badges are visual fixtures of the replica, not live data.
             customizations: vec![
                 CustomizationRow {
                     icon: icons::HOME,
