@@ -371,24 +371,27 @@ fn shell_config(
             // The in-memory thread_store write this hook used before never
             // reached the journal, so the write face (thread_store) and the
             // read face (AHP fold) were two states that never met.
-            on_pin: Some(Box::new(move |id, _w, cx| {
-                let store = mux.read(cx).store();
-                let channel = crate::ahp_store::thread_uri(id);
-                store.update(cx, |store, _| {
-                    let pinned = store
-                        .book
-                        .ext
-                        .get(&channel)
-                        .and_then(|x| x.pinned)
-                        .unwrap_or(false);
-                    store.dispatch(
-                        channel,
-                        ahp_types::actions::StateAction::Unknown(serde_json::json!({
-                            "type": manox_ahp::ext::actions::PINNED_CHANGED,
-                            "pinned": !pinned,
-                        })),
-                    );
-                });
+            on_pin: Some(Box::new({
+                let mux = mux.clone();
+                move |id, _w, cx| {
+                    let store = mux.read(cx).store();
+                    let channel = crate::ahp_store::thread_uri(id);
+                    store.update(cx, |store, _| {
+                        let pinned = store
+                            .book
+                            .ext
+                            .get(&channel)
+                            .and_then(|x| x.pinned)
+                            .unwrap_or(false);
+                        store.dispatch(
+                            channel,
+                            ahp_types::actions::StateAction::Unknown(serde_json::json!({
+                                "type": manox_ahp::ext::actions::PINNED_CHANGED,
+                                "pinned": !pinned,
+                            })),
+                        );
+                    });
+                }
             })),
             // The menu's archive toggle flips the CURRENT partition.
             // Premise: the wire snapshot rides the ACTIVE partition only, so
