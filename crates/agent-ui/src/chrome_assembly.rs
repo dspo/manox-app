@@ -377,12 +377,15 @@ fn shell_config(
                     let store = mux.read(cx).store();
                     let channel = crate::ahp_store::thread_uri(id);
                     store.update(cx, |store, _| {
-                        let pinned = store
-                            .book
-                            .ext
-                            .get(&channel)
-                            .and_then(|x| x.pinned)
-                            .unwrap_or(false);
+                        // The flip reads through the ONE pin read face (fold
+                        // first, list `_meta` baseline second) — flipping
+                        // against the fold alone would no-op a row whose
+                        // baseline has not landed (the menu shows meta).
+                        let pinned = crate::multiplexer::ext_and_meta_pinned(
+                            &store.book,
+                            store.book.summaries.get(id),
+                            &channel,
+                        );
                         store.dispatch(
                             channel,
                             ahp_types::actions::StateAction::Unknown(serde_json::json!({
