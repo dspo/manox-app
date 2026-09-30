@@ -148,5 +148,64 @@ async fn live_ask_edge_retires_a_card_the_fold_cannot_route(cx: &mut TestAppCont
         None,
         "a card the fold cannot route retires instead of stranding the composer"
     );
+
+    // The plan-review zombie (the #88 device repro): the review's turn
+    // finishes before the verdict lands, so the chat-level part can never
+    // fold answered — the reducer only settles active-turn parts. The
+    // verdict on the plan channel is the retirement signal.
+    let plan_channel = format!("{}sess-1", manox_ahp::ext::channels::PLAN);
+    store.update(&mut visual.cx, |s, _| {
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &StateAction::ChatInputRequested(ChatInputRequestedAction {
+                request: select_request("plan-review:e-3"),
+            }),
+        );
+        // The plan channel must exist before its deltas fold (the baseline
+        // creates the ext entry).
+        s.book.apply(
+            &plan_channel,
+            &StateAction::Unknown(serde_json::json!({
+                "type": manox_ahp::ext::actions::BASELINE,
+                "state": {},
+            })),
+        );
+        s.book.apply(
+            &plan_channel,
+            &StateAction::Unknown(serde_json::json!({
+                "type": manox_ahp::ext::actions::PLAN_VERDICT_REQUESTED,
+                "requestId": "plan-review:e-3",
+                "content": "# the plan",
+            })),
+        );
+    });
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_sync_live_ask(cx);
+    });
+    assert_eq!(
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
+        Some("plan-review:e-3".to_string()),
+        "an open plan review seeds its card"
+    );
+
+    // The verdict lands: the card must retire even though the chat-level
+    // part stays unanswered in its archived turn.
+    store.update(&mut visual.cx, |s, _| {
+        s.book.apply(
+            &plan_channel,
+            &StateAction::Unknown(serde_json::json!({
+                "type": manox_ahp::ext::actions::PLAN_VERDICT,
+                "requestId": "plan-review:e-3",
+            })),
+        );
+    });
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_sync_live_ask(cx);
+    });
+    assert_eq!(
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
+        None,
+        "a plan review settled on the plan channel retires the card"
+    );
     manox_agent::thread_store::drop_global_for_test();
 }

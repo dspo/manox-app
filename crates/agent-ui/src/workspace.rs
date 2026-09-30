@@ -1083,6 +1083,24 @@ impl Workspace {
                             if req.id.starts_with("plan-review:") {
                                 let plan =
                                     crate::ahp_store::plan_review_of(&view.book, &sid, &req.id);
+                                // A verdict on the plan channel means the review
+                                // is settled engine-side. The chat-level part can
+                                // never fold answered once its turn archived (the
+                                // reducer only settles active-turn parts, and a
+                                // plan review outlives its turn), so without this
+                                // check the card would re-seed forever with the
+                                // composer locked in ask-supplement mode — the
+                                // #88 device repro.
+                                if plan.is_some_and(|p| {
+                                    p.get("type").and_then(serde_json::Value::as_str)
+                                        == Some(manox_ahp::ext::actions::PLAN_VERDICT)
+                                }) {
+                                    tracing::info!(
+                                        request_id = %req.id,
+                                        "live ask: plan review already settled on the plan channel"
+                                    );
+                                    return None;
+                                }
                                 if let Some(q) = ask.questions.first_mut()
                                     && let Some(content) = plan.and_then(|p| {
                                         p.get("content").and_then(serde_json::Value::as_str)
