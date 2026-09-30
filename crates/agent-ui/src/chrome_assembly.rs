@@ -66,6 +66,28 @@ pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {
         .is_ok()
 }
 
+/// Close one open tab of `id` in the live pane (the external session's
+/// 关闭会话: the tab's close callback reaps the sidebar row); `false` when
+/// no shell or window is live. The caller MUST be off the window's dispatch
+/// (a spawned task) — the same nested-update rule `open_tool_tab` obeys.
+pub fn close_tool_tab(id: &str, cx: &mut App) -> bool {
+    let Some(shell) = shell_handle() else {
+        return false;
+    };
+    let Some(handle) = crate::dispatch::window_global() else {
+        return false;
+    };
+    handle
+        .update(cx, |_, window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell
+                    .right
+                    .update(cx, |pane, cx| pane.close_tab(id, window, cx));
+            });
+        })
+        .is_ok()
+}
+
 /// Close every open tab of `kind` in the live pane; `false` when no shell or
 /// window is live. The workspace retires the ephemeral observation panels
 /// through this when it leaves a thread: a panel's content is the child
@@ -206,15 +228,21 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         let rows = mux.read(cx).thread_list(cx);
         let unread = mux.read(cx).unread_map();
         let removed = crate::project_registry::removed_projects();
-        let sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
+        let mut sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
             crate::sidebar_projection::project_groups(&rows, &unread, &removed)
                 .into_iter()
                 .flat_map(manox_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
+        // Launched external sessions (project-menu agents/terminals) merge
+        // into the snapshot as sidebar rows; the shell regroups them under
+        // their project's header.
+        sessions.extend(ws.read(cx).external_session_rows());
         // The sidebar highlight follows the FOREGROUND thread, not the last
         // click: new-thread landings, /exit replacements and successor
         // hand-offs all switch without a sidebar click, and a stale
-        // highlight would advertise the wrong session as active.
+        // highlight would advertise the wrong session as active. An external
+        // session's highlight is not stolen — it is no thread, so the
+        // foreground rule has no opinion on it while it holds the highlight.
         let fg = ws
             .read(cx)
             .chat
@@ -222,9 +250,15 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .store
             .as_ref()
             .map(|(_, sid)| sid.clone());
+        let active_is_external = shell
+            .read(cx)
+            .active
+            .as_deref()
+            .map(crate::workspace::external_sessions::is_external_row)
+            .unwrap_or(false);
         shell.update(cx, |shell, cx| {
             shell.set_sessions(sessions);
-            if shell.active != fg {
+            if !active_is_external && shell.active != fg {
                 shell.active = fg;
             }
             cx.notify();
@@ -435,10 +469,22 @@ fn shell_config(
                 }
             })),
             // The full production switch path: attach, drafts stash, list
-            // reconciliation.
+            // reconciliation. External-session rows route to their tab
+            // instead — a thread id they are not.
             on_select: Some(Box::new({
                 let ws = ws.clone();
                 move |id, w, cx| {
+                    // An external row brings its session back to the MAIN
+                    // column (a synchronous workspace update — no window
+                    // handle round-trip, no dispatch hazard); a thread id
+                    // takes the full switch path.
+                    if crate::workspace::external_sessions::is_external_row(id) {
+                        ws.update(cx, |ws, cx| {
+                            ws.open_external_session(id, cx);
+                            cx.notify();
+                        });
+                        return;
+                    }
                     ws.update(cx, |ws, cx| {
                         ws.open_thread(id.to_string(), w, cx);
                         cx.notify();
@@ -529,11 +575,17 @@ fn shell_config(
             // menu entity; the chrome mounts and dismisses it.
             on_group_menu: Some(Box::new({
                 let ws = ws.downgrade();
-                let mux = mux.clone();
                 move |_key, project, _anchor, window, cx| {
-                    Some(crate::project_menu::group_menu(
-                        project, &mux, &ws, window, cx,
-                    ))
+                    Some(crate::project_menu::group_menu(project, &ws, window, cx))
+                }
+            })),
+            // The external row menu's 关闭会话: drop the session (its
+            // terminal view dies with the record) and fall back to the
+            // conversation.
+            on_close_external: Some(Box::new({
+                let ws = ws.downgrade();
+                move |id, _w, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.close_external_session(id, cx));
                 }
             })),
         },
@@ -563,6 +615,10 @@ impl MainSurface for PendingMain {
     }
 
     fn title(&self, cx: &App) -> gpui::SharedString {
+        // An external session owning the main column titles it.
+        if let Some(label) = self.ws.read(cx).active_external_label() {
+            return label.into();
+        }
         // The active thread's display title from the foreground store;
         // "manox" before any interaction.
         self.ws

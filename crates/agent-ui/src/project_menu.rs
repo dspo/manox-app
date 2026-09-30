@@ -29,8 +29,7 @@ use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 
 use crate::Workspace;
-use crate::multiplexer::SessionMultiplexer;
-use crate::views::model_cascade::{CascadeEntry, cascade_provider_groups};
+use crate::views::model_cascade::{build_model_menu, launch_wire_key};
 
 /// Build the project group's menu. `project` is the group's directory
 /// (`None` on the no-project bucket — the menu then scopes to the fallback
@@ -39,7 +38,6 @@ use crate::views::model_cascade::{CascadeEntry, cascade_provider_groups};
 /// through the shell handle in `chrome_assembly`.
 pub fn group_menu(
     project: Option<&str>,
-    mux: &Entity<SessionMultiplexer>,
     ws: &gpui::WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
@@ -47,13 +45,12 @@ pub fn group_menu(
     let project_dir: Option<PathBuf> = project
         .map(std::path::PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty());
-    let agents = mux.read(cx).agents(cx);
-    let groups = cascade_provider_groups(&agents);
     // Every menu closure is 'static: it captures OWNED clones of the
     // workspace handle and the project directory, never the caller's
     // borrows.
     let ws = ws.clone();
     let ws_menu = ws.clone();
+    let ws_terminal = ws.clone();
     let dir_manox = project_dir.clone();
     let dir_terminal = project_dir.clone();
     let dir_cascade = project_dir.clone();
@@ -64,10 +61,16 @@ pub fn group_menu(
     let vscode_target = project_dir.clone().or_else(|| {
         crate::chrome_assembly::foreground_project().filter(|p| !p.as_os_str().is_empty())
     });
+    // The registry snapshot is collected ONCE for all three agent cascades
+    // (per-agent submenu builders only clone).
+    let models = crate::model_catalog::rows();
     PopupMenu::build(window, cx, |menu, window, cx| {
         let mut menu = menu.max_w(px(280.));
         // 新建会话: Manox flat row + one provider→model cascade per external
-        // agent kind — the legacy menu's shape, scoped to this project.
+        // agent kind — the legacy menu's shape, scoped to this project. The
+        // cascades render through the COMPOSER model picker's shared builder
+        // (provider display-name submenus, wire-tag rows), so every model
+        // picker in the app looks and picks the same.
         menu = menu.submenu_with_icon(
             Some(Icon::default().path("icons/plus.svg")),
             manox_i18n::t("sidebar-new-session-label"),
@@ -84,55 +87,41 @@ pub fn group_menu(
                             new_thread_at(&ws_manox, dir_new.clone(), cx);
                         }),
                 );
-                // The pick list is collected once and cloned per submenu
-                // closure (the builder closures are `move` + 'static; the
-                // groups borrow cannot ride along). The display name is the
-                // row's label — the same name the right pane's picker shows —
-                // while the config id stays the spawn argument.
-                let rows: Vec<(String, String, String, Option<String>)> = groups
-                    .iter()
-                    .flat_map(|(provider, entries)| {
-                        entries.iter().map(move |e: &CascadeEntry| {
-                            (
-                                provider.clone(),
-                                e.config_id.clone(),
-                                e.display.clone(),
-                                e.wire.clone(),
-                            )
-                        })
-                    })
-                    .collect();
-                if !rows.is_empty() {
-                    for (agent_id, display, svg) in EXTERNAL_AGENTS {
-                        let dir_agent = dir_cascade.clone();
-                        let agent_rows = rows.clone();
-                        submenu = submenu.submenu_with_icon(
-                            Some(Icon::default().path(svg)),
-                            display,
-                            window,
-                            cx,
-                            move |sub, _window, _cx| {
-                                let mut sub = sub;
-                                for (provider, model, label, wire) in agent_rows.clone() {
-                                    let dir_pick = dir_agent.clone();
-                                    sub = sub.item(PopupMenuItem::new(label).on_click(
-                                        move |_, window, cx| {
-                                            spawn_agent_tab(
-                                                &(agent_id, display, svg),
-                                                &provider,
-                                                &model,
-                                                wire.clone(),
-                                                dir_pick.clone(),
-                                                window,
-                                                cx,
-                                            );
+                for (agent_id, display, svg) in EXTERNAL_AGENTS {
+                    let dir_agent = dir_cascade.clone();
+                    let ws_agent = ws_menu.clone();
+                    let agent_models = models.clone();
+                    submenu = submenu.submenu_with_icon(
+                        Some(Icon::default().path(svg)),
+                        display,
+                        window,
+                        cx,
+                        move |sub, window, cx| {
+                            let dir_agent = dir_agent.clone();
+                            let ws_cascade = ws_agent.clone();
+                            let agent_models = agent_models.clone();
+                            build_model_menu(
+                                sub,
+                                agent_models,
+                                move |row, window, cx| {
+                                    spawn_agent_tab(
+                                        &AgentSpawn {
+                                            ws: &ws_cascade,
+                                            agent: (agent_id, display, svg),
+                                            provider: row.provider_display.clone(),
+                                            model: row.id.clone(),
+                                            wire: launch_wire_key(&row.api),
+                                            dir: dir_agent.clone(),
                                         },
-                                    ));
-                                }
-                                sub
-                            },
-                        );
-                    }
+                                        window,
+                                        cx,
+                                    );
+                                },
+                                window,
+                                cx,
+                            )
+                        },
+                    );
                 }
                 submenu
             },
@@ -144,9 +133,14 @@ pub fn group_menu(
                 .on_click(move |_, window, cx| {
                     let cwd = dir_terminal.clone().unwrap_or_else(fallback_cwd);
                     match crate::tool_tabs::spawn_standalone_terminal(&cwd, cx) {
-                        Ok(view) => {
-                            open_terminal_tab(manox_i18n::t("chrome-tab-terminal"), view, cx)
-                        }
+                        Ok(view) => launch_external(
+                            &ws_terminal,
+                            manox_i18n::t("chrome-tab-terminal").to_string(),
+                            "icons/terminal.svg",
+                            dir_terminal.clone(),
+                            view,
+                            cx,
+                        ),
                         Err(e) => spawn_failed_notification(
                             &manox_i18n::t("chrome-tab-terminal"),
                             &e,
@@ -211,37 +205,54 @@ fn new_thread_at(ws: &gpui::WeakEntity<Workspace>, dir: Option<PathBuf>, cx: &mu
     }
 }
 
-/// Spawn the agent CLI under the picked endpoint, rooted at the project
-/// (falling back to the host's cwd rules), and open it as a right-pane tab.
-/// A spawn failure notifies instead of opening anything. `agent` is the
-/// `EXTERNAL_AGENTS` row (id, display, icon).
-fn spawn_agent_tab(
-    agent: &(&'static str, &'static str, &'static str),
-    provider: &str,
-    model: &str,
+/// One cascade pick's spawn request (bundled — the call would otherwise
+/// arc past clippy's argument ceiling).
+struct AgentSpawn<'a> {
+    ws: &'a gpui::WeakEntity<Workspace>,
+    /// The `EXTERNAL_AGENTS` row (id, display, icon).
+    agent: (&'static str, &'static str, &'static str),
+    provider: String,
+    model: String,
     wire: Option<String>,
     dir: Option<PathBuf>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let (agent_id, display, svg) = *agent;
-    let cwd = dir.unwrap_or_else(fallback_cwd);
-    match crate::tool_tabs::spawn_agent_terminal(agent_id, &cwd, provider, model, wire, cx) {
-        Ok(view) => {
-            let tab = crate::tool_tabs::prebuilt_terminal_tab(display, svg, view);
-            crate::chrome_assembly::open_tool_tab(tab, cx);
-        }
+}
+
+/// Spawn the agent CLI under the picked endpoint, rooted at the project
+/// (falling back to the host's cwd rules), and register it as an external
+/// session — the TUI comes up IN THE MAIN COLUMN, its row in the sidebar.
+/// A spawn failure notifies instead of opening anything.
+fn spawn_agent_tab(request: &AgentSpawn, window: &mut Window, cx: &mut App) {
+    let (agent_id, display, svg) = request.agent;
+    let project = request.dir.clone();
+    let cwd = request.dir.clone().unwrap_or_else(fallback_cwd);
+    match crate::tool_tabs::spawn_agent_terminal(
+        agent_id,
+        &cwd,
+        &request.provider,
+        &request.model,
+        request.wire.clone(),
+        cx,
+    ) {
+        Ok(view) => launch_external(request.ws, display.to_string(), svg, project, view, cx),
         Err(e) => spawn_failed_notification(display, &e, window, cx),
     }
 }
 
-fn open_terminal_tab(
-    title: impl Into<gpui::SharedString>,
+/// Register a spawned terminal as an external session and bring it up in
+/// the MAIN column (the shell wraps the main column — terminal/TUI sessions
+/// live there, not in the right pane). The sidebar row rides the
+/// workspace's own projection.
+fn launch_external(
+    ws: &gpui::WeakEntity<Workspace>,
+    label: String,
+    svg: &'static str,
+    project: Option<PathBuf>,
     view: Entity<terminal_ui::TerminalView>,
     cx: &mut App,
 ) {
-    let tab = crate::tool_tabs::prebuilt_terminal_tab(title, "icons/terminal.svg", view);
-    crate::chrome_assembly::open_tool_tab(tab, cx);
+    let _ = ws.update(cx, |ws, cx| {
+        ws.spawn_external_session(label, svg, project, view, cx);
+    });
 }
 
 /// The failure notice names the program that failed to start — the terminal

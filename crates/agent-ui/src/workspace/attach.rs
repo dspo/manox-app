@@ -52,6 +52,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // New-session intent returns the main column to the conversation
+        // (an on-screen external session parks, still running).
+        self.leave_external_session();
         // The park/draft bookkeeping is identical to `attach_thread`'s switch
         // arm, but there is no outgoing-thread double-bind to preserve: the
         // outgoing thread is detached on the park, the incoming id is unknown
@@ -842,6 +845,9 @@ impl Workspace {
     }
 
     pub fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Opening a thread is an implicit park for the external session on
+        // screen (its terminal keeps running) — the conversation returns.
+        self.leave_external_session();
         self.open_thread_inner(id, true, window, cx);
     }
 

@@ -21,8 +21,8 @@ use crate::main_surface::MainSurfaceHandle;
 use crate::panel::{PanelSlot, PanelSurface};
 use crate::right_pane::{RightPane, ToolTabFactory};
 use crate::session_list::{
-    CustomizationRow, FixedRow, SessionGroup, SessionList, SessionRowData, SessionStatus,
-    SidebarGrouping,
+    CustomizationRow, FixedRow, SessionGroup, SessionList, SessionRowData, SessionRowKind,
+    SessionStatus, SidebarGrouping,
 };
 use crate::theme::{
     CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
@@ -44,6 +44,9 @@ pub struct SessionRow {
     /// host's cwd rules and hides the remove-project row.
     pub project: Option<String>,
     pub status: SessionStatus,
+    /// What the row is (thread vs live external session) — the leading slot
+    /// and the row menu ride it.
+    pub kind: SessionRowKind,
     /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
     /// The re-sort stamp: the row's own `updated_at`, except team members
@@ -77,6 +80,7 @@ impl SessionRow {
                 workspace: group.name.clone(),
                 project: group.project.clone(),
                 status: r.status,
+                kind: r.kind,
                 updated_at: r.updated_at,
                 sort_stamp: r.sort_stamp,
                 pinned: r.pinned,
@@ -94,6 +98,7 @@ impl SessionRow {
             updated_at: self.updated_at,
             sort_stamp: self.sort_stamp,
             status: self.status,
+            kind: self.kind,
             pinned: self.pinned,
             archived: self.archived,
             tag: self.tag.clone(),
@@ -169,6 +174,10 @@ pub struct HostHooks {
     /// Group-menu builder (the project actions: launch agents / terminal /
     /// editor, remove project). Absent → group headers carry no menu surface.
     pub on_group_menu: Option<HookOnGroupMenu>,
+    /// Close a live external session (the external row menu's 关闭会话):
+    /// the host closes its tab AND reaps the sidebar row. Absent → the menu
+    /// item fires nothing (a host that surfaces external rows owes this).
+    pub on_close_external: Option<HookOnId>,
 }
 
 /// Everything the shell needs from its host at construction.
@@ -512,10 +521,13 @@ impl Shell {
         self.group_order = order;
     }
 
-    /// Row menu (right-click on a row): the ONLY action surface —
-    /// pin/unpin, archive/unarchive, tag add/rename/remove, copy id. Every
-    /// action closes the menu; toggles read the row's current flags so the
-    /// label names the action it will perform.
+    /// Row menu (right-click on a row): the ONLY action surface. Threads:
+    /// pin/unpin, archive/unarchive, tag add/rename/remove, copy id. A live
+    /// external session (a launched CLI agent / terminal): 关闭会话 + copy
+    /// id — its teardown rides [`HostHooks::on_close_external`], the
+    /// legacy sidebar's ArchiveExternalSession semantics. Every action
+    /// closes the menu; toggles read the row's current flags so the label
+    /// names the action it will perform.
     pub fn open_row_menu(
         &mut self,
         id: &str,
@@ -531,6 +543,45 @@ impl Shell {
         let Some(sess) = self.sessions.iter().find(|s| s.id == id) else {
             return;
         };
+        // The external-session branch: 关闭会话 (the hook reaps the row AND
+        // closes its tab) + copy id. No thread semantics on a PTY.
+        if let crate::session_list::SessionRowKind::External { .. } = sess.kind {
+            let this = cx.entity();
+            let id_close = id.to_string();
+            let id_copy = id.to_string();
+            let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
+                menu.max_w(gpui::px(220.))
+                    .item(
+                        PopupMenuItem::new(manox_i18n::t("sidebar-close-external"))
+                            .icon(crate::theme::icons::CLOSE)
+                            .on_click(move |_, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    if let Some(hook) = &this.hooks.on_close_external {
+                                        hook(&id_close, window, cx);
+                                    }
+                                    this.close_row_menu(cx);
+                                });
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id"))
+                            .icon(crate::theme::icons::COPY)
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    id_copy.clone(),
+                                ));
+                            }),
+                    )
+            });
+            let sub = cx.subscribe(&menu, |this, _menu, _: &gpui::DismissEvent, cx| {
+                this.close_row_menu(cx);
+            });
+            self.row_menu_sub = Some(sub);
+            self.row_menu = Some((id.to_string(), anchor, menu));
+            cx.notify();
+            return;
+        }
         let pinned = sess.pinned;
         let archived = sess.archived;
         let has_tag = sess.tag.is_some();
