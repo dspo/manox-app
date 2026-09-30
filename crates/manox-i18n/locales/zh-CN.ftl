@@ -129,7 +129,6 @@ message-fork-unavailable-mid-turn = 仅可从已完成轮次的最后一条消�
 
 message-fork-unavailable-not-replayed = 该行不属于会话记录，无法分叉
 
-
 recap-card-title = 上下文已压缩
 
 cache-miss-label = 缓存未命中 · { $tokens } tokens
@@ -153,8 +152,6 @@ status-denied = 已拒绝
 status-cancelled = 已取消
 
 ### views/message.rs — Thinking 状态行
-
-context-agents-title = 智能体
 
 context-agents-captain = 船长
 
@@ -289,8 +286,6 @@ settings-desc-file-target = 默认打开文件和文件夹的位置
 settings-row-ui-language = 用户界面语言
 
 settings-desc-ui-language = 界面显示语言，保存后立即生效。
-
-
 
 settings-save-failed-title = 设置保存失败
 
@@ -690,7 +685,6 @@ workspace-reasoning-high = 高
 
 workspace-reasoning-max = 最高
 
-
 workspace-ask-supplement-label = 补充说明
 
 workspace-ask-supplement-placeholder = 添加可选补充说明
@@ -871,12 +865,6 @@ titlebar-schedule = 添加计划任务...
 titlebar-new-window = 在新窗口中打开
 # ── 环境信息面板 ──────────────────────────────────────────────────────
 
-workspace-env-no-project = 暂无项目
-
-workspace-env-usage = 消费
-
-workspace-env-sources = 来源
-
 workspace-env-no-sources = 暂无来源
 
 workspace-env-git-unavailable = git 不可用
@@ -885,36 +873,18 @@ workspace-env-git-not-a-repo = 非 git 仓库
 
 workspace-env-git-detached = 分离头指针
 
-workspace-env-git-copied-branch = 已复制分支名到剪贴板。
-
-workspace-env-git-copied-worktree-name = 已复制目录名到剪贴板。
-
-workspace-env-git-copied-worktree-path = 已复制目录路径到剪贴板。
-
 # ── 上下文栏（右侧边栏）────────────────────────────────────────────────
 
-context-rail-title = 对话信息
-
-context-tooltip-main-calls = 主调用
-
-context-tooltip-side-calls = 辅助调用
-
-context-tooltip-calls-unit = 次
 # ── Cockpit（运行状态 / 里程碑 / 上下文预算）──────────────────────────
 # 运行状态行的阶段标签（三状态 tag：生成中 / 思考中 / 待输入）。
 # "待输入"标签归并 idle / stopped / failed / awaiting approval。
 # 计划区段标题。
 
-cockpit-milestones-header = 计划
 # 计划进度计数，显示在标题栏右侧。{$done}/{$total} 为已完成/总数。
 
-cockpit-plan-progress = {$done}/{$total}
 # 折叠态下当前任务之外的剩余任务数。{$count} 为数字。
 
-cockpit-plan-remaining = +{$count} 项待办
 # 折叠态下全部任务完成的提示。
-
-cockpit-plan-all-done = 全部完成
 
 composer-pasted-image = 粘贴的图片
 
@@ -1101,7 +1071,6 @@ plugins-notice-plugin-removed = 插件已移除。重启 manox 后会卸载启�
 plugins-notice-plugin-enabled = 插件已启用。重启 manox 后会加载其工具、技能、agent、hook 和 MCP 服务器。
 
 plugins-notice-plugin-disabled = 插件已禁用。重启 manox 后会卸载启动时加载的运行时注册表。
-
 
 ## manox-agent-chrome-ui（应用壳：侧栏/标题栏/页签/底部面板）
 

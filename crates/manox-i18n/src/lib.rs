@@ -542,6 +542,13 @@ mod tests {
             !sources.is_empty(),
             "the agent-ui sources are not where the scan expects them"
         );
+        // The conversation info bubble resolves its chrome keys from
+        // `manox-agent-chat-ui/src/views/context_rail.rs` — without this
+        // directory in the scan, its parity is ungated.
+        collect_rs(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../manox-agent-chat-ui/src"),
+            &mut sources,
+        );
         collect_rs(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../manox-agent-chrome-ui/src"),
             &mut sources,

@@ -1,141 +1,364 @@
-//! Right-hand context rail: a stable sidecar showing the active thread's
-//! environment/cockpit information (run status, changes, branch, per-model
-//! token usage, context budget, execution plan, sources).
+//! The conversation info bubble: the active thread's cockpit information
+//! (run status, subagents, branch/worktree, written plan files, todos,
+//! per-model token usage, sources) rendered as a popover above the
+//! composer's context-usage ring.
 //!
-//! The rail is a first-class view owned by [`crate::Workspace`]. It holds
-//! the cockpit state (run phase, the model's plan snapshot, per-cell
-//! counter animation state) that used to live directly on `Workspace`,
-//! plus the AgentServer-backed store mirror it renders against (U7b:
-//! the store leaf is the rail's ONLY read face — the former kernel
-//! thread-handle field outlived the γ-2a dual-read migration it was
-//! the fallback of, and retired). Writes to cockpit state flow through
-//! `Workspace` → `self.context_rail.update(cx, |r, cx| …)`.
+//! The rail entity is the state store the workspace feeds from
+//! `ThreadEvent`s and the Q-face info fetches; the bubble is its only
+//! render face. The floating top-right card it replaces was the same
+//! state drawn as a permanent overlay — the bubble trades the reserved
+//! column inset and the width gate for a click-open surface (toggle on
+//! the ring, outside click / Escape / thread switch to close; the fold
+//! state resets on close).
 //!
-//! Layout: a fixed-width card that floats over the conversation column's
-//! top-right as an absolute overlay — a peer in the z-stack, not a flex
-//! column and not a flush rail. The conversation body reserves the card's
-//! width as right padding so the message list never hides behind it. A shared
-//! title bar spans the whole conversation column over both the message list
-//! and this card's slot. The editor pane is a third top-level column outside
-//! the conversation, and while it is open the card stays hidden so the
-//! conversation reclaims its width.
+//! Layout contract (design/conversation-info-bubble): no headings — six
+//! segments separated only by 1px hairlines, width
+//! `clamp(natural, 260, 360)`, height = content capped by the space above
+//! the ring with internal scrolling past that.
 
 use crate::client_store_handle::ClientStoreHandle;
 use crate::i18n;
-use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, MouseButton, MouseUpEvent, Render,
-    SharedString, Window, prelude::*, px,
-};
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, TITLE_BAR_HEIGHT, Theme, WindowExt as _,
-    h_flex, notification::Notification, tooltip::Tooltip, v_flex,
-};
+use gpui::{AnyElement, App, Context, Entity, Pixels, SharedString, prelude::*, px};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
 use manox_agent::ThreadEvent;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use manox_agent::{PlanSnapshot, PlanStepStatus};
+use manox_agent::{PlanSnapshot, PlanStep, PlanStepStatus};
 
-use crate::cockpit::{CockpitPhase, cache_read_ratio, context_budget_pct, format_cache_hit};
-use crate::git_status::{GitBranchDisplay, GitChangeStats};
-use crate::views::subagents::{SubagentInfo, status_indicator, subagent_display_title};
+use crate::cockpit::{
+    CockpitPhase, cache_read_ratio, context_budget_pct, format_cache_hit, format_tokens_pi,
+};
+use crate::git_status::GitBranchDisplay;
+use crate::views::subagents::{SubagentInfo, status_indicator, task_display_title};
 
-// ── Geometry ─────────────────────────────────────────────────────────────
+// ── Bubble geometry ──────────────────────────────────────────────────────
 
-/// Floating card width. Wide enough for the per-model usage block: model id
-/// on the top line, then `├─ pct% used/cap` and `└─ ↑input ↓output Rcache
-/// CHhit%` tree rows underneath.
-pub const ENV_CARD_WIDTH: f32 = 260.;
-/// Right inset the conversation body reserves for the floating card: the
-/// card width plus a gutter so the message list clears the card's shadow.
-pub const ENV_CONTENT_INSET: f32 = ENV_CARD_WIDTH + 36.;
-/// Below this main-column width the card folds away and the conversation
-/// column takes the full body. Matches the old env-card gate so a narrow
-/// window never crowds the conversation.
-const RAIL_NARROW_BREAK: f32 = 900.;
+/// Bubble width floor: the old card's width, so the information density
+/// never regresses below what the permanent overlay showed.
+pub const BUBBLE_MIN_W: f32 = 260.;
+/// Bubble width ceiling: one overlong branch name or todo must not stretch
+/// the bubble across the window.
+pub const BUBBLE_MAX_W: f32 = 360.;
 
-// ── ContextRail view ──────────────────────────────────────────────────────
+/// Occupancy at which warning coloring kicks in — shared with the
+/// composer ring (agent-ui imports this; the old agent-ui-private copy
+/// forked the threshold).
+pub const CONTEXT_NEAR_FULL_PCT: f64 = 90.0;
+/// Fold caps — rows shown before a section collapses the rest into `+N`.
+const SUBAGENTS_CAP: usize = 5;
+const PLANS_CAP: usize = 5;
+const TODOS_CAP: usize = 8;
+const MODELS_CAP: usize = 5;
 
-/// Right-side context sidecar. Owns the cockpit state (run phase, the model's
-/// plan snapshot, per-cell counter animation state) and renders the
-/// environment/cockpit panel that used to float as an absolute card over the
-/// conversation.
+/// The main agent's literal label. App chrome is localized, but this one
+/// name is a product term rendered verbatim — unlike the message-signature
+/// Captain (`views/message.rs`), which keeps its localized key.
+const CAPTAIN_LABEL: &str = "Captain";
+
+// ── Fold helpers ─────────────────────────────────────────────────────────
+
+/// A capped list section's fold: the visible row count plus the fold size
+/// (what collapsing would hide — the `+N` row's count). `hidden` is
+/// non-zero whenever the collapsed view would hide rows, expanded or not:
+/// the `+N` toggle must stay reachable to fold back down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldPlan {
+    pub visible: usize,
+    pub hidden: usize,
+}
+
+/// Prefix fold for the plainly-capped sections (plans / todos / models):
+/// expanded shows everything; collapsed shows the first `cap` rows. The
+/// fold size is expansion-independent.
+pub fn fold_window(len: usize, cap: usize, expanded: bool) -> FoldPlan {
+    let hidden = len.saturating_sub(cap);
+    FoldPlan {
+        visible: if expanded { len } else { len - hidden },
+        hidden,
+    }
+}
+
+/// Lifecycle activity, per the `ToolCallStatus` — NOT the watchdog's
+/// `health` line, which describes liveness-with-possible-stalls and misses
+/// rows that finished before their first health verdict landed.
+pub fn subagent_is_active(status: manox_agent::ToolCallStatus) -> bool {
+    matches!(
+        status,
+        manox_agent::ToolCallStatus::Running | manox_agent::ToolCallStatus::PendingApproval
+    )
+}
+
+/// The subagent section's folded view: the rows to render (see
+/// [`subagent_display_order`] for the order) plus the fold size — what
+/// collapsing would hide, expansion-independent so the `+N` toggle stays
+/// reachable to fold back down.
+pub struct SubagentFold<'a> {
+    pub rows: Vec<&'a SubagentInfo>,
+    pub hidden: usize,
+}
+
+/// Folded view of the bubble's subagent section: active rows first and
+/// finished rows appended in their first-seen order. Collapsed, the
+/// finished rows fold into `hidden` (plus any active overflow past the
+/// cap); expanded, everything shows. Both halves keep their original
+/// order — the list must not shuffle on every store notify.
+pub fn subagent_display_order(agents: &[SubagentInfo], expanded: bool) -> SubagentFold<'_> {
+    let mut active: Vec<usize> = Vec::new();
+    let mut finished: Vec<usize> = Vec::new();
+    for (i, info) in agents.iter().enumerate() {
+        if subagent_is_active(info.status) {
+            active.push(i);
+        } else {
+            finished.push(i);
+        }
+    }
+    let hidden = agents.len() - active.len().min(SUBAGENTS_CAP);
+    if expanded {
+        active.extend(finished);
+    } else {
+        active.truncate(SUBAGENTS_CAP);
+    }
+    SubagentFold {
+        rows: active.into_iter().map(|i| &agents[i]).collect(),
+        hidden,
+    }
+}
+
+/// Stable priority order for the todo list: InProgress → Pending →
+/// Completed, original order preserved within each group (`sort_by_key` is
+/// stable — an unstable sort would visibly reshuffle rows on every refresh).
+pub fn sort_todo_steps(steps: &mut [PlanStep]) {
+    steps.sort_by_key(|step| plan_sort_key(step.status));
+}
+
+/// Sort priority of a todo status: in-progress work first, then pending,
+/// completed last.
+pub fn plan_sort_key(status: PlanStepStatus) -> u8 {
+    match status {
+        PlanStepStatus::InProgress => 0,
+        PlanStepStatus::Pending => 1,
+        PlanStepStatus::Completed => 2,
+    }
+}
+
+// ── Todo status visuals ───────────────────────────────────────────────────
+
+/// One todo status glyph: a single-diameter ring carrying the state — the
+/// sidebar's "blue dot = awaiting human" vocabulary, not three mismatched
+/// typefaces.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TodoGlyph {
+    pub ring_color: gpui::Hsla,
+    /// `InProgress` only: the accent dot inside the ring.
+    pub inner_dot: bool,
+    /// `Completed` only: the small check nested in the (muted) ring.
+    pub check: bool,
+}
+
+/// Text treatment that rides the glyph — the completed state is carried
+/// mostly by the text (muted + struck through), not by the mark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TodoTextStyle {
+    pub color: gpui::Hsla,
+    pub line_through: bool,
+    pub semibold: bool,
+}
+
+/// Status → glyph + text mapping.
+pub fn todo_visual(status: PlanStepStatus, theme: &Theme) -> (TodoGlyph, TodoTextStyle) {
+    match status {
+        PlanStepStatus::Pending => (
+            TodoGlyph {
+                ring_color: theme.muted_foreground,
+                inner_dot: false,
+                check: false,
+            },
+            TodoTextStyle {
+                color: theme.foreground,
+                line_through: false,
+                semibold: false,
+            },
+        ),
+        PlanStepStatus::InProgress => (
+            TodoGlyph {
+                ring_color: theme.accent,
+                inner_dot: true,
+                check: false,
+            },
+            TodoTextStyle {
+                color: theme.foreground,
+                line_through: false,
+                semibold: true,
+            },
+        ),
+        PlanStepStatus::Completed => (
+            TodoGlyph {
+                ring_color: theme.muted_foreground,
+                inner_dot: false,
+                check: true,
+            },
+            TodoTextStyle {
+                color: theme.muted_foreground,
+                line_through: true,
+                semibold: false,
+            },
+        ),
+    }
+}
+
+// ── Plan files ───────────────────────────────────────────────────────────
+
+/// One plan file this conversation wrote, resolved at bubble-open time by
+/// the workspace from the session's `ProposePlan` rows — the model's only
+/// plan-approval channel, whose args carry the slug/title pair verbatim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanFileEntry {
+    /// Display title: the proposal's supplied title, else the slug (the
+    /// file stem — `<slug>-plan.md` is the on-disk name).
+    pub title: String,
+}
+
+impl PlanFileEntry {
+    /// Parse a `ProposePlan` tool call's arguments into an entry, paired
+    /// with its dedupe key. `None` when the slug is missing or blank —
+    /// the caller drops the row (a proposal without a slug never named a
+    /// plan file).
+    pub fn from_proposal(input: &serde_json::Value) -> Option<(String, Self)> {
+        let slug = input
+            .get("slug")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let title = input
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map_or_else(|| slug.to_string(), str::to_string);
+        Some((slug.to_string(), Self { title }))
+    }
+}
+
+// ── Fold sections ────────────────────────────────────────────────────────
+
+/// Which foldable list section a `+N` row belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BubbleSection {
+    Subagents,
+    Plans,
+    Todos,
+    Models,
+}
+
+/// Per-section fold state. Bubble-local UI state only: reset when the
+/// bubble closes, never persisted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BubbleExpanded {
+    subagents: bool,
+    plans: bool,
+    todos: bool,
+    models: bool,
+}
+
+impl BubbleExpanded {
+    fn flip(&mut self, section: BubbleSection) {
+        match section {
+            BubbleSection::Subagents => self.subagents = !self.subagents,
+            BubbleSection::Plans => self.plans = !self.plans,
+            BubbleSection::Todos => self.todos = !self.todos,
+            BubbleSection::Models => self.models = !self.models,
+        }
+    }
+}
+
+// ── ContextRail state ─────────────────────────────────────────────────────
+
+/// Cockpit state store for the active thread plus the conversation info
+/// bubble's open/fold state. Writes flow through `Workspace` →
+/// `self.context_rail.update(cx, |r, cx| …)`.
 pub struct ContextRail {
     /// The AgentServer-backed store mirroring kernel state via
     /// `ServerNote`s (U7b: the rail's only read face — per-model usage,
-    /// project, cwd and title all read this leaf; the γ-2a dual-read
-    /// fallback the retired kernel thread-handle field served is gone).
+    /// project, cwd and title all read this leaf).
     /// `None` only before the workspace creates the AgentServer
     /// connection.
     store: Option<Entity<ClientStoreHandle>>,
     /// Coarse run phase. Derived from `ThreadEvent`s routed here by
-    /// `Workspace`; used to determine the main agent's status indicator.
+    /// `Workspace`; drives the Captain row's status indicator.
     pub cockpit_phase: CockpitPhase,
-    /// The model's current execution plan, published via `UpdatePlan` and
-    /// recovered from history on reload. `None` until the model publishes one
-    /// (or after it clears its list). The rail renders the snapshot's own
-    /// step statuses verbatim — nothing here infers progress.
+    /// The model's current todo list, published via `UpdatePlan` and
+    /// recovered from history on reload. `None` until the model publishes
+    /// one (or after it clears its list). The bubble renders the snapshot's
+    /// own step statuses verbatim — nothing here infers progress.
     pub plan: Option<PlanSnapshot>,
-    /// Whether the plan section is collapsed (`ToggleCockpitTasks` /
-    /// cmd/ctrl-shift-m toggles). Hidden still renders the run-status row.
-    pub cockpit_hide_tasks: bool,
-    /// Whether a plan has been seen for the current thread yet. The first
-    /// snapshot auto-collapses when it is long enough; subsequent updates
-    /// preserve whatever collapse state the user last chose.
-    pub plan_seen: bool,
     agents: Vec<SubagentInfo>,
     pub side_calls: Vec<manox_agent::SideCallMetric>,
     pub main_call: Option<manox_agent::SideCallMetric>,
-    /// Latest git change stats for the thread's cwd. Refreshed (debounced) by
-    /// `Workspace` on thread attach and terminal stop.
-    pub git_change_stats: Option<GitChangeStats>,
-    /// Latest resolved branch display for the thread's cwd. `None` until the
-    /// first refresh completes; the changes/branch rows render placeholders
-    /// until then.
+    /// Latest resolved branch display for the thread's cwd. `None` until
+    /// the first refresh completes; the bubble's branch pair renders its
+    /// placeholders until then.
     pub git_branch_display: Option<GitBranchDisplay>,
-    /// Reaches the workspace so agent rows can open their observation panel.
-    host: Option<crate::host::ChatHostHandle>,
+    /// Whether the conversation info bubble is open. Toggled by the
+    /// context-usage ring; any close path (toggle, outside click, Escape,
+    /// thread switch) also resets the fold state.
+    pub bubble_open: bool,
+    bubble_expanded: BubbleExpanded,
+    /// Keyboard escape hatch for the open bubble: the surface takes focus
+    /// when it opens, so `Escape` lands on this handle's key context.
+    pub bubble_focus: gpui::FocusHandle,
+    /// Set when an outside `mouse_down` just dismissed the bubble. The
+    /// ring's `click` fires AFTER that dismissal (down out, then up), so a
+    /// click that lands within the suppression window must not re-open —
+    /// otherwise clicking the ring to close would close-then-reopen.
+    bubble_dismissed_at: Option<gpui::Point<gpui::Pixels>>,
 }
 
-/// Wire-api accent color for the rail's model row (moved from the
-/// workspace; a pure palette function).
-pub fn pi_wire_text_color(api: &str, theme: &gpui_component::Theme) -> gpui::Hsla {
+/// Wire api → tag color + display label: THE wire-api vocabulary, shared
+/// with the model menu (whose rows render it as a `Tag` variant). One
+/// mapping, so every surface that names a wire api reads the same color.
+pub fn pi_wire_tag(api: &str) -> Option<(gpui_component::ColorName, &'static str)> {
     match api {
-        "responses" => theme.info,
-        "anthropic" => theme.accent,
-        _ => theme.muted_foreground,
+        "anthropic" => Some((gpui_component::ColorName::Blue, "Anthropic")),
+        "openai_responses" => Some((gpui_component::ColorName::Cyan, "Responses")),
+        "openai_completions" => Some((gpui_component::ColorName::Amber, "Completions")),
+        _ => None,
+    }
+}
+
+/// Wire-api text tint for the bubble's model rows: the tag color at the
+/// menu tag's exact scale (600 light / 300 dark — the `Tag` outline fg
+/// formula), muted for unknown/absent apis.
+pub fn pi_wire_text_color(api: &str, theme: &gpui_component::Theme) -> gpui::Hsla {
+    match pi_wire_tag(api) {
+        Some((color, _)) => color.scale(if theme.is_dark() { 300 } else { 600 }),
+        None => theme.muted_foreground,
     }
 }
 
 impl ContextRail {
-    pub fn new(store: Option<Entity<ClientStoreHandle>>) -> Self {
+    pub fn new(store: Option<Entity<ClientStoreHandle>>, cx: &mut App) -> Self {
         Self {
             store,
             cockpit_phase: CockpitPhase::Idle,
             plan: None,
-            cockpit_hide_tasks: false,
-            plan_seen: false,
             agents: Vec::new(),
             side_calls: Vec::new(),
             main_call: None,
-            git_change_stats: None,
             git_branch_display: None,
-            host: None,
+            bubble_open: false,
+            bubble_expanded: BubbleExpanded::default(),
+            bubble_focus: cx.focus_handle(),
+            bubble_dismissed_at: None,
         }
     }
 
-    /// Injected by the owning workspace after construction so agent rows can
-    /// open their observation panel.
-    pub fn set_host(&mut self, host: crate::host::ChatHostHandle) {
-        self.host = Some(host);
-    }
-
-    /// Re-bind the rail's read face to the newly attached thread's leaf.
-    /// The store is the rail's ONLY data source (U7b): the SessionStatus
-    /// deltas and the Q-face info-fetch responses only reach the leaf of
-    /// the ATTACHED session, so a rail left bound to a previous leaf
-    /// renders a permanently frozen status row and usage face (the
-    /// rail-freeze regression from the visual-acceptance run).
+    /// Re-bind the bubble's read face to the newly attached thread's leaf.
+    /// The store is the ONLY data source (U7b): the SessionStatus deltas
+    /// and the Q-face info-fetch responses only reach the leaf of the
+    /// ATTACHED session, so a rail left bound to a previous leaf renders a
+    /// permanently frozen usage face (the rail-freeze regression from the
+    /// visual-acceptance run).
     pub fn bind_store(&mut self, store: Option<Entity<ClientStoreHandle>>, cx: &mut Context<Self>) {
         self.store = store;
         cx.notify();
@@ -147,22 +370,10 @@ impl ContextRail {
         self.store.as_ref().map(|s| s.entity_id())
     }
 
-    /// Whether the floating context card is shown at the given main-column
-    /// body width. `None` means the window is too narrow: the card folds away
-    /// and the conversation column takes the full body.
-    pub fn rail_width_for(main_body_w: gpui::Pixels) -> Option<f32> {
-        if main_body_w < px(RAIL_NARROW_BREAK) {
-            None
-        } else {
-            Some(ENV_CARD_WIDTH)
-        }
-    }
-
-    /// Reset per-thread cockpit state on thread switch: the outgoing thread's
-    /// plan, running-tool title, and per-model counter state do not
-    /// apply to the incoming one. Mirrors the old `Workspace::set_active_thread`
-    /// reset. Also clears the cached git stats so the incoming thread shows
-    /// placeholders until its own refresh lands.
+    /// Reset per-thread cockpit state on thread switch: the outgoing
+    /// thread's plan and per-model counter state do not apply to the
+    /// incoming one. The bubble closes too — its contents are the outgoing
+    /// thread's, already stale.
     pub fn reset_for_thread_switch(&mut self, running: bool, cx: &mut Context<Self>) {
         self.side_calls.clear();
         self.main_call = None;
@@ -177,22 +388,8 @@ impl ContextRail {
         // `set_plan`; clear here so a thread with no plan starts empty rather
         // than inheriting the outgoing thread's list.
         self.plan = None;
-        self.plan_seen = false;
-        self.git_change_stats = None;
         self.git_branch_display = None;
-        cx.notify();
-    }
-
-    /// Replace the cached git stats/branch display. Called by `Workspace`
-    /// after a debounced background `git_status::gather` resolves.
-    pub fn set_git_status(
-        &mut self,
-        stats: Option<GitChangeStats>,
-        display: Option<GitBranchDisplay>,
-        cx: &mut Context<Self>,
-    ) {
-        self.git_change_stats = stats;
-        self.git_branch_display = display;
+        self.set_bubble_open(false, cx);
         cx.notify();
     }
 
@@ -232,9 +429,10 @@ impl ContextRail {
     }
 
     /// Upsert one sub-agent observation row from a `SubagentProgress` event
-    /// (the pi harness emits these around its ephemeral nested sessions;
-    /// the retired manox harness maintained its list from child threads
-    /// instead). `health` carries the watchdog's one-line verdict while the
+    /// (the pi harness emits these around its ephemeral nested sessions).
+    /// `self.agents` is first-seen order by construction ("update in place,
+    /// else push") — the bubble's subagent section relies on that and never
+    /// re-sorts. `health` carries the watchdog's one-line verdict while the
     /// run is live; `None` leaves the stored verdict untouched.
     pub fn apply_subagent_progress(
         &mut self,
@@ -270,382 +468,248 @@ impl ContextRail {
         cx.notify();
     }
 
-    /// Threshold above which a freshly-seen plan auto-collapses so a long list
-    /// does not dominate the rail. At or below this, the plan starts expanded.
-    const PLAN_AUTOCOLLAPSE_ABOVE: usize = 5;
-
-    /// Adopt a plan snapshot published by the model (or recovered from history).
-    /// An empty snapshot clears the plan. The first plan seen for a thread sets
-    /// the collapse state by length; later updates preserve the user's choice,
-    /// so an update never yanks a plan the user manually expanded back closed.
+    /// Adopt a todo snapshot published by the model (or recovered from
+    /// history). An empty snapshot clears the list.
     pub fn set_plan(&mut self, snapshot: PlanSnapshot, cx: &mut Context<Self>) {
         if snapshot.is_empty() {
             self.plan = None;
             cx.notify();
             return;
         }
-        if !self.plan_seen {
-            self.plan_seen = true;
-            self.cockpit_hide_tasks = snapshot.steps.len() > Self::PLAN_AUTOCOLLAPSE_ABOVE;
-        }
         self.plan = Some(snapshot);
         cx.notify();
     }
 
-    // ── Rendering ─────────────────────────────────────────────────────────
+    /// Replace the cached branch display. Called by `Workspace` after a
+    /// debounced background `git_status::gather_branch` resolves.
+    pub fn set_git_branch(&mut self, display: Option<GitBranchDisplay>, cx: &mut Context<Self>) {
+        self.git_branch_display = display;
+        cx.notify();
+    }
 
-    /// The floating context card's body: the conversation-info chrome (border,
-    /// rounded corners, drop shadow, background) plus its content rows. The
-    /// `Render` impl positions this as an absolute overlay over the
-    /// conversation column's top-right; this fn only paints the card itself.
-    fn render_panel(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let project = self.store.as_ref().map(|s| {
-            s.read(cx)
-                .store
-                .with(|st| std::path::PathBuf::from(st.cwd.clone()))
-        });
-        let agents_section = self.render_agents_section(theme, cx);
+    // ── Bubble open/fold state ────────────────────────────────────────────
+
+    /// Open/close the bubble. Every close path resets the fold state — the
+    /// expansion is bubble-local UI, not durable state.
+    pub fn set_bubble_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.bubble_open == open {
+            return;
+        }
+        self.bubble_open = open;
+        self.bubble_dismissed_at = None;
+        if !open {
+            self.bubble_expanded = BubbleExpanded::default();
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_bubble(&mut self, cx: &mut Context<Self>) {
+        self.set_bubble_open(!self.bubble_open, cx);
+    }
+
+    /// Record an outside-click dismissal. The triggering click's own `up`
+    /// reaches the ring right after; a toggle inside the suppression window
+    /// is the same gesture closing the bubble, not a fresh open.
+    pub fn note_outside_dismiss(&mut self, down_pos: gpui::Point<gpui::Pixels>) {
+        self.bubble_dismissed_at = Some(down_pos);
+    }
+
+    /// Whether the ring's toggle may open the bubble now (see
+    /// [`Self::note_outside_dismiss`]). Same-gesture by POSITION: the
+    /// closing mouse_down versus the click's own down — duration is
+    /// irrelevant, so a slow press-hold still reads as "close".
+    pub fn toggle_suppressed(&mut self, down_pos: gpui::Point<gpui::Pixels>) -> bool {
+        // One-shot: consumed on read. Without the take, a guard left at the
+        // ring's own position would match every later click at that same
+        // spot and the bubble could never be re-opened from there.
+        self.bubble_dismissed_at
+            .take()
+            .is_some_and(|at| (at - down_pos).magnitude() < 6.0)
+    }
+
+    /// The one outside-dismissal close path: close (which resets the fold
+    /// state AND the suppression guard) and only then record the guard.
+    /// Order is load-bearing — `set_bubble_open(false)` clears the guard, so
+    /// noting first would be wiped and the ring's click would re-open the
+    /// bubble it just closed.
+    pub fn dismiss_outside(&mut self, down_pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.set_bubble_open(false, cx);
+        self.note_outside_dismiss(down_pos);
+    }
+
+    fn toggle_section_fold(&mut self, section: BubbleSection, cx: &mut Context<Self>) {
+        self.bubble_expanded.flip(section);
+        cx.notify();
+    }
+
+    // ── Bubble rendering ──────────────────────────────────────────────────
+
+    /// The conversation info bubble's content: six segments separated only
+    /// by hairlines (no headings), each empty segment — divider included —
+    /// skipped. `plan_files` arrives newest-first (the workspace collects
+    /// the session's `ProposePlan` rows and reverses); `max_w`/`max_h` are
+    /// the window-derived clamps the caller refines onto the popover
+    /// surface.
+    pub fn render_bubble(
+        this: &Entity<Self>,
+        plan_files: &[PlanFileEntry],
+        max_w: Pixels,
+        max_h: Pixels,
+        cx: &App,
+    ) -> AnyElement {
+        let rail = this.read(cx);
+        let theme = cx.theme().clone();
+        let expanded = rail.bubble_expanded;
+        let weak = this.downgrade();
+
+        let mut sections = Vec::new();
+        push_section(
+            &mut sections,
+            &theme,
+            rail.render_agents_section(&theme, &weak, cx),
+        );
+        push_section(
+            &mut sections,
+            &theme,
+            rail.render_branch_pair_section(&theme, cx),
+        );
+        push_section(
+            &mut sections,
+            &theme,
+            render_plan_files_section(plan_files, expanded.plans, &weak, &theme),
+        );
+        push_section(
+            &mut sections,
+            &theme,
+            rail.render_todos_section(expanded.todos, &weak, &theme),
+        );
+        push_section(
+            &mut sections,
+            &theme,
+            rail.render_models_section(expanded.models, &weak, &theme, cx),
+        );
+        push_section(&mut sections, &theme, render_sources_section(&theme));
 
         v_flex()
+            .id("conversation-info-bubble")
             .w_full()
-            .min_h_0()
-            .p_3()
+            .min_w(px(BUBBLE_MIN_W))
+            .max_w(max_w)
+            .max_h(max_h)
+            .overflow_y_scroll()
             .gap_2()
-            .border_1()
-            .border_color(theme.border)
-            .rounded(theme.radius)
-            .bg(theme.background)
-            .shadow(std::vec![
-                gpui::BoxShadow::new(px(-3.), px(6.), gpui::hsla(0., 0., 0., 0.22))
-                    .blur_radius(px(10.)),
-            ])
-            .child(
-                gpui::div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.foreground)
-                    .child(i18n::t("context-rail-title")),
-            )
-            .child(agents_section)
-            .child(self.render_branch_block(&project, theme, cx))
-            .child(self.render_usage_section(theme, cx))
-            .child(self.render_plan_section(theme, cx))
-            .child(gpui::div().h(px(1.)).w_full().bg(theme.border))
-            // Sources section.
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        gpui::div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(i18n::t("workspace-env-sources")),
-                    )
-                    .child(
-                        gpui::div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(i18n::t("workspace-env-no-sources")),
-                    ),
-            )
+            .children(sections)
             .into_any_element()
     }
 
-    /// Cumulative token total row with a hover tooltip consolidating main
-    /// and side calls.
-    /// Usage section: a header row (icon + "消费" + total tokens), followed by
-    /// a per-model token breakdown tree when per-model data is available. Each
-    /// model node now carries a tree prefix (├─ / └─), shows its context-window
-    /// size as `[1m]`, and integrates its context-budget fill as the first
-    /// tree child (Context X% used/cap). Input/cache and output are the second
-    /// and third children.
-    fn render_usage_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let muted = theme.muted_foreground;
-        let total = crate::cockpit::format_tokens(
-            self.store
-                .as_ref()
-                .map(|s| {
-                    s.read(cx)
-                        .store
-                        .cumulative_usage
-                        .as_ref()
-                        .map(|u| u.input + u.output)
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0),
-        );
-        // Rate-card cost (#418 wire-boundary pricing); backends/sessions
-        // without pricing keep the tokens-only header.
-        let cumulative_cost = self
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.cumulative_cost))
-            .unwrap_or(0.0);
-        let total = if cumulative_cost > 0.0 {
-            SharedString::from(format!("{total} · {}", format_cost(cumulative_cost)))
-        } else {
-            SharedString::from(total)
-        };
-        let main_call = self.main_call.clone();
-        let side_calls = self.side_calls.clone();
-        let theme_clone = theme.clone();
-        let has_tooltip = main_call.is_some() || !side_calls.is_empty();
-        let header = h_flex()
-            .items_center()
-            .gap_2()
-            .child(
-                Icon::default()
-                    .path("icons/zodiac-scorpio.svg")
-                    .xsmall()
-                    .text_color(muted),
-            )
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(i18n::t("workspace-env-usage")),
-            )
-            .child(
-                gpui::div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(total),
-            );
-        let header: AnyElement = if has_tooltip {
-            header
-                .id("usage-tooltip-trigger")
-                .tooltip(move |window, cx| {
-                    let theme = theme_clone.clone();
-                    let main_call = main_call.clone();
-                    let side_calls = side_calls.clone();
-                    Tooltip::element(move |_w, _c| {
-                        build_usage_tooltip(main_call.as_ref(), &side_calls, &theme)
-                    })
-                    .build(window, cx)
-                })
-                .into_any_element()
-        } else {
-            header.into_any_element()
-        };
-
-        // Per-model token breakdown tree with context budget integrated.
-        let s = &self
-            .store
-            .as_ref()
-            .expect("foreground store present")
-            .read(cx)
-            .store;
-        let per_model = s
-            .per_model_usage
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    manox_agent::TokenUsage {
-                        input_tokens: v.input,
-                        output_tokens: v.output,
-                        cache_creation_input_tokens: v.cache_creation,
-                        cache_read_input_tokens: v.cache_read,
-                    },
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let per_model_last = s
-            .per_request_usage
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    manox_agent::TokenUsage {
-                        input_tokens: v.input,
-                        output_tokens: v.output,
-                        cache_creation_input_tokens: v.cache_creation,
-                        cache_read_input_tokens: v.cache_read,
-                    },
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let per_model_cost = s.per_model_cost.clone();
-        let warn_color = theme.warning;
-        let mut section = v_flex().w_full().gap_0p5().child(header);
-        if !per_model.is_empty() {
-            let mut models: Vec<(&String, &manox_agent::language_model::TokenUsage)> =
-                per_model.iter().collect();
-            models.sort_by_key(|(_, u)| -(u.total_tokens() as i64));
-            let total_models = models.len();
-            for (i, (model_name, usage)) in models.iter().enumerate() {
-                let is_last_model = i == total_models - 1;
-                // Tree glyphs: model node gets the root branch glyph; children
-                // share a 4-column indent prefix (vertical line or blank) plus
-                // their own branch glyph.
-                let branch = if is_last_model { "└─" } else { "├─" };
-                let indent = if is_last_model { "    " } else { "│   " };
-
-                // Model row: "{provider display}/{model display}" with the
-                // model segment tinted by its wire api; the raw composite key
-                // renders verbatim when the registry cannot resolve it.
-                let model_row = match model_name.split_once('/').and_then(|(provider, id)| {
-                    manox_agent::provider_glue::global().resolve_model(provider, id)
-                }) {
-                    Some(m) => h_flex()
-                        .text_xs()
-                        .min_w_0()
-                        .child(
-                            gpui::div()
-                                .flex_none()
-                                .text_color(theme.foreground)
-                                .child(format!("{branch} ")),
-                        )
-                        .child(
-                            gpui::div()
-                                .flex_none()
-                                .text_color(theme.muted_foreground)
-                                .child(manox_agent::provider_glue::display_provider_name(&m)),
-                        )
-                        .child(
-                            gpui::div()
-                                .flex_none()
-                                .text_color(theme.muted_foreground)
-                                .child("/"),
-                        )
-                        .child(
-                            gpui::div()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(pi_wire_text_color(&m.api, theme))
-                                .child(manox_agent::provider_glue::display_name(&m)),
-                        )
-                        .into_any_element(),
-                    None => gpui::div()
-                        .text_xs()
-                        .text_color(theme.foreground)
-                        .truncate()
-                        .child(SharedString::from(format!("{branch} {model_name}")))
-                        .into_any_element(),
-                };
-                section = section.child(model_row);
-
-                // Context budget row — first tree child, only when the model is
-                // registered (so its window size is resolvable).
-                let window_tokens = model_window_tokens(model_name);
-                let budget = window_tokens.and_then(|cap| {
-                    per_model_last.get(*model_name).and_then(|u| {
-                        let active = u
-                            .input_tokens
-                            .saturating_add(u.cache_creation_input_tokens)
-                            .saturating_add(u.cache_read_input_tokens);
-                        context_budget_pct(cap, active)
-                    })
-                });
-                if let Some(budget) = budget {
-                    let used = crate::cockpit::format_tokens_pi(budget.active_tokens);
-                    let cap = crate::cockpit::format_tokens_pi(budget.cap_tokens);
-                    let near_full = budget.used_pct >= 90.0;
-                    let ctx_color = if near_full { warn_color } else { muted };
-                    section = section.child(
-                        gpui::div()
-                            .text_xs()
-                            .text_color(ctx_color)
-                            .truncate()
-                            .child(SharedString::from(format!(
-                                "{indent}├─ {:.1}% {used}/{cap}",
-                                budget.used_pct
-                            ))),
-                    );
-                }
-
-                // Token line: ↑input ↓output Rcache_read CHcache_hit_rate. `--`
-                // (the tooltip convention) when there is no input to measure.
-                // With a priced model the cost row follows as the last child.
-                let cache_hit = crate::cockpit::cache_read_ratio(**usage)
-                    .map(|r| format_cache_hit(r, 1))
-                    .unwrap_or_else(|| "--".into());
-                let cost = per_model_cost.get(*model_name).copied().unwrap_or(0.0);
-                let token_branch = if cost > 0.0 { "├─" } else { "└─" };
-                section = section.child(gpui::div().text_xs().text_color(muted).truncate().child(
-                    SharedString::from(format!(
-                        "{indent}{token_branch} ↑{} ↓{} R{} CH{}",
-                        crate::cockpit::format_tokens_pi(usage.input_tokens),
-                        crate::cockpit::format_tokens_pi(usage.output_tokens),
-                        crate::cockpit::format_tokens_pi(usage.cache_read_input_tokens),
-                        cache_hit,
-                    )),
-                ));
-                if cost > 0.0 {
-                    section =
-                        section.child(gpui::div().text_xs().text_color(muted).truncate().child(
-                            SharedString::from(format!("{indent}└─ {}", format_cost(cost))),
-                        ));
-                }
-            }
-        }
-        section.into_any_element()
-    }
-    /// Change counts `+added` / `-deleted` plus an untracked badge, themed
-    /// directly with no label or icon. Rides as the branch row's trailing
-    /// element (right-aligned). `--` / no-project is the placeholder before
-    /// the first git refresh lands.
-    fn render_changes_trailing(&self, project: &Option<PathBuf>, theme: &Theme) -> AnyElement {
-        let Some(stats) = self.git_change_stats.as_ref() else {
-            let trailing = if project.is_some() {
-                SharedString::from("--")
-            } else {
-                i18n::t("workspace-env-no-project")
-            };
-            return gpui::div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(trailing)
-                .into_any_element();
-        };
-        let added = format!("+{}", stats.added);
-        let deleted = format!("-{}", stats.deleted);
-        h_flex()
-            .gap_1()
-            .text_xs()
-            .child(gpui::div().text_color(theme.success).child(added))
-            .child(gpui::div().text_color(theme.danger).child(deleted))
-            .children(if stats.untracked > 0 {
-                Some(
-                    gpui::div()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("?{}", stats.untracked)),
-                )
-            } else {
-                None
-            })
-            .into_any_element()
-    }
-
-    /// Branch block: (1) the working-directory basename, shown only while the
-    /// session's effective cwd is reported — click copies the name, double-click copies
-    /// the absolute path; (2) the branch row — resolved branch or detached sha
-    /// (+ "(detached)") as the label with the changes counts as its right-aligned
-    /// trailing. Both rows copy on click with a notification for feedback.
-    fn render_branch_block(
-        &mut self,
-        project: &Option<PathBuf>,
+    /// Captain + subagents. The Captain row always renders; subagent rows
+    /// show `{type} · {topic}` on the SAME left baseline (no indent, no
+    /// tree glyphs — the subordination is singular and certain). Only
+    /// unfinished rows show by default; finished rows fold into `+N` (a
+    /// quiet history keeps the Captain row and a bare `+N`).
+    fn render_agents_section(
+        &self,
         theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // The store mirrors the session's effective cwd as a string (the v2
-        // `cwd` projection; T10c retired the separate `cwd_path` note field —
-        // it was the same directory path).
-        let cwd_path = self.store.as_ref().and_then(|s| {
-            s.read(cx).store.with(|st| {
-                if st.cwd.is_empty() {
-                    None
-                } else {
-                    Some(st.cwd.clone())
-                }
-            })
-        });
-        let display = self.git_branch_display.clone();
+        weak: &gpui::WeakEntity<Self>,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let running = self
+            .store
+            .as_ref()
+            .map(|s| s.read(cx).store.with(|st| st.running))
+            .unwrap_or(false);
+        let main_status = if self.cockpit_phase == CockpitPhase::Failed {
+            manox_agent::ToolCallStatus::Error
+        } else if running {
+            manox_agent::ToolCallStatus::Running
+        } else {
+            manox_agent::ToolCallStatus::Success
+        };
+        let mut rows = vec![
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .py_0p5()
+                .gap_1p5()
+                .items_center()
+                .child(Self::captain_status_indicator(main_status, theme))
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(CAPTAIN_LABEL),
+                )
+                .into_any_element(),
+        ];
 
-        // Branch label: branch / detached sha + (detached).
-        let branch_label: SharedString = match &display {
+        let fold = subagent_display_order(&self.agents, self.bubble_expanded.subagents);
+        for info in fold.rows {
+            // `{type} · {topic}` with graceful one-sided fallbacks.
+            let title = task_display_title(&info.subagent_type, &info.description)
+                .unwrap_or_else(|| info.id.clone());
+            rows.push(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .py_0p5()
+                    .gap_1p5()
+                    .items_center()
+                    .child(status_indicator(info.status, theme))
+                    .child(
+                        gpui::div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(title)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if fold.hidden > 0 {
+            rows.push(plus_n_row(
+                BubbleSection::Subagents,
+                fold.hidden,
+                self.bubble_expanded.subagents,
+                weak,
+                theme,
+            ));
+        }
+        Some(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// The branch / worktree pair: `┌ {branch}` over `└ {worktree basename}`,
+    /// one pair per checkout (the thread's single cwd today). Same data
+    /// sources the old card's branch block read; the change ±counts and the
+    /// click-to-copy affordances retired with the card.
+    fn render_branch_pair_section(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
+        let cwd_path = self.store.as_ref().and_then(|s| {
+            s.read(cx)
+                .store
+                .with(|st| (!st.cwd.is_empty()).then(|| PathBuf::from(st.cwd.clone())))
+        });
+        let basename = cwd_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        let Some(basename) = basename else {
+            // No project bound: nothing to pair — hide the segment outright.
+            return None;
+        };
+        let mono = theme.mono_font_family.clone();
+        let display = self.git_branch_display.clone();
+        let branch_row: SharedString = match &display {
             Some(d) if d.is_no_repo() => i18n::t("workspace-env-git-not-a-repo"),
             Some(d) => {
                 let mut s = d
@@ -663,99 +727,235 @@ impl ContextRail {
                 }
                 s
             }
-            None => {
-                if project.is_some() {
-                    SharedString::from("--")
-                } else {
-                    i18n::t("workspace-env-no-project")
-                }
-            }
+            // The refresh is still in flight; `--` keeps the pair's shape.
+            None => SharedString::from("--"),
         };
-
-        let changes_line = self.render_changes_trailing(project, theme);
-
-        // Branch row: click copies the branch name with notification feedback.
-        let branch_for_copy = display.as_ref().and_then(|d| d.branch.clone());
-        let branch_feedback = i18n::t("workspace-env-git-copied-branch");
-        let branch_row = env_row_clickable(
-            "icons/git-branch.svg".into(),
-            branch_label,
-            Some(changes_line),
-            theme,
-            move |_ev: &ClickEvent, window, cx| {
-                if let Some(ref name) = branch_for_copy {
-                    cx.write_to_clipboard(ClipboardItem::new_string(name.clone()));
-                    window.push_notification(Notification::success(branch_feedback.clone()), cx);
-                }
-            },
-        );
-
-        let mut block = v_flex().w_full().gap_0p5();
-        if let Some(path) = cwd_path {
-            // The dual-read yields a path string; re-path it for the
-            // `file_name`/`display` calls below.
-            let path = PathBuf::from(path);
-            let basename = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let basename_clone = basename.clone();
-            let name_feedback = i18n::t("workspace-env-git-copied-worktree-name");
-            let path_feedback = i18n::t("workspace-env-git-copied-worktree-path");
-            let path_for_copy = path.display().to_string();
-            block = block.child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(move |_this, e: &MouseUpEvent, window, cx| {
-                            if e.click_count >= 2 {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    path_for_copy.clone(),
-                                ));
-                                window.push_notification(
-                                    Notification::success(path_feedback.clone()),
-                                    cx,
-                                );
-                            } else {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    basename_clone.clone(),
-                                ));
-                                window.push_notification(
-                                    Notification::success(name_feedback.clone()),
-                                    cx,
-                                );
-                            }
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(
-                        Icon::new(Icon::default().path("icons/workflow.svg"))
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        gpui::div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(basename)),
-                    ),
-            );
-        }
-        block = block.child(branch_row);
-
-        block.into_any_element()
+        let pair = v_flex()
+            .w_full()
+            .min_w_0()
+            .font_family(mono)
+            .child(pair_row(
+                "┌",
+                branch_row,
+                theme.muted_foreground,
+                theme.foreground,
+            ))
+            .child(pair_row(
+                "└",
+                SharedString::from(basename),
+                theme.muted_foreground,
+                theme.muted_foreground,
+            ));
+        Some(pair.into_any_element())
     }
 
-    /// Status indicator for the Captain (main agent) row.
-    /// The Captain uses `ship-wheel` for the completed state, distinguishing it
-    /// from sub-agents that use `circle-check-big`.
+    /// The model's todo list: stable InProgress → Pending → Completed
+    /// order, every status visible (completed rows are part of the
+    /// progress story), unified-diameter ring glyphs.
+    fn render_todos_section(
+        &self,
+        expanded: bool,
+        weak: &gpui::WeakEntity<Self>,
+        theme: &Theme,
+    ) -> Option<AnyElement> {
+        let plan = self.plan.as_ref()?;
+        let mut steps: Vec<PlanStep> = plan.steps.clone();
+        sort_todo_steps(&mut steps);
+        let fold = fold_window(steps.len(), TODOS_CAP, expanded);
+        let mut rows: Vec<AnyElement> = steps[..fold.visible]
+            .iter()
+            .map(|step| todo_row(step, theme))
+            .collect();
+        if fold.hidden > 0 {
+            rows.push(plus_n_row(
+                BubbleSection::Todos,
+                fold.hidden,
+                expanded,
+                weak,
+                theme,
+            ));
+        }
+        Some(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// Per-model token usage, total-token descending. The model row is
+    /// `{provider}/{model}` with the model segment tinted by wire api; the
+    /// `├ Context` line is the LAST-REQUEST occupancy over the window —
+    /// only resolvable for the foreground model (that is the ring's own
+    /// measure), so every other model shows just the `└` token line.
+    fn render_models_section(
+        &self,
+        expanded: bool,
+        weak: &gpui::WeakEntity<Self>,
+        theme: &Theme,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let store_ref = self.store.as_ref()?.read(cx);
+        let per_model: HashMap<String, manox_agent::language_model::TokenUsage> = store_ref
+            .store
+            .per_model_usage
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    manox_agent::language_model::TokenUsage {
+                        input_tokens: v.input,
+                        output_tokens: v.output,
+                        cache_creation_input_tokens: v.cache_creation,
+                        cache_read_input_tokens: v.cache_read,
+                    },
+                )
+            })
+            .collect();
+        if per_model.is_empty() {
+            return None;
+        }
+        // The foreground model's identity — the one model whose last-request
+        // occupancy the ring already measures.
+        let (fg_key, fg_last) = store_ref.store.with(|st| {
+            let identity = st.model.as_ref().and_then(|v| {
+                Some((
+                    v.get("provider")?.as_str()?.to_string(),
+                    v.get("modelId")?.as_str()?.to_string(),
+                ))
+            });
+            (
+                identity.as_ref().map(|(p, i)| format!("{p}/{i}")),
+                st.last_token_usage.clone(),
+            )
+        });
+        let muted = theme.muted_foreground;
+        let warn = theme.warning;
+
+        let mut models: Vec<(&String, &manox_agent::language_model::TokenUsage)> =
+            per_model.iter().collect();
+        // Total tokens desc; ties break by model key so rows cannot
+        // reshuffle between frames (the per-frame HashMap re-collect has no
+        // stable iteration order of its own).
+        models.sort_by(|a, b| {
+            b.1.total_tokens()
+                .cmp(&a.1.total_tokens())
+                .then_with(|| a.0.cmp(b.0))
+        });
+        let fold = fold_window(models.len(), MODELS_CAP, expanded);
+        let mut blocks: Vec<AnyElement> = Vec::new();
+        for (model_name, usage) in models[..fold.visible].iter() {
+            let block = v_flex().w_full().min_w_0().gap_0p5();
+            // Model row: three separately-styled segments (provider muted,
+            // `/` muted, model tinted by wire api) so no width arithmetic
+            // ever overlaps them.
+            let model_row: AnyElement =
+                match model_name.split_once('/').and_then(|(provider, id)| {
+                    manox_agent::provider_glue::global().resolve_model(provider, id)
+                }) {
+                    Some(m) => h_flex()
+                        .min_w_0()
+                        .text_sm()
+                        .child(
+                            gpui::div()
+                                .flex_none()
+                                .text_color(muted)
+                                .child(manox_agent::provider_glue::display_provider_name(&m)),
+                        )
+                        .child(gpui::div().flex_none().text_color(muted).child("/"))
+                        .child(
+                            gpui::div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(pi_wire_text_color(&m.api, theme))
+                                .child(manox_agent::provider_glue::display_name(&m)),
+                        )
+                        .into_any_element(),
+                    None => gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(SharedString::from((*model_name).clone()))
+                        .into_any_element(),
+                };
+            let mut block = block.child(model_row);
+
+            // `├ Context` — last-request occupancy, foreground model only,
+            // ≥90% in the warning color.
+            if Some(*model_name) == fg_key.as_ref()
+                && let Some(last) = fg_last.clone()
+                && let Some(window) = model_window_tokens(model_name)
+            {
+                let active = last
+                    .input
+                    .saturating_add(last.cache_creation)
+                    .saturating_add(last.cache_read);
+                if let Some(budget) = context_budget_pct(window, active) {
+                    let color = if budget.used_pct >= CONTEXT_NEAR_FULL_PCT {
+                        warn
+                    } else {
+                        muted
+                    };
+                    block = block.child(
+                        gpui::div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(color)
+                            .child(SharedString::from(format!(
+                                "├ Context {:.0}% {} / {}",
+                                budget.used_pct,
+                                format_tokens_pi(budget.active_tokens),
+                                format_tokens_pi(budget.cap_tokens),
+                            ))),
+                    );
+                }
+            }
+
+            // `└` token line: `↑input ↓output Rcache_read CHhit%` (`--`
+            // when there is no input to measure).
+            let cache_hit = cache_read_ratio(**usage)
+                .map(|r| format_cache_hit(r, 1))
+                .unwrap_or_else(|| "--".into());
+            block = block.child(
+                gpui::div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from(format!(
+                        "└ ↑{} ↓{} R{} CH{}",
+                        format_tokens_pi(usage.input_tokens),
+                        format_tokens_pi(usage.output_tokens),
+                        format_tokens_pi(usage.cache_read_input_tokens),
+                        cache_hit,
+                    ))),
+            );
+            blocks.push(block.into_any_element());
+        }
+        if fold.hidden > 0 {
+            blocks.push(plus_n_row(
+                BubbleSection::Models,
+                fold.hidden,
+                expanded,
+                weak,
+                theme,
+            ));
+        }
+        Some(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .children(blocks)
+                .into_any_element(),
+        )
+    }
+
+    /// Status indicator for the Captain (main agent) row. The Captain uses
+    /// `ship-wheel` for the completed state, distinguishing it from
+    /// sub-agents that use `circle-check-big`.
     fn captain_status_indicator(status: manox_agent::ToolCallStatus, theme: &Theme) -> AnyElement {
         use manox_agent::ToolCallStatus;
         match status {
@@ -780,499 +980,542 @@ impl ContextRail {
                 .into_any_element(),
         }
     }
+}
 
-    /// Agents observation section: Captain (main thread) row plus one row per
-    /// sub-agent the pi harness reported via `SubagentProgress`. Rows are
-    /// observe-only — the retired manox harness drilled into per-child panels,
-    /// but pi sub-agents are ephemeral nested sessions with no child-thread
-    /// entity to open.
-    fn render_agents_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let running = self
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.running))
-            .unwrap_or(false);
-        let main_status = if self.cockpit_phase == CockpitPhase::Failed {
-            manox_agent::ToolCallStatus::Error
-        } else if running {
-            manox_agent::ToolCallStatus::Running
-        } else {
-            manox_agent::ToolCallStatus::Success
-        };
-        let mut rows = vec![
-            h_flex()
-                .w_full()
-                .py_0p5()
-                .gap_1p5()
-                .items_center()
-                .child(Self::captain_status_indicator(main_status, theme))
-                .child(gpui::div().text_xs().text_color(theme.foreground).child(
-                    crate::views::message::author_display(&manox_agent::MessageAuthor::Lead),
-                ))
-                .into_any_element(),
-        ];
-        // Flat list: pi sub-agents are ephemeral nested sessions that never
-        // nest deeper than one level, so no tree recursion is needed.
-        for info in &self.agents {
-            let title = subagent_display_title(info);
-            let tooltip_text = match &info.health {
-                Some(health) => format!("{title} — {health}"),
-                None => title.clone(),
-            };
-            let Some(host) = self.host.clone() else {
-                return gpui::div().into_any_element();
-            };
-            let id = info.id.clone();
-            let subagent_type = info.subagent_type.clone();
-            let topic = info.description.clone();
-            let status = info.status;
-            // Health verdict coloring: stalls warn, loops alarm, plain
-            // activity stays muted.
-            let health_color = info.health.as_deref().map(|h| {
-                if h.starts_with("stalled") {
-                    theme.warning
-                } else if h.starts_with("looping") {
-                    theme.danger
-                } else {
-                    theme.muted_foreground
-                }
-            });
-            let health = info.health.clone();
-            let row = h_flex()
-                .id(SharedString::from(format!("context-agent-{}", info.id)))
-                .w_full()
-                .min_w_0()
-                .py_0p5()
-                .gap_1p5()
-                .items_center()
-                .rounded(px(4.))
-                .cursor_pointer()
-                .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
-                .on_click(move |_, _window, cx| {
-                    host.open_subagent_tab(&id, &subagent_type, &topic, status, cx);
-                })
-                .child(status_indicator(info.status, theme))
-                .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme.foreground)
-                        .child(title),
-                )
-                .when_some(health.zip(health_color), |el, (health, color)| {
-                    el.child(
-                        gpui::div()
-                            .max_w(px(160.))
-                            .truncate()
-                            .text_xs()
-                            .text_color(color)
-                            .child(health),
-                    )
-                });
-            rows.push(row.into_any_element());
-        }
+// ── Free helpers ──────────────────────────────────────────────────────────
 
-        v_flex()
-            .w_full()
-            .gap_0p5()
-            .child(
-                h_flex()
+/// Append a section with a preceding divider only when earlier sections
+/// exist — computing "has content" BEFORE drawing lines means an empty
+/// section leaves neither an orphan divider nor two adjacent ones.
+fn push_section(out: &mut Vec<AnyElement>, theme: &Theme, section: Option<AnyElement>) {
+    if let Some(content) = section {
+        if !out.is_empty() {
+            out.push(
+                gpui::div()
+                    .h(px(1.))
                     .w_full()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Icon::new(IconName::Bot)
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        gpui::div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(i18n::t("context-agents-title")),
-                    ),
-            )
-            .children(rows)
-            .into_any_element()
-    }
-    /// Sort key for plan steps: InProgress (0) → Pending (1) → Completed (2).
-    /// Within each priority group the original chronological order is preserved
-    /// by `sort_by_key`'s stable sort.
-    fn plan_sort_key(status: PlanStepStatus) -> u8 {
-        match status {
-            PlanStepStatus::InProgress => 0,
-            PlanStepStatus::Pending => 1,
-            PlanStepStatus::Completed => 2,
-        }
-    }
-
-    /// Plan section: the model's `UpdatePlan` snapshot rendered as an execution
-    /// overview. Collapsible by clicking the header or pressing
-    /// `ToggleCockpitTasks` (cmd/ctrl-shift-m). The header carries the
-    /// `done/total` count and a chevron; the count and chevron are the only
-    /// expand/collapse affordance (no hint text). Collapsed shows just the
-    /// current task and the remaining count so the rail stays glanceable;
-    /// expanded lists every step in a bounded, scrollable region. Hidden
-    /// entirely when there is no plan.
-    fn render_plan_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let Some(plan) = self.plan.clone() else {
-            return gpui::div().into_any_element();
-        };
-        let muted = theme.muted_foreground;
-        let hidden = self.cockpit_hide_tasks;
-        let (done, total) = plan.progress();
-        let chevron = if hidden {
-            IconName::ChevronRight
-        } else {
-            IconName::ChevronDown
-        };
-        // Header is a clickable toggle; the chevron plus the `done/total` count
-        // signal collapse state, so no separate hint text is needed.
-        let header = h_flex()
-            .id("cockpit-milestones-header")
-            .w_full()
-            .items_center()
-            .gap_1()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                this.cockpit_hide_tasks = !this.cockpit_hide_tasks;
-                cx.notify();
-            }))
-            .child(Icon::new(IconName::Menu).xsmall().text_color(muted))
-            .child(Icon::new(chevron).xsmall().text_color(muted))
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(i18n::t("cockpit-milestones-header")),
-            )
-            .child(
-                gpui::div()
-                    .text_xs()
-                    .text_color(muted.opacity(0.7))
-                    .child(i18n::t_str(
-                        "cockpit-plan-progress",
-                        &[("done", &done.to_string()), ("total", &total.to_string())],
-                    )),
+                    .bg(theme.border)
+                    .flex_none()
+                    .into_any_element(),
             );
-
-        if hidden {
-            // Collapsed: show the first 5 steps sorted by priority
-            // (InProgress → Pending → Completed), so the rail gives a
-            // glanceable overview without expanding.
-            let mut section = v_flex().w_full().gap_1().child(header);
-            if plan.all_completed() {
-                section = section.child(
-                    gpui::div()
-                        .pl(px(12.))
-                        .text_xs()
-                        .text_color(muted)
-                        .child(i18n::t("cockpit-plan-all-done")),
-                );
-            } else {
-                let mut sorted: Vec<&manox_agent::PlanStep> = plan.steps.iter().collect();
-                sorted.sort_by_key(|s| Self::plan_sort_key(s.status));
-                let remaining = total.saturating_sub(done);
-                for step in sorted.iter().take(5) {
-                    section = section.child(self.render_plan_row(step, theme));
-                }
-                let shown = sorted.len().min(5);
-                if remaining > shown || plan.steps.len() > 5 {
-                    section =
-                        section.child(gpui::div().pl(px(12.)).text_xs().text_color(muted).child(
-                            i18n::t_str(
-                                "cockpit-plan-remaining",
-                                &[("count", &total.saturating_sub(shown).to_string())],
-                            ),
-                        ));
-                }
-            }
-            return section.into_any_element();
         }
-
-        // Expanded: every step, in a bounded scroll region so a long plan does
-        // not push the rest of the rail off-screen. Steps sort by priority:
-        // InProgress first, then Pending, then Completed; original
-        // chronological order is preserved within each group.
-        let mut list = v_flex().w_full().gap_1();
-        let mut steps: Vec<&manox_agent::PlanStep> = plan.steps.iter().collect();
-        steps.sort_by_key(|s| Self::plan_sort_key(s.status));
-        for step in steps {
-            list = list.child(self.render_plan_row(step, theme));
-        }
-        v_flex()
-            .w_full()
-            .gap_1()
-            .child(header)
-            .child(
-                gpui::div()
-                    .id("cockpit-plan-steps")
-                    .w_full()
-                    .max_h(px(160.))
-                    .overflow_y_scroll()
-                    .child(list),
-            )
-            .into_any_element()
-    }
-
-    /// One plan step row: status glyph + title. The in-progress step is
-    /// foreground-bold; others are muted so the live step stands out. The title
-    /// truncates to one line with a tooltip carrying the full text.
-    fn render_plan_row(&self, step: &manox_agent::PlanStep, theme: &Theme) -> AnyElement {
-        let muted = theme.muted_foreground;
-        let (glyph, glyph_color) = match step.status {
-            PlanStepStatus::Pending => ("◻", muted),
-            PlanStepStatus::InProgress => ("▶", theme.foreground),
-            PlanStepStatus::Completed => ("✔", muted.opacity(0.7)),
-        };
-        let (title_color, weight) = match step.status {
-            PlanStepStatus::InProgress => (theme.foreground, gpui::FontWeight::SEMIBOLD),
-            _ => (muted, gpui::FontWeight::NORMAL),
-        };
-        let title = SharedString::from(step.step.clone());
-        // The element id is derived from the (unique) step title so a stateful
-        // tooltip can attach; uniqueness is guaranteed by `PlanSnapshot`
-        // validation, which rejects duplicate titles.
-        let row_id = SharedString::from(format!("plan-step-{}", step.step));
-        h_flex()
-            .w_full()
-            .pl(px(12.))
-            .gap_1()
-            .items_center()
-            .text_xs()
-            .child(
-                gpui::div()
-                    .text_color(glyph_color)
-                    .min_w(px(14.))
-                    .child(SharedString::from(glyph)),
-            )
-            .child(
-                gpui::div()
-                    .id(gpui::ElementId::Name(row_id))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(title_color)
-                    .font_weight(weight)
-                    .child(title.clone())
-                    .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx)),
-            )
-            .into_any_element()
+        out.push(content);
     }
 }
 
-impl Render for ContextRail {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        // The context panel floats over the conversation column's top-right as
-        // an absolute overlay: `top` clears the shared title bar, `right` +
-        // the conversation body's right padding keep the message list clear of
-        // the card. `occlude()` captures pointer hits so drags meant for the
-        // card don't fall through to the conversation. Content height, not
-        // full height — a compact floating card, not a flush column.
-        v_flex()
-            .absolute()
-            .top(TITLE_BAR_HEIGHT + px(16.))
-            .right(px(16.))
-            .w(px(ENV_CARD_WIDTH))
-            .occlude()
-            .child(self.render_panel(&theme, cx))
-    }
-}
-
-// ── Free helpers ───────────────────────────────────────────────────────────
-
-/// Build the hover tooltip for the usage row, consolidating main and side
-/// calls into one tree view.
-fn build_usage_tooltip(
-    main_call: Option<&manox_agent::SideCallMetric>,
-    side_calls: &[manox_agent::SideCallMetric],
-    theme: &Theme,
-) -> AnyElement {
-    let muted = theme.muted_foreground;
-    let tokens = |v: u64| crate::cockpit::format_tokens(v);
-
-    v_flex()
-        .gap_1()
-        .when_some(main_call, |el, metric| {
-            let is_last = side_calls.is_empty();
-            el.child(section_heading(
-                &i18n::t("context-tooltip-main-calls"),
-                muted,
-            ))
-            .child(call_tree_row(metric, None, is_last, muted, &tokens))
-        })
-        .when(!side_calls.is_empty(), |el| {
-            let section = el.child(section_heading(
-                &i18n::t("context-tooltip-side-calls"),
-                muted,
-            ));
-            let total = side_calls.len();
-            side_calls
-                .iter()
-                .enumerate()
-                .fold(section, |el, (i, metric)| {
-                    let is_last_in_section = i == total - 1;
-                    el.child(call_tree_row(
-                        metric,
-                        Some(&metric.purpose),
-                        is_last_in_section,
-                        muted,
-                        &tokens,
-                    ))
-                })
-        })
-        .into_any_element()
-}
-
-/// Section heading in the usage tooltip (e.g. "主调用", "辅助调用").
-fn section_heading(text: &str, muted: gpui::Hsla) -> AnyElement {
-    gpui::div()
-        .text_xs()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(muted.opacity(0.7))
-        .child(SharedString::from(text))
-        .into_any_element()
-}
-
-/// A tree row for a call metric (main or side call).
-fn call_tree_row(
-    metric: &manox_agent::SideCallMetric,
-    purpose_prefix: Option<&str>,
-    is_last: bool,
-    muted: gpui::Hsla,
-    tokens: &dyn Fn(u64) -> String,
-) -> AnyElement {
-    let prefix = if is_last { "╰─ " } else { "├─ " };
-    let avg_ms = metric.latency_ms / metric.calls.max(1);
-    let cache_pct = cache_read_ratio(metric.token_usage)
-        .map(|r| format_cache_hit(r, 0))
-        .unwrap_or_else(|| "--".into());
-    let calls_unit = i18n::t("context-tooltip-calls-unit");
-    let text = match purpose_prefix {
-        Some(purpose) => format!(
-            "{}{}·{}·{}{}·↑[{}]{} / {} ↓{}·RTT {}ms",
-            prefix,
-            purpose,
-            metric.model,
-            metric.calls,
-            calls_unit,
-            cache_pct,
-            tokens(metric.token_usage.cache_read_input_tokens),
-            tokens(metric.token_usage.input_tokens),
-            tokens(metric.token_usage.output_tokens),
-            avg_ms,
-        ),
-        None => format!(
-            "{}{}·{}{}·↑[{}]{} / {} ↓{}·RTT {}ms",
-            prefix,
-            metric.model,
-            metric.calls,
-            calls_unit,
-            cache_pct,
-            tokens(metric.token_usage.cache_read_input_tokens),
-            tokens(metric.token_usage.input_tokens),
-            tokens(metric.token_usage.output_tokens),
-            avg_ms,
-        ),
-    };
-    gpui::div()
-        .pl(px(8.))
-        .text_xs()
-        .text_color(muted)
-        .child(SharedString::from(text))
-        .into_any_element()
-}
-
-/// A clickable row with an icon, label, and optional trailing element.
-/// `icon_path` is a `icons/…` asset path resolved through `ExtrasAssetSource`,
-/// not an `IconName`.
-fn env_row_clickable(
-    icon_path: SharedString,
-    label: SharedString,
-    trailing: Option<AnyElement>,
-    theme: &Theme,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+/// One `┌`/`└` row of the branch pair: tree glyph muted, text truncating.
+fn pair_row(
+    glyph: &str,
+    text: SharedString,
+    glyph_color: gpui::Hsla,
+    color: gpui::Hsla,
 ) -> AnyElement {
     h_flex()
-        .id("env-row-clickable")
         .w_full()
+        .min_w_0()
         .items_center()
-        .gap_2()
-        .cursor_pointer()
-        .on_click(on_click)
+        .gap_1()
         .child(
-            Icon::new(Icon::default().path(icon_path))
-                .xsmall()
-                .text_color(theme.muted_foreground),
+            gpui::div()
+                .flex_none()
+                .text_sm()
+                .text_color(glyph_color)
+                .child(SharedString::from(glyph)),
         )
+        .child(
+            gpui::div()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .text_color(color)
+                .child(text),
+        )
+        .into_any_element()
+}
+
+/// One todo row: the unified ring glyph + the text treatment the status
+/// maps to (completed = muted + struck through).
+fn todo_row(step: &PlanStep, theme: &Theme) -> AnyElement {
+    let (glyph, style) = todo_visual(step.status, theme);
+    let title = SharedString::from(step.step.clone());
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap_1p5()
+        .py_0p5()
+        .child(todo_glyph(glyph))
         .child(
             gpui::div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_sm()
-                .text_color(theme.foreground)
-                .child(label),
+                .text_color(style.color)
+                .when(style.line_through, |d| d.line_through())
+                .when(style.semibold, |d| {
+                    d.font_weight(gpui::FontWeight::SEMIBOLD)
+                })
+                .child(title),
         )
-        .children(trailing)
         .into_any_element()
 }
 
-/// USD cost for the rail: `$1.23` at a dollar and above, three decimals for
-/// cents, four below a cent — rate cards price per 1M tokens, so sub-cent
-/// totals are the common case early in a session.
-fn format_cost(cost: f64) -> String {
-    if cost >= 1.0 {
-        format!("${cost:.2}")
-    } else if cost >= 0.01 {
-        format!("${cost:.3}")
-    } else {
-        format!("${cost:.4}")
-    }
+/// The status ring: fixed 10px diameter across all three states; the inner
+/// dot and the check ride inside it.
+fn todo_glyph(glyph: TodoGlyph) -> AnyElement {
+    gpui::div()
+        .relative()
+        .flex_none()
+        .size(px(10.))
+        .child(
+            gpui::div()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .border_1()
+                .border_color(glyph.ring_color),
+        )
+        .when(glyph.inner_dot, |ring| {
+            ring.child(
+                gpui::div()
+                    .absolute()
+                    .top(px(2.))
+                    .left(px(2.))
+                    .size(px(4.))
+                    .rounded_full()
+                    .bg(glyph.ring_color),
+            )
+        })
+        .when(glyph.check, |ring| {
+            ring.child(
+                gpui::div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::Check)
+                            .with_size(gpui_component::Size::Size(px(7.)))
+                            .text_color(glyph.ring_color),
+                    ),
+            )
+        })
+        .into_any_element()
 }
 
-/// Context window for a model name on the usage rail: the pi build probes
-/// the shared pi provider registry (by wire id, then display name); the
-/// retired manox build probes its own registry.
-fn model_window_tokens(model_name: &str) -> Option<u64> {
-    {
-        let registry = manox_agent::provider_glue::global();
-        // per_model keys are composite "{provider}/{model_id}"; resolve O(1).
-        // Bare ids (legacy keys) fall through to the scan below.
-        if let Some((provider, id)) = model_name.split_once('/')
-            && let Some(m) = registry.resolve_model(provider, id)
-        {
-            return Some(m.context_window as u64);
-        }
-        registry
-            .models()
-            .iter()
-            .find(|m| {
-                m.id == model_name
-                    || m.metadata
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|name| name == model_name)
+/// The `+N` fold toggle: chevron + count on the section's shared left
+/// baseline, rendered only while the section hides rows. Clicking expands
+/// in place (the bubble grows with its content); clicking again collapses.
+/// The handler rides the rail entity — the bubble's fold state is
+/// bubble-local and dies with the close.
+fn plus_n_row(
+    section: BubbleSection,
+    hidden: usize,
+    expanded: bool,
+    rail: &gpui::WeakEntity<ContextRail>,
+    theme: &Theme,
+) -> AnyElement {
+    let id = SharedString::from(format!("bubble-fold-{section:?}"));
+    let rail = rail.clone();
+    h_flex()
+        .id(id)
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap_1()
+        .py_0p5()
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            let _ = rail.update(cx, |rail, cx| rail.toggle_section_fold(section, cx));
+        })
+        .child(
+            Icon::new(if expanded {
+                IconName::ChevronUp
+            } else {
+                IconName::ChevronDown
             })
-            .map(|m| m.context_window as u64)
+            .xsmall()
+            .text_color(theme.muted_foreground),
+        )
+        .child(
+            gpui::div()
+                .min_w_0()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(SharedString::from(format!("+ {hidden}"))),
+        )
+        .into_any_element()
+}
+
+/// The plan-file list: one document row per written plan, newest first.
+fn render_plan_files_section(
+    plan_files: &[PlanFileEntry],
+    expanded: bool,
+    rail: &gpui::WeakEntity<ContextRail>,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    if plan_files.is_empty() {
+        return None;
     }
+    let fold = fold_window(plan_files.len(), PLANS_CAP, expanded);
+    let mut rows: Vec<AnyElement> = plan_files[..fold.visible]
+        .iter()
+        .map(|entry| {
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap_1p5()
+                .py_0p5()
+                .child(
+                    Icon::new(IconName::FileText)
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(SharedString::from(entry.title.clone())),
+                )
+                .into_any_element()
+        })
+        .collect();
+    if fold.hidden > 0 {
+        rows.push(plus_n_row(
+            BubbleSection::Plans,
+            fold.hidden,
+            expanded,
+            rail,
+            theme,
+        ));
+    }
+    Some(
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .children(rows)
+            .into_any_element(),
+    )
+}
+
+/// The sources segment: the old card carried only the placeholder — it
+/// renders the same muted line, heading gone.
+fn render_sources_section(theme: &Theme) -> Option<AnyElement> {
+    Some(
+        gpui::div()
+            .w_full()
+            .min_w_0()
+            .truncate()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(i18n::t("workspace-env-no-sources"))
+            .into_any_element(),
+    )
+}
+
+/// Context window for a model name: the shared pi provider registry, by
+/// wire id then display name (the same probe the usage face has always
+/// used).
+fn model_window_tokens(model_name: &str) -> Option<u64> {
+    let registry = manox_agent::provider_glue::global();
+    // per_model keys are composite "{provider}/{model_id}"; resolve O(1).
+    // Bare ids (legacy keys) fall through to the scan below.
+    if let Some((provider, id)) = model_name.split_once('/')
+        && let Some(m) = registry.resolve_model(provider, id)
+    {
+        return Some(m.context_window as u64);
+    }
+    registry
+        .models()
+        .iter()
+        .find(|m| {
+            m.id == model_name
+                || m.metadata
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|name| name == model_name)
+        })
+        .map(|m| m.context_window as u64)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format_cost;
+    use super::*;
+
+    fn theme() -> Theme {
+        Theme::default()
+    }
+
+    fn step(step: &str, status: PlanStepStatus) -> PlanStep {
+        PlanStep {
+            step: step.to_string(),
+            status,
+        }
+    }
+
+    // ── fold_window ──────────────────────────────────────────────────────
 
     #[test]
-    fn format_cost_tiers() {
-        assert_eq!(format_cost(1.2345), "$1.23");
-        assert_eq!(format_cost(0.0234), "$0.023");
-        assert_eq!(format_cost(0.000123), "$0.0001");
-        assert_eq!(format_cost(12.0), "$12.00");
-        assert_eq!(format_cost(0.01), "$0.010");
+    fn fold_window_shows_plus_n_only_past_the_cap() {
+        // At or under the cap: no fold, no hidden count.
+        assert_eq!(
+            fold_window(8, TODOS_CAP, false),
+            FoldPlan {
+                visible: 8,
+                hidden: 0
+            }
+        );
+        // One past the cap: cap shown, the tail hidden.
+        assert_eq!(
+            fold_window(9, TODOS_CAP, false),
+            FoldPlan {
+                visible: 8,
+                hidden: 1
+            }
+        );
+        // Expanded shows everything, but the fold size stays: the `+N`
+        // toggle must remain rendered (chevron flipped) so the section can
+        // fold back down.
+        assert_eq!(
+            fold_window(30, TODOS_CAP, true),
+            FoldPlan {
+                visible: 30,
+                hidden: 22
+            }
+        );
+        assert_eq!(
+            fold_window(9, TODOS_CAP, true),
+            FoldPlan {
+                visible: 9,
+                hidden: 1
+            }
+        );
+    }
+
+    // ── subagent fold ────────────────────────────────────────────────────
+
+    fn agent(id: &str, status: manox_agent::ToolCallStatus) -> SubagentInfo {
+        SubagentInfo {
+            id: id.to_string(),
+            subagent_type: format!("type-{id}"),
+            description: String::new(),
+            status,
+            health: None,
+        }
+    }
+
+    #[test]
+    fn subagent_fold_keeps_first_seen_order_and_hides_finished() {
+        use manox_agent::ToolCallStatus as S;
+        // Interleaved arrival: finished rows keep their own order, appended
+        // after the actives on expand.
+        let agents = vec![
+            agent("a1", S::Success),
+            agent("a2", S::Running),
+            agent("a3", S::Error),
+            agent("a4", S::Running),
+            agent("a5", S::Cancelled),
+            agent("a6", S::PendingApproval),
+        ];
+        let collapsed = subagent_display_order(&agents, false);
+        assert_eq!(
+            collapsed
+                .rows
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a2", "a4", "a6"],
+            "only unfinished rows show by default, in arrival order"
+        );
+        assert_eq!(collapsed.hidden, 3, "the three finished rows fold into +N");
+
+        let expanded = subagent_display_order(&agents, true);
+        assert_eq!(
+            expanded
+                .rows
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a2", "a4", "a6", "a1", "a3", "a5"]
+        );
+        // The fold size survives expansion: the `+N` toggle stays rendered
+        // so the section can fold back down.
+        assert_eq!(expanded.hidden, 3);
+    }
+
+    #[test]
+    fn subagent_fold_with_no_active_rows_still_reports_hidden() {
+        use manox_agent::ToolCallStatus as S;
+        let agents = vec![agent("a1", S::Success), agent("a2", S::Continued)];
+        let fold = subagent_display_order(&agents, false);
+        assert!(
+            fold.rows.is_empty(),
+            "no active rows: the section shows only +N"
+        );
+        assert_eq!(fold.hidden, 2);
+    }
+
+    // ── todo sort ────────────────────────────────────────────────────────
+
+    #[test]
+    fn todo_sort_is_stable_within_priority_groups() {
+        use PlanStepStatus::{Completed, InProgress, Pending};
+        let mut steps = vec![
+            step("t1", Completed),
+            step("t2", InProgress),
+            step("t3", Pending),
+            step("t4", InProgress),
+            step("t5", Completed),
+            step("t6", Pending),
+        ];
+        sort_todo_steps(&mut steps);
+        let names: Vec<&str> = steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["t2", "t4", "t3", "t6", "t1", "t5"],
+            "in-progress first, then pending, completed last — arrival order within groups"
+        );
+    }
+
+    // ── todo visuals ─────────────────────────────────────────────────────
+
+    #[test]
+    fn todo_status_maps_to_glyph_and_text_treatment() {
+        let t = theme();
+        let (glyph, text) = todo_visual(PlanStepStatus::Pending, &t);
+        assert!(!glyph.inner_dot && !glyph.check);
+        assert!(!text.line_through && !text.semibold);
+
+        let (glyph, text) = todo_visual(PlanStepStatus::InProgress, &t);
+        assert!(glyph.inner_dot && !glyph.check);
+        assert_eq!(glyph.ring_color, t.accent);
+        assert!(text.semibold && !text.line_through);
+
+        let (glyph, text) = todo_visual(PlanStepStatus::Completed, &t);
+        assert!(glyph.check && !glyph.inner_dot);
+        assert!(text.line_through && !text.semibold);
+        assert_eq!(text.color, t.muted_foreground);
+    }
+
+    // ── wire api coloring ────────────────────────────────────────────────
+
+    #[test]
+    fn wire_api_color_matches_the_menu_tag_palette() {
+        let t = theme();
+        // The three routed apis carry their menu tag color at the tag's own
+        // scale; the REAL wire keys are `openai_responses` /
+        // `openai_completions` (the old `responses`/`completions` guesses
+        // never matched a single model and fell through to muted).
+        assert_eq!(
+            pi_wire_text_color("anthropic", &t),
+            gpui_component::ColorName::Blue.scale(600)
+        );
+        assert_eq!(
+            pi_wire_text_color("openai_responses", &t),
+            gpui_component::ColorName::Cyan.scale(600)
+        );
+        assert_eq!(
+            pi_wire_text_color("openai_completions", &t),
+            gpui_component::ColorName::Amber.scale(600)
+        );
+        assert_eq!(pi_wire_text_color("responses", &t), t.muted_foreground);
+        assert_eq!(pi_wire_text_color("completions", &t), t.muted_foreground);
+        assert_eq!(pi_wire_text_color("whatever-comes", &t), t.muted_foreground);
+        // Every mapped api keeps its menu label.
+        assert_eq!(pi_wire_tag("anthropic").unwrap().1, "Anthropic");
+        assert_eq!(pi_wire_tag("openai_responses").unwrap().1, "Responses");
+        assert_eq!(pi_wire_tag("openai_completions").unwrap().1, "Completions");
+    }
+
+    // ── open/close state machine ─────────────────────────────────────────
+
+    #[gpui::test]
+    fn closing_the_bubble_resets_fold_state(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let rail = cx.new(|cx| ContextRail::new(None, cx));
+            rail.update(cx, |rail, cx| {
+                rail.toggle_bubble(cx);
+                rail.toggle_section_fold(BubbleSection::Todos, cx);
+                rail.toggle_section_fold(BubbleSection::Models, cx);
+                assert!(rail.bubble_open);
+                assert!(rail.bubble_expanded.todos && rail.bubble_expanded.models);
+                // Closing — by toggle, outside click or Escape, all funneling
+                // through `set_bubble_open` — wipes the per-section folds.
+                rail.set_bubble_open(false, cx);
+                assert!(!rail.bubble_open);
+                assert_eq!(rail.bubble_expanded, BubbleExpanded::default());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn suppression_is_one_shot_and_cleared_on_open(cx: &mut gpui::TestAppContext) {
+        use gpui::point;
+        cx.update(|cx| {
+            let rail = cx.new(|cx| ContextRail::new(None, cx));
+            rail.update(cx, |rail, cx| {
+                let here = point(px(10.), px(10.));
+                rail.set_bubble_open(true, cx);
+                // The one outside-dismissal path: close, then note the
+                // guard (production order — close clears, note sets).
+                rail.dismiss_outside(here, cx);
+                assert!(!rail.bubble_open);
+                // A click at the same position consumes the guard once…
+                assert!(rail.toggle_suppressed(here), "same-gesture close");
+                assert!(
+                    !rail.toggle_suppressed(here),
+                    "the guard is spent — the next click must open"
+                );
+                // …and opening clears any stale guard entirely.
+                rail.set_bubble_open(true, cx);
+                rail.dismiss_outside(point(px(40.), px(40.)), cx);
+                rail.set_bubble_open(true, cx);
+                assert!(
+                    !rail.toggle_suppressed(here),
+                    "a fresh open must not inherit the old guard"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn thread_switch_closes_the_bubble(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let rail = cx.new(|cx| ContextRail::new(None, cx));
+            rail.update(cx, |rail, cx| {
+                rail.toggle_bubble(cx);
+                assert!(rail.bubble_open);
+                // The bubble's contents are the outgoing thread's — already
+                // stale; the switch must not leave it open.
+                rail.reset_for_thread_switch(false, cx);
+                assert!(!rail.bubble_open);
+                assert_eq!(rail.bubble_expanded, BubbleExpanded::default());
+            });
+        });
+    }
+
+    // ── section assembly ─────────────────────────────────────────────────
+
+    /// The divider rule: dividers only BETWEEN present sections. Driven
+    /// through `push_section` directly since the bubble's builder needs a
+    /// live app context.
+    #[test]
+    fn empty_sections_never_produce_double_dividers() {
+        let t = theme();
+        let mut out: Vec<AnyElement> = Vec::new();
+        let some = || Some(gpui::div().into_any_element());
+        push_section(&mut out, &t, None);
+        push_section(&mut out, &t, some());
+        push_section(&mut out, &t, None);
+        push_section(&mut out, &t, some());
+        push_section(&mut out, &t, None);
+        // Two present sections, one divider between them, nothing else.
+        assert_eq!(out.len(), 3);
     }
 }

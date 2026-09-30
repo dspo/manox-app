@@ -8,7 +8,9 @@
 //! parent's render face and the `tests` child.
 
 use super::*;
+use crate::DismissContextBubble;
 use crate::cockpit::{context_budget_pct, format_tokens_pi};
+use crate::views::context_rail::{BUBBLE_MAX_W, BUBBLE_MIN_W, CONTEXT_NEAR_FULL_PCT, ContextRail};
 use gpui::{Hsla, PathBuilder, PathStyle, Point, StrokeOptions, canvas, point};
 use lyon::tessellation::LineCap;
 pub use manox_agent_chat_ui::column::{QueueDragEdge, QueueRowDrag};
@@ -24,9 +26,6 @@ const CONTEXT_RING_SIZE: f32 = 14.0;
 const CONTEXT_RING_RADIUS: f32 = 5.5;
 /// Ring stroke width; round-capped like the reference's `stroke-linecap`.
 const CONTEXT_RING_STROKE: f32 = 2.0;
-/// Occupancy at which the fill/percent flip to the warning color — the
-/// context rail's budget row uses the same threshold.
-const CONTEXT_NEAR_FULL_PCT: f64 = 90.0;
 
 /// Drag payload for a queued follow-up row. The index is all the gesture
 /// needs: rows are transient session state, so the live queue position is
@@ -136,7 +135,7 @@ impl Workspace {
         // Context-occupancy pill (ring + percent) sits between the model and
         // the action it quantifies: session-state cluster, then the send
         // control. Hidden entirely until usage + a resolvable window exist.
-        let context_ring = self.render_context_usage_ring(theme, cx);
+        let context_ring = self.render_context_usage_ring(theme, window, cx);
         // The completion popover overlays the composer; anchoring it on the
         // composer's own v_flex keeps it glued to the input bar in both hero
         // and footer, with a single mount point and ElementId.
@@ -979,12 +978,25 @@ impl Workspace {
     /// context rail's budget row uses. Renders nothing until a usage row has
     /// landed AND the model's window resolves against the registry (the dsh
     /// meter's contract: no capacity → no meter). The fill and the percent
-    /// flip to the warning color past the rail's ≥90% near-full line. The
-    /// breakdown face stays in the context rail, so the pill carries no
-    /// click action; the tooltip carries the absolute figures instead.
+    /// flip to the warning color past the rail's ≥90% near-full line.
+    ///
+    /// The pill is the conversation info bubble's trigger: click toggles,
+    /// hover only tints — never opens. While open, the bubble floats above
+    /// the pill on the completion overlay's mount (`deferred` + `anchored`
+    /// escapes the column's overflow clipping), its right edge aligned to
+    /// the pill's and its bottom sitting a fixed apron above the pill top
+    /// where the tail bridges toward the ring (the component `Popover`'s
+    /// positioner
+    /// clears the trigger by its own height plus a fixed constant, which
+    /// no content style can tune). Outside click and Escape are wired by
+    /// hand: `on_mouse_down_out` records the dismissal (the ring's click
+    /// fires right after and must not re-open), and the surface takes
+    /// focus so `Escape` lands on its `ContextBubble` key context. Thread
+    /// switches close via the rail's reset.
     pub(super) fn render_context_usage_ring(
         &self,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let usage = self
@@ -997,14 +1009,14 @@ impl Workspace {
             .last_token_usage
             .clone()?;
         let (provider, id) = self.foreground_model_identity(cx)?;
-        let window = manox_agent::provider_glue::global()
+        let window_tokens = manox_agent::provider_glue::global()
             .resolve_model(&provider, &id)
             .map(|m| m.context_window as u64)?;
         let active = usage
             .input
             .saturating_add(usage.cache_creation)
             .saturating_add(usage.cache_read);
-        let budget = context_budget_pct(window, active)?;
+        let budget = context_budget_pct(window_tokens, active)?;
 
         let near_full = budget.used_pct >= CONTEXT_NEAR_FULL_PCT;
         let fill_color = if near_full {
@@ -1022,26 +1034,174 @@ impl Workspace {
             ],
         );
 
+        let rail = self.chat_rail(cx);
+        let bubble_open = rail.read(cx).bubble_open;
+        // Only the open bubble pays for the plan-file scan.
+        let plan_files = if bubble_open {
+            self.collect_plan_files(cx)
+        } else {
+            Vec::new()
+        };
+
+        let pill = h_flex()
+            .id("context-usage-pill")
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.accent.opacity(0.08)))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            // The toggle guard: an outside `mouse_down` dismisses the open
+            // bubble and the ring's `click` fires right after — a toggle in
+            // the suppression window is the same closing gesture, not a
+            // fresh open (otherwise clicking the ring to close would
+            // close-then-reopen).
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                let rail = this.chat_rail(cx);
+                let ClickEvent::Mouse(mouse) = event else {
+                    return;
+                };
+                let suppressed = rail.update(cx, |rail, cx| {
+                    let _ = cx;
+                    rail.toggle_suppressed(mouse.down.position)
+                });
+                if suppressed {
+                    return;
+                }
+                let opening = !rail.read(cx).bubble_open;
+                rail.update(cx, |rail, cx| rail.toggle_bubble(cx));
+                // The surface takes focus while open so `Escape` reaches its
+                // key context; opening came from a click, so stealing focus
+                // from whatever the click already blurred is expected.
+                if opening {
+                    rail.read(cx).bubble_focus.clone().focus(window, cx);
+                }
+            }))
+            // The ring sits in its own relative wrapper so the open-state
+            // tail can anchor to the RING's box: its horizontal center IS
+            // the ring center, no text-width measurement involved.
+            .child(gpui::div().relative().flex_none().child(context_usage_ring(
+                theme.border,
+                fill_color,
+                budget.used_pct / 100.0,
+            )))
+            .child(
+                gpui::div()
+                    .text_xs()
+                    .text_color(fill_color)
+                    .child(SharedString::from(format!("{percent}%"))),
+            );
+
+        if !bubble_open {
+            return Some(pill.into_any_element());
+        }
+        // Width/height clamps are window-derived: the bubble never stretches
+        // past 360 (or a narrow window's own width) and caps at the space
+        // above the composer.
+        let viewport = window.viewport_size();
+        let avail_w = f32::from(viewport.width) - 32.0;
+        let max_w = px(BUBBLE_MAX_W.min(avail_w.max(BUBBLE_MIN_W)));
+        // Height is MEASURED, not a window-height magic number: the pill's
+        // prepaint records its top and the column's root records its own,
+        // so the bubble can never outgrow the visible band between the
+        // column top and the pill — the failure mode the turn navigator's
+        // budget comment warns about (`window.rs`-sized panels get cut off
+        // by the clipping column). One-frame convergence via `refresh()`,
+        // same as the card width.
+        let max_h = self.chat.read(cx).bubble_clearance.max_height(px(640.));
+        let focus = rail.read(cx).bubble_focus.clone();
+        let bubble = v_flex()
+            .absolute()
+            .right(px(0.))
+            .bottom(px(0.))
+            .id("conversation-info-bubble")
+            .occlude()
+            .key_context("ContextBubble")
+            .track_focus(&focus)
+            .on_action(cx.listener(|this, _: &DismissContextBubble, window, cx| {
+                this.chat_rail(cx)
+                    .update(cx, |rail, cx| rail.set_bubble_open(false, cx));
+                this.chat_input(cx)
+                    .update(cx, |state, cx| state.focus(window, cx));
+            }))
+            .on_mouse_down_out(
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    let rail = this.chat_rail(cx);
+                    let held = rail.read(cx).bubble_focus.is_focused(window);
+                    rail.update(cx, |rail, cx| rail.dismiss_outside(event.position, cx));
+                    // Hand the keyboard back ONLY when the bubble held it — a
+                    // click on some other focusable target keeps its own focus.
+                    if held {
+                        this.chat_input(cx)
+                            .update(cx, |state, cx| state.focus(window, cx));
+                    }
+                    cx.notify();
+                }),
+            )
+            .popover_style(cx)
+            .p_3()
+            .child(ContextRail::render_bubble(
+                &rail,
+                &plan_files,
+                max_w,
+                max_h,
+                cx,
+            ));
+
+        // The bubble slot: a zero-height full-width row pulled up over the
+        // pill by a fixed apron, so the surface's bottom edge lands a fixed
+        // distance above the pill top and its right edge aligns with the
+        // pill's — plain relative/absolute, no deferred pass needed (the
+        // footer paints after the message list, so the bubble is on top).
+        // The tail under the surface bridges the remaining gap to the ring.
+        let pill_clearance = self.chat.read(cx).bubble_clearance.clone();
         Some(
-            h_flex()
-                .id("context-usage-pill")
-                .flex_shrink_0()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded(theme.radius)
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                .child(context_usage_ring(
-                    theme.border,
-                    fill_color,
-                    budget.used_pct / 100.0,
-                ))
+            gpui::div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .flex_none()
+                .relative()
                 .child(
                     gpui::div()
-                        .text_xs()
-                        .text_color(fill_color)
-                        .child(SharedString::from(format!("{percent}%"))),
+                        .flex_none()
+                        .on_prepaint(move |bounds, window, _cx| {
+                            if pill_clearance.set_pill_top(bounds.origin.y) {
+                                window.refresh();
+                            }
+                        })
+                        .child(pill),
+                )
+                .child(
+                    gpui::div()
+                        .relative()
+                        .w_full()
+                        .h(px(0.))
+                        .mt(px(-38.))
+                        .child(bubble)
+                        // The tail hangs from the bubble's own bottom edge
+                        // (negative inset — one stroke below the surface)
+                        // and paints AFTER it as a sibling, so it shows
+                        // instead of hiding under the surface. The slot
+                        // spans the wrapper, so left(9) puts the 12px tail's
+                        // center exactly on the ring center (pill px_2 8 +
+                        // ring half 7) without measuring text.
+                        .children(bubble_open.then(|| {
+                            gpui::div()
+                                .absolute()
+                                .left(px(9.))
+                                .bottom(px(-6.))
+                                .size(px(12.))
+                                .child(
+                                    Icon::default()
+                                        .path("icons/context-bubble-tail.svg")
+                                        .with_size(gpui_component::Size::Size(px(12.)))
+                                        .text_color(theme.border),
+                                )
+                        })),
                 )
                 .into_any_element(),
         )

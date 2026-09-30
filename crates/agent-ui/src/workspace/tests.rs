@@ -4140,7 +4140,6 @@ fn turn_navigator_layout_is_budgeted_from_the_card_not_the_window() {
     use super::{CARD_BORDER, turn_navigator_layout};
     use gpui::px;
 
-    let rail_inset = px(crate::views::context_rail::ENV_CONTENT_INSET);
     let half_border = px(CARD_BORDER / 2.);
     // The panel's usable span: what the layout may fill inside the card.
     let fits = |card: gpui::Pixels, l: super::TurnNavigatorLayout| {
@@ -4150,30 +4149,25 @@ fn turn_navigator_layout_is_budgeted_from_the_card_not_the_window() {
     // A full-width card (sidebar collapsed, right pane closed): half the card
     // border on each side, the leftover clamping to the 480 cap.
     let card = px(1_090.);
-    let l = turn_navigator_layout(card, false);
+    let l = turn_navigator_layout(card);
     assert_eq!(l.left_inset, half_border);
     assert_eq!(l.right_inset, half_border);
     assert_eq!(l.panel_width, px(480.));
-    assert!(fits(card, l));
-
-    // Context rail shown: its content inset joins the right side.
-    let l = turn_navigator_layout(card, true);
-    assert_eq!(l.left_inset, half_border);
-    assert_eq!(l.right_inset, half_border + rail_inset);
     assert!(fits(card, l));
 
     // The frame-error case: with the sidebar AND the right pane open, the
     // card is a fraction of the window. The panel shrinks with it instead of
     // taking the 480 cap.
     let card = px(360.);
-    let l = turn_navigator_layout(card, false);
+    let l = turn_navigator_layout(card);
     assert_ne!(l.panel_width, px(480.), "the cap must not exceed the card");
     assert_eq!(l.panel_width, card - l.left_inset - l.right_inset - px(24.));
     assert!(fits(card, l));
 
     // Narrow card: the panel floors at zero — never negative (a negative
-    // width would poison the overlay layout).
-    let l = turn_navigator_layout(px(30.), true);
+    // width would poison the overlay layout). 26px is the exact break-even
+    // (two 1px insets + the 24px gutter); below it the floor bites.
+    let l = turn_navigator_layout(px(26.));
     assert_eq!(l.panel_width, px(0.));
 }
 

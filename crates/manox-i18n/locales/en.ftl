@@ -141,7 +141,6 @@ message-fork-unavailable-mid-turn = Only the last message of a completed turn ca
 
 message-fork-unavailable-not-replayed = This row is not part of the session record
 
-
 recap-card-title = Context compacted
 
 cache-miss-label = cache miss · { $tokens } tokens
@@ -165,8 +164,6 @@ status-denied = Denied
 status-cancelled = Cancelled
 
 ### views/message.rs — Thinking status row
-
-context-agents-title = Agents
 
 context-agents-captain = Captain
 
@@ -301,8 +298,6 @@ settings-desc-file-target = Where files and folders open by default
 settings-row-ui-language = User interface language
 
 settings-desc-ui-language = Interface chrome locale. Applies immediately on save.
-
-
 
 settings-save-failed-title = Settings save failed
 
@@ -703,7 +698,6 @@ workspace-reasoning-high = High
 
 workspace-reasoning-max = Max
 
-
 workspace-ask-supplement-label = Supplemental note
 
 workspace-ask-supplement-placeholder = Add optional context
@@ -887,12 +881,6 @@ titlebar-schedule = Add scheduled task...
 titlebar-new-window = Open in new window
 # ── Environment info panel ──────────────────────────────────────────────
 
-workspace-env-no-project = No project
-
-workspace-env-usage = Usage
-
-workspace-env-sources = Sources
-
 workspace-env-no-sources = No sources yet
 
 workspace-env-git-unavailable = git unavailable
@@ -901,21 +889,8 @@ workspace-env-git-not-a-repo = Not a git repo
 
 workspace-env-git-detached = detached
 
-workspace-env-git-copied-branch = Branch name copied to clipboard.
-
-workspace-env-git-copied-worktree-name = Directory name copied to clipboard.
-
-workspace-env-git-copied-worktree-path = Directory path copied to clipboard.
-
 # ── Context rail (right sidecar) ────────────────────────────────────────
 
-context-rail-title = Conversation Info
-
-context-tooltip-main-calls = Main calls
-
-context-tooltip-side-calls = Side calls
-
-context-tooltip-calls-unit = calls
 # ── Cockpit (run status / milestones / context budget) ──────────────────
 # Phase labels for the run-status row (three-tag pill: generating / reasoning /
 # user-turn).
@@ -923,18 +898,13 @@ context-tooltip-calls-unit = calls
 # awaiting-approval).
 # Plan section header.
 
-cockpit-milestones-header = Plan
 # Plan progress count shown at the right of the header. {$done}/{$total} are
 # completed/total step counts.
 
-cockpit-plan-progress = {$done}/{$total}
 # Remaining tasks beyond the current one, shown when collapsed. {$count} is a
 # number.
 
-cockpit-plan-remaining = +{$count} to do
 # Collapsed-state note when every step is completed.
-
-cockpit-plan-all-done = All done
 
 composer-pasted-image = Pasted image
 
@@ -1121,7 +1091,6 @@ plugins-notice-plugin-removed = Plugin removed. Restart manox to unload runtime 
 plugins-notice-plugin-enabled = Plugin enabled. Restart manox to load its tools, skills, agents, hooks, and MCP servers.
 
 plugins-notice-plugin-disabled = Plugin disabled. Restart manox to unload runtime registries loaded at startup.
-
 
 ## manox-agent-chrome-ui (app shell: sidebar / toolbar / tabs / bottom dock)
 

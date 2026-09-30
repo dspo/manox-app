@@ -610,11 +610,11 @@ impl Workspace {
 
     /// Wire api string → Tag variant + label for the pi model menu.
     pub(crate) fn pi_wire_tag_variant(api: &str) -> (TagVariant, &'static str) {
-        match api {
-            "anthropic" => (TagVariant::Color(ColorName::Blue), "Anthropic"),
-            "openai_responses" => (TagVariant::Color(ColorName::Cyan), "Responses"),
-            "openai_completions" => (TagVariant::Color(ColorName::Amber), "Completions"),
-            _ => (TagVariant::Secondary, "N/A"),
+        // The mapping lives with the bubble's text tint so the menu tag and
+        // the per-model usage rows can never drift apart again.
+        match crate::views::context_rail::pi_wire_tag(api) {
+            Some((color, label)) => (TagVariant::Color(color), label),
+            None => (TagVariant::Secondary, "N/A"),
         }
     }
 

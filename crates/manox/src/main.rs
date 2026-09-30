@@ -198,8 +198,6 @@ fn main() {
             // Cockpit milestone panel: cmd/ctrl-shift-m collapses or expands
             // the plan-steps section in the "Conversation Info" card. The
             // header is also clickable; this is the keyboard affordance.
-            gpui::KeyBinding::new("cmd-shift-m", agent_ui::ToggleCockpitTasks, None),
-            gpui::KeyBinding::new("ctrl-shift-m", agent_ui::ToggleCockpitTasks, None),
             // Completion popover (driven while the composer Input is focused and
             // a `/` or `@` trigger token is active). The Descendant predicate
             // `completion == open > Input` matches at the same depth as the
@@ -232,6 +230,13 @@ fn main() {
                 "escape",
                 agent_ui::CompletionDismiss,
                 Some("completion == open > Input"),
+            ),
+            // Conversation info bubble: the surface takes focus while open,
+            // so this fires on its own key context and nowhere else.
+            gpui::KeyBinding::new(
+                "escape",
+                agent_ui::DismissContextBubble,
+                Some("ContextBubble"),
             ),
             // Archive the current thread and start a fresh one.
             gpui::KeyBinding::new("cmd-;", agent_ui::ArchiveCurrentThread, None),

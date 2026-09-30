@@ -45,7 +45,7 @@ pub use manox_agent_chat_ui::turn_navigator_key_bindings;
 pub use manox_agent_chat_ui::{
     AskCancel, AskNext, AskPrev, CompletionConfirm, CompletionDismiss, CompletionDown,
     CompletionUp, ComposerRecallDown, ComposerRecallUp, CopySelectedTurn, FillComposerTurn,
-    ToggleCockpitTasks, ToggleTurnNavigator, UndoLastQueued,
+    ToggleTurnNavigator, UndoLastQueued,
 };
 
 gpui::actions!(
@@ -54,7 +54,8 @@ gpui::actions!(
         OpenSettings,
         FocusConversation,
         BackgroundCurrentThread,
-        ArchiveCurrentThread
+        ArchiveCurrentThread,
+        DismissContextBubble
     ]
 );
 
