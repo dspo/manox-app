@@ -241,6 +241,35 @@ impl Workspace {
                 })
                 .unwrap_or(false)
             && crate::views::context_rail::ContextRail::rail_width_for(main_body_w).is_some();
+        // Left-edge turn rail: the user-turn anchors are re-derived every
+        // frame (the same projection reads the ⌘M navigator makes on open).
+        // The width gate is a constant compare, so it short-circuits BEFORE
+        // the projection — a narrow card pays nothing. The turn-count gate
+        // lives inside `render_turn_rail` (None below two turns), whose
+        // result is the single source for both the rail and the gutter, so
+        // the two can never fork. Independent of the context rail's own
+        // gate: either side can float alone.
+        let turn_rail = if main_body_w >= px(crate::views::turn_rail::MIN_CARD_WIDTH) {
+            let rail_turns = crate::views::turn_rail::collect_rail_turns(
+                self.chat
+                    .read(cx)
+                    .conversation
+                    .read(cx)
+                    .items()
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, item)| (ix, item.read(cx).kind())),
+            );
+            let workspace = cx.entity();
+            let on_jump: crate::views::turn_rail::JumpFn =
+                std::rc::Rc::new(move |item_ix, _window, cx| {
+                    workspace.update(cx, |workspace, cx| workspace.reveal_message(item_ix, cx));
+                });
+            crate::views::turn_rail::render_turn_rail(&theme, &self.chat, rail_turns, on_jump, cx)
+        } else {
+            None
+        };
+        let show_turn_rail = turn_rail.is_some();
         let overlay = self
             .render_blank_project_overlay(window, &theme, cx)
             .or_else(|| self.render_pending_auth_overlay(&theme, cx));
@@ -376,7 +405,28 @@ impl Workspace {
                                 .min_h_0()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .child(list_wrap)
+                                .relative()
+                                // The gutter pads the list itself, not this
+                                // band: the rail's absolute anchor is the
+                                // band, so padding the band would drag the
+                                // rail right along with the text it must
+                                // clear (the ticks would land ON the
+                                // transcript instead of hugging the edge).
+                                .child(
+                                    h_flex()
+                                        .flex_1()
+                                        .w_full()
+                                        .min_h_0()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .when(show_turn_rail, |this| {
+                                            this.pl(px(crate::views::turn_rail::GUTTER))
+                                        })
+                                        .child(list_wrap),
+                                )
+                                // The rail paints after the list so its marks
+                                // and preview float over the transcript band.
+                                .children(turn_rail)
                         })
                     })
                     .children(footer)

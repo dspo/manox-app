@@ -644,6 +644,20 @@ impl Workspace {
                 turn_navigator: None,
                 turn_navigator_sub: None,
                 turn_navigator_previous_focus: None,
+                turn_rail_active: None,
+                turn_rail_active_from: None,
+                turn_rail_active_gen: 0,
+                turn_rail_hover: None,
+                turn_rail_hover_prev: None,
+                turn_rail_hover_gen: 0,
+                turn_rail_hover_painted: None,
+                turn_rail_pointer_inside: false,
+                turn_rail_followed: None,
+                turn_rail_scroll: gpui::UniformListScrollHandle::new(),
+                turn_rail_preview_mark: None,
+                turn_rail_preview_top: None,
+                turn_rail_preview_gen: 0,
+                turn_rail_box_h: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
                 queued_follow_ups: std::collections::VecDeque::new(),
                 queued_follow_ups_by_thread: HashMap::new(),
                 queue_drag: None,
@@ -705,6 +719,7 @@ impl Workspace {
             chat.list_state.reset(count);
             chat.list_count = count;
             chat.list_state.set_follow_mode(FollowMode::Tail);
+            chat.reset_turn_rail_interaction();
             cx.notify();
         });
         self.observe_conversation(cx);
@@ -714,6 +729,12 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_list_state(&self, cx: &App) -> ListState {
         self.chat.read(cx).list_state.clone()
+    }
+
+    /// The turn rail's hovered mark, for interaction tests.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_turn_rail_hover(&self, cx: &App) -> Option<usize> {
+        self.chat.read(cx).turn_rail_hover
     }
 
     /// Attach a thread through the production switch path. Diagnostic-only
@@ -1687,7 +1708,7 @@ impl Workspace {
                 TurnNavigatorEvent::Navigate { item_ix } => {
                     let target = *item_ix;
                     this.close_turn_navigator(window, cx);
-                    this.reveal_message(target, window, cx);
+                    this.reveal_message(target, cx);
                 }
                 TurnNavigatorEvent::FillComposer { text } => {
                     let text = text.clone();
@@ -1774,7 +1795,7 @@ impl Workspace {
     /// Jump the viewport so the given conversation item is at the top. Native
     /// `scroll_to` is a single atomic state change, so no frame protection is
     /// needed against a stale tail re-pin.
-    fn reveal_message(&mut self, item_ix: usize, _window: &mut Window, cx: &mut Context<Self>) {
+    fn reveal_message(&mut self, item_ix: usize, cx: &mut Context<Self>) {
         self.chat
             .read(cx)
             .list_state

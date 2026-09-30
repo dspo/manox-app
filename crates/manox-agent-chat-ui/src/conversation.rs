@@ -2042,7 +2042,6 @@ mod tests {
                 kind: manox_agent::background_task::TaskKind::MonitorCommand,
                 owner_goal_id: None,
                 event: manox_agent::background_task::TaskEventKind::Output(format!("event-{ix}")),
-                thread_seq: ix,
                 task_seq: ix,
                 timestamp_ms: ix,
             })

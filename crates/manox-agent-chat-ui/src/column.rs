@@ -404,6 +404,40 @@ pub struct ChatColumn {
     pub turn_navigator: Option<Entity<TurnNavigator>>,
     pub turn_navigator_sub: Option<Subscription>,
     pub turn_navigator_previous_focus: Option<FocusHandle>,
+    /// Left-edge turn rail state (`views::turn_rail`). Marks are re-derived
+    /// from the conversation every frame; these fields carry only the
+    /// interaction and tween bookkeeping. `turn_rail_active` is the mark the
+    /// list's scroll position resolves to, with `turn_rail_active_from`
+    /// snapshotting the previous active mark (only when it changes) and
+    /// `turn_rail_active_gen` keying the tick tween so each change starts a
+    /// fresh run. The hover preview mirrors that discipline through
+    /// `turn_rail_preview_{mark,top,gen}`: the last painted top is the next
+    /// travel origin, `top` cleared when the pointer leaves.
+    /// `turn_rail_pointer_inside` pauses active-follow so the marks never
+    /// travel under the hand; `turn_rail_followed` records the last
+    /// auto-followed `(active, count)` pair so the render-time follow cannot
+    /// loop. `turn_rail_box_h` is the rail strip's height, captured at
+    /// prepaint for the preview's clamp.
+    pub turn_rail_active: Option<usize>,
+    pub turn_rail_active_from: Option<usize>,
+    pub turn_rail_active_gen: u64,
+    pub turn_rail_hover: Option<usize>,
+    /// The hover wave's from-snapshots (dsh's indicator_from discipline for
+    /// ticks): the mark that just gained hover tweens up from rest while the
+    /// mark in `turn_rail_hover_prev` tweens back down, both under the id
+    /// keyed by `turn_rail_hover_gen`. `turn_rail_hover_painted` is what the
+    /// last render saw — the change detector, so one pointer sweep across
+    /// several marks runs exactly one tween pair, not one per frame.
+    pub turn_rail_hover_prev: Option<usize>,
+    pub turn_rail_hover_gen: u64,
+    pub turn_rail_hover_painted: Option<usize>,
+    pub turn_rail_pointer_inside: bool,
+    pub turn_rail_followed: Option<(usize, usize)>,
+    pub turn_rail_scroll: gpui::UniformListScrollHandle,
+    pub turn_rail_preview_mark: Option<usize>,
+    pub turn_rail_preview_top: Option<gpui::Pixels>,
+    pub turn_rail_preview_gen: u64,
+    pub turn_rail_box_h: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
     /// Follow-ups submitted while a turn is running. Steer items are injected
     /// into the running turn at the next safe join point; queue items flush as
     /// the next user turn at `TurnFinished`.
@@ -509,6 +543,26 @@ pub struct ChatColumn {
 // workspace; these are the pure state machines the card renders against.
 
 impl ChatColumn {
+    /// Reset the turn rail's interaction and tween state. Called when the
+    /// conversation is re-projected (thread switch, diagnostic replace): a
+    /// stale hover index would otherwise mount a preview card the pointer is
+    /// not on, a stale `pointer_inside` would keep active-follow paused
+    /// forever, and a stale `hover_painted` would fire a spurious tween pair
+    /// on the first remounted frame. The `_gen` counters are deliberately
+    /// kept — they only key animation ids, and fresh runs are what a
+    /// remount wants anyway.
+    pub fn reset_turn_rail_interaction(&mut self) {
+        self.turn_rail_hover = None;
+        self.turn_rail_hover_prev = None;
+        self.turn_rail_hover_painted = None;
+        self.turn_rail_preview_mark = None;
+        self.turn_rail_preview_top = None;
+        self.turn_rail_pointer_inside = false;
+        self.turn_rail_active = None;
+        self.turn_rail_active_from = None;
+        self.turn_rail_followed = None;
+    }
+
     /// The snapshot for the pending ask card at its current step.
     pub fn ask_card_snapshot(&self, id: &str) -> Option<crate::ask_card::AskCardSnapshot> {
         let ask = self.pending_ask.as_ref()?;
