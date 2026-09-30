@@ -20,7 +20,9 @@
 use std::collections::{HashMap, HashSet};
 
 use ahp_types::state::{SessionStatus as WireStatus, SessionSummary};
-use manox_agent_chrome_ui::session_list::{SessionGroup, SessionRowData, SessionStatus};
+use manox_agent_chrome_ui::session_list::{
+    SessionGroup, SessionRowData, SessionRowKind, SessionStatus,
+};
 
 /// One sidebar row: the fields the chrome list renders, derived from a
 /// session summary plus its extension fold. Replaces the retired v2
@@ -104,6 +106,7 @@ pub fn project_row(item: &ThreadRow, unread_override: Option<bool>) -> SessionRo
         updated_at: item.updated_at,
         sort_stamp: item.updated_at,
         status: five_state(item, unread_override),
+        kind: SessionRowKind::Thread,
         pinned: item.pinned,
         archived: item.archived,
         tag: item.tag.clone(),
@@ -214,7 +217,7 @@ pub fn project_groups(
 
 /// Project display name: the path's last segment; empty (quick chats) →
 /// "Chats".
-fn project_label(path: &str) -> String {
+pub(crate) fn project_label(path: &str) -> String {
     if path.is_empty() || path == "." {
         return "Chats".into();
     }

@@ -178,6 +178,7 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             // The project menu surface, with a stand-in item per row — the
             // real cascade lives in the app's assembly (agent-ui); the
             // example only has to prove the surface anchors and dismisses.
+            on_close_external: None,
             on_group_menu: Some(Box::new(|key, project, _anchor, window, cx| {
                 let label = match project {
                     Some(p) => format!("Project actions: {p}"),
@@ -352,6 +353,7 @@ fn load_rows() -> Vec<SessionRow> {
                 .unwrap_or_else(|| t.summary.clone()),
             workspace: project_label(&t.project),
             project: (!t.project.is_empty()).then(|| t.project.clone()),
+            kind: manox_agent_chrome_ui::session_list::SessionRowKind::Thread,
             status: five_state(t.errored, running, t.has_unread),
             tag: None,
             team_leader: false,
