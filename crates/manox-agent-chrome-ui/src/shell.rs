@@ -22,6 +22,7 @@ use crate::panel::{PanelSlot, PanelSurface};
 use crate::right_pane::{RightPane, ToolTabFactory};
 use crate::session_list::{
     CustomizationRow, FixedRow, SessionGroup, SessionList, SessionRowData, SessionStatus,
+    SidebarGrouping,
 };
 use crate::theme::{
     CARD_BG, CARD_BORDER, FG_DIM, FG_FAINT, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
@@ -105,8 +106,16 @@ pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>
 /// Host nav move: opens the previous/next thread in the host's history and
 /// returns the thread id it landed on (`None` when there is nowhere to go).
 pub type HookOnNav = Box<dyn Fn(&mut Window, &mut App) -> Option<String>>;
-/// Host state query (render-time read face, no mutation).
+/// Host state query face (render-time read, no mutation).
 pub type HookQuery<T> = Box<dyn Fn(&App) -> T>;
+
+/// Which nav moves have an edge to land on right now (named because two
+/// anonymous booleans carry their meaning only in positional order).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NavAvail {
+    pub back: bool,
+    pub forward: bool,
+}
 
 /// Host-side actions the shell mirrors to. All optional; an absent hook
 /// leaves the shell's local behavior only (e.g. `on_pin` flips the local row
@@ -121,8 +130,9 @@ pub struct HostHooks {
     /// New-session request (the New button / ⌘N). Absent → the shell just
     /// clears the active session.
     pub on_new_session: Option<HookOnUnit>,
-    /// Selection-change notification — also the row menu's 打开 action (the
-    /// full production switch path).
+    /// Selection-change notification (the full production switch path; the
+    /// row menu has no open action — its five items are pin / archive /
+    /// tag / clear-tag / copy id).
     pub on_select: Option<HookOnId>,
     /// ←/→ session-history navigation. The hook performs the host-side move
     /// and reports the landed thread id so the shell can move its own
@@ -131,19 +141,9 @@ pub struct HostHooks {
     pub on_nav_forward: Option<HookOnNav>,
     /// Availability of the two nav moves, queried at render time (the host
     /// owns the history stack; the shell only paints its edges).
-    pub nav_avail: Option<HookQuery<(bool, bool)>>,
+    pub nav_avail: Option<HookQuery<NavAvail>>,
     /// Open the foreground session's workspace in the user's editor.
     pub on_open_editor: Option<HookOnUnit>,
-}
-
-/// The sidebar's two grouping modes: by workspace (project) — the default,
-/// drag-reorderable — or by last-activity time buckets (today / yesterday /
-/// last 7 days / earlier).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum SidebarGrouping {
-    #[default]
-    Workspace,
-    Time,
 }
 
 /// Everything the shell needs from its host at construction.
@@ -158,7 +158,7 @@ pub struct ShellConfig {
     pub customizations: Vec<CustomizationRow>,
     /// The app brand mark for the titlebar's avatar slot (a per-call element
     /// factory — elements rebuild each frame). `None` falls back to the
-    /// generic account glyph.
+    /// generic code glyph.
     pub brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
     pub hooks: HostHooks,
 }
@@ -331,13 +331,13 @@ impl Shell {
     }
 
     /// Whether the two nav moves can fire right now (the host's history
-    /// edges; `(false, false)` with no host face).
-    pub fn nav_avail(&self, cx: &App) -> (bool, bool) {
+    /// edges; all-false with no host face).
+    pub fn nav_avail(&self, cx: &App) -> NavAvail {
         self.hooks
             .nav_avail
             .as_ref()
             .map(|q| q(cx))
-            .unwrap_or((false, false))
+            .unwrap_or_default()
     }
 
     /// The titlebar's editor button: open the foreground session's workspace
@@ -349,16 +349,17 @@ impl Shell {
     }
 
     /// The brand-mark element for the titlebar's avatar slot, rebuilt for
-    /// this frame (`None` → the caller renders its fallback).
+    /// this frame (`None` → the titlebar renders its generic fallback).
     pub fn brand_element(&self) -> Option<gpui::AnyElement> {
         self.brand.as_ref().map(|f| f())
     }
 
     /// The sidebar sort button: workspace grouping ↔ time buckets.
     pub fn toggle_grouping(&mut self) {
-        self.grouping = match self.grouping {
-            SidebarGrouping::Workspace => SidebarGrouping::Time,
-            SidebarGrouping::Time => SidebarGrouping::Workspace,
+        self.grouping = if self.grouping.is_time() {
+            SidebarGrouping::Workspace
+        } else {
+            SidebarGrouping::Time
         };
     }
 
@@ -367,36 +368,39 @@ impl Shell {
     }
 
     /// The sidebar search button: expand/collapse the filter row. Expanding
-    /// builds the input on this event path (an InputState needs a Window),
-    /// clears the term and focuses it; collapsing drops both.
+    /// builds the input on this event path (an InputState needs a Window;
+    /// the row always starts collapsed, so the input is built exactly once
+    /// per expansion), clears the term and focuses it; collapsing drops both.
     pub fn toggle_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_filter_open = !self.sidebar_filter_open;
         if self.sidebar_filter_open {
-            if self.filter_query.is_none() {
-                let query = cx.new(|cx| {
-                    gpui_component::input::InputState::new(window, cx)
-                        .placeholder(manox_i18n::t("chrome-sidebar-search-placeholder"))
-                });
-                let sub = cx.subscribe_in(
-                    &query,
-                    window,
-                    |_, _, _: &gpui_component::input::InputEvent, _w, cx| cx.notify(),
-                );
-                self._filter_sub = Some(sub);
-                self.filter_query = Some(query);
-            }
-            if let Some(query) = self.filter_query.clone() {
-                query.update(cx, |s, cx| {
-                    s.set_value("", window, cx);
-                    let handle = s.presentation().focus_handle().clone();
-                    window.focus(&handle, cx);
-                });
-            }
+            let query = cx.new(|cx| {
+                gpui_component::input::InputState::new(window, cx)
+                    .placeholder(manox_i18n::t("chrome-sidebar-search-placeholder"))
+            });
+            let sub = cx.subscribe_in(
+                &query,
+                window,
+                |_, _, _: &gpui_component::input::InputEvent, _w, cx| cx.notify(),
+            );
+            self._filter_sub = Some(sub);
+            query.update(cx, |s, cx| {
+                s.set_value("", window, cx);
+                let handle = s.presentation().focus_handle().clone();
+                window.focus(&handle, cx);
+            });
+            self.filter_query = Some(query);
         } else {
             self._filter_sub = None;
             self.filter_query = None;
         }
         cx.notify();
+    }
+
+    /// The filter row's input, if mounted (read face for hosts/tests that
+    /// need to drive the term).
+    pub fn filter_input(&self) -> Option<Entity<gpui_component::input::InputState>> {
+        self.filter_query.clone()
     }
 
     /// The current filter term (lowercased; `None` while the row is closed
@@ -430,7 +434,7 @@ impl Shell {
     /// concept only.
     pub fn move_group(&mut self, dragged: &str, target: &str, before: bool) {
         self.group_drag_marker = None;
-        if dragged == target || self.grouping == SidebarGrouping::Time {
+        if dragged == target || self.grouping.is_time() {
             return;
         }
         // Materialize the current display order into `group_order` first
@@ -768,9 +772,10 @@ impl Shell {
                 }
             })
             .collect();
-        let mut groups: Vec<SessionGroup> = match self.grouping {
-            SidebarGrouping::Workspace => self.workspace_groups(&visible),
-            SidebarGrouping::Time => self.time_groups(&visible),
+        let mut groups: Vec<SessionGroup> = if self.grouping.is_time() {
+            self.time_groups(&visible, today(cx))
+        } else {
+            self.workspace_groups(&visible)
         };
         // While filtering, a group that matched hides nothing: the term is
         // the visible structure, not the collapse toggles.
@@ -794,6 +799,7 @@ impl Shell {
             } else {
                 groups.push(SessionGroup {
                     name: s.workspace.clone(),
+                    key: s.workspace.clone(),
                     collapsed,
                     rows: vec![s.row_data()],
                 });
@@ -821,25 +827,33 @@ impl Shell {
     }
 
     /// Time grouping: four recency buckets by local natural day (today /
-    /// yesterday / last 7 days / earlier); unknown stamps (0) fall into
-    /// "earlier". Pinned rows lead each bucket, then the team sort stamp.
-    fn time_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
-        const BUCKET_KEYS: [&str; 4] = [
-            "chrome-group-today",
-            "chrome-group-yesterday",
-            "chrome-group-week",
-            "chrome-group-earlier",
+    /// yesterday / last 7 days / earlier). Rows bucket by their `sort_stamp`
+    /// — the projection stamps team members with their leader's stamp, so a
+    /// team lands in ONE bucket and stays contiguous under its chevron
+    /// (bucketing by each row's own `updated_at` would split it). Unknown
+    /// stamps (0) fall into "earlier". Pinned rows lead each bucket.
+    fn time_groups(&self, sessions: &[&SessionRow], today: chrono::NaiveDate) -> Vec<SessionGroup> {
+        const BUCKETS: [TimeBucket; 4] = [
+            TimeBucket::Today,
+            TimeBucket::Yesterday,
+            TimeBucket::Week,
+            TimeBucket::Earlier,
         ];
-        let mut groups: Vec<SessionGroup> = BUCKET_KEYS
+        let mut groups: Vec<SessionGroup> = BUCKETS
             .iter()
-            .map(|key| SessionGroup {
-                name: manox_i18n::t(key).to_string(),
-                collapsed: self.collapsed.iter().any(|k| *k == *key),
-                rows: Vec::new(),
+            .map(|bucket| {
+                let key = bucket.state_key();
+                SessionGroup {
+                    name: manox_i18n::t(bucket.label_key()).to_string(),
+                    key: key.to_string(),
+                    collapsed: self.collapsed.iter().any(|k| k == bucket.state_key()),
+                    rows: Vec::new(),
+                }
             })
             .collect();
         for s in sessions {
-            groups[time_bucket(s.updated_at)].rows.push(s.row_data());
+            let bucket = time_bucket(s.sort_stamp, today);
+            groups[bucket as usize].rows.push(s.row_data());
         }
         for g in &mut groups {
             g.rows.sort_by(|a, b| {
@@ -1475,23 +1489,107 @@ fn menu_icon(path: &'static str) -> gpui_component::Icon {
         .text_color(gpui::Hsla::from(FG_FAINT))
 }
 
-/// The time-grouping bucket for a last-active stamp, by local natural day:
-/// 0 = today, 1 = yesterday, 2 = last 7 days, 3 = earlier. Unknown stamps
-/// (0 unix secs) land in "earlier".
-fn time_bucket(updated_at: i64) -> usize {
-    use chrono::TimeZone as _;
-    if updated_at <= 0 {
-        return 3;
+/// The four recency buckets, in display order. The enum closes the loop
+/// between the bucket index and its state key / label key — swapping or
+/// inserting a bucket cannot silently shift the other two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimeBucket {
+    Today = 0,
+    Yesterday = 1,
+    Week = 2,
+    Earlier = 3,
+}
+
+impl TimeBucket {
+    /// The collapse-state key (stable across UI languages).
+    fn state_key(self) -> &'static str {
+        match self {
+            TimeBucket::Today => "chrome-group-today",
+            TimeBucket::Yesterday => "chrome-group-yesterday",
+            TimeBucket::Week => "chrome-group-week",
+            TimeBucket::Earlier => "chrome-group-earlier",
+        }
     }
-    let Some(t) = chrono::Local.timestamp_opt(updated_at, 0).single() else {
-        return 3;
+
+    fn label_key(self) -> &'static str {
+        self.state_key()
+    }
+}
+
+/// The time-grouping bucket for a stamp, by local natural day: unknown
+/// stamps (≤ 0 unix secs) and undecodable ones land in "earlier".
+fn time_bucket(sort_stamp: i64, today: chrono::NaiveDate) -> TimeBucket {
+    use chrono::TimeZone as _;
+    if sort_stamp <= 0 {
+        return TimeBucket::Earlier;
+    }
+    let Some(t) = chrono::Local.timestamp_opt(sort_stamp, 0).single() else {
+        return TimeBucket::Earlier;
     };
-    let today = chrono::Local::now().date_naive();
-    let day = t.date_naive();
-    match today.signed_duration_since(day).num_days() {
-        d if d <= 0 => 0,
-        1 => 1,
-        d if d < 7 => 2,
-        _ => 3,
+    match today.signed_duration_since(t.date_naive()).num_days() {
+        d if d <= 0 => TimeBucket::Today,
+        1 => TimeBucket::Yesterday,
+        d if d < 7 => TimeBucket::Week,
+        _ => TimeBucket::Earlier,
+    }
+}
+
+/// The render-time "today" anchor for the bucket math (injectable for
+/// determinism at the call sites that need it).
+fn today(cx: &App) -> chrono::NaiveDate {
+    let _ = cx;
+    chrono::Local::now().date_naive()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn day(offset: i64) -> chrono::NaiveDate {
+        chrono::Local::now().date_naive() + chrono::Duration::days(offset)
+    }
+
+    /// Unix seconds for local noon on `day` (noon survives DST shifts).
+    fn stamp_on(day: chrono::NaiveDate) -> i64 {
+        use chrono::TimeZone as _;
+        chrono::Local
+            .from_local_datetime(&day.and_hms_opt(12, 0, 0).expect("noon exists"))
+            .single()
+            .expect("local noon resolves")
+            .timestamp()
+    }
+
+    #[test]
+    fn time_bucket_respects_the_local_day_boundaries() {
+        let today = day(0);
+        assert_eq!(time_bucket(stamp_on(today), today), TimeBucket::Today);
+        // Future stamps (clock skew) read as today.
+        assert_eq!(time_bucket(stamp_on(day(1)), today), TimeBucket::Today);
+        assert_eq!(time_bucket(stamp_on(day(-1)), today), TimeBucket::Yesterday);
+        assert_eq!(time_bucket(stamp_on(day(-6)), today), TimeBucket::Week);
+        assert_eq!(time_bucket(stamp_on(day(-7)), today), TimeBucket::Earlier);
+        assert_eq!(time_bucket(stamp_on(day(-30)), today), TimeBucket::Earlier);
+        // Unknown stamps land in "earlier".
+        assert_eq!(time_bucket(0, today), TimeBucket::Earlier);
+        assert_eq!(time_bucket(-5, today), TimeBucket::Earlier);
+    }
+
+    #[test]
+    fn time_bucket_cannot_be_index_shifted_by_key_edits() {
+        // The enum's state keys are one-per-bucket: a duplicate or missing
+        // key breaks the collapse mapping long before a user sees it.
+        let keys: Vec<&'static str> = [
+            TimeBucket::Today,
+            TimeBucket::Yesterday,
+            TimeBucket::Week,
+            TimeBucket::Earlier,
+        ]
+        .iter()
+        .map(|b| b.state_key())
+        .collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(keys.len(), sorted.len(), "bucket state keys must be unique");
     }
 }

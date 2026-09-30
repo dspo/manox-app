@@ -185,7 +185,15 @@ mod macos {
                     count: None,
                 },
             ],
-            hooks: HostHooks::default(),
+            hooks: HostHooks {
+                // Live nav edges: the screenshot is the only acceptance face
+                // for the titlebar's enabled-arrow state.
+                nav_avail: Some(Box::new(|_| manox_agent_chrome_ui::shell::NavAvail {
+                    back: true,
+                    forward: false,
+                })),
+                ..Default::default()
+            },
         }
     }
 

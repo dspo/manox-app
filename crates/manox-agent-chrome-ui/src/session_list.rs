@@ -32,7 +32,22 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ElementExt as _, Sizable as _};
 
 use crate::primitives::{icon_button, kbd_chip, small_icon_button};
-use crate::shell::SidebarGrouping;
+
+/// The sidebar's two grouping modes: by workspace (project) — the default,
+/// drag-reorderable — or by last-activity time buckets (today / yesterday /
+/// last 7 days / earlier).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SidebarGrouping {
+    #[default]
+    Workspace,
+    Time,
+}
+
+impl SidebarGrouping {
+    pub fn is_time(self) -> bool {
+        self == Self::Time
+    }
+}
 
 /// Action callback taking a row id (select / toggle group / menu target).
 pub type OnId = Rc<dyn Fn(&String, &mut Window, &mut App)>;
@@ -94,7 +109,12 @@ pub enum SessionStatus {
 /// One workspace group.
 #[derive(Clone, PartialEq)]
 pub struct SessionGroup {
+    /// Display name (the header label).
     pub name: String,
+    /// Stable state key — collapse state and drag identity ride THIS, never
+    /// the display name (which follows the UI language in time grouping and
+    /// must not become state).
+    pub key: String,
     pub collapsed: bool,
     pub rows: Vec<SessionRowData>,
 }
@@ -283,17 +303,20 @@ impl RenderOnce for SessionList {
                     .children(self.groups.iter().map(|g| group(&self, g, &order, window)))
                     // A filter active on a fully-filtered-out list: an empty
                     // state of its own, distinct from "no chats yet".
-                    .when(self.filter_active && self.groups.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .mx(px(20.))
-                                .py(px(3.))
-                                .px(px(6.))
-                                .text_size(px(12.))
-                                .text_color(FG_FAINT)
-                                .child(manox_i18n::t("chrome-sidebar-no-match")),
-                        )
-                    }),
+                    .when(
+                        self.filter_active && !self.no_chats_hint && self.groups.is_empty(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .mx(px(20.))
+                                    .py(px(3.))
+                                    .px(px(6.))
+                                    .text_size(px(12.))
+                                    .text_color(FG_FAINT)
+                                    .child(manox_i18n::t("chrome-sidebar-no-match")),
+                            )
+                        },
+                    ),
             )
             .child(customizations(&self.customizations))
     }
@@ -377,7 +400,7 @@ fn header(
                         "sort",
                         icons::SORT_PRECEDENCE,
                         14.,
-                        grouping == SidebarGrouping::Time,
+                        grouping.is_time(),
                         move |e, w, cx| on_toggle_grouping(e, w, cx),
                     )
                     .tooltip(hover_tooltip("chrome-sidebar-grouping")),
@@ -402,6 +425,7 @@ fn filter_row(
     on_clear: Option<OnWindowApp>,
 ) -> impl IntoElement {
     div()
+        .id("sidebar-filter")
         .w_full()
         .flex()
         .items_center()
@@ -508,18 +532,24 @@ fn group(
     window: &Window,
 ) -> impl IntoElement {
     let toggle = list.on_toggle_group.clone();
-    let name = g.name.clone();
+    let key = g.key.clone();
     let on_move = list.on_move_group.clone();
     let on_drag_move_cb = list.on_drag_move_group.clone();
     let marker = list.group_drag_marker.clone();
+    // Drag reorder is a workspace-mode concept: in time grouping the order
+    // is the recency sort, so the group header is not a drag source and the
+    // container is not a drop target — a live insertion line whose commit
+    // is silently discarded would be a fake control.
+    let draggable = !list.grouping.is_time();
 
-    let header_name = g.name.clone();
-    let mut items: Vec<gpui::AnyElement> = vec![
-        div()
-            .id(SharedString::from(format!("grp-{name}")))
-            .on_click(move |_, w, cx| toggle(&name, w, cx))
-            .on_drag(DraggedGroup(SharedString::from(header_name.as_str())), {
-                let payload = DraggedGroup(SharedString::from(header_name.as_str()));
+    let header_key = g.key.clone();
+    let mut header = div()
+        .id(SharedString::from(format!("grp-{}", g.key)))
+        .on_click(move |_, w, cx| toggle(&key, w, cx));
+    if draggable {
+        header = header
+            .on_drag(DraggedGroup(SharedString::from(header_key.as_str())), {
+                let payload = DraggedGroup(SharedString::from(header_key.as_str()));
                 move |_, _, _, cx| {
                     use gpui::AppContext as _;
                     cx.stop_propagation();
@@ -528,7 +558,7 @@ fn group(
                 }
             })
             .on_drag_move::<DraggedGroup>({
-                let target = g.name.clone();
+                let target = g.key.clone();
                 let cb = on_drag_move_cb.clone();
                 move |e: &gpui::DragMoveEvent<DraggedGroup>, w, cx| {
                     // Update the marker only while the pointer is inside this
@@ -541,33 +571,35 @@ fn group(
                     let before = e.event.position.y < e.bounds.origin.y + e.bounds.size.height / 2.;
                     (cb)(&e.drag(cx).0.to_string(), &target, before, w, cx);
                 }
-            })
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(5.))
-            .py(px(4.))
-            .px(px(6.))
-            .text_size(px(12.5))
-            .hover(|style| style.bg(LIST_HOVER))
-            .child(icon(
-                if g.collapsed {
-                    icons::CHEVRON_RIGHT
-                } else {
-                    icons::CHEVRON_DOWN
-                },
-                13.,
-            ))
-            .child(icon(icons::FOLDER, 15.))
-            .child(
-                div()
-                    .font_weight(FontWeight::BOLD)
-                    .min_w_0()
-                    .truncate()
-                    .child(g.name.clone()),
-            )
-            .into_any_element(),
-    ];
+            });
+    }
+    let header = header
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .py(px(4.))
+        .px(px(6.))
+        .text_size(px(12.5))
+        .hover(|style| style.bg(LIST_HOVER))
+        .child(icon(
+            if g.collapsed {
+                icons::CHEVRON_RIGHT
+            } else {
+                icons::CHEVRON_DOWN
+            },
+            13.,
+        ))
+        .child(icon(icons::FOLDER, 15.))
+        .child(
+            div()
+                .font_weight(FontWeight::BOLD)
+                .min_w_0()
+                .truncate()
+                .child(g.name.clone()),
+        );
+
+    let mut items: Vec<gpui::AnyElement> = vec![header.into_any_element()];
     if !g.collapsed {
         items.extend(
             g.rows
@@ -576,15 +608,15 @@ fn group(
         );
     }
 
-    let slot_name = g.name.clone();
-    div()
-        .id(SharedString::from(format!("grp-slot-{slot_name}")))
+    let mut slot = div()
+        .id(SharedString::from(format!("grp-slot-{}", g.key)))
         .w_full()
         .flex()
         .flex_col()
-        .relative()
-        .on_drop::<DraggedGroup>({
-            let target = g.name.clone();
+        .relative();
+    if draggable {
+        slot = slot.on_drop::<DraggedGroup>({
+            let target = g.key.clone();
             let on_move = on_move.clone();
             let marker = marker.clone();
             move |dragged: &DraggedGroup, w, cx| {
@@ -600,35 +632,29 @@ fn group(
                     .unwrap_or(true);
                 (on_move)(&dragged.0.to_string(), &target, before, w, cx);
             }
+        });
+    }
+    // The insertion line reads (dragged, target, before); in time grouping
+    // the marker stays None because no header is a drag source there.
+    let slot = slot.children(marker.clone().and_then(|(dragged, target, before)| {
+        (target == g.key && dragged != g.key).then(|| {
+            let line = div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(2.))
+                .rounded_full()
+                .bg(ACCENT);
+            if before {
+                line.top_0()
+            } else {
+                line.bottom_0()
+            }
         })
-        .children(marker.clone().and_then(|(dragged, target, before)| {
-            (target == g.name && dragged != g.name).then(|| {
-                let line = div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .h(px(2.))
-                    .rounded_full()
-                    .bg(ACCENT);
-                if before {
-                    line.top_0()
-                } else {
-                    line.bottom_0()
-                }
-            })
-        }))
-        .children(items)
+    }));
+    slot.children(items)
 }
 
-/// One session row — a fixed 66px three-line card, no controls:
-/// - line 1: the 16px status slot + the title (marquee on hover when
-///   truncated; team leaders prepend a chevron in front of the slot);
-/// - line 2: the tag line — the short-id chip first, then the user tag (or
-///   the inline tag editor while that row is being edited);
-/// - line 3: the info line — last-active time only.
-///
-/// All three lines share one left baseline; right-clicking anywhere opens
-/// the row menu (the only action surface).
 fn session_row(
     list: &SessionList,
     data: &SessionRowData,

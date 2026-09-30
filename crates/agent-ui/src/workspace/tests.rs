@@ -376,3 +376,81 @@ mod suite {
         );
     }
 }
+
+/// The ←/→ history invariants (see `NavHistory`): these pin the state
+/// machine's dedup / truncation / cap / edge semantics without a Window.
+#[cfg(test)]
+mod nav_history {
+    use super::super::NavHistory;
+
+    fn recorded(ids: &[&str]) -> NavHistory {
+        let mut nav = NavHistory::default();
+        for id in ids {
+            nav.record(id);
+        }
+        nav
+    }
+
+    #[test]
+    fn reopening_the_current_entry_after_a_back_step_is_a_noop() {
+        let mut nav = recorded(&["a", "b", "c"]);
+        nav.step_back();
+        // The pointer sits on b; clicking b's row again must not duplicate
+        // it (an entry dup here made ← land on the same b twice).
+        nav.record("b");
+        assert_eq!(nav.step_back().as_deref(), Some("a"));
+        assert_eq!(nav.step_forward().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_new_open_truncates_the_forward_tail() {
+        let mut nav = recorded(&["a", "b", "c"]);
+        nav.step_back();
+        nav.record("d");
+        assert_eq!(nav.step_forward(), None, "the tail after d must be gone");
+        assert_eq!(nav.step_back().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn the_cap_drains_the_front_and_keeps_the_index_at_the_tail() {
+        let mut nav = NavHistory::default();
+        for i in 0..110 {
+            nav.record(&format!("t{i}"));
+        }
+        assert_eq!(nav.step_back().as_deref(), Some("t108"));
+        // The front drained: exactly the last 100 survive.
+        assert_eq!(nav.step_back().map(|_| ()), Some(()));
+    }
+
+    #[test]
+    fn edges_report_no_move_and_the_front_is_not_a_panic() {
+        let mut nav = recorded(&["a", "b"]);
+        assert_eq!(nav.step_back().as_deref(), Some("a"));
+        assert_eq!(nav.step_back(), None, "the front is inert");
+        assert!(!nav.avail().back);
+        assert!(nav.avail().forward);
+        assert_eq!(nav.step_forward().as_deref(), Some("b"));
+        assert_eq!(nav.step_forward(), None, "the tail is inert");
+    }
+
+    #[test]
+    fn an_empty_history_is_unavailable_in_both_directions() {
+        let nav = NavHistory::default();
+        assert!(!nav.avail().back);
+        assert!(!nav.avail().forward);
+    }
+
+    #[test]
+    fn the_successor_handoff_rewrites_the_current_entry_in_place() {
+        let mut nav = recorded(&["a"]);
+        // A 换代成 a'：同一场会话的新身份，原地改写而非追加。
+        nav.replace_current("a2");
+        assert_eq!(nav.step_back(), None, "rewrite must not grow the stack");
+        nav.record("b");
+        assert_eq!(
+            nav.step_back().as_deref(),
+            Some("a2"),
+            "← lands on the SUCCESSOR id, never the retired predecessor"
+        );
+    }
+}

@@ -23,7 +23,7 @@ use gpui::{
     App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Styled as _,
     WeakEntity, Window,
 };
-use gpui_component::Root;
+use gpui_component::{Root, WindowExt as _, notification::Notification};
 use manox_agent_chrome_ui::right_pane::ToolTab;
 use manox_agent_chrome_ui::{
     CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, icons,
@@ -210,8 +210,22 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                 .into_iter()
                 .flat_map(manox_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
+        // The sidebar highlight follows the FOREGROUND thread, not the last
+        // click: new-thread landings, /exit replacements and successor
+        // hand-offs all switch without a sidebar click, and a stale
+        // highlight would advertise the wrong session as active.
+        let fg = ws
+            .read(cx)
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone());
         shell.update(cx, |shell, cx| {
             shell.set_sessions(sessions);
+            if shell.active != fg {
+                shell.active = fg;
+            }
             cx.notify();
         });
         refresh_foreground_cwd(&ws, &rows, cx);
@@ -434,17 +448,52 @@ fn shell_config(
                 let ws = ws.clone();
                 move |cx| ws.read(cx).nav_avail()
             })),
-            // "Open in editor": hand the foreground thread's workspace to the
-            // plain VS Code launch (no injection, no restart prompts) — the
-            // same open -a semantics as the tools menu's 「打开」.
-            on_open_editor: Some(Box::new(|_w, _cx| {
-                let Some(cwd) = foreground_cwd() else {
-                    tracing::warn!("open-in-editor: no foreground workspace yet");
+            // "Open in VS Code": hand the foreground thread's project to the
+            // plain VS Code launch (no injection, no restart prompts). The
+            // launch blocks on `open`'s exit, so it runs on a background
+            // thread and reports through a notification — a silent failure
+            // here would be indistinguishable from a dead button.
+            on_open_editor: Some(Box::new(|window, cx| {
+                let Some(project) = FOREGROUND_PROJECT
+                    .lock()
+                    .expect("foreground project lock")
+                    .clone()
+                else {
+                    window.push_notification(
+                        Notification::error(manox_i18n::t("vscode-open-no-project")),
+                        cx,
+                    );
                     return;
                 };
-                if let Err(e) = manox_ext_agents::vscode_app::launch_plain(Some(&cwd)) {
-                    tracing::warn!("open-in-editor failed: {e:#}");
-                }
+                cx.spawn({
+                    let handle = crate::dispatch::window_global();
+                    async move |cx| {
+                        let result = manox_ext_agents::vscode_app::launch_plain(Some(&project));
+                        if let Some(handle) = handle {
+                            let _ = handle.update(cx, |_, window, cx| match result {
+                                Ok(()) => {
+                                    window.push_notification(
+                                        Notification::success(manox_i18n::t(
+                                            "vscode-open-launched",
+                                        )),
+                                        cx,
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, "open-in-VS Code failed");
+                                    window.push_notification(
+                                        Notification::error(format!(
+                                            "{}: {e}",
+                                            manox_i18n::t("vscode-open-failed")
+                                        )),
+                                        cx,
+                                    );
+                                }
+                            });
+                        }
+                    }
+                })
+                .detach();
             })),
         },
         // The titlebar's avatar slot wears the app's own mark.
@@ -496,8 +545,14 @@ impl MainSurface for PendingMain {
 /// The foreground thread's cwd, refreshed by the assembly's observer on
 /// every thread switch — the dock surface reads it at open time (a static
 /// because the surface must stay entity-free to ride an `Arc`; the same
-/// pattern as the badge pump's LAST_COUNT).
+/// pattern as the badge pump's LAST_COUNT). Falls back to $HOME: a terminal
+/// has to spawn SOMEWHERE.
 static FOREGROUND_CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+/// The foreground thread's PROJECT path, or `None` when there is no
+/// foreground row / no project — "open in editor" must not silently open
+/// `$HOME`, so it reads this rather than the cwd fallback above.
+static FOREGROUND_PROJECT: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 
 /// The dock surface's read face of the foreground cwd.
 pub fn foreground_cwd() -> Option<std::path::PathBuf> {
@@ -556,12 +611,17 @@ fn refresh_foreground_cwd(
         .and_then(|id| rows.iter().find(|r| &r.id == id))
         .and_then(|r| r.project.clone())
         .filter(|p| !p.is_empty());
-    let cwd = project.map(std::path::PathBuf::from).unwrap_or_else(|| {
-        std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| ".".into())
-    });
+    let cwd = project
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| ".".into())
+        });
     *FOREGROUND_CWD.lock().expect("foreground cwd lock") = Some(cwd);
+    *FOREGROUND_PROJECT.lock().expect("foreground project lock") =
+        project.map(std::path::PathBuf::from);
 }
 
 /// Wrap a chrome Shell into the window's Root view (the bin mounts this).

@@ -168,9 +168,12 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                     });
                 }
             })),
-            on_nav_back: None,
-            on_nav_forward: None,
-            nav_avail: None,
+            on_nav_back: Some(Box::new(|_, _| None)),
+            on_nav_forward: Some(Box::new(|_, _| None)),
+            nav_avail: Some(Box::new(|_| manox_agent_chrome_ui::shell::NavAvail {
+                back: true,
+                forward: true,
+            })),
             on_open_editor: None,
         },
         brand: None,

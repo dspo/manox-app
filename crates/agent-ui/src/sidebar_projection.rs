@@ -187,6 +187,7 @@ pub fn project_groups(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<Session
         .into_iter()
         .map(|name| SessionGroup {
             rows: project_forest(buckets.get(&name).expect("bucket just built"), unread),
+            key: name.clone(),
             name,
             collapsed: false,
         })

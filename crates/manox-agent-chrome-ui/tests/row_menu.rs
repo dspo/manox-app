@@ -336,6 +336,7 @@ fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
     // the projection's `sort_stamp`), not in hand-written rows.
     let rows = SessionRow::from_group(SessionGroup {
         name: "Chats".into(),
+        key: "Chats".into(),
         collapsed: false,
         rows: vec![
             row_data("leader-1", 300, 300, true),
@@ -402,4 +403,171 @@ fn tag_edit_wires_enter_and_escape_keystrokes(cx: &mut TestAppContext) {
         "escape cancels through the propagated action"
     );
     assert_eq!(log.borrow().len(), 1, "escape writes nothing");
+}
+
+/// Time grouping: rows bucket by sort_stamp, collapse rides the STABLE
+/// state key (not the translated display name — the P0 regression where a
+/// collapsed bucket re-expanded the very next frame), and drag reorder is
+/// inert in time mode.
+#[gpui::test]
+fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
+    let rows = SessionRow::from_group(SessionGroup {
+        name: "Chats".into(),
+        key: "Chats".into(),
+        collapsed: false,
+        rows: vec![
+            // Team: leader today, member's OWN stamp is older — the shared
+            // sort_stamp must keep them in one bucket.
+            row_data("leader", stamp_days_ago(0), stamp_days_ago(0), true),
+            row_data("member", stamp_days_ago(40), stamp_days_ago(0), false),
+            row_data("old", stamp_days_ago(30), stamp_days_ago(30), false),
+        ],
+    });
+    let (_visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
+
+    shell.update(cx, |s, cx| {
+        s.toggle_grouping();
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert_eq!(groups.len(), 2, "today + earlier");
+        let today = &groups[0];
+        assert_eq!(
+            today.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["leader", "member"],
+            "the team buckets together and stays contiguous"
+        );
+        // Collapse through the group's stable key — the same identity the
+        // header's toggle passes (display names follow the UI language and
+        // must not become state).
+        s.toggle_group(&today.key);
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert!(
+            groups
+                .iter()
+                .find(|g| g.key == "chrome-group-today")
+                .expect("today bucket")
+                .collapsed,
+            "collapsing a time bucket must survive the next props build"
+        );
+        // Reorder is inert in time mode.
+        s.move_group("chrome-group-earlier", "chrome-group-today", true);
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert_eq!(
+            groups[0].key, "chrome-group-today",
+            "order is the recency sort"
+        );
+    });
+}
+
+/// The sidebar filter narrows rows case-insensitively over title / tag,
+/// force-expands surviving groups, and its empty result reads as no groups.
+#[gpui::test]
+fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
+    let titled = |id: &str, title: &str, stamp: i64| SessionRowData {
+        id: id.into(),
+        title: title.into(),
+        updated_at: stamp,
+        sort_stamp: stamp,
+        status: SessionStatus::Idle,
+        pinned: false,
+        archived: false,
+        tag: None,
+        team_leader: false,
+    };
+    let rows = SessionRow::from_group(SessionGroup {
+        name: "proj".into(),
+        key: "proj".into(),
+        collapsed: false,
+        rows: vec![
+            titled("hit", "alpha design", stamp_days_ago(0)),
+            titled("miss", "unrelated", stamp_days_ago(1)),
+        ],
+    });
+    let (mut visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
+    // Pre-collapse the group: an active filter must force it open.
+    shell.update(cx, |s, _cx| s.toggle_group("proj"));
+
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.toggle_sidebar_search(window, cx));
+    });
+    let input = shell
+        .read_with(cx, |s, _| s.filter_input())
+        .expect("the filter row mounts an input");
+    visual.update(|window, cx| {
+        input.update(cx, |state, cx| state.set_value("ALPHA", window, cx));
+    });
+    shell.update(cx, |s, cx| {
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].rows.len(), 1);
+        assert_eq!(groups[0].rows[0].id, "hit");
+        assert!(
+            !groups[0].collapsed,
+            "a matching group is force-expanded while filtering"
+        );
+    });
+    // A term matching nothing leaves no groups.
+    visual.update(|window, cx| {
+        input.update(cx, |state, cx| state.set_value("zzz", window, cx));
+    });
+    shell.update(cx, |s, cx| {
+        let (_, groups, _) = s.sidebar_props(cx);
+        assert!(groups.is_empty());
+    });
+}
+
+/// The shell's nav moves call the host hooks only when the move has an
+/// edge (the dimmed-inert contract), and the landed id drives the
+/// selection.
+#[gpui::test]
+fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
+    use manox_agent_chrome_ui::shell::NavAvail;
+    let back_log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let log = back_log.clone();
+    let slot: Rc<RefCell<Option<gpui::Entity<Shell>>>> = Rc::new(RefCell::new(None));
+    let slot_for_build = slot.clone();
+    cx.update(gpui_component::init);
+    let window = cx.open_window(size(px(900.), px(600.)), move |window, cx| {
+        manox_i18n::init();
+        register_fonts(cx);
+        let main: gpui::AnyView = cx.new(|_| StubView).into();
+        let mut config = shell_config(main, Rc::new(RefCell::new(Vec::new())));
+        config.hooks.nav_avail = Some(Box::new(move |_| NavAvail {
+            back: true,
+            forward: false,
+        }));
+        let log = log.clone();
+        config.hooks.on_nav_back = Some(Box::new(move |_w, _cx| {
+            log.borrow_mut().push("back".into());
+            Some("landed".into())
+        }));
+        let shell = cx.new(|cx| Shell::new(config, window, cx));
+        *slot_for_build.borrow_mut() = Some(shell.clone());
+        Root::new(shell, window, cx)
+    });
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let shell = slot.borrow().clone().expect("shell captured");
+
+    // forward has no edge: the move must not call any hook.
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.nav_forward(window, cx));
+    });
+    assert!(back_log.borrow().is_empty());
+    // back is live: the hook fires and the landed id becomes the selection.
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.nav_back(window, cx));
+    });
+    assert_eq!(back_log.borrow().len(), 1);
+    shell.read_with(cx, |s, _| assert_eq!(s.active.as_deref(), Some("landed")));
+}
+
+/// Unix seconds for local noon N days ago (noon survives DST shifts).
+fn stamp_days_ago(days: usize) -> i64 {
+    use chrono::TimeZone as _;
+    let day = chrono::Local::now().date_naive() - chrono::Duration::days(days as i64);
+    chrono::Local
+        .from_local_datetime(&day.and_hms_opt(12, 0, 0).expect("noon exists"))
+        .single()
+        .expect("local noon resolves")
+        .timestamp()
 }

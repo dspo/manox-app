@@ -19,8 +19,10 @@ impl Render for Workspace {
             v
         }) {
             // The successor hand-off is an identity swap of the same
-            // conversation, not user navigation — no history entry.
-            self.open_thread_unrecorded(next, window, cx);
+            // conversation, not user navigation: the current history entry
+            // is REWRITTEN to the successor id (appending would strand the
+            // retired predecessor one ← away).
+            self.replace_nav_current(next, window, cx);
             cx.notify();
         }
         // The turn navigator belongs to the conversation page; leaving it

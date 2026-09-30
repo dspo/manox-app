@@ -56,7 +56,7 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
         this.open_editor(window, cx);
         cx.notify();
     });
-    let (can_back, can_forward) = shell.nav_avail(cx);
+    let avail = shell.nav_avail(cx);
 
     div()
         .id("titlebar")
@@ -92,14 +92,14 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
         .child(nav_button(
             "tb-back",
             icons::ARROW_LEFT,
-            can_back,
+            avail.back,
             "chrome-titlebar-back",
             move |e, w, cx| nav_back(e, w, cx),
         ))
         .child(nav_button(
             "tb-fwd",
             icons::ARROW_RIGHT,
-            can_forward,
+            avail.forward,
             "chrome-titlebar-forward",
             move |e, w, cx| nav_forward(e, w, cx),
         ))
@@ -132,9 +132,10 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
             shell.right.read(cx).visible,
             move |e, w, cx| toggle_right(e, w, cx),
         ))
-        // The app brand mark: a deliberate non-interactive slot (part of the
-        // window-drag surface); the host injects the mark, the shell keeps a
-        // generic glyph as the fallback.
+        // The app brand mark: a deliberate non-interactive slot, held out of
+        // the window-drag surface (the mouse-down is swallowed) so pressing
+        // it never drags the window; the host injects the mark, the shell
+        // keeps a generic glyph as the fallback.
         .child(
             div()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -162,7 +163,10 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
 }
 
 /// A session-history nav button: live when the move has an edge to land on,
-/// a dimmed inert glyph otherwise (still explaining itself on hover).
+/// a dimmed inert glyph otherwise. The two states share the flat-button
+/// geometry (outer 6/12 + inner 3/4), so enabling a move never reflows the
+/// row; the disabled form still swallows mouse-down (the titlebar turns
+/// escaped presses into window drags) and explains itself on hover.
 fn nav_button(
     id: &'static str,
     glyph: crate::theme::Icon,
@@ -170,27 +174,38 @@ fn nav_button(
     tooltip_key: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let tooltip = move |window: &mut Window, cx: &mut App| {
+        gpui_component::tooltip::Tooltip::new(manox_i18n::t(tooltip_key)).build(window, cx)
+    };
+    let mut inner = div()
+        .id(id)
+        .py(px(3.))
+        .px(px(4.))
+        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(glyph, 14.));
+    let outer = div()
+        .id(id)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .py(px(6.))
+        .px(px(12.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(tooltip);
     if enabled {
-        icon_button(id, glyph, 14., false, on_click)
-            .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(manox_i18n::t(tooltip_key)).build(window, cx)
-            })
+        let _ = &mut inner;
+        outer
+            .text_color(FG_DIM)
+            .hover(|style| style.bg(crate::theme::SURFACE_TERTIARY))
+            .on_click(on_click)
             .into_any_element()
     } else {
-        div()
-            .id(id)
-            .py(px(6.))
-            .px(px(12.))
-            .rounded(px(6.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(FG_FAINT)
-            .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(manox_i18n::t(tooltip_key)).build(window, cx)
-            })
-            .child(icon(glyph, 14.))
-            .into_any_element()
+        inner = inner.text_color(FG_FAINT);
+        outer.child(inner).into_any_element()
     }
 }
 
