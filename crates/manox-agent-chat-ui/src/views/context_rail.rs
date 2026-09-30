@@ -305,11 +305,6 @@ pub struct ContextRail {
     /// Keyboard escape hatch for the open bubble: the surface takes focus
     /// when it opens, so `Escape` lands on this handle's key context.
     pub bubble_focus: gpui::FocusHandle,
-    /// Set when an outside `mouse_down` just dismissed the bubble. The
-    /// ring's `click` fires AFTER that dismissal (down out, then up), so a
-    /// click that lands within the suppression window must not re-open —
-    /// otherwise clicking the ring to close would close-then-reopen.
-    bubble_dismissed_at: Option<gpui::Point<gpui::Pixels>>,
 }
 
 /// Wire api → tag color + display label: THE wire-api vocabulary, shared
@@ -347,7 +342,6 @@ impl ContextRail {
             bubble_open: false,
             bubble_expanded: BubbleExpanded::default(),
             bubble_focus: cx.focus_handle(),
-            bubble_dismissed_at: None,
         }
     }
 
@@ -498,7 +492,6 @@ impl ContextRail {
             return;
         }
         self.bubble_open = open;
-        self.bubble_dismissed_at = None;
         if !open {
             self.bubble_expanded = BubbleExpanded::default();
         }
@@ -507,36 +500,6 @@ impl ContextRail {
 
     pub fn toggle_bubble(&mut self, cx: &mut Context<Self>) {
         self.set_bubble_open(!self.bubble_open, cx);
-    }
-
-    /// Record an outside-click dismissal. The triggering click's own `up`
-    /// reaches the ring right after; a toggle inside the suppression window
-    /// is the same gesture closing the bubble, not a fresh open.
-    pub fn note_outside_dismiss(&mut self, down_pos: gpui::Point<gpui::Pixels>) {
-        self.bubble_dismissed_at = Some(down_pos);
-    }
-
-    /// Whether the ring's toggle may open the bubble now (see
-    /// [`Self::note_outside_dismiss`]). Same-gesture by POSITION: the
-    /// closing mouse_down versus the click's own down — duration is
-    /// irrelevant, so a slow press-hold still reads as "close".
-    pub fn toggle_suppressed(&mut self, down_pos: gpui::Point<gpui::Pixels>) -> bool {
-        // One-shot: consumed on read. Without the take, a guard left at the
-        // ring's own position would match every later click at that same
-        // spot and the bubble could never be re-opened from there.
-        self.bubble_dismissed_at
-            .take()
-            .is_some_and(|at| (at - down_pos).magnitude() < 6.0)
-    }
-
-    /// The one outside-dismissal close path: close (which resets the fold
-    /// state AND the suppression guard) and only then record the guard.
-    /// Order is load-bearing — `set_bubble_open(false)` clears the guard, so
-    /// noting first would be wiped and the ring's click would re-open the
-    /// bubble it just closed.
-    pub fn dismiss_outside(&mut self, down_pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
-        self.set_bubble_open(false, cx);
-        self.note_outside_dismiss(down_pos);
     }
 
     fn toggle_section_fold(&mut self, section: BubbleSection, cx: &mut Context<Self>) {
@@ -1446,36 +1409,6 @@ mod tests {
                 rail.set_bubble_open(false, cx);
                 assert!(!rail.bubble_open);
                 assert_eq!(rail.bubble_expanded, BubbleExpanded::default());
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn suppression_is_one_shot_and_cleared_on_open(cx: &mut gpui::TestAppContext) {
-        use gpui::point;
-        cx.update(|cx| {
-            let rail = cx.new(|cx| ContextRail::new(None, cx));
-            rail.update(cx, |rail, cx| {
-                let here = point(px(10.), px(10.));
-                rail.set_bubble_open(true, cx);
-                // The one outside-dismissal path: close, then note the
-                // guard (production order — close clears, note sets).
-                rail.dismiss_outside(here, cx);
-                assert!(!rail.bubble_open);
-                // A click at the same position consumes the guard once…
-                assert!(rail.toggle_suppressed(here), "same-gesture close");
-                assert!(
-                    !rail.toggle_suppressed(here),
-                    "the guard is spent — the next click must open"
-                );
-                // …and opening clears any stale guard entirely.
-                rail.set_bubble_open(true, cx);
-                rail.dismiss_outside(point(px(40.), px(40.)), cx);
-                rail.set_bubble_open(true, cx);
-                assert!(
-                    !rail.toggle_suppressed(here),
-                    "a fresh open must not inherit the old guard"
-                );
             });
         });
     }
