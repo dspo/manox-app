@@ -157,6 +157,15 @@ fn frame_layer(cells: &[(usize, usize, Hsla)]) -> gpui::Div {
     layer
 }
 
+/// The page's frame-loop animation: one full CYCLE per run, repeating. The
+/// tests assert on THIS builder, so dropping `.repeat()` fails the build's
+/// regression pin rather than just changing runtime behavior.
+fn sprite_animation() -> Animation {
+    // gpui animations are oneshot by default; the loading page can stay up
+    // arbitrarily long, so the loop must repeat.
+    Animation::new(Duration::from_secs_f64(CYCLE.len() as f64 / SLOTS_PER_SEC)).repeat()
+}
+
 /// The full loading page: the animated meerkat, the heading, and the thread
 /// id. No composer — the thread is not ready.
 pub(crate) fn render_history_loading(theme: &Theme, thread_id: &str) -> AnyElement {
@@ -167,9 +176,7 @@ pub(crate) fn render_history_loading(theme: &Theme, thread_id: &str) -> AnyEleme
     for (i, &frame_ix) in CYCLE.iter().enumerate() {
         sprite = sprite.child(frame_layer(&frame_table[frame_ix]).with_animation(
             format!("history-loading-frame-{i}"),
-            // gpui animations are oneshot by default; the loading page can
-            // stay up arbitrarily long, so the loop must repeat.
-            Animation::new(Duration::from_secs_f64(CYCLE.len() as f64 / SLOTS_PER_SEC)).repeat(),
+            sprite_animation(),
             move |el, delta| {
                 let active = active_slot(delta) == i;
                 el.opacity(if active { 1.0 } else { 0.0 })
@@ -245,9 +252,9 @@ mod tests {
 
     #[test]
     fn the_loop_animation_is_not_oneshot() {
-        let animation =
-            Animation::new(Duration::from_secs_f64(CYCLE.len() as f64 / SLOTS_PER_SEC)).repeat();
-        assert!(!animation.oneshot);
+        // Asserts on the same builder the page mounts — dropping `.repeat()`
+        // from `sprite_animation` fails here.
+        assert!(!sprite_animation().oneshot);
     }
 
     #[test]

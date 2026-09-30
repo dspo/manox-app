@@ -768,9 +768,11 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_backdate_history_gate(&self, cx: &mut App) {
         self.chat.update(cx, |chat, cx| {
-            chat.awaiting_history = chat
-                .awaiting_history
-                .map(|since| since - 2 * crate::views::history_loading::HISTORY_TIMEOUT);
+            chat.awaiting_history = chat.awaiting_history.and_then(|since| {
+                // `Instant` has no lower bound; a panicking subtraction could
+                // fire on a machine with seconds of uptime.
+                since.checked_sub(2 * crate::views::history_loading::HISTORY_TIMEOUT)
+            });
             cx.notify();
         });
     }
