@@ -11,16 +11,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::OnceLock;
-
-/// This process's birth wall-clock — the staleness baseline for turns folded
-/// from a previous run's journal. The host is in-process, so nothing older
-/// than this process can still be running.
-static PROCESS_START: OnceLock<std::time::SystemTime> = OnceLock::new();
-
-pub(crate) fn process_start() -> std::time::SystemTime {
-    *PROCESS_START.get_or_init(std::time::SystemTime::now)
-}
 
 use crate::i18n;
 use gpui::ClickEvent;
@@ -1253,6 +1243,10 @@ impl Workspace {
                             id == &request_id && at.elapsed() < Self::ASK_REDECLINE_WINDOW
                         });
                 if recently_declined {
+                    // Re-issue the decline for the re-parked question, but do
+                    // NOT return: the unified confirmation card below runs on
+                    // the same pass, and an early return would leave a parked
+                    // confirmation without its card for the whole window.
                     if let Some((_, sid)) = self.chat.read(cx).store.clone() {
                         let view = store.read(cx);
                         if let Some((chat_id, _)) =
@@ -1267,37 +1261,37 @@ impl Workspace {
                             });
                         }
                     }
-                    return;
-                }
-                let stale = self
-                    .chat
-                    .read(cx)
-                    .pending_ask
-                    .as_ref()
-                    .is_none_or(|a| a.id != ask.id);
-                if stale {
-                    let input = ask_input_json(&ask, &request_id);
-                    let summary = ask
-                        .questions
-                        .first()
-                        .map(|q| q.header.clone())
-                        .unwrap_or_default();
-                    tracing::info!(
-                        request_id = %request_id,
-                        questions = ask.questions.len(),
-                        summary = %summary,
-                        "live ask: seeding the interactive card"
-                    );
-                    self.chat.update(cx, |chat, cx| {
-                        chat.pending_ask = Some(ask);
-                        chat.pending_ask_live = true;
-                        chat.ask_step = 0;
-                        chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
-                        chat.last_declined_ask = None;
-                        cx.notify();
-                    });
-                    self.reset_ask_custom(cx);
-                    self.ensure_ask_tool_item(&request_id, &summary, input, cx);
+                } else {
+                    let stale = self
+                        .chat
+                        .read(cx)
+                        .pending_ask
+                        .as_ref()
+                        .is_none_or(|a| a.id != ask.id);
+                    if stale {
+                        let input = ask_input_json(&ask, &request_id);
+                        let summary = ask
+                            .questions
+                            .first()
+                            .map(|q| q.header.clone())
+                            .unwrap_or_default();
+                        tracing::info!(
+                            request_id = %request_id,
+                            questions = ask.questions.len(),
+                            summary = %summary,
+                            "live ask: seeding the interactive card"
+                        );
+                        self.chat.update(cx, |chat, cx| {
+                            chat.pending_ask = Some(ask);
+                            chat.pending_ask_live = true;
+                            chat.ask_step = 0;
+                            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+                            chat.last_declined_ask = None;
+                            cx.notify();
+                        });
+                        self.reset_ask_custom(cx);
+                        self.ensure_ask_tool_item(&request_id, &summary, input, cx);
+                    }
                 }
             }
             None => {
