@@ -399,6 +399,7 @@ impl Workspace {
                                 .min_h_0()
                                 .min_w_0();
                             let list_wrap = v_flex()
+                                .debug_selector(|| "workspace-message-list".into())
                                 .flex_1()
                                 .h_full()
                                 .min_h_0()
@@ -424,6 +425,11 @@ impl Workspace {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .relative()
+                                // h_flex presets items_center, which centers
+                                // the children vertically and collapses the
+                                // list's h_full to zero — the transcript band
+                                // must stretch them instead.
+                                .items_stretch()
                                 // The gutter pads the list itself, not this
                                 // band: the rail's absolute anchor is the
                                 // band, so padding the band would drag the
@@ -437,6 +443,7 @@ impl Workspace {
                                         .min_h_0()
                                         .min_w_0()
                                         .overflow_hidden()
+                                        .items_stretch()
                                         .when(show_turn_rail, |this| {
                                             this.pl(px(crate::views::turn_rail::GUTTER))
                                         })
