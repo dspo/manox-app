@@ -66,7 +66,7 @@ pub fn collect_user_turns<'a>(
     turns
 }
 
-pub(crate) fn collapse_whitespace(text: &str) -> String {
+fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

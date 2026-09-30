@@ -18,7 +18,6 @@ use gpui_component::{ElementExt as _, Theme, h_flex, v_flex};
 use crate::column::ChatColumn;
 use crate::conversation::ConvItem;
 use crate::i18n;
-use crate::views::turn_navigator::collapse_whitespace;
 
 /// Fixed pitch between neighbouring marks; overflow scrolls inside the rail.
 pub const MARK_PITCH: f32 = 10.;
@@ -59,12 +58,13 @@ pub struct RailTurn {
 }
 
 /// Project the conversation into ascending rail turns. The prompt is the
-/// user bubble's text — collapsed and capped, or the ⌘M navigator's
-/// attachment-only / empty-message copy for bubbles with no text; the
-/// response is the turn's last non-empty assistant reply (dsh's `findLast`
-/// rule), collapsed and capped. Assistant rows before the first user bubble
-/// belong to no turn and are dropped. Both caps run on a prefix slice first
-/// (`cap_preview`), so a huge turn costs O(limit) per row, not O(全文).
+/// user bubble's text — word-accumulated up to the preview budget, or the
+/// ⌘M navigator's attachment-only / empty-message copy for bubbles with no
+/// text; the response is the turn's last non-empty assistant reply (dsh's
+/// `findLast` rule), capped the same way. Assistant rows before the first
+/// user bubble belong to no turn and are dropped. Both caps walk at most
+/// the budget's worth of words (`cap_preview`), so a huge turn costs
+/// O(limit) per row, not O(全文).
 pub fn collect_rail_turns<'a>(items: impl Iterator<Item = (usize, &'a ConvItem)>) -> Vec<RailTurn> {
     let mut turns: Vec<RailTurn> = Vec::new();
     for (ix, item) in items {
@@ -81,7 +81,7 @@ pub fn collect_rail_turns<'a>(items: impl Iterator<Item = (usize, &'a ConvItem)>
                 if let Some(last) = turns.last_mut() {
                     // Every non-empty reply overwrites the previous one, so
                     // the last one wins; each overwrite only costs O(limit)
-                    // thanks to the prefix slice in `cap_preview`.
+                    // thanks to the word walk in `cap_preview`.
                     last.response = cap_preview(text, RESPONSE_PREVIEW_CHARS);
                 }
             }
@@ -91,14 +91,14 @@ pub fn collect_rail_turns<'a>(items: impl Iterator<Item = (usize, &'a ConvItem)>
     turns
 }
 
-/// The prompt line's display text: the collapsed, capped bubble text — or,
-/// for a textless bubble, the ⌘M navigator's attachment-only / empty-message
-/// copy (the same distinction `TurnEntry::new` draws, so both surfaces name
-/// the same turn the same way).
+/// The prompt line's display text: the capped bubble text — or, for a
+/// textless bubble, the ⌘M navigator's attachment-only / empty-message copy
+/// (the same distinction `TurnEntry::new` draws, so both surfaces name the
+/// same turn the same way).
 fn prompt_preview(text: &str, has_images: bool) -> String {
-    let collapsed = collapse_whitespace(text);
-    if !collapsed.is_empty() {
-        cap_preview(&collapsed, PROMPT_PREVIEW_CHARS)
+    let capped = cap_preview(text, PROMPT_PREVIEW_CHARS);
+    if !capped.is_empty() {
+        capped
     } else if has_images {
         i18n::t("turn-navigator-attachment-only").to_string()
     } else {
@@ -107,23 +107,44 @@ fn prompt_preview(text: &str, has_images: bool) -> String {
 }
 
 /// Collapse whitespace and cap at `limit` characters with a trailing
-/// ellipsis when clipped. A prefix slice bounds the work before the
-/// collapse: whitespace folds at worst 2:1, so `2 * limit` characters yield
-/// at least `limit - 1` visible ones for any text with content (a giant
-/// leading whitespace run collapses to empty — the same degenerate result
-/// dsh's per-part rule produces). The `limit - 1` threshold, and the
-/// resulting "exactly `limit` characters also folds" edge, is dsh's
-/// `preview()` rule, kept for parity.
+/// ellipsis when clipped. Words are accumulated up to the budget instead of
+/// slicing a prefix: `split_whitespace` skips runs of ANY whitespace length,
+/// so indented code blocks and aligned tables fill the budget exactly like
+/// prose (a prefix slice before collapsing would under-fill on multi-space
+/// runs), the walk stops once the budget is reached, and words never split
+/// mid-word. The `limit - 1` budget — ellipsis included, so exactly `limit`
+/// characters of content also folds — is dsh's `preview()` shape, kept for
+/// parity.
 fn cap_preview(text: &str, limit: usize) -> String {
-    let prefix: String = text.chars().take(limit * 2).collect();
-    let normalized = collapse_whitespace(&prefix);
-    if normalized.chars().count() > limit - 1 {
-        let head: String = normalized.chars().take(limit - 1).collect();
-        let head = head.trim_end();
-        format!("{head}…")
-    } else {
-        normalized
+    let mut out = String::new();
+    let mut truncated = false;
+    for word in text.split_whitespace() {
+        let projected = out.chars().count() + word.chars().count() + usize::from(!out.is_empty());
+        if projected > limit - 1 {
+            truncated = true;
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
     }
+    if truncated && out.is_empty() {
+        // A single word longer than the budget: fall back to a character
+        // slice so the preview never comes back empty.
+        let head: String = text
+            .split_whitespace()
+            .next()
+            .expect("a word broke the budget, so one exists")
+            .chars()
+            .take(limit - 1)
+            .collect();
+        return format!("{head}…");
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
 }
 
 /// The mark at the reading line, given the list's logical top item: the last
@@ -635,6 +656,34 @@ mod tests {
     }
 
     #[test]
+    fn cap_preview_fills_the_budget_regardless_of_whitespace_runs() {
+        // Indented-block style text (multi-space runs): the word walk must
+        // fill the budget exactly like prose and keep the truncation mark —
+        // a prefix-slice-then-collapse would under-fill AND drop the `…`
+        // (review round 3, B).
+        let indented: String = "word".to_string() + &" ".repeat(20);
+        let indented = indented.repeat(200);
+        let prose = "word ".repeat(200);
+        let indented_capped = cap_preview(&indented, 120);
+        let prose_capped = cap_preview(&prose, 120);
+        assert_eq!(
+            indented_capped.chars().count(),
+            prose_capped.chars().count(),
+            "multi-space runs must fill the budget like prose"
+        );
+        assert_eq!(indented_capped.chars().count(), 120);
+        assert!(indented_capped.ends_with('…'));
+        assert!(prose_capped.ends_with('…'));
+    }
+
+    #[test]
+    fn cap_preview_never_returns_empty_for_an_overlong_word() {
+        let capped = cap_preview(&"x".repeat(200), 20);
+        assert_eq!(capped.chars().count(), 20);
+        assert!(capped.ends_with('…'));
+    }
+
+    #[test]
     fn textless_bubbles_use_the_navigator_copy_by_attachment_presence() {
         // Textless with images → the attachment-only copy.
         assert_eq!(
@@ -649,14 +698,6 @@ mod tests {
         );
         // Texted bubbles carry the capped text either way.
         assert_eq!(prompt_preview("hello", true), "hello");
-    }
-
-    #[test]
-    fn cap_preview_bounds_its_work_to_a_prefix_slice() {
-        // A prefix-bounded collapse must agree with collapsing the whole
-        // text (whitespace folds at worst 2:1, so 2*limit chars suffice).
-        let huge = format!("{}tail", "word ".repeat(5_000));
-        assert_eq!(cap_preview(&huge, 20), cap_preview(&huge[..400], 20));
     }
 
     #[test]
