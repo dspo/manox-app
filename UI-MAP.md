@@ -58,7 +58,7 @@ slash_command / Settings 视图）、`manox-agent-chat-ui`（聊天状态机与�
 | 模型选择器 | ✅ | pi `ProviderRegistry`，按 provider 显示名分组 |
 | 项目（composer chip / 侧栏文件夹 / 绑定新会话） | ✅ | 宿主 workspace registry（`ClientCall::Workspace` + `HostEvent::WorkspaceUpdate` 状态流），客户端不再写 threads.db `projects` 表 |
 | Sidebar / 会话列表 / 新建切换归档 / LLM 标题 | ✅ | pi `SessionRepository` + sidecar；标题双模式语义移植自 manox |
-| ContextRail（usage/cost/cockpit 相位/git 状态/plan/changes/branch） | ✅ | cost 来自内核 `session_stats`（rate card 计价）；cockpit 相位随事件流驱动 |
+| ConversationInfoBubble（composer 圆圈上方：Captain/subagents/branch 对/plan 文件/todos/per-model 用量/sources） | ✅ | 用量与圆圈同口径（最近请求输入侧）；per-model 成本行与 ±change 计数随卡片退役 |
 | `/compact` + Recap 卡片 | ✅ | 内核 `HarnessEvent` compaction 事件（manual/threshold/overflow） |
 | 后台线程（ctrl-b 置底 / 切换自动 park） | ✅ | `background_threads` + `attach_thread` parking |
 | CLI agent 终端（Claude Code / Codex / GitHub Copilot） | ✅ | 右栏 ToolTab：先落 provider→model 级联（共享投影 `cascade_provider_groups`），选中即以该端点 `AgentBuilder` 拉起 CLI（PTY relay → `TerminalView`；cwd = 前台线程项目目录） |
@@ -96,9 +96,9 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 - [MessageColumn](#messagecolumn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice) · [FollowStopProjection](#followstapprojection)
 
-### ContextRail
+### ConversationInfoBubble
 
-- [ContextRail](#contextrail) · [ContextRailPanel](#contextrailpanel) · [ContextRailCollapseBtn](#contextrailcollapsebtn) · [ContextRailChangesRow](#contextrailchangesrow) · [ContextRailBranchRow](#contextrailbranchrow) · [ContextRailBranchMenu](#contextrailbranchmenu)
+- [ConversationInfoBubble](#conversationinfobubble)（composer 圆圈上方气泡；状态舱数据仍在 `ContextRail` 实体上）
 
 ### Hero / LoadingIndicator
 
@@ -196,7 +196,7 @@ browser host 槽位、侧栏投影泵所需的全部状态；渲染只产出会�
 #### Workspace
 
 会话列的根容器：hero 空屏或虚拟化消息列表、composer footer（附件 + chips）、
-ask / blank-project overlay、浮动 [ContextRail](#contextrail)、TurnNavigator overlay，
+ask / blank-project overlay、TurnNavigator overlay，
 外面套一层键盘动作装饰（`apply_chat_actions`：settings / turn navigator / 队列回退 /
 completion / 回忆 / archive / 后台化）。每帧在这里维护的状态：blank-project input、
 ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端已结 settle 通知。
@@ -218,18 +218,15 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 ## 3. 会话列布局
 
 会话列是壳主区卡的内部内容，四周的 gutter / 侧栏槽 / 卡壳 / 内嵌标题栏全部由壳负责。
-列宽口径：浮动的 [ContextRail](#contextrail) 不是 flex 兄弟列，而是绝对浮层
-（`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`，内容高度），
-会话正文预留 `ENV_CONTENT_INSET` 右内边距；窄于 `RAIL_NARROW_BREAK`（消息列 900px）时卡片折叠、
-消息列吃满。TurnNavigator 浮层锚定卡片内边距盒（左右各 `CARD_BORDER / 2`，显示 rail 时右侧再加
-其内容内边距）。
+会话信息以 [ConversationInfoBubble](#conversationinfobubble) 气泡按需展开（composer 右侧圆圈
+上方），不再占用常驻纵向空间；TurnNavigator 浮层锚定卡片内边距盒（左右各 `CARD_BORDER / 2`）。
 
 ```
 ┌ 壳主区卡（圆角 + 边框）──────────────────────┐
 │ ╭─────────────────────────────┬──────────╮ │
 │ │ 会话列                      │ 右栏     │ │
 │ │  消息列表 / hero            │ ToolTab  │ │
-│ │  浮动 ContextRail           │ 页签体   │ │
+│ │  （信息以圆圈气泡按需展开）  │ 页签体   │ │
 │ │  composer footer            │          │ │
 │ ╰─────────────────────────────┴──────────╯ │
 └────────────────────────────────────────────┘
@@ -238,9 +235,9 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 ### 3.2 MessageColumn
 
 Central conversation column, flex-1 — the main card's only content (the shell's sidebar and right
-pane are siblings of the card, outside this view). The [ContextRail](#contextrail) floats over this
-column's top-right as an absolute overlay (not a flex sibling); the conversation body reserves
-`ENV_CONTENT_INSET` right padding when the rail is shown so the message list clears it.
+pane are siblings of the card, outside this view). Session info lives in the
+[ConversationInfoBubble](#conversationinfobubble) above the composer's context ring — the column
+carries no reserved overlay inset.
 
 #### MessageColumn
 
@@ -496,7 +493,7 @@ Dropdown chip showing `provider · model · effort` (the reasoning-effort wire v
 
 #### ContextUsagePill
 
-Compact context-occupancy pill in the footer's right control cluster, between [ModelChip](#modelchip) and [SendBtn](#sendbtn) (the dsh ContextMeter port): a 14px stroke ring + the integer percent, no click action (the breakdown face stays in the [ContextRail](#contextrail); the tooltip carries the absolute figures, `composer-context-usage-tooltip`). Data: the foreground leaf's `last_token_usage` — the latest request's input-side tokens (`input + cache_creation + cache_read`, the same active-token formula as the rail's budget row) — against the foreground model's `context_window` resolved through the shared provider registry. Renders nothing until a usage row has landed AND the window resolves (no capacity → no meter); fill + percent flip to `warning` at ≥90% (the rail's near-full threshold). The ring is a GPUI `canvas`: a `border`-tone full-circle stroke plus a `muted_foreground` arc sweeping clockwise from 12 o'clock, replicating the reference SVG verbatim (r 5.5, 2px round-capped stroke, `r + stroke/2 = 6.5` filling the 7px half-box); a full turn redraws the closed circle, 0% strokes nothing. Live updates ride the leaf's `TokenUsageUpdated` notify.
+Compact context-occupancy pill in the footer's right control cluster, between [ModelChip](#modelchip) and [SendBtn](#sendbtn) (the dsh ContextMeter port): a 14px stroke ring + the integer percent, and the [ConversationInfoBubble](#conversationinfobubble)'s toggle — click opens/closes the bubble above it, hover only tints (never opens). The tooltip carries the absolute figures, `composer-context-usage-tooltip`. Data: the foreground leaf's `last_token_usage` — the latest request's input-side tokens (`input + cache_creation + cache_read`, the same active-token formula as the rail's budget row) — against the foreground model's `context_window` resolved through the shared provider registry. Renders nothing until a usage row has landed AND the window resolves (no capacity → no meter); fill + percent flip to `warning` at ≥90% (the rail's near-full threshold). The ring is a GPUI `canvas`: a `border`-tone full-circle stroke plus a `muted_foreground` arc sweeping clockwise from 12 o'clock, replicating the reference SVG verbatim (r 5.5, 2px round-capped stroke, `r + stroke/2 = 6.5` filling the 7px half-box); a full turn redraws the closed circle, 0% strokes nothing. Live updates ride the leaf's `TokenUsageUpdated` notify.
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_context_usage_ring`, `context_usage_ring`, `occupancy_arc_end`, the `CONTEXT_RING_*` constants)
 
@@ -718,94 +715,64 @@ Trigger: "Create blank project" from [ProjectMenu](#projectmenu). Centered modal
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
-### 3.3 ContextRail
+### 3.3 ConversationInfoBubble
 
-Right-side context panel that floats over the Workspace's conversation column top-right as an absolute overlay — NOT a flex sibling of [MessageColumn](#messagecolumn). The `Render` impl positions it (`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`); the panel body (`render_panel`) carries the card chrome (`border_1` / `rounded(theme.radius)` / drop shadow / `bg:background` + `p_3`/`gap_2`). Content height, never full-height — a compact floating card, not a flush column or a second title bar. The conversation body reserves `ENV_CONTENT_INSET` (card width + 36px gutter) right padding so the message list never hides behind the card. Owned by `Workspace` as `Entity<ContextRail>`; the rail owns the cockpit state (run phase, the model's `PlanSnapshot`, per-cell counter animation) that used to live on `Workspace`.
+Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实现）：点击
+[ContextUsagePill](#contextusagepill) 开/关，外点 / `Escape` / 会话切换关闭。无标题、无段标题，
+段与段之间只用 1px 细线分隔；宽度 `clamp(内容自然宽, 260, 360)`（260 = 原卡片
+`ENV_CARD_WIDTH`，信息密度不退化；360 防超长 branch 名/todo 横撑），高度 = 内容高、封顶于
+圆圈上方可用空间，超出内部滚动。气泡是只读信息面（无交互控件）；展开/折叠是气泡本地 UI 状态，
+随关闭重置，不持久化。
 
-Visibility is gated on the main-column body width (`ContextRail::rail_width_for`): shown as `Some(ENV_CARD_WIDTH)` (260px) at/above `RAIL_NARROW_BREAK` (900px), folded away (`None`) below it. The card's `top` clears the shared [TitleBar](#titlebar) overlay.
+段序（自上而下，空段连同分割线一起不画，相邻段不产生双线）：
 
-The card is hidden on the empty first screen and before the thread has interacted; the right pane's
-width is the shell's business (it sits outside the card), so the only width the rail gate reads is
-the card interior. The card floats as an absolute overlay (content height); the conversation column
-is `flex_1`/`min_w_0` and reserves `ENV_CONTENT_INSET` right padding when the card is shown.
+1. **Captain + subagents**：主 Agent 行字面量 `Captain`（不走 i18n；`views/message.rs` 的署名仍走
+   `context-agents-captain`「船长」，互不相干）。subagent 行 `{type} · {topic}`
+   （`subagents.rs::task_display_title`）与 Captain 同一条左基线（无缩进、无树符——从属关系唯一，
+   不需要视觉编码）。**默认只显示未结束的行**（`ToolCallStatus::Running | PendingApproval` 判定，
+   不用 watchdog 的 `health`），已结束的折叠进 `+N`；活行 0 也保留 Captain 行 + `+N`。上限 5。
+2. **branch / worktree 对**：`┌ {branch}` / `└ {worktree 目录名}`（mono 字体，长名 truncate），
+   数据 = `git_branch_display` + store `cwd`（原 `render_branch_block` 的取数方式；±change 计数与
+   点击复制随卡片退役，`git_status` 收敛为 branch-only）。
+3. **plan 文件**：本对话写出的 plan 文件行（文档图标 + 标题），来源 = 会话内 `ProposePlan` 工具行
+   （模型唯一的 plan 审批通道，参数带 `slug`/`title`；`Workspace::collect_plan_files` 零拷贝扫描
+   `kind()` 引用，按 slug 去重、末次写入倒序）。标题 =  supplied title，缺省 slug
+   （即 `<slug>-plan.md` 的文件干）。点击开右栏 markdown 预览本期不实现。上限 5。
+4. **todos**：`UpdatePlan` 的 `PlanSnapshot.steps`，稳定排序 InProgress → Pending → Completed
+   （组内保持原时序，`sort_by_key`）。状态符号 = 统一外径圆环（Pending 空心 muted /
+   InProgress accent 环 + accent 内圆、文字 semibold / Completed muted 环 + 勾、文字 muted +
+   删除线）——替换旧 `◻ / ▶ / ✔` 三源字形。全部状态可见（Completed 是进度感的一部分）。上限 8。
+5. **per-model 用量**：模型行无树符，`{provider}/{model}` 三段分别渲染（provider 恒 muted、
+   `/` muted、model 段按 wire api `pi_wire_text_color` 着色——h_flex 分段排列，不做宽度算术）。
+   `├ Context {pct}% {used} / {cap}` = **该模型最后一次请求**的占用 / 窗口上限（与圆圈同口径：
+   `last_token_usage` + `model_window_tokens`；只有前台模型可解析，其余模型只画 `└` 行），
+   ≥90% 转 warning。`└ ↑in ↓out R{cache_read} CH{hit%}`（`format_cache_hit`，无输入 `--`）。
+   按总 token 降序（稳定），上限 5。无段标题、无 per-model 成本行。
+6. **sources**：沿用占位行（`workspace-env-no-sources`），去掉「来源」标题。
 
-#### ContextRail
+`+N` 折叠行：chevron + 计数，与段内行共用左基线；只在隐藏数 > 0 时出现；点击就地展开
+（气泡随内容长高），再点收起。排序必须稳定（store notify 频繁，不稳定排序会跳行闪动）。
 
-Floating absolute card over the conversation column's top-right (`absolute().top(TITLE_BAR_HEIGHT + 16).right(16).w(ENV_CARD_WIDTH).occlude()`). Owns `Entity<Thread>` and renders the panel body (`render_panel`) which carries the card chrome (border / rounded / shadow / background + `p_3`/`gap_2`) at content height.
+> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs`（`render_bubble` 及各段 builder、
+> `fold_window` / `subagent_display_order` / `sort_todo_steps` / `todo_visual`）；挂载与开关：
+> `crates/agent-ui/src/workspace/composer_render.rs`（`render_context_usage_ring`，
+> 相对/绝对普通挂载 + 尾巴 `icons/context-bubble-tail.svg`）；plan 投影：
+> `crates/agent-ui/src/workspace.rs`（`collect_plan_files`）；验收图：
+> `design/conversation-info-bubble/acceptance/`（`BUBBLE_SHOT=… cargo test -p agent-ui --test
+> visual_bubble`，`BUBBLE_STATE=open|closed`）。
 
-> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs`
+#### 状态舱（ContextRail 实体）
 
-#### ContextRailPanel
+气泡的数据舱仍是 `ContextRail` 实体（`Entity` 由 chat state 持有，`Workspace` 经
+`chat_rail()` 取用）：cockpit 相位（`update_cockpit_phase`）、subagent 行
+（`apply_subagent_progress`，首现序即展示序）、`PlanSnapshot`（`set_plan`）、branch 显示
+（`set_git_branch`，`git_status::gather_branch` 后台 400ms 去抖刷新）。浮层卡片的渲染面
+（`render_panel` 及分段渲染）、宽度门（`rail_width_for`/`RAIL_NARROW_BREAK`）、
+`ENV_CONTENT_INSET` 列内缩、`set_host` 观察面板入口已随卡片删除；会话切换
+（`reset_for_thread_switch`）连带关气泡并重置折叠态。
 
-Panel body (the card's content, content height — no internal scroll surface, though the plan section has its own bounded scroll region). The conversation-info rows (title, status, changes, branch) sit above the usage tree; the plan section renders from cockpit state owned by the rail.
-
-Contents, top to bottom:
-
-- **Header**: bold title (i18n `context-rail-title`) + a [ContextRailCollapseBtn](#contextrailcollapsebtn) ghost button.
-- **Agents section** (`render_agents_section`): `Bot` icon + "Agents" / "智能体" header (i18n `context-agents-title`), then a Captain row plus one observe-only row per pi sub-agent fed by `SubagentProgress` events. Each row: status indicator + truncated `{type} · {topic}` title; live rows append a truncated one-line watchdog health verdict (working / tool running / stalled / looping) from the event's `health` field — `stalled` renders warning-colored, `looping` danger-colored, others muted, and the row tooltip reads `{title} — {health}`. Sub-agent rows are left-aligned with the Captain row (shared icon column, no extra indent — the earlier `pl(12px)` that offset them was removed). Rows are flat (pi sub-agents never nest deeper than one level) and open the sub-agent tab on click.
-- **Status block** (`cockpit_status_block`): a two-line card — phase label (semibold) on line 1, an xs muted elapsed+tokens meta line (i18n `cockpit-run-status-meta`) on line 2. Elapsed refreshes per-second via the thinking ticker.
-- **Usage section** (`render_usage_section`): `zodiac-scorpio` icon + "Usage" / "消费" header with cumulative token total, plus cumulative USD cost via `format_cost` when the session carries priced usage (kernel `session_stats` rate-card pricing); a hover tooltip splits main-call vs side-call usage. Then a per-model tree (sorted by total tokens desc, empty for unused models). Each model node is keyed by the canonical `{provider}/{model}` identity the server fold emits verbatim in the §E.3 payload's `model` field (`ClientStore::apply_conversation_info` keys `per_model_usage` by it directly — it must not re-prefix `provider`, or every `split_once('/')` resolution below silently fails); the node carries a tree prefix (`├─` / `└─`) and renders the resolved display pair `{display_provider_name}/{display_name}` (e.g. `百炼/qwen3.8-max`), with the model segment tinted by its wire api via `pi_wire_text_color` (theme-token `info`/`success`/`warning`, shared with the composer model chip), and the `[1m]` context-window suffix resolved from pi registry metadata (`model_window_tokens`); it falls back to the raw key only when the registry cannot resolve it. Tree children per model (indented `│   ` / `    ` + `├─` / `└─`):
-  1. **Context budget row**: `{pct}% {used}/{cap}` from `context_budget_pct(window_tokens, effective_context_tokens(...))`; only when the model's window size resolves. Goes warning-colored at ≥90%.
-  2. **Token row**: `↑{input} ↓{output} R{cache_read} CH{cache_hit%}` (`--` when there is no input to measure). `CH` renders via `format_cache_hit`: an imperfect hit rate never rounds up to a full 100% — values in the rounding-up band clamp to the top value at the display precision (99.9% at one decimal), so only an exact 1.0 ratio reads as full.
-  3. **Cost row** (only for priced models): `format_cost(cost)` from `Thread::per_model_cost`.
-- **Plan section** (`render_plan_section`, collapsible via `ToggleCockpitTasks` / ctrl/cmd-shift-m, `cockpit_hide_tasks`): the model's execution plan, taken verbatim from the `PlanSnapshot` it publishes via the `UpdatePlan` tool.
-- **Changes row**: [ContextRailChangesRow](#contextrailchangesrow).
-- **Branch row**: [ContextRailBranchRow](#contextrailbranchrow).
-- **Hairline divider**.
-- **Sources section**: `Sources` label + "No sources yet" placeholder.
-
-Each numeric cell animates scoreboard-style (`counter_animated`): a fresh `gen` is appended to the animation id on every value delta, so gpui fires a 600ms `ease_out_quint` tween from the previous rendered value to the new one. `env_counter_state: HashMap<String, (u64, u64)>` lives on `ContextRail`, rebuilt every render inside `render_usage_section` to auto-prune cells whose model disappeared.
-
-> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs` (`render_panel`)
-
-#### ContextRailCollapseBtn
-
-Ghost `xsmall` button in the panel header, `IconName::PanelRightClose`, tooltip i18n `context-rail-collapse`. Folds the rail into a drawer when narrow (the drawer's open affordance uses `context-rail-drawer-open` / `context-rail-expand`).
-
-> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs`
-
-#### ContextRailChangesRow
-
-Working-tree diff stat line in the panel body. `env_row` with `Frame` icon, "Changes" label, and a trailing `+added` (green) / `-deleted` (red) / `?untracked` (muted) cluster from `GitChangeStats`. Before the first git refresh lands (or when no project is bound) the trailing slot shows `--` / "No project" so the row keeps its height instead of flickering.
-
-Stats come from `git diff --numstat HEAD` (binary rows `-`/`-` skipped) plus `git ls-files --others --exclude-standard` for untracked, shelled out via [`crate::git_status`](#git_status) on the global tokio runtime. Refreshed (debounced 400ms) by `Workspace` on thread attach and terminal `Stop`.
-
-> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs` (`render_changes_row`)
-
-#### ContextRailBranchRow
-
-Resolved git identity block in the panel body (`render_branch_block`). When the session's effective cwd differs from the launch directory (a worktree entered through a per-call `cwd`), a leading directory-name row precedes the branch row; both rows share the same `h_flex` (icon + label) layout, `text_sm` font, and `gap_2` spacing so they read as peer rows.
-
-- **Working-directory row** (rendered only while the effective cwd is reported): lucide `workflow` icon (resolved via [assets](#assets) at `icons/workflow.svg`) + the directory basename as the label. Non-interactive — no trailing, no cursor, no menu.
-- **Branch row**: `env_row_clickable` with lucide `git-branch` icon (`icons/git-branch.svg`) — the whole row is a pointer cursor that opens [ContextRailBranchMenu](#contextrailbranchmenu). The label shows:
-  - The branch name when on a normal branch.
-  - The short sha + "(detached)" hint when in detached HEAD.
-  - "Not a git repo" when `git rev-parse --show-toplevel` fails.
-  - "git unavailable" when the `git` binary is missing.
-  - "--" before the first refresh lands; "No project" when no project is bound.
-
-Both glyphs live in manox's local asset bundle (`ExtrasAssetSource` in `crates/agent-ui/src/assets.rs`), not `gpui-kit-assets` — `IconName` is generated at compile time from the latter's directory and cannot reference them, so the rows construct `Icon::default().path("icons/…")` instead of `Icon::new(IconName::…)`. Branch resolution shells out to `git branch --show-current`, falling back to `git rev-parse --short HEAD` for detached HEAD. All via [`crate::git_status`](#git_status).
-
-> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs` (`render_branch_block`)
-
-#### ContextRailBranchMenu
-
-`PopupMenu` anchored under the branch row, rendered as a `deferred(...).with_priority(1)` overlay so it paints on top of the entire workspace tree and is never occluded by the rail's later-painted siblings (usage/budget/plan rows) nor clipped by the rail's scroll container. Mirrors the title-menu / model-selector pattern: the menu entity + its `DismissEvent` subscription are created lazily on open, dropped on close. Items:
-
-- **Copy branch name** (i18n `workspace-env-git-copy-branch`) — shown when a branch resolved; writes to the clipboard silently.
-- **Copy working-directory path** (i18n `workspace-env-git-copy-path`) — shown when an effective cwd is reported.
-
-> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs` (`render_branch_row`)
-
-#### git_status
-
-Pure parsing + tokio-bridged IO module backing [ContextRailChangesRow](#contextrailchangesrow) / [ContextRailBranchRow](#contextrailbranchrow). Shells out to the system `git` binary (never `git2` — banned by project rule) on the global tokio runtime via `manox_agent::runtime::handle`, delivering results back through an `async_channel`.
-
-- `parse_numstat` / `parse_branch` / `parse_short_sha` / `count_untracked` — pure value-type parsers (unit-tested without a real repo).
-- `gather` — runs `git rev-parse --show-toplevel`, `git branch --show-current` / `git rev-parse --short HEAD`, `git diff --numstat HEAD`, `git ls-files --others --exclude-standard` in one background task; returns `None` when the cwd is not under git.
-- `gather_bridged` — spawns `gather` on the tokio runtime and awaits the result from a gpui `cx.spawn`.
-
-> Source: `crates/manox-agent-chat-ui/src/git_status.rs`
+> Source: `crates/manox-agent-chat-ui/src/views/context_rail.rs`；`git_status` 分支解析：
+> `crates/manox-agent-chat-ui/src/git_status.rs`
 
 ### 3.4 右栏页签内容
 
@@ -824,7 +791,7 @@ topic 文本（共享 `subagent_topic` / 派发提示首行推导，空则回退
 模型），随后是 bridged 子事件翻译成共享 `ThreadEvent` 契约后的助手气泡、推理折叠、工具卡片。
 实时累积在 `Workspace::subagent_transcripts`，整个会话期保留（终态也不再裁剪），所以事后打开仍
 重放全过程；重载后打开则回退到 `subagent_final_text` + `subagent-panel-final-note` 提示。
-由 [ContextRail](#contextrail) agents 段的子代理行、或会话里的子代理卡片点击打开
+由会话里的子代理卡片点击打开（原 rail agents 段的点击入口随只读气泡退役）
 （`ChatHost::open_subagent_tab` → 装配层 `chrome_assembly::open_tool_tab`）；页签随线程走壳的
 per-thread stash，切线程时只清该线程的转写数据（`clear_subagent_observation`）。
 
@@ -1005,7 +972,7 @@ chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操
 
 #### ConversationColumn
 
-`Workspace::render_column`：会话列本身（hero 空屏／虚拟化消息列表／composer footer＋附件与 chips／ask 与 blank-project overlay／浮动 ContextRail／TurnNavigator overlay），四周的 gutter / 侧栏槽 / 卡壳 / 内嵌标题栏全部归壳；键盘动作面经根装饰器 `apply_chat_actions`。装配把该视图作为壳的 `MainSurface`，其 multiplexer 同时喂侧栏投影泵。
+`Workspace::render_column`：会话列本身（hero 空屏／虚拟化消息列表／composer footer＋附件与 chips／ask 与 blank-project overlay／TurnNavigator overlay），四周的 gutter / 侧栏槽 / 卡壳 / 内嵌标题栏全部归壳；键盘动作面经根装饰器 `apply_chat_actions`。装配把该视图作为壳的 `MainSurface`，其 multiplexer 同时喂侧栏投影泵。
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 

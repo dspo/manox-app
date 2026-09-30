@@ -223,23 +223,14 @@ impl Workspace {
         // frame of a fresh window falls back to the window width and the
         // prepaint below schedules the frame that corrects it.
         let card_width = self.chat.read(cx).card_width.clone();
+        let bubble_clearance = self.chat.read(cx).bubble_clearance.clone();
         let main_body_w = card_width
             .get()
             .unwrap_or_else(|| window.bounds().size.width);
-        let show_rail = !first_screen
-            && self
-                .chat
-                .read(cx)
-                .store
-                .as_ref()
-                .map(|s| s.read(cx).store.has_interacted)
-                .unwrap_or(false)
-            && crate::views::context_rail::ContextRail::rail_width_for(main_body_w).is_some();
         let overlay = self
             .render_blank_project_overlay(window, &theme, cx)
             .or_else(|| self.render_pending_auth_overlay(&theme, cx));
-        let turn_navigator_overlay =
-            self.render_turn_navigator_overlay(&theme, show_rail, main_body_w, cx);
+        let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
 
         let footer = (composer_placement == ComposerPlacement::Footer).then(|| {
             v_flex()
@@ -294,9 +285,6 @@ impl Workspace {
                     .w_full()
                     .overflow_hidden()
                     .pb_2()
-                    .when(show_rail, |this| {
-                        this.pr(px(crate::views::context_rail::ENV_CONTENT_INSET))
-                    })
                     .children(self.render_follow_stop_banner(&theme, cx))
                     .children(hero)
                     .children({
@@ -375,10 +363,7 @@ impl Workspace {
                     })
                     .children(footer)
                     .children(overlay),
-            )
-            .when(show_rail, |this| {
-                this.child(self.chat.read(cx).context_rail.clone())
-            });
+            );
         let root = gpui::div()
             .id("embedded-column")
             .size_full()
@@ -386,7 +371,9 @@ impl Workspace {
             .child(conversation_column)
             .children(turn_navigator_overlay)
             .on_prepaint(move |bounds, window, _app| {
-                if card_width.set(bounds.size.width) {
+                let width_moved = card_width.set(bounds.size.width);
+                let top_moved = bubble_clearance.set_column_top(bounds.origin.y);
+                if width_moved || top_moved {
                     window.refresh();
                 }
             });

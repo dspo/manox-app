@@ -96,10 +96,10 @@ mod tests {
     }
 
     #[test]
-    fn embeds_context_rail_branch_and_worktree_glyphs() {
-        // Rail glyphs resolved via `ExtrasAssetSource`; a missing file would
-        // silently fall through to `gpui-kit-assets`, which does not
-        // ship these names, rendering blank.
+    fn embeds_overrides_that_shadow_kit_icons() {
+        // These files exist in gpui-kit-assets too; the local copies win
+        // (ExtrasAssetSource layers local first) so the bubble/rail render
+        // this repo's shapes, not the kit's.
         for path in ["icons/git-branch.svg", "icons/workflow.svg"] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
         }
@@ -121,6 +121,7 @@ mod tests {
             "icons/grip-vertical.svg",
             "icons/image.svg",
             "icons/pencil.svg",
+            "icons/context-bubble-tail.svg",
         ] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
         }

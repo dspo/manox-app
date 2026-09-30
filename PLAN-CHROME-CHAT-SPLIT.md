@@ -304,7 +304,7 @@ ChatColumn 与状态层分两处）。
 
 | action | 归属 |
 | --- | --- |
-| `AskPrev` `AskNext` `AskCancel` `CompletionUp/Down/Confirm/Dismiss` `ComposerRecallUp/Down` `UndoLastQueued` `ToggleTurnNavigator` `CopySelectedTurn` `FillComposerTurn` `ToggleCockpitTasks` | chat-ui（crate 内定义，agent-ui re-export 保持 main.rs 绑定面稳定） |
+| `AskPrev` `AskNext` `AskCancel` `CompletionUp/Down/Confirm/Dismiss` `ComposerRecallUp/Down` `UndoLastQueued` `ToggleTurnNavigator` `CopySelectedTurn` `FillComposerTurn` | chat-ui（crate 内定义，agent-ui re-export 保持 main.rs 绑定面稳定） |
 | `ToggleEditor` `ToggleEditorPreview` `CloseEditor` `OpenSettings` `NewTerminalTab` `CloseTerminalTab` `FocusTerminal` `FocusConversation` `OpenBrowserTab` `CloseBrowserTab` `BackgroundCurrentThread` `ArchiveCurrentThread` | agent-ui/壳子（Phase 3 后归 chrome 或装配层定义） |
 
 `composer_recall_key_bindings()` / `turn_navigator_key_bindings()` 随 chat-ui 走。

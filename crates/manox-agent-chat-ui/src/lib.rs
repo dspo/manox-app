@@ -48,7 +48,6 @@ gpui::actions!(
         ToggleTurnNavigator,
         CopySelectedTurn,
         FillComposerTurn,
-        ToggleCockpitTasks,
     ]
 );
 
