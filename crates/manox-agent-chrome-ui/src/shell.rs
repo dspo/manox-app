@@ -25,7 +25,7 @@ use crate::session_list::{
     SidebarGrouping,
 };
 use crate::theme::{
-    CARD_BG, CARD_BORDER, FG_DIM, FG_FAINT, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
+    CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
 };
 use crate::{divider, titlebar};
 
@@ -1510,16 +1510,6 @@ impl Shell {
 
 /// sidebar|main seam width (the left handle is absolutely centered on it).
 const PANE_GAP: f32 = 6.;
-
-/// A small muted menu-item icon (svg paths resolve through the host's asset
-/// source — the agent-ui override layer plus the default bundle).
-fn menu_icon(path: &'static str) -> gpui_component::Icon {
-    use gpui_component::Sizable as _;
-    gpui_component::Icon::default()
-        .path(path)
-        .small()
-        .text_color(gpui::Hsla::from(FG_FAINT))
-}
 
 /// The four recency buckets, in display order. `state_key` supplies BOTH
 /// the collapse-state key and the ftl label key (one string, so they cannot
