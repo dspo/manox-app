@@ -469,6 +469,13 @@ impl Workspace {
     pub(crate) fn dismiss_ask(&mut self, cx: &mut Context<Self>) {
         let ask = match self.chat.update(cx, |chat, cc| {
             let v = chat.take_pending_ask();
+            // Remember the dismissal: the engine's restore re-parks an
+            // unsettled question (upstream #840), so the fold can re-open
+            // this exact request after a NoOp'd decline race; the live-ask
+            // edge re-issues the decline for it inside the window.
+            chat.last_declined_ask = v
+                .as_ref()
+                .map(|a| (a.id.clone(), std::time::Instant::now()));
             cc.notify();
             v
         }) {

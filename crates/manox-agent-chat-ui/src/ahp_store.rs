@@ -15,7 +15,7 @@
 //! (the host did not fold them either), so the state self-corrects; the store
 //! logs and records rejections for the UI.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -65,6 +65,12 @@ pub struct ChannelBook {
     /// `x-manox-commands://`): their baseline state is an open payload the
     /// XManoxState fold has no slots for, so it is kept verbatim.
     pub catalogues: HashMap<String, Value>,
+    /// Bare chat ids whose `subscribe` snapshot has landed. A first replay
+    /// delta can beat the snapshot (the bridge re-emits the journal while the
+    /// subscribe answer is in flight), so "the fold holds a chat" does not
+    /// imply "the authoritative snapshot arrived" — rebuild consumers use
+    /// this to heal a transcript built from the partial pre-snapshot fold.
+    chat_snapshots: HashSet<String>,
     /// Highest `serverSeq` seen — the reconnect resume point.
     pub server_seq: u64,
 }
@@ -91,6 +97,7 @@ impl Default for ChannelBook {
             ext: HashMap::new(),
             metrics: HashMap::new(),
             catalogues: HashMap::new(),
+            chat_snapshots: HashSet::new(),
             server_seq: 0,
         }
     }
@@ -225,6 +232,7 @@ impl ChannelBook {
                 true
             }
             SnapshotState::Chat(chat) => {
+                self.chat_snapshots.insert(id_of(uri).to_string());
                 self.chats.insert(id_of(uri).to_string(), *chat);
                 true
             }
@@ -255,6 +263,18 @@ impl ChannelBook {
         self.sessions
             .get(session_id)
             .and_then(|s| s.default_chat.clone())
+    }
+
+    /// Whether the chat channel's authoritative subscribe snapshot has landed
+    /// for `session_id` — checked against both the session id and the default
+    /// chat pointer's id, since the host answers whichever URI was subscribed.
+    pub fn chat_snapshot_landed(&self, session_id: &str) -> bool {
+        if self.chat_snapshots.contains(session_id) {
+            return true;
+        }
+        self.default_chat(session_id)
+            .map(|uri| id_of(&uri).to_string())
+            .is_some_and(|id| self.chat_snapshots.contains(id.as_str()))
     }
 }
 
@@ -1127,6 +1147,18 @@ impl AhpStore {
     /// Recent dispatch rejections, oldest first.
     pub fn rejections(&self) -> impl Iterator<Item = &str> {
         self.rejections.iter().map(String::as_str)
+    }
+
+    /// Re-apply the folded chat state as its own subscribe snapshot — the
+    /// host's snapshot ≈ the replayed journal — marking the snapshot landed
+    /// for the rebuild-heal watermark. Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_apply_folded_chat_snapshot(&mut self, session_id: &str) -> bool {
+        let Some(chat) = self.book.chats.get(session_id).cloned() else {
+            return false;
+        };
+        self.book
+            .apply_snapshot(&chat_uri(session_id), SnapshotState::Chat(Box::new(chat)))
     }
 
     // ── typed write surface ─────────────────────────────────────────
