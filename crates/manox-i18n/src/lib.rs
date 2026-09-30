@@ -549,6 +549,12 @@ mod tests {
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../manox-agent-chat-ui/src"),
             &mut sources,
         );
+        assert!(
+            sources
+                .iter()
+                .any(|p| p.components().any(|c| matches!(c, std::path::Component::Normal(name) if name.to_str() == Some("manox-agent-chat-ui")))),
+            "the chat-ui sources are not where the scan expects them"
+        );
         collect_rs(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../manox-agent-chrome-ui/src"),
             &mut sources,

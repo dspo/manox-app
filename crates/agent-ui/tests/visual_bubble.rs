@@ -8,9 +8,11 @@
 //! (default `closed`).
 //!
 //! Real faces under test: `ContextRail::render_bubble` — the six segments,
-//! the fold/`+N` rows, the divider rule, the width clamp, the shared
-//! `BubbleClearance` height cap and the tail (same SVG asset + offsets as
-//! production). Mocked: the composer row's stand-ins and the seed data.
+//! the fold/`+N` rows, the divider rule and the width clamp. Mocked: the
+//! composer row's stand-ins, the seed data and the pill mount glue
+//! (mirrored: same tail SVG asset + offsets, but the height cap here is an
+//! independent estimate — production measures via `BubbleClearance`, which
+//! a Workspace-less harness cannot drive end to end).
 //! `Workspace::render_context_usage_ring` is a `Workspace` method the
 //! harness cannot construct, so the pill mount glue is mirrored here; the
 //! pixel output still comes from the real render pipeline. Per AGENTS.md
@@ -35,7 +37,6 @@ mod macos {
     use agent_ui::client_store::UsageSnapshot;
     use agent_ui::client_store_handle::ClientStoreHandle;
     use agent_ui::views::context_rail::{BUBBLE_MAX_W, BUBBLE_MIN_W, ContextRail, PlanFileEntry};
-    use gpui::prelude::FluentBuilder as _;
     use gpui::{
         App, AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement,
         PathBuilder, PathStyle, Pixels, Point, Render, StrokeOptions, Styled, VisualTestAppContext,
@@ -394,9 +395,9 @@ mod macos {
 
     /// The pill + bubble mount, mirrored from `render_context_usage_ring`:
     /// ring-in-relative-wrapper (the tail anchors to the ring box), the
-    /// completion-overlay mount (`deferred` + `anchored`) with the 30px
-    /// transparent apron, and the real `render_bubble` content under the
-    /// popover chrome.
+    /// completion-overlay mount (the 38px transparent apron keeps the
+    /// surface clear of the pill; the tail bridges that band), and the
+    /// real `render_bubble` content under the popover chrome.
     #[derive(IntoElement)]
     struct PopoverHost {
         rail: gpui::Entity<ContextRail>,
@@ -423,22 +424,7 @@ mod macos {
                     gpui::div()
                         .relative()
                         .flex_none()
-                        .child(occupancy_ring(track, fill, 0.37))
-                        .when(open, |wrapper| {
-                            wrapper.child(
-                                gpui::div()
-                                    .absolute()
-                                    .left(px(1.))
-                                    .bottom(px(27.))
-                                    .size(px(12.))
-                                    .child(
-                                        Icon::default()
-                                            .path("icons/context-bubble-tail.svg")
-                                            .with_size(gpui_component::Size::Size(px(12.)))
-                                            .text_color(theme.border),
-                                    ),
-                            )
-                        }),
+                        .child(occupancy_ring(track, fill, 0.37)),
                 )
                 .child(gpui::div().text_xs().text_color(fill).child("37%"));
 
@@ -483,7 +469,20 @@ mod macos {
                         .w_full()
                         .h(px(0.))
                         .mt(px(-38.))
-                        .child(bubble),
+                        .child(bubble)
+                        .children(open.then(|| {
+                            gpui::div()
+                                .absolute()
+                                .left(px(9.))
+                                .bottom(px(-6.))
+                                .size(px(12.))
+                                .child(
+                                    Icon::default()
+                                        .path("icons/context-bubble-tail.svg")
+                                        .with_size(gpui_component::Size::Size(px(12.)))
+                                        .text_color(theme.border),
+                                )
+                        })),
                 )
                 .into_any_element()
         }
