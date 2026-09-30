@@ -83,7 +83,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### 壳（Shell）
 
-- [ChromeShell](#chromeshell) · [ChromeSessionList](#chromesessionlist) · [SidebarProjection](#sidebarprojection) · [ChromeRightPane](#chromerightpane) · [ToolTabRegistry](#tooltabregistry) · [ChromePanel](#chromepanel) · [ConversationColumn](#conversationcolumn) · [SettingsCard](#settingscard)
+- [ChromeShell](#chromeshell) · [ChromeSessionList](#chromesessionlist) · [ProjectGroupMenu](#projectgroupmenu) · [SidebarProjection](#sidebarprojection) · [ChromeRightPane](#chromerightpane) · [ToolTabRegistry](#tooltabregistry) · [ChromePanel](#chromepanel) · [ConversationColumn](#conversationcolumn) · [SettingsCard](#settingscard)
 
 ### 顶层
 
@@ -952,11 +952,19 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### ChromeSessionList
 
-侧栏会话树（props 驱动，`crates/manox-agent-chrome-ui/src/session_list.rs`）：**三行 66px 行卡（2026-09-29 thread-item 设计稿）**——标题行（16px 状态槽 + 6px 间距 + 标题）、tag 行（短 id chip 恒首位 + 用户 tag chip）、info 行（仅最后活跃时间：72h 内相对、之外本地 `MM-DD HH:MM`），三行共用一条左基线、无任何右对齐内容、**不随项目层级缩进**（层级只由分组头与 leader chevron 表达）。行面上**零控件**：pin/archive/标签/复制 ID 全部收进右键菜单（`Shell::open_row_menu` 五项：置顶 toggle／归档 toggle／添加·重命名标签／移除标签／复制 ID；tag 内联编辑挂在 tag 行，Escape 取消、Enter/blur 提交、空值丢弃、10 字上限；双击用户 tag 芯片 = 老壳同款进入重命名编辑，短 id 芯片单击复制完整 id）。五态字形（`Errored` 红三角／`PendingAuth`·`PendingPlan` 实心 8px 蓝点／`Running` 像素积木 2×3 点阵 1820ms 阶梯循环（VS Code pixelSpinner grid 变体移植）／`Unread` 空心 6.5px 蓝点／`Idle` 空槽）。四态表面：未选中无背景、悬浮 `LIST_HOVER` + 标题转 500 字重 + **截断标题跑马灯**（双份标题 + 24px 间隔的无缝循环轨道：24px/s、每循环停 600ms、回绕点像素级相同无闪跳；仅 `is_hovered && title_truncated` 启动，移开复位；截断判定 = 与渲染器省略号同一套 `shape_text` 实测宽 vs `on_prepaint` 逐帧记录的剪裁盒宽）、选中白卡 + 15% 描边、键盘焦点 = `track_focus` + `focus_visible` 1.5px accent 环（↑/↓ 在可见行间移动焦点，行高四态一致不 reflow）；分组头可折叠（折叠态按**稳定 state key** 存取——`SessionGroup.key`，时间分组用 i18n 键字符串、workspace 分组用项目名，显示名随语言切换不落状态）并作为拖拽源/放置目标（2px accent 插入线；**仅 workspace 模式**——时间模式的分组头不是拖拽源、容器不是放置目标，渲染期直接不挂拖拽机械）。
+侧栏会话树（props 驱动，`crates/manox-agent-chrome-ui/src/session_list.rs`）：**三行 66px 行卡（2026-09-29 thread-item 设计稿）**——标题行（16px 状态槽 + 6px 间距 + 标题）、tag 行（短 id chip 恒首位 + 用户 tag chip）、info 行（仅最后活跃时间：72h 内相对、之外本地 `MM-DD HH:MM`），三行共用一条左基线、无任何右对齐内容、**不随项目层级缩进**（层级只由分组头与 leader chevron 表达）。行面上**零控件**：pin/archive/标签/复制 ID 全部收进右键菜单（`Shell::open_row_menu` 五项：置顶 toggle／归档 toggle／添加·重命名标签／移除标签／复制 ID；tag 内联编辑挂在 tag 行，Escape 取消、Enter/blur 提交、空值丢弃、10 字上限；双击用户 tag 芯片 = 老壳同款进入重命名编辑，短 id 芯片单击复制完整 id）。五态字形（`Errored` 红三角／`PendingAuth`·`PendingPlan` 实心 8px 蓝点／`Running` 像素积木 2×3 点阵 1820ms 阶梯循环（VS Code pixelSpinner grid 变体移植）／`Unread` 空心 6.5px 蓝点／`Idle` 空槽）。四态表面：未选中无背景、悬浮 `LIST_HOVER` + 标题转 500 字重 + **截断标题跑马灯**（双份标题 + 24px 间隔的无缝循环轨道：24px/s、每循环停 600ms、回绕点像素级相同无闪跳；仅 `is_hovered && title_truncated` 启动，移开复位；截断判定 = 与渲染器省略号同一套 `shape_text` 实测宽 vs `on_prepaint` 逐帧记录的剪裁盒宽）、选中白卡 + 15% 描边、键盘焦点 = `track_focus` + `focus_visible` 1.5px accent 环（↑/↓ 在可见行间移动焦点，行高四态一致不 reflow）；分组头可折叠（折叠态按**稳定 state key** 存取——`SessionGroup.key`，时间分组用 i18n 键字符串、workspace 分组用项目名，显示名随语言切换不落状态）并作为拖拽源/放置目标（2px accent 插入线；**仅 workspace 模式**——时间模式的分组头不是拖拽源、容器不是放置目标，渲染期直接不挂拖拽机械）；workspace 模式下分组头同时是**项目菜单**面（见 [ProjectGroupMenu](#projectgroupmenu)：头右端常驻 `MORE` 省略号钮（FG_FAINT，hover 转 FG）+ 头右键，二者都 `stop_propagation` 不触发折叠）。
 
 头部右侧控件（2026-09-30 起为真控件）：**sort**（workspace ↔ 时间分组切换，时间模式下点亮；时间分组 = 本地自然日四桶「今天/昨天/最近 7 天/更早」，分桶与桶内排序同源 `sort_stamp`（member 沿用 leader 的戳，team 不拆桶不散序；成员单独置顶仍可上浮——pin 逐行的既有语义），空桶不渲染）与 **search**（展开 header 下过滤行：InputState 过滤输入 + × 清空；title/project/tag 不区分大小写包含，无匹配组隐藏、过滤中强制展开，全滤空时显示「无匹配会话」提示；纯壳内显示态，不持久化）。
 
 > Source: `crates/manox-agent-chrome-ui/src/session_list.rs`, `crates/manox-agent-chrome-ui/src/shell.rs`
+
+#### ProjectGroupMenu
+
+项目分组头的动作菜单——旧壳侧栏（2026-09-28 随单壳切换退役）的「项目 `…` 菜单」在 chrome 壳上的回归。**职责切分**：chrome 只出**面**——分组头省略号钮/右键捕获打开位置，`HostHooks::on_group_menu(key, project, anchor)` 把 (state key, 项目路径) 交给宿主，宿主经 `agent_ui::project_menu::group_menu` 构建菜单实体，壳用与行菜单同型的 deferred/anchored 浮层挂载（`chrome-group-menu`），DismissEvent 收起；时间模式无此面（时间桶不是启动目标）。**内容**（`project` 为 `None` 的 Chats 桶保留全部启动行、按宿主回退 cwd 定界，仅隐藏移除行）：「新建会话」子菜单（Manox 平行行 = `start_new_thread(Some(project))`；Claude Code／Codex／GitHub Copilot 各一个 provider→model 级联，数据同右栏 agent 页签的 `cascade_provider_groups`，选中即 `spawn_agent_terminal` 以**该项目目录**为 cwd 拉起 CLI，经 `prebuilt_terminal_tab` 包装成右栏 ToolTab 打开）；「新建终端」（`spawn_standalone_terminal`，项目目录）；「VS Code」（`launch_vscode_app_from_settings` 注入式启动、后台执行，未装 VS Code 或无目录可用时禁用）；分隔线 + 「移除项目」（`project_registry::forget_project` overlay 写 + `thread_store::remove_project` 同步 v2 账户，`ws.notify()` 立即重投影——组溶解、会话落回 Chats 桶，历史不动）。
+
+**移除的持久化**（AHP 世界无项目注册表可反注册，分组读会话自身 project 绑定）：`agent_ui::project_registry` 在共享 `~/.manox/settings.toml` 的 app 自有键 `removed_projects` 上做 parse-edit-serialize（与 `ui_language` 同款只碰己键纪律）+ 进程级缓存（投影每次 multiplexer notify 都要查，不逐帧读文件）；`project_groups(rows, unread, removed)` 把命中行**改投 Chats 桶而非隐藏**。重新绑定即重新注册：`Workspace::register_project_in_store` 是全部绑定路径的汇聚点，顺带清 overlay 条目（往目录里拉起会话 = 重新注册）。
+
+> Source: `crates/agent-ui/src/project_menu.rs`, `crates/agent-ui/src/project_registry.rs`, `crates/agent-ui/src/chrome_assembly.rs`, `crates/manox-agent-chrome-ui/src/shell.rs`
 
 #### SidebarProjection
 

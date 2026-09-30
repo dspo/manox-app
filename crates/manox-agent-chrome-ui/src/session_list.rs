@@ -63,6 +63,12 @@ pub type OnWindowApp = Rc<dyn Fn(&mut Window, &mut App)>;
 pub type OnGroupDragMove = Rc<dyn Fn(&String, &String, bool, &mut Window, &mut App)>;
 /// Drop-commit callback for group reordering (dragged, target, before-half?).
 pub type OnGroupMove = Rc<dyn Fn(&String, &String, bool, &mut Window, &mut App)>;
+/// Group-menu callback (state key, the group's project path when it is a
+/// workspace group, open position). The HOST builds the menu — the project
+/// actions (launch agents / editor, remove project) are host semantics the
+/// chrome carries no opinion on; an absent callback leaves the header with
+/// no menu surface.
+pub type OnGroupMenu = Rc<dyn Fn(&str, Option<&str>, gpui::Point<Pixels>, &mut Window, &mut App)>;
 
 /// One session row as projected by the host. The chrome owns only the
 /// interaction state around these (selection, collapse, order); it never
@@ -116,6 +122,11 @@ pub struct SessionGroup {
     /// must not become state).
     pub key: String,
     pub collapsed: bool,
+    /// The group's project directory, host-supplied — the project menu's
+    /// launch target. `None` on time buckets and on the no-project bucket;
+    /// the menu still opens there, scoped to the host's fallback cwd, minus
+    /// the remove-project row.
+    pub project: Option<String>,
     pub rows: Vec<SessionRowData>,
 }
 
@@ -230,6 +241,10 @@ pub struct SessionList {
     pub on_hover_row: OnHover,
     /// Row menu (right-click anywhere on the row): the only action surface.
     pub on_row_menu: OnRowMenu,
+    /// Group-menu surface (the header's ellipsis button + right-click): the
+    /// host builds the menu. Workspace grouping only — a time bucket is not
+    /// a launch target.
+    pub on_group_menu: Option<OnGroupMenu>,
     /// Escape inside the inline tag editor.
     pub on_tag_edit_cancel: Option<OnWindowApp>,
     /// Double-click on a row's user tag chip: begin the RENAME editor (the
@@ -583,6 +598,17 @@ fn group(
                 }
             });
     }
+    // The project menu surface rides the header in workspace grouping: the
+    // ellipsis button and a right-click anywhere on the header both hand the
+    // host (key, project, open position) to build the menu from.
+    if draggable && let Some(on_group_menu) = list.on_group_menu.clone() {
+        let menu_key = g.key.clone();
+        let menu_project = g.project.clone();
+        header = header.on_mouse_down(gpui::MouseButton::Right, move |e, w, cx| {
+            cx.stop_propagation();
+            (on_group_menu)(&menu_key, menu_project.as_deref(), e.position, w, cx);
+        });
+    }
     let header = header
         .w_full()
         .flex()
@@ -607,6 +633,29 @@ fn group(
                 .min_w_0()
                 .truncate()
                 .child(g.name.clone()),
+        )
+        .child(div().flex_1())
+        .when_some(
+            list.on_group_menu.clone().filter(|_| draggable),
+            |el, on_menu| {
+                let btn_key = g.key.clone();
+                let btn_selector = g.key.clone();
+                let btn_project = g.project.clone();
+                el.child(
+                    div()
+                        .id(SharedString::from(format!("grp-menu-{}", g.key)))
+                        .debug_selector(move || format!("chrome-group-menu-btn-{}", btn_selector))
+                        .on_click(move |e, w, cx| {
+                            cx.stop_propagation();
+                            (on_menu)(&btn_key, btn_project.as_deref(), e.position(), w, cx);
+                        })
+                        .px(px(2.))
+                        .rounded(px(3.))
+                        .text_color(FG_FAINT)
+                        .hover(|style| style.text_color(FG).bg(LIST_HOVER))
+                        .child(icon(icons::MORE, 13.)),
+                )
+            },
         );
 
     let mut items: Vec<gpui::AnyElement> = vec![header.into_any_element()];

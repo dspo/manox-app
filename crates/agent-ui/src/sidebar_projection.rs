@@ -17,7 +17,7 @@
 //! - `updated_at` / `archived` / the tag chip / the pinned flag ride the row
 //!   verbatim.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ahp_types::state::{SessionStatus as WireStatus, SessionSummary};
 use manox_agent_chrome_ui::session_list::{SessionGroup, SessionRowData, SessionStatus};
@@ -172,14 +172,31 @@ pub fn project_forest(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<Session
 
 /// Group a full wire list into chrome `SessionGroup`s keyed by project
 /// display name (the path's last segment; empty → "Chats"), applying
-/// `project_forest` per partition.
-pub fn project_groups(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<SessionGroup> {
+/// `project_forest` per partition. `removed` is the client-side removal
+/// overlay ([`crate::project_registry`]): a row whose effective project sits
+/// in the set groups as loose, the v2 store's remove-project semantics — the
+/// folder dissolves, the history stays.
+pub fn project_groups(
+    rows: &[ThreadRow],
+    unread: &UnreadMirrors,
+    removed: &HashSet<String>,
+) -> Vec<SessionGroup> {
+    // The effective grouping project: the row's own, minus removed paths (a
+    // removed row keeps its row data — it re-buckets, it does not vanish).
+    let effective = |row: &ThreadRow| -> Option<String> {
+        row.project
+            .clone()
+            .filter(|p| !p.is_empty() && !removed.contains(p))
+    };
     let mut order: Vec<String> = Vec::new();
     let mut buckets: HashMap<String, Vec<ThreadRow>> = HashMap::new();
+    let mut bucket_project: HashMap<String, Option<String>> = HashMap::new();
     for row in rows {
-        let key = project_label(row.project.as_deref().unwrap_or(""));
+        let project = effective(row);
+        let key = project_label(project.as_deref().unwrap_or(""));
         if !buckets.contains_key(&key) {
             order.push(key.clone());
+            bucket_project.insert(key.clone(), project);
         }
         buckets.entry(key).or_default().push(row.clone());
     }
@@ -188,6 +205,7 @@ pub fn project_groups(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<Session
         .map(|name| SessionGroup {
             rows: project_forest(buckets.get(&name).expect("bucket just built"), unread),
             key: name.clone(),
+            project: bucket_project.get(&name).cloned().flatten(),
             name,
             collapsed: false,
         })
@@ -294,11 +312,42 @@ mod tests {
         rows[1].project = None;
         rows[1].tag = Some("mytag".into());
         rows[1].pinned = true;
-        let groups = project_groups(&rows, &UnreadMirrors::new());
+        let groups = project_groups(&rows, &UnreadMirrors::new(), &HashSet::new());
         let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, vec!["wire", "Chats"]);
         let chats = &groups[1].rows[0];
         assert_eq!(chats.tag.as_deref(), Some("mytag"));
         assert!(chats.pinned);
+    }
+
+    /// The group carries its real project path (the menu's launch target),
+    /// a removed project re-buckets to loose WITHOUT losing its rows, and a
+    /// no-project group carries no path.
+    #[test]
+    fn groups_carry_project_and_removed_paths_rebucket_to_loose() {
+        let mut rows = vec![row("a", 0, None), row("b", 0, None), row("c", 0, None)];
+        rows[0].project = None;
+        rows[1].project = Some("/p/wire".into());
+        rows[2].project = Some("/p/wire".into());
+        let removed: HashSet<String> = ["/p/wire".to_string()].into_iter().collect();
+        let groups = project_groups(&rows, &UnreadMirrors::new(), &removed);
+        // Everything loose: one "Chats" bucket, no project path on it.
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "Chats");
+        assert_eq!(groups[0].project, None);
+        assert_eq!(
+            groups[0].rows.len(),
+            3,
+            "removed rows re-bucket, not vanish"
+        );
+
+        // Without the removal, the bucket is the project group with the path.
+        let groups = project_groups(&rows, &UnreadMirrors::new(), &HashSet::new());
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "Chats");
+        assert_eq!(groups[0].project, None);
+        assert_eq!(groups[1].name, "wire");
+        assert_eq!(groups[1].project.as_deref(), Some("/p/wire"));
+        assert_eq!(groups[1].rows.len(), 2);
     }
 }

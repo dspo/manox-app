@@ -224,6 +224,7 @@ mod macos {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Chats")
                     .to_string(),
+                project: (!t.project.is_empty()).then(|| t.project.clone()),
                 status: if t.errored {
                     SessionStatus::Errored
                 } else if running {

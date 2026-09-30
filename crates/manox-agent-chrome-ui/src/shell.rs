@@ -39,6 +39,10 @@ pub struct SessionRow {
     pub title: String,
     /// Workspace (project) display name — the grouping key.
     pub workspace: String,
+    /// The group's project directory (the host's launch target for the
+    /// project menu); `None` on no-project rows — the menu falls back to the
+    /// host's cwd rules and hides the remove-project row.
+    pub project: Option<String>,
     pub status: SessionStatus,
     /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
@@ -71,6 +75,7 @@ impl SessionRow {
                 id: r.id,
                 title: r.title,
                 workspace: group.name.clone(),
+                project: group.project.clone(),
                 status: r.status,
                 updated_at: r.updated_at,
                 sort_stamp: r.sort_stamp,
@@ -103,6 +108,16 @@ pub type HookOnId = Box<dyn Fn(&str, &mut Window, &mut App)>;
 pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
 /// Host tag write (row id, `Some(tag)` to set / `None` to clear).
 pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>;
+/// Host-built group menu (state key, the group's project path when it is a
+/// workspace group, open position) → the menu entity to mount, or `None` to
+/// open nothing. The chrome supplies the surface (anchor + dismissal); the
+/// content is host semantics — the project actions are not the chrome's to
+/// invent.
+pub type HookOnGroupMenu = Box<
+    dyn Fn(&str, Option<&str>, gpui::Point<Pixels>, &mut Window, &mut App) -> Option<MenuEntity>,
+>;
+/// The popup menu entity the host builds and the shell mounts.
+pub type MenuEntity = Entity<gpui_component::menu::PopupMenu>;
 /// Host nav move: opens the previous/next thread in the host's history and
 /// returns the thread id it landed on (`None` when there is nowhere to go).
 pub type HookOnNav = Box<dyn Fn(&mut Window, &mut App) -> Option<String>>;
@@ -151,6 +166,9 @@ pub struct HostHooks {
     pub nav_avail: Option<HookQuery<NavAvail>>,
     /// Open the foreground session's workspace in the user's editor.
     pub on_open_editor: Option<HookOnUnit>,
+    /// Group-menu builder (the project actions: launch agents / terminal /
+    /// editor, remove project). Absent → group headers carry no menu surface.
+    pub on_group_menu: Option<HookOnGroupMenu>,
 }
 
 /// Everything the shell needs from its host at construction.
@@ -213,6 +231,10 @@ pub struct Shell {
     /// Row-menu DismissEvent subscription (the menu closes itself on outside
     /// click; the event drives the host side shut).
     row_menu_sub: Option<gpui::Subscription>,
+    /// The open group menu (state key, anchor, the host-built menu entity).
+    group_menu: Option<(String, gpui::Point<Pixels>, MenuEntity)>,
+    /// Group-menu dismissal subscription (same shape as the row menu's).
+    group_menu_sub: Option<gpui::Subscription>,
     /// The inline tag editor (row + input); Escape cancels, Enter/blur
     /// commits, an empty value is silently discarded.
     tag_edit: Option<TagEdit>,
@@ -272,6 +294,8 @@ impl Shell {
             customizations: config.customizations,
             row_menu: None,
             row_menu_sub: None,
+            group_menu: None,
+            group_menu_sub: None,
             tag_edit: None,
             show_sidebar: true,
             show_panel: false,
@@ -501,6 +525,9 @@ impl Shell {
     ) {
         use gpui_component::menu::{PopupMenu, PopupMenuItem};
 
+        // One menu at a time: an open group menu's anchor would lie under
+        // this menu (the mirror of open_group_menu's close_row_menu).
+        self.close_group_menu(cx);
         let Some(sess) = self.sessions.iter().find(|s| s.id == id) else {
             return;
         };
@@ -620,6 +647,46 @@ impl Shell {
     /// Whether the row menu is open (read face for hosts/tests).
     pub fn row_menu_open(&self) -> bool {
         self.row_menu.is_some()
+    }
+
+    /// Group menu (the header's ellipsis button / right-click): the HOST
+    /// builds the menu through [`HostHooks::on_group_menu`] — the project
+    /// actions are host semantics — and the shell mounts it anchored at the
+    /// trigger, handling dismissal. One group menu at a time; opening one
+    /// replaces the previous (and the row menu, whose anchor would now lie).
+    pub fn open_group_menu(
+        &mut self,
+        key: &str,
+        project: Option<&str>,
+        anchor: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(hook) = &self.hooks.on_group_menu else {
+            return;
+        };
+        let Some(menu) = hook(key, project, anchor, window, cx) else {
+            return;
+        };
+        self.close_row_menu(cx);
+        let sub = cx.subscribe(&menu, |this, _menu, _: &gpui::DismissEvent, cx| {
+            this.close_group_menu(cx);
+        });
+        self.group_menu_sub = Some(sub);
+        self.group_menu = Some((key.to_string(), anchor, menu));
+        cx.notify();
+    }
+
+    pub fn close_group_menu(&mut self, cx: &mut Context<Self>) {
+        self.group_menu_sub = None;
+        if self.group_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Whether the group menu is open (read face for hosts/tests).
+    pub fn group_menu_open(&self) -> bool {
+        self.group_menu.is_some()
     }
 
     /// The hovered row id, if any (read face for hosts/tests).
@@ -816,7 +883,9 @@ impl Shell {
     }
 
     /// Workspace grouping (the default): one group per project display name,
-    /// ordered by the recorded drag order, unrecorded groups trailing.
+    /// ordered by the recorded drag order, unrecorded groups trailing. The
+    /// group's project path rides the rows (the host stamps every row of a
+    /// group with it).
     fn workspace_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
         let mut groups: Vec<SessionGroup> = Vec::new();
         for s in sessions {
@@ -829,6 +898,7 @@ impl Shell {
                     name: s.workspace.clone(),
                     key: s.workspace.clone(),
                     collapsed,
+                    project: s.project.clone(),
                     rows: vec![s.row_data()],
                 });
             }
@@ -877,6 +947,7 @@ impl Shell {
                     name: manox_i18n::t(key).to_string(),
                     key: key.to_string(),
                     collapsed: self.collapsed.iter().any(|k| k == key),
+                    project: None,
                     rows: Vec::new(),
                 }
             })
@@ -1050,6 +1121,12 @@ impl gpui::Render for Shell {
             .row_menu
             .as_ref()
             .map(|(id, anchor, menu)| (id.clone(), *anchor, menu.clone()));
+        // Group-menu anchor snapshot (same deferred layer, one menu at a
+        // time).
+        let group_menu = self
+            .group_menu
+            .as_ref()
+            .map(|(key, anchor, menu)| (key.clone(), *anchor, menu.clone()));
         let titlebar = titlebar::render(self, window, cx);
         let content = self.render_content(cx);
         let close_picker = cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -1161,6 +1238,26 @@ impl gpui::Render for Shell {
                                 div()
                                     .id(gpui::SharedString::from(format!("row-menu-{id}")))
                                     .debug_selector(|| "chrome-row-menu".into())
+                                    .occlude()
+                                    .child(menu),
+                            ),
+                    )
+                    .with_priority(1),
+                )
+            })
+            // Group menu (the project actions): the same anchored floating
+            // layer, fed by the host-built menu entity.
+            .when_some(group_menu, |this, (key, anchor, menu)| {
+                this.child(
+                    gpui::deferred(
+                        gpui::anchored()
+                            .anchor(gpui::Anchor::TopRight)
+                            .position(anchor)
+                            .offset(gpui::point(px(0.), px(2.)))
+                            .child(
+                                div()
+                                    .id(gpui::SharedString::from(format!("group-menu-{key}")))
+                                    .debug_selector(|| "chrome-group-menu".into())
                                     .occlude()
                                     .child(menu),
                             ),
@@ -1316,6 +1413,11 @@ impl Shell {
         let on_row_menu = cx.listener(|this, (id, pos): &(String, gpui::Point<Pixels>), w, cx| {
             this.open_row_menu(id, *pos, w, cx);
         });
+        let on_group_menu = cx.listener(
+            |this, (key, project, pos): &(String, Option<String>, gpui::Point<Pixels>), w, cx| {
+                this.open_group_menu(key, project.as_deref(), *pos, w, cx);
+            },
+        );
         let on_tag_rename = cx.listener(|this, id: &String, w, cx| {
             let id = id.clone();
             this.begin_tag_edit(id, true, w, cx);
@@ -1380,6 +1482,24 @@ impl Shell {
                 on_row_menu: std::rc::Rc::new(move |id, pos, w, cx| {
                     on_row_menu(&(id.clone(), pos), w, cx)
                 }),
+                on_group_menu: if grouping.is_time() {
+                    None
+                } else {
+                    let cb: crate::session_list::OnGroupMenu = std::rc::Rc::new(
+                        move |key: &str,
+                              project: Option<&str>,
+                              pos: gpui::Point<gpui::Pixels>,
+                              w: &mut gpui::Window,
+                              cx: &mut gpui::App| {
+                            on_group_menu(
+                                &(key.to_string(), project.map(str::to_string), pos),
+                                w,
+                                cx,
+                            )
+                        },
+                    );
+                    Some(cb)
+                },
                 on_tag_edit_cancel: Some(on_tag_edit_cancel),
                 on_tag_rename: std::rc::Rc::new(move |id, w, cx| on_tag_rename(id, w, cx)),
                 on_toggle_grouping: std::rc::Rc::new(move |e, w, cx| on_toggle_grouping(e, w, cx)),

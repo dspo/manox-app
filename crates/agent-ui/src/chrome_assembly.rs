@@ -205,8 +205,9 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         }
         let rows = mux.read(cx).thread_list(cx);
         let unread = mux.read(cx).unread_map();
+        let removed = crate::project_registry::removed_projects();
         let sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
-            crate::sidebar_projection::project_groups(&rows, &unread)
+            crate::sidebar_projection::project_groups(&rows, &unread, &removed)
                 .into_iter()
                 .flat_map(manox_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
@@ -370,24 +371,27 @@ fn shell_config(
             // The in-memory thread_store write this hook used before never
             // reached the journal, so the write face (thread_store) and the
             // read face (AHP fold) were two states that never met.
-            on_pin: Some(Box::new(move |id, _w, cx| {
-                let store = mux.read(cx).store();
-                let channel = crate::ahp_store::thread_uri(id);
-                store.update(cx, |store, _| {
-                    let pinned = store
-                        .book
-                        .ext
-                        .get(&channel)
-                        .and_then(|x| x.pinned)
-                        .unwrap_or(false);
-                    store.dispatch(
-                        channel,
-                        ahp_types::actions::StateAction::Unknown(serde_json::json!({
-                            "type": manox_ahp::ext::actions::PINNED_CHANGED,
-                            "pinned": !pinned,
-                        })),
-                    );
-                });
+            on_pin: Some(Box::new({
+                let mux = mux.clone();
+                move |id, _w, cx| {
+                    let store = mux.read(cx).store();
+                    let channel = crate::ahp_store::thread_uri(id);
+                    store.update(cx, |store, _| {
+                        let pinned = store
+                            .book
+                            .ext
+                            .get(&channel)
+                            .and_then(|x| x.pinned)
+                            .unwrap_or(false);
+                        store.dispatch(
+                            channel,
+                            ahp_types::actions::StateAction::Unknown(serde_json::json!({
+                                "type": manox_ahp::ext::actions::PINNED_CHANGED,
+                                "pinned": !pinned,
+                            })),
+                        );
+                    });
+                }
             })),
             // The menu's archive toggle flips the CURRENT partition.
             // Premise: the wire snapshot rides the ACTIVE partition only, so
@@ -517,6 +521,18 @@ fn shell_config(
                 })
                 .detach();
             })),
+            // The project group's action menu: agent/terminal/editor launches
+            // rooted at the group's directory + 移除项目. The host builds the
+            // menu entity; the chrome mounts and dismisses it.
+            on_group_menu: Some(Box::new({
+                let ws = ws.downgrade();
+                let mux = mux.clone();
+                move |_key, project, _anchor, window, cx| {
+                    Some(crate::project_menu::group_menu(
+                        project, &mux, &ws, window, cx,
+                    ))
+                }
+            })),
         },
         // The titlebar's avatar slot wears the app's own mark.
         brand: Some(Arc::new(|| {
@@ -579,6 +595,16 @@ static FOREGROUND_PROJECT: std::sync::Mutex<Option<std::path::PathBuf>> =
 /// The dock surface's read face of the foreground cwd.
 pub fn foreground_cwd() -> Option<std::path::PathBuf> {
     FOREGROUND_CWD.lock().expect("foreground cwd lock").clone()
+}
+
+/// The foreground thread's project path (read face for the project menu's
+/// no-project fallback — a launch without a directory never silently opens
+/// $HOME).
+pub fn foreground_project() -> Option<std::path::PathBuf> {
+    FOREGROUND_PROJECT
+        .lock()
+        .expect("foreground project lock")
+        .clone()
 }
 
 /// The threads database behind the store global — the pane snapshot's
