@@ -29,8 +29,7 @@ use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 
 use crate::Workspace;
-use crate::multiplexer::SessionMultiplexer;
-use crate::views::model_cascade::{CascadeEntry, cascade_provider_groups};
+use crate::views::model_cascade::{build_model_menu, launch_wire_key};
 
 /// Build the project group's menu. `project` is the group's directory
 /// (`None` on the no-project bucket — the menu then scopes to the fallback
@@ -39,7 +38,6 @@ use crate::views::model_cascade::{CascadeEntry, cascade_provider_groups};
 /// through the shell handle in `chrome_assembly`.
 pub fn group_menu(
     project: Option<&str>,
-    mux: &Entity<SessionMultiplexer>,
     ws: &gpui::WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
@@ -47,8 +45,6 @@ pub fn group_menu(
     let project_dir: Option<PathBuf> = project
         .map(std::path::PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty());
-    let agents = mux.read(cx).agents(cx);
-    let groups = cascade_provider_groups(&agents);
     // Every menu closure is 'static: it captures OWNED clones of the
     // workspace handle and the project directory, never the caller's
     // borrows.
@@ -64,10 +60,16 @@ pub fn group_menu(
     let vscode_target = project_dir.clone().or_else(|| {
         crate::chrome_assembly::foreground_project().filter(|p| !p.as_os_str().is_empty())
     });
+    // The registry snapshot is collected ONCE for all three agent cascades
+    // (per-agent submenu builders only clone).
+    let models = crate::model_catalog::rows();
     PopupMenu::build(window, cx, |menu, window, cx| {
         let mut menu = menu.max_w(px(280.));
         // 新建会话: Manox flat row + one provider→model cascade per external
-        // agent kind — the legacy menu's shape, scoped to this project.
+        // agent kind — the legacy menu's shape, scoped to this project. The
+        // cascades render through the COMPOSER model picker's shared builder
+        // (provider display-name submenus, wire-tag rows), so every model
+        // picker in the app looks and picks the same.
         menu = menu.submenu_with_icon(
             Some(Icon::default().path("icons/plus.svg")),
             manox_i18n::t("sidebar-new-session-label"),
@@ -84,55 +86,35 @@ pub fn group_menu(
                             new_thread_at(&ws_manox, dir_new.clone(), cx);
                         }),
                 );
-                // The pick list is collected once and cloned per submenu
-                // closure (the builder closures are `move` + 'static; the
-                // groups borrow cannot ride along). The display name is the
-                // row's label — the same name the right pane's picker shows —
-                // while the config id stays the spawn argument.
-                let rows: Vec<(String, String, String, Option<String>)> = groups
-                    .iter()
-                    .flat_map(|(provider, entries)| {
-                        entries.iter().map(move |e: &CascadeEntry| {
-                            (
-                                provider.clone(),
-                                e.config_id.clone(),
-                                e.display.clone(),
-                                e.wire.clone(),
+                for (agent_id, display, svg) in EXTERNAL_AGENTS {
+                    let dir_agent = dir_cascade.clone();
+                    let agent_models = models.clone();
+                    submenu = submenu.submenu_with_icon(
+                        Some(Icon::default().path(svg)),
+                        display,
+                        window,
+                        cx,
+                        move |sub, window, cx| {
+                            let dir_agent = dir_agent.clone();
+                            build_model_menu(
+                                sub,
+                                agent_models,
+                                move |row, window, cx| {
+                                    spawn_agent_tab(
+                                        &(agent_id, display, svg),
+                                        &row.provider_display,
+                                        &row.id,
+                                        launch_wire_key(&row.api),
+                                        dir_agent.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                                window,
+                                cx,
                             )
-                        })
-                    })
-                    .collect();
-                if !rows.is_empty() {
-                    for (agent_id, display, svg) in EXTERNAL_AGENTS {
-                        let dir_agent = dir_cascade.clone();
-                        let agent_rows = rows.clone();
-                        submenu = submenu.submenu_with_icon(
-                            Some(Icon::default().path(svg)),
-                            display,
-                            window,
-                            cx,
-                            move |sub, _window, _cx| {
-                                let mut sub = sub;
-                                for (provider, model, label, wire) in agent_rows.clone() {
-                                    let dir_pick = dir_agent.clone();
-                                    sub = sub.item(PopupMenuItem::new(label).on_click(
-                                        move |_, window, cx| {
-                                            spawn_agent_tab(
-                                                &(agent_id, display, svg),
-                                                &provider,
-                                                &model,
-                                                wire.clone(),
-                                                dir_pick.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    ));
-                                }
-                                sub
-                            },
-                        );
-                    }
+                        },
+                    );
                 }
                 submenu
             },
