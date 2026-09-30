@@ -11,6 +11,16 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// This process's birth wall-clock — the staleness baseline for turns folded
+/// from a previous run's journal. The host is in-process, so nothing older
+/// than this process can still be running.
+static PROCESS_START: OnceLock<std::time::SystemTime> = OnceLock::new();
+
+pub(crate) fn process_start() -> std::time::SystemTime {
+    *PROCESS_START.get_or_init(std::time::SystemTime::now)
+}
 
 use crate::i18n;
 use gpui::ClickEvent;
@@ -820,6 +830,9 @@ impl Workspace {
                 turn_active: false,
                 thinking_ticker_gen: 0,
                 awaiting_history: None,
+                rebuilt_pre_snapshot: false,
+                built_turns: 0,
+                last_declined_ask: None,
                 context_rail,
             }),
         };
@@ -977,6 +990,33 @@ impl Workspace {
             cc.notify();
         });
     }
+
+    /// Run the store-observe's rebuild guard directly. Diagnostic-only: the
+    /// production guard fires on store notify, which a detached test store
+    /// never produces. Returns `(rebuilt, chat_landed)`.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_run_rebuild_guard(&mut self, cx: &mut Context<Self>) -> (bool, bool) {
+        self.sync_rebuild_from_book(cx)
+    }
+
+    /// The dismiss leg (`dismiss_ask`): the ask card's close and the stop
+    /// button both ride it. Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_dismiss_ask(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_ask(cx);
+    }
+
+    /// The rebuild watermark triple: (built pre-snapshot, built turn count,
+    /// conversation item count). Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_rebuild_watermark(&self, cx: &App) -> (bool, usize, usize) {
+        let chat = self.chat.read(cx);
+        (
+            chat.rebuilt_pre_snapshot,
+            chat.built_turns,
+            chat.conversation.read(cx).items().len(),
+        )
+    }
     /// Run the live-ask edge against the bound store. Diagnostic-only: the
     /// production edge fires on store notify, which a detached test store
     /// never produces.
@@ -1103,6 +1143,11 @@ impl Workspace {
         self.resolve_auth(auth_id, None, decision, cx);
     }
 
+    /// How long a dismissed ask's re-park re-issues the decline instead of
+    /// re-seeding the card. Bounds the dismiss/restore race window without
+    /// ever swallowing an answerable question permanently.
+    const ASK_REDECLINE_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
     /// The live ask edge: reconcile the pending ask with the fold's open
     /// elicitation (the session's input-needed list). A new request id seeds
     /// the interactive card — synthesizing its `ToolCall` item, since the v2
@@ -1191,6 +1236,38 @@ impl Workspace {
         };
         match live {
             Some((request_id, ask)) => {
+                // The engine's restore re-parks an unsettled question (upstream
+                // #840), so a just-dismissed ask can come right back: the
+                // decline raced the restore and reduced to NoOp host-side.
+                // Re-issue the decline for the same request inside the window
+                // instead of re-seeding the card the user closed; past the
+                // window the card seeds again — an answerable question must
+                // not be silently swallowed forever.
+                let recently_declined =
+                    self.chat
+                        .read(cx)
+                        .last_declined_ask
+                        .as_ref()
+                        .is_some_and(|(id, at)| {
+                            id == &request_id && at.elapsed() < Self::ASK_REDECLINE_WINDOW
+                        });
+                if recently_declined {
+                    if let Some((_, sid)) = self.chat.read(cx).store.clone() {
+                        let view = store.read(cx);
+                        if let Some((chat_id, _)) =
+                            crate::ahp_store::leaf(&view.book, &sid).chat_input(&request_id)
+                        {
+                            tracing::info!(
+                                request_id = %request_id,
+                                "live ask: re-declining the re-parked question"
+                            );
+                            store.update(cx, |s, _| {
+                                s.decline_input(&chat_id, &request_id);
+                            });
+                        }
+                    }
+                    return;
+                }
                 let stale = self
                     .chat
                     .read(cx)
@@ -1215,6 +1292,7 @@ impl Workspace {
                         chat.pending_ask_live = true;
                         chat.ask_step = 0;
                         chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+                        chat.last_declined_ask = None;
                         cx.notify();
                     });
                     self.reset_ask_custom(cx);
@@ -1513,7 +1591,7 @@ impl Workspace {
         let Some((store, sid)) = self.chat.read(cx).store.clone() else {
             return;
         };
-        let (running, display, usage) = {
+        let (running, display, usage, pre_snapshot, built_turns) = {
             let view = store.read(cx);
             let leaf = crate::ahp_store::leaf(&view.book, &sid);
             let running = leaf.running();
@@ -1539,7 +1617,8 @@ impl Workspace {
                 first_user_text_empty = chat.turns.first().is_some_and(|t| t.message.text.is_empty()),
                 "rebuild: synthesized transcript from the chat fold"
             );
-            (running, display, usage)
+            let pre_snapshot = !view.book.chat_snapshot_landed(&sid);
+            (running, display, usage, pre_snapshot, chat.turns.len())
         };
         let role = self.model_label(cx);
         let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
@@ -1561,6 +1640,8 @@ impl Workspace {
         });
         self.chat.update(cx, |chat, cx| {
             chat.conversation = new_conv;
+            chat.rebuilt_pre_snapshot = pre_snapshot;
+            chat.built_turns = built_turns;
             // The snapshot landed with displayable history: the loading gate's
             // job is done.
             chat.awaiting_history = None;
@@ -1568,6 +1649,44 @@ impl Workspace {
         });
         self.sync_list_count(cx);
         cx.notify();
+    }
+
+    /// The store-observe's rebuild guard, shared with the diagnostic test
+    /// entry: rebuild the foreground conversation when the fold outgrew what
+    /// the conversation was built from. Returns `(rebuilt, chat_landed)`.
+    fn sync_rebuild_from_book(&mut self, cx: &mut Context<Self>) -> (bool, bool) {
+        let (displayable, chat_landed, snapshot_landed, turns_now) = self
+            .chat
+            .read(cx)
+            .store
+            .clone()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, &sid).chat.map(|c| {
+                    (
+                        !c.turns.is_empty() || c.active_turn.is_some(),
+                        true,
+                        view.book.chat_snapshot_landed(&sid),
+                        c.turns.len(),
+                    )
+                })
+            })
+            .unwrap_or((false, false, false, 0));
+        // A build that ran before the chat snapshot landed (first replay
+        // deltas beat the subscribe answer) froze whatever partial fold
+        // existed then; once the snapshot lands with more settled turns than
+        // the build saw, rebuild over it — the one-shot empty check below can
+        // never fire again on a non-empty skeleton.
+        let healing = {
+            let chat = self.chat.read(cx);
+            chat.rebuilt_pre_snapshot && snapshot_landed && turns_now > chat.built_turns
+        };
+        if displayable && (healing || self.chat_conversation(cx).read(cx).is_empty(cx)) {
+            self.rebuild_conversation_from_book(cx);
+            (true, chat_landed)
+        } else {
+            (false, chat_landed)
+        }
     }
 
     fn subscribe_thread(&self, cx: &mut Context<Self>) -> (Subscription, Subscription) {
@@ -1590,23 +1709,8 @@ impl Workspace {
             // synth_display lowers the same way) — and the conversation is
             // still empty, rebuild from the snapshot. The drained deltas are
             // already inside it, so the drain skips one round.
-            let (snapshot_ready, chat_landed) = this
-                .chat
-                .read(cx)
-                .store
-                .clone()
-                .and_then(|(store, sid)| {
-                    let view = store.read(cx);
-                    crate::ahp_store::leaf(&view.book, &sid)
-                        .chat
-                        .map(|c| (!c.turns.is_empty() || c.active_turn.is_some(), true))
-                })
-                .unwrap_or((false, false));
-            let mut rebuilt = false;
-            if snapshot_ready && this.chat_conversation(cx).read(cx).is_empty(cx) {
-                this.rebuild_conversation_from_book(cx);
-                rebuilt = true;
-            } else if chat_landed && this.chat.read(cx).awaiting_history.is_some() {
+            let (rebuilt, chat_landed) = this.sync_rebuild_from_book(cx);
+            if !rebuilt && chat_landed && this.chat.read(cx).awaiting_history.is_some() {
                 // The chat snapshot landed but holds no displayable turn: the
                 // reopened session is genuinely empty. Drop the loading gate so
                 // the hero screen returns (without this the loading view would

@@ -530,6 +530,20 @@ pub struct ChatColumn {
     /// observe for a genuinely empty session) and when the wait exceeds the
     /// view's timeout so a failed reopen cannot pin the page forever.
     pub awaiting_history: Option<std::time::Instant>,
+    /// The last conversation rebuild ran against a fold that had not yet
+    /// received its authoritative chat snapshot (first replay deltas beat the
+    /// subscribe answer). The store observe heals it with one more rebuild
+    /// once the snapshot lands with more settled turns than the build saw.
+    pub rebuilt_pre_snapshot: bool,
+    /// Settled-turn count the current conversation was built from — the
+    /// rebuild-heal watermark's comparison base.
+    pub built_turns: usize,
+    /// The ask the user most recently dismissed, with when. The engine's
+    /// restore re-parks an unsettled question (upstream #840), so a dismiss
+    /// can race the restore and reduce to NoOp on the host; when the fold
+    /// re-opens the same request inside the window, the live-ask edge
+    /// re-issues the decline instead of re-seeding the card the user closed.
+    pub last_declined_ask: Option<(String, std::time::Instant)>,
     pub input_sub: Option<Subscription>,
     /// Height-invalidation subscription: any `ConversationState` mutation may
     /// change a row's height (including off-screen rows whose height is cached

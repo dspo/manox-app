@@ -281,6 +281,17 @@ fn epoch_of(started_at: &Option<String>) -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether the fold's active turn started before `process_start`. The host is
+/// in-process, so nothing older than this process can still be running: a
+/// cold-open fold carrying such a turn holds the previous run's unsettled
+/// turn, not a live one.
+pub fn active_turn_predates(chat: &ChatState, process_start: std::time::SystemTime) -> bool {
+    chat.active_turn
+        .as_ref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t.started_at).ok())
+        .is_some_and(|ts| std::time::SystemTime::from(ts) < process_start)
+}
+
 fn push_turn(turn: &Turn, entries: &mut Vec<HistoryEntry>, usage: &mut UsageTable) {
     // The turn's wall-clock start is the only time the fold carries; parts
     // have no times of their own, so every message lowered from this turn
@@ -639,6 +650,41 @@ mod tests {
             "turns": [turn],
         }))
         .expect("chat parses")
+    }
+
+    #[test]
+    fn active_turn_staleness_compares_against_the_process_start() {
+        let chat: ChatState = serde_json::from_value(serde_json::json!({
+            "resource": "ahp-chat:/c-1",
+            "title": "t",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [],
+            "activeTurn": {
+                "id": "t-9",
+                "startedAt": "2026-09-30T00:00:00Z",
+                "message": { "text": "go", "origin": { "kind": "user" } },
+                "responseParts": [],
+            },
+        }))
+        .expect("chat parses");
+        let before = std::time::SystemTime::from(
+            chrono::DateTime::parse_from_rfc3339("2026-09-30T12:00:00Z").expect("parses"),
+        );
+        assert!(
+            active_turn_predates(&chat, before),
+            "a turn started before the process began is stale"
+        );
+        let after = std::time::SystemTime::from(
+            chrono::DateTime::parse_from_rfc3339("2025-09-30T00:00:00Z").expect("parses"),
+        );
+        assert!(
+            !active_turn_predates(&chat, after),
+            "a turn started inside the process lifetime is live"
+        );
+        let mut no_turn = chat;
+        no_turn.active_turn = None;
+        assert!(!active_turn_predates(&no_turn, before), "no active turn");
     }
 
     #[test]
