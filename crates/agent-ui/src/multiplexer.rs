@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use crate::sidebar_projection::ThreadRow;
 use ahp_types::state::AgentInfo;
 use gpui::{App, Context, Entity};
-use manox_agent_chat_ui::ahp_store::{AhpStore, CLIENT_ID, chat_uri, session_uri};
+use manox_agent_chat_ui::ahp_store::{AhpStore, CLIENT_ID, chat_uri, plan_uri, session_uri};
 
 /// The per-app multiplexer: store handle plus attach/focus bookkeeping.
 pub struct SessionMultiplexer {
@@ -52,7 +52,12 @@ impl SessionMultiplexer {
 
     /// Attach (subscribe) a session. Idempotent: a second call for a live
     /// session only refreshes its catalogue row. The session and its default
-    /// chat channel are subscribed; the chat's turns stream from there.
+    /// chat channel are subscribed; the chat's turns stream from there. The
+    /// plan channel rides along: its baseline is the only fold-visible record
+    /// of a plan review's settlement (the verdict lands after the turn has
+    /// archived, and the chat-level part can then never fold answered), and
+    /// without the subscription the live-ask edge cannot tell a settled
+    /// review from an open one — the #88 composer lock.
     pub fn open_or_create(&mut self, session_id: &str, _reopen: bool, cx: &mut Context<Self>) {
         if self.attached.iter().any(|id| id == session_id) {
             return;
@@ -67,6 +72,7 @@ impl SessionMultiplexer {
                 // subscribing by session id too is tolerated by the host and
                 // covers the window before the pointer lands.
                 store.subscribe(chat_uri(&sid), cx);
+                store.subscribe(plan_uri(&sid), cx);
                 store.claim_active_client(&sid);
             });
             let _ = this.update(cx, |_, _| {});

@@ -911,6 +911,33 @@ impl Workspace {
             });
         }
     }
+
+    /// Bind a caller-built store as the foreground store, bypassing the
+    /// multiplexer handshake. Diagnostic-only: the live-ask edge's retirement
+    /// semantics read the fold through this binding.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_bind_store(
+        &mut self,
+        store: gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        session_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let sid = session_id.into();
+        self.chat.update(cx, |chat, cc| {
+            chat.store = Some((store, sid));
+            cc.notify();
+        });
+    }
+    /// Run the live-ask edge against the bound store. Diagnostic-only: the
+    /// production edge fires on store notify, which a detached test store
+    /// never produces.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_sync_live_ask(&mut self, cx: &mut Context<Self>) {
+        if let Some((store, _)) = self.chat.read(cx).store.clone() {
+            self.sync_live_ask(&store, cx);
+        }
+    }
+
     /// Seed a parsed `AskUserQuestion` as the pending ask. Diagnostic-only:
     /// bypasses the engine gate so the synthesis path can be tested with a
     /// fake engine (whose `pending_auth_entries` is empty).
@@ -1056,6 +1083,24 @@ impl Workspace {
                             if req.id.starts_with("plan-review:") {
                                 let plan =
                                     crate::ahp_store::plan_review_of(&view.book, &sid, &req.id);
+                                // A verdict on the plan channel means the review
+                                // is settled engine-side. The chat-level part can
+                                // never fold answered once its turn archived (the
+                                // reducer only settles active-turn parts, and a
+                                // plan review outlives its turn), so without this
+                                // check the card would re-seed forever with the
+                                // composer locked in ask-supplement mode — the
+                                // #88 device repro.
+                                if plan.is_some_and(|p| {
+                                    p.get("type").and_then(serde_json::Value::as_str)
+                                        == Some(manox_ahp::ext::actions::PLAN_REVIEW_SETTLED)
+                                }) {
+                                    tracing::info!(
+                                        request_id = %req.id,
+                                        "live ask: plan review already settled on the plan channel"
+                                    );
+                                    return None;
+                                }
                                 if let Some(q) = ask.questions.first_mut()
                                     && let Some(content) = plan.and_then(|p| {
                                         p.get("content").and_then(serde_json::Value::as_str)
@@ -1115,8 +1160,35 @@ impl Workspace {
             None => {
                 let live_seeded = self.chat.read(cx).pending_ask_live;
                 let has_ask = self.chat.read(cx).pending_ask.is_some();
-                if live_seeded && has_ask {
-                    tracing::info!("live ask: request left the fold, retiring the card");
+                // A live-seeded card retires outright — its source of truth
+                // left the fold. Any other card retires when the fold
+                // demonstrably lacks its request id: the fold is the only
+                // route an answer can ride (`resolve_ask` looks it up there),
+                // so a card the fold cannot route is dead weight that parks
+                // the composer in ask-supplement mode — the composer half of
+                // the #88 dead-lock. The live edge re-seeds from the fold on
+                // a later notify, so a premature retirement heals itself.
+                let fold_lacks_id = has_ask && !live_seeded && {
+                    let view = store.read(cx);
+                    self.chat
+                        .read(cx)
+                        .store
+                        .as_ref()
+                        .map(|(_, sid)| sid.clone())
+                        .is_some_and(|sid| {
+                            self.chat.read(cx).pending_ask.as_ref().is_some_and(|a| {
+                                crate::ahp_store::leaf(&view.book, &sid)
+                                    .chat_input(&a.id)
+                                    .is_none()
+                            })
+                        })
+                };
+                if has_ask && (live_seeded || fold_lacks_id) {
+                    tracing::info!(
+                        live_seeded,
+                        fold_lacks_id,
+                        "live ask: request left the fold, retiring the card"
+                    );
                     self.chat.update(cx, |chat, cx| {
                         chat.pending_ask = None;
                         chat.pending_ask_live = false;
