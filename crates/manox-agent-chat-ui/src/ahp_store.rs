@@ -258,6 +258,29 @@ impl ChannelBook {
         self.summaries.remove(id_of(session_uri)).is_some()
     }
 
+    /// Drop every folded trace of one session: its catalogue row, session
+    /// state, snapshot marks, the chat states it could reach (the sid form
+    /// plus the default-chat pointer), and every per-session extension and
+    /// metrics channel. Without this a disposed session's fold lived on
+    /// forever and memory grew monotonically with the delete count.
+    pub fn remove_session(&mut self, session_id: &str) {
+        let default_chat = self.default_chat(session_id);
+        self.summaries.remove(session_id);
+        self.sessions.remove(session_id);
+        self.chat_snapshots.remove(session_id);
+        let mut chat_ids: Vec<String> = vec![session_id.to_string()];
+        chat_ids.extend(default_chat.map(|uri| id_of(&uri).to_string()));
+        for chat_id in &chat_ids {
+            self.chats.remove(chat_id);
+            self.metrics
+                .remove(&format!("{}{chat_id}", manox_ahp::ext::channels::METRICS));
+            self.ext
+                .remove(&format!("{}{chat_id}", manox_ahp::ext::channels::PLAN));
+        }
+        self.ext.remove(&thread_uri(session_id));
+        self.ext.remove(&work_uri(session_id));
+    }
+
     /// The default chat URI of a session, from its folded state.
     pub fn default_chat(&self, session_id: &str) -> Option<String> {
         self.sessions
@@ -713,11 +736,9 @@ impl AhpStore {
                         let _ = tokio_wait({
                             let client = client.clone();
                             move || async move {
+                                // Notification form — see `unsubscribe`.
                                 client
-                                    .request::<_, Value>(
-                                        "unsubscribe",
-                                        serde_json::json!({ "channel": uri }),
-                                    )
+                                    .notify("unsubscribe", serde_json::json!({ "channel": uri }))
                                     .await
                                     .map_err(|err| err.to_string())
                             }
@@ -896,7 +917,7 @@ impl AhpStore {
             ahp::SubscriptionEvent::SessionRemoved(params) => {
                 let removed = self.book.remove_summary(&params.channel);
                 if removed {
-                    self.book.sessions.remove(id_of(&params.channel));
+                    self.book.remove_session(id_of(&params.channel));
                     cx.notify();
                 }
             }
@@ -954,6 +975,13 @@ impl AhpStore {
     }
 
     /// Unsubscribe one channel.
+    ///
+    /// Sent as a NOTIFICATION, not a request: the v0.1.0 router matches
+    /// `unsubscribe` only in its notification dispatch (the request table has
+    /// no arm), so the request form answered `declared but not matched`
+    /// (-32083) on every detach and the subscription silently stayed alive.
+    /// Upstream dspo/manox#856 tracks the contract asymmetry; revisit if the
+    /// host later promotes the request form.
     pub fn unsubscribe(&mut self, uri: impl Into<String>) {
         let uri = uri.into();
         // A write issued while the pre-connect replay is running queues behind
@@ -967,7 +995,7 @@ impl AhpStore {
         let client = self.client.clone().expect("guard above");
         manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client
-                .request::<_, Value>("unsubscribe", serde_json::json!({ "channel": uri }))
+                .notify("unsubscribe", serde_json::json!({ "channel": uri }))
                 .await
             {
                 tracing::warn!(error = %err, "unsubscribe failed");
