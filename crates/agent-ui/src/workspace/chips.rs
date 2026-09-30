@@ -10,6 +10,7 @@
 
 use super::*;
 use gpui_component::ColorName;
+use gpui_component::ThemeStyled as _;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::popover::{Popover, PopoverState};
 use gpui_component::tag::{Tag, TagVariant};
@@ -931,7 +932,7 @@ impl Workspace {
             .hover(|s| s.bg(theme.accent.opacity(0.08)))
             .cursor_pointer()
             .children(if let Some((ref prov_display, ref m)) = model {
-                let (_, _, color_name) = Self::wire_visual(&m.api);
+                let (_, _, color_name) = crate::model_catalog::wire_visual(&m.api);
                 let model_color = color_name.scale(500);
                 let dot = || {
                     gpui::div()
@@ -1131,31 +1132,10 @@ impl Workspace {
     /// per registration at the source); a config model registered through
     /// several wire apis appears once per wire endpoint (registration names
     /// differ), so the responses and completions variants stay selectable
-    /// alongside the anthropic one.
-    /// The one wire-api visual mapping: the menu row's tag and the chip
-    /// echo's text color read the same source, so the surfaces cannot
-    /// drift apart.
-    pub(crate) fn wire_visual(api: &str) -> (TagVariant, &'static str, gpui_component::ColorName) {
-        match api {
-            "anthropic" => (
-                TagVariant::Color(ColorName::Blue),
-                "Anthropic",
-                ColorName::Blue,
-            ),
-            "openai_responses" => (
-                TagVariant::Color(ColorName::Cyan),
-                "Responses",
-                ColorName::Cyan,
-            ),
-            "openai_completions" => (
-                TagVariant::Color(ColorName::Amber),
-                "Completions",
-                ColorName::Amber,
-            ),
-            _ => (TagVariant::Secondary, "N/A", ColorName::Gray),
-        }
-    }
-
+    /// alongside the anthropic one. The rows render through the SHARED
+    /// cascade builder (`model_cascade::build_model_menu` — the project
+    /// menu's agent submenus serve the same face); the wire visual mapping
+    /// lives with the catalogue (`model_catalog::wire_visual`).
     pub(super) fn build_model_popup_menu_pi(
         menu: PopupMenu,
         workspace: WeakEntity<Workspace>,
@@ -1164,77 +1144,31 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
-        // Group by DISPLAY name via lookup (not adjacency): the snapshot is
-        // sorted by registration name, so same-display-name providers with
-        // different registrations must still merge into one submenu.
-        // One submenu per agent registration; AHP's root catalogue carries
-        // the provider identity the v2 wire list flattened.
-        // Group by the provider's display name via lookup: wire variants of
-        // one cx config merge into a single submenu, each row carrying its
-        // own wire tag.
-        let mut providers: Vec<(String, Vec<crate::model_catalog::ModelRow>)> = Vec::new();
-        for m in models {
-            match providers
-                .iter_mut()
-                .find(|(name, _)| *name == m.provider_display)
-            {
-                Some((_, rows)) => rows.push(m),
-                None => providers.push((m.provider_display.clone(), vec![m])),
-            }
-        }
-        let mut menu = menu;
-        if providers.is_empty() {
-            return menu.item(PopupMenuItem::Label("No models configured".into()));
-        }
-        for (prov_name, models) in providers {
-            let ws = workspace.clone();
-            menu = menu.submenu(prov_name, window, cx, move |submenu, _window, _cx| {
-                let mut submenu = submenu;
-                for m in &models {
-                    let model = m.clone();
-                    let model_name = model.name.clone();
-                    let (variant, label, _) = Self::wire_visual(&model.api);
-                    let ws = ws.clone();
-                    submenu = submenu.item(
-                        PopupMenuItem::element(move |_window, _cx| {
-                            h_flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    Tag::new()
-                                        .with_variant(variant)
-                                        .outline()
-                                        .small()
-                                        .child(label),
-                                )
-                                .child(model_name.clone())
-                        })
-                        .on_click(move |_, _, cx: &mut gpui::App| {
-                            let model = model.clone();
-                            let _ = ws.update(cx, |this, cx| {
-                                // L8 wire identity: the registration-qualified
-                                // `{provider}/{model}` ref, so a pick pins the
-                                // exact endpoint (wire variants of one model
-                                // share the bare id).
-                                this.with_foreground_store(cx, |store, sid| {
-                                    let mut config = serde_json::Map::new();
-                                    config.insert(
-                                        "model".into(),
-                                        serde_json::json!(format!(
-                                            "{}/{}",
-                                            model.provider, model.id
-                                        )),
-                                    );
-                                    store.optimistic_config(&sid, &config);
-                                    store.set_config(&sid, config);
-                                });
-                            });
-                        }),
-                    );
-                }
-                submenu
-            });
-        }
+        // The provider→model rows come from the SHARED cascade builder (the
+        // project menu's agent submenus render the same shape). The pick
+        // pins the registration-qualified `{provider}/{model}` identity
+        // (L8): the exact endpoint, since wire variants of one model share
+        // the bare id.
+        let ws = workspace.clone();
+        let mut menu = crate::views::model_cascade::build_model_menu(
+            menu,
+            models,
+            move |row, _window, cx| {
+                let _ = ws.update(cx, |this, cx| {
+                    this.with_foreground_store(cx, |store, sid| {
+                        let mut config = serde_json::Map::new();
+                        config.insert(
+                            "model".into(),
+                            serde_json::json!(format!("{}/{}", row.provider, row.id)),
+                        );
+                        store.optimistic_config(&sid, &config);
+                        store.set_config(&sid, config);
+                    });
+                });
+            },
+            window,
+            cx,
+        );
         // The reasoning-effort knob lives in the model dropdown, next to the
         // model switch it tunes. The current effort is checked; a click
         // applies to the next request (same mid-run semantics as a model

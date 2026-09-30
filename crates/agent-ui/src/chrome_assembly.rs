@@ -529,11 +529,8 @@ fn shell_config(
             // menu entity; the chrome mounts and dismisses it.
             on_group_menu: Some(Box::new({
                 let ws = ws.downgrade();
-                let mux = mux.clone();
                 move |_key, project, _anchor, window, cx| {
-                    Some(crate::project_menu::group_menu(
-                        project, &mux, &ws, window, cx,
-                    ))
+                    Some(crate::project_menu::group_menu(project, &ws, window, cx))
                 }
             })),
         },
