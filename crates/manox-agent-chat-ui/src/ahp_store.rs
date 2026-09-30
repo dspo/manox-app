@@ -489,6 +489,11 @@ pub struct AhpStore {
     request_hook: Option<RequestHook>,
     /// Recent dispatch rejections (bounded ring) for UI surfacing.
     rejections: std::collections::VecDeque<String>,
+    /// Session ids whose thread channel this store already subscribed — the
+    /// sidebar subscribes one channel per catalogue row (the pin badge and
+    /// the pin dispatch both read `x-manox-thread` state), re-issued only
+    /// for rows that appear after their subscription.
+    thread_subs: std::collections::HashSet<String>,
     _tasks: Vec<gpui::Task<()>>,
 }
 
@@ -509,6 +514,7 @@ impl AhpStore {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
         store.spawn_handshake(cwd, event_tx, req_tx, cx);
@@ -536,6 +542,7 @@ impl AhpStore {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         }
     }
@@ -873,6 +880,7 @@ impl AhpStore {
             }
             ahp::SubscriptionEvent::SessionAdded(params) => {
                 let changed = self.book.seed_summaries(vec![params.summary]);
+                self.subscribe_thread_channels_for_summaries(cx);
                 if changed {
                     cx.notify();
                 }
@@ -1025,10 +1033,31 @@ impl AhpStore {
                     if store.book.seed_summaries(result.items) {
                         cx.notify();
                     }
+                    store.subscribe_thread_channels_for_summaries(cx);
                 });
             }
         })
         .detach();
+    }
+
+    /// Subscribe the thread channel of every catalogue row. The sidebar's
+    /// pin badge reads `x-manox-thread` state (the thread-scoped baseline
+    /// rides the subscription), and the pin dispatch targets the same
+    /// channel — both only work for rows whose channel is subscribed, so a
+    /// catalogue seed subscribes one channel per row, deduplicated per run.
+    pub fn subscribe_thread_channels_for_summaries(&mut self, cx: &mut gpui::Context<Self>) {
+        let ids: Vec<String> = self.book.summaries.keys().cloned().collect();
+        for sid in ids {
+            if self.thread_sub_due(&sid) {
+                self.subscribe(thread_uri(&sid), cx);
+            }
+        }
+    }
+
+    /// Whether this row's thread subscription is still due (first sight this
+    /// run); marks it issued. Split out for the cx-free test face.
+    fn thread_sub_due(&mut self, session_id: &str) -> bool {
+        self.thread_subs.insert(session_id.to_string())
     }
 
     /// Create a session over a client-minted id (the idempotency key).
@@ -1521,16 +1550,24 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
 /// The plan-review payload (`{requestId, title, content, planFile}`) from the
 /// session's plan channel, when it belongs to `request_id` — the plan content
 /// the review card renders beneath the verdict question.
+/// The plan channel URI a session's plan rows ride: the default chat's plan
+/// channel once the pointer has landed, else the session-id form (the
+/// pre-pointer subscription). The single key authority for the subscription
+/// face and every read face — they must never fork.
+pub fn plan_channel_for(book: &ChannelBook, session_id: &str) -> String {
+    let chat_id = book
+        .default_chat(session_id)
+        .map(|uri| id_of(&uri).to_string())
+        .unwrap_or_else(|| session_id.to_string());
+    format!("{}{chat_id}", manox_ahp::ext::channels::PLAN)
+}
+
 pub fn plan_review_of<'a>(
     book: &'a ChannelBook,
     session_id: &str,
     request_id: &str,
 ) -> Option<&'a Value> {
-    let chat_id = book
-        .default_chat(session_id)
-        .map(|uri| id_of(&uri).to_string())
-        .unwrap_or_else(|| session_id.to_string());
-    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
+    let channel = plan_channel_for(book, session_id);
     book.ext
         .get(&channel)?
         .plan_review
@@ -1543,13 +1580,8 @@ pub fn plan_review_of<'a>(
 /// id (the session id until the pointer lands); the thread-channel ext state
 /// carries nothing for them, so a `LeafView.ext` read is always `None`.
 pub fn plan_mode_of(book: &ChannelBook, session_id: &str) -> bool {
-    let chat_id = book
-        .default_chat(session_id)
-        .map(|uri| id_of(&uri).to_string())
-        .unwrap_or_else(|| session_id.to_string());
-    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
     book.ext
-        .get(&channel)
+        .get(&plan_channel_for(book, session_id))
         .and_then(|x| x.plan_mode)
         .unwrap_or(false)
 }
@@ -1557,12 +1589,10 @@ pub fn plan_mode_of(book: &ChannelBook, session_id: &str) -> bool {
 /// The session's current plan document (the kernel snapshot shape the plan
 /// restore rehydrates), from the `x-manox-plan` channel.
 pub fn plan_snapshot_of<'a>(book: &'a ChannelBook, session_id: &str) -> Option<&'a Value> {
-    let chat_id = book
-        .default_chat(session_id)
-        .map(|uri| id_of(&uri).to_string())
-        .unwrap_or_else(|| session_id.to_string());
-    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
-    book.ext.get(&channel)?.plan.as_ref()
+    book.ext
+        .get(&plan_channel_for(book, session_id))?
+        .plan
+        .as_ref()
 }
 
 /// The session's active browser suites, from the `x-manox-work` channel
@@ -1588,13 +1618,8 @@ pub fn goal_of<'a>(book: &'a ChannelBook, session_id: &str) -> Option<&'a Value>
 /// [`plan_review_of`] does, falling back to the session id when the pointer
 /// has not landed.
 pub fn plan_review_proposed(book: &ChannelBook, session_id: &str) -> bool {
-    let chat_id = book
-        .default_chat(session_id)
-        .map(|uri| id_of(&uri).to_string())
-        .unwrap_or_else(|| session_id.to_string());
-    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
     book.ext
-        .get(&channel)
+        .get(&plan_channel_for(book, session_id))
         .and_then(|x| x.plan_review.as_ref())
         .and_then(|r| r.get("state"))
         .and_then(Value::as_str)
@@ -2109,6 +2134,11 @@ mod tests {
         );
         assert!(plan_mode_of(&book, "s-1"));
         assert_eq!(
+            goal_of(&book, "s-1"),
+            Some(&serde_json::json!({ "text": "ship" }))
+        );
+        assert!(goal_of(&book, "s-2").is_none(), "unsubscribed work channel");
+        assert_eq!(
             plan_snapshot_of(&book, "s-1"),
             Some(&serde_json::json!({ "v": 1 }))
         );
@@ -2135,6 +2165,39 @@ mod tests {
         assert!(goal_of(&book, "s-2").is_none());
         assert!(!plan_mode_of(&book, "s-2"));
         assert!(!plan_review_proposed(&book, "s-2"));
+    }
+
+    #[test]
+    fn thread_subscriptions_are_due_once_per_row_per_run() {
+        let mut store = AhpStore {
+            book: ChannelBook::default(),
+            client: None,
+            replay_pending: false,
+            chat_events: Vec::new(),
+            optimistic_undo: Vec::new(),
+            pending_writes: Vec::new(),
+            request_hook: None,
+            rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
+            _tasks: Vec::new(),
+        };
+        store.book.seed_summaries(vec![
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri("s-1"),
+                "provider": "test",
+                "title": "row",
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            }))
+            .expect("summary parses"),
+        ]);
+        // First sight is due; the second sight of the same row is not — the
+        // catalogue refetches on every summary change and must not re-issue
+        // the subscription (nor, with one, duplicate it server-side).
+        assert!(store.thread_sub_due("s-1"));
+        assert!(!store.thread_sub_due("s-1"));
+        assert!(store.thread_sub_due("s-2"), "an unseen row is still due");
     }
 
     #[test]
@@ -2183,6 +2246,7 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         }
     }
