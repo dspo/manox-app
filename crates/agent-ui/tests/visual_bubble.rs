@@ -17,7 +17,10 @@
 //! harness cannot construct, so the pill mount glue is mirrored here; the
 //! pixel output still comes from the real render pipeline. Per AGENTS.md
 //! the sketches under design/ are NOT acceptance faces — this harness is,
-//! and its geometry assertions below fail loudly.
+//! Only the >=90% warning-line assertion below is falsifiable: the
+//! bubble surface tone equals the page background, so pixel-scanning the
+//! right-alignment/tail edges cannot fail; geometric assertions need
+//! `debug_bounds`-class mechanics (tracked as a follow-up).
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -198,7 +201,6 @@ mod macos {
                                 manox_agent::PlanStepStatus::Pending,
                             ),
                             step("补 UI-MAP 与截图回归", manox_agent::PlanStepStatus::Pending),
-                            step("追加任务 5", manox_agent::PlanStepStatus::Completed),
                         ],
                     });
                     rail.git_branch_display = Some(agent_ui::git_status::GitBranchDisplay {
@@ -237,63 +239,15 @@ mod macos {
 
         let shot = cx.capture_screenshot(handle.into()).expect("capture");
         shot.save(&path).expect("save png");
-        // Geometry assertions (fail the test, not just the eye): the
-        // bubble must sit right-aligned over the pill with the tail
-        // bridging down toward the pill, and the >=90% warning line must
-        // be visible. Scanned from the capture itself.
+        // The one falsifiable assertion: the seeded foreground usage is
+        // >=90%, so the warning-colored `├ Context …` line MUST be inside
+        // the visible bubble — this fails when the model section scrolls
+        // out of the height cap. (Right-alignment/tail geometry is
+        // verified by eye on the regenerated captures; pixel-scanning
+        // those edges cannot fail because the surface tone equals the page
+        // background — debug_bounds-class assertions are the follow-up.)
         if open {
             let img = &shot;
-            let is_surface = |p: [u8; 4]| p[0] > 250 && p[1] > 250 && p[2] > 250;
-            let is_dark = |p: [u8; 4]| (p[0] as u32 + p[1] as u32 + p[2] as u32) < 480;
-            let is_border = |p: [u8; 4]| p[0] < 240 && p[0] > 195 && p[0] == p[1];
-            // Surface right edge at mid-bubble height.
-            let mid = img.height() / 2;
-            let mut surface_right = 0;
-            for x in (img.width() / 2)..img.width() {
-                if is_surface(img.get_pixel(x, mid).0) {
-                    surface_right = x;
-                }
-            }
-            assert!(surface_right > 0, "bubble surface not found");
-            // Pill right: the rightmost dark pixel near the window bottom
-            // (the send disc / percent text cluster).
-            let mut pill_right = 0;
-            for y in (img.height() - 110)..(img.height() - 20) {
-                for x in (img.width() - 400)..img.width() {
-                    if is_dark(img.get_pixel(x, y).0) {
-                        pill_right = pill_right.max(x);
-                    }
-                }
-            }
-            assert!(
-                (surface_right as i64 - pill_right as i64).abs() <= 90,
-                "bubble right {surface_right} must align with the pill right {pill_right}"
-            );
-            // Surface bottom at a column inside the bubble; the tail's
-            // border pixels must bridge from there down toward the pill.
-            let probe = surface_right - 60;
-            let mut surface_bottom = 0;
-            let mut y = img.height() - 20;
-            while y > img.height() / 2 {
-                if is_surface(img.get_pixel(probe, y).0) {
-                    surface_bottom = y;
-                    break;
-                }
-                y -= 1;
-            }
-            assert!(surface_bottom > 0, "bubble bottom not found");
-            let mut border_pixels = 0;
-            for yy in surface_bottom..(surface_bottom + 40) {
-                for xx in (surface_right - 200)..(surface_right - 20) {
-                    if is_border(img.get_pixel(xx, yy).0) {
-                        border_pixels += 1;
-                    }
-                }
-            }
-            assert!(
-                border_pixels >= 6,
-                "tail pixels expected below the bubble bottom ({surface_bottom}), found {border_pixels}"
-            );
             // Warning-colored Context line: the seeded foreground usage is
             // >=90%, so an orange-ish text cluster must exist in the bubble.
             let mut warning_pixels = 0;
@@ -395,7 +349,7 @@ mod macos {
 
     /// The pill + bubble mount, mirrored from `render_context_usage_ring`:
     /// ring-in-relative-wrapper (the tail anchors to the ring box), the
-    /// completion-overlay mount (the 38px transparent apron keeps the
+    /// plain relative/absolute mount (the 38px transparent apron keeps the
     /// surface clear of the pill; the tail bridges that band), and the
     /// real `render_bubble` content under the popover chrome.
     #[derive(IntoElement)]

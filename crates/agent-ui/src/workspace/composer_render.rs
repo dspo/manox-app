@@ -982,17 +982,14 @@ impl Workspace {
     ///
     /// The pill is the conversation info bubble's trigger: click toggles,
     /// hover only tints — never opens. While open, the bubble floats above
-    /// the pill on the completion overlay's mount (`deferred` + `anchored`
-    /// escapes the column's overflow clipping), its right edge aligned to
-    /// the pill's and its bottom sitting a fixed apron above the pill top
-    /// where the tail bridges toward the ring (the component `Popover`'s
-    /// positioner
-    /// clears the trigger by its own height plus a fixed constant, which
-    /// no content style can tune). Outside click and Escape are wired by
-    /// hand: `on_mouse_down_out` records the dismissal (the ring's click
-    /// fires right after and must not re-open), and the surface takes
-    /// focus so `Escape` lands on its `ContextBubble` key context. Thread
-    /// switches close via the rail's reset.
+    /// the pill on a plain relative/absolute mount: the zero-height slot
+    /// below pins the surface's bottom a fixed apron above the pill top,
+    /// right-aligns it to the pill, and the tail bridges the rest of the
+    /// gap down to the ring. Outside click and Escape are wired by hand:
+    /// `on_mouse_down_out` records the dismissal (the ring's click fires
+    /// right after and must not re-open), and the surface takes focus so
+    /// `Escape` lands on its `ContextBubble` key context. Thread switches
+    /// close via the rail's reset.
     pub(super) fn render_context_usage_ring(
         &self,
         theme: &Theme,
