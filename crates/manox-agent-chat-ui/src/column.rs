@@ -544,6 +544,13 @@ pub struct ChatColumn {
     /// re-opens the same request inside the window, the live-ask edge
     /// re-issues the decline instead of re-seeding the card the user closed.
     pub last_declined_ask: Option<(String, std::time::Instant)>,
+    /// The chat id whose plan channel is subscribed. Plan rows ride
+    /// `x-manox-plan:/<active chat id>`; the attach-time subscription rides
+    /// the session id, and once the default-chat pointer lands the
+    /// subscription is re-issued for the real chat id (the two diverge on
+    /// session continuation, where reading the session form would receive
+    /// nothing).
+    pub plan_chat_subscribed: Option<String>,
     pub input_sub: Option<Subscription>,
     /// Height-invalidation subscription: any `ConversationState` mutation may
     /// change a row's height (including off-screen rows whose height is cached

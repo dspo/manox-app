@@ -833,6 +833,7 @@ impl Workspace {
                 rebuilt_pre_snapshot: false,
                 built_turns: 0,
                 last_declined_ask: None,
+                plan_chat_subscribed: None,
                 context_rail,
             }),
         };
@@ -1681,6 +1682,29 @@ impl Workspace {
             let chat = self.chat.read(cx);
             chat.rebuilt_pre_snapshot && snapshot_landed && turns_now > chat.built_turns
         };
+        // Align the plan-channel subscription with the default-chat pointer:
+        // plan rows are emitted on `x-manox-plan:/<active chat id>`, and the
+        // attach-time subscription rides the session id until the pointer
+        // lands (the two diverge on session continuation). One re-issue per
+        // pointer value.
+        if chat_landed && let Some((store, sid)) = self.chat.read(cx).store.clone() {
+            let chat_id = {
+                let view = store.read(cx);
+                view.book
+                    .default_chat(&sid)
+                    .map(|uri| crate::ahp_store::id_of(&uri).to_string())
+            };
+            if let Some(chat_id) = chat_id
+                && self.chat.read(cx).plan_chat_subscribed.as_ref() != Some(&chat_id)
+            {
+                self.chat.update(cx, |chat, _| {
+                    chat.plan_chat_subscribed = Some(chat_id.clone());
+                });
+                store.update(cx, |s, cx| {
+                    s.subscribe(crate::ahp_store::plan_uri(&chat_id), cx);
+                });
+            }
+        }
         if displayable && (healing || self.chat_conversation(cx).read(cx).is_empty(cx)) {
             self.rebuild_conversation_from_book(cx);
             (true, chat_landed)

@@ -1521,16 +1521,24 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
 /// The plan-review payload (`{requestId, title, content, planFile}`) from the
 /// session's plan channel, when it belongs to `request_id` — the plan content
 /// the review card renders beneath the verdict question.
+/// The plan channel URI a session's plan rows ride: the default chat's plan
+/// channel once the pointer has landed, else the session-id form (the
+/// pre-pointer subscription). The single key authority for the subscription
+/// face and every read face — they must never fork.
+fn plan_channel_for(book: &ChannelBook, session_id: &str) -> String {
+    let chat_id = book
+        .default_chat(session_id)
+        .map(|uri| id_of(&uri).to_string())
+        .unwrap_or_else(|| session_id.to_string());
+    format!("{}{chat_id}", manox_ahp::ext::channels::PLAN)
+}
+
 pub fn plan_review_of<'a>(
     book: &'a ChannelBook,
     session_id: &str,
     request_id: &str,
 ) -> Option<&'a Value> {
-    let chat_id = book
-        .default_chat(session_id)
-        .map(|uri| id_of(&uri).to_string())
-        .unwrap_or_else(|| session_id.to_string());
-    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
+    let channel = plan_channel_for(book, session_id);
     book.ext
         .get(&channel)?
         .plan_review
@@ -1543,13 +1551,8 @@ pub fn plan_review_of<'a>(
 /// id (the session id until the pointer lands); the thread-channel ext state
 /// carries nothing for them, so a `LeafView.ext` read is always `None`.
 pub fn plan_mode_of(book: &ChannelBook, session_id: &str) -> bool {
-    let chat_id = book
-        .default_chat(session_id)
-        .map(|uri| id_of(&uri).to_string())
-        .unwrap_or_else(|| session_id.to_string());
-    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
     book.ext
-        .get(&channel)
+        .get(&plan_channel_for(book, session_id))
         .and_then(|x| x.plan_mode)
         .unwrap_or(false)
 }
@@ -1557,12 +1560,10 @@ pub fn plan_mode_of(book: &ChannelBook, session_id: &str) -> bool {
 /// The session's current plan document (the kernel snapshot shape the plan
 /// restore rehydrates), from the `x-manox-plan` channel.
 pub fn plan_snapshot_of<'a>(book: &'a ChannelBook, session_id: &str) -> Option<&'a Value> {
-    let chat_id = book
-        .default_chat(session_id)
-        .map(|uri| id_of(&uri).to_string())
-        .unwrap_or_else(|| session_id.to_string());
-    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
-    book.ext.get(&channel)?.plan.as_ref()
+    book.ext
+        .get(&plan_channel_for(book, session_id))?
+        .plan
+        .as_ref()
 }
 
 /// The session's active browser suites, from the `x-manox-work` channel
@@ -1588,13 +1589,8 @@ pub fn goal_of<'a>(book: &'a ChannelBook, session_id: &str) -> Option<&'a Value>
 /// [`plan_review_of`] does, falling back to the session id when the pointer
 /// has not landed.
 pub fn plan_review_proposed(book: &ChannelBook, session_id: &str) -> bool {
-    let chat_id = book
-        .default_chat(session_id)
-        .map(|uri| id_of(&uri).to_string())
-        .unwrap_or_else(|| session_id.to_string());
-    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
     book.ext
-        .get(&channel)
+        .get(&plan_channel_for(book, session_id))
         .and_then(|x| x.plan_review.as_ref())
         .and_then(|r| r.get("state"))
         .and_then(Value::as_str)
@@ -2108,6 +2104,11 @@ mod tests {
             },
         );
         assert!(plan_mode_of(&book, "s-1"));
+        assert_eq!(
+            goal_of(&book, "s-1"),
+            Some(&serde_json::json!({ "text": "ship" }))
+        );
+        assert!(goal_of(&book, "s-2").is_none(), "unsubscribed work channel");
         assert_eq!(
             plan_snapshot_of(&book, "s-1"),
             Some(&serde_json::json!({ "v": 1 }))
