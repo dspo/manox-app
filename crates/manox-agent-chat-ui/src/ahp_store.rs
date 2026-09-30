@@ -1574,6 +1574,15 @@ pub fn browser_suites_of(book: &ChannelBook, session_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The session goal (verbatim payload), from the `x-manox-work` channel —
+/// work rows never ride the thread channel, so a `LeafView.ext` read is
+/// always `None` for them.
+pub fn goal_of<'a>(book: &'a ChannelBook, session_id: &str) -> Option<&'a Value> {
+    book.ext
+        .get(&work_uri(session_id))
+        .and_then(|x| x.goal.as_ref())
+}
+
 /// Whether the session's plan channel holds an open (proposed) review — the
 /// sidebar row badge's read. Resolves the chat id the same way
 /// [`plan_review_of`] does, falling back to the session id when the pointer
@@ -1766,11 +1775,6 @@ impl<'a> LeafView<'a> {
             scan(&turn.response_parts, id, &mut latest);
         }
         latest.map(|input| (id_of(&chat.resource).to_string(), &input.request))
-    }
-
-    /// The session goal (verbatim payload).
-    pub fn goal(&self) -> Option<&Value> {
-        self.ext.and_then(|x| x.goal.as_ref())
     }
 }
 
@@ -2099,6 +2103,7 @@ mod tests {
             work_uri("s-1"),
             XManoxState {
                 browser_suites: Some(vec!["chrome".into()]),
+                goal: Some(serde_json::json!({ "text": "ship" })),
                 ..Default::default()
             },
         );
@@ -2108,6 +2113,18 @@ mod tests {
             Some(&serde_json::json!({ "v": 1 }))
         );
         assert_eq!(browser_suites_of(&book, "s-1"), vec!["chrome".to_string()]);
+        assert_eq!(
+            goal_of(&book, "s-1"),
+            Some(&serde_json::json!({ "text": "ship" }))
+        );
+        // The trap: the goal rides the work channel, so the thread-channel
+        // ext face (`LeafView.ext`) never sees it.
+        assert!(
+            leaf(&book, "s-1")
+                .ext
+                .and_then(|x| x.goal.as_ref())
+                .is_none()
+        );
         assert!(plan_review_proposed(&book, "s-1"));
         assert_eq!(
             book.ext.get(&thread_uri("s-1")).and_then(|x| x.pinned),
@@ -2115,6 +2132,7 @@ mod tests {
         );
         // An unsubscribed channel reads empty rather than panicking.
         assert!(browser_suites_of(&book, "s-2").is_empty());
+        assert!(goal_of(&book, "s-2").is_none());
         assert!(!plan_mode_of(&book, "s-2"));
         assert!(!plan_review_proposed(&book, "s-2"));
     }
