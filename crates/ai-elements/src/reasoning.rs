@@ -387,7 +387,6 @@ impl RenderOnce for ReasoningTrigger {
             .into_any_element();
 
         let focus_handle = self.state.read(cx).focus_handle.clone();
-        let keyboard_state = self.state.clone();
 
         h_flex()
             .id(self.id.clone())
@@ -408,12 +407,10 @@ impl RenderOnce for ReasoningTrigger {
             .when(focus_handle.is_focused(window), |row| {
                 row.focus_ring_style(window, cx)
             })
+            // The single activation path: mouse clicks here, and a focused
+            // row's Enter/Space arrives as gpui's synthesized keyboard click.
+            // A key-down handler would toggle a second time per press.
             .on_click(move |_, _window, cx| click_state.update(cx, |state, cx| state.toggle(cx)))
-            .on_key_down(move |event, _window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    keyboard_state.update(cx, |state, cx| state.toggle(cx));
-                }
-            })
             .child(
                 self.icon
                     .unwrap_or_else(|| Icon::new(IconName::BookOpen).xsmall().into_any_element()),
