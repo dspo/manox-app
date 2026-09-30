@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use ai_elements::{AUTO_CLOSE_DELAY, Reasoning, ReasoningEvent, ReasoningState};
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
-    ParentElement as _, Render, TestAppContext, VisualTestContext, Window, div, px,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, KeyDownEvent,
+    KeyUpEvent, Keystroke, Modifiers, ParentElement as _, PlatformInput, Render, TestAppContext,
+    VisualTestContext, Window, div, px,
 };
 use gpui_component::Theme;
 use manox_components::markdown::Markdown;
@@ -364,8 +365,31 @@ fn clicking_the_trigger_opens_the_block(cx: &mut TestAppContext) {
     assert!(visual.debug_bounds("reasoning-0-content").is_some());
 }
 
+/// Dispatch one real press — key-down followed by key-up, built exactly as
+/// [`Window::dispatch_keystroke`] builds its half. The platform pairs the two,
+/// and a focused element's activation click is synthesized from the pair, so
+/// `simulate_keystrokes` (key-down only) cannot exercise that path.
+fn press(visual: &mut VisualTestContext, key: &str) {
+    let keystroke = Keystroke::parse(key)
+        .expect("valid keystroke")
+        .with_simulated_ime();
+    visual.update(|window, cx| {
+        window.dispatch_event(
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(PlatformInput::KeyUp(KeyUpEvent { keystroke }), cx);
+    });
+}
+
 /// The trigger is a tab stop: a focused block opens and closes from the
-/// keyboard, standing in for the `<button>` upstream's trigger renders.
+/// keyboard, standing in for the `<button>` upstream's trigger renders. The
+/// activation must net exactly one toggle per press — a press that toggles
+/// twice (key-down plus the synthesized key-up click) reads as dead.
 #[gpui::test]
 fn the_trigger_answers_the_keyboard(cx: &mut TestAppContext) {
     let state = closed_state(cx);
@@ -378,11 +402,21 @@ fn the_trigger_answers_the_keyboard(cx: &mut TestAppContext) {
     visual.simulate_click(trigger.center(), Modifiers::default());
     assert!(visual.update(|_, cx| state.read(cx).is_open()));
 
-    visual.simulate_keystrokes("enter");
-    assert!(!visual.update(|_, cx| state.read(cx).is_open()));
+    // Repaint: the synthesized-click listeners register only in frames painted
+    // while the element is focused.
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
-    visual.simulate_keystrokes("space");
-    assert!(visual.update(|_, cx| state.read(cx).is_open()));
+    press(visual, "enter");
+    assert!(
+        !visual.update(|_, cx| state.read(cx).is_open()),
+        "one Enter press must toggle exactly once"
+    );
+
+    press(visual, "space");
+    assert!(
+        visual.update(|_, cx| state.read(cx).is_open()),
+        "one Space press must toggle exactly once"
+    );
 }
 
 /// A block whose body is the real markdown component the conversation passes
