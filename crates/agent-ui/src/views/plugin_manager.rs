@@ -148,15 +148,19 @@ impl PluginManagerView {
         );
     }
 
-    fn uninstall_plugin(&mut self, plugin: String, cx: &mut Context<Self>) {
+    /// The argument is the plugin's full registry key (`name@marketplace`) —
+    /// same-name installs from two marketplaces are independent rows, and
+    /// only the addressed one moves.
+    fn uninstall_plugin(&mut self, key: String, cx: &mut Context<Self>) {
         self.run_task(
             i18n::t("plugins-notice-plugin-removed"),
-            move || PluginManager::uninstall(&plugin),
+            move || PluginManager::uninstall(&key),
             cx,
         );
     }
 
-    fn set_plugin_enabled(&mut self, plugin: String, enabled: bool, cx: &mut Context<Self>) {
+    /// See `uninstall_plugin`: the argument is the registry key.
+    fn set_plugin_enabled(&mut self, key: String, enabled: bool, cx: &mut Context<Self>) {
         self.run_task(
             if enabled {
                 i18n::t("plugins-notice-plugin-enabled")
@@ -165,9 +169,9 @@ impl PluginManagerView {
             },
             move || {
                 if enabled {
-                    PluginManager::enable(&plugin)
+                    PluginManager::enable(&key)
                 } else {
-                    PluginManager::disable(&plugin)
+                    PluginManager::disable(&key)
                 }
             },
             cx,
@@ -489,6 +493,9 @@ fn marketplace_plugin_card(
     let marketplace_action = plugin.marketplace_slug.clone();
     let name_toggle = plugin.name.clone();
     let marketplace_toggle = plugin.marketplace_slug.clone();
+    // Marketplace rows carry name + slug, not the key: the toggle addresses
+    // the install the record describes, assembled as `name@slug`.
+    let key_toggle = format!("{}@{}", plugin.name, marketplace_toggle);
     let name_uninstall = plugin.name.clone();
     let installed = plugin.installed;
     let enabled = plugin.enabled;
@@ -558,7 +565,7 @@ fn marketplace_plugin_card(
                                 .disabled(busy)
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
-                                        this.set_plugin_enabled(name_toggle.clone(), !enabled, cx);
+                                        this.set_plugin_enabled(key_toggle.clone(), !enabled, cx);
                                     },
                                 )),
                             )
@@ -593,8 +600,8 @@ fn installed_plugin_card(
     let theme = cx.theme().clone();
     let name_update = plugin.name.clone();
     let market_update = plugin.marketplace.clone();
-    let name_toggle = plugin.name.clone();
-    let name_delete = plugin.name.clone();
+    let key_toggle = plugin.key.clone();
+    let key_delete = plugin.key.clone();
     let can_update = !plugin.marketplace.is_empty();
     let enabled = plugin.enabled;
     let subtitle = format!(
@@ -647,7 +654,7 @@ fn installed_plugin_card(
                                 .into_any_element()
                         }))
                         .child(
-                            Button::new(format!("toggle-installed-{}", name_toggle))
+                            Button::new(format!("toggle-installed-{}", key_toggle))
                                 .small()
                                 .outline()
                                 .label(if enabled {
@@ -657,17 +664,17 @@ fn installed_plugin_card(
                                 })
                                 .disabled(busy)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_plugin_enabled(name_toggle.clone(), !enabled, cx);
+                                    this.set_plugin_enabled(key_toggle.clone(), !enabled, cx);
                                 })),
                         )
                         .child(
-                            Button::new(format!("uninstall-{}", name_delete))
+                            Button::new(format!("uninstall-{}", key_delete))
                                 .small()
                                 .danger()
                                 .label(i18n::t("plugins-uninstall"))
                                 .disabled(busy)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.uninstall_plugin(name_delete.clone(), cx);
+                                    this.uninstall_plugin(key_delete.clone(), cx);
                                 })),
                         ),
                 ),
