@@ -1137,7 +1137,6 @@ chrome-tab-retry = Retry
 chrome-titlebar-back = Go back one session
 chrome-titlebar-forward = Go forward one session
 chrome-titlebar-open-editor = Open in VS Code
-vscode-open-launched = VS Code opened
 vscode-open-failed = Failed to open VS Code
 vscode-open-no-project = No project to open — the foreground session has no project folder
 chrome-sidebar-grouping = Toggle grouping

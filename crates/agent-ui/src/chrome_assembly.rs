@@ -450,9 +450,10 @@ fn shell_config(
             })),
             // "Open in VS Code": hand the foreground thread's project to the
             // plain VS Code launch (no injection, no restart prompts). The
-            // launch blocks on `open`'s exit, so it runs on a background
-            // thread and reports through a notification — a silent failure
-            // here would be indistinguishable from a dead button.
+            // launch blocks on `open`'s exit, so it runs on the BACKGROUND
+            // executor (`cx.spawn` alone would stay on the main thread and
+            // freeze the run loop); only a failure notifies — a success
+            // announces itself by VS Code opening.
             on_open_editor: Some(Box::new(|window, cx| {
                 let Some(project) = FOREGROUND_PROJECT
                     .lock()
@@ -465,32 +466,34 @@ fn shell_config(
                     );
                     return;
                 };
-                cx.spawn({
-                    let handle = crate::dispatch::window_global();
-                    async move |cx| {
-                        let result = manox_ext_agents::vscode_app::launch_plain(Some(&project));
-                        if let Some(handle) = handle {
-                            let _ = handle.update(cx, |_, window, cx| match result {
-                                Ok(()) => {
-                                    window.push_notification(
-                                        Notification::success(manox_i18n::t(
-                                            "vscode-open-launched",
-                                        )),
-                                        cx,
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "open-in-VS Code failed");
-                                    window.push_notification(
-                                        Notification::error(format!(
-                                            "{}: {e}",
-                                            manox_i18n::t("vscode-open-failed")
-                                        )),
-                                        cx,
-                                    );
-                                }
-                            });
-                        }
+                let handle = crate::dispatch::window_global();
+                cx.spawn(async move |cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            manox_ext_agents::vscode_app::launch_plain(Some(&project))
+                        })
+                        .await;
+                    if let Some(handle) = handle
+                        && let Err(err) = handle.update(cx, |_, window, cx| {
+                            if let Err(e) = result {
+                                tracing::error!(error = %e, "open-in-VS-Code failed");
+                                window.push_notification(
+                                    Notification::error(format!(
+                                        "{}: {e}",
+                                        manox_i18n::t("vscode-open-failed")
+                                    )),
+                                    cx,
+                                );
+                            }
+                        })
+                    {
+                        // The window closed before the launch settled: the
+                        // result had no surface left, log it so the failure
+                        // is not fully invisible.
+                        tracing::warn!(
+                            error = ?err,
+                            "open-in-VS-Code result unreported (window gone)"
+                        );
                     }
                 })
                 .detach();

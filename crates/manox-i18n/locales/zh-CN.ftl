@@ -1117,7 +1117,6 @@ chrome-tab-retry = 重试
 chrome-titlebar-back = 后退一个会话
 chrome-titlebar-forward = 前进一个会话
 chrome-titlebar-open-editor = 在 VS Code 中打开
-vscode-open-launched = 已打开 VS Code
 vscode-open-failed = 打开 VS Code 失败
 vscode-open-no-project = 没有可打开的项目——当前会话未绑定项目目录
 chrome-sidebar-grouping = 切换分组方式

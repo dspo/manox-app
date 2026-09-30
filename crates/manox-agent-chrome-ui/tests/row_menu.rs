@@ -416,44 +416,69 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
         key: "Chats".into(),
         collapsed: false,
         rows: vec![
-            // Team: leader today, member's OWN stamp is older — the shared
-            // sort_stamp must keep them in one bucket.
+            // Team sharing the leader's stamp; the member is NEWER on its
+            // own clock (the classic "member just finished, leader idle")
+            // — the shared sort_stamp must keep it below the leader in the
+            // bucket order, not float it above the chevron.
             row_data("leader", stamp_days_ago(0), stamp_days_ago(0), true),
-            row_data("member", stamp_days_ago(40), stamp_days_ago(0), false),
+            row_data("member", stamp_days_ago(0) + 60, stamp_days_ago(0), false),
             row_data("old", stamp_days_ago(30), stamp_days_ago(30), false),
         ],
     });
-    let (_visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
+    let (mut visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
 
+    shell.update(cx, |s, _cx| s.toggle_grouping());
+    visual.run_until_parked();
     shell.update(cx, |s, cx| {
-        s.toggle_grouping();
         let (_, groups, _) = s.sidebar_props(cx);
         assert_eq!(groups.len(), 2, "today + earlier");
         let today = &groups[0];
         assert_eq!(
             today.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["leader", "member"],
-            "the team buckets together and stays contiguous"
+            "the team buckets together; the newer member stays under the chevron"
         );
-        // Collapse through the group's stable key — the same identity the
-        // header's toggle passes (display names follow the UI language and
-        // must not become state).
-        s.toggle_group(&today.key);
+    });
+
+    // Collapse through a REAL CLICK on the rendered header — the write side
+    // (which identity the header's on_click passes) is the defect this test
+    // pins; calling toggle_group directly would bypass it.
+    // The mode flip notified the shell; give the window its redraw so the
+    // time-mode headers exist in the rendered frame.
+    visual.update(|window, _| window.refresh());
+    visual.run_until_parked();
+    let header_bounds = visual
+        .debug_bounds("chrome-group-header-chrome-group-today")
+        .expect("the today header paints");
+    visual.simulate_click(header_bounds.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    shell.update(cx, |s, cx| {
         let (_, groups, _) = s.sidebar_props(cx);
+        let today = groups
+            .iter()
+            .find(|g| g.key == "chrome-group-today")
+            .expect("today bucket survives");
         assert!(
-            groups
-                .iter()
-                .find(|g| g.key == "chrome-group-today")
-                .expect("today bucket")
-                .collapsed,
-            "collapsing a time bucket must survive the next props build"
+            today.collapsed,
+            "a clicked-header collapse must survive the next props build"
         );
-        // Reorder is inert in time mode.
+        // The other bucket is untouched.
+        assert!(!groups[1].collapsed);
+    });
+
+    // Reorder is inert in time mode: not only does the display order stay
+    // (trivially true — time_groups never reads group_order), the recorded
+    // drag ORDER must come out unpolluted when the user switches back.
+    shell.update(cx, |s, _cx| {
         s.move_group("chrome-group-earlier", "chrome-group-today", true);
+        s.toggle_grouping();
+    });
+    shell.update(cx, |s, cx| {
         let (_, groups, _) = s.sidebar_props(cx);
         assert_eq!(
-            groups[0].key, "chrome-group-today",
-            "order is the recency sort"
+            groups.iter().map(|g| g.key.as_str()).collect::<Vec<_>>(),
+            ["Chats"],
+            "the workspace order is exactly as it was before the time-mode drag"
         );
     });
 }
@@ -522,7 +547,9 @@ fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
 fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
     use manox_agent_chrome_ui::shell::NavAvail;
     let back_log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let fwd_log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let log = back_log.clone();
+    let fwd = fwd_log.clone();
     let slot: Rc<RefCell<Option<gpui::Entity<Shell>>>> = Rc::new(RefCell::new(None));
     let slot_for_build = slot.clone();
     cx.update(gpui_component::init);
@@ -540,6 +567,10 @@ fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
             log.borrow_mut().push("back".into());
             Some("landed".into())
         }));
+        config.hooks.on_nav_forward = Some(Box::new(move |_w, _cx| {
+            fwd.borrow_mut().push("fwd".into());
+            Some("fwd-landed".into())
+        }));
         let shell = cx.new(|cx| Shell::new(config, window, cx));
         *slot_for_build.borrow_mut() = Some(shell.clone());
         Root::new(shell, window, cx)
@@ -548,11 +579,16 @@ fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     let shell = slot.borrow().clone().expect("shell captured");
 
-    // forward has no edge: the move must not call any hook.
+    // forward has no edge (nav_avail says so, and the hook would log):
+    // the move must not fire it.
     visual.update(|window, cx| {
         shell.update(cx, |s, cx| s.nav_forward(window, cx));
     });
     assert!(back_log.borrow().is_empty());
+    assert!(
+        fwd_log.borrow().is_empty(),
+        "an edge-less forward must not call its hook"
+    );
     // back is live: the hook fires and the landed id becomes the selection.
     visual.update(|window, cx| {
         shell.update(cx, |s, cx| s.nav_back(window, cx));

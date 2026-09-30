@@ -391,6 +391,13 @@ impl NavHistory {
         self.index
             .and_then(|i| self.entries.get(i).map(String::as_str))
     }
+
+    /// Test read face: the raw entries + pointer, for shape assertions
+    /// (cap size, front id) the move API cannot express.
+    #[cfg(test)]
+    fn state(&self) -> (&[String], Option<usize>) {
+        (&self.entries, self.index)
+    }
 }
 
 /// The visited-thread history cap: past this, the front drains so the
@@ -1454,14 +1461,23 @@ impl Workspace {
         let successor = cx.observe(&store, |this, store, cx| {
             // Identity hand-off: a disposed session records its successor;
             // the foreground moves onto it at the next render (the switch
-            // needs a window).
-            let next = store.read(cx).book.sessions.values().find_map(|s| {
-                s.meta
-                    .as_ref()
-                    .and_then(|m| m.get("replacedBy"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            });
+            // needs a window). Only the FOREGROUND session's own
+            // `replacedBy` counts — a book-wide find_map could hit some
+            // unrelated disposed session and, through
+            // `replace_nav_current`, overwrite the user's history entry.
+            let next = this
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .and_then(|(_, sid)| store.read(cx).book.sessions.get(sid))
+                .and_then(|s| {
+                    s.meta
+                        .as_ref()
+                        .and_then(|m| m.get("replacedBy"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
             if let Some(next) = next
                 && this
                     .chat

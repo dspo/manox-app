@@ -309,9 +309,14 @@ impl Shell {
         }
     }
 
-    /// ←: one step back through the host's session history. The hook lands
-    /// the move and reports the thread; the shell follows with its selection.
+    /// ←: one step back through the host's session history. The move fires
+    /// only when the host reports a live back edge ([`Self::nav_avail`]) —
+    /// the same contract the dimmed button paints, so a programmatic move
+    /// at a dead edge is as inert as the click.
     pub fn nav_back(&mut self, window: &mut Window, cx: &mut App) {
+        if !self.nav_avail(cx).back {
+            return;
+        }
         let Some(hook) = &self.hooks.on_nav_back else {
             return;
         };
@@ -320,8 +325,12 @@ impl Shell {
         }
     }
 
-    /// →: one step forward through the host's session history.
+    /// →: one step forward through the host's session history (live-edge
+    /// gated, see [`Self::nav_back`]).
     pub fn nav_forward(&mut self, window: &mut Window, cx: &mut App) {
+        if !self.nav_avail(cx).forward {
+            return;
+        }
         let Some(hook) = &self.hooks.on_nav_forward else {
             return;
         };
@@ -354,8 +363,11 @@ impl Shell {
         self.brand.as_ref().map(|f| f())
     }
 
-    /// The sidebar sort button: workspace grouping ↔ time buckets.
+    /// The sidebar sort button: workspace grouping ↔ time buckets. Drops a
+    /// drag marker left by an abandoned drag (dropped outside every slot,
+    /// where `on_drop` never fired) so it cannot resurface on the way back.
     pub fn toggle_grouping(&mut self) {
+        self.group_drag_marker = None;
         self.grouping = if self.grouping.is_time() {
             SidebarGrouping::Workspace
         } else {
@@ -616,11 +628,11 @@ impl Shell {
             .map(|e| (e.id.clone(), e.input.clone()))
     }
 
-    pub fn toggle_group(&mut self, name: &str) {
-        if let Some(i) = self.collapsed.iter().position(|k| k == name) {
+    pub fn toggle_group(&mut self, key: &str) {
+        if let Some(i) = self.collapsed.iter().position(|k| k == key) {
             self.collapsed.remove(i);
         } else {
-            self.collapsed.push(name.to_string());
+            self.collapsed.push(key.to_string());
         }
     }
 
@@ -773,7 +785,7 @@ impl Shell {
             })
             .collect();
         let mut groups: Vec<SessionGroup> = if self.grouping.is_time() {
-            self.time_groups(&visible, today(cx))
+            self.time_groups(&visible, today())
         } else {
             self.workspace_groups(&visible)
         };
@@ -827,11 +839,13 @@ impl Shell {
     }
 
     /// Time grouping: four recency buckets by local natural day (today /
-    /// yesterday / last 7 days / earlier). Rows bucket by their `sort_stamp`
-    /// — the projection stamps team members with their leader's stamp, so a
-    /// team lands in ONE bucket and stays contiguous under its chevron
-    /// (bucketing by each row's own `updated_at` would split it). Unknown
-    /// stamps (0) fall into "earlier". Pinned rows lead each bucket.
+    /// yesterday / last 7 days / earlier). Rows bucket AND order by their
+    /// `sort_stamp` — the projection stamps team members with their leader's
+    /// stamp, so a team lands in ONE bucket and the bucket sort keeps it
+    /// contiguous (per-row keys would split it / reorder it under the
+    /// chevron; a member pinned individually can still float up — pin is
+    /// per-row, pre-existing). Unknown stamps (0) fall into "earlier".
+    /// Empty buckets are not rendered.
     fn time_groups(&self, sessions: &[&SessionRow], today: chrono::NaiveDate) -> Vec<SessionGroup> {
         const BUCKETS: [TimeBucket; 4] = [
             TimeBucket::Today,
@@ -844,9 +858,9 @@ impl Shell {
             .map(|bucket| {
                 let key = bucket.state_key();
                 SessionGroup {
-                    name: manox_i18n::t(bucket.label_key()).to_string(),
+                    name: manox_i18n::t(key).to_string(),
                     key: key.to_string(),
-                    collapsed: self.collapsed.iter().any(|k| k == bucket.state_key()),
+                    collapsed: self.collapsed.iter().any(|k| k == key),
                     rows: Vec::new(),
                 }
             })
@@ -856,11 +870,13 @@ impl Shell {
             groups[bucket as usize].rows.push(s.row_data());
         }
         for g in &mut groups {
+            // sort_stamp is the ONLY time key: team members share their
+            // leader's, so equal stamps keep the wire order (stable sort)
+            // and the team stays contiguous under its chevron.
             g.rows.sort_by(|a, b| {
                 b.pinned
                     .cmp(&a.pinned)
                     .then(b.sort_stamp.cmp(&a.sort_stamp))
-                    .then(b.updated_at.cmp(&a.updated_at))
             });
         }
         groups.retain(|g| !g.rows.is_empty());
@@ -1501,7 +1517,8 @@ enum TimeBucket {
 }
 
 impl TimeBucket {
-    /// The collapse-state key (stable across UI languages).
+    /// The collapse-state key AND the ftl label key — one string serving
+    /// both, so a bucket's state and its label cannot drift apart.
     fn state_key(self) -> &'static str {
         match self {
             TimeBucket::Today => "chrome-group-today",
@@ -1509,10 +1526,6 @@ impl TimeBucket {
             TimeBucket::Week => "chrome-group-week",
             TimeBucket::Earlier => "chrome-group-earlier",
         }
-    }
-
-    fn label_key(self) -> &'static str {
-        self.state_key()
     }
 }
 
@@ -1534,10 +1547,10 @@ fn time_bucket(sort_stamp: i64, today: chrono::NaiveDate) -> TimeBucket {
     }
 }
 
-/// The render-time "today" anchor for the bucket math (injectable for
-/// determinism at the call sites that need it).
-fn today(cx: &App) -> chrono::NaiveDate {
-    let _ = cx;
+/// The render-time "today" anchor for the bucket math. Determinism comes
+/// from the injection seams downstream (`time_bucket` /
+/// `time_groups` both take the anchor as a parameter), not from here.
+fn today() -> chrono::NaiveDate {
     chrono::Local::now().date_naive()
 }
 

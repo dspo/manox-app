@@ -31,7 +31,7 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ElementExt as _, Sizable as _};
 
-use crate::primitives::{icon_button, kbd_chip, small_icon_button};
+use crate::primitives::{IconButtonState, icon_button, kbd_chip, small_icon_button};
 
 /// The sidebar's two grouping modes: by workspace (project) — the default,
 /// drag-reorderable — or by last-activity time buckets (today / yesterday /
@@ -400,7 +400,11 @@ fn header(
                         "sort",
                         icons::SORT_PRECEDENCE,
                         14.,
-                        grouping.is_time(),
+                        if grouping.is_time() {
+                            IconButtonState::On
+                        } else {
+                            IconButtonState::Off
+                        },
                         move |e, w, cx| on_toggle_grouping(e, w, cx),
                     )
                     .tooltip(hover_tooltip("chrome-sidebar-grouping")),
@@ -410,7 +414,11 @@ fn header(
                         "search",
                         icons::SEARCH,
                         14.,
-                        filter_open,
+                        if filter_open {
+                            IconButtonState::On
+                        } else {
+                            IconButtonState::Off
+                        },
                         move |e, w, cx| on_toggle_search(e, w, cx),
                     )
                     .tooltip(hover_tooltip("chrome-sidebar-search")),
@@ -543,8 +551,10 @@ fn group(
     let draggable = !list.grouping.is_time();
 
     let header_key = g.key.clone();
+    let bounds_key = g.key.clone();
     let mut header = div()
         .id(SharedString::from(format!("grp-{}", g.key)))
+        .debug_selector(move || format!("chrome-group-header-{}", bounds_key))
         .on_click(move |_, w, cx| toggle(&key, w, cx));
     if draggable {
         header = header

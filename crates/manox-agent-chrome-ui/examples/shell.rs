@@ -168,8 +168,11 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                     });
                 }
             })),
-            on_nav_back: Some(Box::new(|_, _| None)),
-            on_nav_forward: Some(Box::new(|_, _| None)),
+            // Fixture history: the arrows light up and actually step the
+            // selection through the loaded sessions (`nav_step`), so the
+            // enabled state is drawn AND visibly functional.
+            on_nav_back: Some(Box::new(|_, cx| nav_step(-1, cx))),
+            on_nav_forward: Some(Box::new(|_, cx| nav_step(1, cx))),
             nav_avail: Some(Box::new(|_| manox_agent_chrome_ui::shell::NavAvail {
                 back: true,
                 forward: true,
@@ -182,11 +185,37 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
 
 // ── session source (real ~/.manox threads) ────────────────────────────────
 
+thread_local! {
+    /// The example shell, for the nav hooks (they carry no entity handle).
+    static NAV_SHELL: std::cell::RefCell<Option<gpui::WeakEntity<Shell>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Step the fixture selection by `delta` through the loaded sessions; the
+/// example's stand-in for the real history stack.
+fn nav_step(delta: i32, cx: &mut gpui::App) -> Option<String> {
+    let shell = NAV_SHELL.with(|slot| slot.borrow().as_ref()?.upgrade())?;
+    shell.update(cx, |shell, _| {
+        let ids: Vec<String> = shell.sessions.iter().map(|s| s.id.clone()).collect();
+        let cur = shell
+            .active
+            .as_ref()
+            .and_then(|a| ids.iter().position(|i| i == a));
+        let next = match cur {
+            Some(i) => (i as i64 + delta as i64).clamp(0, ids.len() as i64 - 1) as usize,
+            None => 0,
+        };
+        shell.active = Some(ids[next].clone());
+        Some(ids[next].clone())
+    })
+}
+
 /// Push thread snapshots into the shell. The one active scan happens here
 /// (off the first frame); afterwards the store's change events drive
 /// snapshot-only reads — calling `refresh_thread_list` from an event
 /// callback would loop (refresh is an async scan that re-emits the event).
 fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
+    NAV_SHELL.with(|slot| *slot.borrow_mut() = Some(shell.downgrade()));
     manox_agent::thread_store::refresh_thread_list();
     let rx = manox_agent::thread_store::global().subscribe();
     cx.spawn(async move |cx| {

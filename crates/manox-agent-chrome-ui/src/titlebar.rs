@@ -8,7 +8,7 @@
 //! window, a double-click maximizes, and interactive children stop
 //! propagation themselves.
 
-use crate::primitives::icon_button;
+use crate::primitives::{IconButtonState, icon_button};
 use crate::session_list::SessionStatus;
 use crate::shell::Shell;
 use crate::theme::{
@@ -84,7 +84,11 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
             "tb-sidebar",
             icons::LAYOUT_SIDEBAR_LEFT,
             15.,
-            shell.show_sidebar,
+            if shell.show_sidebar {
+                IconButtonState::On
+            } else {
+                IconButtonState::Off
+            },
             move |e, w, cx| toggle_sidebar(e, w, cx),
         ))
         // Session-history navigation: a move with no edge behind/ahead stays
@@ -109,9 +113,13 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
         // "Open in editor": hands the foreground session's workspace to the
         // host (which launches the user's editor against it).
         .child(
-            icon_button("tb-editor", icons::CODE, 13., false, move |e, w, cx| {
-                open_editor(e, w, cx)
-            })
+            icon_button(
+                "tb-editor",
+                icons::CODE,
+                13.,
+                IconButtonState::Off,
+                move |e, w, cx| open_editor(e, w, cx),
+            )
             .tooltip(|window, cx| {
                 gpui_component::tooltip::Tooltip::new(manox_i18n::t("chrome-titlebar-open-editor"))
                     .build(window, cx)
@@ -121,7 +129,11 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
             "tb-panel",
             icons::LAYOUT_PANEL,
             15.,
-            shell.show_panel,
+            if shell.show_panel {
+                IconButtonState::On
+            } else {
+                IconButtonState::Off
+            },
             move |e, w, cx| toggle_panel(e, w, cx),
         ))
         // Right-pane toggle.
@@ -129,7 +141,11 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
             "tb-right",
             icons::LAYOUT_SIDEBAR_RIGHT,
             15.,
-            shell.right.read(cx).visible,
+            if shell.right.read(cx).visible {
+                IconButtonState::On
+            } else {
+                IconButtonState::Off
+            },
             move |e, w, cx| toggle_right(e, w, cx),
         ))
         // The app brand mark: a deliberate non-interactive slot, held out of
@@ -163,10 +179,8 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
 }
 
 /// A session-history nav button: live when the move has an edge to land on,
-/// a dimmed inert glyph otherwise. The two states share the flat-button
-/// geometry (outer 6/12 + inner 3/4), so enabling a move never reflows the
-/// row; the disabled form still swallows mouse-down (the titlebar turns
-/// escaped presses into window drags) and explains itself on hover.
+/// the shared flat-button's Disabled tone otherwise (same geometry, no
+/// reflow, mouse-downs still swallowed, hover tooltip explains the move).
 fn nav_button(
     id: &'static str,
     glyph: crate::theme::Icon,
@@ -174,39 +188,21 @@ fn nav_button(
     tooltip_key: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let tooltip = move |window: &mut Window, cx: &mut App| {
+    icon_button(
+        id,
+        glyph,
+        14.,
+        if enabled {
+            IconButtonState::Off
+        } else {
+            IconButtonState::Disabled
+        },
+        on_click,
+    )
+    .tooltip(move |window, cx| {
         gpui_component::tooltip::Tooltip::new(manox_i18n::t(tooltip_key)).build(window, cx)
-    };
-    let mut inner = div()
-        .id(id)
-        .py(px(3.))
-        .px(px(4.))
-        .rounded(px(4.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(icon(glyph, 14.));
-    let outer = div()
-        .id(id)
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .py(px(6.))
-        .px(px(12.))
-        .rounded(px(6.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .tooltip(tooltip);
-    if enabled {
-        let _ = &mut inner;
-        outer
-            .text_color(FG_DIM)
-            .hover(|style| style.bg(crate::theme::SURFACE_TERTIARY))
-            .on_click(on_click)
-            .into_any_element()
-    } else {
-        inner = inner.text_color(FG_FAINT);
-        outer.child(inner).into_any_element()
-    }
+    })
+    .into_any_element()
 }
 
 /// The session picker (trigger + dropdown panel). The trigger row: a folder

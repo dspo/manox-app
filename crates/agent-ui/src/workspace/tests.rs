@@ -417,9 +417,15 @@ mod nav_history {
         for i in 0..110 {
             nav.record(&format!("t{i}"));
         }
+        // Exactly the last CAP entries survive, the front drained, and the
+        // pointer sits on the tail — without the index reset a drain would
+        // leave the pointer out of bounds and the moves would go dead.
+        let (entries, index) = nav.state();
+        assert_eq!(entries.len(), 100);
+        assert_eq!(entries.first().map(String::as_str), Some("t10"));
+        assert_eq!(entries.last().map(String::as_str), Some("t109"));
+        assert_eq!(index, Some(99));
         assert_eq!(nav.step_back().as_deref(), Some("t108"));
-        // The front drained: exactly the last 100 survive.
-        assert_eq!(nav.step_back().map(|_| ()), Some(()));
     }
 
     #[test]
@@ -443,7 +449,6 @@ mod nav_history {
     #[test]
     fn the_successor_handoff_rewrites_the_current_entry_in_place() {
         let mut nav = recorded(&["a"]);
-        // A 换代成 a'：同一场会话的新身份，原地改写而非追加。
         nav.replace_current("a2");
         assert_eq!(nav.step_back(), None, "rewrite must not grow the stack");
         nav.record("b");
