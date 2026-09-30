@@ -12,13 +12,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_ui::Workspace;
-use gpui::{AppContext as _, Entity, TestAppContext, px, size};
+use gpui::{
+    AppContext as _, Context, Entity, IntoElement, Pixels, Render, TestAppContext, Window, px, size,
+};
 use gpui_component::Theme;
-use manox_agent::Thread;
-use manox_agent::db::ThreadSummary;
-use manox_agent::language_model::{LanguageModelToolUse, MessageContent, TokenUsage};
+use manox_agent::db::{HistoryEntry, ThreadSummary};
+use manox_agent::language_model::{LanguageModelToolUse, MessageContent, Role, TokenUsage};
 use manox_agent::message::Message;
 use manox_agent::thread_engine::{BackendNotice, ThreadEngine};
+use manox_agent::{MessageProvenance, Thread};
 use manox_harness::types::{ContentBlock, Model as PiModel};
 
 /// Minimal backend for the workspace tests: no actor, fixed history. The
@@ -149,6 +151,72 @@ pub fn landing_thread(id: &str) -> manox_agent::thread::ThreadHandle {
         manox_agent::ThreadId(id.to_string()),
         PathBuf::from("/tmp"),
     )
+}
+
+/// A minimal chat `Message` with a single text block, as the transcript
+/// builders seed one.
+pub fn msg(id: &str, role: Role, text: &str) -> Message {
+    Message {
+        id: id.to_string(),
+        timestamp: 0,
+        parent_id: None,
+        provenance: if role == Role::User {
+            MessageProvenance::User
+        } else {
+            MessageProvenance::Assistant
+        },
+        role,
+        content: vec![MessageContent::Text(text.to_string())],
+        ui: None,
+    }
+}
+
+/// A transcript taller than the viewport (`filler`-padded answers): with
+/// short content the native `gpui::list` re-anchors every layout at its
+/// floor (chat-log semantics) and no scroll position can survive.
+pub fn tall_history(turns: usize) -> Vec<HistoryEntry> {
+    let filler = "lorem ipsum ".repeat(40);
+    (0..turns)
+        .flat_map(|turn| {
+            vec![
+                HistoryEntry::Message(msg(
+                    &format!("u{turn}"),
+                    Role::User,
+                    &format!("question {turn}"),
+                )),
+                HistoryEntry::Message(msg(
+                    &format!("a{turn}"),
+                    Role::Assistant,
+                    &format!("{filler} answer {turn}"),
+                )),
+            ]
+        })
+        .collect()
+}
+
+/// The probe window's height, the viewport bound the ask-card geometry
+/// assertions check the footer against.
+pub const PROBE_WINDOW_HEIGHT: Pixels = px(780.);
+
+/// Re-pulls the diagnostic ask-card element from the workspace state on EVERY
+/// frame — an `AnyElement` is consumed by its first paint, so a stored one
+/// would leave later frames empty. The weak handle is deliberately invalid:
+/// the build runs while the workspace entity is `update`-held, and the card's
+/// render path upgrades the weak to read the custom-input state, which would
+/// double-borrow. A geometry probe needs no live custom row.
+pub struct AskCardProbe {
+    pub ws: Entity<Workspace>,
+}
+
+impl Render for AskCardProbe {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A geometry probe needs no live host: the noop host mirrors the
+        // old invalid-weak trick (no custom row, controls render inert).
+        let card = self.ws.update(cx, |ws, cx| {
+            ws.diagnostic_ask_card_element(manox_agent_chat_ui::host::noop_host(), 0, cx)
+        });
+        card.unwrap_or_else(|| gpui::div().into_any_element())
+    }
 }
 
 /// A real plan file on disk, as `ProposePlan` leaves one.
