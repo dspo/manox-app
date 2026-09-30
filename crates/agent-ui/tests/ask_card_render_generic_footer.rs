@@ -15,7 +15,7 @@
 mod common;
 
 use common::{AskCardProbe, PROBE_WINDOW_HEIGHT, init_harness, open_workspace};
-use gpui::{AppContext as _, TestAppContext, VisualTestContext, px, size};
+use gpui::{TestAppContext, VisualTestContext, px, size};
 
 #[gpui::test]
 async fn generic_ask_footer_renders_below_the_body(cx: &mut TestAppContext) {
