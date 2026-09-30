@@ -63,6 +63,7 @@ fn sample_row(id: &str) -> SessionRow {
         id: id.into(),
         title: "把 sidebar 的 thread 行改成三行布局".into(),
         workspace: "Chats".into(),
+        project: None,
         status: SessionStatus::Idle,
         updated_at: 0,
         sort_stamp: 0,
@@ -338,6 +339,7 @@ fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
         name: "Chats".into(),
         key: "Chats".into(),
         collapsed: false,
+        project: None,
         rows: vec![
             row_data("leader-1", 300, 300, true),
             // Post-projection shape: the member carries its leader's stamp
@@ -415,6 +417,7 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
         name: "Chats".into(),
         key: "Chats".into(),
         collapsed: false,
+        project: None,
         rows: vec![
             // Team sharing the leader's stamp; the member is NEWER on its
             // own clock (the classic "member just finished, leader idle")
@@ -511,6 +514,7 @@ fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
         name: "proj".into(),
         key: "proj".into(),
         collapsed: false,
+        project: None,
         rows: vec![
             titled("hit", "alpha design", stamp_days_ago(0)),
             titled("miss", "unrelated", stamp_days_ago(1)),

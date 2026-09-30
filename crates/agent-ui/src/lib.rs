@@ -21,6 +21,8 @@ pub mod i18n;
 pub mod menu;
 pub mod model_catalog;
 pub mod multiplexer;
+pub mod project_menu;
+pub mod project_registry;
 pub mod sidebar_projection;
 pub mod slash_command;
 pub mod tool_tabs;

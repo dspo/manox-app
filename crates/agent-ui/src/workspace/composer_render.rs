@@ -1573,8 +1573,11 @@ impl Workspace {
 
     /// Register a bound project on the active variant's thread store so the
     /// sidebar keeps its folder (persisted; survives restarts and archives).
+    /// Every bind path funnels here, so it is also where a removed-project
+    /// overlay entry clears: launching into a folder is the re-registration.
     pub(super) fn register_project_in_store(path: &std::path::Path, _cx: &mut Context<Self>) {
         let path = path.to_string_lossy().to_string();
+        crate::project_registry::register_project(&path);
         manox_agent::thread_store_global().with_mut(|s| s.register_project(path));
     }
 

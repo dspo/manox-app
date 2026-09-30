@@ -175,6 +175,29 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             on_nav_forward: Some(Box::new(|_, _| nav_step(1))),
             nav_avail: Some(Box::new(|_| nav_avail_fixture())),
             on_open_editor: None,
+            // The project menu surface, with a stand-in item per row — the
+            // real cascade lives in the app's assembly (agent-ui); the
+            // example only has to prove the surface anchors and dismisses.
+            on_group_menu: Some(Box::new(|key, project, _anchor, window, cx| {
+                let label = match project {
+                    Some(p) => format!("Project actions: {p}"),
+                    None => format!("Group actions: {key}"),
+                };
+                Some(gpui_component::menu::PopupMenu::build(
+                    window,
+                    cx,
+                    |menu, _, _| {
+                        menu.max_w(px(280.)).item(
+                            gpui_component::menu::PopupMenuItem::new(label)
+                                .icon(icons::FOLDER)
+                                .on_click(|_, _, cx| {
+                                    println!("group action picked");
+                                    let _ = cx;
+                                }),
+                        )
+                    },
+                ))
+            })),
         },
         brand: None,
     }
@@ -328,6 +351,7 @@ fn load_rows() -> Vec<SessionRow> {
                 .or_else(|| t.title.clone())
                 .unwrap_or_else(|| t.summary.clone()),
             workspace: project_label(&t.project),
+            project: (!t.project.is_empty()).then(|| t.project.clone()),
             status: five_state(t.errored, running, t.has_unread),
             tag: None,
             team_leader: false,

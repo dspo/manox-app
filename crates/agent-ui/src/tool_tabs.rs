@@ -35,7 +35,7 @@ fn next_instance_id(kind: &str) -> String {
 /// The foreground thread's working directory (its project path — the wire
 /// row's `project` column, the same source the sidebar groups by), falling
 /// back to the store's cwd, then home.
-fn thread_cwd_or_home() -> std::path::PathBuf {
+pub(crate) fn thread_cwd_or_home() -> std::path::PathBuf {
     crate::chrome_assembly::foreground_cwd().unwrap_or_else(|| {
         std::env::var("HOME")
             .map(std::path::PathBuf::from)
@@ -572,7 +572,7 @@ fn div_missing() -> gpui::Div {
 /// The full cx launch path: registry-pinned agent + the picked endpoint →
 /// `AgentBuilder` (PTY relay) → `Terminal` → `TerminalView`. Dropping the
 /// view tears the child tree down.
-fn spawn_agent_terminal(
+pub(crate) fn spawn_agent_terminal(
     agent_id: &str,
     cwd: &std::path::Path,
     provider: &str,
@@ -869,6 +869,77 @@ pub(crate) fn spawn_standalone_terminal(
         .map_err(|e| e.to_string())?;
     let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(handle, cx));
     Ok(terminal_ui::TerminalView::new(proxy, cx))
+}
+
+/// Wrap an ALREADY-SPAWNED terminal as a right-pane tab — the project menu's
+/// mount face: the agent/terminal is launched at the picked project
+/// directory on the menu-click path, and the tab only renders the live view.
+/// The tab owns the view (closing it tears the process tree down); its
+/// content is a live process, so there is no persisted form.
+pub(crate) fn prebuilt_terminal_tab(
+    title: impl Into<SharedString>,
+    svg: &'static str,
+    view: Entity<terminal_ui::TerminalView>,
+) -> Arc<dyn ToolTab> {
+    Arc::new(PrebuiltTerminalTab {
+        id: next_instance_id("prebuilt-terminal"),
+        title: title.into(),
+        svg,
+        view,
+    })
+}
+
+struct PrebuiltTerminalTab {
+    id: String,
+    title: SharedString,
+    svg: &'static str,
+    view: Entity<terminal_ui::TerminalView>,
+}
+
+impl ToolTab for PrebuiltTerminalTab {
+    fn kind(&self) -> &'static str {
+        "terminal"
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn title(&self, _cx: &App) -> SharedString {
+        self.title.clone()
+    }
+
+    fn icon(&self, _cx: &App) -> AnyElement {
+        brand_icon(self.svg)
+    }
+
+    fn open(
+        &self,
+        _window: &mut Window,
+        _cx: &mut App,
+        store: &mut TabStore,
+        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+    ) {
+        store.put(&self.id, self.view.clone());
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
+        use gpui::{ParentElement, Styled, div, px};
+        match store.get::<terminal_ui::TerminalView>(&self.id) {
+            Some(view) => div()
+                .w_full()
+                .h_full()
+                .flex()
+                .p(px(4.))
+                .child(view)
+                .into_any_element(),
+            None => div().w_full().h_full().into_any_element(),
+        }
+    }
+
+    fn persist(&self, _cx: &App, _store: &TabStore) -> Option<String> {
+        None
+    }
 }
 
 /// Brand glyph: the SVG asset rides the app's asset source
