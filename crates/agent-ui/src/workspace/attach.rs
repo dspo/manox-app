@@ -390,10 +390,7 @@ impl Workspace {
             .chat_store(cx)
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
-                    .ext
-                    .and_then(|x| x.browser_suites.clone())
-                    .unwrap_or_default()
+                crate::ahp_store::browser_suites_of(&view.book, &sid)
                     .into_iter()
                     .filter_map(|s| {
                         serde_json::from_value::<manox_agent::engine::BrowserSuite>(
@@ -600,9 +597,8 @@ impl Workspace {
         let restored_plan = plan_from_messages.or_else(|| {
             self.chat.read(cx).store.clone().and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
-                    .ext
-                    .and_then(|x| x.plan.clone())
+                crate::ahp_store::plan_snapshot_of(&view.book, &sid)
+                    .cloned()
                     .and_then(|v| serde_json::from_value::<manox_agent::plan::PlanSnapshot>(v).ok())
             })
         });

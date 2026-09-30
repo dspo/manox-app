@@ -502,10 +502,7 @@ impl Workspace {
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                let plan_mode = crate::ahp_store::leaf(&view.book, sid)
-                    .ext
-                    .and_then(|x| x.plan_mode)
-                    .unwrap_or(false);
+                let plan_mode = crate::ahp_store::plan_mode_of(&view.book, sid);
                 (plan_mode, false)
             })
             .unwrap_or((false, false));

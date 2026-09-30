@@ -397,6 +397,20 @@ pub fn plan_uri(id: &str) -> String {
     format!("{}{id}", manox_ahp::ext::channels::PLAN)
 }
 
+/// Build the thread extension channel URI for a session id — the post-#842
+/// home of the thread rows (pinned / label / session info / leaf cursor).
+/// Upstream #818–#842 first emitted them on the session channel, where no
+/// fold ever consumed them.
+pub fn thread_uri(id: &str) -> String {
+    format!("{}{id}", manox_ahp::ext::channels::THREAD)
+}
+
+/// Build the work extension channel URI for a session id — goal, background
+/// tasks, browser suites, sub-agents, active tools.
+pub fn work_uri(id: &str) -> String {
+    format!("{}{id}", manox_ahp::ext::channels::WORK)
+}
+
 // ---------------------------------------------------------------------------
 // AhpStore: the entity the UI binds.
 // ---------------------------------------------------------------------------
@@ -1459,7 +1473,10 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
         session_id,
         session: book.sessions.get(session_id),
         chat: book.chats.get(&chat_id),
-        ext: book.ext.get(&session_uri(session_id)),
+        // The thread rows (pinned / label / session info / leaf) ride the
+        // `x-manox-thread` extension channel since upstream #842 — the
+        // session channel's ext face carries nothing anymore.
+        ext: book.ext.get(&thread_uri(session_id)),
         // The fold keys the metrics map by the channel the delta rode
         // (`x-manox-metrics:/<chat-id>`), not by the chat channel — reading
         // the chat URI here would miss every entry the fold ever wrote.
@@ -1487,6 +1504,60 @@ pub fn plan_review_of<'a>(
         .plan_review
         .as_ref()
         .filter(|payload| payload.get("requestId").and_then(Value::as_str) == Some(request_id))
+}
+
+/// Whether the session's plan mode is engaged — the composer plan chip's read
+/// face. Plan rows ride the `x-manox-plan` channel keyed by the default chat
+/// id (the session id until the pointer lands); the thread-channel ext state
+/// carries nothing for them, so a `LeafView.ext` read is always `None`.
+pub fn plan_mode_of(book: &ChannelBook, session_id: &str) -> bool {
+    let chat_id = book
+        .default_chat(session_id)
+        .map(|uri| id_of(&uri).to_string())
+        .unwrap_or_else(|| session_id.to_string());
+    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
+    book.ext
+        .get(&channel)
+        .and_then(|x| x.plan_mode)
+        .unwrap_or(false)
+}
+
+/// The session's current plan document (the kernel snapshot shape the plan
+/// restore rehydrates), from the `x-manox-plan` channel.
+pub fn plan_snapshot_of<'a>(book: &'a ChannelBook, session_id: &str) -> Option<&'a Value> {
+    let chat_id = book
+        .default_chat(session_id)
+        .map(|uri| id_of(&uri).to_string())
+        .unwrap_or_else(|| session_id.to_string());
+    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
+    book.ext.get(&channel)?.plan.as_ref()
+}
+
+/// The session's active browser suites, from the `x-manox-work` channel
+/// (keyed by the session id — work rows have no chat scope).
+pub fn browser_suites_of(book: &ChannelBook, session_id: &str) -> Vec<String> {
+    book.ext
+        .get(&work_uri(session_id))
+        .and_then(|x| x.browser_suites.clone())
+        .unwrap_or_default()
+}
+
+/// Whether the session's plan channel holds an open (proposed) review — the
+/// sidebar row badge's read. Resolves the chat id the same way
+/// [`plan_review_of`] does, falling back to the session id when the pointer
+/// has not landed.
+pub fn plan_review_proposed(book: &ChannelBook, session_id: &str) -> bool {
+    let chat_id = book
+        .default_chat(session_id)
+        .map(|uri| id_of(&uri).to_string())
+        .unwrap_or_else(|| session_id.to_string());
+    let channel = format!("{}{chat_id}", manox_ahp::ext::channels::PLAN);
+    book.ext
+        .get(&channel)
+        .and_then(|x| x.plan_review.as_ref())
+        .and_then(|r| r.get("state"))
+        .and_then(Value::as_str)
+        == Some("proposed")
 }
 
 /// The call id of a confirmation-state tool call (pending / pending-result).
@@ -1925,6 +1996,95 @@ mod tests {
             })),
         );
         assert_eq!(effect, FoldEffect::Ignored);
+    }
+
+    #[test]
+    fn the_thread_channel_baseline_replaces_the_row_state() {
+        let mut book = ChannelBook::default();
+        let channel = thread_uri("s-1");
+        let effect = book.apply(
+            &channel,
+            &StateAction::Unknown(serde_json::json!({
+                "type": ext::actions::BASELINE,
+                "state": { "pinned": true, "label": "audit", "leaf": "t-9" },
+            })),
+        );
+        assert_eq!(effect, FoldEffect::Changed);
+        assert_eq!(book.ext[&channel].pinned, Some(true));
+        assert_eq!(book.ext[&channel].label.as_deref(), Some("audit"));
+        assert_eq!(book.ext[&channel].leaf.as_deref(), Some("t-9"));
+    }
+
+    #[test]
+    fn thread_row_deltas_fold_on_the_thread_channel() {
+        let mut book = ChannelBook::default();
+        let channel = thread_uri("s-1");
+        book.ext.insert(channel.clone(), XManoxState::default());
+        // Upstream #818 first emitted these rows on the session channel,
+        // where no fold ever consumed them; #842 moved them here.
+        let pinned = book.apply(
+            &channel,
+            &StateAction::Unknown(serde_json::json!({
+                "type": "x-manox/pinnedChanged",
+                "pinned": true,
+            })),
+        );
+        assert_eq!(pinned, FoldEffect::Changed);
+        assert_eq!(book.ext[&channel].pinned, Some(true));
+        let label = book.apply(
+            &channel,
+            &StateAction::Unknown(serde_json::json!({
+                "type": "x-manox/labelChanged",
+                "label": "audit",
+            })),
+        );
+        assert_eq!(label, FoldEffect::Changed);
+        assert_eq!(book.ext[&channel].label.as_deref(), Some("audit"));
+    }
+
+    #[test]
+    fn the_row_accessors_read_their_verbatim_channels() {
+        let mut book = ChannelBook::default();
+        // Plan rows are keyed by the chat id, work rows and thread rows by the
+        // session id — and none of them ever landed on the session channel.
+        book.ext.insert(
+            thread_uri("s-1"),
+            XManoxState {
+                pinned: Some(true),
+                ..Default::default()
+            },
+        );
+        book.ext.insert(
+            plan_uri("s-1"),
+            XManoxState {
+                plan_mode: Some(true),
+                plan: Some(serde_json::json!({ "v": 1 })),
+                plan_review: Some(serde_json::json!({ "state": "proposed" })),
+                ..Default::default()
+            },
+        );
+        book.ext.insert(
+            work_uri("s-1"),
+            XManoxState {
+                browser_suites: Some(vec!["chrome".into()]),
+                ..Default::default()
+            },
+        );
+        assert!(plan_mode_of(&book, "s-1"));
+        assert_eq!(
+            plan_snapshot_of(&book, "s-1"),
+            Some(&serde_json::json!({ "v": 1 }))
+        );
+        assert_eq!(browser_suites_of(&book, "s-1"), vec!["chrome".to_string()]);
+        assert!(plan_review_proposed(&book, "s-1"));
+        assert_eq!(
+            book.ext.get(&thread_uri("s-1")).and_then(|x| x.pinned),
+            Some(true)
+        );
+        // An unsubscribed channel reads empty rather than panicking.
+        assert!(browser_suites_of(&book, "s-2").is_empty());
+        assert!(!plan_mode_of(&book, "s-2"));
+        assert!(!plan_review_proposed(&book, "s-2"));
     }
 
     #[test]
