@@ -141,7 +141,6 @@ message-fork-unavailable-mid-turn = Only the last message of a completed turn ca
 
 message-fork-unavailable-not-replayed = This row is not part of the session record
 
-
 recap-card-title = Context compacted
 
 cache-miss-label = cache miss · { $tokens } tokens
@@ -301,8 +300,6 @@ settings-desc-file-target = Where files and folders open by default
 settings-row-ui-language = User interface language
 
 settings-desc-ui-language = Interface chrome locale. Applies immediately on save.
-
-
 
 settings-save-failed-title = Settings save failed
 
@@ -703,7 +700,6 @@ workspace-reasoning-high = High
 
 workspace-reasoning-max = Max
 
-
 workspace-ask-supplement-label = Supplemental note
 
 workspace-ask-supplement-placeholder = Add optional context
@@ -761,8 +757,6 @@ workspace-project-select-folder = Select folder
 workspace-project-name-prompt = Project folder name
 
 workspace-empty-prompt = What should we do?
-
-workspace-loading-history = Loading conversation…
 
 follow-stop-stream-failing = Live follow stopped: repeated reconnects failed; the view keeps the last content it received. Retry to reconnect.
 
@@ -1120,7 +1114,6 @@ plugins-notice-plugin-enabled = Plugin enabled. Restart manox to load its tools,
 
 plugins-notice-plugin-disabled = Plugin disabled. Restart manox to unload runtime registries loaded at startup.
 
-
 ## manox-agent-chrome-ui (app shell: sidebar / toolbar / tabs / bottom dock)
 
 chrome-sessions-title = Sessions
@@ -1154,6 +1147,7 @@ chrome-spawn-failed = Failed to start { $prog }: { $err }
 chrome-main-pending = The chat column mounts here (next tranche)
 
 workspace-hero-heading = Start a conversation
+workspace-history-loading-heading = Loading conversation…
 
 chrome-tab-editor = Editor
 chrome-quick-editor = Open the editor

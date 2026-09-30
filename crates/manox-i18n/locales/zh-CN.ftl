@@ -129,7 +129,6 @@ message-fork-unavailable-mid-turn = 仅可从已完成轮次的最后一条消�
 
 message-fork-unavailable-not-replayed = 该行不属于会话记录，无法分叉
 
-
 recap-card-title = 上下文已压缩
 
 cache-miss-label = 缓存未命中 · { $tokens } tokens
@@ -289,8 +288,6 @@ settings-desc-file-target = 默认打开文件和文件夹的位置
 settings-row-ui-language = 用户界面语言
 
 settings-desc-ui-language = 界面显示语言，保存后立即生效。
-
-
 
 settings-save-failed-title = 设置保存失败
 
@@ -690,7 +687,6 @@ workspace-reasoning-high = 高
 
 workspace-reasoning-max = 最高
 
-
 workspace-ask-supplement-label = 补充说明
 
 workspace-ask-supplement-placeholder = 添加可选补充说明
@@ -748,8 +744,6 @@ workspace-project-select-folder = 选择文件夹
 workspace-project-name-prompt = 项目文件夹名称
 
 workspace-empty-prompt = 我们该做什么？
-
-workspace-loading-history = 正在加载对话…
 
 follow-stop-stream-failing = 实时跟进已停止：多次重连失败，视图停留在最后收到的内容。点「重试」可重新连接。
 
@@ -1100,7 +1094,6 @@ plugins-notice-plugin-enabled = 插件已启用。重启 manox 后会加载其�
 
 plugins-notice-plugin-disabled = 插件已禁用。重启 manox 后会卸载启动时加载的运行时注册表。
 
-
 ## manox-agent-chrome-ui（应用壳：侧栏/标题栏/页签/底部面板）
 
 chrome-sessions-title = 会话
@@ -1134,6 +1127,7 @@ chrome-spawn-failed = 无法启动 { $prog }：{ $err }
 chrome-main-pending = 聊天主栏装配中（下一批接入）
 
 workspace-hero-heading = 开始你的对话
+workspace-history-loading-heading = 加载对话…
 
 chrome-tab-editor = 编辑器
 chrome-quick-editor = 打开编辑器

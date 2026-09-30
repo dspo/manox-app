@@ -6,6 +6,7 @@
 
 pub mod browser_view;
 pub mod composer_menu;
+pub mod history_loading;
 pub mod management_shell;
 pub mod model_cascade;
 pub mod plugin_manager;

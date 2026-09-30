@@ -206,6 +206,31 @@ impl Workspace {
         use gpui_component::{h_flex, v_flex};
         let theme = cx.theme().clone();
 
+        // History-loading gate: a reopened thread whose chat snapshot has not
+        // landed yet (the fold still holds no chat channel) suppresses the
+        // hero / list / footer in favor of the meerkat loading page. Render
+        // re-checks the fold so a stale flag can never pin the page after the
+        // snapshot, and prunes the flag once the wait outlives the timeout so
+        // a failed reopen degrades to the hero screen.
+        self.prune_history_gate(cx);
+        let history_loading = self.chat.read(cx).awaiting_history.is_some()
+            && self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|(store, sid)| {
+                    crate::ahp_store::leaf(&store.read(cx).book, sid.as_str())
+                        .chat
+                        .is_none()
+                })
+                .unwrap_or(false);
+        let thread_id = if history_loading {
+            self.chat.read(cx).thread.read(|t| t.id.0.clone())
+        } else {
+            String::new()
+        };
+
         let running = self
             .chat
             .read(cx)
@@ -230,6 +255,7 @@ impl Workspace {
             .get()
             .unwrap_or_else(|| window.bounds().size.width);
         let show_rail = !first_screen
+            && !history_loading
             && self
                 .chat
                 .read(cx)
@@ -276,18 +302,19 @@ impl Workspace {
         let turn_navigator_overlay =
             self.render_turn_navigator_overlay(&theme, show_rail, main_body_w, cx);
 
-        let footer = (composer_placement == ComposerPlacement::Footer).then(|| {
-            v_flex()
-                .w_full()
-                .flex_shrink_0()
-                .bg(theme.background)
-                .py_2()
-                .gap_2()
-                .child(centered(gpui::div().w_full().h(px(1.)).bg(theme.border)))
-                .children(self.render_attachments(&theme, cx))
-                .child(centered(self.render_composer(running, window, &theme, cx)))
-        });
-        let hero = if composer_placement != ComposerPlacement::Hero {
+        let footer =
+            (composer_placement == ComposerPlacement::Footer && !history_loading).then(|| {
+                v_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .bg(theme.background)
+                    .py_2()
+                    .gap_2()
+                    .child(centered(gpui::div().w_full().h(px(1.)).bg(theme.border)))
+                    .children(self.render_attachments(&theme, cx))
+                    .child(centered(self.render_composer(running, window, &theme, cx)))
+            });
+        let hero = if composer_placement != ComposerPlacement::Hero || history_loading {
             None
         } else {
             Some(
@@ -334,6 +361,11 @@ impl Workspace {
                     })
                     .children(self.render_follow_stop_banner(&theme, cx))
                     .children(hero)
+                    .when(history_loading, |this| {
+                        this.child(crate::views::history_loading::render_history_loading(
+                            &theme, &thread_id,
+                        ))
+                    })
                     .children({
                         // The row factory is a pure read-only projection
                         // over the conversation.
@@ -374,7 +406,7 @@ impl Workspace {
                         let message_list_width = self.chat.read(cx).message_list_width.clone();
                         let diag_state = self.chat.read(cx).list_state.clone();
                         let mono_family = theme.mono_font_family.clone();
-                        (!first_screen).then(move || {
+                        (!first_screen && !history_loading).then(move || {
                             let list_el = gpui::list(list_state, processor)
                                 .w_full()
                                 .h_full()
