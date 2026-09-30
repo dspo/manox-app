@@ -326,9 +326,10 @@ fn shell_config(
     mux: &Entity<crate::multiplexer::SessionMultiplexer>,
     _cx: &mut Context<Shell>,
 ) -> ShellConfig {
+    let mux = mux.clone();
     let placeholder: gpui::AnyView = ws.clone().into();
     ShellConfig {
-        tool_kinds: registry(mux, &ws),
+        tool_kinds: registry(&mux, &ws),
         main: Arc::new(PendingMain {
             view: placeholder,
             ws: ws.clone(),
@@ -364,14 +365,30 @@ fn shell_config(
             },
         ],
         hooks: HostHooks {
-            // Pin/archive/tag ride the thread store — the same seam the
-            // sidebar's row actions use; the next wire snapshot reconciles.
-            on_pin: Some(Box::new(|id, _w, _cx| {
-                let loaded = manox_agent::thread_store::global().with_mut(|st| st.load_thread(id));
-                if let Ok(Some(handle)) = loaded {
-                    let was = handle.read(|t| t.is_pinned());
-                    handle.with_mut(|t| t.set_pinned(!was));
-                }
+            // Pin is a client-dispatchable extension action on the thread
+            // channel: dispatching journals it host-side (the store row plus
+            // sidebar order) and the echo folds back into the sidebar read.
+            // The in-memory thread_store write this hook used before never
+            // reached the journal, so the write face (thread_store) and the
+            // read face (AHP fold) were two states that never met.
+            on_pin: Some(Box::new(move |id, _w, cx| {
+                let store = mux.read(cx).store();
+                let channel = crate::ahp_store::thread_uri(id);
+                store.update(cx, |store, _| {
+                    let pinned = store
+                        .book
+                        .ext
+                        .get(&channel)
+                        .and_then(|x| x.pinned)
+                        .unwrap_or(false);
+                    store.dispatch(
+                        channel,
+                        ahp_types::actions::StateAction::Unknown(serde_json::json!({
+                            "type": manox_ahp::ext::actions::PINNED_CHANGED,
+                            "pinned": !pinned,
+                        })),
+                    );
+                });
             })),
             // The menu's archive toggle flips the CURRENT partition.
             // Premise: the wire snapshot rides the ACTIVE partition only, so
