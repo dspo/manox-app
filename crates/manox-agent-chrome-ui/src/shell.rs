@@ -525,6 +525,9 @@ impl Shell {
     ) {
         use gpui_component::menu::{PopupMenu, PopupMenuItem};
 
+        // One menu at a time: an open group menu's anchor would lie under
+        // this menu (the mirror of open_group_menu's close_row_menu).
+        self.close_group_menu(cx);
         let Some(sess) = self.sessions.iter().find(|s| s.id == id) else {
             return;
         };

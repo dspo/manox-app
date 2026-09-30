@@ -84,48 +84,55 @@ pub fn group_menu(
                             new_thread_at(&ws_manox, dir_new.clone(), cx);
                         }),
                 );
-                for (agent_id, display, svg) in EXTERNAL_AGENTS {
-                    // The cascade rows are owned per submenu closure (the
-                    // builder closures are `move` + 'static; the groups
-                    // borrow cannot ride along).
-                    let rows: Vec<(String, String, Option<String>)> = groups
-                        .iter()
-                        .flat_map(|(provider, entries)| {
-                            entries.iter().map(move |e: &CascadeEntry| {
-                                (provider.clone(), e.config_id.clone(), e.wire.clone())
-                            })
+                // The pick list is collected once and cloned per submenu
+                // closure (the builder closures are `move` + 'static; the
+                // groups borrow cannot ride along). The display name is the
+                // row's label — the same name the right pane's picker shows —
+                // while the config id stays the spawn argument.
+                let rows: Vec<(String, String, String, Option<String>)> = groups
+                    .iter()
+                    .flat_map(|(provider, entries)| {
+                        entries.iter().map(move |e: &CascadeEntry| {
+                            (
+                                provider.clone(),
+                                e.config_id.clone(),
+                                e.display.clone(),
+                                e.wire.clone(),
+                            )
                         })
-                        .collect();
-                    if rows.is_empty() {
-                        continue;
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    for (agent_id, display, svg) in EXTERNAL_AGENTS {
+                        let dir_agent = dir_cascade.clone();
+                        let agent_rows = rows.clone();
+                        submenu = submenu.submenu_with_icon(
+                            Some(Icon::default().path(svg)),
+                            display,
+                            window,
+                            cx,
+                            move |sub, _window, _cx| {
+                                let mut sub = sub;
+                                for (provider, model, label, wire) in agent_rows.clone() {
+                                    let dir_pick = dir_agent.clone();
+                                    sub = sub.item(PopupMenuItem::new(label).on_click(
+                                        move |_, window, cx| {
+                                            spawn_agent_tab(
+                                                &(agent_id, display, svg),
+                                                &provider,
+                                                &model,
+                                                wire.clone(),
+                                                dir_pick.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ));
+                                }
+                                sub
+                            },
+                        );
                     }
-                    let dir_agent = dir_cascade.clone();
-                    submenu = submenu.submenu_with_icon(
-                        Some(Icon::default().path(svg)),
-                        display,
-                        window,
-                        cx,
-                        move |sub, _window, _cx| {
-                            let mut sub = sub;
-                            for (provider, model, wire) in rows.clone() {
-                                let dir_pick = dir_agent.clone();
-                                sub = sub.item(PopupMenuItem::new(model.clone()).on_click(
-                                    move |_, window, cx| {
-                                        spawn_agent_tab(
-                                            &(agent_id, display, svg),
-                                            &provider,
-                                            &model,
-                                            wire.clone(),
-                                            dir_pick.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    },
-                                ));
-                            }
-                            sub
-                        },
-                    );
                 }
                 submenu
             },
@@ -140,7 +147,12 @@ pub fn group_menu(
                         Ok(view) => {
                             open_terminal_tab(manox_i18n::t("chrome-tab-terminal"), view, cx)
                         }
-                        Err(e) => spawn_failed_notification(&e, window, cx),
+                        Err(e) => spawn_failed_notification(
+                            &manox_i18n::t("chrome-tab-terminal"),
+                            &e,
+                            window,
+                            cx,
+                        ),
                     }
                 }),
         );
@@ -219,7 +231,7 @@ fn spawn_agent_tab(
             let tab = crate::tool_tabs::prebuilt_terminal_tab(display, svg, view);
             crate::chrome_assembly::open_tool_tab(tab, cx);
         }
-        Err(e) => spawn_failed_notification(&e, window, cx),
+        Err(e) => spawn_failed_notification(display, &e, window, cx),
     }
 }
 
@@ -232,11 +244,13 @@ fn open_terminal_tab(
     crate::chrome_assembly::open_tool_tab(tab, cx);
 }
 
-fn spawn_failed_notification(error: &str, window: &mut Window, cx: &mut App) {
+/// The failure notice names the program that failed to start — the terminal
+/// row passes its localized name, an agent row its display name.
+fn spawn_failed_notification(prog: &str, error: &str, window: &mut Window, cx: &mut App) {
     window.push_notification(
         Notification::error(manox_i18n::t_str(
             "chrome-spawn-failed",
-            &[("prog", "agent"), ("err", error)],
+            &[("prog", prog), ("err", error)],
         )),
         cx,
     );
