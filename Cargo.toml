@@ -49,15 +49,15 @@ publish = false
 
 [workspace.dependencies]
 # —— agent runtime（dspo/manox，tag 锁发布；9 依赖共用同一 tag 声明）——
-manox-agent = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
-manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
-manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
-manox-providers = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
-supervisor = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
+manox-agent = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
+manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
+manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
+manox-providers = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
+supervisor = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
 # 终端仿真核心与 hyperlinks 已回流 runtime 仓（dspo/manox#773），本仓经
 # git 依赖消费；CxSessionSource 桥留在本仓的 manox-ext-agents。
-manox-terminal = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
-hyperlinks = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
+manox-terminal = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
+hyperlinks = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
 # v3 交互协议 = AHP（dspo/manox#818 删除了 manox-protocol）。app 是纯 AHP 客户端：
 # `ahp`/`ahp-types` 是官方客户端 SDK（client + 纯 reducer），`manox-ahp` 提
 # x-manox 扩展通道的声明常量与客户端 fold，`manox-ahp-runtime` 提进程单例
@@ -66,8 +66,8 @@ ahp = "=0.9.0"
 ahp-types = "=0.9.0"
 # 仅 dev e2e：对 `cx ahp` 网关跑 WS 腿冒烟（宿主侧 WS 不用它，它只会 dial）。
 ahp-ws = "=0.9.0"
-manox-ahp = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
-manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.1.0" }
+manox-ahp = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
+manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
 
 # —— 本仓成员（path 依赖；经 `foo.workspace = true` 引用）——
 agent-ui = { path = "crates/agent-ui" }
