@@ -50,6 +50,16 @@ impl Render for Workspace {
         if matches!(self.view_mode, ViewMode::Settings) && !self.exiting_settings {
             return self.render_settings_card(window, cx);
         }
+        // An external session (a launched CLI agent TUI / plain terminal)
+        // owns the main column the same way — the shell wraps the main
+        // column, and terminal/TUI sessions live THERE, not in the right
+        // pane. A vanished record falls through to the conversation
+        // defensively.
+        if matches!(self.view_mode, ViewMode::ExternalSession)
+            && let Some(card) = self.render_external_session_card(cx)
+        {
+            return self.apply_chat_actions(card, window, cx);
+        }
         // A blocking overlay owns the page: the turn navigator cannot stay
         // mounted under it.
         if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {
@@ -199,6 +209,26 @@ impl Workspace {
             )
             .child(v_flex().flex_1().min_w_0().h_full().child(main));
         self.apply_chat_actions(root, window, cx)
+    }
+
+    /// The external session's main-column card: the live terminal, full
+    /// surface (the same wrap the right-pane tabs use — a 4px inset on the
+    /// card background).
+    fn render_external_session_card(
+        &mut self,
+        _cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        use gpui::{ParentElement as _, Styled as _, div, px};
+        let id = self.active_external.clone()?;
+        let view = self.externals.iter().find(|s| s.id == id)?.view.clone();
+        Some(
+            div()
+                .id("external-session-main")
+                .size_full()
+                .flex()
+                .p(px(4.))
+                .child(view),
+        )
     }
 
     /// The conversation column — the chrome card's main surface, bare of the

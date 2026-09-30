@@ -22,14 +22,14 @@
 //! handlers will need to pick the target window (e.g. from `cx.active_window()`
 //! after the deferred dispatch).
 
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 
 use gpui::{Entity, WindowHandle};
 
 use crate::workspace::Workspace;
 use gpui_component::Root;
 
-static WORKSPACE: OnceLock<Entity<Workspace>> = OnceLock::new();
+static WORKSPACE: RwLock<Option<Entity<Workspace>>> = RwLock::new(None);
 static WINDOW: RwLock<Option<WindowHandle<Root>>> = RwLock::new(None);
 
 /// Register the single main `Workspace` entity. Call once, from inside
@@ -38,7 +38,14 @@ static WINDOW: RwLock<Option<WindowHandle<Root>>> = RwLock::new(None);
 /// deliberately process-lifetime so the workspace (and the threads it holds)
 /// survives the window being closed.
 pub fn set_workspace(workspace: Entity<Workspace>) {
-    let _ = WORKSPACE.set(workspace);
+    let mut slot = WORKSPACE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // First registration wins (the process-lifetime workspace); later
+    // windows re-open over the same entity.
+    if slot.is_none() {
+        *slot = Some(workspace);
+    }
 }
 
 /// Register the main window's typed `WindowHandle<Root>`. Replaces any
@@ -57,7 +64,21 @@ pub fn set_window(window: WindowHandle<Root>) {
 /// Returns the global `Workspace` entity, or `None` if the main window has
 /// not been opened yet.
 pub fn workspace_global() -> Option<Entity<Workspace>> {
-    WORKSPACE.get().cloned()
+    WORKSPACE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Test-only: drop the workspace global so a gpui test's leak detector sees
+/// no entity handle outliving the test. The real app holds the workspace
+/// for the process lifetime by design; a reset slot exists only for the
+/// test harness (`OnceLock` cannot be cleared).
+#[cfg(feature = "test-support")]
+pub fn clear_globals_for_test() {
+    if let Ok(mut slot) = WORKSPACE.write() {
+        *slot = None;
+    }
 }
 
 /// Returns the main window's typed handle, or `None` if no main window is

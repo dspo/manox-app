@@ -245,6 +245,7 @@ fn build_permission_content(
 }
 mod composer;
 mod external;
+pub(crate) mod external_sessions;
 mod plan_review;
 mod subagent;
 
@@ -455,6 +456,13 @@ pub struct Workspace {
     /// Top-level view mode. `Settings` replaces the entire window content
     /// with the SettingsView overlay until the user requests exit.
     view_mode: ViewMode,
+    /// Live external sessions (project-menu launches: CLI agent TUIs and
+    /// plain terminals) and the id of the one occupying the main column
+    /// while `view_mode == ExternalSession`. In-memory only — the PTY dies
+    /// with the process, nothing persists (the legacy shell's
+    /// `external_sessions` + `active_external` pair).
+    pub(crate) externals: Vec<external_sessions::ExternalSessionRecord>,
+    active_external: Option<String>,
     /// Set briefly while the Settings overlay is sliding out to the right.
     /// Keeps `view_mode == Settings` mounted so the exit animation can play
     /// before the unmount; cleared when the slide-out completes.
@@ -480,6 +488,11 @@ enum ViewMode {
     #[default]
     Workspace,
     Settings,
+    /// A live external session (a launched CLI agent TUI / plain terminal)
+    /// renders IN PLACE OF the conversation column — the legacy shell's
+    /// full-pane external-session mode. Switching away parks the session
+    /// (its terminal keeps running); closing kills it.
+    ExternalSession,
 }
 
 /// The empty band the session list reserves at its top before any content:
@@ -737,6 +750,8 @@ impl Workspace {
             subagent_prompts: HashMap::new(),
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
+            externals: Vec::new(),
+            active_external: None,
             exiting_settings: false,
             settings_transition_gen: 0,
             settings_view: None,
