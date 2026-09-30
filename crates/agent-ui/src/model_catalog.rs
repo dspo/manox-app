@@ -45,3 +45,35 @@ pub(crate) fn resolve(provider: &str, id: &str) -> Option<ModelRow> {
         .into_iter()
         .find(|r| r.provider == provider && r.id == id)
 }
+
+/// The wire api → the picker row's visual vocabulary (tag variant + label +
+/// the tint the composer chip reuses). Every surface that renders a wire
+/// distinction reads this one mapping.
+pub(crate) fn wire_visual(
+    api: &str,
+) -> (
+    gpui_component::tag::TagVariant,
+    &'static str,
+    gpui_component::ColorName,
+) {
+    use gpui_component::ColorName;
+    use gpui_component::tag::TagVariant;
+    match api {
+        "anthropic" => (
+            TagVariant::Color(ColorName::Blue),
+            "Anthropic",
+            ColorName::Blue,
+        ),
+        "openai_responses" => (
+            TagVariant::Color(ColorName::Cyan),
+            "Responses",
+            ColorName::Cyan,
+        ),
+        "openai_completions" => (
+            TagVariant::Color(ColorName::Amber),
+            "Completions",
+            ColorName::Amber,
+        ),
+        _ => (TagVariant::Secondary, "N/A", ColorName::Gray),
+    }
+}
