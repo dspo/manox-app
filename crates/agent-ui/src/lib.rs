@@ -17,6 +17,7 @@ pub mod browser_host;
 pub mod chatgpt_app;
 pub mod chrome_assembly;
 pub mod dispatch;
+pub mod external_sessions;
 pub mod i18n;
 pub mod menu;
 pub mod model_catalog;

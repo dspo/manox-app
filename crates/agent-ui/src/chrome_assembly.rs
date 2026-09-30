@@ -106,6 +106,10 @@ pub fn subagent_panel(address: &str, cx: &App) -> Option<Entity<SubagentPanel>> 
 /// Build the whole chrome window root: multiplexer + shell + the projection
 /// pump. Called from the manox bin on every window open.
 pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
+    // The external-session registry rides the previous window's pane; a
+    // fresh window starts clean (the launched PTYs died with it — the same
+    // window-scoped lifetime the dock/right-pane stashes follow).
+    crate::external_sessions::clear_all();
     // ONE workspace carries the whole data face — its multiplexer feeds both
     // the sidebar projection and the conversation column mounted as the
     // shell's main surface. A re-opened window mounts a fresh shell over the
@@ -206,15 +210,25 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         let rows = mux.read(cx).thread_list(cx);
         let unread = mux.read(cx).unread_map();
         let removed = crate::project_registry::removed_projects();
-        let sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
+        let mut sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
             crate::sidebar_projection::project_groups(&rows, &unread, &removed)
                 .into_iter()
                 .flat_map(manox_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
+        // Launched external sessions (project-menu agents/terminals) merge
+        // into the snapshot as sidebar rows; the shell regroups them under
+        // their project's header.
+        sessions.extend(
+            crate::external_sessions::all()
+                .iter()
+                .map(crate::external_sessions::row_of),
+        );
         // The sidebar highlight follows the FOREGROUND thread, not the last
         // click: new-thread landings, /exit replacements and successor
         // hand-offs all switch without a sidebar click, and a stale
-        // highlight would advertise the wrong session as active.
+        // highlight would advertise the wrong session as active. An external
+        // session's highlight is not stolen — it is no thread, so the
+        // foreground rule has no opinion on it while it holds the highlight.
         let fg = ws
             .read(cx)
             .chat
@@ -222,9 +236,15 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .store
             .as_ref()
             .map(|(_, sid)| sid.clone());
+        let active_is_external = shell
+            .read(cx)
+            .active
+            .as_deref()
+            .map(crate::external_sessions::is_external)
+            .unwrap_or(false);
         shell.update(cx, |shell, cx| {
             shell.set_sessions(sessions);
-            if shell.active != fg {
+            if !active_is_external && shell.active != fg {
                 shell.active = fg;
             }
             cx.notify();
@@ -432,10 +452,15 @@ fn shell_config(
                 }
             })),
             // The full production switch path: attach, drafts stash, list
-            // reconciliation.
+            // reconciliation. External-session rows route to their tab
+            // instead — a thread id they are not.
             on_select: Some(Box::new({
                 let ws = ws.clone();
                 move |id, w, cx| {
+                    if crate::external_sessions::is_external(id) {
+                        crate::external_sessions::focus(id, cx);
+                        return;
+                    }
                     ws.update(cx, |ws, cx| {
                         ws.open_thread(id.to_string(), w, cx);
                         cx.notify();

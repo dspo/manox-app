@@ -122,9 +122,16 @@ pub fn group_menu(
                 .on_click(move |_, window, cx| {
                     let cwd = dir_terminal.clone().unwrap_or_else(fallback_cwd);
                     match crate::tool_tabs::spawn_standalone_terminal(&cwd, cx) {
-                        Ok(view) => {
-                            open_terminal_tab(manox_i18n::t("chrome-tab-terminal"), view, cx)
-                        }
+                        Ok(view) => launch_external(
+                            manox_i18n::t("chrome-tab-terminal").to_string(),
+                            "icons/terminal.svg",
+                            dir_terminal
+                                .clone()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .filter(|p| !p.is_empty()),
+                            view,
+                            cx,
+                        ),
                         Err(e) => spawn_failed_notification(
                             &manox_i18n::t("chrome-tab-terminal"),
                             &e,
@@ -190,9 +197,10 @@ fn new_thread_at(ws: &gpui::WeakEntity<Workspace>, dir: Option<PathBuf>, cx: &mu
 }
 
 /// Spawn the agent CLI under the picked endpoint, rooted at the project
-/// (falling back to the host's cwd rules), and open it as a right-pane tab.
-/// A spawn failure notifies instead of opening anything. `agent` is the
-/// `EXTERNAL_AGENTS` row (id, display, icon).
+/// (falling back to the host's cwd rules), and register it as an external
+/// session — a right-pane tab plus its sidebar row. A spawn failure notifies
+/// instead of opening anything. `agent` is the `EXTERNAL_AGENTS` row
+/// (id, display, icon).
 fn spawn_agent_tab(
     agent: &(&'static str, &'static str, &'static str),
     provider: &str,
@@ -203,23 +211,28 @@ fn spawn_agent_tab(
     cx: &mut App,
 ) {
     let (agent_id, display, svg) = *agent;
+    let project = dir
+        .clone()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|p| !p.is_empty());
     let cwd = dir.unwrap_or_else(fallback_cwd);
     match crate::tool_tabs::spawn_agent_terminal(agent_id, &cwd, provider, model, wire, cx) {
-        Ok(view) => {
-            let tab = crate::tool_tabs::prebuilt_terminal_tab(display, svg, view);
-            crate::chrome_assembly::open_tool_tab(tab, cx);
-        }
+        Ok(view) => launch_external(display.to_string(), svg, project, view, cx),
         Err(e) => spawn_failed_notification(display, &e, window, cx),
     }
 }
 
-fn open_terminal_tab(
-    title: impl Into<gpui::SharedString>,
+/// Register a spawned terminal as an external session: a right-pane tab
+/// (minted on demand) plus its sidebar row — the legacy session semantics
+/// on the chrome face. The launch focuses the tab immediately.
+fn launch_external(
+    label: String,
+    svg: &'static str,
+    project: Option<String>,
     view: Entity<terminal_ui::TerminalView>,
     cx: &mut App,
 ) {
-    let tab = crate::tool_tabs::prebuilt_terminal_tab(title, "icons/terminal.svg", view);
-    crate::chrome_assembly::open_tool_tab(tab, cx);
+    crate::external_sessions::launch(label, svg, project, view, cx);
 }
 
 /// The failure notice names the program that failed to start — the terminal

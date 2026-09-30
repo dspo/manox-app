@@ -871,32 +871,42 @@ pub(crate) fn spawn_standalone_terminal(
     Ok(terminal_ui::TerminalView::new(proxy, cx))
 }
 
-/// Wrap an ALREADY-SPAWNED terminal as a right-pane tab — the project menu's
-/// mount face: the agent/terminal is launched at the picked project
-/// directory on the menu-click path, and the tab only renders the live view.
-/// The tab owns the view (closing it tears the process tree down); its
-/// content is a live process, so there is no persisted form.
-pub(crate) fn prebuilt_terminal_tab(
+/// Wrap an ALREADY-SPAWNED terminal as a right-pane tab — the external
+/// session's mount face (see [`crate::external_sessions`]): the agent or
+/// terminal is launched at the picked project directory on the menu-click
+/// path, and the tab only renders the live view. The tab owns the view
+/// (closing it tears the process tree down); its content is a live process,
+/// so there is no persisted form. `id` is the shared sidebar-row identity;
+/// `on_close` reaps the session when the pane closes the tab.
+/// The tab-close reaper (the external session's registry, which must stay
+/// `Send + Sync` — pane tabs are shared across the window's executors).
+type OnTabClose = Box<dyn Fn(&mut App) + Send + Sync>;
+
+pub(crate) fn external_session_tab(
+    id: String,
     title: impl Into<SharedString>,
     svg: &'static str,
     view: Entity<terminal_ui::TerminalView>,
+    on_close: OnTabClose,
 ) -> Arc<dyn ToolTab> {
-    Arc::new(PrebuiltTerminalTab {
-        id: next_instance_id("prebuilt-terminal"),
+    Arc::new(ExternalSessionTab {
+        id,
         title: title.into(),
         svg,
         view,
+        on_close: Some(on_close),
     })
 }
 
-struct PrebuiltTerminalTab {
+struct ExternalSessionTab {
     id: String,
     title: SharedString,
     svg: &'static str,
     view: Entity<terminal_ui::TerminalView>,
+    on_close: Option<OnTabClose>,
 }
 
-impl ToolTab for PrebuiltTerminalTab {
+impl ToolTab for ExternalSessionTab {
     fn kind(&self) -> &'static str {
         "terminal"
     }
@@ -935,6 +945,15 @@ impl ToolTab for PrebuiltTerminalTab {
                 .into_any_element(),
             None => div().w_full().h_full().into_any_element(),
         }
+    }
+
+    /// The pane closed the tab: reclaim the view (the PTY dies with it) and
+    /// let the owner reap the sidebar row.
+    fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
+        if let Some(on_close) = &self.on_close {
+            on_close(cx);
+        }
+        store.reset(&self.id);
     }
 
     fn persist(&self, _cx: &App, _store: &TabStore) -> Option<String> {

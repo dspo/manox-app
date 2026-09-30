@@ -214,7 +214,7 @@ pub fn project_groups(
 
 /// Project display name: the path's last segment; empty (quick chats) →
 /// "Chats".
-fn project_label(path: &str) -> String {
+pub(crate) fn project_label(path: &str) -> String {
     if path.is_empty() || path == "." {
         return "Chats".into();
     }
