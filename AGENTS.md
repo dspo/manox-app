@@ -4,7 +4,7 @@ Guidance for coding agents working in this repo.（本文件是 manox-app 仓库
 
 ## 项目概述
 
-manox-app 是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端、webview、系统托盘）与 cx 启动器（外部 agent CLI）。agent runtime（harness/agent/session-core/protocol/providers/supervisor/lsp，外加回流的终端仿真核心 manox-terminal 与 hyperlinks）来自 **dspo/manox**，经 git 依赖（branch=main）+ 提交的 Cargo.lock 锁 rev 消费。单二进制、单进程。逐文件架构靠读代码获得——本文件只承载不可从代码推导的约束。
+manox-app 是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端、webview、系统托盘）与 cx 启动器（外部 agent CLI）。agent runtime（harness/agent/session-core/providers/supervisor，外加回流的终端仿真核心 manox-terminal 与 hyperlinks）来自 **dspo/manox**，经 git 依赖（tag 锁发布，见「与 manox 仓的联动开发」）+ 提交的 Cargo.lock 消费。单二进制、单进程。逐文件架构靠读代码获得——本文件只承载不可从代码推导的约束。
 
 ### 代码结构
 
@@ -49,13 +49,24 @@ manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（d
 
 ### 与 manox 仓的联动开发
 
+上游自 v0.1.0 起走双轨发布：修复进 `release/0.1` 分支打 `v0.1.x` tag，新特性进 main 打 `v0.2.x` tag；本仓的 9 个 runtime git 依赖（manox-agent/harness/session-core/providers/supervisor/terminal/hyperlinks/ahp/ahp-runtime）共用同一个 tag 声明。
+
 ```bash
 script/local-manox.sh on            # git 依赖 → ../manox 本地路径（.cargo/config.toml，已 gitignore）
 script/local-manox.sh off           # 还原纯 git 依赖（CI 形态）
-cargo update -p manox-agent         # 显式拾取上游新 rev（patch off 时）
+# 拾取上游新发布（patch off 时）：改 Cargo.toml [workspace.dependencies] 的 tag= 值，
+# 然后 cargo update -p manox-agent（全部 9 依赖随同一 tag 整体移动）
 ```
 
 runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。两仓共享运行时状态根 `~/.manox/`（路径清单见 dspo/manox 仓 AGENTS.md）。
+
+### 跨仓配对修复的消费义务
+
+上游 PR 的 body 或 commit message 点名 dspo/manox-app 需要伴随改动的（「Companion change required in dspo/manox-app」及同类表述），其消费义务落在把锁推进到该发布的那个本仓 PR：**同一 PR 内完成订阅/换道/接线，或在 Assumptions 里显式申报滞留原因**——静默不消费等于上游白修（桌面端撞不到修复）。台账（销账即删行）：
+
+- dspo/manox#824（LSP 降级独立库）：脚本/注释碎片清理已落地（本节所在 PR）
+- dspo/manox#840（interaction park 跨 restore 结算）：纯宿主侧，app 零动作
+- dspo/manox#842（x-manox-thread 通道 / thread-row 换道）：待消费——需订阅新通道并把 pinned/label 读取换道（#103 的 Assumptions 曾误称 #95/#99 已消费，已评论更正）
 
 ## 构建与开发命令
 
@@ -126,7 +137,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 - 每 PR 门禁：`cargo clippy -D warnings --all-targets` + 全量
   `cargo test` + `cargo test -p agent-ui --features test-support` + `cargo fmt`；
   PR 写清 Test Plan 与 Assumptions。
-- **合并前必须把 manox 依赖 bump 到最新兼容 commit**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下执行 `cargo update -p manox-agent`——同出 dspo/manox 一个 git source 的全部依赖（manox-agent/harness/protocol/session-core/providers/supervisor/manox-terminal/hyperlinks）在 Cargo.lock 中共用同一锁 rev，任一条目即可整体抬升——重跑全部门禁，并把 Cargo.lock 变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容 rev 再 bump，或在 PR 中显式声明滞留原因（旧 rev 停留是债务，不是默认状态）。
+- **合并前必须把 manox 依赖 bump 到最新兼容发布**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下确认 Cargo.toml 的 runtime tag 指向 release/0.1（或 main 的 v0.2 轨）最新兼容 tag——9 个依赖共用同一 tag，改一处声明 + `cargo update -p manox-agent` 整体移动——重跑全部门禁，并把变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容发布再 bump，或在 PR 中显式声明滞留原因（旧 tag 停留是债务，不是默认状态）。
 - 提交信息不得携带 Co-Authored-By 尾注（CI 强制拒绝）。
 
 ## 项目规则

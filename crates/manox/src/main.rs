@@ -413,9 +413,9 @@ fn main() {
 
     // The app has quit (gpui torn down) but the process has not exited yet —
     // the forgotten tokio runtime (`runtime::init` `mem::forget`s it) still owns
-    // its worker threads. Reap every third-party process manox spawned (LSP/MCP
+    // its worker threads. Reap every third-party process manox spawned (MCP
     // servers) so they don't outlive manox and get reparented to init as
-    // orphans. Prefer the graceful path — LSP servers get their `shutdown`/
+    // orphans. Prefer the graceful path — MCP servers get their `shutdown`/
     // `exit` handshake, then SIGTERM, then SIGKILL — each bounded by the
     // supervisor's per-process timeouts. The main thread is not a tokio worker
     // (gpui's `run` returned here), so `Handle::block_on` is safe. Only manox's
