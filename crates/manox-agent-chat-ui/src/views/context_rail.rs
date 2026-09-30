@@ -16,7 +16,7 @@
 //! `clamp(natural, 260, 360)`, height = content capped by the space above
 //! the ring with internal scrolling past that.
 
-use crate::client_store_handle::ClientStoreHandle;
+use crate::ahp_store::{AhpStore, leaf as leaf_of};
 use crate::i18n;
 use gpui::{AnyElement, App, Context, Entity, Pixels, SharedString, prelude::*, px};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
@@ -278,12 +278,10 @@ impl BubbleExpanded {
 /// bubble's open/fold state. Writes flow through `Workspace` →
 /// `self.context_rail.update(cx, |r, cx| …)`.
 pub struct ContextRail {
-    /// The AgentServer-backed store mirroring kernel state via
-    /// `ServerNote`s (U7b: the rail's only read face — per-model usage,
-    /// project, cwd and title all read this leaf).
-    /// `None` only before the workspace creates the AgentServer
-    /// connection.
-    store: Option<Entity<ClientStoreHandle>>,
+    /// The AHP store plus the attached session id (the rail's only read
+    /// face — per-model usage, project, cwd and title all derive from the
+    /// book's channel state). `None` only before the workspace connects.
+    store: Option<(gpui::Entity<AhpStore>, String)>,
     /// Coarse run phase. Derived from `ThreadEvent`s routed here by
     /// `Workspace`; drives the Captain row's status indicator.
     pub cockpit_phase: CockpitPhase,
@@ -337,7 +335,7 @@ pub fn pi_wire_text_color(api: &str, theme: &gpui_component::Theme) -> gpui::Hsl
 }
 
 impl ContextRail {
-    pub fn new(store: Option<Entity<ClientStoreHandle>>, cx: &mut App) -> Self {
+    pub fn new(store: Option<(gpui::Entity<AhpStore>, String)>, cx: &mut App) -> Self {
         Self {
             store,
             cockpit_phase: CockpitPhase::Idle,
@@ -359,7 +357,11 @@ impl ContextRail {
     /// ATTACHED session, so a rail left bound to a previous leaf renders a
     /// permanently frozen usage face (the rail-freeze regression from the
     /// visual-acceptance run).
-    pub fn bind_store(&mut self, store: Option<Entity<ClientStoreHandle>>, cx: &mut Context<Self>) {
+    pub fn bind_store(
+        &mut self,
+        store: Option<(gpui::Entity<AhpStore>, String)>,
+        cx: &mut Context<Self>,
+    ) {
         self.store = store;
         cx.notify();
     }
@@ -367,7 +369,7 @@ impl ContextRail {
     /// Diagnostic: the entity id of the bound store leaf (the rail-freeze
     /// regression asserts the attach-time re-bind).
     pub fn diagnostic_store_id(&self) -> Option<gpui::EntityId> {
-        self.store.as_ref().map(|s| s.entity_id())
+        self.store.as_ref().map(|(store, _)| store.entity_id())
     }
 
     /// Reset per-thread cockpit state on thread switch: the outgoing
@@ -616,7 +618,10 @@ impl ContextRail {
         let running = self
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.running))
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                leaf_of(&view.book, sid).running()
+            })
             .unwrap_or(false);
         let main_status = if self.cockpit_phase == CockpitPhase::Failed {
             manox_agent::ToolCallStatus::Error
@@ -693,10 +698,9 @@ impl ContextRail {
     /// sources the old card's branch block read; the change ±counts and the
     /// click-to-copy affordances retired with the card.
     fn render_branch_pair_section(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
-        let cwd_path = self.store.as_ref().and_then(|s| {
-            s.read(cx)
-                .store
-                .with(|st| (!st.cwd.is_empty()).then(|| PathBuf::from(st.cwd.clone())))
+        let cwd_path = self.store.as_ref().and_then(|(store, sid)| {
+            let view = store.read(cx);
+            leaf_of(&view.book, sid).cwd().map(PathBuf::from)
         });
         let basename = cwd_path
             .as_ref()
@@ -796,39 +800,31 @@ impl ContextRail {
         theme: &Theme,
         cx: &App,
     ) -> Option<AnyElement> {
-        let store_ref = self.store.as_ref()?.read(cx);
-        let per_model: HashMap<String, manox_agent::language_model::TokenUsage> = store_ref
-            .store
-            .per_model_usage
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    manox_agent::language_model::TokenUsage {
-                        input_tokens: v.input,
-                        output_tokens: v.output,
-                        cache_creation_input_tokens: v.cache_creation,
-                        cache_read_input_tokens: v.cache_read,
-                    },
-                )
+        let (store, sid) = self.store.as_ref()?;
+        let leaf = leaf_of(&store.read(cx).book, sid);
+        let per_model: HashMap<String, manox_agent::language_model::TokenUsage> = leaf
+            .metrics
+            .map(|m| {
+                m.per_model_usage
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_tokens()))
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         if per_model.is_empty() {
             return None;
         }
         // The foreground model's identity — the one model whose last-request
-        // occupancy the ring already measures.
-        let (fg_key, fg_last) = store_ref.store.with(|st| {
-            let identity = st.model.as_ref().and_then(|v| {
-                Some((
-                    v.get("provider")?.as_str()?.to_string(),
-                    v.get("modelId")?.as_str()?.to_string(),
-                ))
-            });
-            (
-                identity.as_ref().map(|(p, i)| format!("{p}/{i}")),
-                st.last_token_usage.clone(),
-            )
+        // occupancy the ring already measures; the measure itself is the
+        // in-flight turn's usage report while streaming, else the last
+        // completed turn's (cache-write tokens are not modeled on the AHP
+        // turn usage, so the occupancy floor is input + cache-read).
+        let fg_key: Option<String> = leaf.model_id().map(str::to_string);
+        let fg_last = leaf.last_usage().map(|u| crate::ahp_store::UsageSnapshot {
+            input: u.input_tokens.unwrap_or(0).max(0) as u64,
+            output: u.output_tokens.unwrap_or(0).max(0) as u64,
+            cache_creation: 0,
+            cache_read: u.cache_read_tokens.unwrap_or(0).max(0) as u64,
         });
         let muted = theme.muted_foreground;
         let warn = theme.warning;
@@ -885,7 +881,7 @@ impl ContextRail {
             // `├ Context` — last-request occupancy, foreground model only,
             // ≥90% in the warning color.
             if Some(*model_name) == fg_key.as_ref()
-                && let Some(last) = fg_last.clone()
+                && let Some(last) = fg_last
                 && let Some(window) = model_window_tokens(model_name)
             {
                 let active = last

@@ -1,0 +1,752 @@
+//! The conversation column's left-edge turn rail: the dsh TurnNavigator
+//! mirrored onto the leading edge. One tick per user turn at a fixed pitch,
+//! vertically centered over the message band; the active mark tracks the
+//! message list's scroll position, hovering a mark previews the turn in a
+//! card beside the rail, and clicking one jumps through the same
+//! `reveal_message` path as the ⌘M popup navigator.
+
+use std::rc::Rc;
+use std::time::Duration;
+
+use gpui::{
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla,
+    IntoElement, ListSizingBehavior, ListState, ParentElement as _, Pixels, ScrollStrategy,
+    SharedString, Styled as _, Window, div, ease_out_quint, prelude::*, px, uniform_list,
+};
+use gpui_component::{ElementExt as _, Theme, h_flex, v_flex};
+
+use crate::column::ChatColumn;
+use crate::conversation::ConvItem;
+use crate::i18n;
+
+/// Fixed pitch between neighbouring marks; overflow scrolls inside the rail.
+pub const MARK_PITCH: f32 = 10.;
+/// The rail strip's width (the marks' column).
+pub const RAIL_WIDTH: f32 = 28.;
+/// The rail strip's left inset inside the message band.
+pub const RAIL_LEFT_INSET: f32 = 4.;
+/// Left padding the transcript reserves while the rail is visible.
+pub const GUTTER: f32 = 40.;
+/// Cap on the marks ladder's height before it scrolls internally.
+pub const MAX_RAIL_HEIGHT: f32 = 420.;
+/// Minimum conversation-card width for the rail to mount.
+pub const MIN_CARD_WIDTH: f32 = 640.;
+
+const TICK_REST_W: f32 = 12.;
+const TICK_HOVER_W: f32 = 18.;
+const TICK_ACTIVE_W: f32 = 20.;
+const TICK_H: f32 = 2.;
+/// Hover preview card: width, height budget, and gap off the marks.
+const PREVIEW_WIDTH: f32 = 300.;
+const PREVIEW_HEIGHT: f32 = 100.;
+const PREVIEW_GAP: f32 = 10.;
+/// Preview enter / travel and active-tick tween durations (dsh's values).
+const PREVIEW_ENTER_MS: u64 = 120;
+const PREVIEW_TRAVEL_MS: u64 = 140;
+const TICK_TWEEN_MS: u64 = 140;
+/// Preview budgets: one prompt line, a few response lines.
+const PROMPT_PREVIEW_CHARS: usize = 50;
+const RESPONSE_PREVIEW_CHARS: usize = 120;
+
+/// One rail mark: the conversation item the turn anchors on (its user
+/// bubble) plus the bounded preview texts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RailTurn {
+    pub item_ix: usize,
+    pub prompt: String,
+    pub response: String,
+}
+
+/// Project the conversation into ascending rail turns. The prompt is the
+/// user bubble's text — word-accumulated up to the preview budget, or the
+/// ⌘M navigator's attachment-only / empty-message copy for bubbles with no
+/// text; the response is the turn's last non-empty assistant reply (dsh's
+/// `findLast` rule), capped the same way. Assistant rows before the first
+/// user bubble belong to no turn and are dropped. Both caps walk at most
+/// the budget's worth of words (`cap_preview`), so a huge turn costs
+/// O(limit) per row, not O(全文).
+pub fn collect_rail_turns<'a>(items: impl Iterator<Item = (usize, &'a ConvItem)>) -> Vec<RailTurn> {
+    let mut turns: Vec<RailTurn> = Vec::new();
+    for (ix, item) in items {
+        match item {
+            ConvItem::User { text, images, .. } => turns.push(RailTurn {
+                item_ix: ix,
+                prompt: prompt_preview(text, !images.is_empty()),
+                response: String::new(),
+            }),
+            ConvItem::Assistant { text, .. } => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if let Some(last) = turns.last_mut() {
+                    // Every non-empty reply overwrites the previous one, so
+                    // the last one wins; each overwrite only costs O(limit)
+                    // thanks to the word walk in `cap_preview`.
+                    last.response = cap_preview(text, RESPONSE_PREVIEW_CHARS);
+                }
+            }
+            _ => {}
+        }
+    }
+    turns
+}
+
+/// The prompt line's display text: the capped bubble text — or, for a
+/// textless bubble, the ⌘M navigator's attachment-only / empty-message copy
+/// (the same distinction `TurnEntry::new` draws, so both surfaces name the
+/// same turn the same way).
+fn prompt_preview(text: &str, has_images: bool) -> String {
+    let capped = cap_preview(text, PROMPT_PREVIEW_CHARS);
+    if !capped.is_empty() {
+        capped
+    } else if has_images {
+        i18n::t("turn-navigator-attachment-only").to_string()
+    } else {
+        i18n::t("turn-navigator-empty-message").to_string()
+    }
+}
+
+/// Collapse whitespace and cap at `limit` characters with a trailing
+/// ellipsis when clipped. Words are accumulated up to the budget instead of
+/// slicing a prefix: `split_whitespace` skips runs of ANY whitespace length,
+/// so indented code blocks and aligned tables fill the budget exactly like
+/// prose (a prefix slice before collapsing would under-fill on multi-space
+/// runs), the walk stops once the budget is reached, and words never split
+/// mid-word. The `limit - 1` budget — ellipsis included, so exactly `limit`
+/// characters of content also folds — is dsh's `preview()` shape, kept for
+/// parity.
+fn cap_preview(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    let mut truncated = false;
+    for word in text.split_whitespace() {
+        let projected = out.chars().count() + word.chars().count() + usize::from(!out.is_empty());
+        if projected > limit - 1 {
+            truncated = true;
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if truncated && out.is_empty() {
+        // A single word longer than the budget: fall back to a character
+        // slice so the preview never comes back empty.
+        let head: String = text
+            .split_whitespace()
+            .next()
+            .expect("a word broke the budget, so one exists")
+            .chars()
+            .take(limit - 1)
+            .collect();
+        return format!("{head}…");
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
+}
+
+/// The mark at the reading line, given the list's logical top item: the last
+/// turn whose anchor is at or above it. The list's floor (tail-follow)
+/// reports `count` as the top, which resolves to the newest turn; rows above
+/// the first user bubble resolve to the first mark.
+pub fn active_mark(top_item_ix: usize, turns: &[RailTurn]) -> Option<usize> {
+    if turns.is_empty() {
+        return None;
+    }
+    Some(
+        turns
+            .iter()
+            .rposition(|turn| turn.item_ix <= top_item_ix)
+            .unwrap_or(0),
+    )
+}
+
+/// [`active_mark`] fed straight from the message list's scroll position.
+pub fn active_rail_turn(list_state: &ListState, turns: &[RailTurn]) -> Option<usize> {
+    active_mark(list_state.logical_scroll_top().item_ix, turns)
+}
+
+/// The marks ladder's laid-out height: its content size, capped by
+/// `MAX_RAIL_HEIGHT` and the rail box (which shrinks it on short bands).
+fn ladder_height(mark_count: usize, box_h: Pixels) -> Pixels {
+    px(mark_count as f32 * MARK_PITCH)
+        .min(px(MAX_RAIL_HEIGHT))
+        .min(box_h)
+}
+
+/// The ladder's top inside the rail box: centered while shorter than the
+/// box, flush while filling it. An unmeasured box (`None`, first frame)
+/// assumes a flush top until the capture lands.
+fn ladder_top(mark_count: usize, box_h: Option<Pixels>) -> Pixels {
+    match box_h {
+        None => px(0.),
+        Some(h) => (h - ladder_height(mark_count, h)) / 2.,
+    }
+}
+
+/// A mark's center y inside the rail box. `scroll_top` is the ladder's
+/// scrolled amount, already sign-corrected to positive-down
+/// (`-ScrollHandle::offset().y` — gpui's raw offset runs negative while
+/// scrolling down, the same convention `uniform_list` itself uses).
+fn mark_center_y(mark_ix: usize, ladder_top: Pixels, scroll_top: Pixels) -> Pixels {
+    ladder_top + px(mark_ix as f32 * MARK_PITCH + MARK_PITCH / 2.) - scroll_top
+}
+
+/// Clamp the preview's top so the card stays inside the rail box. An
+/// unmeasured box skips the clamp's ceiling; the band's own
+/// `overflow_hidden` is the backstop for that first frame.
+fn preview_top(mark_y: Pixels, box_h: Option<Pixels>) -> Pixels {
+    let centered = (mark_y - px(PREVIEW_HEIGHT / 2.)).max(px(0.));
+    match box_h {
+        None => centered,
+        Some(h) => centered.min((h - px(PREVIEW_HEIGHT)).max(px(0.))),
+    }
+}
+
+fn lerp_px(a: Pixels, b: Pixels, delta: f32) -> Pixels {
+    px(f32::from(a) + (f32::from(b) - f32::from(a)) * delta)
+}
+
+fn lerp_hsla(a: Hsla, b: Hsla, delta: f32) -> Hsla {
+    Hsla {
+        h: a.h + (b.h - a.h) * delta,
+        s: a.s + (b.s - a.s) * delta,
+        l: a.l + (b.l - a.l) * delta,
+        a: a.a + (b.a - a.a) * delta,
+    }
+}
+
+/// Jump callback: receives the anchor item index of the clicked mark.
+pub type JumpFn = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// Build the rail for the current frame: marks, hover preview, and the
+/// per-frame bookkeeping (active-tick tween endpoints, preview travel
+/// origin, active-follow). Returns `None` below two turns.
+///
+/// The bookkeeping writes land before the elements are built and repaint
+/// the same frame, so no notify is sent — the frame is already in flight.
+pub fn render_turn_rail(
+    theme: &Theme,
+    chat: &Entity<ChatColumn>,
+    turns: Vec<RailTurn>,
+    on_jump: JumpFn,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let count = turns.len();
+    if count < 2 {
+        return None;
+    }
+    let active = active_rail_turn(&chat.read(cx).list_state, &turns)?;
+
+    let box_h_raw = chat.read(cx).turn_rail_box_h.get();
+    let box_h = (box_h_raw > px(0.)).then_some(box_h_raw);
+    // Sign-corrected to positive-down: gpui's ScrollHandle offset runs
+    // NEGATIVE while scrolling down (clamped to [-max_offset, 0]), so the
+    // raw value must be negated before feeding the geometry (the same
+    // `let scroll_top = -offset.y` convention uniform_list itself uses).
+    let scroll_top = -chat
+        .read(cx)
+        .turn_rail_scroll
+        .0
+        .borrow()
+        .base_handle
+        .offset()
+        .y;
+    let hover = chat.read(cx).turn_rail_hover;
+    let travel_from = match (
+        chat.read(cx).turn_rail_preview_mark,
+        chat.read(cx).turn_rail_preview_top,
+        hover,
+    ) {
+        (Some(prev_mark), Some(top), Some(ix)) if prev_mark != ix => Some(top),
+        _ => None,
+    };
+    let new_preview_top = hover.map(|ix| {
+        preview_top(
+            mark_center_y(ix, ladder_top(count, box_h), scroll_top),
+            box_h,
+        )
+    });
+
+    chat.update(cx, |chat, _| {
+        if chat.turn_rail_active != Some(active) {
+            chat.turn_rail_active_from = chat.turn_rail_active;
+            chat.turn_rail_active = Some(active);
+            chat.turn_rail_active_gen += 1;
+        }
+        // The active mark centers only while the pointer is elsewhere;
+        // inside the rail the marks never travel under the hand.
+        if !chat.turn_rail_pointer_inside && chat.turn_rail_followed != Some((active, count)) {
+            chat.turn_rail_followed = Some((active, count));
+            chat.turn_rail_scroll
+                .scroll_to_item(active, ScrollStrategy::Nearest);
+        }
+        // Preview bookkeeping: an appearance replays the enter run with no
+        // travel origin; a re-target keeps the last painted top as the
+        // travel origin (dsh's indicator_from discipline — snapshot only
+        // when the target changes).
+        match (chat.turn_rail_preview_mark, hover) {
+            (None, Some(_)) => {
+                chat.turn_rail_preview_mark = hover;
+                chat.turn_rail_preview_top = None;
+                chat.turn_rail_preview_gen += 1;
+            }
+            (Some(prev_mark), Some(ix)) if prev_mark != ix => {
+                chat.turn_rail_preview_mark = Some(ix);
+            }
+            _ => {}
+        }
+        if hover.is_none() {
+            chat.turn_rail_preview_mark = None;
+            chat.turn_rail_preview_top = None;
+        } else {
+            chat.turn_rail_preview_top = new_preview_top;
+        }
+        // Hover wave: a change snapshots the vacated mark and keys one tween
+        // pair — the new target grows from rest, the vacated mark shrinks
+        // back — so a pointer sweep ripples down the rail (dsh's 140ms
+        // hover transition).
+        if chat.turn_rail_hover != chat.turn_rail_hover_painted {
+            chat.turn_rail_hover_prev = chat.turn_rail_hover_painted;
+            chat.turn_rail_hover_painted = chat.turn_rail_hover;
+            chat.turn_rail_hover_gen += 1;
+        }
+    });
+
+    let enter_gen = chat.read(cx).turn_rail_preview_gen;
+
+    let item_ixes: Vec<usize> = turns.iter().map(|turn| turn.item_ix).collect();
+    let chat_for_marks = chat.clone();
+    let theme_for_marks = theme.clone();
+    let scroll = chat.read(cx).turn_rail_scroll.clone();
+    let marks = uniform_list(
+        "turn-rail-marks",
+        count,
+        move |visible_range, _window, cx| {
+            let state = chat_for_marks.read(cx);
+            let active = state.turn_rail_active;
+            let from_active = state.turn_rail_active_from;
+            let active_gen = state.turn_rail_active_gen;
+            let hover = state.turn_rail_hover;
+            let hover_prev = state.turn_rail_hover_prev;
+            let hover_gen = state.turn_rail_hover_gen;
+            visible_range
+                .map(|ix| {
+                    render_mark_row(
+                        ix,
+                        item_ixes[ix],
+                        active,
+                        from_active,
+                        active_gen,
+                        hover,
+                        hover_prev,
+                        hover_gen,
+                        &theme_for_marks,
+                        chat_for_marks.clone(),
+                        on_jump.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .with_sizing_behavior(ListSizingBehavior::Infer)
+    .max_h(px(MAX_RAIL_HEIGHT))
+    .w_full()
+    .track_scroll(&scroll);
+
+    let preview = hover.filter(|ix| *ix < count).map(|ix| {
+        let top = new_preview_top.expect("top computed for every hover");
+        render_preview(theme, &turns[ix], ix, enter_gen, travel_from, top)
+    });
+
+    let box_h_cell = chat.read(cx).turn_rail_box_h.clone();
+    let chat_for_hover = chat.clone();
+    Some(
+        div()
+            .id("turn-rail")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(RAIL_LEFT_INSET))
+            .w(px(RAIL_WIDTH))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .debug_selector(|| "turn-rail".into())
+            .on_prepaint(move |bounds, _window, _app| box_h_cell.set(bounds.size.height))
+            .on_hover(move |inside, _window, cx| {
+                chat_for_hover.update(cx, |chat, cx| {
+                    chat.turn_rail_pointer_inside = *inside;
+                    if !inside && chat.turn_rail_hover.is_some() {
+                        chat.turn_rail_hover = None;
+                    }
+                    cx.notify();
+                });
+            })
+            .child(marks)
+            .children(preview)
+            .into_any_element(),
+    )
+}
+
+/// One 10px hit row with its tick visual. The row is the click/hover target;
+/// the tick is purely visual, left-anchored (the mirrored image of dsh's
+/// right-anchored marks).
+///
+/// Every state change tweens between the tick's own previous and current
+/// style (dsh's 140ms CSS-transition semantics): the hovered mark rises from
+/// rest, the vacated mark sinks back — a pointer sweep down the ladder reads
+/// as a wave — and the active hand-off grows one mark while shrinking the
+/// other. Each change runs under a fresh id keyed by its generation, so it
+/// starts from the resting style instead of resuming. Known design limit:
+/// `turn_rail_hover_prev` holds a single slot, so when the pointer crosses a
+/// third mark within the 140ms window the earliest vacated mark is already
+/// off the tree and snaps back to rest instead of tweening — fast sweeps
+/// truncate the wave's tail by design.
+// Eleven parameters, but they are the row's whole world: the frame state
+// snapshot (active/from/gen, hover/prev/gen), the mark's identity, and the
+// theme + state/callback handles. A parameters struct would just move the
+// same names one indent deeper.
+#[allow(clippy::too_many_arguments)]
+fn render_mark_row(
+    ix: usize,
+    item_ix: usize,
+    active: Option<usize>,
+    from_active: Option<usize>,
+    active_gen: u64,
+    hover: Option<usize>,
+    hover_prev: Option<usize>,
+    hover_gen: u64,
+    theme: &Theme,
+    chat: Entity<ChatColumn>,
+    on_jump: JumpFn,
+) -> AnyElement {
+    let is_active = active == Some(ix);
+    let is_hover = hover == Some(ix) && !is_active;
+    let (target_w, target_color) = if is_active {
+        (px(TICK_ACTIVE_W), theme.foreground)
+    } else if is_hover {
+        (px(TICK_HOVER_W), theme.muted_foreground)
+    } else {
+        (px(TICK_REST_W), theme.border)
+    };
+
+    let (rest_color, hover_color, active_color) =
+        (theme.border, theme.muted_foreground, theme.foreground);
+    let base = move |el: gpui::Div| el.w(target_w).h(px(TICK_H)).rounded_full();
+    let tick: AnyElement = if is_active && from_active.is_some() {
+        // The new active mark grows from rest.
+        base(div())
+            .with_animation(
+                format!("turn-rail-tick-{ix}-{active_gen}"),
+                Animation::new(Duration::from_millis(TICK_TWEEN_MS)).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    el.w(lerp_px(px(TICK_REST_W), target_w, delta))
+                        .bg(lerp_hsla(rest_color, active_color, delta))
+                },
+            )
+            .into_any_element()
+    } else if !is_active && from_active == Some(ix) && !is_hover {
+        // The mark that lost active sinks back (unless the pointer took it —
+        // the hover wave owns the animation slot then).
+        base(div())
+            .with_animation(
+                format!("turn-rail-tick-{ix}-{active_gen}"),
+                Animation::new(Duration::from_millis(TICK_TWEEN_MS)).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    el.w(lerp_px(px(TICK_ACTIVE_W), target_w, delta))
+                        .bg(lerp_hsla(active_color, rest_color, delta))
+                },
+            )
+            .into_any_element()
+    } else if is_hover && hover_prev != Some(ix) {
+        // Just hovered: rise from rest (the wave's leading crest).
+        base(div())
+            .with_animation(
+                format!("turn-rail-hover-{ix}-{hover_gen}"),
+                Animation::new(Duration::from_millis(TICK_TWEEN_MS)).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    el.w(lerp_px(px(TICK_REST_W), target_w, delta))
+                        .bg(lerp_hsla(rest_color, hover_color, delta))
+                },
+            )
+            .into_any_element()
+    } else if hover_prev == Some(ix) && !is_hover && !is_active {
+        // Just vacated: sink back to rest (the wave's trailing edge).
+        base(div())
+            .with_animation(
+                format!("turn-rail-hover-{ix}-{hover_gen}"),
+                Animation::new(Duration::from_millis(TICK_TWEEN_MS)).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    el.w(lerp_px(px(TICK_HOVER_W), target_w, delta))
+                        .bg(lerp_hsla(hover_color, rest_color, delta))
+                },
+            )
+            .into_any_element()
+    } else {
+        base(div()).bg(target_color).into_any_element()
+    };
+
+    let chat_for_enter = chat.clone();
+    let chat_for_leave = chat.clone();
+    h_flex()
+        .id(("turn-rail-mark", ix))
+        .h(px(MARK_PITCH))
+        .w_full()
+        .items_center()
+        .debug_selector(move || format!("turn-rail-mark-{item_ix}"))
+        .on_hover(move |hovered, _window, cx| {
+            if *hovered {
+                chat_for_enter.update(cx, |chat, cx| {
+                    if chat.turn_rail_hover != Some(ix) {
+                        chat.turn_rail_hover = Some(ix);
+                        cx.notify();
+                    }
+                });
+            } else {
+                // Only retract the row's own mark: a stale leave landing
+                // after the next row's enter must not clear it (gpui hover
+                // crossing).
+                chat_for_leave.update(cx, |chat, cx| {
+                    if chat.turn_rail_hover == Some(ix) {
+                        chat.turn_rail_hover = None;
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .on_click(move |_: &ClickEvent, window, cx| on_jump(item_ix, window, cx))
+        .child(tick)
+        .into_any_element()
+}
+
+/// The hover card: prompt line over response excerpt, fading in with a 4px
+/// slide from the marks and traveling between marks without replaying the
+/// enter run. The prompt arrives pre-shaped (`collect_rail_turns` already
+/// picked the attachment-only / empty-message copy), so it renders as-is.
+fn render_preview(
+    theme: &Theme,
+    turn: &RailTurn,
+    ix: usize,
+    enter_gen: u64,
+    travel_from: Option<Pixels>,
+    top: Pixels,
+) -> AnyElement {
+    let prompt = SharedString::from(turn.prompt.clone());
+    let mut card = v_flex()
+        .debug_selector(|| "turn-rail-preview".into())
+        .w(px(PREVIEW_WIDTH))
+        .max_h(px(PREVIEW_HEIGHT))
+        .overflow_hidden()
+        .p_2()
+        .gap_1()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.popover)
+        .text_color(theme.popover_foreground)
+        .shadow_md()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .truncate()
+                .child(prompt),
+        );
+    if !turn.response.is_empty() {
+        card = card.child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(SharedString::from(turn.response.clone())),
+        );
+    }
+    let entered = div()
+        .with_animation(
+            format!("turn-rail-preview-enter-{enter_gen}"),
+            Animation::new(Duration::from_millis(PREVIEW_ENTER_MS)).with_easing(ease_out_quint()),
+            |el, delta| el.opacity(delta).ml(px(4. * (1. - delta))),
+        )
+        .child(card);
+    match travel_from {
+        Some(from_top) => div()
+            .absolute()
+            .left(px(RAIL_WIDTH + PREVIEW_GAP))
+            .with_animation(
+                format!("turn-rail-preview-top-{ix}"),
+                Animation::new(Duration::from_millis(PREVIEW_TRAVEL_MS))
+                    .with_easing(ease_out_quint()),
+                move |el, delta| el.top(lerp_px(from_top, top, delta)),
+            )
+            .child(entered)
+            .into_any_element(),
+        None => div()
+            .absolute()
+            .left(px(RAIL_WIDTH + PREVIEW_GAP))
+            .top(top)
+            .child(entered)
+            .into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(text: &str) -> ConvItem {
+        ConvItem::User {
+            text: text.to_string(),
+            images: Vec::new(),
+            meta: None,
+        }
+    }
+
+    fn assistant(text: &str) -> ConvItem {
+        ConvItem::Assistant {
+            text: text.to_string(),
+            streaming: false,
+            token_usage: None,
+            activity_header: false,
+            entry_id: None,
+            fork_unavailable: None,
+        }
+    }
+
+    #[test]
+    fn collects_ascending_turns_with_last_non_empty_response() {
+        let items = [
+            assistant("orphan reply"),
+            user("first"),
+            assistant("first reply"),
+            assistant("  "),
+            assistant("first reply two"),
+            user("second"),
+            assistant("second reply"),
+        ];
+        let turns = collect_rail_turns(items.iter().enumerate());
+        assert_eq!(
+            turns,
+            vec![
+                RailTurn {
+                    item_ix: 1,
+                    prompt: "first".into(),
+                    response: "first reply two".into(),
+                },
+                RailTurn {
+                    item_ix: 5,
+                    prompt: "second".into(),
+                    response: "second reply".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn caps_previews_with_trailing_ellipsis() {
+        let long = "word ".repeat(40);
+        let capped = cap_preview(&long, 20);
+        assert!(capped.chars().count() <= 20);
+        assert!(capped.ends_with('…'));
+
+        let short = cap_preview("short", 20);
+        assert_eq!(short, "short");
+    }
+
+    #[test]
+    fn cap_preview_fills_the_budget_regardless_of_whitespace_runs() {
+        // Indented-block style text (multi-space runs): the word walk must
+        // fill the budget exactly like prose and keep the truncation mark —
+        // a prefix-slice-then-collapse would under-fill AND drop the `…`
+        // (review round 3, B).
+        let indented: String = "word".to_string() + &" ".repeat(20);
+        let indented = indented.repeat(200);
+        let prose = "word ".repeat(200);
+        let indented_capped = cap_preview(&indented, 120);
+        let prose_capped = cap_preview(&prose, 120);
+        assert_eq!(
+            indented_capped.chars().count(),
+            prose_capped.chars().count(),
+            "multi-space runs must fill the budget like prose"
+        );
+        assert_eq!(indented_capped.chars().count(), 120);
+        assert!(indented_capped.ends_with('…'));
+        assert!(prose_capped.ends_with('…'));
+    }
+
+    #[test]
+    fn cap_preview_never_returns_empty_for_an_overlong_word() {
+        let capped = cap_preview(&"x".repeat(200), 20);
+        assert_eq!(capped.chars().count(), 20);
+        assert!(capped.ends_with('…'));
+    }
+
+    #[test]
+    fn textless_bubbles_use_the_navigator_copy_by_attachment_presence() {
+        // Textless with images → the attachment-only copy.
+        assert_eq!(
+            prompt_preview("", true),
+            i18n::t("turn-navigator-attachment-only")
+        );
+        // Textless without images → the empty-message copy, not the
+        // attachment-only one (the ⌘M navigator's distinction).
+        assert_eq!(
+            prompt_preview(" ", false),
+            i18n::t("turn-navigator-empty-message")
+        );
+        // Texted bubbles carry the capped text either way.
+        assert_eq!(prompt_preview("hello", true), "hello");
+    }
+
+    #[test]
+    fn active_mark_tracks_reading_line() {
+        let turns = collect_rail_turns(
+            [
+                user("a"),
+                assistant("ra"),
+                user("b"),
+                assistant("rb"),
+                user("c"),
+            ]
+            .iter()
+            .enumerate(),
+        );
+        // Anchors at items 0, 2, 4.
+        assert_eq!(active_mark(0, &turns), Some(0));
+        assert_eq!(active_mark(2, &turns), Some(1));
+        assert_eq!(active_mark(3, &turns), Some(1));
+        assert_eq!(active_mark(5, &turns), Some(2));
+        // The tail-follow floor reports `count` as the top → newest mark.
+        assert_eq!(active_mark(usize::MAX, &turns), Some(2));
+    }
+
+    #[test]
+    fn active_mark_is_none_without_turns() {
+        assert_eq!(active_mark(0, &[]), None);
+    }
+
+    #[test]
+    fn preview_top_clamps_inside_a_measured_box() {
+        let box_h = px(300.);
+        assert_eq!(preview_top(px(150.), Some(box_h)), px(100.));
+        // Near the edges: pinned inside the box.
+        assert_eq!(preview_top(px(40.), Some(box_h)), px(0.));
+        assert_eq!(preview_top(px(290.), Some(box_h)), px(200.));
+        // An unmeasured box only clamps the floor.
+        assert_eq!(preview_top(px(-30.), None), px(0.));
+        assert_eq!(preview_top(px(500.), None), px(450.));
+    }
+
+    #[test]
+    fn ladder_geometry_centers_short_content() {
+        let box_h = px(300.);
+        assert_eq!(ladder_height(3, box_h), px(30.));
+        assert_eq!(ladder_top(3, Some(box_h)), px(135.));
+        // Tall content fills the box: flush top, capped height.
+        assert_eq!(ladder_height(100, box_h), px(300.));
+        assert_eq!(ladder_top(100, Some(box_h)), px(0.));
+        assert_eq!(mark_center_y(2, px(135.), px(0.)), px(160.));
+    }
+}

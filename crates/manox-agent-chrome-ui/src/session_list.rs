@@ -1,36 +1,64 @@
 //! The sidebar session tree — SessionList (fixed rows + workspace groups +
 //! session rows + the bottom Customizations block).
 //!
-//! Pixel-calibrated against the agents-window reference: group headers
-//! (chevron + folder + name) collapse; session rows are two-line fixed-height
-//! 46px cards (status icon + title | time · pinned/unread meta); the selected
-//! row is a white card with a stroke and floating pin/archive actions on its
-//! right edge; hover is `#00000014`. Header overlap rule: the Sessions title
-//! fills the width underneath, the right-side controls (New / sort / search)
-//! float above it with an opaque background — a too-narrow sidebar occludes
-//! the title rather than squeezing the controls.
+//! Pixel-calibrated against the agents-window reference: every session row is a
+//! fixed-height 66px three-line card — title (16px status slot + 6px gap) /
+//! tag line (short-id chip + user chip) / info line (last-active time) — all
+//! three lines sharing one left baseline with no right-aligned content and no
+//! per-row indentation (hierarchy is expressed by the group header alone).
+//! All row actions (pin / archive / tags / copy id) live exclusively in the
+//! right-click menu ([`SessionList::on_row_menu`]); the row surface itself
+//! carries no controls. Header overlap rule: the Sessions title fills the
+//! width underneath, the right-side controls (New / sort / search) float
+//! above it with an opaque background — a too-narrow sidebar occludes the
+//! title rather than squeezing the controls.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
 use crate::theme::{
-    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, BORDER, CARD_BG, CARD_BORDER, ERR_RED, FG, FG_FAINT,
-    FG_STRONG, Icon, LIST_HOVER, OK_GREEN, icon, icons,
+    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, BORDER, CARD_BG, CARD_BORDER, ERR_RED, FG, FG_DIM,
+    FG_FAINT, FG_STRONG, FONT_UI, IconAsset, LIST_HOVER, SHELL_BG, icon, icons,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnimationExt, App, ClickEvent, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
-    RenderOnce, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px,
+    AnimationExt, App, ClickEvent, Entity, FocusHandle, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Window, div, linear_color_stop, linear_gradient, px,
 };
+use gpui_component::input::{Input, InputState};
+use gpui_component::{ElementExt as _, Sizable as _};
 
-use crate::primitives::{icon_button, kbd_chip, small_icon_button};
+use crate::primitives::{IconButtonState, icon_button, kbd_chip, small_icon_button};
 
-/// Action callback taking a row id (select / toggle group / pin / archive).
+/// The sidebar's two grouping modes: by workspace (project) — the default,
+/// drag-reorderable — or by last-activity time buckets (today / yesterday /
+/// last 7 days / earlier).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SidebarGrouping {
+    #[default]
+    Workspace,
+    Time,
+}
+
+impl SidebarGrouping {
+    pub fn is_time(self) -> bool {
+        self == Self::Time
+    }
+}
+
+/// Action callback taking a row id (select / toggle group / menu target).
 pub type OnId = Rc<dyn Fn(&String, &mut Window, &mut App)>;
 /// Action callback with no payload (New).
 pub type OnUnit = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
-/// Row-menu callback (id + open position, right-click / kebab).
+/// Row-menu callback (id + open position, right-click).
 pub type OnRowMenu = Rc<dyn Fn(&String, gpui::Point<Pixels>, &mut Window, &mut App)>;
+/// Hover-enter/leave callback (row id, entered?).
+pub type OnHover = Rc<dyn Fn(&String, bool, &mut Window, &mut App)>;
+/// Plain window callback (tag-edit cancel on Escape).
+pub type OnWindowApp = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Drag-over-group callback updating the drop marker (dragged, target, before-half?).
 pub type OnGroupDragMove = Rc<dyn Fn(&String, &String, bool, &mut Window, &mut App)>;
 /// Drop-commit callback for group reordering (dragged, target, before-half?).
@@ -43,23 +71,31 @@ pub type OnGroupMove = Rc<dyn Fn(&String, &String, bool, &mut Window, &mut App)>
 pub struct SessionRowData {
     pub id: String,
     pub title: String,
-    pub time: String,
+    /// Last-active unix seconds — the info line's display source.
+    pub updated_at: i64,
+    /// The re-sort stamp: the row's own `updated_at`, except team members,
+    /// which the projection stamps with their leader's — a team sorts (and
+    /// survives a pin re-order) as one unit, contiguous under its chevron.
+    pub sort_stamp: i64,
     pub status: SessionStatus,
     pub pinned: bool,
-    pub unread: bool,
-    /// The user tag chip beside the title (D2: the persisted sidecar tag).
+    /// The store-partition flag behind the menu's archive/unarchive toggle.
+    /// Premise: the wire snapshot rides the ACTIVE partition only, so this
+    /// reads false on every row the shell is fed today — the unarchive half
+    /// is for the archived-partition rows the wire will grow; until then the
+    /// menu always offers archive.
+    pub archived: bool,
+    /// The persisted user tag chip on the tag line.
     pub tag: Option<String>,
-    /// Team-nesting depth (`depth * 14px` indent + a 1px guide rail);
-    /// 0 = top-level row.
-    pub indent: u8,
-    /// A team leader renders its collapse chevron before the status glyph.
+    /// A team leader renders its collapse chevron before the status slot
+    /// (the row itself does not indent — nesting shows via the chevron only).
     pub team_leader: bool,
 }
 
-/// The row's five-state machine (D2 parity with the agent-ui sidebar):
-/// `Errored` paints the danger triangle, `PendingAuth`/`PendingPlan` the
-/// pulsing attention dot (info/accent), `Running` the falling blocks,
-/// `Unread` the static filled dot, `Idle` the empty slot.
+/// The row's five-state machine (parity with the agent-ui sidebar). States
+/// where a turn stopped and waits for a human (`PendingAuth`/`PendingPlan`)
+/// render the filled blue dot; `Unread` the hollow one; `Running` the pixel
+/// grid; `Errored` the danger triangle; `Idle` the empty slot.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SessionStatus {
     Idle,
@@ -73,7 +109,12 @@ pub enum SessionStatus {
 /// One workspace group.
 #[derive(Clone, PartialEq)]
 pub struct SessionGroup {
+    /// Display name (the header label).
     pub name: String,
+    /// Stable state key — collapse state and drag identity ride THIS, never
+    /// the display name (which follows the UI language in time grouping and
+    /// must not become state).
+    pub key: String,
     pub collapsed: bool,
     pub rows: Vec<SessionRowData>,
 }
@@ -81,7 +122,7 @@ pub struct SessionGroup {
 /// A fixed sidebar row (Automations / Chats …) — labels come from the host.
 #[derive(Clone, PartialEq)]
 pub struct FixedRow {
-    pub icon: Icon,
+    pub icon: IconAsset,
     pub label: String,
     pub badge: Option<String>,
 }
@@ -89,14 +130,64 @@ pub struct FixedRow {
 /// A Customizations block row.
 #[derive(Clone, PartialEq)]
 pub struct CustomizationRow {
-    pub icon: Icon,
+    pub icon: IconAsset,
     pub label: String,
     pub count: Option<u32>,
 }
 
-/// Uniform two-line row height (identical across the three states so a state
-/// change never reflows the list).
-const ROW_H: f32 = 46.;
+// ---- thread-item geometry -------------------------------------------------
+
+/// Uniform three-line row height (identical across the four states so a state
+/// change never reflows the list). 66 = pad_y(5) + 20 + 2 + 17 + 2 + 15 + 5.
+const ROW_H: f32 = 66.;
+const PAD_X: f32 = 8.;
+/// The status slot every state reserves (16px, even when visually empty).
+const LEAD: f32 = 16.;
+/// Status-slot → text gap; title / tags / info share the resulting baseline.
+const GAP: f32 = 6.;
+/// Team-leader chevron slot (icon + margin) prepended to the baseline.
+const CHEVRON_SLOT: f32 = 15.;
+const PAD_Y: f32 = 5.;
+const L1_H: f32 = 20.;
+const L2_H: f32 = 17.;
+const L3_H: f32 = 15.;
+const LINE_GAP: f32 = 2.;
+const ROW_R: f32 = 6.;
+const TITLE_SIZE: f32 = 12.5;
+
+/// Marquee parameters: 24px/s, a 600ms hold once per cycle, a 24px gap
+/// separating the two track copies; runs
+/// only while hovered and the title is actually truncated. The track is
+/// [copy][gap][copy] and every cycle scrolls exactly one period, so the
+/// wrap-around lands on pixel-identical content — a seamless loop.
+const MARQUEE_SPEED: f32 = 24.;
+const MARQUEE_PAUSE: f32 = 0.6;
+const MARQUEE_GAP: f32 = 24.;
+const MARQUEE_FADE_W: f32 = 14.;
+
+/// The running pixel grid: a 2×3 dot matrix, 2px dots, 2px gaps, one
+/// 1820ms stepped cycle; the long/short variants stretch or shrink the
+/// middle hold so the cascade reads as a wave.
+const PIXEL_GRID_MS: f32 = 1820.;
+/// Per-dot keyframe variants: dots 1-4 the standard cycle, dot 5 long, dot 6
+/// short (delays in ms — the calibration's values).
+const PIXEL_DOTS: [(f32, SpinVariant); 6] = [
+    (520., SpinVariant::Cycle),
+    (650., SpinVariant::Cycle),
+    (260., SpinVariant::Cycle),
+    (390., SpinVariant::Cycle),
+    (0., SpinVariant::Long),
+    (130., SpinVariant::Short),
+];
+
+/// Which keyframe set a pixel-grid dot follows (the long/short variants
+/// stretch or shrink the middle hold so the cascade reads as a wave).
+#[derive(Clone, Copy)]
+enum SpinVariant {
+    Cycle,
+    Long,
+    Short,
+}
 
 /// SessionList: props-driven; interactions surface through callbacks, never
 /// through global state.
@@ -108,15 +199,42 @@ pub struct SessionList {
     pub selected: Option<String>,
     /// Show the "No chats" empty hint under the Chats row.
     pub no_chats_hint: bool,
+    /// The hovered row id (hover = 500 title weight + marquee trigger).
+    pub hovered: Option<String>,
+    /// The inline tag editor (row id + input), mounted on that row's tag
+    /// line. At most one edit in flight.
+    pub tag_edit: Option<(String, Entity<InputState>)>,
+    /// The sidebar grouping mode (the sort button's state).
+    pub grouping: SidebarGrouping,
+    /// The sort button: workspace grouping ↔ time buckets.
+    pub on_toggle_grouping: OnUnit,
+    /// The search button: expand/collapse the filter row.
+    pub on_toggle_search: OnUnit,
+    /// Whether the filter input row is expanded.
+    pub filter_open: bool,
+    /// Whether a filter term is active (non-empty) — with zero surviving
+    /// groups the list shows the no-match hint.
+    pub filter_active: bool,
+    /// The filter input (mounted inside the filter row while open).
+    pub filter_input: Option<Entity<InputState>>,
+    /// The filter row's clear (×) control: collapse and reset.
+    pub on_filter_clear: Option<OnWindowApp>,
+    /// Per-row title clip-box width, written unguarded by each row's
+    /// `on_prepaint` every frame; the marquee reads the last painted value.
+    pub title_box_w: Rc<RefCell<HashMap<String, Pixels>>>,
+    /// Per-row focus handles: `track_focus` + up/down row navigation.
+    pub row_focus: Rc<HashMap<String, FocusHandle>>,
     pub on_select: OnId,
     pub on_toggle_group: OnId,
     pub on_new: OnUnit,
-    /// Pin/archive for the selected row (the host performs the real store
-    /// write; the shell flips its local copy for immediate feedback).
-    pub on_pin: Option<OnId>,
-    pub on_archive: Option<OnId>,
-    /// Row menu (kebab / right-click): copy Thread ID, pin, archive.
+    pub on_hover_row: OnHover,
+    /// Row menu (right-click anywhere on the row): the only action surface.
     pub on_row_menu: OnRowMenu,
+    /// Escape inside the inline tag editor.
+    pub on_tag_edit_cancel: Option<OnWindowApp>,
+    /// Double-click on a row's user tag chip: begin the RENAME editor (the
+    /// old shell's chip double-click semantics).
+    pub on_tag_rename: OnId,
     /// Group reorder commit (dragged → before/after edge of target).
     pub on_move_group: OnGroupMove,
     /// Drag-over-group: update the drop marker (insertion-line position).
@@ -127,7 +245,16 @@ pub struct SessionList {
 }
 
 impl RenderOnce for SessionList {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        // Flat visible-row order for the up/down focus walk (collapsed
+        // groups contribute nothing).
+        let order: Vec<String> = self
+            .groups
+            .iter()
+            .flat_map(|g| (!g.collapsed).then(|| g.rows.iter().map(|r| r.id.clone())))
+            .flatten()
+            .collect();
+
         div()
             .flex()
             .flex_col()
@@ -137,7 +264,19 @@ impl RenderOnce for SessionList {
             .px(px(8.))
             .gap(px(1.))
             .text_color(FG)
-            .child(header(self.on_new.clone()))
+            .child(header(
+                self.on_new.clone(),
+                self.grouping,
+                self.on_toggle_grouping.clone(),
+                self.on_toggle_search.clone(),
+                self.filter_open,
+            ))
+            .when(self.filter_open, |this| {
+                this.child(filter_row(
+                    self.filter_input.clone(),
+                    self.on_filter_clear.clone(),
+                ))
+            })
             .child(
                 div()
                     .id("sessions-scroll")
@@ -161,18 +300,46 @@ impl RenderOnce for SessionList {
                                 .child(manox_i18n::t("chrome-no-chats")),
                         )
                     })
-                    .children(self.groups.iter().map(|g| group(&self, g))),
+                    .children(self.groups.iter().map(|g| group(&self, g, &order, window)))
+                    // A filter active on a fully-filtered-out list: an empty
+                    // state of its own, distinct from "no chats yet".
+                    .when(
+                        self.filter_active && !self.no_chats_hint && self.groups.is_empty(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .mx(px(20.))
+                                    .py(px(3.))
+                                    .px(px(6.))
+                                    .text_size(px(12.))
+                                    .text_color(FG_FAINT)
+                                    .child(manox_i18n::t("chrome-sidebar-no-match")),
+                            )
+                        },
+                    ),
             )
             .child(customizations(&self.customizations))
     }
 }
 
+/// A localized hover tooltip view (gpui-component Tooltip over the Root).
+fn hover_tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    move |window, cx| gpui_component::tooltip::Tooltip::new(manox_i18n::t(text)).build(window, cx)
+}
+
 /// Header: the Sessions title + New button (⌘N kbd chip) + sort/search.
-/// Overlap rule: the title layer fills the width underneath, the controls
-/// float above it with an opaque background — a narrow sidebar occludes the
-/// title (the reference screenshot's "Se…" truncation) instead of squeezing
-/// the controls.
-fn header(on_new: OnUnit) -> impl IntoElement {
+/// The sort button toggles workspace ↔ time grouping (lit in time mode); the
+/// search button expands the filter row (lit while open). Overlap rule: the
+/// title layer fills the width underneath, the controls float above it with
+/// an opaque background — a narrow sidebar occludes the title (the reference
+/// screenshot's "Se…" truncation) instead of squeezing the controls.
+fn header(
+    on_new: OnUnit,
+    grouping: SidebarGrouping,
+    on_toggle_grouping: OnUnit,
+    on_toggle_search: OnUnit,
+    filter_open: bool,
+) -> impl IntoElement {
     div()
         .relative()
         .w_full()
@@ -194,7 +361,7 @@ fn header(on_new: OnUnit) -> impl IntoElement {
                         .min_w_0()
                         .truncate()
                         .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::BOLD)
+                        .font_weight(FontWeight::BOLD)
                         .text_color(FG_STRONG)
                         .child(manox_i18n::t("chrome-sessions-title")),
                 ),
@@ -228,26 +395,82 @@ fn header(on_new: OnUnit) -> impl IntoElement {
                         .child(manox_i18n::t("chrome-new"))
                         .child(kbd_chip("⌘N")),
                 )
-                .child(icon_button(
-                    "sort",
-                    icons::SORT_PRECEDENCE,
-                    14.,
-                    false,
-                    |_, _, _| {},
-                ))
-                .child(icon_button(
-                    "search",
-                    icons::SEARCH,
-                    14.,
-                    false,
-                    |_, _, _| {},
-                )),
+                .child(
+                    icon_button(
+                        "sort",
+                        icons::SORT_PRECEDENCE,
+                        14.,
+                        if grouping.is_time() {
+                            IconButtonState::On
+                        } else {
+                            IconButtonState::Off
+                        },
+                        move |e, w, cx| on_toggle_grouping(e, w, cx),
+                    )
+                    .tooltip(hover_tooltip("chrome-sidebar-grouping")),
+                )
+                .child(
+                    icon_button(
+                        "search",
+                        icons::SEARCH,
+                        14.,
+                        if filter_open {
+                            IconButtonState::On
+                        } else {
+                            IconButtonState::Off
+                        },
+                        move |e, w, cx| on_toggle_search(e, w, cx),
+                    )
+                    .tooltip(hover_tooltip("chrome-sidebar-search")),
+                ),
         )
 }
 
-/// Fixed row: icon + label + badge (the badge hugs the label; no flex fill).
+/// The expanded filter row (under the header): search glyph + input + clear.
+/// Typing narrows the list live; × collapses the row and resets the term.
+fn filter_row(
+    filter_input: Option<Entity<InputState>>,
+    on_clear: Option<OnWindowApp>,
+) -> impl IntoElement {
+    div()
+        .id("sidebar-filter")
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .h(px(26.))
+        .px(px(6.))
+        .rounded(px(5.))
+        .border_1()
+        .border_color(BORDER)
+        .bg(CARD_BG)
+        .flex_shrink_0()
+        .text_color(FG_DIM)
+        .child(icon(icons::SEARCH, 13.))
+        .child(div().flex_1().min_w_0().children(filter_input.map(|input| {
+            Input::new(&input)
+                .appearance(false)
+                .h_full()
+                .w_full()
+                .text_size(px(12.))
+        })))
+        .children(on_clear.map(|cb| {
+            small_icon_button(
+                "sidebar-filter-clear",
+                icons::CLOSE,
+                10.,
+                FG_FAINT,
+                FG,
+                move |_, w, cx| cb(w, cx),
+            )
+        }))
+}
+
+/// Fixed row: icon + label + badge. Not implemented yet — the row renders
+/// dimmed and says so on hover; it stays inert until a real surface exists.
 fn fixed_row(row: &FixedRow) -> impl IntoElement {
     div()
+        .id(SharedString::from(format!("fixed-{}", row.label)))
         .w_full()
         .flex()
         .items_center()
@@ -256,6 +479,8 @@ fn fixed_row(row: &FixedRow) -> impl IntoElement {
         .px(px(8.))
         .rounded(px(4.))
         .flex_shrink_0()
+        .text_color(FG_FAINT)
+        .tooltip(hover_tooltip("chrome-unimplemented"))
         .child(icon(row.icon, 15.))
         .child(
             div()
@@ -305,21 +530,36 @@ impl gpui::Render for DraggedGroup {
 /// pointer is in. gpui dispatches drag-move/drop by payload type and fires
 /// every registered listener of that type, so each header checks its own
 /// bounds and skips when the pointer is not over it — only the hit group
-/// updates the marker.
-fn group(list: &SessionList, g: &SessionGroup) -> impl IntoElement {
+/// updates the marker. The header keeps its own padding — it is the one
+/// element that still expresses project hierarchy; session rows run full
+/// width beneath it.
+fn group(
+    list: &SessionList,
+    g: &SessionGroup,
+    order: &[String],
+    window: &Window,
+) -> impl IntoElement {
     let toggle = list.on_toggle_group.clone();
-    let name = g.name.clone();
+    let key = g.key.clone();
     let on_move = list.on_move_group.clone();
     let on_drag_move_cb = list.on_drag_move_group.clone();
     let marker = list.group_drag_marker.clone();
+    // Drag reorder is a workspace-mode concept: in time grouping the order
+    // is the recency sort, so the group header is not a drag source and the
+    // container is not a drop target — a live insertion line whose commit
+    // is silently discarded would be a fake control.
+    let draggable = !list.grouping.is_time();
 
-    let header_name = g.name.clone();
-    let mut items: Vec<gpui::AnyElement> = vec![
-        div()
-            .id(SharedString::from(format!("grp-{name}")))
-            .on_click(move |_, w, cx| toggle(&name, w, cx))
-            .on_drag(DraggedGroup(SharedString::from(header_name.as_str())), {
-                let payload = DraggedGroup(SharedString::from(header_name.as_str()));
+    let header_key = g.key.clone();
+    let bounds_key = g.key.clone();
+    let mut header = div()
+        .id(SharedString::from(format!("grp-{}", g.key)))
+        .debug_selector(move || format!("chrome-group-header-{}", bounds_key))
+        .on_click(move |_, w, cx| toggle(&key, w, cx));
+    if draggable {
+        header = header
+            .on_drag(DraggedGroup(SharedString::from(header_key.as_str())), {
+                let payload = DraggedGroup(SharedString::from(header_key.as_str()));
                 move |_, _, _, cx| {
                     use gpui::AppContext as _;
                     cx.stop_propagation();
@@ -328,7 +568,7 @@ fn group(list: &SessionList, g: &SessionGroup) -> impl IntoElement {
                 }
             })
             .on_drag_move::<DraggedGroup>({
-                let target = g.name.clone();
+                let target = g.key.clone();
                 let cb = on_drag_move_cb.clone();
                 move |e: &gpui::DragMoveEvent<DraggedGroup>, w, cx| {
                     // Update the marker only while the pointer is inside this
@@ -341,50 +581,52 @@ fn group(list: &SessionList, g: &SessionGroup) -> impl IntoElement {
                     let before = e.event.position.y < e.bounds.origin.y + e.bounds.size.height / 2.;
                     (cb)(&e.drag(cx).0.to_string(), &target, before, w, cx);
                 }
-            })
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(5.))
-            .py(px(4.))
-            .px(px(6.))
-            .text_size(px(12.5))
-            .hover(|style| style.bg(LIST_HOVER))
-            .child(icon(
-                if g.collapsed {
-                    icons::CHEVRON_RIGHT
-                } else {
-                    icons::CHEVRON_DOWN
-                },
-                13.,
-            ))
-            .child(icon(icons::FOLDER, 15.))
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .min_w_0()
-                    .truncate()
-                    .child(g.name.clone()),
-            )
-            .into_any_element(),
-    ];
+            });
+    }
+    let header = header
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .py(px(4.))
+        .px(px(6.))
+        .text_size(px(12.5))
+        .hover(|style| style.bg(LIST_HOVER))
+        .child(icon(
+            if g.collapsed {
+                icons::CHEVRON_RIGHT
+            } else {
+                icons::CHEVRON_DOWN
+            },
+            13.,
+        ))
+        .child(icon(icons::FOLDER, 15.))
+        .child(
+            div()
+                .font_weight(FontWeight::BOLD)
+                .min_w_0()
+                .truncate()
+                .child(g.name.clone()),
+        );
+
+    let mut items: Vec<gpui::AnyElement> = vec![header.into_any_element()];
     if !g.collapsed {
         items.extend(
             g.rows
                 .iter()
-                .map(|r| session_row(list, r).into_any_element()),
+                .map(|r| session_row(list, r, order, window).into_any_element()),
         );
     }
 
-    let slot_name = g.name.clone();
-    div()
-        .id(SharedString::from(format!("grp-slot-{slot_name}")))
+    let mut slot = div()
+        .id(SharedString::from(format!("grp-slot-{}", g.key)))
         .w_full()
         .flex()
         .flex_col()
-        .relative()
-        .on_drop::<DraggedGroup>({
-            let target = g.name.clone();
+        .relative();
+    if draggable {
+        slot = slot.on_drop::<DraggedGroup>({
+            let target = g.key.clone();
             let on_move = on_move.clone();
             let marker = marker.clone();
             move |dragged: &DraggedGroup, w, cx| {
@@ -400,218 +642,157 @@ fn group(list: &SessionList, g: &SessionGroup) -> impl IntoElement {
                     .unwrap_or(true);
                 (on_move)(&dragged.0.to_string(), &target, before, w, cx);
             }
+        });
+    }
+    // The insertion line reads (dragged, target, before); in time grouping
+    // the marker stays None because no header is a drag source there.
+    let slot = slot.children(marker.clone().and_then(|(dragged, target, before)| {
+        (target == g.key && dragged != g.key).then(|| {
+            let line = div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(2.))
+                .rounded_full()
+                .bg(ACCENT);
+            if before {
+                line.top_0()
+            } else {
+                line.bottom_0()
+            }
         })
-        .children(marker.clone().and_then(|(dragged, target, before)| {
-            (target == g.name && dragged != g.name).then(|| {
-                let line = div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .h(px(2.))
-                    .rounded_full()
-                    .bg(ACCENT);
-                if before {
-                    line.top_0()
-                } else {
-                    line.bottom_0()
-                }
-            })
-        }))
-        .children(items)
+    }));
+    slot.children(items)
 }
 
-/// One session row (two lines):
-/// - line 1: conversation status icon + title (single-line truncated); when
-///   selected, floating pin/archive/menu actions sit absolutely at the right
-///   edge with an opaque background, covering the title on narrow widths
-///   rather than squeezing it
-/// - line 2: meta (last-active time · pinned/unread) + unread dot + short-id
-///   tag
-fn session_row(list: &SessionList, data: &SessionRowData) -> Stateful<gpui::Div> {
+fn session_row(
+    list: &SessionList,
+    data: &SessionRowData,
+    order: &[String],
+    window: &Window,
+) -> Stateful<gpui::Div> {
     let selected = list.selected.as_deref() == Some(data.id.as_str());
+    let hovered = list.hovered.as_deref() == Some(data.id.as_str());
 
-    // Line-1 leading glyphs, one per five-state (see `SessionStatus`).
-    let leader_chevron = data
-        .team_leader
-        .then(|| icon(icons::CHEVRON_DOWN, 11.).into_any_element());
-    let leading: gpui::AnyElement = match data.status {
-        SessionStatus::Errored => div()
-            .size(px(16.))
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .justify_center()
-            .text_color(ERR_RED)
-            .child(icon(icons::WARNING, 11.))
-            .into_any_element(),
-        SessionStatus::PendingAuth | SessionStatus::PendingPlan => {
-            attention_pulse(&data.id).into_any_element()
-        }
-        SessionStatus::Running => running_blocks(&data.id).into_any_element(),
-        SessionStatus::Unread => div()
-            .size(px(16.))
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .justify_center()
-            .child(div().size(px(7.)).rounded_full().bg(BADGE_BLUE_BG))
-            .into_any_element(),
-        SessionStatus::Idle => div().size(px(16.)).flex_shrink_0().into_any_element(),
-    };
+    let focus = list.row_focus.get(&data.id);
+    let ix = order.iter().position(|id| id == &data.id).unwrap_or(0);
+    let neighbor = |at: usize| order.get(at).and_then(|id| list.row_focus.get(id)).cloned();
+    let prev_focus = ix.checked_sub(1).and_then(neighbor);
+    let next_focus = neighbor(ix + 1);
 
-    let mut meta = data.time.clone();
-    if data.pinned {
-        meta.push_str(" · ");
-        meta.push_str(&manox_i18n::t("chrome-row-pinned"));
-    }
-    if data.unread {
-        meta.push_str(" · ");
-        meta.push_str(&manox_i18n::t("chrome-row-unread"));
-    }
+    // The shared left baseline for the tag + info lines; the title box
+    // reaches it via slot + gap. Leader rows prepend the chevron slot.
+    let text_indent = LEAD + GAP + if data.team_leader { CHEVRON_SLOT } else { 0. };
 
-    // Selected-state actions: absolutely positioned at the right edge with an
-    // opaque background covering the title (the occlusion rule), plus a
-    // kebab for the row menu (copy ID / pin / archive).
-    let actions = selected.then(|| {
-        let pinned = data.pinned;
-        let on_pin = list.on_pin.clone();
-        let on_archive = list.on_archive.clone();
-        let on_menu = list.on_row_menu.clone();
-        let id_pin = data.id.clone();
-        let id_archive = data.id.clone();
-        let id_menu = data.id.clone();
-        div()
-            .absolute()
-            .top_0()
-            .right_0()
-            .h_full()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .py(px(1.))
-            .px(px(2.))
-            .bg(if selected { CARD_BG } else { LIST_HOVER })
-            .child(
-                on_pin
-                    .map(|cb| {
-                        small_icon_button(
-                            SharedString::from(format!("pin-{}", data.id)),
-                            icons::PIN,
-                            11.,
-                            if pinned { OK_GREEN } else { FG_FAINT },
-                            FG,
-                            move |_, w, cx| cb(&id_pin, w, cx),
-                        )
-                    })
-                    .map(IntoElement::into_any_element)
-                    .unwrap_or_else(|| div().into_any_element()),
-            )
-            .child(
-                on_archive
-                    .map(|cb| {
-                        small_icon_button(
-                            SharedString::from(format!("archive-{}", data.id)),
-                            icons::ARCHIVE,
-                            11.,
-                            FG_FAINT,
-                            FG,
-                            move |_, w, cx| cb(&id_archive, w, cx),
-                        )
-                    })
-                    .map(IntoElement::into_any_element)
-                    .unwrap_or_else(|| div().into_any_element()),
-            )
-            .child({
-                let id = id_menu.clone();
-                small_icon_button(
-                    SharedString::from(format!("menu-{}", data.id)),
-                    icons::MORE,
-                    11.,
-                    FG_FAINT,
-                    FG,
-                    move |e, w, cx| {
-                        let pos = match e {
-                            ClickEvent::Mouse(m) => m.up.position,
-                            _ => gpui::Point::default(),
-                        };
-                        (on_menu)(&id, pos, w, cx);
-                    },
-                )
-            })
-    });
-
-    let on_select = list.on_select.clone();
-    let id = data.id.clone();
-
-    let on_menu = list.on_row_menu.clone();
-    let id_menu = data.id.clone();
     let row = div()
         .id(SharedString::from(format!("sess-{}", data.id)))
-        .on_click(move |_, w, cx| on_select(&id, w, cx))
+        .debug_selector({
+            let key = data.id.clone();
+            move || format!("chrome-session-row-{key}")
+        })
+        .on_click({
+            let on_select = list.on_select.clone();
+            let id = data.id.clone();
+            move |_, w, cx| on_select(&id, w, cx)
+        })
         .on_mouse_down(gpui::MouseButton::Right, {
-            let id = id_menu.clone();
+            let on_menu = list.on_row_menu.clone();
+            let id = data.id.clone();
             move |e, w, cx| {
                 cx.stop_propagation();
                 (on_menu)(&id, e.position, w, cx);
             }
         })
+        .on_hover({
+            let on_hover = list.on_hover_row.clone();
+            let id = data.id.clone();
+            move |entered, w, cx| (on_hover)(&id, *entered, w, cx)
+        })
+        .when_some(focus.cloned(), |el, fh| {
+            el.track_focus(&fh)
+                .focus_visible(|style| style.border(px(1.5)).border_color(ACCENT))
+                .on_key_down(move |ev: &gpui::KeyDownEvent, w, cx| {
+                    match ev.keystroke.key.as_str() {
+                        "up" => {
+                            if let Some(f) = &prev_focus {
+                                w.focus(f, cx);
+                                cx.stop_propagation();
+                            }
+                        }
+                        "down" => {
+                            if let Some(f) = &next_focus {
+                                w.focus(f, cx);
+                                cx.stop_propagation();
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+        })
         .w_full()
         .h(px(ROW_H))
-        .mx(px(16.))
-        .py(px(3.))
-        .px(px(6.))
-        .rounded(px(4.))
         .flex()
         .flex_col()
-        .gap(px(1.))
+        .py(px(PAD_Y))
+        .px(px(PAD_X))
+        .gap(px(LINE_GAP))
+        .rounded(px(ROW_R))
         .flex_shrink_0()
         .overflow_hidden()
-        // Line 1: status + title (fills the width, occluded by the trailing
-        // actions when selected).
+        // Line 1: status slot + title.
         .child(
             div()
-                .relative()
-                .w_full()
-                .h(px(20.))
+                .h(px(L1_H))
+                .flex()
+                .items_center()
+                .when(data.team_leader, |this| {
+                    this.child(
+                        div()
+                            .mr(px(4.))
+                            .flex_shrink_0()
+                            .child(icon(icons::CHEVRON_DOWN, 11.)),
+                    )
+                })
+                .child(
+                    div()
+                        .w(px(LEAD))
+                        .h_full()
+                        .mr(px(GAP))
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .child(status_slot(&data.id, data.status)),
+                )
+                .child(title_line(list, data, selected, hovered, window)),
+        )
+        // Line 2: tag line — id chip first, then the user tag (or editor).
+        .child(
+            div()
+                .h(px(L2_H))
+                .min_w_0()
+                .pl(px(text_indent))
                 .flex()
                 .items_center()
                 .gap(px(4.))
-                .children(leader_chevron)
-                .child(leading)
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .text_color(if selected { FG_STRONG } else { FG })
-                        .child(data.title.clone()),
-                )
-                .children(data.tag.clone().map(|t| {
-                    // The persisted user tag: an outlined mini-chip beside the
-                    // title (single line, truncated).
-                    div()
-                        .px(px(4.))
-                        .rounded(px(3.))
-                        .border_1()
-                        .border_color(BORDER)
-                        .text_size(px(10.))
-                        .text_color(FG_FAINT)
-                        .flex_shrink_0()
-                        .max_w(px(90.))
-                        .truncate()
-                        .child(t)
-                }))
-                .children(actions),
+                .child(id_tag(&data.id))
+                .children(match (&list.tag_edit, &data.tag) {
+                    (Some((edit_id, input)), _) if edit_id == &data.id => Some(
+                        tag_edit_input(input, list.on_tag_edit_cancel.clone()).into_any_element(),
+                    ),
+                    (_, Some(tag)) => Some(
+                        user_tag(&data.id, tag.clone(), list.on_tag_rename.clone())
+                            .into_any_element(),
+                    ),
+                    _ => None,
+                }),
         )
-        // Line 2: meta (time · pinned) + flexible gap + unread dot + short-id
-        // tag (click copies the full id).
+        // Line 3: info — last-active time only.
         .child(
             div()
-                .w_full()
-                .h(px(16.))
-                .pl(px(20.))
-                .pr(px(2.))
+                .h(px(L3_H))
+                .min_w_0()
+                .pl(px(text_indent))
                 .flex()
                 .items_center()
                 .child(
@@ -620,32 +801,12 @@ fn session_row(list: &SessionList, data: &SessionRowData) -> Stateful<gpui::Div>
                         .truncate()
                         .text_size(px(11.))
                         .text_color(FG_FAINT)
-                        .child(meta),
-                )
-                .child(div().flex_1())
-                .when(data.unread, |this| {
-                    this.child(
-                        div()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(BADGE_BLUE_BG)
-                            .flex_shrink_0(),
-                    )
-                })
-                .child(id_tag(&data.id)),
+                        .child(format_active_time(data.updated_at, now_unix_secs())),
+                ),
         );
 
-    // Team indent: the whole card shifts right with a 1px guide rail on
-    // its left edge, tying member rows to their leader.
-    let row = if data.indent > 0 {
-        row.ml(px(f32::from(data.indent) * 14.))
-            .border_l_1()
-            .border_color(LIST_HOVER)
-    } else {
-        row
-    };
-    // Row background (selected card / hover / rest) + a 1px stroke kept
-    // transparent in the unselected states so all three share one height.
+    // Row surface (selected card / hover / rest) + the 1px stroke kept
+    // transparent in the unselected states so all four share one height.
     if selected {
         row.bg(CARD_BG).border_1().border_color(CARD_BORDER)
     } else {
@@ -653,6 +814,52 @@ fn session_row(list: &SessionList, data: &SessionRowData) -> Stateful<gpui::Div>
             .border_color(gpui::transparent_black())
             .hover(|style| style.bg(LIST_HOVER))
     }
+}
+
+/// The user tag chip on the tag line — the same visual language as the
+/// short-id chip (outlined mini-pill, truncated at 90px).
+fn user_tag(id: &str, tag: String, on_rename: OnId) -> impl IntoElement {
+    let id = id.to_string();
+    div()
+        .id(SharedString::from(format!("usertag-{id}")))
+        .on_click(move |ev, w, cx| {
+            // Swallow every click (the row's open-click must not fire from
+            // chip work) and start the rename editor on the second click of
+            // a double-click — the old shell's chip semantics.
+            cx.stop_propagation();
+            if ev.click_count() >= 2 {
+                (on_rename)(&id, w, cx);
+            }
+        })
+        .px(px(4.))
+        .rounded(px(3.))
+        .border_1()
+        .border_color(BORDER)
+        .text_size(px(10.))
+        .text_color(FG_FAINT)
+        .flex_shrink_0()
+        .max_w(px(90.))
+        .truncate()
+        .child(tag)
+}
+
+/// The inline tag editor, mounted on the tag line: an invisible-border
+/// xsmall input. Clicks on the wrapper never reach the row's open click; the
+/// input's propagated `Escape` cancels (Enter/blur commit through the
+/// subscription the shell holds).
+fn tag_edit_input(input: &Entity<InputState>, on_cancel: Option<OnWindowApp>) -> impl IntoElement {
+    div()
+        .id("tag-edit")
+        .w(px(90.))
+        .flex_shrink_0()
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .when_some(on_cancel, |el, cancel| {
+            el.on_action(move |_: &gpui_component::input::Escape, w, cx| {
+                cx.stop_propagation();
+                cancel(w, cx);
+            })
+        })
+        .child(Input::new(input).appearance(false).xsmall())
 }
 
 /// Short-id tag chip (click copies the full id).
@@ -665,7 +872,6 @@ fn id_tag(id: &str) -> impl IntoElement {
             cx.stop_propagation();
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(full.clone()));
         })
-        .ml(px(4.))
         .px(px(4.))
         .rounded(px(3.))
         .border_1()
@@ -676,52 +882,280 @@ fn id_tag(id: &str) -> impl IntoElement {
         .child(short)
 }
 
-/// The pulsing attention dot for a parked ask / plan verdict: a small
-/// accent dot breathing on a 1s loop — the chrome counterpart of the
-/// agent-ui sidebar's pending spinner.
-fn attention_pulse(id: &str) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_shrink_0()
-        .size(px(16.))
-        .items_center()
-        .justify_center()
-        .child(div().size(px(7.)).rounded_full().bg(ACCENT).with_animation(
-            SharedString::from(format!("pulse-{id}")),
-            gpui::Animation::new(Duration::from_millis(1000)).repeat(),
-            |el, t| {
-                let mut c: Hsla = ACCENT.into();
-                c.a = 0.35 + 0.65 * (1.0 - t);
-                el.bg(c)
-            },
-        ))
+/// The 16px status slot's content, one glyph per five-state: parked turns
+/// (`PendingAuth`/`PendingPlan`) the filled 8px blue dot, `Unread` the hollow
+/// 6.5px one (distinct semantics, same blue), `Running` the pixel grid,
+/// `Errored` the danger triangle, `Idle` nothing.
+fn status_slot(id: &str, status: SessionStatus) -> impl IntoElement {
+    match status {
+        SessionStatus::Errored => div()
+            .flex()
+            .text_color(ERR_RED)
+            .child(icon(icons::WARNING, 11.))
+            .into_any_element(),
+        SessionStatus::PendingAuth | SessionStatus::PendingPlan => div()
+            .size(px(8.))
+            .rounded_full()
+            .bg(BADGE_BLUE_BG)
+            .into_any_element(),
+        SessionStatus::Running => pixel_grid(id).into_any_element(),
+        SessionStatus::Unread => div()
+            .size(px(6.5))
+            .rounded_full()
+            .border(px(1.5))
+            .border_color(BADGE_BLUE_BG)
+            .into_any_element(),
+        SessionStatus::Idle => div().into_any_element(),
+    }
 }
 
-/// The "falling blocks" indicator for a running thread: three small squares
-/// light up top-down on a loop, brighter the closer to the "current" block
-/// (540ms cycle, the calibration's parameters).
-fn running_blocks(id: &str) -> impl IntoElement {
+/// The title line: a clip box whose width is recorded every frame (the
+/// marquee's truncation test reads the last painted value). Hovered +
+/// truncated → the marquee runs; otherwise a plain truncated title.
+fn title_line(
+    list: &SessionList,
+    data: &SessionRowData,
+    selected: bool,
+    hovered: bool,
+    window: &Window,
+) -> gpui::AnyElement {
+    let weight = if selected || hovered {
+        FontWeight::MEDIUM
+    } else {
+        FontWeight::NORMAL
+    };
+    let text_w = natural_title_width(window, &data.title, weight);
+    let box_w = list
+        .title_box_w
+        .borrow()
+        .get(&data.id)
+        .copied()
+        .unwrap_or(px(0.));
+    // The same comparison the text element runs before eliding (shape the
+    // natural line, compare against the clip width) — see
+    // `natural_title_width`; the marquee therefore triggers exactly when the
+    // "…" suffix does.
+    let truncated = box_w > px(0.) && text_w > box_w;
+    let color = if selected { FG_STRONG } else { FG };
+
+    let clip = div()
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .overflow_hidden()
+        .on_prepaint({
+            let metrics = Rc::clone(&list.title_box_w);
+            let key = data.id.clone();
+            move |bounds, _, _| {
+                metrics.borrow_mut().insert(key.clone(), bounds.size.width);
+            }
+        });
+
+    if hovered && truncated {
+        // Seamless loop: the track carries the title TWICE separated by the
+        // 24px between-pass gap, so the period is exactly one copy + gap.
+        // Each cycle holds 600ms at x=0, then scrolls one full period — the
+        // wrap back to x=0 lands on pixel-identical content (copy B where
+        // copy A was), so there is no visible snap. Two copies always
+        // suffice: the truncation condition gives text_w > box_w, so the
+        // period alone already overshoots the clip width.
+        let period = f32::from(text_w) + MARQUEE_GAP;
+        let secs = period / MARQUEE_SPEED;
+        let total = MARQUEE_PAUSE + secs;
+        let fade: Hsla = if selected {
+            CARD_BG.into()
+        } else {
+            SHELL_BG.into()
+        };
+        let title = data.title.clone();
+        clip.child(
+            div()
+                .absolute()
+                .top_0()
+                .left(px(0.))
+                .h_full()
+                .with_animation(
+                    SharedString::from(format!("marquee-{}", data.id)),
+                    gpui::Animation::new(Duration::from_secs_f32(total)).repeat(),
+                    move |el, t| {
+                        let tt = t * total;
+                        let x = if tt < MARQUEE_PAUSE {
+                            0.
+                        } else {
+                            -((tt - MARQUEE_PAUSE) * MARQUEE_SPEED).min(period)
+                        };
+                        let copy = || {
+                            div()
+                                .whitespace_nowrap()
+                                .flex_shrink_0()
+                                .text_size(px(TITLE_SIZE))
+                                .font_weight(weight)
+                                .text_color(color)
+                                .child(title.clone())
+                        };
+                        el.left(px(x))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .child(copy())
+                            .child(div().w(px(MARQUEE_GAP)).flex_shrink_0())
+                            .child(copy())
+                    },
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .w(px(MARQUEE_FADE_W))
+                        .h_full()
+                        .bg(linear_gradient(
+                            90.,
+                            linear_color_stop(gpui::transparent_black(), 0.),
+                            linear_color_stop(fade, 1.),
+                        )),
+                ),
+        )
+        .into_any_element()
+    } else {
+        clip.child(
+            div()
+                .truncate()
+                .text_size(px(TITLE_SIZE))
+                .font_weight(weight)
+                .text_color(color)
+                .child(data.title.clone()),
+        )
+        .into_any_element()
+    }
+}
+
+/// Natural (unclipped) width of the title line — the marquee's truncation
+/// probe, and the SAME expression the text element runs before eliding:
+/// shape the natural line via `shape_text`, then compare
+/// `line.size(line_height).width` against the clip width. Sharing the
+/// renderer's shaping entry point and width accessor keeps the marquee
+/// trigger and the "…" suffix one decision; the run mirrors the title div's
+/// resolved style (root font family + state weight + size), the one piece
+/// gpui does not expose from an element-build context. A shaping failure
+/// degrades to width 0 (marquee off, the rendered ellipsis stays
+/// authoritative).
+fn natural_title_width(window: &Window, text: &str, weight: FontWeight) -> Pixels {
+    let font_size = px(TITLE_SIZE);
+    // Only feeds WrappedLine::size's height; width is line-height
+    // independent. 1.28 is the shell root's relative line height.
+    let line_height = px(TITLE_SIZE * 1.28);
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: gpui::Font {
+            family: FONT_UI.into(),
+            weight,
+            ..gpui::Font::default()
+        },
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(text.into(), font_size, &[run], None, None)
+        .ok()
+        .and_then(|lines| lines.first().map(|line| line.size(line_height).width))
+        .unwrap_or(px(0.))
+}
+
+/// The running pixel grid: 2×3 dots inside a 16×16 clipped container. The
+/// timeline is quantized into six discrete steps, each dot's phase shifted
+/// by its delay; the container clips the fall.
+fn pixel_grid(id: &str) -> impl IntoElement {
     div()
-        .flex()
-        .flex_col()
-        .gap(px(1.))
-        .items_center()
-        .w(px(16.))
-        .flex_shrink_0()
-        .justify_center()
+        .size(px(16.))
+        .relative()
+        .overflow_hidden()
         .with_animation(
-            SharedString::from(format!("blocks-{id}")),
-            gpui::Animation::new(Duration::from_millis(540)).repeat(),
+            SharedString::from(format!("pxgrid-{id}")),
+            gpui::Animation::new(Duration::from_millis(PIXEL_GRID_MS as u64)).repeat(),
             |el, t| {
-                let v = t * 3.;
-                el.children((0..3).map(move |i| {
-                    let d = (v - i as f32).abs().min(1.);
-                    let mut c: Hsla = ACCENT.into();
-                    c.a = 1.0 - d * (170. / 255.);
-                    div().size(px(5.)).rounded(px(1.5)).bg(c)
+                let q_ms = (t * 6.).floor().min(5.) / 5. * PIXEL_GRID_MS;
+                el.children(PIXEL_DOTS.iter().enumerate().map(|(i, (delay, variant))| {
+                    let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+                    let local = if q_ms < *delay {
+                        0.
+                    } else {
+                        (q_ms - delay) % PIXEL_GRID_MS
+                    };
+                    let (dy, alpha) = spin_phase(local / PIXEL_GRID_MS, *variant);
+                    div()
+                        .absolute()
+                        .left(px(5. + col * 4.))
+                        .top(px(3. + row * 4. + dy))
+                        .size(px(2.))
+                        .rounded_full()
+                        .bg(accent_alpha(alpha))
                 }))
             },
         )
+}
+
+/// One dot's keyframes: rise from -4px (invisible), hold at 0 (opaque), fall
+/// to +7px fading out. The long/short variants stretch or shrink the hold so
+/// the cascade reads as a wave.
+fn spin_phase(u: f32, variant: SpinVariant) -> (f32, f32) {
+    let (hold, fall) = match variant {
+        SpinVariant::Cycle => (0.5714, 0.6648),
+        SpinVariant::Long => (0.6429, 0.7363),
+        SpinVariant::Short => (0.50, 0.5934),
+    };
+    if u < 0.0934 {
+        (-4., 0.)
+    } else if u < hold {
+        (0., 1.)
+    } else if u < fall {
+        let f = (u - hold) / (fall - hold);
+        (7. * f, 1. - f)
+    } else {
+        (7., 0.)
+    }
+}
+
+fn accent_alpha(a: f32) -> Hsla {
+    let mut c: Hsla = ACCENT.into();
+    c.a = a;
+    c
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The info-line timestamp: relative (`刚刚 / N分钟前 / N小时前`) within 72h,
+/// then a local `MM-DD HH:MM` wall-clock stamp. The chrome's own rule — the
+/// legacy sidebar's week-long relative window is intentionally not shared.
+pub fn format_active_time(updated_at: i64, now: i64) -> String {
+    let delta = (now - updated_at).max(0);
+    if delta < 60 {
+        manox_i18n::t("sidebar-time-just-now")
+    } else if delta < 3_600 {
+        manox_i18n::t_count("sidebar-time-minutes", delta / 60)
+    } else if delta < 3 * 86_400 {
+        manox_i18n::t_count("sidebar-time-hours", delta / 3_600)
+    } else {
+        absolute_stamp(updated_at)
+    }
+}
+
+fn absolute_stamp(epoch: i64) -> String {
+    use chrono::TimeZone as _;
+    chrono::Local
+        .timestamp_opt(epoch, 0)
+        .single()
+        .map(|t| t.format("%m-%d %H:%M").to_string())
+        .unwrap_or_default()
 }
 
 /// The bottom Customizations block.
@@ -745,12 +1179,13 @@ fn customizations(rows: &[CustomizationRow]) -> impl IntoElement {
                 .child(icon(icons::CHEVRON_DOWN, 13.))
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::BOLD)
+                        .font_weight(FontWeight::BOLD)
                         .child(manox_i18n::t("chrome-customizations")),
                 ),
         )
         .children(rows.iter().map(|r| {
             div()
+                .id(SharedString::from(format!("custom-{}", r.label)))
                 .w_full()
                 .mx(px(14.))
                 .flex()
@@ -760,6 +1195,8 @@ fn customizations(rows: &[CustomizationRow]) -> impl IntoElement {
                 .px(px(6.))
                 .text_size(px(12.))
                 .flex_shrink_0()
+                .text_color(FG_FAINT)
+                .tooltip(hover_tooltip("chrome-unimplemented"))
                 .child(icon(r.icon, 13.))
                 .child(div().min_w_0().flex_1().truncate().child(r.label.clone()))
                 .when_some(r.count, |this, c| {
@@ -771,4 +1208,51 @@ fn customizations(rows: &[CustomizationRow]) -> impl IntoElement {
                     )
                 })
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_i18n() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(manox_i18n::init);
+    }
+
+    /// The three windows agree with the user rule: sub-minute → 刚刚,
+    /// sub-hour → whole minutes, sub-72h → whole hours.
+    #[test]
+    fn active_time_windows() {
+        init_i18n();
+        let now = 1_000_000;
+        assert_eq!(format_active_time(now, now), "刚刚");
+        assert_eq!(format_active_time(now - 59, now), "刚刚");
+        assert_eq!(format_active_time(now - 60, now), "1 分钟前");
+        assert_eq!(format_active_time(now - 3_599, now), "59 分钟前");
+        assert_eq!(format_active_time(now - 3_600, now), "1 小时前");
+        assert_eq!(format_active_time(now - 259_199, now), "71 小时前");
+    }
+
+    /// At exactly 72h the display flips to the absolute stamp — an 11-char
+    /// `MM-DD HH:MM` wall-clock shape (digit positions asserted instead of a
+    /// literal so the test is timezone-independent). Future-dated rows (clock
+    /// skew) clamp to 刚刚, never a negative delta.
+    #[test]
+    fn active_time_flips_to_absolute_at_72h() {
+        init_i18n();
+        let now = 1_800_000_000;
+        let stamp = format_active_time(now - 259_200, now);
+        assert_eq!(stamp.len(), 11, "MM-DD HH:MM shape, got {stamp:?}");
+        assert_eq!(&stamp[2..3], "-");
+        assert_eq!(&stamp[5..6], " ");
+        assert_eq!(&stamp[8..9], ":");
+        assert!(
+            stamp
+                .chars()
+                .enumerate()
+                .all(|(i, c)| matches!(i, 2 | 5 | 8) || c.is_ascii_digit()),
+            "MM-DD HH:MM digit shape, got {stamp:?}"
+        );
+        assert_eq!(format_active_time(now + 30, now), "刚刚");
+    }
 }

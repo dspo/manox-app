@@ -33,7 +33,7 @@ mod macos {
     use manox_agent_chrome_ui::right_pane::TabStore;
     use manox_agent_chrome_ui::session_list::SessionStatus;
     use manox_agent_chrome_ui::shell::SessionRow;
-    use manox_agent_chrome_ui::theme::Icon;
+    use manox_agent_chrome_ui::theme::IconAsset;
     use manox_agent_chrome_ui::{
         CustomizationRow, FixedRow, HostHooks, MainSurface, PanelSurface, Shell, ShellConfig,
         ToolTab, ToolTabFactory, icons, register_fonts,
@@ -52,7 +52,8 @@ mod macos {
         // readback); the window renders offscreen at (-10000,-10000), never
         // flashing on any display.
         let platform = gpui_platform::current_platform(false);
-        let mut cx = VisualTestAppContext::with_asset_source(platform, Arc::new(EmptyAssets));
+        let mut cx =
+            VisualTestAppContext::with_asset_source(platform, Arc::new(gpui_kit_assets::AllAssets));
         cx.update(|cx| {
             gpui_component::init(cx);
             manox_i18n::init();
@@ -149,11 +150,12 @@ mod macos {
                 kinds
             },
             panel_surface: Some(Arc::new(DummyPanel)),
+            brand: None,
             fixed_rows: vec![
                 FixedRow {
                     icon: icons::CALENDAR,
                     label: manox_i18n::t("chrome-sidebar-automations"),
-                    badge: Some("NEW".into()),
+                    badge: None,
                 },
                 FixedRow {
                     icon: icons::COMMENT_DISCUSSION,
@@ -161,7 +163,6 @@ mod macos {
                     badge: None,
                 },
             ],
-            // Count badges are visual fixtures of the replica, not live data.
             customizations: vec![
                 CustomizationRow {
                     icon: icons::HOME,
@@ -176,15 +177,23 @@ mod macos {
                 CustomizationRow {
                     icon: icons::SETTINGS_GEAR,
                     label: manox_i18n::t("chrome-sidebar-mcp"),
-                    count: Some(1),
+                    count: None,
                 },
                 CustomizationRow {
                     icon: icons::WAND,
                     label: manox_i18n::t("chrome-sidebar-skills"),
-                    count: Some(13),
+                    count: None,
                 },
             ],
-            hooks: HostHooks::default(),
+            hooks: HostHooks {
+                // Live nav edges: the screenshot is the only acceptance face
+                // for the titlebar's enabled-arrow state.
+                nav_avail: Some(Box::new(|_| manox_agent_chrome_ui::shell::NavAvail {
+                    back: true,
+                    forward: false,
+                })),
+                ..Default::default()
+            },
         }
     }
 
@@ -215,7 +224,6 @@ mod macos {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Chats")
                     .to_string(),
-                time: "now".into(),
                 status: if t.errored {
                     SessionStatus::Errored
                 } else if running {
@@ -226,11 +234,13 @@ mod macos {
                     SessionStatus::Idle
                 },
                 tag: None,
-                indent: t.depth.min(3) as u8,
                 team_leader: false,
                 updated_at: t.updated_at,
+                // Team rows are filtered out above, so every row is its own
+                // sort unit (production stamping lives in project_forest).
+                sort_stamp: t.updated_at,
                 pinned: t.pinned,
-                unread: t.has_unread,
+                archived: t.archived,
             })
             .take(12)
             .collect()
@@ -490,26 +500,12 @@ mod macos {
             "Dummy".into()
         }
 
-        fn icon(&self) -> Icon {
+        fn icon(&self) -> IconAsset {
             icons::TOOLS
         }
 
         fn open(&self, _window: &mut gpui::Window, cx: &mut gpui::App) -> Result<AnyView, String> {
             Ok(AnyView::from(cx.new(|_| DummyPanelView)))
-        }
-    }
-
-    // ── assets ────────────────────────────────────────────────────────────────
-
-    struct EmptyAssets;
-
-    impl gpui::AssetSource for EmptyAssets {
-        fn load(&self, _path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-            Ok(None)
-        }
-
-        fn list(&self, _path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-            Ok(Vec::new())
         }
     }
 }

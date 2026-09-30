@@ -15,7 +15,6 @@ use agent_ui::Workspace;
 use gpui::{AppContext as _, Entity, TestAppContext, px, size};
 use gpui_component::Theme;
 use manox_agent::Thread;
-use manox_agent::ThreadEvent;
 use manox_agent::db::ThreadSummary;
 use manox_agent::language_model::{LanguageModelToolUse, MessageContent, TokenUsage};
 use manox_agent::message::Message;
@@ -143,17 +142,13 @@ pub fn fake_thread(
     })
 }
 
-/// Emit a `ThreadEvent` on the store bound to `thread_id` (foreground or a
-/// parked background thread), driving the workspace's subscription handler.
-pub fn emit(
-    workspace: &Entity<Workspace>,
-    cx: &mut TestAppContext,
-    thread_id: &str,
-    event: ThreadEvent,
-) {
-    cx.update(|cx| {
-        workspace.update(cx, |ws, cx| ws.diagnostic_emit_event(thread_id, event, cx));
-    });
+/// A landing thread facade with a pinned id, as the history-gate tests attach
+/// one (defers engine creation, so no host is needed to observe the gate).
+pub fn landing_thread(id: &str) -> manox_agent::thread::ThreadHandle {
+    manox_agent::thread::Thread::landing_with_id(
+        manox_agent::ThreadId(id.to_string()),
+        PathBuf::from("/tmp"),
+    )
 }
 
 /// A real plan file on disk, as `ProposePlan` leaves one.

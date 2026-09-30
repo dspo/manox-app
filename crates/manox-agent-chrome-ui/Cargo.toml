@@ -17,9 +17,16 @@ harness = false
 [dependencies]
 gpui.workspace = true
 gpui-component.workspace = true
+# Chrome icons live as paths into this bundle's full Lucide catalog: the lib
+# implements `IconNamed for theme::IconAsset` so the constants feed
+# gpui-component icon slots directly, and the guard test pins every path to
+# the embedded bytes.
+gpui-kit-assets.workspace = true
 # Chrome text is app chrome by definition, so the crate resolves its own
 # labels through the shared bundles (zh-CN primary, en fallback).
 manox-i18n.workspace = true
+# The info line's absolute branch (72h+ → local MM-DD HH:MM stamp).
+chrono.workspace = true
 
 [dev-dependencies]
 # Example + visual harness wire real content: the manox thread store for the

@@ -19,8 +19,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use gpui::{App, AppContext as _, Context, Entity, WeakEntity, Window};
-use gpui_component::Root;
+use gpui::{
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Styled as _,
+    WeakEntity, Window,
+};
+use gpui_component::{Root, WindowExt as _, notification::Notification};
 use manox_agent_chrome_ui::right_pane::ToolTab;
 use manox_agent_chrome_ui::{
     CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, icons,
@@ -200,15 +203,29 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             })
             .detach();
         }
-        let rows = mux.read(cx).thread_list().to_vec();
-        let unread = mux.read(cx).unread_map(cx);
+        let rows = mux.read(cx).thread_list(cx);
+        let unread = mux.read(cx).unread_map();
         let sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
             crate::sidebar_projection::project_groups(&rows, &unread)
                 .into_iter()
                 .flat_map(manox_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
+        // The sidebar highlight follows the FOREGROUND thread, not the last
+        // click: new-thread landings, /exit replacements and successor
+        // hand-offs all switch without a sidebar click, and a stale
+        // highlight would advertise the wrong session as active.
+        let fg = ws
+            .read(cx)
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone());
         shell.update(cx, |shell, cx| {
             shell.set_sessions(sessions);
+            if shell.active != fg {
+                shell.active = fg;
+            }
             cx.notify();
         });
         refresh_foreground_cwd(&ws, &rows, cx);
@@ -220,7 +237,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.id.0.clone());
+            .map(|(_, sid)| sid.clone());
         if fg != dock_thread && fg.is_some() {
             let old_id = dock_thread.take();
             shell.update(cx, |shell, cx| {
@@ -282,8 +299,15 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                             }
                             None => {
                                 // Fresh thread: drop any lingering pane state
-                                // to the empty page without touching the stash.
-                                shell.right.update(cx, |pane, cx| pane.new_tab_page(cx));
+                                // to the empty page, COLLAPSED — the pane's
+                                // per-thread memory (stash/durable snapshot)
+                                // restores the thread's own visibility when it
+                                // has one; a thread without one starts with the
+                                // transcript full-width.
+                                shell.right.update(cx, |pane, cx| {
+                                    pane.new_tab_page(cx);
+                                    pane.collapse(cx);
+                                });
                             }
                         }
                     }
@@ -310,11 +334,15 @@ fn shell_config(
         }),
 
         panel_surface: Some(Arc::new(ThreadTerminalPanelSurface)),
+        // The fixed sidebar rows / Customizations block are still fake
+        // surfaces (Automations scheduling, plugin/MCP management pages
+        // don't exist here yet) — no fabricated badge/count, the chrome
+        // marks the rows unimplemented on its own.
         fixed_rows: vec![
             FixedRow {
                 icon: icons::CALENDAR,
                 label: manox_i18n::t("chrome-sidebar-automations"),
-                badge: Some("NEW".into()),
+                badge: None,
             },
             FixedRow {
                 icon: icons::COMMENT_DISCUSSION,
@@ -335,8 +363,8 @@ fn shell_config(
             },
         ],
         hooks: HostHooks {
-            // Pin/archive ride the thread store; the next wire snapshot
-            // reconciles.
+            // Pin/archive/tag ride the thread store — the same seam the
+            // sidebar's row actions use; the next wire snapshot reconciles.
             on_pin: Some(Box::new(|id, _w, _cx| {
                 let loaded = manox_agent::thread_store::global().with_mut(|st| st.load_thread(id));
                 if let Ok(Some(handle)) = loaded {
@@ -344,8 +372,33 @@ fn shell_config(
                     handle.with_mut(|t| t.set_pinned(!was));
                 }
             })),
+            // The menu's archive toggle flips the CURRENT partition.
+            // Premise: the wire snapshot rides the ACTIVE partition only, so
+            // every row the shell sees is unarchived and the unarchive half
+            // is for the archived-partition rows the wire will grow. The
+            // store journals a decision (and fires SessionEnd) even for a
+            // missing id, so an unknown id is refused here instead of
+            // written — callers pass live rows only.
             on_archive: Some(Box::new(|id, _w, _cx| {
-                manox_agent::thread_store::global().with_mut(|st| st.archive_thread(id, true));
+                let store = manox_agent::thread_store_global();
+                let archived = store.read(|st| {
+                    if st.summaries().iter().any(|s| s.id.as_str() == id) {
+                        Some(false)
+                    } else {
+                        st.archived_summaries()
+                            .iter()
+                            .any(|s| s.id.as_str() == id)
+                            .then_some(true)
+                    }
+                });
+                if let Some(archived) = archived {
+                    store.with_mut(|st| st.archive_thread(id, !archived));
+                }
+            })),
+            // Thread-tag write-back (`None` clears) — the same store write
+            // the sidebar's SetThreadTag event lands on.
+            on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
+                manox_agent::thread_store_global().with_mut(|st| st.set_thread_tag(id, tag));
             })),
             // The workspace's own new-thread path (park + fresh landing).
             on_new_session: Some(Box::new({
@@ -368,7 +421,98 @@ fn shell_config(
                     });
                 }
             })),
+            // ←/→ session history: the workspace owns the visited-thread
+            // stack; the hook reports the landed id so the shell's selection
+            // follows without re-deriving host state.
+            on_nav_back: Some(Box::new({
+                let ws = ws.clone();
+                move |w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        let landed = ws.nav_back(w, cx);
+                        cx.notify();
+                        landed
+                    })
+                }
+            })),
+            on_nav_forward: Some(Box::new({
+                let ws = ws.clone();
+                move |w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        let landed = ws.nav_forward(w, cx);
+                        cx.notify();
+                        landed
+                    })
+                }
+            })),
+            nav_avail: Some(Box::new({
+                let ws = ws.clone();
+                move |cx| ws.read(cx).nav_avail()
+            })),
+            // "Open in VS Code": hand the foreground thread's project to the
+            // plain VS Code launch (no injection, no restart prompts). The
+            // launch blocks on `open`'s exit, so it runs on the BACKGROUND
+            // executor (`cx.spawn` alone would stay on the main thread and
+            // freeze the run loop); only a failure notifies — a success
+            // announces itself by VS Code opening.
+            on_open_editor: Some(Box::new(|window, cx| {
+                let Some(project) = FOREGROUND_PROJECT
+                    .lock()
+                    .expect("foreground project lock")
+                    .clone()
+                else {
+                    window.push_notification(
+                        Notification::error(manox_i18n::t("vscode-open-no-project")),
+                        cx,
+                    );
+                    return;
+                };
+                let handle = crate::dispatch::window_global();
+                cx.spawn(async move |cx| {
+                    let launch_err = cx
+                        .background_spawn(async move {
+                            manox_ext_agents::vscode_app::launch_plain(Some(&project)).err()
+                        })
+                        .await;
+                    if let Some(handle) = handle
+                        && let Err(update_err) = handle.update(cx, |_, window, cx| {
+                            if let Some(e) = &launch_err {
+                                tracing::error!(error = %e, "open-in-VS-Code failed");
+                                window.push_notification(
+                                    Notification::error(format!(
+                                        "{}: {e}",
+                                        manox_i18n::t("vscode-open-failed")
+                                    )),
+                                    cx,
+                                );
+                            }
+                        })
+                    {
+                        // The window closed before the launch settled: the
+                        // notification had no surface left. Log BOTH errors —
+                        // the update failure alone would hide what actually
+                        // went wrong with the launch.
+                        tracing::warn!(
+                            launch = ?launch_err,
+                            update = ?update_err,
+                            "open-in-VS-Code result unreported (window gone)"
+                        );
+                    }
+                })
+                .detach();
+            })),
         },
+        // The titlebar's avatar slot wears the app's own mark.
+        brand: Some(Arc::new(|| {
+            gpui::div()
+                .size(gpui::px(13.))
+                .child(
+                    gpui::svg()
+                        .path("icons/manox.svg")
+                        .size_full()
+                        .text_color(manox_agent_chrome_ui::theme::BADGE_BLUE_FG),
+                )
+                .into_any_element()
+        })),
     }
 }
 
@@ -391,7 +535,12 @@ impl MainSurface for PendingMain {
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.with(|st| st.display_title.clone()))
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid)
+                    .display_title()
+                    .map(str::to_string)
+            })
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "Manox".to_string())
             .into()
@@ -401,25 +550,30 @@ impl MainSurface for PendingMain {
 /// The foreground thread's cwd, refreshed by the assembly's observer on
 /// every thread switch — the dock surface reads it at open time (a static
 /// because the surface must stay entity-free to ride an `Arc`; the same
-/// pattern as the badge pump's LAST_COUNT).
+/// pattern as the badge pump's LAST_COUNT). Falls back to $HOME: a terminal
+/// has to spawn SOMEWHERE.
 static FOREGROUND_CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+/// The foreground thread's PROJECT path, or `None` when there is no
+/// foreground row / no project — "open in editor" must not silently open
+/// `$HOME`, so it reads this rather than the cwd fallback above.
+static FOREGROUND_PROJECT: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 
 /// The dock surface's read face of the foreground cwd.
 pub fn foreground_cwd() -> Option<std::path::PathBuf> {
     FOREGROUND_CWD.lock().expect("foreground cwd lock").clone()
 }
 
+/// The threads database behind the store global — the pane snapshot's
+/// upsert/load face (one acquisition site shared by both directions).
+fn pane_db() -> std::sync::Arc<manox_agent::db::ThreadsDatabase> {
+    manox_agent::thread_store_global().read(|s| s.db().clone())
+}
+
 /// Upsert the current foreground thread's right-pane snapshot into
 /// `threads.db` (the pane's own kind/spec encoding, one row per thread).
 fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
-    let Some(thread_id) = ws
-        .read(cx)
-        .chat
-        .read(cx)
-        .store
-        .as_ref()
-        .map(|s| s.read(cx).store.id.0.clone())
-    else {
+    let Some(thread_id) = ws.read(cx).chat.read(cx).store.clone().map(|(_, sid)| sid) else {
         return;
     };
     let (visible, active, tabs) = shell.read(cx).right.read(cx).persisted(cx);
@@ -431,21 +585,19 @@ fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
             .map(|(kind, spec)| serde_json::json!({ "kind": kind, "spec": spec }))
             .collect::<Vec<_>>(),
     });
-    let db = manox_agent::thread_store_global().read(|s| s.db().clone());
-    if let Err(e) = db.upsert_right_pane(&thread_id, &payload.to_string()) {
+    if let Err(e) = pane_db().upsert_right_pane(&thread_id, &payload.to_string()) {
         tracing::warn!(error = %e, thread_id = %thread_id, "persist chrome right pane failed");
     }
 }
 
 /// Load a thread's persisted right-pane snapshot (the chrome encoding).
 fn load_right_pane(thread_id: &str) -> Option<String> {
-    let db = manox_agent::thread_store_global().read(|s| s.db().clone());
-    db.load_right_pane(thread_id).ok().flatten()
+    pane_db().load_right_pane(thread_id).ok().flatten()
 }
 
 fn refresh_foreground_cwd(
     ws: &Entity<Workspace>,
-    rows: &[manox_protocol::ThreadListItem],
+    rows: &[crate::sidebar_projection::ThreadRow],
     cx: &App,
 ) {
     // The thread's working directory is its PROJECT path — the wire row's
@@ -458,18 +610,23 @@ fn refresh_foreground_cwd(
         .read(cx)
         .store
         .as_ref()
-        .map(|s| s.read(cx).store.id.0.clone());
+        .map(|(_, sid)| sid.clone());
     let project = fg
         .as_ref()
         .and_then(|id| rows.iter().find(|r| &r.id == id))
         .and_then(|r| r.project.clone())
         .filter(|p| !p.is_empty());
-    let cwd = project.map(std::path::PathBuf::from).unwrap_or_else(|| {
-        std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| ".".into())
-    });
+    let cwd = project
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| ".".into())
+        });
     *FOREGROUND_CWD.lock().expect("foreground cwd lock") = Some(cwd);
+    *FOREGROUND_PROJECT.lock().expect("foreground project lock") =
+        project.map(std::path::PathBuf::from);
 }
 
 /// Wrap a chrome Shell into the window's Root view (the bin mounts this).

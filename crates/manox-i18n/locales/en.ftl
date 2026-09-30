@@ -756,8 +756,6 @@ workspace-project-name-prompt = Project folder name
 
 workspace-empty-prompt = What should we do?
 
-workspace-loading-history = Loading conversation…
-
 follow-stop-stream-failing = Live follow stopped: repeated reconnects failed; the view keeps the last content it received. Retry to reconnect.
 
 follow-stop-indicator-stream-failing = Follow stopped
@@ -1098,17 +1096,27 @@ chrome-sessions-title = Sessions
 chrome-new = New
 chrome-no-chats = No chats
 chrome-customizations = Customizations
-chrome-row-pinned = Pinned
-chrome-row-unread = Unread
 chrome-row-copy-id = Copy Thread ID
 chrome-row-pin = Pin
 chrome-row-unpin = Unpin
-chrome-row-archive = Archive
 chrome-picker-search = Search sessions
 chrome-picker-empty = No matching session
 chrome-tab-new-tab = New Tab
 chrome-tab-retry = Retry
-chrome-titlebar-sync = Sync Changes
+chrome-titlebar-back = Go back one session
+chrome-titlebar-forward = Go forward one session
+chrome-titlebar-open-editor = Open in VS Code
+vscode-open-failed = Failed to open VS Code
+vscode-open-no-project = No project to open — the foreground session has no project folder
+chrome-sidebar-grouping = Toggle grouping
+chrome-sidebar-search = Search sessions
+chrome-sidebar-search-placeholder = Search sessions
+chrome-sidebar-no-match = No matching sessions
+chrome-unimplemented = Not implemented yet
+chrome-group-today = Today
+chrome-group-yesterday = Yesterday
+chrome-group-week = Last 7 days
+chrome-group-earlier = Earlier
 chrome-panel-empty = Panel content closed
 chrome-sidebar-automations = Automations
 chrome-sidebar-chats = Chats
@@ -1128,9 +1136,12 @@ chrome-spawn-failed = Failed to start { $prog }: { $err }
 chrome-main-pending = The chat column mounts here (next tranche)
 
 workspace-hero-heading = Start a conversation
+workspace-history-loading-heading = Loading conversation…
 
 chrome-tab-editor = Editor
 chrome-quick-editor = Open the editor
 chrome-editor-placeholder = Write markdown here…
 
 chrome-agent-pick-model = Choose a model for { $agent }
+
+workspace-change-rejected = Change not applied (rejected by the host)

@@ -5,12 +5,16 @@
 //! and every state-changing action is mirrored to the host through
 //! [`HostHooks`] — the chrome never touches a data source.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Pixels, StatefulInteractiveElement, Styled, Window, actions, div, px,
+    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, InteractiveElement,
+    IntoElement, ParentElement, Pixels, StatefulInteractiveElement, Styled, Window, actions, div,
+    px,
 };
 
 use crate::main_surface::MainSurfaceHandle;
@@ -18,6 +22,7 @@ use crate::panel::{PanelSlot, PanelSurface};
 use crate::right_pane::{RightPane, ToolTabFactory};
 use crate::session_list::{
     CustomizationRow, FixedRow, SessionGroup, SessionList, SessionRowData, SessionStatus,
+    SidebarGrouping,
 };
 use crate::theme::{
     CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
@@ -34,39 +39,44 @@ pub struct SessionRow {
     pub title: String,
     /// Workspace (project) display name — the grouping key.
     pub workspace: String,
-    pub time: String,
     pub status: SessionStatus,
-    /// `ThreadStore`-style update stamp (unix seconds) for local re-sorting
-    /// after a pin flip.
+    /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
+    /// The re-sort stamp: the row's own `updated_at`, except team members
+    /// arrive with their leader's (the projection owns the team structure),
+    /// so a team sorts as one unit and stays contiguous through the
+    /// pinned-first re-order. Note the store pins per thread: pinning a
+    /// member floats that member alone — unit-wide pinning is the store's
+    /// concern when teams land.
+    pub sort_stamp: i64,
     pub pinned: bool,
-    pub unread: bool,
-    /// D2 columns: the user tag chip, team-nesting depth, leader mark.
+    /// See [`SessionRowData::archived`] — always false on today's wire.
+    pub archived: bool,
+    /// D2 columns: the user tag chip and the team-leader mark (rows do not
+    /// indent — hierarchy lives in the group header and the leader chevron).
     pub tag: Option<String>,
-    pub indent: u8,
     pub team_leader: bool,
 }
 
 impl SessionRow {
     /// Lift one projected group (see agent-ui's `sidebar_projection`) into
-    /// the shell's row carrier, deriving each row's sort stamp from its
-    /// position (the projection emits recency order already).
+    /// the shell's row carrier. The projection emits wire order (recency)
+    /// already, carries each row's real `updated_at`, and owns the team
+    /// structure: members arrive with their leader's `sort_stamp`.
     pub fn from_group(group: crate::session_list::SessionGroup) -> Vec<SessionRow> {
         group
             .rows
             .into_iter()
-            .enumerate()
-            .map(|(ix, r)| SessionRow {
+            .map(|r| SessionRow {
                 id: r.id,
                 title: r.title,
                 workspace: group.name.clone(),
-                time: r.time,
                 status: r.status,
-                updated_at: -(ix as i64),
+                updated_at: r.updated_at,
+                sort_stamp: r.sort_stamp,
                 pinned: r.pinned,
-                unread: r.unread,
+                archived: r.archived,
                 tag: r.tag,
-                indent: r.indent,
                 team_leader: r.team_leader,
             })
             .collect()
@@ -76,12 +86,12 @@ impl SessionRow {
         SessionRowData {
             id: self.id.clone(),
             title: self.title.clone(),
-            time: self.time.clone(),
+            updated_at: self.updated_at,
+            sort_stamp: self.sort_stamp,
             status: self.status,
             pinned: self.pinned,
-            unread: self.unread,
+            archived: self.archived,
             tag: self.tag.clone(),
-            indent: self.indent,
             team_leader: self.team_leader,
         }
     }
@@ -91,20 +101,56 @@ impl SessionRow {
 pub type HookOnId = Box<dyn Fn(&str, &mut Window, &mut App)>;
 /// Host action with no payload.
 pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
+/// Host tag write (row id, `Some(tag)` to set / `None` to clear).
+pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>;
+/// Host nav move: opens the previous/next thread in the host's history and
+/// returns the thread id it landed on (`None` when there is nowhere to go).
+pub type HookOnNav = Box<dyn Fn(&mut Window, &mut App) -> Option<String>>;
+/// Host state query face (render-time read, no mutation).
+pub type HookQuery<T> = Box<dyn Fn(&App) -> T>;
+
+/// Which nav moves have an edge to land on right now (named because two
+/// anonymous booleans carry their meaning only in positional order).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NavAvail {
+    pub back: bool,
+    pub forward: bool,
+}
 
 /// Host-side actions the shell mirrors to. All optional; an absent hook
 /// leaves the shell's local behavior only (e.g. `on_pin` flips the local row
-/// and the next `set_sessions` snapshot reconciles).
+/// and the next `set_sessions` snapshot reconciles). One asymmetry: the nav
+/// moves REQUIRE their `nav_avail` face — an absent face reads as "no edge
+/// in either direction", so `on_nav_back`/`on_nav_forward` without it are
+/// inert by design.
+
 #[derive(Default)]
 pub struct HostHooks {
     pub on_pin: Option<HookOnId>,
     pub on_archive: Option<HookOnId>,
+    /// Thread-tag write-back (the same store seam the sidebar's
+    /// `SetThreadTag` uses). `None` clears the tag.
+    pub on_set_tag: Option<HookOnSetTag>,
     /// New-session request (the New button / ⌘N). Absent → the shell just
     /// clears the active session.
     pub on_new_session: Option<HookOnUnit>,
-    /// Selection-change notification (the future chat-column swap hooks
-    /// here).
+    /// Selection-change notification (the full production switch path; the
+    /// row menu has no open action — its five items are pin / archive /
+    /// tag / clear-tag / copy id).
     pub on_select: Option<HookOnId>,
+    /// ←/→ session-history navigation. The hook performs the host-side move
+    /// and reports the landed thread id so the shell can move its own
+    /// selection without re-deriving host state.
+    pub on_nav_back: Option<HookOnNav>,
+    pub on_nav_forward: Option<HookOnNav>,
+    /// Availability of the two nav moves, queried at render time AND
+    /// enforced by [`Shell::nav_back`] / [`Shell::nav_forward`]. ABSENT =
+    /// neither move may fire: a host that ships `on_nav_back` without this
+    /// face gets permanently dead arrows BY CONTRACT (the shell cannot
+    /// invent the history edges it does not own). Provide the face.
+    pub nav_avail: Option<HookQuery<NavAvail>>,
+    /// Open the foreground session's workspace in the user's editor.
+    pub on_open_editor: Option<HookOnUnit>,
 }
 
 /// Everything the shell needs from its host at construction.
@@ -117,7 +163,22 @@ pub struct ShellConfig {
     pub fixed_rows: Vec<FixedRow>,
     /// Customizations-block rows (Overview / Plugins / MCP / Skills).
     pub customizations: Vec<CustomizationRow>,
+    /// The app brand mark for the titlebar's avatar slot (a per-call element
+    /// factory — elements rebuild each frame). `None` falls back to the
+    /// generic code glyph.
+    pub brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
     pub hooks: HostHooks,
+}
+
+/// Thread-tag character ceiling (the sidebar editor's rule).
+const MAX_THREAD_TAG_CHARS: usize = 10;
+
+/// The inline tag editor in flight (one at a time); the subscription commits
+/// on Enter/blur and clamps on Change.
+struct TagEdit {
+    id: String,
+    input: Entity<gpui_component::input::InputState>,
+    _sub: gpui::Subscription,
 }
 
 /// The app-shell root view.
@@ -132,6 +193,15 @@ pub struct Shell {
     /// Live group-drag drop marker (dragged, target, before-edge?); drives
     /// the insertion line, cleared when the drag ends.
     group_drag_marker: Option<(String, String, bool)>,
+    /// The hovered row id (marquee + title-weight trigger), mirrored from
+    /// the list's hover events.
+    hovered_row: Option<String>,
+    /// Per-row focus handles, rebuilt against the visible id set on every
+    /// sidebar render (keyboard focus ring + up/down row navigation).
+    row_focus: HashMap<String, FocusHandle>,
+    /// Per-row title clip-box width, written by the rows' `on_prepaint` and
+    /// read by the marquee's truncation test (last painted frame's value).
+    title_box_w: Rc<RefCell<HashMap<String, Pixels>>>,
     fixed_rows: Vec<FixedRow>,
     customizations: Vec<CustomizationRow>,
     /// The open row menu (id, anchor, the PopupMenu entity).
@@ -143,6 +213,9 @@ pub struct Shell {
     /// Row-menu DismissEvent subscription (the menu closes itself on outside
     /// click; the event drives the host side shut).
     row_menu_sub: Option<gpui::Subscription>,
+    /// The inline tag editor (row + input); Escape cancels, Enter/blur
+    /// commits, an empty value is silently discarded.
+    tag_edit: Option<TagEdit>,
     // ── layout ──
     pub show_sidebar: bool,
     pub show_panel: bool,
@@ -151,6 +224,17 @@ pub struct Shell {
     pub right: Entity<RightPane>,
     /// Sidebar width (invisible-handle drag, 180–460, double-click reset).
     pub sidebar_width: Pixels,
+    /// The app brand mark factory (the titlebar avatar slot's content).
+    brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
+    /// Sidebar grouping mode (the sort button's toggle).
+    grouping: SidebarGrouping,
+    // ── sidebar filter ──
+    /// Whether the filter input row is expanded (the search button's toggle).
+    pub sidebar_filter_open: bool,
+    /// The filter term (created on open; an InputState needs a Window, so it
+    /// is built on the event path).
+    filter_query: Option<Entity<gpui_component::input::InputState>>,
+    _filter_sub: Option<gpui::Subscription>,
     // ── bottom dock ──
     panel: Option<PanelSlot>,
     // ── titlebar session picker ──
@@ -181,13 +265,22 @@ impl Shell {
             collapsed: Vec::new(),
             group_order: Vec::new(),
             group_drag_marker: None,
+            hovered_row: None,
+            row_focus: HashMap::new(),
+            title_box_w: Rc::new(RefCell::new(HashMap::new())),
             fixed_rows: config.fixed_rows,
             customizations: config.customizations,
             row_menu: None,
             row_menu_sub: None,
+            tag_edit: None,
             show_sidebar: true,
             show_panel: false,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
+            brand: config.brand,
+            grouping: SidebarGrouping::default(),
+            sidebar_filter_open: false,
+            filter_query: None,
+            _filter_sub: None,
             panel,
             session_picker_open: false,
             picker_anchor: gpui::Point::default(),
@@ -223,6 +316,128 @@ impl Shell {
         }
     }
 
+    /// ←: one step back through the host's session history. The move fires
+    /// only when the host reports a live back edge ([`Self::nav_avail`]) —
+    /// the same contract the dimmed button paints, so a programmatic move
+    /// at a dead edge is as inert as the click.
+    pub fn nav_back(&mut self, window: &mut Window, cx: &mut App) {
+        if !self.nav_avail(cx).back {
+            return;
+        }
+        let Some(hook) = &self.hooks.on_nav_back else {
+            return;
+        };
+        if let Some(id) = hook(window, cx) {
+            self.active = Some(id);
+        }
+    }
+
+    /// →: one step forward through the host's session history (live-edge
+    /// gated, see [`Self::nav_back`]).
+    pub fn nav_forward(&mut self, window: &mut Window, cx: &mut App) {
+        if !self.nav_avail(cx).forward {
+            return;
+        }
+        let Some(hook) = &self.hooks.on_nav_forward else {
+            return;
+        };
+        if let Some(id) = hook(window, cx) {
+            self.active = Some(id);
+        }
+    }
+
+    /// Whether the two nav moves can fire right now (the host's history
+    /// edges; all-false with no host face).
+    pub fn nav_avail(&self, cx: &App) -> NavAvail {
+        self.hooks
+            .nav_avail
+            .as_ref()
+            .map(|q| q(cx))
+            .unwrap_or_default()
+    }
+
+    /// The titlebar's editor button: open the foreground session's workspace
+    /// in the user's editor. No-op without a host face.
+    pub fn open_editor(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(hook) = &self.hooks.on_open_editor {
+            hook(window, cx);
+        }
+    }
+
+    /// The brand-mark element for the titlebar's avatar slot, rebuilt for
+    /// this frame (`None` → the titlebar renders its generic fallback).
+    pub fn brand_element(&self) -> Option<gpui::AnyElement> {
+        self.brand.as_ref().map(|f| f())
+    }
+
+    /// The sidebar sort button: workspace grouping ↔ time buckets. Drops a
+    /// drag marker left by an abandoned drag (dropped outside every slot,
+    /// where `on_drop` never fired) so it cannot resurface on the way back.
+    pub fn toggle_grouping(&mut self) {
+        self.group_drag_marker = None;
+        self.grouping = if self.grouping.is_time() {
+            SidebarGrouping::Workspace
+        } else {
+            SidebarGrouping::Time
+        };
+    }
+
+    pub fn grouping(&self) -> SidebarGrouping {
+        self.grouping
+    }
+
+    /// The sidebar search button: expand/collapse the filter row. Expanding
+    /// builds the input on this event path (an InputState needs a Window;
+    /// the row always starts collapsed, so the input is built exactly once
+    /// per expansion), clears the term and focuses it; collapsing drops both.
+    pub fn toggle_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_filter_open = !self.sidebar_filter_open;
+        if self.sidebar_filter_open {
+            let query = cx.new(|cx| {
+                gpui_component::input::InputState::new(window, cx)
+                    .placeholder(manox_i18n::t("chrome-sidebar-search-placeholder"))
+            });
+            let sub = cx.subscribe_in(
+                &query,
+                window,
+                |_, _, _: &gpui_component::input::InputEvent, _w, cx| cx.notify(),
+            );
+            self._filter_sub = Some(sub);
+            query.update(cx, |s, cx| {
+                s.set_value("", window, cx);
+                let handle = s.presentation().focus_handle().clone();
+                window.focus(&handle, cx);
+            });
+            self.filter_query = Some(query);
+        } else {
+            self._filter_sub = None;
+            self.filter_query = None;
+        }
+        cx.notify();
+    }
+
+    /// The filter row's input, if mounted (read face for hosts/tests that
+    /// need to drive the term).
+    pub fn filter_input(&self) -> Option<Entity<gpui_component::input::InputState>> {
+        self.filter_query.clone()
+    }
+
+    /// The current filter term (lowercased; `None` while the row is closed
+    /// or the term is empty — an empty term means no filtering).
+    pub fn sidebar_filter(&self, cx: &App) -> Option<String> {
+        if !self.sidebar_filter_open {
+            return None;
+        }
+        let value = self
+            .filter_query
+            .as_ref()?
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        (!value.is_empty()).then(|| value.to_lowercase())
+    }
+
     /// Group-drag marker update (drag-move path; the insertion line follows
     /// the pointer).
     pub fn set_group_drag_marker(&mut self, dragged: String, target: String, before: bool) {
@@ -234,16 +449,22 @@ impl Shell {
 
     /// Group reorder: insert `dragged` before/after `target`'s edge
     /// (same-name / same-place drops are ignored). Committing clears the
-    /// marker.
+    /// marker. A no-op in time grouping — drag order is a workspace-mode
+    /// concept only.
     pub fn move_group(&mut self, dragged: &str, target: &str, before: bool) {
         self.group_drag_marker = None;
-        if dragged == target {
+        if dragged == target || self.grouping.is_time() {
             return;
         }
         // Materialize the current display order into `group_order` first
         // (unrecorded groups trail in default order), then move, so a first
         // drag never loses the existing relative order.
-        let current: Vec<String> = self.sidebar_props().1.into_iter().map(|g| g.name).collect();
+        let all: Vec<&SessionRow> = self.sessions.iter().collect();
+        let current: Vec<String> = self
+            .workspace_groups(&all)
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
         if self.group_order.is_empty() {
             self.group_order = current.clone();
         }
@@ -267,7 +488,10 @@ impl Shell {
         self.group_order = order;
     }
 
-    /// Row menu (kebab / right-click): copy Thread ID, pin/unpin, archive.
+    /// Row menu (right-click on a row): the ONLY action surface —
+    /// pin/unpin, archive/unarchive, tag add/rename/remove, copy id. Every
+    /// action closes the menu; toggles read the row's current flags so the
+    /// label names the action it will perform.
     pub fn open_row_menu(
         &mut self,
         id: &str,
@@ -281,51 +505,100 @@ impl Shell {
             return;
         };
         let pinned = sess.pinned;
+        let archived = sess.archived;
+        let has_tag = sess.tag.is_some();
         let this = cx.entity();
 
-        let id_copy = id.to_string();
         let id_pin = id.to_string();
-        let id_archive = id.to_string();
         let id_pin2 = id_pin.clone();
+        let id_archive = id.to_string();
+        let id_arch2 = id_archive.clone();
+        let id_tag_edit = id.to_string();
+        let id_tag_clear = id.to_string();
+        let id_copy = id.to_string();
         let this_pin = this.clone();
         let this_archive = this.clone();
+        let this_tag = this.clone();
+        let this_tag2 = this.clone();
 
         let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
-            menu.max_w(gpui::px(220.))
-                .item(
-                    PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id")).on_click(
-                        move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
-                        },
-                    ),
-                )
+            let menu = menu
+                .max_w(gpui::px(220.))
                 .item(
                     PopupMenuItem::new(if pinned {
                         manox_i18n::t("chrome-row-unpin")
                     } else {
                         manox_i18n::t("chrome-row-pin")
                     })
-                    .on_click(move |_, _, cx| {
-                        let id = id_pin2.clone();
+                    .icon(crate::theme::icons::PIN)
+                    .on_click(move |_, window, cx| {
                         this_pin.update(cx, |this, cx| {
-                            this.toggle_pin(&id, cx);
-                            this.row_menu = None;
-                            cx.notify();
+                            if let Some(hook) = &this.hooks.on_pin {
+                                hook(&id_pin2, window, cx);
+                            }
+                            this.toggle_pin(&id_pin2, cx);
+                            this.close_row_menu(cx);
                         });
                     }),
                 )
                 .item(
-                    PopupMenuItem::new(manox_i18n::t("chrome-row-archive")).on_click(
-                        move |_, _, cx| {
-                            let id = id_archive.clone();
-                            this_archive.update(cx, |this, cx| {
-                                this.archive_session(&id, cx);
-                                this.row_menu = None;
-                                cx.notify();
-                            });
-                        },
-                    ),
+                    PopupMenuItem::new(if archived {
+                        manox_i18n::t("sidebar-unarchive")
+                    } else {
+                        manox_i18n::t("sidebar-archive")
+                    })
+                    .icon(if archived {
+                        crate::theme::icons::ARCHIVE_RESTORE
+                    } else {
+                        crate::theme::icons::ARCHIVE
+                    })
+                    .on_click(move |_, window, cx| {
+                        this_archive.update(cx, |this, cx| {
+                            if let Some(hook) = &this.hooks.on_archive {
+                                hook(&id_arch2, window, cx);
+                            }
+                            this.set_archived(&id_arch2, !archived, cx);
+                            this.close_row_menu(cx);
+                        });
+                    }),
                 )
+                .separator()
+                .item(
+                    PopupMenuItem::new(if has_tag {
+                        manox_i18n::t("sidebar-thread-tag-rename")
+                    } else {
+                        manox_i18n::t("sidebar-thread-tag-add")
+                    })
+                    .icon(crate::theme::icons::TAG)
+                    .on_click(move |_, window, cx| {
+                        this_tag.update(cx, |this, cx| {
+                            this.close_row_menu(cx);
+                            this.begin_tag_edit(id_tag_edit.clone(), has_tag, window, cx);
+                        });
+                    }),
+                );
+            // 移除标签 only exists while a tag does.
+            let menu = if has_tag {
+                menu.item(
+                    PopupMenuItem::new(manox_i18n::t("sidebar-thread-tag-clear"))
+                        .icon(crate::theme::icons::TRASH)
+                        .on_click(move |_, window, cx| {
+                            this_tag2.update(cx, |this, cx| {
+                                this.set_tag(&id_tag_clear, None, window, cx);
+                                this.close_row_menu(cx);
+                            });
+                        }),
+                )
+            } else {
+                menu
+            };
+            menu.separator().item(
+                PopupMenuItem::new(manox_i18n::t("chrome-row-copy-id"))
+                    .icon(crate::theme::icons::COPY)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
+                    }),
+            )
         });
         // DismissEvent → the host closes (the menu handles outside clicks
         // itself).
@@ -344,11 +617,29 @@ impl Shell {
         }
     }
 
-    pub fn toggle_group(&mut self, name: &str) {
-        if let Some(i) = self.collapsed.iter().position(|k| k == name) {
+    /// Whether the row menu is open (read face for hosts/tests).
+    pub fn row_menu_open(&self) -> bool {
+        self.row_menu.is_some()
+    }
+
+    /// The hovered row id, if any (read face for hosts/tests).
+    pub fn hovered_row(&self) -> Option<&str> {
+        self.hovered_row.as_deref()
+    }
+
+    /// The in-flight inline tag editor, if any — the row id and its input
+    /// (read face for hosts/tests that need to drive the value).
+    pub fn tag_edit_input(&self) -> Option<(String, Entity<gpui_component::input::InputState>)> {
+        self.tag_edit
+            .as_ref()
+            .map(|e| (e.id.clone(), e.input.clone()))
+    }
+
+    pub fn toggle_group(&mut self, key: &str) {
+        if let Some(i) = self.collapsed.iter().position(|k| k == key) {
             self.collapsed.remove(i);
         } else {
-            self.collapsed.push(name.to_string());
+            self.collapsed.push(key.to_string());
         }
     }
 
@@ -362,29 +653,173 @@ impl Shell {
         let _ = cx;
     }
 
-    /// Archive: the hook performs the store write; the local row disappears
-    /// (and the active selection clears if it was archived).
-    pub fn archive_session(&mut self, id: &str, cx: &mut App) {
-        self.sessions.retain(|s| s.id != id);
-        if self.active.as_deref() == Some(id) {
-            self.active = None;
+    /// Archive/unarchive local reconciliation (the hook performs the store
+    /// write): archiving drops the row (and clears the selection if it was
+    /// active); unarchiving flips the row's partition flag so the next
+    /// snapshot only confirms it.
+    pub fn set_archived(&mut self, id: &str, archived: bool, cx: &mut App) {
+        if archived {
+            self.sessions.retain(|s| s.id != id);
+            if self.active.as_deref() == Some(id) {
+                self.active = None;
+            }
+        } else if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+            s.archived = false;
         }
         let _ = cx;
     }
 
-    /// Pinned first, then by update time descending.
+    /// Thread-tag write-back: the hook (the store seam) then the local row,
+    /// so the chip updates without waiting for the next snapshot.
+    pub fn set_tag(&mut self, id: &str, tag: Option<String>, window: &mut Window, cx: &mut App) {
+        if let Some(hook) = &self.hooks.on_set_tag {
+            hook(id, tag.clone(), window, cx);
+        }
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+            s.tag = tag;
+        }
+    }
+
+    /// The inline tag editor on a row's tag line. Rename mode prefills the
+    /// current tag; the input is focused immediately and clamped to
+    /// [`MAX_THREAD_TAG_CHARS`] on every edit.
+    pub fn begin_tag_edit(
+        &mut self,
+        id: String,
+        rename: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = rename.then(|| {
+            self.sessions
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.tag.clone())
+        });
+        let placeholder = manox_i18n::t("sidebar-thread-tag-placeholder");
+        let input = cx.new(|cx| {
+            let mut state =
+                gpui_component::input::InputState::new(window, cx).placeholder(placeholder);
+            if let Some(Some(value)) = prefill {
+                state.set_value(value, window, cx);
+            }
+            state
+        });
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &gpui_component::input::InputEvent, window, cx| match event {
+                // The pinned gpui-component input has no max-length support;
+                // clamp every edit down to the tag ceiling.
+                gpui_component::input::InputEvent::Change => {
+                    input.update(cx, |state, cx| {
+                        let value = state.value();
+                        if value.chars().count() > MAX_THREAD_TAG_CHARS {
+                            let truncated: String =
+                                value.chars().take(MAX_THREAD_TAG_CHARS).collect();
+                            state.set_value(truncated, window, cx);
+                        }
+                    });
+                }
+                gpui_component::input::InputEvent::PressEnter { .. }
+                | gpui_component::input::InputEvent::Blur => {
+                    this.commit_tag_edit(window, cx);
+                }
+                _ => {}
+            },
+        );
+        self.tag_edit = Some(TagEdit {
+            id,
+            input: input.clone(),
+            _sub: sub,
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Commit the in-flight tag edit: a non-empty value rides
+    /// [`Self::set_tag`] (hook + local row), an empty one is discarded
+    /// silently. Either way the editor unmounts. Idempotent — a blur may
+    /// race in after an Enter commit.
+    pub fn commit_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.tag_edit.take() else {
+            return;
+        };
+        let value = edit.input.read(cx).value().trim().to_string();
+        if !value.is_empty() {
+            self.set_tag(&edit.id, Some(value), window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Escape in the editor: unmount without writing.
+    pub fn cancel_tag_edit(&mut self, cx: &mut Context<Self>) {
+        if self.tag_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The recorded drag order (read face for hosts/tests): a test can
+    /// assert the RECORDING was not polluted — the display order alone
+    /// cannot show it (time grouping ignores `group_order`, and a
+    /// workspace relist only surfaces recorded names that match real
+    /// groups).
+    pub fn group_order(&self) -> &[String] {
+        &self.group_order
+    }
+
+    /// Pinned first, then by the team-unit sort stamp descending (see
+    /// `SessionRow::sort_stamp`).
     fn sort_sessions(&mut self) {
         self.sessions.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)
-                .then(b.updated_at.cmp(&a.updated_at))
+                .then(b.sort_stamp.cmp(&a.sort_stamp))
         });
     }
 
-    /// Sidebar props (fixed rows + workspace groups + Customizations).
-    pub fn sidebar_props(&self) -> (Vec<FixedRow>, Vec<SessionGroup>, Vec<CustomizationRow>) {
+    /// Sidebar props (fixed rows + groups + Customizations). Groups follow
+    /// the sidebar's grouping mode; the filter term (the expanded search
+    /// row's input) narrows the rows and force-expands every surviving group.
+    pub fn sidebar_props(
+        &self,
+        cx: &App,
+    ) -> (Vec<FixedRow>, Vec<SessionGroup>, Vec<CustomizationRow>) {
+        let filter = self.sidebar_filter(cx);
+        let visible: Vec<&SessionRow> = self
+            .sessions
+            .iter()
+            .filter(|s| match &filter {
+                None => true,
+                Some(f) => {
+                    s.title.to_lowercase().contains(f)
+                        || s.workspace.to_lowercase().contains(f)
+                        || s.tag
+                            .as_deref()
+                            .is_some_and(|t| t.to_lowercase().contains(f))
+                }
+            })
+            .collect();
+        let mut groups: Vec<SessionGroup> = if self.grouping.is_time() {
+            self.time_groups(&visible, today())
+        } else {
+            self.workspace_groups(&visible)
+        };
+        // While filtering, a group that matched hides nothing: the term is
+        // the visible structure, not the collapse toggles.
+        if filter.is_some() {
+            for g in &mut groups {
+                g.collapsed = false;
+            }
+        }
+        (self.fixed_rows.clone(), groups, self.customizations.clone())
+    }
+
+    /// Workspace grouping (the default): one group per project display name,
+    /// ordered by the recorded drag order, unrecorded groups trailing.
+    fn workspace_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
         let mut groups: Vec<SessionGroup> = Vec::new();
-        for s in &self.sessions {
+        for s in sessions {
             let collapsed = self.collapsed.iter().any(|k| k == &s.workspace);
             if let Some(g) = groups.iter_mut().find(|g| g.name == s.workspace) {
                 g.rows.push(s.row_data());
@@ -392,6 +827,7 @@ impl Shell {
             } else {
                 groups.push(SessionGroup {
                     name: s.workspace.clone(),
+                    key: s.workspace.clone(),
                     collapsed,
                     rows: vec![s.row_data()],
                 });
@@ -415,7 +851,52 @@ impl Shell {
                 (None, None) => std::cmp::Ordering::Equal,
             }
         });
-        (self.fixed_rows.clone(), groups, self.customizations.clone())
+        groups
+    }
+
+    /// Time grouping: four recency buckets by local natural day (today /
+    /// yesterday / last 7 days / earlier). Rows bucket AND order by their
+    /// `sort_stamp` — the projection stamps team members with their leader's
+    /// stamp, so a team lands in ONE bucket and the bucket sort keeps it
+    /// contiguous (per-row keys would split it / reorder it under the
+    /// chevron; a member pinned individually can still float up — pin is
+    /// per-row, pre-existing). Unknown stamps (0) fall into "earlier".
+    /// Empty buckets are not rendered.
+    fn time_groups(&self, sessions: &[&SessionRow], today: chrono::NaiveDate) -> Vec<SessionGroup> {
+        const BUCKETS: [TimeBucket; 4] = [
+            TimeBucket::Today,
+            TimeBucket::Yesterday,
+            TimeBucket::Week,
+            TimeBucket::Earlier,
+        ];
+        let mut groups: Vec<SessionGroup> = BUCKETS
+            .iter()
+            .map(|bucket| {
+                let key = bucket.state_key();
+                SessionGroup {
+                    name: manox_i18n::t(key).to_string(),
+                    key: key.to_string(),
+                    collapsed: self.collapsed.iter().any(|k| k == key),
+                    rows: Vec::new(),
+                }
+            })
+            .collect();
+        for s in sessions {
+            let bucket = time_bucket(s.sort_stamp, today);
+            groups[bucket as usize].rows.push(s.row_data());
+        }
+        for g in &mut groups {
+            // sort_stamp is the ONLY time key: team members share their
+            // leader's, so equal stamps keep the wire order (stable sort)
+            // and the team stays contiguous under its chevron.
+            g.rows.sort_by(|a, b| {
+                b.pinned
+                    .cmp(&a.pinned)
+                    .then(b.sort_stamp.cmp(&a.sort_stamp))
+            });
+        }
+        groups.retain(|g| !g.rows.is_empty());
+        groups
     }
 
     /// Session-picker open/close: records the anchor (the triggering click
@@ -679,6 +1160,7 @@ impl gpui::Render for Shell {
                             .child(
                                 div()
                                     .id(gpui::SharedString::from(format!("row-menu-{id}")))
+                                    .debug_selector(|| "chrome-row-menu".into())
                                     .occlude()
                                     .child(menu),
                             ),
@@ -765,10 +1247,40 @@ impl Shell {
 
     /// The sidebar view: shell session state → SessionList props.
     fn render_sidebar(&mut self, cx: &mut Context<Shell>) -> impl IntoElement {
-        let (fixed, groups, customizations) = self.sidebar_props();
+        let (fixed, groups, customizations) = self.sidebar_props(cx);
         let selected = self.active.clone();
+        let hovered = self.hovered_row.clone();
         let has_chats = !self.sessions.is_empty();
         let marker = self.group_drag_marker.clone();
+        let grouping = self.grouping;
+        let filter_open = self.sidebar_filter_open;
+        let filter_active = self.sidebar_filter(cx).is_some();
+        let filter_input = self.filter_query.clone();
+        let tag_edit = self
+            .tag_edit
+            .as_ref()
+            .map(|e| (e.id.clone(), e.input.clone()));
+        let title_box_w = Rc::clone(&self.title_box_w);
+
+        // Focus handles track the VISIBLE row set: prune the stale ids, then
+        // create on demand so every painted row is focusable and the
+        // up/down walk has stable handles across frames.
+        let visible: std::collections::HashSet<String> = groups
+            .iter()
+            .flat_map(|g| (!g.collapsed).then(|| g.rows.iter().map(|r| r.id.clone())))
+            .flatten()
+            .collect();
+        let mut focus = std::mem::take(&mut self.row_focus);
+        focus.retain(|k, _| visible.contains(k));
+        for id in &visible {
+            focus.entry(id.clone()).or_insert_with(|| cx.focus_handle());
+        }
+        self.row_focus = focus;
+        let row_focus = Rc::new(self.row_focus.clone());
+        // Title clip widths of rows that left the list stop accumulating.
+        self.title_box_w
+            .borrow_mut()
+            .retain(|k, _| visible.contains(k));
 
         let on_select = cx.listener(|this, id: &String, w, cx| {
             let id = id.clone();
@@ -783,28 +1295,34 @@ impl Shell {
             this.new_session(w, cx);
             cx.notify();
         });
-        // Pin/archive: run the host hook (the real store write) first, then
-        // flip the local row — the next snapshot push reconciles.
-        let on_pin = cx.listener(|this, id: &String, w, cx| {
-            if let Some(hook) = &this.hooks.on_pin {
-                let id = id.clone();
-                hook(&id, w, cx);
+        let on_hover_row = cx.listener(|this, (id, entered): &(String, bool), _w, cx| {
+            // A leave retracts only its OWN row: crossing directly from one
+            // row into the next delivers the new row's enter and the old
+            // row's leave within one mouse-move dispatch (either order), and
+            // a stale leave must not strand the hover on None — the marquee
+            // would never start until the pointer moved again.
+            let next = if *entered {
+                Some(id.clone())
+            } else if this.hovered_row.as_deref() == Some(id.as_str()) {
+                None
+            } else {
+                return;
+            };
+            if this.hovered_row != next {
+                this.hovered_row = next;
+                cx.notify();
             }
-            let id = id.clone();
-            this.toggle_pin(&id, cx);
-            cx.notify();
-        });
-        let on_archive = cx.listener(|this, id: &String, w, cx| {
-            if let Some(hook) = &this.hooks.on_archive {
-                let id = id.clone();
-                hook(&id, w, cx);
-            }
-            let id = id.clone();
-            this.archive_session(&id, cx);
-            cx.notify();
         });
         let on_row_menu = cx.listener(|this, (id, pos): &(String, gpui::Point<Pixels>), w, cx| {
             this.open_row_menu(id, *pos, w, cx);
+        });
+        let on_tag_rename = cx.listener(|this, id: &String, w, cx| {
+            let id = id.clone();
+            this.begin_tag_edit(id, true, w, cx);
+        });
+        let this = cx.entity();
+        let on_tag_edit_cancel: crate::session_list::OnWindowApp = Rc::new(move |_w, cx| {
+            this.update(cx, |this, cx| this.cancel_tag_edit(cx));
         });
         let on_move_group = cx.listener(
             |this, (dragged, target, before): &(String, String, bool), _w, cx| {
@@ -818,6 +1336,19 @@ impl Shell {
                 cx.notify();
             },
         );
+        let on_toggle_grouping = cx.listener(|this, _: &ClickEvent, _w, cx| {
+            this.toggle_grouping();
+            cx.notify();
+        });
+        let on_toggle_search = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.toggle_sidebar_search(window, cx);
+        });
+        let on_filter_clear: crate::session_list::OnWindowApp = {
+            let this = cx.entity();
+            Rc::new(move |window, cx| {
+                this.update(cx, |this, cx| this.toggle_sidebar_search(window, cx));
+            })
+        };
 
         let width = self.sidebar_width;
 
@@ -832,14 +1363,28 @@ impl Shell {
                 customizations,
                 selected,
                 no_chats_hint: !has_chats,
+                hovered,
+                tag_edit,
+                title_box_w,
+                row_focus,
+                grouping,
+                filter_open,
+                filter_active,
+                filter_input,
                 on_select: std::rc::Rc::new(move |id, w, cx| on_select(id, w, cx)),
                 on_toggle_group: std::rc::Rc::new(move |name, w, cx| on_toggle_group(name, w, cx)),
                 on_new: std::rc::Rc::new(move |e, w, cx| on_new(e, w, cx)),
-                on_pin: Some(std::rc::Rc::new(move |id, w, cx| on_pin(id, w, cx))),
-                on_archive: Some(std::rc::Rc::new(move |id, w, cx| on_archive(id, w, cx))),
+                on_hover_row: std::rc::Rc::new(move |id, entered, w, cx| {
+                    on_hover_row(&(id.clone(), entered), w, cx)
+                }),
                 on_row_menu: std::rc::Rc::new(move |id, pos, w, cx| {
                     on_row_menu(&(id.clone(), pos), w, cx)
                 }),
+                on_tag_edit_cancel: Some(on_tag_edit_cancel),
+                on_tag_rename: std::rc::Rc::new(move |id, w, cx| on_tag_rename(id, w, cx)),
+                on_toggle_grouping: std::rc::Rc::new(move |e, w, cx| on_toggle_grouping(e, w, cx)),
+                on_toggle_search: std::rc::Rc::new(move |e, w, cx| on_toggle_search(e, w, cx)),
+                on_filter_clear: Some(on_filter_clear),
                 on_move_group: std::rc::Rc::new(move |dragged, target, before, w, cx| {
                     on_move_group(&(dragged.clone(), target.clone(), before), w, cx)
                 }),
@@ -965,3 +1510,107 @@ impl Shell {
 
 /// sidebar|main seam width (the left handle is absolutely centered on it).
 const PANE_GAP: f32 = 6.;
+
+/// The four recency buckets, in display order. `state_key` supplies BOTH
+/// the collapse-state key and the ftl label key (one string, so they cannot
+/// drift); the explicit discriminant is the index into the render-order
+/// array — reordering `BUCKETS` without renumbering these is the one
+/// mismatch the compiler cannot catch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimeBucket {
+    Today = 0,
+    Yesterday = 1,
+    Week = 2,
+    Earlier = 3,
+}
+
+impl TimeBucket {
+    /// The collapse-state key AND the ftl label key — one string serving
+    /// both, so a bucket's state and its label cannot drift apart.
+    fn state_key(self) -> &'static str {
+        match self {
+            TimeBucket::Today => "chrome-group-today",
+            TimeBucket::Yesterday => "chrome-group-yesterday",
+            TimeBucket::Week => "chrome-group-week",
+            TimeBucket::Earlier => "chrome-group-earlier",
+        }
+    }
+}
+
+/// The time-grouping bucket for a stamp, by local natural day: unknown
+/// stamps (≤ 0 unix secs) and undecodable ones land in "earlier".
+fn time_bucket(sort_stamp: i64, today: chrono::NaiveDate) -> TimeBucket {
+    use chrono::TimeZone as _;
+    if sort_stamp <= 0 {
+        return TimeBucket::Earlier;
+    }
+    let Some(t) = chrono::Local.timestamp_opt(sort_stamp, 0).single() else {
+        return TimeBucket::Earlier;
+    };
+    match today.signed_duration_since(t.date_naive()).num_days() {
+        d if d <= 0 => TimeBucket::Today,
+        1 => TimeBucket::Yesterday,
+        d if d < 7 => TimeBucket::Week,
+        _ => TimeBucket::Earlier,
+    }
+}
+
+/// The render-time "today" anchor for the bucket math. Determinism comes
+/// from the injection seams downstream (`time_bucket` /
+/// `time_groups` both take the anchor as a parameter), not from here.
+fn today() -> chrono::NaiveDate {
+    chrono::Local::now().date_naive()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn day(offset: i64) -> chrono::NaiveDate {
+        chrono::Local::now().date_naive() + chrono::Duration::days(offset)
+    }
+
+    /// Unix seconds for local noon on `day` (noon survives DST shifts).
+    fn stamp_on(day: chrono::NaiveDate) -> i64 {
+        use chrono::TimeZone as _;
+        chrono::Local
+            .from_local_datetime(&day.and_hms_opt(12, 0, 0).expect("noon exists"))
+            .single()
+            .expect("local noon resolves")
+            .timestamp()
+    }
+
+    #[test]
+    fn time_bucket_respects_the_local_day_boundaries() {
+        let today = day(0);
+        assert_eq!(time_bucket(stamp_on(today), today), TimeBucket::Today);
+        // Future stamps (clock skew) read as today.
+        assert_eq!(time_bucket(stamp_on(day(1)), today), TimeBucket::Today);
+        assert_eq!(time_bucket(stamp_on(day(-1)), today), TimeBucket::Yesterday);
+        assert_eq!(time_bucket(stamp_on(day(-6)), today), TimeBucket::Week);
+        assert_eq!(time_bucket(stamp_on(day(-7)), today), TimeBucket::Earlier);
+        assert_eq!(time_bucket(stamp_on(day(-30)), today), TimeBucket::Earlier);
+        // Unknown stamps land in "earlier".
+        assert_eq!(time_bucket(0, today), TimeBucket::Earlier);
+        assert_eq!(time_bucket(-5, today), TimeBucket::Earlier);
+    }
+
+    #[test]
+    fn time_bucket_state_keys_are_unique() {
+        // The enum's state keys are one-per-bucket: a duplicate or missing
+        // key breaks the collapse mapping long before a user sees it.
+        let keys: Vec<&'static str> = [
+            TimeBucket::Today,
+            TimeBucket::Yesterday,
+            TimeBucket::Week,
+            TimeBucket::Earlier,
+        ]
+        .iter()
+        .map(|b| b.state_key())
+        .collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(keys.len(), sorted.len(), "bucket state keys must be unique");
+    }
+}

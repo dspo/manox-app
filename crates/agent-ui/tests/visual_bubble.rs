@@ -3,9 +3,11 @@
 //! rendering; the Metal readback is macOS-only, everything else prints a
 //! skip line).
 //!
-//! Run with `BUBBLE_SHOT=/tmp/bubble.png cargo test -p agent-ui --test
-//! visual_bubble`; `BUBBLE_STATE=open` renders the bubble expanded
-//! (default `closed`).
+//! Run with `BUBBLE_SHOT=/tmp/bubble.png cargo test -p agent-ui --features
+//! test-support --test visual_bubble`; `BUBBLE_STATE=open` renders the
+//! bubble expanded (default `closed`). Seeds the AhpStore book directly
+//! (`detached`), so like every harness that talks to the AHP fold this
+//! binary only builds under `--features test-support`.
 //!
 //! Real faces under test: `ContextRail::render_bubble` — the six segments,
 //! the fold/`+N` rows, the divider rule and the width clamp. Mocked: the
@@ -23,24 +25,24 @@
 //! rather than the pill's geometry — debug_bounds-class assertions are
 //! the follow-up.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), not(feature = "test-support")))]
 fn main() {
-    eprintln!("visual_bubble: macOS-only (Metal readback), skipping");
+    eprintln!("visual_bubble: skipped (needs macOS Metal readback + test-support)");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "test-support"))]
 fn main() {
     macos::main();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "test-support"))]
 mod macos {
     use std::sync::Arc;
 
+    use agent_ui::ahp_store::AhpStore;
     use agent_ui::assets::ExtrasAssetSource;
-    use agent_ui::client_store::UsageSnapshot;
-    use agent_ui::client_store_handle::ClientStoreHandle;
     use agent_ui::views::context_rail::{BUBBLE_MAX_W, BUBBLE_MIN_W, ContextRail, PlanFileEntry};
+    use ahp_types::state::{ChatState, SessionState};
     use gpui::{
         App, AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement,
         PathBuilder, PathStyle, Pixels, Point, Render, StrokeOptions, Styled, VisualTestAppContext,
@@ -75,7 +77,7 @@ mod macos {
 
         let handle = cx
             .open_offscreen_window(size(px(1280.), px(820.)), |window, cx| {
-                let store = cx.new(|cx| ClientStoreHandle::leaf("visual-session", cx));
+                let store = cx.new(|_| AhpStore::detached());
                 // Seed the usage tree from REAL registered models so the
                 // wire-api tint resolves through the same registry the
                 // bubble reads; two distinct apis when available.
@@ -106,7 +108,7 @@ mod macos {
                                  "cacheRead": 88_200, "cacheWrite": 0},
                             ],
                         }),
-                        serde_json::json!({"provider": "百炼", "modelId": "glm-5.2"}),
+                        "百炼/glm-5.2".to_string(),
                     )
                 } else {
                     let rows: Vec<serde_json::Value> = chosen
@@ -126,23 +128,65 @@ mod macos {
                     let fg = &chosen[0];
                     (
                         serde_json::json!({ "models": rows }),
-                        serde_json::json!({"provider": fg.provider, "modelId": fg.id}),
+                        format!("{}/{}", fg.provider, fg.id),
                     )
                 };
                 store.update(cx, |h, _| {
-                    h.store.apply_conversation_info(&info_json);
+                    let book = &mut h.book;
+                    // Per-model usage, folded exactly as a metrics-channel
+                    // delta lands (the map is keyed by the metrics channel).
+                    book.metrics
+                        .entry(format!(
+                            "{}visual-session",
+                            manox_ahp::ext::channels::METRICS
+                        ))
+                        .or_default()
+                        .apply("conversation", &info_json);
+                    // The foreground model identity rides the session config;
+                    // the working directory rides the newest working-directories
+                    // grant (the config echo is absent by design here).
+                    let session: SessionState = serde_json::from_value(serde_json::json!({
+                        "provider": "pi",
+                        "title": "visual",
+                        "status": 0,
+                        "lifecycle": "ready",
+                        "activeClients": [],
+                        "chats": [],
+                        "workingDirectories": [
+                            "file:///Users/chenzhongrun/projects/dspo/manox-app-bubble"
+                        ],
+                        "config": {
+                            "schema": { "type": "object", "properties": {} },
+                            "values": { "model": fg_identity },
+                        },
+                    }))
+                    .expect("session seed");
+                    book.sessions.insert("visual-session".to_string(), session);
+                    // One completed turn carrying the last-request usage: the
+                    // in-flight turn is absent, so `last_usage` reads this.
                     let near_full = chosen[0].context_window as u64 * 92 / 100;
-                    h.store.last_token_usage = Some(UsageSnapshot {
-                        input: near_full,
-                        output: 0,
-                        cache_creation: 0,
-                        cache_read: 61_000,
-                    });
-                    h.store.model = Some(fg_identity);
-                    h.store.cwd = "/Users/chenzhongrun/projects/dspo/manox-app-bubble".into();
+                    let chat: ChatState = serde_json::from_value(serde_json::json!({
+                        "resource": "ahp-chat:/visual-session",
+                        "title": "visual",
+                        "status": 0,
+                        "modifiedAt": "2026-09-30T00:00:00Z",
+                        "turns": [{
+                            "id": "t1",
+                            "message": { "text": "hi", "origin": { "kind": "user" } },
+                            "responseParts": [],
+                            "usage": {
+                                "inputTokens": near_full,
+                                "cacheReadTokens": 61_000,
+                            },
+                            "state": "complete",
+                        }],
+                    }))
+                    .expect("chat seed");
+                    book.chats.insert("visual-session".to_string(), chat);
                 });
 
-                let rail = cx.new(|cx| ContextRail::new(Some(store), cx));
+                let rail =
+                    cx.new(|cx| ContextRail::new(Some((store, "visual-session".to_string())), cx));
                 rail.update(cx, |rail, cx| {
                     // Two live subagents + three finished (fold into +N).
                     use manox_agent::ToolCallStatus as S;

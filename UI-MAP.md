@@ -65,6 +65,7 @@ slash_command / Settings 视图）、`manox-agent-chat-ui`（聊天状态机与�
 | 集成终端 / VS Code 注入 / ChatGPT.app 注入 | ✅ | 右栏终端页签（$SHELL，独立 PTY）+ 工具菜单的 VS Code / ChatGPT.app 注入启动（后台线程 + 通知，应用独立存活） |
 | Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface |
 | TurnNavigator | ✅ | cmd-m 打开；↑/↓ 选条、enter 定位、⌘↵ 回填 composer、⌘C 复制；历史回溯另有 ⌥↑/⌥↓ |
+| TurnRail（左缘轮次导航） | ✅ | 常驻左缘刻度 rail（dsh TurnNavigator 移植，≥2 轮且卡宽 ≥640px 显示）；悬停预览、点击定位、active 随滚动追踪 |
 | 图片附件 | ✅ | 剪贴板粘贴 / plus 选择 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
@@ -94,15 +95,15 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### MessageColumn
 
-- [MessageColumn](#messagecolumn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice) · [FollowStopProjection](#followstapprojection)
+- [MessageColumn](#messagecolumn) · [Body](#body) · [FollowStoppedNotice](#followstoppednotice) · [FollowStopProjection](#followstapprojection) · [TurnRail](#turnrail)
 
 ### ConversationInfoBubble
 
 - [ConversationInfoBubble](#conversationinfobubble)（composer 圆圈上方气泡；状态舱数据仍在 `ContextRail` 实体上）
 
-### Hero / LoadingIndicator
+### Hero / HistoryLoading
 
-- [Hero](#hero) · [LoadingIndicator](#loadingindicator)
+- [Hero](#hero) · [HistoryLoading](#historyloading)
 
 ### MessageArea
 
@@ -219,14 +220,16 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 会话列是壳主区卡的内部内容，四周的 gutter / 侧栏槽 / 卡壳 / 内嵌标题栏全部由壳负责。
 会话信息以 [ConversationInfoBubble](#conversationinfobubble) 气泡按需展开（composer 右侧圆圈
-上方），不再占用常驻纵向空间；TurnNavigator 浮层锚定卡片内边距盒（左右各 `CARD_BORDER / 2`）。
+上方），不再占用常驻纵向空间。[TurnRail](#turnrail) 可见时正文预留 `GUTTER`（40px）左内边距；
+TurnNavigator 浮层锚定卡片内边距盒（左右各 `CARD_BORDER / 2`）。
 
 ```
 ┌ 壳主区卡（圆角 + 边框）──────────────────────┐
 │ ╭─────────────────────────────┬──────────╮ │
 │ │ 会话列                      │ 右栏     │ │
-│ │  消息列表 / hero            │ ToolTab  │ │
-│ │  （信息以圆圈气泡按需展开）  │ 页签体   │ │
+│ │ 刻度│ 消息列表 / hero       │ ToolTab  │ │
+│ │TurnRail（≥2 轮）│（信息以圆圈  │ 页签体   │ │
+│ │                   │ 气泡按需展开）│          │ │
 │ │  composer footer            │          │ │
 │ ╰─────────────────────────────┴──────────╯ │
 └────────────────────────────────────────────┘
@@ -247,7 +250,7 @@ Vertical flex container, fills remaining width.
 
 #### Body
 
-Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNotice](#followstoppednotice) (only while the follow stream has stopped) and then [Hero](#hero) (with the [LoadingIndicator](#loadingindicator) while an empty session restores) or [MessageArea](#messagearea) + [Footer](#footer).
+Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses the [FollowStoppedNotice](#followstoppednotice) (only while the follow stream has stopped) and then [Hero](#hero) or [HistoryLoading](#historyloading) (while a reopened thread's snapshot is in flight) or [MessageArea](#messagearea) + [Footer](#footer).
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 
@@ -274,11 +277,11 @@ Vertically centered welcome area: logo/heading + inline [Composer](#composer).
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 
-#### LoadingIndicator
+#### HistoryLoading
 
-Centered BrailleSpinner + "Loading conversation…" (`workspace-loading-history`), shown inside the [Hero](#hero) while a sidebar-opened session's history is still restoring. The composer mounts immediately below it and accepts draft edits; send remains disabled and keyboard submission is gated on the thread's `HistoryPhase` until `Ready`. Preview batches stream into the [MessageArea](#messagearea) incrementally (`ThreadEvent::HistoryProgress`); once the first preview content lands, the composer moves to the [Footer](#footer) without waiting for the authoritative restore.
+Full-column pixel loading page that suppresses the hero, message list, and footer while a reopened thread's chat snapshot is still in flight: `ChatColumn.awaiting_history` is set at reopen attach when the caller declares it expects history (`expect_history`, not the wire-side `reopen` flag — a created session re-opens too) and the fold holds no chat channel. Cleared by the snapshot rebuild (history present), by the store observe (genuinely empty session → hero returns), or by the render-time timeout (`HISTORY_TIMEOUT`, 10s) so a failed reopen cannot pin the page. Render re-checks the fold, so a stale flag cannot pin it either. Layout: a 12×14-cell pixel meerkat sprite played as a 6-slot loop at 3 slots/sec (4 distinct frames: idle, bob, blink, tail flick — each cell a flat solid block, no bevel), centered above the heading (`workspace-history-loading-heading`) and the monospace thread id. No composer while it shows.
 
-> Source: `crates/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/views/history_loading.rs`; gate: `crates/agent-ui/src/workspace/attach.rs` (`attach_thread`), `crates/agent-ui/src/workspace/render.rs` (`render_column`), `crates/manox-agent-chat-ui/src/column.rs` (`awaiting_history`)
 
 #### 3.2.2 MessageArea
 
@@ -296,6 +299,14 @@ Wraps [MessageList](#messagelist).
 Virtual list backed by native `gpui::list` (`gpui::list(list_state, render_item)`, `ListState` held directly on `Workspace`). GPUI owns virtualization, scroll, the per-item height cache, and tail-follow; `ListAlignment::Bottom` gives native chat-log semantics — short histories sit at the viewport bottom, long ones scroll — and `FollowMode::Tail` pins to the live end on each layout while following (disengaging on upward scroll, re-arming at the bottom). The row factory captures `Conversation` directly and is strictly read-only during list measurement/prepaint; Workspace-derived ask-card snapshots are synchronized before list construction. `MSG_LIST_OVERDRAW` pre-measures rows below the viewport. Visible rows re-measure every frame, but the pinned official GPUI revision retains off-screen row heights across width changes, so `MessageListWidthInvalidator` observes the final positive list width after layout, invalidates the complete cache with `remeasure_items`, and requests a settling frame while preserving the logical item/offset anchor. Count changes are reconciled via `splice` and in-place mutations via `remeasure_items`, both driven from the `ThreadEvent` handler's `ApplyOutcome`. Only the visible items render. Markdown text rows use Manox's public-API `RichText` leaf rather than GPUI `StyledText`: every width constraint is shaped independently, widths narrower than one em are treated as intrinsic probes, and prepaint reconciles shaping with the final allocated width. This prevents zero-width explosion from entering the list cache and makes painted glyph height match the row allocation without a Zed fork.
 
 > Source: `crates/agent-ui/src/workspace/render.rs` (`ListState` wiring, `MSG_LIST_OVERDRAW`), `crates/manox-components/src/markdown/rich_text.rs` (constraint-safe shaping and paint geometry)
+
+#### TurnRail
+
+Left-edge turn navigation: the dsh TurnNavigator mirrored onto the conversation column's leading edge. An absolute strip (`absolute().top_0().bottom_0().left(RAIL_LEFT_INSET=4).w(RAIL_WIDTH=28)`), vertically centered inside the message band's `h_flex` (mounted as a sibling painted after [MessageList](#messagelist), so it floats over the transcript but never over the composer — the band excludes the footer). One 2px tick per user turn at a fixed 10px pitch; from two turns up, and only when the card interior is at least `MIN_CARD_WIDTH` (640px) — independent of the [ContextRail](#contextrail)'s own gate, either side can float alone. While visible, the `GUTTER` (40px) left padding goes on the **list wrapper inside the band, never on the band itself**: the rail's absolute anchor is the band, so padding the band would drag the rail right along with the text it must clear (the ticks would sit on the transcript instead of hugging the edge — acceptance-round-1 regression).
+
+Marks are re-derived from the conversation every frame — but only past the width gate, which short-circuits before the projection, and `render_turn_rail`'s `Some`/`None` is the single gate for both the rail and the gutter (`collect_rail_turns`: prompt = the user bubble's text collapsed and capped at 50 chars, or the ⌘M navigator's attachment-only / empty-message copy for a textless bubble — the same distinction `TurnEntry::new` draws; response = the turn's last non-empty assistant reply capped at 120 — dsh's `findLast` rule; both caps word-accumulate up to the budget (`split_whitespace` skips whitespace runs of any length, so indented blocks fill it like prose), so a huge turn costs O(limit), not O(全文)). The active mark is `active_rail_turn`: the last turn whose anchor item is at or above the list's `logical_scroll_top` item (the tail-follow floor reports `count`, resolving to the newest mark). Interactions: hover grows the tick 12→18px with a border→muted 140ms tween and the vacated mark sinks back in the same run — a pointer sweep reads as a wave down the ladder (dsh's CSS-transition semantics; each change keys one tween pair under `turn_rail_hover_gen`, with `turn_rail_hover_prev`/`_painted` snapshotting only on change; fast sweeps within the 140ms window truncate the wave's tail by design — the prev slot is single); hover opens a 300px preview card beside the rail (prompt line + response excerpt), fading in over 120ms with a 4px slide and traveling between marks over 140ms `ease_out_quint` (the from-top snapshots only when the hovered mark changes — the tab-indicator `indicator_from` discipline); click jumps through `Workspace::reveal_message` (the ⌘M navigator's own path). The active tick tweens width+color over 140ms on change (previous mark shrinks, new mark grows, keyed per generation; a tick that loses active while hovered hands the animation slot to the hover wave); active-follow scrolls the ladder (`scroll_to_item(Nearest)`) whenever the pointer is outside the strip (`turn_rail_pointer_inside` pauses it so marks never travel under the hand). An over-420px ladder scrolls inside the strip (`uniform_list` + `ListSizingBehavior::Infer` + `max_h`); the preview's geometry consumes the ladder's `ScrollHandle` offset **sign-corrected to positive-down** (gpui's raw offset runs negative scrolling down — the `-offset.y` convention `uniform_list` itself uses; round-1 C1). Thread re-projection (`attach_thread`, diagnostic replace) resets the interaction state via `ChatColumn::reset_turn_rail_interaction` — a stale hover index must not mount a preview on the new conversation. Tick rows follow the gpui hover-crossing rule: a row's leave retracts only its own mark.
+
+> Source: `crates/manox-agent-chat-ui/src/views/turn_rail.rs` (rail + state contract), state fields on `ChatColumn` (`crates/manox-agent-chat-ui/src/column.rs`), mounted in `crates/agent-ui/src/workspace/render.rs` (`render_column`)
 
 #### MessageItem
 
@@ -934,25 +945,29 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### ChromeShell
 
-应用壳根视图（`crates/manox-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px、侧栏开关、session 下拉选择器、VS 徽标、Sync 胶囊、面板/右栏开关、头像）+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为隐形 absolute 层（挂在根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（选中、分组折叠、分组拖排、下拉/行菜单）。
+应用壳根视图（`crates/manox-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px、侧栏开关、**←/→ 会话历史导航**（可用性由宿主经 `nav_avail` 查询钩子渲染期提供，无可去边界时置灰 inert）、session 下拉选择器、**「在 VS Code 中打开」**（`on_open_editor` → 宿主后台 spawn `launch_plain(前台 project)`，只失败推错误通知（成功由 VS Code 打开自证）；无项目时推「没有可打开的项目」错误通知，绝不静默打开 `$HOME`）、面板/右栏开关、**品牌位**（`ShellConfig.brand` 注入的 app logo 元素工厂，None 回退通用字形；刻意非交互，且被排除在窗口拖拽面外——mouse-down 被吞掉））+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为隐形 absolute 层（挂在根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行、品牌位与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（分组折叠/拖排、下拉/行菜单、**侧栏分组模式与过滤词**）；选中高亮由宿主每次快照用前台线程 id 覆写（`shell.active`），不跟随点击。固定行（Automations/Chats）与 Customizations 块（Overview/MCP）**尚未实现**：整行 `FG_FAINT` 化 + hover「尚未实现」tooltip，保持 inert（2026-09-30 假控件清理：Run/split/右栏 split·external 已删——原版 Run 是 split-button、manox 无任务系统；Sync Changes 胶囊已删——git pull/push 集成另立特性）。
 
-> Source: `crates/manox-agent-chrome-ui/src/shell.rs`, `crates/manox-agent-chrome-ui/src/titlebar.rs`, `crates/manox-agent-chrome-ui/src/divider.rs`
+会话历史的权威栈在 `Workspace` 的 `NavHistory`（cap 100，去重判据是「当前指向项」而非栈尾）：用户发起的 `open_thread`（侧栏点击/下拉选中）与 fork 落地、新建落地（⌘N、/exit 的替换会话经 `attach_created_session`）都入栈并截断前进尾；←/→ 移动指针不重复记录；successor 换代把**当前条目原地改写**为后继 id（`replace_nav_current`——追加会把已处置的前任留在 ← 一步可达处）。降级语义：栈内 id 若在线程归档/换代后失效，回退仍走 landing attach（空 landing 可接受）——不剪枝是接受的取舍。
+
+> Source: `crates/manox-agent-chrome-ui/src/shell.rs`, `crates/manox-agent-chrome-ui/src/titlebar.rs`, `crates/manox-agent-chrome-ui/src/divider.rs`, `crates/agent-ui/src/workspace/attach.rs`
 
 #### ChromeSessionList
 
-侧栏会话树（props 驱动，`crates/manox-agent-chrome-ui/src/session_list.rs`）：两行 46px 行卡，五态字形（`Errored` 红三角／`PendingAuth`·`PendingPlan` accent 呼吸点／`Running` 落积木动画／`Unread` 蓝点／`Idle` 空槽）、置顶星标领先分区、用户标签 chip、短 id chip（点击复制）、team 嵌套（indent × 14px + 左导轨 + leader chevron）、选中行白卡 + 浮出 pin/archive/kebab 操作；分组头可折叠并作为拖拽源/放置目标（2px accent 插入线）。
+侧栏会话树（props 驱动，`crates/manox-agent-chrome-ui/src/session_list.rs`）：**三行 66px 行卡（2026-09-29 thread-item 设计稿）**——标题行（16px 状态槽 + 6px 间距 + 标题）、tag 行（短 id chip 恒首位 + 用户 tag chip）、info 行（仅最后活跃时间：72h 内相对、之外本地 `MM-DD HH:MM`），三行共用一条左基线、无任何右对齐内容、**不随项目层级缩进**（层级只由分组头与 leader chevron 表达）。行面上**零控件**：pin/archive/标签/复制 ID 全部收进右键菜单（`Shell::open_row_menu` 五项：置顶 toggle／归档 toggle／添加·重命名标签／移除标签／复制 ID；tag 内联编辑挂在 tag 行，Escape 取消、Enter/blur 提交、空值丢弃、10 字上限；双击用户 tag 芯片 = 老壳同款进入重命名编辑，短 id 芯片单击复制完整 id）。五态字形（`Errored` 红三角／`PendingAuth`·`PendingPlan` 实心 8px 蓝点／`Running` 像素积木 2×3 点阵 1820ms 阶梯循环（VS Code pixelSpinner grid 变体移植）／`Unread` 空心 6.5px 蓝点／`Idle` 空槽）。四态表面：未选中无背景、悬浮 `LIST_HOVER` + 标题转 500 字重 + **截断标题跑马灯**（双份标题 + 24px 间隔的无缝循环轨道：24px/s、每循环停 600ms、回绕点像素级相同无闪跳；仅 `is_hovered && title_truncated` 启动，移开复位；截断判定 = 与渲染器省略号同一套 `shape_text` 实测宽 vs `on_prepaint` 逐帧记录的剪裁盒宽）、选中白卡 + 15% 描边、键盘焦点 = `track_focus` + `focus_visible` 1.5px accent 环（↑/↓ 在可见行间移动焦点，行高四态一致不 reflow）；分组头可折叠（折叠态按**稳定 state key** 存取——`SessionGroup.key`，时间分组用 i18n 键字符串、workspace 分组用项目名，显示名随语言切换不落状态）并作为拖拽源/放置目标（2px accent 插入线；**仅 workspace 模式**——时间模式的分组头不是拖拽源、容器不是放置目标，渲染期直接不挂拖拽机械）。
 
-> Source: `crates/manox-agent-chrome-ui/src/session_list.rs`
+头部右侧控件（2026-09-30 起为真控件）：**sort**（workspace ↔ 时间分组切换，时间模式下点亮；时间分组 = 本地自然日四桶「今天/昨天/最近 7 天/更早」，分桶与桶内排序同源 `sort_stamp`（member 沿用 leader 的戳，team 不拆桶不散序；成员单独置顶仍可上浮——pin 逐行的既有语义），空桶不渲染）与 **search**（展开 header 下过滤行：InputState 过滤输入 + × 清空；title/project/tag 不区分大小写包含，无匹配组隐藏、过滤中强制展开，全滤空时显示「无匹配会话」提示；纯壳内显示态，不持久化）。
+
+> Source: `crates/manox-agent-chrome-ui/src/session_list.rs`, `crates/manox-agent-chrome-ui/src/shell.rs`
 
 #### SidebarProjection
 
-wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ThreadListItem`（multiplexer 权威行，含 §D.5 增量合并）→ 五态优先级（errored > pending_auth > pending_plan > running > unread，叶子 unread 镜像覆盖 wire 标志）＋ team 森林（leader 保序、member 缩进一级、孤儿拍平）＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
+wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ThreadListItem`（multiplexer 权威行，含 §D.5 增量合并）→ 五态优先级（errored > pending_auth > pending_plan > running > unread，叶子 unread 镜像覆盖 wire 标志）＋ team 森林（leader 保序、member 随后、孤儿拍平；**member 不再缩进**，leader chevron 是唯一嵌套标记）＋ `updated_at`/`archived`/tag/pinned 原样透传 ＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
 
 > Source: `crates/agent-ui/src/sidebar_projection.rs`
 
 #### ChromeRightPane
 
-右栏外壳（`crates/manox-agent-chrome-ui/src/right_pane.rs`）：圆角卡 + 页签条（**下划线式页签**：平面标签压在条带自身的 `border_b_1` 共享轨道上，激活项为 `ACCENT` + 半粗；一条**共享的下划线指示器**按激活 id 播放滑动动画，从旧页签横移到新页签）+ 新标签页空态（快捷操作由注册表生成）+ 打开/激活/关闭生命周期（最后一个页签关闭即收起）。
+右栏外壳（`crates/manox-agent-chrome-ui/src/right_pane.rs`）：圆角卡 + 页签条（**下划线式页签**：平面标签压在条带自身的 `border_b_1` 共享轨道上，激活项为 `ACCENT` + 半粗；一条**共享的下划线指示器**按激活 id 播放滑动动画，从旧页签横移到新页签；条右端仅「+」一个动作——再开一个激活 kind 的实例；无激活页签（新标签页空态）时按共享扁平按钮的 Disabled 形态置灰且不挂点击，2026-09-30 删除无语义的 split/external 假钮；**条行容器必须显式 `.flex()`**——gpui div 默认 block，缺了动作组会换行压进正文）+ 新标签页空态（快捷操作由注册表生成）+ 打开/激活/关闭生命周期（最后一个页签关闭即收起）。
 
 页签几何由 `on_prepaint` 实测上报（`TabBounds`，键为页签 id），指示器据此定位——标签宽度不一，无法由序号推出。注意 `on_prepaint` 上报的是**内容盒原点**（它挂的是 `canvas().absolute().size_full()` 子元素，padding 已计入），故记录时减去 `TAB_PL` 还原页签左边界；指示器与条带是**兄弟**（同在 relative wrapper 内）而非父子——gpui 的 `Style::paint` 先画子元素、**后画自身 border**，所以子元素永远压不住条带的 `border_b_1`，会只剩半截可见。wrapper 即指示器的包含块，其原点也就是 tab 几何的反基准坐标系。内容经 `ToolTab` 注入、kind 经 `ToolTabFactory` 注册；**实例级 id**（一种 kind 可多开）。**per-thread 会话**：`RightPaneSession{open, store, active_id, visible}` 整体 stash/restore（挂起走 `on_active(false)`——浏览器子视图隐藏、终端保活；仅显式关页签才拆内容）。快照经 `ToolTab::persist` / `ToolTabFactory::restore`（浏览器 `{"url"}`、编辑器空稿可恢复；终端与 CLI 会话不可复活，恢复时丢弃）落 `threads.db` 的 `thread_right_pane`。
 
@@ -1038,7 +1053,9 @@ Shared framed text container (`manox-components::turn_frame::TurnFrame`) used fo
 
 #### Icon
 
-Named icon from the icon set (e.g., `IconName::Folder`, `IconName::Search`).
+Named icon from the icon set (e.g., `IconName::Folder`, `IconName::Search`). 全部图标统一走 SVG 方案：组件层用 gpui-component 的 `Icon`（`IconName` 枚举或 `Icon::default().path("icons/…")`），运行时经 `ExtrasAssetSource`（manox 本地 svg 优先 → `gpui-kit-assets::AllAssets` 全量 Lucide）解析。
+
+chrome 壳自有图标表在 `manox-agent-chrome-ui/src/theme/icons.rs`：`IconAsset(pub &'static str)` 常量即 svg 资产路径（Lucide 名），宏同时生成常量与 `ALL` 列表；`theme::icon(glyph, size)` 返回 `gpui_component::Icon`，且 `IconAsset` 实现了 `IconNamed`（常量可直喂 `PopupMenuItem::icon` / `Button::icon`）；颜色继承祖先 `text_color`。守护测试遍历 `ALL` 断言每条路径在嵌入 bundle 内可解析 + 路径两两不重复（上游改名测试即红）。旧 codicon 字体方案（codicon.ttf + `FONT_ICON`）已退役。
 
 #### BrailleSpinner
 

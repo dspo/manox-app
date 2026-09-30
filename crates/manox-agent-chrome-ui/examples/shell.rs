@@ -29,7 +29,7 @@ use manox_agent_chat_ui::views::message::MessageItem;
 use manox_agent_chrome_ui::right_pane::TabStore;
 use manox_agent_chrome_ui::session_list::SessionStatus;
 use manox_agent_chrome_ui::shell::SessionRow;
-use manox_agent_chrome_ui::theme::{self, Icon, icon};
+use manox_agent_chrome_ui::theme::{self, IconAsset, icon};
 use manox_agent_chrome_ui::{
     CustomizationRow, FixedRow, HostHooks, MainSurface, PanelSurface, Shell, ShellConfig, ToolTab,
     ToolTabFactory, icons, register_fonts, window_options,
@@ -113,7 +113,7 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             FixedRow {
                 icon: icons::CALENDAR,
                 label: manox_i18n::t("chrome-sidebar-automations"),
-                badge: Some("NEW".into()),
+                badge: None,
             },
             FixedRow {
                 icon: icons::COMMENT_DISCUSSION,
@@ -121,7 +121,6 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                 badge: None,
             },
         ],
-        // Count badges are visual fixtures of the replica, not live data.
         customizations: vec![
             CustomizationRow {
                 icon: icons::HOME,
@@ -136,17 +135,20 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             CustomizationRow {
                 icon: icons::SETTINGS_GEAR,
                 label: manox_i18n::t("chrome-sidebar-mcp"),
-                count: Some(1),
+                count: None,
             },
             CustomizationRow {
                 icon: icons::WAND,
                 label: manox_i18n::t("chrome-sidebar-skills"),
-                count: Some(13),
+                count: None,
             },
         ],
         hooks: HostHooks {
             on_pin: Some(Box::new(|id, _w, _cx| store_toggle_pin(id))),
-            on_archive: Some(Box::new(|id, _w, _cx| store_set_archived(id))),
+            on_archive: Some(Box::new(|id, _w, _cx| store_toggle_archived(id))),
+            on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
+                manox_agent::thread_store::global().with_mut(|s| s.set_thread_tag(id, tag));
+            })),
             on_new_session: None,
             on_select: Some(Box::new({
                 let titles = titles.clone();
@@ -166,11 +168,88 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                     });
                 }
             })),
+            // Fixture history: the arrows actually step the selection
+            // through the loaded sessions (`nav_step`), and their lit state
+            // tracks the fixture's real edges — no lit-but-inert arrows.
+            on_nav_back: Some(Box::new(|_, _| nav_step(-1))),
+            on_nav_forward: Some(Box::new(|_, _| nav_step(1))),
+            nav_avail: Some(Box::new(|_| nav_avail_fixture())),
+            on_open_editor: None,
         },
+        brand: None,
     }
 }
 
 // ── session source (real ~/.manox threads) ────────────────────────────────
+
+thread_local! {
+    /// The fixture's nav state: an id snapshot + pointer + live edges.
+    /// The hooks run inside the titlebar's `cx.listener`, which holds the
+    /// Shell lease for the whole listener call — a hook that touched the
+    /// Shell entity would double-lease (hard panic). The snapshot pump
+    /// below refreshes this on every push.
+    static NAV_FIXTURE: std::cell::RefCell<NavFixture> =
+        const { std::cell::RefCell::new(NavFixture::EMPTY) };
+}
+
+/// The example's stand-in for the real history stack.
+struct NavFixture {
+    ids: Vec<String>,
+    index: Option<usize>,
+    back: bool,
+    forward: bool,
+}
+
+impl NavFixture {
+    const EMPTY: Self = Self {
+        ids: Vec::new(),
+        index: None,
+        back: false,
+        forward: false,
+    };
+}
+
+/// Step the fixture pointer by `delta`; returns the landed id (`None` at an
+/// edge or with nothing loaded — never a no-op move).
+fn nav_step(delta: i32) -> Option<String> {
+    NAV_FIXTURE.with(|cell| {
+        let mut f = cell.borrow_mut();
+        let i = f.index?;
+        let j = i as i64 + delta as i64;
+        if j < 0 || j as usize >= f.ids.len() {
+            return None;
+        }
+        let j = j as usize;
+        f.index = Some(j);
+        f.back = j > 0;
+        f.forward = j + 1 < f.ids.len();
+        Some(f.ids[j].clone())
+    })
+}
+
+fn nav_avail_fixture() -> manox_agent_chrome_ui::shell::NavAvail {
+    NAV_FIXTURE.with(|cell| {
+        let f = cell.borrow();
+        manox_agent_chrome_ui::shell::NavAvail {
+            back: f.back,
+            forward: f.forward,
+        }
+    })
+}
+
+/// Re-sync the fixture nav state from the freshly pushed rows.
+fn nav_fixture_sync(shell: &Shell) {
+    NAV_FIXTURE.with(|cell| {
+        let mut f = cell.borrow_mut();
+        f.ids = shell.sessions.iter().map(|s| s.id.clone()).collect();
+        f.index = shell
+            .active
+            .as_ref()
+            .and_then(|a| f.ids.iter().position(|i| i == a));
+        f.back = f.index.is_some_and(|i| i > 0);
+        f.forward = f.index.is_some_and(|i| i + 1 < f.ids.len());
+    });
+}
 
 /// Push thread snapshots into the shell. The one active scan happens here
 /// (off the first frame); afterwards the store's change events drive
@@ -199,6 +278,7 @@ fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
                     titles.borrow_mut().insert(r.id.clone(), r.title.clone());
                 }
                 shell.set_sessions(rows);
+                nav_fixture_sync(shell);
                 cx.notify();
             });
             anyhow::Ok(())
@@ -248,14 +328,15 @@ fn load_rows() -> Vec<SessionRow> {
                 .or_else(|| t.title.clone())
                 .unwrap_or_else(|| t.summary.clone()),
             workspace: project_label(&t.project),
-            time: relative_time(t.updated_at),
             status: five_state(t.errored, running, t.has_unread),
             tag: None,
-            indent: t.depth.min(3) as u8,
             team_leader: false,
             updated_at: t.updated_at,
+            // Team rows are filtered out above, so every row is its own
+            // sort unit (production stamping lives in project_forest).
+            sort_stamp: t.updated_at,
             pinned: t.pinned,
-            unread: t.has_unread,
+            archived: t.archived,
         })
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
@@ -274,22 +355,6 @@ fn project_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// unix seconds → relative time (the sidebar's time column).
-fn relative_time(unix_secs: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let delta = (now - unix_secs).max(0);
-    match delta {
-        0..=59 => "now".into(),
-        60..=3599 => format!("{}m", delta / 60),
-        3600..=86_399 => format!("{}h", delta / 3600),
-        86_400..=1_209_599 => format!("{}d", delta / 86_400),
-        _ => format!("{}w", delta / 604_800),
-    }
-}
-
 fn store_toggle_pin(id: &str) {
     let loaded = manox_agent::thread_store::global().with_mut(|st| st.load_thread(id));
     if let Ok(Some(handle)) = loaded {
@@ -298,11 +363,19 @@ fn store_toggle_pin(id: &str) {
     }
 }
 
-fn store_set_archived(id: &str) {
-    let loaded = manox_agent::thread_store::global().with_mut(|st| st.load_thread(id));
-    if let Ok(Some(handle)) = loaded {
-        handle.with_mut(|t| t.set_archived(true));
-    }
+/// The menu's archive toggle: flip the thread's CURRENT archived state (the
+/// store partitions active/archived, so whichever list holds the id names
+/// the state).
+fn store_toggle_archived(id: &str) {
+    let store = manox_agent::thread_store::global();
+    let archived = store.read(|st| {
+        if st.summaries().iter().any(|s| s.id.as_str() == id) {
+            false
+        } else {
+            st.archived_summaries().iter().any(|s| s.id.as_str() == id)
+        }
+    });
+    store.with_mut(|st| st.archive_thread(id, !archived));
 }
 
 // ── right-pane tool kinds ─────────────────────────────────────────────────
@@ -313,15 +386,18 @@ fn next_instance_id(kind: &str) -> String {
     format!("{kind}-{}", INSTANCE.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Glyph: brand SVG asset first, codicon fallback.
-fn icon_el(svg_path: Option<&'static str>, codicon: Icon, size: f32) -> gpui::AnyElement {
+/// Glyph: brand SVG asset first, chrome table fallback.
+fn icon_el(svg_path: Option<&'static str>, glyph: IconAsset, size: f32) -> gpui::AnyElement {
     match svg_path {
+        // A bare `svg()` paints nothing without an explicit color (its style
+        // does not inherit the ancestor's text color).
         Some(path) => svg()
             .path(path)
             .size(px(size))
             .flex_shrink_0()
+            .text_color(theme::FG)
             .into_any_element(),
-        None => icon(codicon, size).into_any_element(),
+        None => icon(glyph, size).into_any_element(),
     }
 }
 
@@ -708,7 +784,7 @@ impl PanelSurface for TerminalPanel {
         manox_i18n::t("chrome-tab-terminal").into()
     }
 
-    fn icon(&self) -> Icon {
+    fn icon(&self) -> IconAsset {
         icons::TERMINAL
     }
 
@@ -924,8 +1000,9 @@ fn install_light_theme(cx: &mut gpui::App) {
 
 // ── assets ────────────────────────────────────────────────────────────────
 
-/// SVG asset layer: the brand icons embedded via rust-embed; `gpui::svg()`
-/// resolves through this source.
+/// SVG asset layer: the example's brand icons embedded via rust-embed win,
+/// then the full `gpui-kit-assets` catalog (chrome's icon table lives there);
+/// `gpui::svg()` resolves through this source.
 use gpui::{AssetSource, Result as AssetResult};
 
 #[derive(rust_embed::RustEmbed)]
@@ -937,14 +1014,23 @@ struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> AssetResult<Option<Cow<'static, [u8]>>> {
-        Ok(EmbeddedAssets::get(path).map(|f| f.data))
+        if let Some(file) = EmbeddedAssets::get(path) {
+            return Ok(Some(file.data));
+        }
+        gpui_kit_assets::AllAssets.load(path)
     }
 
     fn list(&self, path: &str) -> AssetResult<Vec<SharedString>> {
         let prefix = format!("{}/", path.trim_matches('/'));
-        Ok(EmbeddedAssets::iter()
+        let mut names: Vec<SharedString> = EmbeddedAssets::iter()
             .filter(|p| p.starts_with(&prefix))
             .map(|p| SharedString::from(p.to_string()))
-            .collect())
+            .collect();
+        for name in gpui_kit_assets::AllAssets.list(path)? {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        Ok(names)
     }
 }

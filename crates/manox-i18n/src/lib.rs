@@ -477,6 +477,18 @@ mod tests {
         // client_store_handle.rs).
         "follow-stop-stream-failing",
         "follow-stop-indicator-stream-failing",
+        // `hover_tooltip` (chrome-ui session_list.rs).
+        "chrome-sidebar-grouping",
+        "chrome-sidebar-search",
+        "chrome-unimplemented",
+        // `nav_button`'s tooltip_key (chrome-ui titlebar.rs).
+        "chrome-titlebar-back",
+        "chrome-titlebar-forward",
+        // `TimeBucket::state_key` (chrome-ui shell.rs).
+        "chrome-group-today",
+        "chrome-group-yesterday",
+        "chrome-group-week",
+        "chrome-group-earlier",
     ];
 
     /// Every literal key an `i18n::t*` call site in agent-ui or the chrome
@@ -599,7 +611,7 @@ mod tests {
             }
         }
         assert!(
-            keys.iter().any(|key| key == "follow-stop-retry"),
+            keys.iter().any(|key| key == "workspace-input-placeholder"),
             "the scan found no agent-ui keys — it is scanning the wrong tree"
         );
         assert!(

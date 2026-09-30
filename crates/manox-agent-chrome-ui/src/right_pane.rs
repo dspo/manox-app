@@ -4,10 +4,10 @@
 //! what lives in the pane and how.
 //!
 //! Shell responsibilities: the floating rounded card, the tab strip (active
-//! tab joins the body with top corners, the new-tab tab, +/split/external),
-//! the new-tab empty page (quick actions generated from the registry),
-//! open/activate/close lifecycles (closing the last tab collapses the pane),
-//! and the width.
+//! tab joins the body with top corners, the new-tab tab, the "+" re-open
+//! action), the new-tab empty page (quick actions generated from the
+//! registry), open/activate/close lifecycles (closing the last tab collapses
+//! the pane), and the width.
 //!
 //! Invariants:
 //! - entity creation / process spawning only happens in `open`/`close` (the
@@ -24,7 +24,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::primitives::{icon_button, small_icon_button};
+use crate::primitives::{IconButtonState, icon_button, small_icon_button};
 use crate::theme::{
     ACCENT, BORDER, CARD_BG, CARD_BORDER, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, icon, icons,
 };
@@ -341,7 +341,10 @@ impl RightPane {
             }
         }
         self.active = self.open.get(active).cloned();
-        self.visible = visible && !self.open.is_empty();
+        // The persisted `visible` is the thread's own memory: a user collapse
+        // with zero tabs survives a restart as a collapsed pane (rendering
+        // the new-tab page), not as a forced expand.
+        self.visible = visible;
         if let Some(tab) = self.active.clone() {
             tab.on_active(self.visible, cx, &self.store);
         }
@@ -411,6 +414,17 @@ impl RightPane {
             prev.on_active(false, cx, &self.store);
         }
         self.visible = true;
+        cx.notify();
+    }
+
+    /// Collapse the pane without touching the open tabs: the thread's tab set
+    /// is remembered for the next expand, and a fresh thread starts collapsed
+    /// instead of expanded over the transcript.
+    pub fn collapse(&mut self, cx: &mut Context<Self>) {
+        self.visible = false;
+        if let Some(prev) = self.active.take() {
+            prev.on_active(false, cx, &self.store);
+        }
         cx.notify();
     }
 
@@ -555,8 +569,11 @@ impl gpui::Render for RightPane {
         let on_new_tab = cx.listener(|this, _: &ClickEvent, _w, cx| {
             this.new_tab_page(cx);
         });
-        // The pane "+" opens another instance of the active tab's kind —
-        // one click demonstrates the multi-instance contract.
+        // The pane "+" opens another instance of the active tab's kind.
+        // With no active tab (the new-tab page) there is nothing to
+        // multiply, so the button paints dimmed and inert instead of
+        // accepting a click it would discard.
+        let plus_available = active.is_some();
         let on_plus = cx.listener(|this, _: &ClickEvent, w, cx| {
             if let Some(kind) = this.active.as_ref().map(|t| t.kind()) {
                 this.open_kind(kind, w, cx);
@@ -604,8 +621,8 @@ impl gpui::Render for RightPane {
             .text_size(px(13.))
             .flex()
             .flex_col()
-            // Tab strip: tool tabs + the new-tab tab + right-side
-            // +/split/external. Tabs sit ON the strip's bottom hairline; the
+            // Tab strip: tool tabs + the new-tab tab + the right-side "+"
+            // action. Tabs sit ON the strip's bottom hairline; the
             // sliding indicator covers that line.
             //
             // The wrapper exists so the indicator can be a SIBLING of the
@@ -629,6 +646,7 @@ impl gpui::Render for RightPane {
                         div()
                             .w_full()
                             .h(px(TAB_STRIP_H))
+                            .flex()
                             .flex_shrink_0()
                             .pl(px(STRIP_PL))
                             .pr(px(STRIP_PR))
@@ -640,40 +658,20 @@ impl gpui::Render for RightPane {
                                 div()
                                     .flex_1()
                                     .min_w_0()
+                                    // The new-tab pill cannot shrink, so an
+                                    // over-full row would otherwise paint
+                                    // into the action group's slots and
+                                    // steal its clicks.
+                                    .overflow_hidden()
                                     .flex()
                                     .items_end()
                                     .gap(px(2.))
                                     .children(pills)
                                     .child(new_tab_pill(active.is_none(), on_new_tab)),
                             )
-                            .child(
-                                div()
-                                    .h_full()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(2.))
-                                    .child(icon_button(
-                                        "rp-add",
-                                        icons::ADD,
-                                        14.,
-                                        false,
-                                        move |e, w, cx| on_plus(e, w, cx),
-                                    ))
-                                    .child(icon_button(
-                                        "rp-split",
-                                        icons::SPLIT_HORIZONTAL,
-                                        14.,
-                                        false,
-                                        |_, _, _| {},
-                                    ))
-                                    .child(icon_button(
-                                        "rp-external",
-                                        icons::LINK_EXTERNAL,
-                                        14.,
-                                        false,
-                                        |_, _, _| {},
-                                    )),
-                            ),
+                            .child(div().h_full().flex().items_center().gap(px(2.)).child(
+                                strip_add_button(plus_available, move |e, w, cx| on_plus(e, w, cx)),
+                            )),
                     )
                     // Sibling of the strip, inside the relative wrapper, so it
                     // paints over the strip's own bottom border.
@@ -829,7 +827,10 @@ fn tab_pill(
         .pr(px(TAB_PR))
         .gap(px(6.))
         .items_center()
-        .flex_shrink_0()
+        // Shrinkable (unlike the new-tab pill): when the strip runs out of
+        // room the tab's label truncates and the close button stays intact —
+        // nothing overflows into the action group's slots.
+        .min_w_0()
         .flex()
         .text_color(if active { ACCENT } else { FG_DIM })
         .hover(|style| style.bg(LIST_HOVER));
@@ -855,6 +856,26 @@ fn tab_pill(
             FG,
             close,
         ))
+}
+
+/// The tab strip's "+" action: re-opens the active tab's kind. With no
+/// active tab (the new-tab page) it takes the shared flat-button's Disabled
+/// tone — a click it would silently discard must not be accept-shaped.
+fn strip_add_button(
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<gpui::Div> {
+    icon_button(
+        "rp-add",
+        icons::ADD,
+        14.,
+        if enabled {
+            IconButtonState::Off
+        } else {
+            IconButtonState::Disabled
+        },
+        on_click,
+    )
 }
 
 fn new_tab_pill(

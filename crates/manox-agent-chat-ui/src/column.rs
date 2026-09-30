@@ -11,7 +11,7 @@ use gpui::{Entity, FocusHandle, ListState, Subscription};
 use gpui_component::input::{InputState, TextareaState};
 use gpui_component::menu::PopupMenu;
 
-use crate::client_store_handle::ClientStoreHandle;
+use crate::ahp_store::AhpStore;
 use crate::conversation::{ConversationState, UserImage, UserTurnMeta};
 use crate::host::ChatHostHandle;
 use crate::views::completion::CompletionState;
@@ -211,7 +211,7 @@ pub enum FollowUpState {
     /// to be promoted to a steer via the Steer action).
     Queued,
     /// Promoted to the server steer queue for the running turn. Carries the
-    /// client-minted id sent with [`manox_protocol::ClientCall::Steer`]: the
+    /// client-minted id the steer dispatch carries: the
     /// injected row's durable identity (the retire-on-injection key) and the
     /// stranded-verdict key at settle. Not removable (no steer-withdrawal
     /// channel in the protocol). A normal settle the injection row missed
@@ -300,15 +300,12 @@ pub struct ChatColumn {
     pub host: ChatHostHandle,
 
     pub thread: manox_agent::thread::ThreadHandle,
-    /// The `AgentServer`-backed `ClientStoreHandle` — the v2 `SessionStore`
-    /// (journal window + projection face + echo map) fed by the multiplexer's
-    /// follow stream. `None` until the workspace creates the AgentServer
-    /// connection (landing thread); views read the store mirror. Held on
-    /// the workspace for the next wiring step (re-handling the store on
-    /// thread switch) — written at landing, read there.
-    pub store: Option<gpui::Entity<ClientStoreHandle>>,
+    /// The AHP store plus this column's session id. Views derive every
+    /// former mirror field from the book's channel state. Written at
+    /// landing, re-handled on thread switch.
+    pub store: Option<(gpui::Entity<AhpStore>, String)>,
     /// γ-3: the AgentServer session_id for the landing thread. Used as the
-    /// `session_id` field in `FromClient` commands.
+    /// `session_id` field in the command payloads.
     pub session_id: Option<String>,
     /// Generation counter for git-status refreshes: bumping it means any
     /// prior in-flight refresh self-cancels instead of overwriting newer
@@ -331,6 +328,15 @@ pub struct ChatColumn {
     pub recall_draft: Option<String>,
     /// A pending `AskUserQuestion` card rendered inline in the message list.
     pub pending_ask: Option<PendingAsk>,
+    /// Whether the pending ask was seeded by the live ask edge (the fold's
+    /// open elicitation). Only a live-seeded card is retired when its request
+    /// leaves the fold — a diagnostic-seeded one belongs to the test, not to
+    /// the wire.
+    pub pending_ask_live: bool,
+    /// Same liveness marker for the generic authorization card (tool
+    /// confirmations and bare asks): only a live-seeded card is retired when
+    /// its request leaves the fold.
+    pub pending_auth_live: bool,
     pub pending_auth: Option<PendingAuth>,
     /// Whether the CURRENT pending interaction's id has been observed in the
     /// leaf store's `pending_auth` projection set. Arms the remote-settle
@@ -398,6 +404,40 @@ pub struct ChatColumn {
     pub turn_navigator: Option<Entity<TurnNavigator>>,
     pub turn_navigator_sub: Option<Subscription>,
     pub turn_navigator_previous_focus: Option<FocusHandle>,
+    /// Left-edge turn rail state (`views::turn_rail`). Marks are re-derived
+    /// from the conversation every frame; these fields carry only the
+    /// interaction and tween bookkeeping. `turn_rail_active` is the mark the
+    /// list's scroll position resolves to, with `turn_rail_active_from`
+    /// snapshotting the previous active mark (only when it changes) and
+    /// `turn_rail_active_gen` keying the tick tween so each change starts a
+    /// fresh run. The hover preview mirrors that discipline through
+    /// `turn_rail_preview_{mark,top,gen}`: the last painted top is the next
+    /// travel origin, `top` cleared when the pointer leaves.
+    /// `turn_rail_pointer_inside` pauses active-follow so the marks never
+    /// travel under the hand; `turn_rail_followed` records the last
+    /// auto-followed `(active, count)` pair so the render-time follow cannot
+    /// loop. `turn_rail_box_h` is the rail strip's height, captured at
+    /// prepaint for the preview's clamp.
+    pub turn_rail_active: Option<usize>,
+    pub turn_rail_active_from: Option<usize>,
+    pub turn_rail_active_gen: u64,
+    pub turn_rail_hover: Option<usize>,
+    /// The hover wave's from-snapshots (dsh's indicator_from discipline for
+    /// ticks): the mark that just gained hover tweens up from rest while the
+    /// mark in `turn_rail_hover_prev` tweens back down, both under the id
+    /// keyed by `turn_rail_hover_gen`. `turn_rail_hover_painted` is what the
+    /// last render saw — the change detector, so one pointer sweep across
+    /// several marks runs exactly one tween pair, not one per frame.
+    pub turn_rail_hover_prev: Option<usize>,
+    pub turn_rail_hover_gen: u64,
+    pub turn_rail_hover_painted: Option<usize>,
+    pub turn_rail_pointer_inside: bool,
+    pub turn_rail_followed: Option<(usize, usize)>,
+    pub turn_rail_scroll: gpui::UniformListScrollHandle,
+    pub turn_rail_preview_mark: Option<usize>,
+    pub turn_rail_preview_top: Option<gpui::Pixels>,
+    pub turn_rail_preview_gen: u64,
+    pub turn_rail_box_h: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
     /// Follow-ups submitted while a turn is running. Steer items are injected
     /// into the running turn at the next safe join point; queue items flush as
     /// the next user turn at `TurnFinished`.
@@ -444,6 +484,14 @@ pub struct ChatColumn {
     /// this a double click mints two children for one intent. Cleared on both
     /// verdicts so a failed fork stays retryable.
     pub fork_in_flight: bool,
+    /// A reopened thread is waiting for its chat snapshot: the attach bound a
+    /// landing mirror while the fold still holds no chat channel for the new
+    /// session. The workspace swaps the hero screen for the history-loading
+    /// view while this is set (render re-checks the fold). `None` clears the
+    /// gate — when the snapshot lands (rebuild with history, or the store
+    /// observe for a genuinely empty session) and when the wait exceeds the
+    /// view's timeout so a failed reopen cannot pin the page forever.
+    pub awaiting_history: Option<std::time::Instant>,
     pub input_sub: Option<Subscription>,
     /// Height-invalidation subscription: any `ConversationState` mutation may
     /// change a row's height (including off-screen rows whose height is cached
@@ -506,6 +554,26 @@ pub struct ChatColumn {
 // workspace; these are the pure state machines the card renders against.
 
 impl ChatColumn {
+    /// Reset the turn rail's interaction and tween state. Called when the
+    /// conversation is re-projected (thread switch, diagnostic replace): a
+    /// stale hover index would otherwise mount a preview card the pointer is
+    /// not on, a stale `pointer_inside` would keep active-follow paused
+    /// forever, and a stale `hover_painted` would fire a spurious tween pair
+    /// on the first remounted frame. The `_gen` counters are deliberately
+    /// kept — they only key animation ids, and fresh runs are what a
+    /// remount wants anyway.
+    pub fn reset_turn_rail_interaction(&mut self) {
+        self.turn_rail_hover = None;
+        self.turn_rail_hover_prev = None;
+        self.turn_rail_hover_painted = None;
+        self.turn_rail_preview_mark = None;
+        self.turn_rail_preview_top = None;
+        self.turn_rail_pointer_inside = false;
+        self.turn_rail_active = None;
+        self.turn_rail_active_from = None;
+        self.turn_rail_followed = None;
+    }
+
     /// The snapshot for the pending ask card at its current step.
     pub fn ask_card_snapshot(&self, id: &str) -> Option<crate::ask_card::AskCardSnapshot> {
         let ask = self.pending_ask.as_ref()?;

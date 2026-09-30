@@ -29,8 +29,9 @@
 //! Known gaps at this stage (tracked in PLAN-CHROME-CHAT-SPLIT.md): the
 //! session-row props model still carries the replica's three-state status
 //! (the manox five-state semantics extend it at the assembly stage);
-//! per-session right-pane tab sets are not yet modeled; the toolbar's
-//! back/forward/run/split glyphs stay visual-only.
+//! per-session right-pane tab sets are not yet modeled; the sidebar's fixed
+//! rows (Automations / Chats) and the Customizations block are decorative —
+//! dimmed with an unimplemented tooltip until real surfaces exist.
 //!
 //! All chrome text resolves through `manox-i18n` (`chrome-*` keys, zh-CN
 //! primary / en fallback) — chrome copy is app chrome by definition.

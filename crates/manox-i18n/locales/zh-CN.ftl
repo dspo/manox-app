@@ -743,8 +743,6 @@ workspace-project-name-prompt = 项目文件夹名称
 
 workspace-empty-prompt = 我们该做什么？
 
-workspace-loading-history = 正在加载对话…
-
 follow-stop-stream-failing = 实时跟进已停止：多次重连失败，视图停留在最后收到的内容。点「重试」可重新连接。
 
 follow-stop-indicator-stream-failing = 跟进已停止
@@ -1078,17 +1076,27 @@ chrome-sessions-title = 会话
 chrome-new = 新建
 chrome-no-chats = 暂无会话
 chrome-customizations = 自定义
-chrome-row-pinned = 已置顶
-chrome-row-unread = 未读
 chrome-row-copy-id = 复制 Thread ID
 chrome-row-pin = 置顶
 chrome-row-unpin = 取消置顶
-chrome-row-archive = 归档
 chrome-picker-search = 搜索 session
 chrome-picker-empty = 无匹配 session
 chrome-tab-new-tab = 新标签页
 chrome-tab-retry = 重试
-chrome-titlebar-sync = Sync Changes
+chrome-titlebar-back = 后退一个会话
+chrome-titlebar-forward = 前进一个会话
+chrome-titlebar-open-editor = 在 VS Code 中打开
+vscode-open-failed = 打开 VS Code 失败
+vscode-open-no-project = 没有可打开的项目——当前会话未绑定项目目录
+chrome-sidebar-grouping = 切换分组方式
+chrome-sidebar-search = 搜索会话
+chrome-sidebar-search-placeholder = 搜索会话
+chrome-sidebar-no-match = 无匹配会话
+chrome-unimplemented = 尚未实现
+chrome-group-today = 今天
+chrome-group-yesterday = 昨天
+chrome-group-week = 最近 7 天
+chrome-group-earlier = 更早
 chrome-panel-empty = 面板内容已关闭
 chrome-sidebar-automations = 自动化
 chrome-sidebar-chats = 对话
@@ -1108,9 +1116,12 @@ chrome-spawn-failed = 无法启动 { $prog }：{ $err }
 chrome-main-pending = 聊天主栏装配中（下一批接入）
 
 workspace-hero-heading = 开始你的对话
+workspace-history-loading-heading = 加载对话…
 
 chrome-tab-editor = 编辑器
 chrome-quick-editor = 打开编辑器
 chrome-editor-placeholder = 在此书写 markdown…
 
 chrome-agent-pick-model = 为 { $agent } 选择模型
+
+workspace-change-rejected = 更改未生效（宿主拒绝）

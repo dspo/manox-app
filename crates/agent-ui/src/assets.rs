@@ -5,14 +5,17 @@
 //! cannot carry manox's own brand icons (the Manox / Claude / Codex / GitHub Copilot
 //! marks used in the sidebar and the new-session menu). `ExtrasAssetSource`
 //! layers those on top: a `rust-embed` lookup of `assets/icons/**` wins, then
-//! it falls through to `gpui-kit-assets` for everything else. The manox
+//! it falls through to `gpui-kit-assets` for everything else. The fallback is
+//! `AllAssets` — the full Lucide catalog — not the default 101-icon subset,
+//! so every `IconName` variant resolves at runtime (the chrome icon table
+//! relies on names outside the subset). The manox
 //! bin registers it via `with_assets`, so any `gpui::svg().path("icons/…")`
 //! call site resolves through here.
 
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
-use gpui_kit_assets::Assets as ComponentAssets;
+use gpui_kit_assets::AllAssets as ComponentAssets;
 use rust_embed::RustEmbed;
 
 /// Embedded manox-local SVG assets (brand icons not in gpui-component).
@@ -96,10 +99,11 @@ mod tests {
     }
 
     #[test]
-    fn embeds_overrides_that_shadow_kit_icons() {
-        // These files exist in gpui-kit-assets too; the local copies win
-        // (ExtrasAssetSource layers local first) so the bubble/rail render
-        // this repo's shapes, not the kit's.
+    fn embeds_context_rail_branch_and_worktree_glyphs() {
+        // Rail glyphs resolved via `ExtrasAssetSource`. Local files shadow the
+        // kit fallback: since the fallback is `AllAssets` (full catalog), a
+        // name that exists in both silently renders the kit drawing here, so
+        // keeping a local copy is only meaningful for drawings we own.
         for path in ["icons/git-branch.svg", "icons/workflow.svg"] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
         }
@@ -107,8 +111,11 @@ mod tests {
 
     #[test]
     fn embeds_custom_icon_overrides() {
-        // Icons not shipped by gpui-kit-assets; layered in via
-        // ExtrasAssetSource so call sites can use Icon::default().path(…).
+        // Local copies for names we render via `Icon::default().path(…)`.
+        // Most of these also exist in the kit's full catalog; the local file
+        // shadows it, so a removal here silently switches the drawing to the
+        // upstream Lucide one (and a name unique to this bundle would render
+        // blank when missing).
         for path in [
             "icons/circle-check-big.svg",
             "icons/check-check.svg",
@@ -121,9 +128,37 @@ mod tests {
             "icons/grip-vertical.svg",
             "icons/image.svg",
             "icons/pencil.svg",
+            // The row-menu glyphs: not in the gpui-kit-assets default
+            // bundle, so the local layer is the only provider.
+            "icons/pin.svg",
+            "icons/archive.svg",
+            "icons/archive-restore.svg",
+            "icons/tag.svg",
+            "icons/trash-2.svg",
             "icons/context-bubble-tail.svg",
         ] {
             assert!(LocalAssets::get(path).is_some(), "missing {path}");
+        }
+    }
+
+    #[test]
+    fn extras_load_resolves_chrome_table_and_known_literals() {
+        // The production `load` path (local first, then the kit bundle) must
+        // resolve every chrome icon and the repo's other literal icon paths —
+        // falling back to the 101-icon `Assets` subset instead of `AllAssets`
+        // would blank these out while every test that bypasses `load` stays
+        // green.
+        let extras = ExtrasAssetSource::new();
+        let mut paths: Vec<&str> = manox_agent_chrome_ui::theme::icons::ALL
+            .iter()
+            .map(|glyph| glyph.0)
+            .collect();
+        paths.push("icons/square-pen.svg");
+        for path in paths {
+            match extras.load(path) {
+                Ok(Some(_)) => {}
+                other => panic!("{path} does not resolve through ExtrasAssetSource: {other:?}"),
+            }
         }
     }
 }

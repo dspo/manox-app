@@ -6,6 +6,21 @@
 
 use super::*;
 
+/// The call id, uniform across every lifecycle state.
+fn tool_call_id_of(call: &ahp_types::state::ToolCallState) -> &str {
+    use ahp_types::state::ToolCallState as T;
+    match call {
+        T::Streaming(s) => &s.tool_call_id,
+        T::PendingConfirmation(s) => &s.tool_call_id,
+        T::Running(s) => &s.tool_call_id,
+        T::AuthRequired(s) => &s.tool_call_id,
+        T::PendingResultConfirmation(s) => &s.tool_call_id,
+        T::Completed(s) => &s.tool_call_id,
+        T::Cancelled(s) => &s.tool_call_id,
+        T::Unknown(_) => "",
+    }
+}
+
 impl Workspace {
     /// Open (or focus) a sub-agent observation panel in the right pane. The
     /// tab label is the subagent's address (`id`); the panel's banner shows
@@ -81,19 +96,40 @@ impl Workspace {
     /// reload when no live transcript was accumulated. T10c: reads the v2
     /// display fold (the message rows ARE the transcript).
     pub(super) fn agent_final_text(&self, id: &str, cx: &App) -> Option<String> {
-        use manox_agent::language_model::MessageContent;
-        self.chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|s| s.read(cx).store.derived_messages())
-            .expect("foreground store present")
-            .iter()
-            .flat_map(|m| m.content.iter())
-            .find_map(|c| match c {
-                MessageContent::ToolResult(r) if r.tool_use_id == id => Some(r.content.clone()),
-                _ => None,
+        self.chat.read(cx).store.as_ref().and_then(|(store, sid)| {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, sid).chat.map(|chat| {
+                chat.turns
+                    .iter()
+                    .flat_map(|t| t.response_parts.iter())
+                    .find_map(|part| match part {
+                        ahp_types::state::ResponsePart::ToolCall(call)
+                            if tool_call_id_of(&call.tool_call) == id =>
+                        {
+                            match &call.tool_call {
+                                ahp_types::state::ToolCallState::Completed(c) => {
+                                    Some(c.content.as_deref().map(|blocks| {
+                                        blocks
+                                            .iter()
+                                            .filter_map(|b| match b {
+                                                ahp_types::state::ToolResultContent::Text(t) => {
+                                                    Some(t.text.as_str())
+                                                }
+                                                _ => None,
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    }))
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(None)
+                    .unwrap_or_default()
             })
+        })
     }
 
     /// Drop the per-thread sub-agent observation state: the accumulated child

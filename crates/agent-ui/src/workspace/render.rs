@@ -18,7 +18,11 @@ impl Render for Workspace {
             cc.notify();
             v
         }) {
-            self.open_thread(next, window, cx);
+            // The successor hand-off is an identity swap of the same
+            // conversation, not user navigation: the current history entry
+            // is REWRITTEN to the successor id (appending would strand the
+            // retired predecessor one ← away).
+            self.replace_nav_current(next, window, cx);
             cx.notify();
         }
         // The turn navigator belongs to the conversation page; leaving it
@@ -206,12 +210,40 @@ impl Workspace {
         use gpui_component::{h_flex, v_flex};
         let theme = cx.theme().clone();
 
+        // History-loading gate: a reopened thread whose chat snapshot has not
+        // landed yet (the fold still holds no chat channel) suppresses the
+        // hero / list / footer in favor of the meerkat loading page. Render
+        // re-checks the fold so a stale flag can never pin the page after the
+        // snapshot, and prunes the flag once the wait outlives the timeout so
+        // a failed reopen degrades to the hero screen.
+        self.prune_history_gate(cx);
+        let history_loading = self.chat.read(cx).awaiting_history.is_some()
+            && self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .map(|(store, sid)| {
+                    crate::ahp_store::leaf(&store.read(cx).book, sid.as_str())
+                        .chat
+                        .is_none()
+                })
+                .unwrap_or(false);
+        let thread_id = if history_loading {
+            self.chat.read(cx).thread.read(|t| t.id.0.clone())
+        } else {
+            String::new()
+        };
+
         let running = self
             .chat
             .read(cx)
             .store
             .as_ref()
-            .map(|s| s.read(cx).store.running)
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid).running()
+            })
             .unwrap_or(false);
         let first_screen = self.chat_conversation(cx).read(cx).is_empty(cx) && !running;
         let composer_placement = composer_placement(first_screen);
@@ -227,23 +259,53 @@ impl Workspace {
         let main_body_w = card_width
             .get()
             .unwrap_or_else(|| window.bounds().size.width);
+        // Left-edge turn rail: the user-turn anchors are re-derived every
+        // frame (the same projection reads the ⌘M navigator makes on open).
+        // The width gate is a constant compare, so it short-circuits BEFORE
+        // the projection — a narrow card pays nothing. The turn-count gate
+        // lives inside `render_turn_rail` (None below two turns), whose
+        // result is the single source for both the rail and the gutter, so
+        // the two can never fork. Independent of the context rail's own
+        // gate: either side can float alone.
+        let turn_rail = if main_body_w >= px(crate::views::turn_rail::MIN_CARD_WIDTH) {
+            let rail_turns = crate::views::turn_rail::collect_rail_turns(
+                self.chat
+                    .read(cx)
+                    .conversation
+                    .read(cx)
+                    .items()
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, item)| (ix, item.read(cx).kind())),
+            );
+            let workspace = cx.entity();
+            let on_jump: crate::views::turn_rail::JumpFn =
+                std::rc::Rc::new(move |item_ix, _window, cx| {
+                    workspace.update(cx, |workspace, cx| workspace.reveal_message(item_ix, cx));
+                });
+            crate::views::turn_rail::render_turn_rail(&theme, &self.chat, rail_turns, on_jump, cx)
+        } else {
+            None
+        };
+        let show_turn_rail = turn_rail.is_some();
         let overlay = self
             .render_blank_project_overlay(window, &theme, cx)
             .or_else(|| self.render_pending_auth_overlay(&theme, cx));
         let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
 
-        let footer = (composer_placement == ComposerPlacement::Footer).then(|| {
-            v_flex()
-                .w_full()
-                .flex_shrink_0()
-                .bg(theme.background)
-                .py_2()
-                .gap_2()
-                .child(centered(gpui::div().w_full().h(px(1.)).bg(theme.border)))
-                .children(self.render_attachments(&theme, cx))
-                .child(centered(self.render_composer(running, window, &theme, cx)))
-        });
-        let hero = if composer_placement != ComposerPlacement::Hero {
+        let footer =
+            (composer_placement == ComposerPlacement::Footer && !history_loading).then(|| {
+                v_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .bg(theme.background)
+                    .py_2()
+                    .gap_2()
+                    .child(centered(gpui::div().w_full().h(px(1.)).bg(theme.border)))
+                    .children(self.render_attachments(&theme, cx))
+                    .child(centered(self.render_composer(running, window, &theme, cx)))
+            });
+        let hero = if composer_placement != ComposerPlacement::Hero || history_loading {
             None
         } else {
             Some(
@@ -287,6 +349,11 @@ impl Workspace {
                     .pb_2()
                     .children(self.render_follow_stop_banner(&theme, cx))
                     .children(hero)
+                    .when(history_loading, |this| {
+                        this.child(crate::views::history_loading::render_history_loading(
+                            &theme, &thread_id,
+                        ))
+                    })
                     .children({
                         // The row factory is a pure read-only projection
                         // over the conversation.
@@ -327,7 +394,7 @@ impl Workspace {
                         let message_list_width = self.chat.read(cx).message_list_width.clone();
                         let diag_state = self.chat.read(cx).list_state.clone();
                         let mono_family = theme.mono_font_family.clone();
-                        (!first_screen).then(move || {
+                        (!first_screen && !history_loading).then(move || {
                             let list_el = gpui::list(list_state, processor)
                                 .w_full()
                                 .h_full()
@@ -358,7 +425,28 @@ impl Workspace {
                                 .min_h_0()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .child(list_wrap)
+                                .relative()
+                                // The gutter pads the list itself, not this
+                                // band: the rail's absolute anchor is the
+                                // band, so padding the band would drag the
+                                // rail right along with the text it must
+                                // clear (the ticks would land ON the
+                                // transcript instead of hugging the edge).
+                                .child(
+                                    h_flex()
+                                        .flex_1()
+                                        .w_full()
+                                        .min_h_0()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .when(show_turn_rail, |this| {
+                                            this.pl(px(crate::views::turn_rail::GUTTER))
+                                        })
+                                        .child(list_wrap),
+                                )
+                                // The rail paints after the list so its marks
+                                // and preview float over the transcript band.
+                                .children(turn_rail)
                         })
                     })
                     .children(footer)
@@ -393,72 +481,11 @@ impl Workspace {
     /// or a retry dies again.
     fn render_follow_stop_banner(
         &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
+        _theme: &Theme,
+        _cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let stop = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()?
-            .read(cx)
-            .follow_stop()
-            .filter(|stop| !stop.dismissed)?;
-        Some(
-            h_flex()
-                .debug_selector(|| "follow-stopped-notice".into())
-                .flex_shrink_0()
-                .items_center()
-                .gap_2()
-                .mx_2()
-                .mt_1()
-                .px_3()
-                .py_1p5()
-                .rounded(theme.radius)
-                .border_1()
-                .border_color(theme.danger.opacity(0.35))
-                .bg(theme.danger.opacity(0.08))
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .xsmall()
-                        .text_color(theme.danger),
-                )
-                .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(i18n::t(stop.reason.notice_key())),
-                )
-                .child(
-                    Button::new("follow-stop-retry")
-                        .label(i18n::t("follow-stop-retry"))
-                        .ghost()
-                        .small()
-                        .debug_selector(|| "follow-stop-retry-btn".into())
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            let Some(store) = this.chat.read(cx).store.clone() else {
-                                return;
-                            };
-                            store.update(cx, |handle, cx| handle.retry_follow(cx));
-                        })),
-                )
-                .child(
-                    Button::new("follow-stop-dismiss")
-                        .icon(IconName::Close)
-                        .ghost()
-                        .xsmall()
-                        .tooltip(i18n::t("follow-stop-dismiss"))
-                        .debug_selector(|| "follow-stop-dismiss-btn".into())
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            let Some(store) = this.chat.read(cx).store.clone() else {
-                                return;
-                            };
-                            store.update(cx, |handle, cx| handle.dismiss_follow_stop(cx));
-                        })),
-                )
-                .into_any_element(),
-        )
+        // The retry notice retired with the v2 follow stream: a failed turn
+        // surfaces as the chat's error part now.
+        None
     }
 }
