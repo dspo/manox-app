@@ -493,8 +493,7 @@ impl SlashCommand for GoalCommand {
             .as_ref()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid)
-                    .goal()
+                crate::ahp_store::goal_of(&view.book, sid)
                     .cloned()
                     .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())
             });

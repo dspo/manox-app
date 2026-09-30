@@ -1288,7 +1288,7 @@ impl Workspace {
             .as_ref()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).goal().cloned()
+                crate::ahp_store::goal_of(&view.book, sid).cloned()
             })
             .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())
             .is_some_and(|goal| !goal.status.is_terminal())
@@ -1339,7 +1339,7 @@ impl Workspace {
             .as_ref()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).goal().cloned()
+                crate::ahp_store::goal_of(&view.book, sid).cloned()
             })
             .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())
             .map(|goal| goal.objective.clone())
@@ -1365,7 +1365,7 @@ impl Workspace {
             .as_ref()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).goal().cloned()
+                crate::ahp_store::goal_of(&view.book, sid).cloned()
             })
             .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())
             .and_then(|goal| goal.token_budget)
@@ -1385,7 +1385,7 @@ impl Workspace {
             .as_ref()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).goal().cloned()
+                crate::ahp_store::goal_of(&view.book, sid).cloned()
             })
             .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())
             .and_then(|goal| goal.max_rounds)
@@ -1434,7 +1434,7 @@ impl Workspace {
             .as_ref()
             .and_then(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).goal().cloned()
+                crate::ahp_store::goal_of(&view.book, sid).cloned()
             })
             .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())?;
         let accent = theme.accent;
