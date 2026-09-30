@@ -1186,19 +1186,33 @@ impl AhpStore {
         self.dispatch(chat_uri(chat_id), action);
     }
 
-    /// Settle a tool-call confirmation (the approval gate). The host keys
-    /// the settle on the pending call's auth id, carried in `tool_call_id`.
+    /// Settle a tool-call confirmation (the approval gate).
+    ///
+    /// The host keys the settle on the confirmation's auth id, and only
+    /// reads it from the action's `_meta` stamp: a confirmation without
+    /// `meta["x-manox"]["authId"]` is treated as a client-minted tool call
+    /// and silently ignored, so the verdict must always carry it. The fold's
+    /// `SessionToolConfirmationRequest.id` IS that auth id (the translator
+    /// seeds the request under it), which is what callers pass here.
     pub fn confirm_tool_call(
         &mut self,
         chat_id: &str,
         turn_id: &str,
         tool_call_id: &str,
+        auth_id: &str,
         approved: bool,
     ) {
+        // The `x-manox` seat with the translator's auth stamp. The field
+        // names mirror the host's `approval_meta` (which exposes no
+        // constants): only `authId` is read back today.
+        let mut auth = serde_json::Map::new();
+        auth.insert("authId".to_string(), Value::String(auth_id.to_string()));
+        let mut meta = serde_json::Map::new();
+        meta.insert(ext::META_KEY.to_string(), Value::Object(auth));
         let action = StateAction::ChatToolCallConfirmed(ChatToolCallConfirmedAction {
             turn_id: turn_id.to_string(),
             tool_call_id: tool_call_id.to_string(),
-            meta: None,
+            meta: Some(meta),
             approved,
             confirmed: None,
             reason: None,
@@ -1943,5 +1957,47 @@ mod tests {
         assert!(book.summaries.contains_key("s-9"));
         assert!(book.remove_summary(&session_uri("s-9")));
         assert!(book.summaries.is_empty());
+    }
+
+    /// A disconnected store: `dispatch` queues into `pending_writes` instead
+    /// of dialing the process-singleton host, so a test reads back exactly
+    /// what would ride the wire.
+    fn disconnected_store() -> AhpStore {
+        AhpStore {
+            book: ChannelBook::default(),
+            client: None,
+            replay_pending: false,
+            chat_events: Vec::new(),
+            optimistic_undo: Vec::new(),
+            pending_writes: Vec::new(),
+            request_hook: None,
+            rejections: std::collections::VecDeque::new(),
+            _tasks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn confirmation_verdicts_carry_the_translator_auth_stamp() {
+        for (approved, decision) in [(true, "allow"), (false, "deny")] {
+            let mut store = disconnected_store();
+            store.confirm_tool_call("c-1", "t-1", "call-1", "auth-1", approved);
+            assert_eq!(store.pending_writes.len(), 1);
+            let Some(PendingWrite::Dispatch(channel, action)) = store.pending_writes.first() else {
+                panic!("the {decision} verdict queues while disconnected");
+            };
+            assert_eq!(channel, &chat_uri("c-1"));
+            let StateAction::ChatToolCallConfirmed(confirmed) = action.as_ref() else {
+                panic!("the queued write is the confirmation");
+            };
+            assert_eq!(confirmed.approved, approved);
+            let meta = confirmed.meta.as_ref().expect("the auth stamp rides _meta");
+            assert_eq!(
+                meta.get(ext::META_KEY)
+                    .and_then(|seat| seat.get("authId"))
+                    .and_then(Value::as_str),
+                Some("auth-1"),
+                "the host settles by this id and silently ignores a verdict without it"
+            );
+        }
     }
 }
