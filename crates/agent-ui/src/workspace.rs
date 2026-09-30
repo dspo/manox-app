@@ -1686,22 +1686,23 @@ impl Workspace {
         // plan rows are emitted on `x-manox-plan:/<active chat id>`, and the
         // attach-time subscription rides the session id until the pointer
         // lands (the two diverge on session continuation). One re-issue per
-        // pointer value.
+        // pointer value; the key comes from `plan_channel_for` — the same
+        // authority every read face uses, so they cannot fork.
         if chat_landed && let Some((store, sid)) = self.chat.read(cx).store.clone() {
-            let chat_id = {
+            let plan_channel = {
                 let view = store.read(cx);
-                view.book
-                    .default_chat(&sid)
-                    .map(|uri| crate::ahp_store::id_of(&uri).to_string())
+                crate::ahp_store::plan_channel_for(&view.book, &sid)
             };
-            if let Some(chat_id) = chat_id
-                && self.chat.read(cx).plan_chat_subscribed.as_ref() != Some(&chat_id)
+            let chat_id = crate::ahp_store::id_of(&plan_channel).to_string();
+            // The session-id form is already subscribed at attach; a pointer
+            // that lands on the same id needs no second subscription.
+            if chat_id != sid && self.chat.read(cx).plan_chat_subscribed.as_ref() != Some(&chat_id)
             {
                 self.chat.update(cx, |chat, _| {
                     chat.plan_chat_subscribed = Some(chat_id.clone());
                 });
                 store.update(cx, |s, cx| {
-                    s.subscribe(crate::ahp_store::plan_uri(&chat_id), cx);
+                    s.subscribe(plan_channel, cx);
                 });
             }
         }
