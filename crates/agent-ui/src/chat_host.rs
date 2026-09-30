@@ -70,6 +70,28 @@ impl ChatHost for WorkspaceChatHost {
         }
     }
 
+    fn resolve_tool_confirmation(
+        &self,
+        auth_id: &str,
+        option_id: &str,
+        approved: bool,
+        cx: &mut App,
+    ) {
+        // The auth id is the GUARD (a stale button must not settle a
+        // different park); the option id rides the verdict so the host
+        // learns which option's semantics the user chose.
+        if let Some(ws) = up(self, cx) {
+            let decision = if approved {
+                manox_agent::PermissionDecision::AllowOnce
+            } else {
+                manox_agent::PermissionDecision::Deny
+            };
+            ws.update(cx, |w, cx| {
+                w.resolve_auth(auth_id, Some(option_id.to_string()), decision, cx);
+            });
+        }
+    }
+
     fn ask_body_scroll(&self, qi: usize, cx: &App) -> Option<gpui::ScrollHandle> {
         // Read through the workspace's own accessor (it holds the chat guard
         // internally).

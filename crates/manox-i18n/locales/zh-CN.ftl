@@ -689,7 +689,6 @@ workspace-ask-supplement-label = 补充说明
 
 workspace-ask-supplement-placeholder = 添加可选补充说明
 
-workspace-ask-settled-elsewhere = 已在另一客户端处理
 
 workspace-ask-recommended = 推荐
 
@@ -705,13 +704,9 @@ workspace-ask-skip = 跳过
 
 workspace-cancel = 取消
 
-pending-auth-title = 审批请求
 
-pending-auth-waiting = 等待你的决定
 
-pending-auth-allow = 仅此一次允许
 
-pending-auth-deny = 拒绝
 
 workspace-mode-readonly-title = 只读
 

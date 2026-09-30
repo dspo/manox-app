@@ -56,14 +56,14 @@ impl Render for Workspace {
             self.close_turn_navigator(window, cx);
         }
         // Per-frame conversation maintenance, all of it needing `&mut Window`
-        // (the ask card's per-question inputs) or draining a one-shot marker:
-        // reconcile the local cards against the server projections, allocate
-        // the missing ask inputs, sync the workspace-derived snapshot onto the
-        // owning tool row, and announce cards retired on another client.
+        // (the ask card's per-question inputs): reconcile the local cards
+        // against the server projections, allocate the missing ask inputs,
+        // and sync the workspace-derived snapshots onto the owning tool rows
+        // (the ask card and the unified confirmation card).
         self.reconcile_pending_with_projections(cx);
         self.ensure_ask_custom_inputs(window, cx);
         self.sync_ask_card_snapshots(cx);
-        self.notice_settled_elsewhere(window, cx);
+        self.sync_confirmation_snapshot(cx);
         self.render_column(window, cx)
     }
 }
@@ -204,8 +204,8 @@ impl Workspace {
     /// The conversation column — the chrome card's main surface, bare of the
     /// shell furniture (gutter/sidebar/card/title bar all belong to the
     /// chrome shell around it). Hero-or-list, footer composer, the floating
-    /// context rail, the blank-project / pending-auth overlays, and the
-    /// turn-navigator overlay.
+    /// context rail, the blank-project overlay, and the turn-navigator
+    /// overlay.
     fn render_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui_component::{h_flex, v_flex};
         let theme = cx.theme().clone();
@@ -288,9 +288,7 @@ impl Workspace {
             None
         };
         let show_turn_rail = turn_rail.is_some();
-        let overlay = self
-            .render_blank_project_overlay(window, &theme, cx)
-            .or_else(|| self.render_pending_auth_overlay(&theme, cx));
+        let overlay = self.render_blank_project_overlay(window, &theme, cx);
         let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
 
         let footer =

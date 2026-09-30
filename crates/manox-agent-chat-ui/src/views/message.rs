@@ -61,6 +61,7 @@ use manox_components::turn_frame::TurnFrame;
 use std::path::{Path, PathBuf};
 
 use crate::ask_card::{AskCardQuestion, AskCardSnapshot};
+use crate::column::ConfirmationSnapshot;
 use crate::host::ChatHostHandle;
 use crate::views::centered;
 
@@ -81,6 +82,7 @@ pub struct AgentTaskCtx {
 pub struct ToolCallCtx {
     pub host: ChatHostHandle,
     pub ask: Option<AskCardSnapshot>,
+    pub confirmation: Option<ConfirmationSnapshot>,
 }
 
 /// Markdown renderer with theme-aware syntax highlighting.
@@ -189,6 +191,11 @@ pub struct MessageItem {
     /// measuring rows, so `render` never reads the owning `Workspace` and the
     /// list callback remains read-only.
     pub ask_snapshot: Option<AskCardSnapshot>,
+    /// The unified confirmation card's decision surface, budgeted by the
+    /// `Workspace` under the same contract as `ask_snapshot`: present only
+    /// while the fold still carries the park, so a settle anywhere retires
+    /// the row's action buttons on the next sync.
+    pub confirmation: Option<ConfirmationSnapshot>,
     /// Copy controls' copied-feedback state, keyed by each control's
     /// `ElementId` (see `copy_feedback`).
     copied: CopiedRegistry,
@@ -210,6 +217,7 @@ impl MessageItem {
             markdown: None,
             notice_panel: None,
             ask_snapshot: None,
+            confirmation: None,
             copied: CopiedRegistry::default(),
         }
     }
@@ -724,6 +732,7 @@ impl Render for MessageItem {
         let tool_ctx = Some(ToolCallCtx {
             host: self.host.clone(),
             ask: self.ask_snapshot.clone(),
+            confirmation: self.confirmation.clone(),
         });
         // The owned markdown document for text-bearing items (persistent across
         // frames → selection + streaming state survive). `None` for non-text
@@ -2822,7 +2831,60 @@ pub fn render_tool_call(
     if show_body && !item.output.is_empty() {
         card = card.child(render_tool_output(item, ix, theme, cx));
     }
+    // The unified confirmation card: the parked call's own row carries the
+    // decision. The buttons ARE the fold's options, rendered verbatim —
+    // runtime labels are never re-localized, and a park the fold no longer
+    // carries loses its snapshot (and with it the row) on the next sync.
+    if item.status == ToolCallStatus::PendingApproval
+        && let Some(confirmation) = tool_ctx.and_then(|c| c.confirmation.as_ref())
+        && let Some(host) = tool_ctx.map(|c| c.host.clone())
+        && let Some(actions) = render_confirmation_actions(item, ix, theme, confirmation, host)
+    {
+        card = card.child(actions);
+    }
     card.into_any_element()
+}
+
+/// The confirmation card's action row: one button per fold option, the
+/// approve kind primary and everything else outline. `None` when the park
+/// carries no options — buttons that could never settle are worse than none.
+fn render_confirmation_actions(
+    item: &ToolCallItem,
+    ix: usize,
+    theme: &Theme,
+    confirmation: &ConfirmationSnapshot,
+    host: ChatHostHandle,
+) -> Option<gpui::AnyElement> {
+    if confirmation.actions.is_empty() {
+        return None;
+    }
+    let auth_id = confirmation.auth_id.clone();
+    let row = gpui::div()
+        .flex()
+        .w_full()
+        .items_center()
+        .justify_end()
+        .gap_2()
+        .px_2()
+        .py_2()
+        .border_t_1()
+        .border_color(theme.border)
+        .children(confirmation.actions.iter().enumerate().map(|(oi, action)| {
+            let id = format!("confirm-{ix}-{}-{oi}", item.id);
+            let auth_id = auth_id.clone();
+            let host = host.clone();
+            let option_id = action.option_id.clone();
+            let label = action.label.clone();
+            let approve = action.approve;
+            Button::new(id)
+                .label(label)
+                .when(action.approve, |button| button.primary())
+                .when(!action.approve, |button| button.outline())
+                .on_click(move |_, _, cx: &mut App| {
+                    host.resolve_tool_confirmation(&auth_id, &option_id, approve, cx);
+                })
+        }));
+    Some(row.into_any_element())
 }
 
 /// Fixed-height container with the tool's output. While streaming we paint a

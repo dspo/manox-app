@@ -1200,6 +1200,7 @@ impl AhpStore {
         turn_id: &str,
         tool_call_id: &str,
         auth_id: &str,
+        selected_option_id: Option<String>,
         approved: bool,
     ) {
         // The `x-manox` seat with the translator's auth stamp. The field
@@ -1213,13 +1214,13 @@ impl AhpStore {
             turn_id: turn_id.to_string(),
             tool_call_id: tool_call_id.to_string(),
             meta: Some(meta),
+            selected_option_id,
             approved,
             confirmed: None,
             reason: None,
             edited_tool_input: None,
             user_suggestion: None,
             reason_message: None,
-            selected_option_id: None,
         });
         self.dispatch(chat_uri(chat_id), action);
     }
@@ -1980,7 +1981,14 @@ mod tests {
     fn confirmation_verdicts_carry_the_translator_auth_stamp() {
         for (approved, decision) in [(true, "allow"), (false, "deny")] {
             let mut store = disconnected_store();
-            store.confirm_tool_call("c-1", "t-1", "call-1", "auth-1", approved);
+            store.confirm_tool_call(
+                "c-1",
+                "t-1",
+                "call-1",
+                "auth-1",
+                (!approved).then(|| "deny".to_string()),
+                approved,
+            );
             assert_eq!(store.pending_writes.len(), 1);
             let Some(PendingWrite::Dispatch(channel, action)) = store.pending_writes.first() else {
                 panic!("the {decision} verdict queues while disconnected");
@@ -1990,6 +1998,12 @@ mod tests {
                 panic!("the queued write is the confirmation");
             };
             assert_eq!(confirmed.approved, approved);
+            assert_eq!(
+                confirmed.selected_option_id.as_deref(),
+                (!approved).then_some("deny"),
+                "the clicked option rides the verdict (an \"always\"-style \
+                 label must not collapse to a bare bool)"
+            );
             let meta = confirmed.meta.as_ref().expect("the auth stamp rides _meta");
             assert_eq!(
                 meta.get(ext::META_KEY)

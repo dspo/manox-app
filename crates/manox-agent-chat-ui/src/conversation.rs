@@ -774,6 +774,17 @@ impl ConversationState {
             .push(cx.new(|_| MessageItem::new(ConvItem::ToolCall(item), role, item_id, host)));
     }
 
+    /// Remove the top-level tool row with `id` — the promoted confirmation
+    /// card's retire leg (a synthesized row carries no history of its own
+    /// once the park leaves it). Returns whether a row was removed.
+    pub fn remove_tool(&mut self, id: &str, cx: &App) -> bool {
+        let Some(ix) = self.find_tool(id, cx) else {
+            return false;
+        };
+        self.items.remove(ix);
+        true
+    }
+
     pub fn find_tool(&self, id: &str, cx: &App) -> Option<usize> {
         self.items
             .iter()

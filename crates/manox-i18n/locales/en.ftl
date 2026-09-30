@@ -702,7 +702,6 @@ workspace-ask-supplement-label = Supplemental note
 
 workspace-ask-supplement-placeholder = Add optional context
 
-workspace-ask-settled-elsewhere = Handled in another client
 
 workspace-ask-recommended = Recommended
 
@@ -718,13 +717,9 @@ workspace-ask-skip = Skip
 
 workspace-cancel = Cancel
 
-pending-auth-title = Approval requested
 
-pending-auth-waiting = waiting for your decision
 
-pending-auth-allow = Allow once
 
-pending-auth-deny = Deny
 
 workspace-mode-readonly-title = Read Only
 
