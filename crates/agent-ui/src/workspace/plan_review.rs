@@ -20,10 +20,7 @@ impl Workspace {
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                manox_agent_chat_ui::ahp_store::leaf(&view.book, sid)
-                    .ext
-                    .and_then(|x| x.plan_mode)
-                    .unwrap_or(false)
+                manox_agent_chat_ui::ahp_store::plan_mode_of(&view.book, sid)
             })
             .unwrap_or(false)
     }

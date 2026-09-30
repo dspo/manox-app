@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use crate::sidebar_projection::ThreadRow;
 use ahp_types::state::AgentInfo;
 use gpui::{App, Context, Entity};
-use manox_agent_chat_ui::ahp_store::{AhpStore, CLIENT_ID, chat_uri, plan_uri, session_uri};
+use manox_agent_chat_ui::ahp_store::{
+    AhpStore, CLIENT_ID, chat_uri, plan_uri, session_uri, thread_uri, work_uri,
+};
 
 /// The per-app multiplexer: store handle plus attach/focus bookkeeping.
 pub struct SessionMultiplexer {
@@ -57,7 +59,10 @@ impl SessionMultiplexer {
     /// of a plan review's settlement (the verdict lands after the turn has
     /// archived, and the chat-level part can then never fold answered), and
     /// without the subscription the live-ask edge cannot tell a settled
-    /// review from an open one — the #88 composer lock.
+    /// review from an open one — the #88 composer lock. The thread channel
+    /// rides for the row state (pin/label/leaf — upstream #842 moved the rows
+    /// there and nothing on the session channel ever folded them), and the
+    /// work channel for the browser-suite surface.
     pub fn open_or_create(&mut self, session_id: &str, _reopen: bool, cx: &mut Context<Self>) {
         if self.attached.iter().any(|id| id == session_id) {
             return;
@@ -73,6 +78,8 @@ impl SessionMultiplexer {
                 // covers the window before the pointer lands.
                 store.subscribe(chat_uri(&sid), cx);
                 store.subscribe(plan_uri(&sid), cx);
+                store.subscribe(thread_uri(&sid), cx);
+                store.subscribe(work_uri(&sid), cx);
                 store.claim_active_client(&sid);
             });
             let _ = this.update(cx, |_, _| {});
@@ -179,13 +186,12 @@ impl SessionMultiplexer {
             .values()
             .map(|summary| {
                 let sid = manox_agent_chat_ui::ahp_store::id_of(&summary.resource);
-                let ext = book.ext.get(&session_uri(sid));
+                // The row state rides the `x-manox-thread` extension channel
+                // (upstream #842); the session channel's ext face carries
+                // nothing since then.
+                let ext = book.ext.get(&thread_uri(sid));
                 let pinned = ext.and_then(|x| x.pinned).unwrap_or(false);
-                let pending_plan = ext
-                    .and_then(|x| x.plan_review.as_ref())
-                    .and_then(|r| r.get("state"))
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| s == "proposed");
+                let pending_plan = manox_agent_chat_ui::ahp_store::plan_review_proposed(book, sid);
                 let mut row = ThreadRow::from_summary(summary, pinned, pending_plan);
                 // The host's project field trails a brand-new session (its
                 // store row lands with the first persistence), but the fold's
