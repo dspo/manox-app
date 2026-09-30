@@ -183,7 +183,7 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
 /// reflow, mouse-downs still swallowed, hover tooltip explains the move).
 fn nav_button(
     id: &'static str,
-    glyph: crate::theme::Icon,
+    glyph: crate::theme::IconAsset,
     enabled: bool,
     tooltip_key: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,

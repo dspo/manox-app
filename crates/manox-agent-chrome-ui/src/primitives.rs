@@ -2,8 +2,7 @@
 //! agents-window calibration value for value (sizes, radii, colors).
 
 use crate::theme::{
-    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, FG_DIM, FG_FAINT, ICON_ON_BG, IconAsset,
-    SURFACE_ACTIVE,
+    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, FG_DIM, FG_FAINT, ICON_ON_BG, IconAsset, SURFACE_ACTIVE,
     SURFACE_TERTIARY, TOOLBAR_HOVER, icon,
 };
 use gpui::{

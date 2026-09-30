@@ -25,7 +25,7 @@ use crate::session_list::{
     SidebarGrouping,
 };
 use crate::theme::{
-    CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
+    CARD_BG, CARD_BORDER, FG_DIM, FG_FAINT, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
 };
 use crate::{divider, titlebar};
 
@@ -1624,4 +1624,3 @@ mod tests {
         assert_eq!(keys.len(), sorted.len(), "bucket state keys must be unique");
     }
 }
-
