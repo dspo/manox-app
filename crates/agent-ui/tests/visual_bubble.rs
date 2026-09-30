@@ -17,10 +17,11 @@
 //! harness cannot construct, so the pill mount glue is mirrored here; the
 //! pixel output still comes from the real render pipeline. Per AGENTS.md
 //! the sketches under design/ are NOT acceptance faces — this harness is,
-//! Only the >=90% warning-line assertion below is falsifiable: the
-//! bubble surface tone equals the page background, so pixel-scanning the
-//! right-alignment/tail edges cannot fail; geometric assertions need
-//! `debug_bounds`-class mechanics (tracked as a follow-up).
+//! Only the >=90% warning-line assertion below is falsifiable: the pixel
+//! predicates could not separate the tail from the bubble's own
+//! border+shadow, and the alignment reference resolved to a text edge
+//! rather than the pill's geometry — debug_bounds-class assertions are
+//! the follow-up.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -243,9 +244,10 @@ mod macos {
         // >=90%, so the warning-colored `├ Context …` line MUST be inside
         // the visible bubble — this fails when the model section scrolls
         // out of the height cap. (Right-alignment/tail geometry is
-        // verified by eye on the regenerated captures; pixel-scanning
-        // those edges cannot fail because the surface tone equals the page
-        // background — debug_bounds-class assertions are the follow-up.)
+        // verified by eye on the regenerated captures: the pixel
+        // predicates could not separate the tail from the bubble's own
+        // border+shadow, and the alignment reference resolved to a text
+        // edge — debug_bounds-class assertions are the follow-up.)
         if open {
             let img = &shot;
             // Warning-colored Context line: the seeded foreground usage is
@@ -348,7 +350,7 @@ mod macos {
     }
 
     /// The pill + bubble mount, mirrored from `render_context_usage_ring`:
-    /// ring-in-relative-wrapper (the tail anchors to the ring box), the
+    /// tail hangs from the bubble slot, offset to land on the ring centre, the
     /// plain relative/absolute mount (the 38px transparent apron keeps the
     /// surface clear of the pill; the tail bridges that band), and the
     /// real `render_bubble` content under the popover chrome.
