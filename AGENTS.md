@@ -108,11 +108,15 @@ CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p manox-agent
 - `gpui-component` — gpui-component 组件库（Button/Input/List/Sidebar 等）
 - `gpui-component-dev` — 为 gpui-component 贡献新组件时额外加载
 
+另有唯一随仓库走的 skill：`.agents/skills/gpui-kit-follow`（gpui-kit 版本跟进/升级方法论，含手搓热点表）——评估 gpui-kit 新版本、bump gpui 依赖、或调研组件库新特性能否替代手搓实现前加载。
+
 ## GPUI 依赖版本锁定
 
 GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再直接依赖 zed-industries/zed**：`gpui`/`gpui_platform` 是 `gpui-pre`/`gpui-pre-platform` 的包名别名——Longbridge 每周从 zed main republish 的快照（`[lib]` 名保留，`use gpui::*` 不变），每个版本自带 zed commit 映射（crate description / `[package.metadata]`）可审计。组件层 `gpui-component` 与资产 `gpui-kit-assets`（原 gpui-component-assets）同线 semver。全部 `=` 精确 pin，防周更快照漂移。
 
 升级姿势：`cargo update -p gpui-pre --precise x.y.z`（与组件版本按 gpui-kit lock 对齐）→ 重跑全部门禁；gpui-pre 的 `[[patch.unused]]`/duplicate 用 `cargo tree -d | grep -i gpui` 验证单一版本，`script/check-no-zed-git.sh` 验证 zed 零引用（CI 门禁）。gpui 相关依赖在 debug 下仍需 opt-level=3（`[profile.dev.package] gpui-pre*`）。历史注：旧栈（gpui@zed-1d217ee + gpui-component@longbridge-git）已退役；gpui-pre ≥0.3.4 含上游 gpui#60295 element-arena 修复。
+
+版本跟进/升级的完整流程（跟进触发面、评估三问、整列 runbook、adoption 跟进与手搓热点表）见 `.agents/skills/gpui-kit-follow/SKILL.md`。
 
 ## 提示词与 i18n
 
