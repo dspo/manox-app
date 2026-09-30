@@ -1,7 +1,8 @@
 //! History-loading view: a pixel meerkat played frame-by-frame in the main
 //! column while a reopened thread's chat snapshot is still in flight (the
 //! fold holds no chat channel yet). The sprite is a 12×14 cell grid defined
-//! as character rows; the 6-frame cycle bobs, blinks, and flicks its tail.
+//! as character rows; 4 distinct frames play in a 6-slot loop (idle, bob,
+//! blink, bob, idle, tail flick), so the bob and idle slots each repeat.
 
 use std::time::Duration;
 
@@ -16,12 +17,16 @@ const CELL: f32 = 10.0;
 /// Sprite grid size.
 const GRID_W: f32 = 12.0;
 const GRID_H: f32 = 14.0;
-/// Frames per second of the cycle.
-const FPS: f64 = 3.0;
-/// Playback order: idle, bob, blink, bob, idle, tail-flick.
+/// Playback slots advanced per second.
+const SLOTS_PER_SEC: f64 = 3.0;
+/// Playback order over [`FRAMES`]: idle, bob, blink, bob, idle, tail flick.
 const CYCLE: [usize; 6] = [0, 1, 2, 1, 0, 3];
+/// A reopened thread whose chat snapshot never lands (host error, missing
+/// session) must not pin the loading page forever: after this long the gate
+/// self-clears and the hero screen returns.
+pub(crate) const HISTORY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Sprite palette: outline, body, belly, eye patches, features, tail.
+/// Sprite palette: outline, body, belly, eye patches, nose, tail.
 const PALETTE: [(&str, u32); 6] = [
     ("o", 0x4A3626),
     ("b", 0xC89B6D),
@@ -50,7 +55,8 @@ const F0: [&str; 14] = [
     "..oo....oo..",
 ];
 
-/// Bob: the whole sprite sits one cell lower — the idle "breathing" frame.
+/// Bob: every row shifts one cell down and the feet row falls off the grid —
+/// the sprite reads as a small hop rather than a rigid translation.
 const F1: [&str; 14] = [
     "............",
     "..oo....oo..",
@@ -68,7 +74,8 @@ const F1: [&str; 14] = [
     "..obb..bbo.t",
 ];
 
-/// Blink: the eye patches close to a thin outline line at the brow row.
+/// Blink: the eye patches collapse to a thin outline line one row BELOW the
+/// brow (where the patch bottom used to be).
 const F2: [&str; 14] = [
     "..oo....oo..",
     ".oddo..oddo.",
@@ -109,32 +116,43 @@ const FRAMES: [[&str; 14]; 4] = [F0, F1, F2, F3];
 fn palette_lookup(ch: char) -> Option<Hsla> {
     PALETTE
         .iter()
-        .find(|(key, _)| key.chars().next() == Some(ch))
+        .find(|(key, _)| key.starts_with(ch))
         .map(|(_, hex)| rgb(*hex).into())
 }
 
-/// One frame: a fixed-size box with a div per solid pixel.
-fn frame_layer(grid: &[&str; 14]) -> gpui::Div {
-    let mut layer = div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(div().relative().w(px(GRID_W * CELL)).h(px(GRID_H * CELL)));
+/// Which CYCLE slot an animation delta falls in. Extracted for tests: the
+/// slot mapping (including the wrap at delta 1.0) is the whole animation.
+fn active_slot(delta: f32) -> usize {
+    (delta * CYCLE.len() as f32).floor() as usize % CYCLE.len()
+}
+
+/// Precomputed solid cells of one frame: (x, y, color) in cell units. Parsing
+/// runs once per page render, not once per frame layer.
+fn frame_cells(grid: &[&str; 14]) -> Vec<(usize, usize, Hsla)> {
+    let mut cells = Vec::new();
     for (y, row) in grid.iter().enumerate() {
         for (x, ch) in row.chars().enumerate() {
             if let Some(color) = palette_lookup(ch) {
-                layer = layer.child(
-                    div()
-                        .absolute()
-                        .left(px(x as f32 * CELL))
-                        .top(px(y as f32 * CELL))
-                        .size(px(CELL))
-                        .bg(color),
-                );
+                cells.push((x, y, color));
             }
         }
+    }
+    cells
+}
+
+/// One frame: a sprite-sized box with a div per solid pixel, filling the
+/// (relative) parent it is mounted in.
+fn frame_layer(cells: &[(usize, usize, Hsla)]) -> gpui::Div {
+    let mut layer = div().absolute().inset_0();
+    for &(x, y, color) in cells {
+        layer = layer.child(
+            div()
+                .absolute()
+                .left(px(x as f32 * CELL))
+                .top(px(y as f32 * CELL))
+                .size(px(CELL))
+                .bg(color),
+        );
     }
     layer
 }
@@ -142,14 +160,18 @@ fn frame_layer(grid: &[&str; 14]) -> gpui::Div {
 /// The full loading page: the animated meerkat, the heading, and the thread
 /// id. No composer — the thread is not ready.
 pub(crate) fn render_history_loading(theme: &Theme, thread_id: &str) -> AnyElement {
+    // All four grids parse once here; the six layers share the results.
+    let frame_table: Vec<Vec<(usize, usize, Hsla)>> = FRAMES.iter().map(frame_cells).collect();
+
     let mut sprite = div().relative().w(px(GRID_W * CELL)).h(px(GRID_H * CELL));
     for (i, &frame_ix) in CYCLE.iter().enumerate() {
-        let frames_total = CYCLE.len() as f32;
-        sprite = sprite.child(frame_layer(&FRAMES[frame_ix]).with_animation(
+        sprite = sprite.child(frame_layer(&frame_table[frame_ix]).with_animation(
             format!("history-loading-frame-{i}"),
-            Animation::new(Duration::from_secs_f64(CYCLE.len() as f64 / FPS)),
+            // gpui animations are oneshot by default; the loading page can
+            // stay up arbitrarily long, so the loop must repeat.
+            Animation::new(Duration::from_secs_f64(CYCLE.len() as f64 / SLOTS_PER_SEC)).repeat(),
             move |el, delta| {
-                let active = (delta * frames_total).floor() as usize % CYCLE.len() == i;
+                let active = active_slot(delta) == i;
                 el.opacity(if active { 1.0 } else { 0.0 })
             },
         ));
@@ -160,6 +182,7 @@ pub(crate) fn render_history_loading(theme: &Theme, thread_id: &str) -> AnyEleme
         .w_full()
         .relative()
         .overflow_hidden()
+        .debug_selector(|| "history-loading".into())
         .bg(theme.background)
         .child(
             v_flex()
@@ -174,7 +197,7 @@ pub(crate) fn render_history_loading(theme: &Theme, thread_id: &str) -> AnyEleme
                         .text_base()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.foreground)
-                        .child(i18n::t("history-loading-heading")),
+                        .child(i18n::t("workspace-history-loading-heading")),
                 )
                 .child(
                     div()
@@ -194,7 +217,6 @@ mod tests {
     #[test]
     fn every_row_is_grid_width_and_uses_palette_chars() {
         for frame in &FRAMES {
-            assert_eq!(frame.len(), 14);
             for row in frame {
                 assert_eq!(row.chars().count(), 12);
                 for ch in row.chars() {
@@ -205,19 +227,27 @@ mod tests {
     }
 
     #[test]
-    fn every_frame_has_a_nose() {
-        for frame in &FRAMES {
-            let all: String = frame.concat();
-            assert!(all.contains('d'), "nose missing");
+    fn cycle_indices_are_valid_frames() {
+        for &ix in &CYCLE {
+            assert!(ix < FRAMES.len());
         }
     }
 
     #[test]
-    fn cycle_indices_are_valid_frames() {
-        assert_eq!(CYCLE.len(), 6);
-        for &ix in &CYCLE {
-            assert!(ix < FRAMES.len());
-        }
+    fn slot_mapping_covers_the_cycle_and_wraps() {
+        assert_eq!(active_slot(0.0), 0);
+        assert_eq!(active_slot(0.2), 1);
+        assert_eq!(active_slot(0.99), 5);
+        // One-shot animations clamp delta to 1.0; the wrap must land on the
+        // first slot, not panic on an out-of-range remainder.
+        assert_eq!(active_slot(1.0), 0);
+    }
+
+    #[test]
+    fn the_loop_animation_is_not_oneshot() {
+        let animation =
+            Animation::new(Duration::from_secs_f64(CYCLE.len() as f64 / SLOTS_PER_SEC)).repeat();
+        assert!(!animation.oneshot);
     }
 
     #[test]

@@ -667,7 +667,7 @@ impl Workspace {
                 goal_ticker_gen: 0,
                 turn_active: false,
                 thinking_ticker_gen: 0,
-                awaiting_history: false,
+                awaiting_history: None,
                 context_rail,
             }),
         };
@@ -719,15 +719,85 @@ impl Workspace {
 
     /// Attach a thread through the production switch path. Diagnostic-only
     /// entry point so integration tests can exercise parking + re-surface
-    /// without simulating the sidebar click.
+    /// without simulating the sidebar click. `expect_history` passes through
+    /// to the history-loading gate.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_attach_thread(
         &mut self,
         thread: manox_agent::thread::ThreadHandle,
+        expect_history: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.attach_thread(thread, false, window, cx);
+        self.attach_thread(thread, false, expect_history, window, cx);
+    }
+
+    /// Diagnostic read of the history-loading gate.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_awaiting_history(&self, cx: &App) -> Option<std::time::Instant> {
+        self.chat.read(cx).awaiting_history
+    }
+
+    /// Fold an empty chat snapshot for the foreground session into the book
+    /// and notify the store — the wire shape of "the reopen's chat snapshot
+    /// landed, and the session is genuinely empty". Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_apply_empty_chat_snapshot(&self, cx: &mut App) {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            return;
+        };
+        let chat: ahp_types::state::ChatState = serde_json::from_value(serde_json::json!({
+            "resource": crate::ahp_store::chat_uri(&sid),
+            "title": "gate-test",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [],
+        }))
+        .expect("empty chat snapshot parses");
+        store.update(cx, |s, cx| {
+            s.book.apply_snapshot(
+                &crate::ahp_store::chat_uri(&sid),
+                ahp_types::state::SnapshotState::Chat(Box::new(chat)),
+            );
+            cx.notify();
+        });
+    }
+
+    /// Backdate the history-loading gate past its timeout, so the prune path
+    /// is testable without a real 10-second wait. Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_backdate_history_gate(&self, cx: &mut App) {
+        self.chat.update(cx, |chat, cx| {
+            chat.awaiting_history = chat
+                .awaiting_history
+                .map(|since| since - 2 * crate::views::history_loading::HISTORY_TIMEOUT);
+            cx.notify();
+        });
+    }
+
+    /// Diagnostic entry to the gate's timeout prune ([`Self::prune_history_gate`]).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_prune_history_gate(&mut self, cx: &mut Context<Self>) {
+        self.prune_history_gate(cx);
+    }
+
+    /// Drop the history-loading gate once it has outlived
+    /// [`crate::views::history_loading::HISTORY_TIMEOUT`]: the chat snapshot
+    /// never landed (host error, missing session), and a permanent
+    /// full-column loading page with no composer and no transcript is worse
+    /// than the hero screen. Render calls this every frame; tests call it
+    /// directly.
+    fn prune_history_gate(&mut self, cx: &mut Context<Self>) {
+        let expired =
+            self.chat.read(cx).awaiting_history.is_some_and(|since| {
+                since.elapsed() > crate::views::history_loading::HISTORY_TIMEOUT
+            });
+        if expired {
+            self.chat.update(cx, |chat, cx| {
+                chat.awaiting_history = None;
+                cx.notify();
+            });
+        }
     }
     /// Seed a parsed `AskUserQuestion` as the pending ask. Diagnostic-only:
     /// bypasses the engine gate so the synthesis path can be tested with a
@@ -1251,7 +1321,7 @@ impl Workspace {
             chat.conversation = new_conv;
             // The snapshot landed with displayable history: the loading gate's
             // job is done.
-            chat.awaiting_history = false;
+            chat.awaiting_history = None;
             cx.notify();
         });
         self.sync_list_count(cx);
@@ -1294,13 +1364,13 @@ impl Workspace {
             if snapshot_ready && this.chat_conversation(cx).read(cx).is_empty(cx) {
                 this.rebuild_conversation_from_book(cx);
                 rebuilt = true;
-            } else if chat_landed && this.chat.read(cx).awaiting_history {
+            } else if chat_landed && this.chat.read(cx).awaiting_history.is_some() {
                 // The chat snapshot landed but holds no displayable turn: the
                 // reopened session is genuinely empty. Drop the loading gate so
                 // the hero screen returns (without this the loading view would
                 // stick forever on an empty history).
                 this.chat.update(cx, |chat, cx| {
-                    chat.awaiting_history = false;
+                    chat.awaiting_history = None;
                     cx.notify();
                 });
             }

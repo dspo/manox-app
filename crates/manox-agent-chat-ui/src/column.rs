@@ -453,10 +453,11 @@ pub struct ChatColumn {
     /// A reopened thread is waiting for its chat snapshot: the attach bound a
     /// landing mirror while the fold still holds no chat channel for the new
     /// session. The workspace swaps the hero screen for the history-loading
-    /// view while this is set (render re-checks the fold). Cleared when the
-    /// snapshot lands — either by the rebuild (history present) or by the
-    /// store observe (genuinely empty session → back to the hero).
-    pub awaiting_history: bool,
+    /// view while this is set (render re-checks the fold). `None` clears the
+    /// gate — when the snapshot lands (rebuild with history, or the store
+    /// observe for a genuinely empty session) and when the wait exceeds the
+    /// view's timeout so a failed reopen cannot pin the page forever.
+    pub awaiting_history: Option<std::time::Instant>,
     pub input_sub: Option<Subscription>,
     /// Height-invalidation subscription: any `ConversationState` mutation may
     /// change a row's height (including off-screen rows whose height is cached

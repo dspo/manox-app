@@ -762,7 +762,6 @@ workspace-project-name-prompt = Project folder name
 
 workspace-empty-prompt = What should we do?
 
-workspace-loading-history = Loading conversation…
 
 follow-stop-stream-failing = Live follow stopped: repeated reconnects failed; the view keeps the last content it received. Retry to reconnect.
 
@@ -1157,7 +1156,7 @@ chrome-spawn-failed = Failed to start { $prog }: { $err }
 chrome-main-pending = The chat column mounts here (next tranche)
 
 workspace-hero-heading = Start a conversation
-history-loading-heading = Loading conversation…
+workspace-history-loading-heading = Loading conversation…
 
 chrome-tab-editor = Editor
 chrome-quick-editor = Open the editor

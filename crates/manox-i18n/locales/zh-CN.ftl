@@ -749,7 +749,6 @@ workspace-project-name-prompt = 项目文件夹名称
 
 workspace-empty-prompt = 我们该做什么？
 
-workspace-loading-history = 正在加载对话…
 
 follow-stop-stream-failing = 实时跟进已停止：多次重连失败，视图停留在最后收到的内容。点「重试」可重新连接。
 
@@ -1137,7 +1136,7 @@ chrome-spawn-failed = 无法启动 { $prog }：{ $err }
 chrome-main-pending = 聊天主栏装配中（下一批接入）
 
 workspace-hero-heading = 开始你的对话
-history-loading-heading = 加载对话…
+workspace-history-loading-heading = 加载对话…
 
 chrome-tab-editor = 编辑器
 chrome-quick-editor = 打开编辑器

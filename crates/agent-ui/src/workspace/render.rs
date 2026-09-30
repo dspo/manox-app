@@ -207,11 +207,13 @@ impl Workspace {
         let theme = cx.theme().clone();
 
         // History-loading gate: a reopened thread whose chat snapshot has not
-        // landed yet (the fold still holds no chat channel) swaps the hero /
-        // list / footer for the tetromino loading page. Render re-checks the
-        // fold so a stale flag can never pin the page after the snapshot.
-        let thread_id = self.chat.read(cx).thread.read(|t| t.id.0.clone());
-        let history_loading = self.chat.read(cx).awaiting_history
+        // landed yet (the fold still holds no chat channel) suppresses the
+        // hero / list / footer in favor of the meerkat loading page. Render
+        // re-checks the fold so a stale flag can never pin the page after the
+        // snapshot, and prunes the flag once the wait outlives the timeout so
+        // a failed reopen degrades to the hero screen.
+        self.prune_history_gate(cx);
+        let history_loading = self.chat.read(cx).awaiting_history.is_some()
             && self
                 .chat
                 .read(cx)
@@ -223,6 +225,11 @@ impl Workspace {
                         .is_none()
                 })
                 .unwrap_or(false);
+        let thread_id = if history_loading {
+            self.chat.read(cx).thread.read(|t| t.id.0.clone())
+        } else {
+            String::new()
+        };
 
         let running = self
             .chat
