@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use crate::i18n;
 use gpui::{AnyElement, App, ScrollHandle, SharedString, Window, prelude::*, px};
+use gpui_component::input::{InlineToken, InlineTokenError, InputContent};
 use gpui_component::{Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
 
 use crate::views::popup_menu::{self, LIST_HORIZONTAL_PADDING, MAX_LIST_HEIGHT};
@@ -244,6 +245,27 @@ pub fn build_replacement(
 /// Callback invoked when a completion row is selected (by click or keyboard).
 pub type SelectHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
+/// `build_replacement` plus the inserted name wrapped as an atomic inline
+/// token, ready for `TextareaState::set_value`. The token spans exactly
+/// `trigger+name`; the trailing separator stays plain text, so the mention
+/// deletes as one unit while the caret lands after the space. `id` names the
+/// referenced resource (registry key / command name).
+pub fn build_replacement_content(
+    trigger: char,
+    id: &str,
+    name: &str,
+    value: &str,
+    token_start: usize,
+    cursor: usize,
+) -> Result<(InputContent, usize), InlineTokenError> {
+    let (new_value, caret) = build_replacement(trigger, name, value, token_start, cursor);
+    let prefix = token_start.min(value.len());
+    let range = prefix..prefix + trigger.len_utf8() + name.len();
+    let token = InlineToken::new(id, new_value[range.clone()].to_string());
+    let content = InputContent::new(new_value).with_token(range, token)?;
+    Ok((content, caret))
+}
+
 /// Render the popover list. `on_select(ix)` fires on click or keyboard confirm.
 /// Uses plain `.children()` (not `gpui::list`) because the virtualized list
 /// needs a bounded height from its container, which the `deferred` + `anchored`
@@ -405,5 +427,42 @@ mod tests {
         let (new, caret) = build_replacement('@', "github", "hello @gi rest", 6, 9);
         assert_eq!(new, "hello @github rest");
         assert_eq!(caret, "hello @github ".len());
+    }
+
+    #[test]
+    fn build_replacement_content_marks_inserted_name() {
+        let (content, caret) =
+            build_replacement_content('@', "github", "github", "hello @gi rest", 6, 9).unwrap();
+        assert_eq!(content.text().as_ref(), "hello @github rest");
+        assert_eq!(caret, "hello @github ".len());
+        let spans = content.tokens();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].range(), 6..13);
+        assert_eq!(spans[0].token().text().as_ref(), "@github");
+        assert_eq!(spans[0].token().id().as_ref(), "github");
+    }
+
+    #[test]
+    fn build_replacement_content_offsets_multibyte_prefix() {
+        // "你好 @gi" — the trigger token starts after a multibyte prefix
+        // (bytes: 你 0..3, 好 3..6, space 6..7, token 7..).
+        let value = "你好 @gi";
+        let cursor = value.len();
+        let (content, caret) =
+            build_replacement_content('/', "mode", "mode", value, 7, cursor).unwrap();
+        assert_eq!(content.text().as_ref(), "你好 /mode ");
+        assert_eq!(caret, content.text().len());
+        assert_eq!(content.tokens()[0].range(), 7..12);
+        assert_eq!(content.tokens()[0].token().text().as_ref(), "/mode");
+    }
+
+    #[test]
+    fn build_replacement_content_at_value_end() {
+        // No suffix at all: the caret lands after the added separator.
+        let (content, caret) =
+            build_replacement_content('@', "github", "github", "hello @gi", 6, 9).unwrap();
+        assert_eq!(content.text().as_ref(), "hello @github ");
+        assert_eq!(caret, content.text().len());
+        assert_eq!(content.tokens()[0].range(), 6..13);
     }
 }
