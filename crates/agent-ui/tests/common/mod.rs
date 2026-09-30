@@ -147,7 +147,7 @@ pub fn fake_thread(
 pub fn landing_thread(id: &str) -> manox_agent::thread::ThreadHandle {
     manox_agent::thread::Thread::landing_with_id(
         manox_agent::ThreadId(id.to_string()),
-        std::path::PathBuf::from("/tmp"),
+        PathBuf::from("/tmp"),
     )
 }
 
