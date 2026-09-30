@@ -390,6 +390,13 @@ pub fn chat_uri(id: &str) -> String {
     format!("ahp-chat:/{id}")
 }
 
+/// Build the plan extension channel URI for a chat id — the one home of the
+/// plan-review lifecycle (proposal and verdict), whose baseline is the only
+/// fold-visible record of a review's settlement.
+pub fn plan_uri(id: &str) -> String {
+    format!("{}{id}", manox_ahp::ext::channels::PLAN)
+}
+
 // ---------------------------------------------------------------------------
 // AhpStore: the entity the UI binds.
 // ---------------------------------------------------------------------------
