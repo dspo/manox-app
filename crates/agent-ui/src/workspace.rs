@@ -45,8 +45,8 @@ use crate::conversation::{ApplyOutcome, ConversationState, NoticeAnchor, UserIma
 use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
-    CompletionState, SelectHandler, build_replacement, detect, mention_source, render_completion,
-    slash_source,
+    CompletionState, SelectHandler, build_replacement, build_replacement_content, detect,
+    mention_source, render_completion, slash_source,
 };
 use crate::views::composer_menu::{
     PendingAttachment, build_plus_menu, load_attachment, render_attachment_chips,
@@ -55,6 +55,7 @@ use crate::views::composer_menu::{
 use crate::views::popup_menu;
 use crate::views::settings::{SettingsEvent, SettingsView};
 use crate::views::turn_navigator::{TurnNavigator, TurnNavigatorEvent, collect_user_turns};
+use gpui_component::input::InputContent;
 
 mod attach;
 mod catch_up;
@@ -2047,7 +2048,17 @@ impl Workspace {
         if cursor > value.len() || token_start > cursor {
             return;
         }
-        let (new_value, caret) = build_replacement(trigger, &name, &value, token_start, cursor);
+        // The inserted name rides as an atomic inline token (chip render, whole
+        // unit delete); a rejected token op degrades to the plain-text insert.
+        let (new_value, caret): (InputContent, usize) =
+            match build_replacement_content(trigger, &name, &name, &value, token_start, cursor) {
+                Ok((content, caret)) => (content, caret),
+                Err(_) => {
+                    let (text, caret) =
+                        build_replacement(trigger, &name, &value, token_start, cursor);
+                    (InputContent::from(text), caret)
+                }
+            };
         self.chat_input(cx).update(cx, |s, cx| {
             s.set_value(new_value, window, cx);
             let pos = RopeExt::offset_to_position(s.text(), caret.min(s.text().len()));
