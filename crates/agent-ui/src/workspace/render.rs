@@ -255,7 +255,6 @@ impl Workspace {
         // frame of a fresh window falls back to the window width and the
         // prepaint below schedules the frame that corrects it.
         let card_width = self.chat.read(cx).card_width.clone();
-        let bubble_clearance = self.chat.read(cx).bubble_clearance.clone();
         let main_body_w = card_width
             .get()
             .unwrap_or_else(|| window.bounds().size.width);
@@ -464,9 +463,7 @@ impl Workspace {
             .child(conversation_column)
             .children(turn_navigator_overlay)
             .on_prepaint(move |bounds, window, _app| {
-                let width_moved = card_width.set(bounds.size.width);
-                let top_moved = bubble_clearance.set_column_top(bounds.origin.y);
-                if width_moved || top_moved {
+                if card_width.set(bounds.size.width) {
                     window.refresh();
                 }
             });

@@ -9,9 +9,10 @@
 //! handlers and the `tests` child.
 
 use super::*;
+use gpui_component::ColorName;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::popover::{Popover, PopoverState};
 use gpui_component::tag::{Tag, TagVariant};
-use gpui_component::{ColorName, ThemeStyled as _};
 
 /// The protocol id of an open input request.
 fn request_id(r: &ahp_types::state::SessionInputRequest) -> &str {
@@ -33,7 +34,28 @@ fn parse_effort(raw: &str) -> Option<manox_agent::language_model::ReasoningEffor
     }
 }
 
-use gpui::Window;
+use gpui::{Anchor, Window};
+
+/// The goal chip as a [`Popover`] trigger. `Selectable` is the library's hook
+/// for pushing open-state styling into its own components; the chip paints its
+/// open state (the chevron) from workspace state, so the impl is a no-op.
+struct GoalChipTrigger(gpui::AnyElement);
+
+impl gpui::IntoElement for GoalChipTrigger {
+    type Element = gpui::AnyElement;
+    fn into_element(self) -> Self::Element {
+        self.0
+    }
+}
+
+impl gpui_component::Selectable for GoalChipTrigger {
+    fn selected(self, _: bool) -> Self {
+        self
+    }
+    fn is_selected(&self) -> bool {
+        false
+    }
+}
 
 impl Workspace {
     /// Remote-settle reconcile for a surfaced interaction card. The leaf's
@@ -1457,6 +1479,10 @@ impl Workspace {
         let label: SharedString = format!("◎ {} · {}", i18n::t(status_key), elapsed).into();
         let open = self.chat.read(cx).goal_popover_open;
 
+        // The chip is the popover's trigger: the component owns the click
+        // toggle (synced back through `on_open_change`) and the overlay
+        // (outside-click dismiss). Focus is pinned to the composer input so
+        // opening the panel never steals the typing focus.
         let trigger = h_flex()
             .id("goal-chip")
             .items_center()
@@ -1482,18 +1508,12 @@ impl Workspace {
                 })
                 .xsmall()
                 .text_color(muted),
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                this.chat.update(cx, |chat, cx| {
-                    chat.goal_popover_open = !chat.goal_popover_open;
-                    cx.notify();
-                });
-                cx.notify();
-            }));
+            );
 
-        if !open {
-            return Some(trigger.into_any_element());
-        }
+        let ws = cx.entity();
+        let chat = self.chat.clone();
+        let input_focus = gpui::Focusable::focus_handle(self.chat_input(cx).read(cx), cx).clone();
+        let accent_fg = theme.accent_foreground;
 
         let objective = g.objective.clone();
         let status = i18n::t(status_key);
@@ -1536,209 +1556,242 @@ impl Workspace {
         let replace_label = i18n::t("goal-popover-replace");
         let new_label = i18n::t("goal-popover-new");
         let title_label = i18n::t("goal-popover-title");
-        let popover = v_flex()
-            .w_full()
-            .gap_1()
-            .p_3()
-            .child(
-                gpui::div()
-                    .text_xs()
-                    .text_color(theme.accent_foreground)
-                    .child(format!("◎ {title_label}")),
-            )
-            .child(goal_popover_row(&objective_label, &objective, fg, muted))
-            .child(goal_popover_row(&status_label, &status, fg, muted))
-            .child(goal_popover_row(&elapsed_label, &elapsed, fg, muted))
-            .child(goal_popover_row(&reason_label, &reason, fg, muted))
-            .child(goal_popover_row(&tokens_label, &tokens, fg, muted))
-            .child(goal_popover_row(&budget_label, &budget, fg, muted))
-            .child(goal_popover_row(&remaining_label, &remaining, fg, muted))
-            .child(goal_popover_row(&rounds_label, &rounds, fg, muted))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_1()
-                    .when(
-                        goal_status == manox_agent::goal::GoalStatus::Active,
-                        |row| {
-                            row.child(
-                                Button::new("goal-pause")
-                                    .small()
-                                    .label(pause_label)
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.with_foreground_store(cx, |store, sid| {
-                                            let reply =
-                                                store.send_goal(&sid, "pause", None, None, None);
-                                            crate::ahp_store::await_reply(reply);
+        let content = move |_: &mut PopoverState,
+                            _: &mut Window,
+                            _: &mut gpui::Context<PopoverState>| {
+            v_flex()
+                .w(gpui::px(360.))
+                .gap_1()
+                .child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(accent_fg)
+                        .child(format!("◎ {title_label}")),
+                )
+                .child(goal_popover_row(&objective_label, &objective, fg, muted))
+                .child(goal_popover_row(&status_label, &status, fg, muted))
+                .child(goal_popover_row(&elapsed_label, &elapsed, fg, muted))
+                .child(goal_popover_row(&reason_label, &reason, fg, muted))
+                .child(goal_popover_row(&tokens_label, &tokens, fg, muted))
+                .child(goal_popover_row(&budget_label, &budget, fg, muted))
+                .child(goal_popover_row(&remaining_label, &remaining, fg, muted))
+                .child(goal_popover_row(&rounds_label, &rounds, fg, muted))
+                .child(
+                    h_flex()
+                        .justify_end()
+                        .gap_1()
+                        .when(
+                            goal_status == manox_agent::goal::GoalStatus::Active,
+                            |row| {
+                                row.child(
+                                    Button::new("goal-pause")
+                                        .small()
+                                        .label(pause_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, _window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.with_foreground_store(cx, |store, sid| {
+                                                        let reply = store.send_goal(
+                                                            &sid, "pause", None, None, None,
+                                                        );
+                                                        crate::ahp_store::await_reply(reply);
+                                                    });
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            matches!(
+                                goal_status,
+                                manox_agent::goal::GoalStatus::Paused
+                                    | manox_agent::goal::GoalStatus::Blocked
+                            ),
+                            |row| {
+                                row.child(
+                                    Button::new("goal-resume")
+                                        .small()
+                                        .label(resume_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, _window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.with_foreground_store(cx, |store, sid| {
+                                                        let reply = store.send_goal(
+                                                            &sid, "resume", None, None, None,
+                                                        );
+                                                        crate::ahp_store::await_reply(reply);
+                                                    });
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            matches!(
+                                goal_status,
+                                manox_agent::goal::GoalStatus::Active
+                                    | manox_agent::goal::GoalStatus::Paused
+                                    | manox_agent::goal::GoalStatus::Blocked
+                            ),
+                            |row| {
+                                row.child(
+                                    Button::new("goal-edit")
+                                        .small()
+                                        .label(edit_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.begin_goal_edit(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            matches!(
+                                goal_status,
+                                manox_agent::goal::GoalStatus::Active
+                                    | manox_agent::goal::GoalStatus::Paused
+                                    | manox_agent::goal::GoalStatus::Blocked
+                            ),
+                            |row| {
+                                row.child(
+                                    Button::new("goal-edit-rounds")
+                                        .small()
+                                        .label(edit_rounds_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.begin_goal_rounds_edit(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            goal_status == manox_agent::goal::GoalStatus::BudgetLimited,
+                            |row| {
+                                row.child(
+                                    Button::new("goal-edit-budget")
+                                        .small()
+                                        .label(edit_budget_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.begin_goal_budget_edit(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            matches!(
+                                goal_status,
+                                manox_agent::goal::GoalStatus::Paused
+                                    | manox_agent::goal::GoalStatus::Blocked
+                                    | manox_agent::goal::GoalStatus::BudgetLimited
+                            ),
+                            |row| {
+                                row.child(
+                                    Button::new("goal-replace")
+                                        .small()
+                                        .label(replace_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.begin_goal_replace(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            goal_status == manox_agent::goal::GoalStatus::Complete,
+                            |row| {
+                                row.child(
+                                    Button::new("goal-new")
+                                        .small()
+                                        .label(new_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.begin_goal_new(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .child(
+                            Button::new("goal-clear")
+                                .small()
+                                .label(clear_label.clone())
+                                .on_click({
+                                    let ws = ws.clone();
+                                    move |_: &ClickEvent, _window, cx| {
+                                        ws.update(cx, |this, cx| {
+                                            this.chat.update(cx, |chat, cx| {
+                                                chat.goal_popover_open = false;
+                                                cx.notify();
+                                            });
+                                            this.with_foreground_store(cx, |store, sid| {
+                                                let reply = store
+                                                    .send_goal(&sid, "clear", None, None, None);
+                                                crate::ahp_store::await_reply(reply);
+                                            });
                                         });
-                                    })),
-                            )
-                        },
-                    )
-                    .when(
-                        matches!(
-                            goal_status,
-                            manox_agent::goal::GoalStatus::Paused
-                                | manox_agent::goal::GoalStatus::Blocked
-                        ),
-                        |row| {
-                            row.child(
-                                Button::new("goal-resume")
-                                    .small()
-                                    .label(resume_label)
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.with_foreground_store(cx, |store, sid| {
-                                            let reply =
-                                                store.send_goal(&sid, "resume", None, None, None);
-                                            crate::ahp_store::await_reply(reply);
-                                        });
-                                    })),
-                            )
-                        },
-                    )
-                    .when(
-                        matches!(
-                            goal_status,
-                            manox_agent::goal::GoalStatus::Active
-                                | manox_agent::goal::GoalStatus::Paused
-                                | manox_agent::goal::GoalStatus::Blocked
-                        ),
-                        |row| {
-                            row.child(Button::new("goal-edit").small().label(edit_label).on_click(
-                                cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.chat.update(cx, |chat, cx| {
-                                        chat.goal_popover_open = false;
-                                        cx.notify();
-                                    });
-                                    this.begin_goal_edit(window, cx);
+                                    }
                                 }),
-                            ))
-                        },
-                    )
-                    .when(
-                        matches!(
-                            goal_status,
-                            manox_agent::goal::GoalStatus::Active
-                                | manox_agent::goal::GoalStatus::Paused
-                                | manox_agent::goal::GoalStatus::Blocked
                         ),
-                        |row| {
-                            row.child(
-                                Button::new("goal-edit-rounds")
-                                    .small()
-                                    .label(edit_rounds_label)
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
-                                            this.chat.update(cx, |chat, cx| {
-                                                chat.goal_popover_open = false;
-                                                cx.notify();
-                                            });
-                                            this.begin_goal_rounds_edit(window, cx);
-                                        },
-                                    )),
-                            )
-                        },
-                    )
-                    .when(
-                        goal_status == manox_agent::goal::GoalStatus::BudgetLimited,
-                        |row| {
-                            row.child(
-                                Button::new("goal-edit-budget")
-                                    .small()
-                                    .label(edit_budget_label)
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
-                                            this.chat.update(cx, |chat, cx| {
-                                                chat.goal_popover_open = false;
-                                                cx.notify();
-                                            });
-                                            this.begin_goal_budget_edit(window, cx);
-                                        },
-                                    )),
-                            )
-                        },
-                    )
-                    .when(
-                        matches!(
-                            goal_status,
-                            manox_agent::goal::GoalStatus::Paused
-                                | manox_agent::goal::GoalStatus::Blocked
-                                | manox_agent::goal::GoalStatus::BudgetLimited
-                        ),
-                        |row| {
-                            row.child(
-                                Button::new("goal-replace")
-                                    .small()
-                                    .label(replace_label)
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
-                                            this.chat.update(cx, |chat, cx| {
-                                                chat.goal_popover_open = false;
-                                                cx.notify();
-                                            });
-                                            this.begin_goal_replace(window, cx);
-                                        },
-                                    )),
-                            )
-                        },
-                    )
-                    .when(
-                        goal_status == manox_agent::goal::GoalStatus::Complete,
-                        |row| {
-                            row.child(Button::new("goal-new").small().label(new_label).on_click(
-                                cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.chat.update(cx, |chat, cx| {
-                                        chat.goal_popover_open = false;
-                                        cx.notify();
-                                    });
-                                    this.begin_goal_new(window, cx);
-                                }),
-                            ))
-                        },
-                    )
-                    .child(
-                        Button::new("goal-clear")
-                            .small()
-                            .label(clear_label)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.with_foreground_store(cx, |store, sid| {
-                                    let reply = store.send_goal(&sid, "clear", None, None, None);
-                                    crate::ahp_store::await_reply(reply);
-                                });
-                                this.chat.update(cx, |chat, cx| {
-                                    chat.goal_popover_open = false;
-                                    cx.notify();
-                                });
-                                cx.notify();
-                            })),
-                    ),
-            );
+                )
+        };
 
         Some(
-            gpui::div()
-                .relative()
-                .child(trigger)
-                .child(
-                    deferred(
-                        gpui::div()
-                            .id("goal-dropdown")
-                            .absolute()
-                            .bottom_full()
-                            .left_0()
-                            .occlude()
-                            .w(gpui::px(360.))
-                            .popover_style(cx)
-                            .child(popover)
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                this.chat.update(cx, |chat, cx| {
-                                    chat.goal_popover_open = false;
-                                    cx.notify();
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .with_priority(1),
-                )
+            Popover::new("goal-popover")
+                .trigger(GoalChipTrigger(trigger.into_any_element()))
+                .anchor(Anchor::BottomLeft)
+                .open(open)
+                .track_focus(&input_focus)
+                .on_open_change(move |open, _, cx| {
+                    chat.update(cx, |chat, cx| {
+                        chat.goal_popover_open = *open;
+                        cx.notify();
+                    });
+                })
+                .content(content)
                 .into_any_element(),
         )
     }

@@ -49,8 +49,7 @@ impl MessageListWidthInvalidator {
 /// siblings of the card, so the window width overstates the card by whatever
 /// they claim — enough to mis-gate the context rail and to size the turn
 /// navigator's panel wider than the card. Unset until the first prepaint;
-/// callers fall back to their own estimate until then (the bubble's
-/// clearance keeps that fallback conservative — see [`BubbleClearance`]).
+/// callers fall back to their own estimate until then.
 #[derive(Clone, Default)]
 pub struct CardWidth {
     last_width: Rc<Cell<Option<Pixels>>>,
@@ -75,44 +74,6 @@ impl CardWidth {
         self.last_width.get()
     }
 }
-/// The conversation info bubble's vertical budget, measured in prepaint:
-/// the pill's top edge minus the conversation column's top edge (both in
-/// window coordinates). `None` parts fall back to the caller's estimate for
-/// exactly one frame, like [`CardWidth`].
-#[derive(Clone, Default)]
-pub struct BubbleClearance {
-    column_top: Rc<Cell<Option<Pixels>>>,
-    pill_top: Rc<Cell<Option<Pixels>>>,
-}
-
-impl BubbleClearance {
-    pub fn set_column_top(&self, y: Pixels) -> bool {
-        self.column_top
-            .replace(Some(y))
-            .is_none_or(|previous| (previous - y).abs() > px(0.5))
-    }
-
-    pub fn set_pill_top(&self, y: Pixels) -> bool {
-        self.pill_top
-            .replace(Some(y))
-            .is_none_or(|previous| (previous - y).abs() > px(0.5))
-    }
-
-    /// The bubble's height cap: from the pill's top down to the column's
-    /// top, minus a breathing margin (the `-38` slot apron + pill padding
-    /// assume a ~30px pill; the margin absorbs the difference). Unmeasured
-    /// frames and degenerately narrow bands floor at 160 — small enough to
-    /// stay scrollable inside the column instead of spilling past its top.
-    pub fn max_height(&self, fallback: Pixels) -> Pixels {
-        match (self.pill_top.get(), self.column_top.get()) {
-            (Some(pill), Some(column)) if pill - column > px(160.) => {
-                (pill - column - px(8.)).min(fallback)
-            }
-            _ => fallback.min(px(160.)),
-        }
-    }
-}
-
 /// Wrap content in a full-width, centered container that adapts to the
 /// window width (no cap — the host dropped the fixed content width so wide
 /// windows get the full span).
