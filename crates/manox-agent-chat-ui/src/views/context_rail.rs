@@ -498,10 +498,6 @@ impl ContextRail {
         cx.notify();
     }
 
-    pub fn toggle_bubble(&mut self, cx: &mut Context<Self>) {
-        self.set_bubble_open(!self.bubble_open, cx);
-    }
-
     fn toggle_section_fold(&mut self, section: BubbleSection, cx: &mut Context<Self>) {
         self.bubble_expanded.flip(section);
         cx.notify();
@@ -1399,7 +1395,7 @@ mod tests {
         cx.update(|cx| {
             let rail = cx.new(|cx| ContextRail::new(None, cx));
             rail.update(cx, |rail, cx| {
-                rail.toggle_bubble(cx);
+                rail.set_bubble_open(true, cx);
                 rail.toggle_section_fold(BubbleSection::Todos, cx);
                 rail.toggle_section_fold(BubbleSection::Models, cx);
                 assert!(rail.bubble_open);
@@ -1418,7 +1414,7 @@ mod tests {
         cx.update(|cx| {
             let rail = cx.new(|cx| ContextRail::new(None, cx));
             rail.update(cx, |rail, cx| {
-                rail.toggle_bubble(cx);
+                rail.set_bubble_open(true, cx);
                 assert!(rail.bubble_open);
                 // The bubble's contents are the outgoing thread's — already
                 // stale; the switch must not leave it open.
