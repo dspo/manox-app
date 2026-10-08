@@ -66,13 +66,8 @@ ahp = "=0.9.0"
 ahp-types = "=0.9.0"
 # 仅 dev e2e：对 `cx ahp` 网关跑 WS 腿冒烟（宿主侧 WS 不用它，它只会 dial）。
 ahp-ws = "=0.9.0"
-<<<<<<< HEAD
-manox-ahp = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
-manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.1.1" }
-=======
-manox-ahp = { git = "https://github.com/dspo/manox.git", rev = "cb19548218ae57f5164d21f4f6ec40c05e504801" }
-manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", rev = "cb19548218ae57f5164d21f4f6ec40c05e504801" }
->>>>>>> 915c973 (fix(plugins): address plugin writes by registry key; pin manox to the key-identity head)
+manox-ahp = { git = "https://github.com/dspo/manox.git", rev = "15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd" }
+manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", rev = "15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd" }
 
 # —— 本仓成员（path 依赖；经 `foo.workspace = true` 引用）——
 agent-ui = { path = "crates/agent-ui" }
