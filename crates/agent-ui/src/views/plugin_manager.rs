@@ -493,8 +493,8 @@ fn marketplace_plugin_card(
     let marketplace_action = plugin.marketplace_slug.clone();
     let name_toggle = plugin.name.clone();
     let marketplace_toggle = plugin.marketplace_slug.clone();
-    // Marketplace rows carry name + slug, not the key: the toggle AND the
-    // uninstall address the install the record describes, assembled as
+    // Marketplace rows carry name + slug, not the key: the toggle/uninstall
+    // handlers address the install the record describes, assembled as
     // `name@slug` — the exact key the registry records. A bare name here
     // fails loud `not installed` (the registry records keys only).
     let key_toggle = format!("{}@{}", plugin.name, marketplace_toggle);
