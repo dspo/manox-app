@@ -127,8 +127,13 @@ mod tests {
     /// found".
     #[test]
     fn cx_name_resolves_the_config_name_behind_a_registration() {
-        manox_agent::provider_glue::init();
-        let registry = provider_glue::global();
+        // Deterministic seam: register into a LOCAL registry and install it
+        // as the global. `install_for_test` freezes the slot — init()'s
+        // background registration build can no longer swap a fresh registry
+        // (built from the developer's real cx config) in over the test
+        // provider, which is exactly the fd48c07 CI red — and the test never
+        // reads the developer's config at all.
+        let registry = std::sync::Arc::new(manox_harness::ProviderRegistry::new());
         registry
             .register_provider(
                 "launch-bridge-test-anthropic",
@@ -152,6 +157,7 @@ mod tests {
                 },
             )
             .expect("register");
+        manox_agent::provider_glue::install_for_test(registry);
         let rows = rows();
         let bridged = rows
             .iter()
