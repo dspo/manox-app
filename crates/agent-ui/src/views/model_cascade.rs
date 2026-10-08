@@ -198,6 +198,7 @@ mod tests {
     fn row(provider: &str, id: &str, display: &str) -> ModelRow {
         ModelRow {
             provider: provider.into(),
+            cx_name: provider.into(),
             provider_display: display.into(),
             id: id.into(),
             name: id.into(),

@@ -108,7 +108,13 @@ pub fn group_menu(
                                         &AgentSpawn {
                                             ws: &ws_cascade,
                                             agent: (agent_id, display, svg),
-                                            provider: row.provider_display.clone(),
+                                            // The launch args are the cx
+                                            // CONFIG identity (AgentBuilder
+                                            // matches providers by config
+                                            // name — the display name never
+                                            // resolves) and the bare model
+                                            // id.
+                                            provider: row.cx_name.clone(),
                                             model: row.id.clone(),
                                             wire: launch_wire_key(&row.api),
                                             dir: dir_agent.clone(),
