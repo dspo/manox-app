@@ -74,10 +74,24 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
             )
         });
 
-    // PARK: any thread navigation parks the session (leave_external_session
-    // — open_thread's first move). The main column returns to the
-    // conversation.
-    ws.update(cx, |ws, _cx| ws.leave_external_session());
+    // PARK via the REAL path: opening a thread (the sidebar click's full
+    // effect — synchronous leave + the async attach tail).
+    let any = window.into();
+    cx.update_window(any, |_, window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.diagnostic_attach_thread(common::landing_thread("park-target"), true, window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // The REAL sidebar-click path: open_thread parks the external session
+    // (its first move) and attaches the thread.
+    cx.update_window(any, |_, window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.open_thread("park-target".into(), window, cx)
+        });
+    })
+    .unwrap();
     cx.run_until_parked();
     assert!(
         !ws.read_with(cx, |ws, _| ws.external_session_foreground()),
@@ -88,10 +102,19 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
     // back to the main column.
     visual.simulate_click(row.center(), gpui::Modifiers::default());
     cx.run_until_parked();
+    for _ in 0..3 {
+        cx.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    }
 
     assert!(
         ws.read_with(cx, |ws, _| ws.external_session_foreground()),
         "clicking the parked session's row re-foregrounds it in the main column"
+    );
+    // And the main column actually PAINTS the session card (not just state).
+    assert!(
+        visual.debug_bounds("external-session-main").is_some(),
+        "the external session card paints in the main column after the resume click"
     );
     assert_eq!(
         shell.read_with(cx, |s, _| s.active.clone()),

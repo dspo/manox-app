@@ -224,6 +224,7 @@ impl Workspace {
         Some(
             div()
                 .id("external-session-main")
+                .debug_selector(|| "external-session-main".into())
                 .size_full()
                 .flex()
                 .p(px(4.))

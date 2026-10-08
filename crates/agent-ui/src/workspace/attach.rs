@@ -660,7 +660,13 @@ impl Workspace {
         // The incoming thread's cwd / worktree may differ from the outgoing
         // one; refresh the rail's git stats/branch display for it.
         self.spawn_git_status_refresh(cx);
-        self.view_mode = ViewMode::Workspace;
+        // A stale attach tail must not steal the main column back: the user
+        // may have re-entered an external session (or anything else) while
+        // this async attach was landing — the synchronous leave in
+        // open_thread already handled the normal transition.
+        if !matches!(self.view_mode, ViewMode::ExternalSession) {
+            self.view_mode = ViewMode::Workspace;
+        }
         cx.notify();
     }
 
