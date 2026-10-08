@@ -11,7 +11,7 @@
 mod common;
 
 use agent_ui::Workspace;
-use common::{init_harness, open_workspace};
+use common::init_harness;
 use gpui::{AppContext as _, TestAppContext, VisualTestContext, px, size};
 use gpui_component::Root;
 use manox_agent_chrome_ui::register_fonts;

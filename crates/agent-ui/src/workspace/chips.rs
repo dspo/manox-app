@@ -9,11 +9,8 @@
 //! handlers and the `tests` child.
 
 use super::*;
-use gpui_component::ColorName;
-use gpui_component::ThemeStyled as _;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::popover::{Popover, PopoverState};
-use gpui_component::tag::{Tag, TagVariant};
 
 /// The protocol id of an open input request.
 fn request_id(r: &ahp_types::state::SessionInputRequest) -> &str {
