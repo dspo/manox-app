@@ -232,12 +232,11 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .read(cx)
             .active
             .as_deref()
-            .filter(|id| crate::workspace::external_sessions::is_external_row(id))
-            // The prefix alone lies after a close: a closed foreground
-            // external leaves its dead id in `active`, and honoring it here
-            // would leave the sidebar highlight-less until the next click.
-            .filter(|id| ws.read(cx).external_is_live(id))
-            .is_some();
+            // The record lookup is inherently live-guarded: a close removes
+            // the record, so a dead id left in `active` resolves false and
+            // the highlight falls back to the foreground thread.
+            .map(|id| ws.read(cx).is_external_session(id))
+            .unwrap_or(false);
         shell.update(cx, |shell, cx| {
             shell.set_sessions(sessions);
             if !active_is_external && shell.active != fg {
@@ -457,18 +456,18 @@ fn shell_config(
                 let ws = ws.clone();
                 move |id, w, cx| {
                     // An external row brings its session back to the MAIN
-                    // column (a synchronous workspace update — no window
-                    // handle round-trip, no dispatch hazard); a thread id
-                    // takes the full switch path.
-                    if crate::workspace::external_sessions::is_external_row(id) {
-                        ws.update(cx, |ws, cx| {
-                            ws.open_external_session(id, cx);
-                            cx.notify();
-                        });
-                        return;
-                    }
+                    // column — focused (a synchronous workspace update, no
+                    // window-handle round-trip, no dispatch hazard); a
+                    // thread id takes the full switch path. The routing is
+                    // the workspace's own record lookup (the row id is a
+                    // namespaced `external:…` uuid, not a prefix protocol).
+                    let is_external = ws.read(cx).is_external_session(id);
                     ws.update(cx, |ws, cx| {
-                        ws.open_thread(id.to_string(), w, cx);
+                        if is_external {
+                            ws.open_external_session(id, w, cx);
+                        } else {
+                            ws.open_thread(id.to_string(), w, cx);
+                        }
                         cx.notify();
                     });
                 }

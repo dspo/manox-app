@@ -30,6 +30,7 @@ use gpui_component::notification::Notification;
 
 use crate::Workspace;
 use crate::views::model_cascade::{build_model_menu, launch_wire_key};
+use crate::workspace::external_sessions::ExternalSessionLaunch;
 
 /// Build the project group's menu. `project` is the group's directory
 /// (`None` on the no-project bucket — the menu then scopes to the fallback
@@ -158,10 +159,15 @@ pub fn group_menu(
                     match crate::tool_tabs::spawn_standalone_terminal(&cwd, cx) {
                         Ok(view) => launch_external(
                             &ws_terminal,
-                            manox_i18n::t("chrome-tab-terminal").to_string(),
-                            "icons/terminal.svg",
-                            dir_terminal.clone(),
+                            ExternalSessionLaunch {
+                                agent_id: "terminal",
+                                cx_session_id: String::new(),
+                                label: manox_i18n::t("chrome-tab-terminal").to_string(),
+                                svg: "icons/terminal.svg",
+                                project: dir_terminal.clone(),
+                            },
                             view,
+                            window,
                             cx,
                         ),
                         Err(e) => spawn_failed_notification(
@@ -256,25 +262,36 @@ fn spawn_agent_tab(request: &AgentSpawn, window: &mut Window, cx: &mut App) {
         request.wire.clone(),
         cx,
     ) {
-        Ok(view) => launch_external(request.ws, display.to_string(), svg, project, view, cx),
+        Ok((view, cx_session_id)) => launch_external(
+            request.ws,
+            ExternalSessionLaunch {
+                agent_id,
+                cx_session_id,
+                label: display.to_string(),
+                svg,
+                project,
+            },
+            view,
+            window,
+            cx,
+        ),
         Err(e) => spawn_failed_notification(display, &e, window, cx),
     }
 }
 
-/// Register a spawned terminal as an external session and bring it up in
-/// the MAIN column (the shell wraps the main column — terminal/TUI sessions
-/// live there, not in the right pane). The sidebar row rides the
-/// workspace's own projection.
+/// Register a spawned terminal as an external session and bring it up —
+/// FOCUSED — in the MAIN column (the shell wraps the main column —
+/// terminal/TUI sessions live there, not in the right pane). The sidebar
+/// row rides the workspace's own projection.
 fn launch_external(
     ws: &gpui::WeakEntity<Workspace>,
-    label: String,
-    svg: &'static str,
-    project: Option<PathBuf>,
+    launch: crate::workspace::external_sessions::ExternalSessionLaunch<'_>,
     view: Entity<terminal_ui::TerminalView>,
+    window: &mut Window,
     cx: &mut App,
 ) {
     let _ = ws.update(cx, |ws, cx| {
-        ws.spawn_external_session(label, svg, project, view, cx);
+        ws.spawn_external_session(launch, view, window, cx);
     });
 }
 

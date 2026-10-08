@@ -39,19 +39,34 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
     let mut visual = VisualTestContext::from_window(window.into(), cx);
 
     // Launch an external session the way the project menu does.
-    ws.update(cx, |ws, cx| {
-        let terminal = manox_terminal::Terminal::spawn(
-            "test-ext-pty".into(),
-            std::path::PathBuf::from("/tmp"),
-            80,
-            24,
-            Box::new(FakePty),
-        )
-        .expect("fake terminal spawns");
-        let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-        let view = terminal_ui::TerminalView::new(proxy, cx);
-        ws.spawn_external_session("Claude Code".into(), "icons/claude.svg", None, view, cx);
-    });
+    let any = window.into();
+    cx.update_window(any, |_, window, cx| {
+        ws.update(cx, |ws, cx| {
+            let terminal = manox_terminal::Terminal::spawn(
+                "test-ext-pty".into(),
+                std::path::PathBuf::from("/tmp"),
+                80,
+                24,
+                Box::new(FakePty),
+            )
+            .expect("fake terminal spawns");
+            let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
+            let view = terminal_ui::TerminalView::new(proxy, cx);
+            ws.spawn_external_session(
+                agent_ui::workspace::external_sessions::ExternalSessionLaunch {
+                    agent_id: "claude",
+                    cx_session_id: "cx-session-1234".into(),
+                    label: "Claude Code".into(),
+                    svg: "icons/claude.svg",
+                    project: None,
+                },
+                view,
+                window,
+                cx,
+            );
+        });
+    })
+    .unwrap();
     cx.run_until_parked();
 
     // The session foregrounds immediately (spawn = register + main column).
@@ -60,19 +75,19 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
         "spawning foregrounds the session in the main column"
     );
 
-    // The sidebar carries the row (brand-mark kind, project group merged).
+    // The sidebar carries the row under its namespaced uuid id.
+    let row_id = shell.read_with(cx, |s, _| {
+        s.sessions
+            .iter()
+            .find(|r| r.id.starts_with("external:claude:"))
+            .map(|r| r.id.clone())
+            .expect("the external row merged into the sidebar snapshot")
+    });
+    let row_selector: &'static str =
+        Box::leak(format!("chrome-session-row-{row_id}").into_boxed_str());
     let row = visual
-        .debug_bounds("chrome-session-row-ext-0001")
-        .unwrap_or_else(|| {
-            panic!(
-                "the external session's row must paint in the sidebar; rows: {:?}",
-                shell.read_with(cx, |s, _| s
-                    .sessions
-                    .iter()
-                    .map(|r| (r.id.clone(), r.title.clone()))
-                    .collect::<Vec<_>>())
-            )
-        });
+        .debug_bounds(row_selector)
+        .expect("the external session's row paints in the sidebar");
 
     // PARK via the REAL path: opening a thread (the sidebar click's full
     // effect — synchronous leave + the async attach tail).
@@ -118,8 +133,14 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
     );
     assert_eq!(
         shell.read_with(cx, |s, _| s.active.clone()),
-        Some("ext-0001".to_string()),
+        Some(row_id.clone()),
         "the shell's highlight follows the clicked external row"
+    );
+    // The identity link rides the record: the row id is namespaced, the
+    // real cx session id is recorded beside it.
+    assert!(
+        ws.read_with(cx, |ws, _| ws.is_external_session(&row_id)),
+        "the workspace routes the namespaced row id"
     );
 
     manox_agent::thread_store::drop_global_for_test();

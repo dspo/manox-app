@@ -579,7 +579,7 @@ pub(crate) fn spawn_agent_terminal(
     model: &str,
     wire: Option<String>,
     cx: &mut App,
-) -> Result<Entity<terminal_ui::TerminalView>, String> {
+) -> Result<(Entity<terminal_ui::TerminalView>, String), String> {
     let agent = match agent_id {
         "claude" => manox_ext_agents::Agent::Claude,
         "codex" => manox_ext_agents::Agent::Codex,
@@ -596,12 +596,18 @@ pub(crate) fn spawn_agent_terminal(
         builder = builder.wire_api(w);
     }
     let handle = Arc::new(builder.spawn().map_err(|e| e.to_string())?);
+    // The REAL external session id: the cx session socket's `<id>.sock`
+    // filename (the legacy identity link — cx does not expose session_id()).
+    let cx_session_id = handle
+        .socket_path()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .unwrap_or_default();
     let id = format!("chrome-assembly:{agent_id}:{}", next_instance_id("agent"));
     let source = CxSessionSource::new(Arc::clone(&handle));
     let terminal = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, Box::new(source))
         .map_err(|e| e.to_string())?;
     let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-    Ok(terminal_ui::TerminalView::new(proxy, cx))
+    Ok((terminal_ui::TerminalView::new(proxy, cx), cx_session_id))
 }
 
 // ── the agent model picker ────────────────────────────────────────────────
@@ -726,7 +732,7 @@ impl gpui::Render for AgentPicker {
                             wire.clone(),
                             cx,
                         ) {
-                            Ok(view) => this.launched = Some(view),
+                            Ok((view, _cx_session_id)) => this.launched = Some(view),
                             Err(e) => this.error = Some(e),
                         }
                         let _ = display_name;

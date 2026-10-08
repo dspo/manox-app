@@ -6,34 +6,39 @@
 //! sessions live); switching away parks the session (its terminal keeps
 //! running), closing drops the view and tears the process tree down.
 //!
+//! Identity (the legacy model): each session mints a manox-app-style row id
+//! `external:{agent}:{uuid}` — namespaced so it never collides with a manox
+//! thread UUID in the sidebar's selection namespace — and records the REAL
+//! external session id behind it (`cx_session_id`, derived from the cx
+//! session socket's `<id>.sock` filename; empty for plain terminals and
+//! when the IPC bind failed). The row id is what the sidebar shows and
+//! routes on; the cx id is the traceable link to `~/.manox/sessions/`.
+//!
 //! In-memory only — the PTY dies with the process, nothing persists. The
-//! sidebar rows are projected by [`external_session_rows`] and merged into
-//! the assembly's snapshot (the chrome regroups them under the project's
-//! header).
+//! sidebar rows are projected by [`Workspace::external_session_rows`] and
+//! merged into the assembly's snapshot (the chrome regroups them under the
+//! project's header).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use manox_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
 use manox_agent_chrome_ui::shell::SessionRow;
 
 use super::Workspace;
 
-/// The row-id vocabulary (`ext-NNNN`) — the select hook's routing predicate
-/// in the chrome assembly matches this exact prefix.
-pub(crate) fn is_external_row(id: &str) -> bool {
-    id.starts_with("ext-")
-}
-
-fn mint_id() -> String {
-    static SEQ: AtomicU64 = AtomicU64::new(1);
-    format!("ext-{:04}", SEQ.fetch_add(1, Ordering::Relaxed))
-}
-
-/// One live external session: the sidebar row's fields plus the terminal
-/// entity that occupies the main column while the session is foreground.
+/// One live external session: the identity pair, the sidebar row's fields,
+/// and the terminal entity that occupies the main column while the session
+/// is foreground.
 pub(crate) struct ExternalSessionRecord {
+    /// `external:{agent_id}:{uuid}` — the manox-app-style row id. It is the
+    /// sidebar selection key AND the routing key; the `external:` namespace
+    /// keeps it clear of manox thread UUIDs.
     pub id: String,
+    /// The REAL external session id (the cx session naming
+    /// `~/.manox/sessions/<id>.sock`), derived from the session handle's
+    /// socket path at spawn. Empty for plain terminals and when the IPC
+    /// bind failed — the association the row id resolves to.
+    pub cx_session_id: String,
     /// Row title / main-column heading (the agent's display name, or the
     /// localized terminal name).
     pub label: String,
@@ -45,42 +50,81 @@ pub(crate) struct ExternalSessionRecord {
     pub view: gpui::Entity<terminal_ui::TerminalView>,
 }
 
+fn mint_row_id(agent_id: &str) -> String {
+    format!("external:{}:{}", agent_id, uuid::Uuid::new_v4())
+}
+
+/// One launch's session payload (bundled — the spawn would otherwise arc
+/// past clippy's argument ceiling).
+pub struct ExternalSessionLaunch<'a> {
+    /// Names the row-id namespace (`external:{agent}:{uuid}`).
+    pub agent_id: &'a str,
+    /// The REAL external session id (see [`ExternalSessionRecord`]).
+    pub cx_session_id: String,
+    pub label: String,
+    pub svg: &'static str,
+    pub project: Option<PathBuf>,
+}
+
 impl Workspace {
-    /// Register a spawned terminal and bring it up in the main column.
-    /// `view` comes from `tool_tabs::spawn_agent_terminal` /
-    /// `spawn_standalone_terminal` — the record owns it, so dropping the
-    /// record tears the process tree down.
+    /// Register a spawned terminal and bring it up in the main column —
+    /// focused, so the TUI takes keyboard input immediately.
     pub fn spawn_external_session(
         &mut self,
-        label: String,
-        svg: &'static str,
-        project: Option<PathBuf>,
+        launch: ExternalSessionLaunch<'_>,
         view: gpui::Entity<terminal_ui::TerminalView>,
+        window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        let id = mint_id();
+        let id = mint_row_id(launch.agent_id);
         self.externals.push(ExternalSessionRecord {
             id: id.clone(),
-            label,
-            svg,
-            project,
+            cx_session_id: launch.cx_session_id,
+            label: launch.label,
+            svg: launch.svg,
+            project: launch.project,
             created_at: chrono::Utc::now().timestamp(),
-            view,
+            view: view.clone(),
         });
+        // The identity link, read from the record: a row id traces back to
+        // the cx session's socket on disk.
+        let record = self.externals.last().expect("just pushed");
+        tracing::info!(
+            row_id = %record.id,
+            cx_session_id = %record.cx_session_id,
+            agent = launch.agent_id,
+            "external session registered"
+        );
         self.active_external = Some(id);
         self.view_mode = super::ViewMode::ExternalSession;
+        focus_terminal(&view, window, cx);
         cx.notify();
     }
 
     /// Bring a parked session back into the main column (the sidebar row's
-    /// click). A no-op for an unknown id — a stale row cannot crash.
-    pub fn open_external_session(&mut self, id: &str, cx: &mut gpui::Context<Self>) {
-        if !self.externals.iter().any(|s| s.id == id) {
+    /// click) — re-focused. A no-op for an unknown id — a stale row cannot
+    /// crash.
+    pub fn open_external_session(
+        &mut self,
+        id: &str,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(record) = self.externals.iter().find(|s| s.id == id) else {
             return;
-        }
+        };
+        let view = record.view.clone();
         self.active_external = Some(id.to_string());
         self.view_mode = super::ViewMode::ExternalSession;
+        focus_terminal(&view, window, cx);
         cx.notify();
+    }
+
+    /// Whether `id` names a live external session (the select hook's routing
+    /// predicate — an external row opens its session, anything else takes
+    /// the thread switch path).
+    pub fn is_external_session(&self, id: &str) -> bool {
+        self.externals.iter().any(|s| s.id == id)
     }
 
     /// Close a session (the sidebar row's 关闭会话): drop the record — the
@@ -117,15 +161,6 @@ impl Workspace {
         Some(self.externals.iter().find(|s| s.id == id)?.label.clone())
     }
 
-    /// Whether `id` names a still-live external session row. The assembly
-    /// layer's active guard needs this beyond the `ext-` prefix check: a
-    /// closed foreground external leaves its dead id in the chrome's
-    /// `active`, and a prefix-only guard would leave the sidebar
-    /// highlight-less until the next click.
-    pub(crate) fn external_is_live(&self, id: &str) -> bool {
-        self.externals.iter().any(|s| s.id == id)
-    }
-
     /// The sidebar rows: one per live session, stamped with the external
     /// kind (brand-mark leading slot, close-session menu on the chrome
     /// side) and the project grouping key.
@@ -157,17 +192,28 @@ impl Workspace {
     }
 }
 
+/// Focus a session's terminal (the event-path face — open/spawn call this
+/// so the TUI takes keyboard input immediately; `render` may not focus).
+fn focus_terminal(
+    view: &gpui::Entity<terminal_ui::TerminalView>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) {
+    let handle = view.read(cx).focus_handle();
+    window.focus(&handle, cx);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The row vocabulary the chrome routes on: minted ids always match,
-    /// thread ids never do.
+    /// The row-id vocabulary: namespaced `external:{agent}:{uuid}`, unique,
+    /// and never colliding with a bare thread UUID.
     #[test]
-    fn row_predicate_matches_the_minted_vocabulary() {
-        assert!(!is_external_row("0197uuid-thread-id"));
-        let id = mint_id();
-        assert!(is_external_row(&id));
-        assert!(mint_id() != id, "ids are unique");
+    fn row_ids_are_namespaced_and_unique() {
+        let id = mint_row_id("claude");
+        assert!(id.starts_with("external:claude:"));
+        assert!(mint_row_id("claude") != id, "ids are unique");
+        assert!(!id.starts_with("0197"), "never a bare thread-uuid shape");
     }
 }

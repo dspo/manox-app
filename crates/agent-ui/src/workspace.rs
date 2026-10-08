@@ -245,7 +245,7 @@ fn build_permission_content(
 }
 mod composer;
 mod external;
-pub(crate) mod external_sessions;
+pub mod external_sessions;
 mod plan_review;
 mod subagent;
 
