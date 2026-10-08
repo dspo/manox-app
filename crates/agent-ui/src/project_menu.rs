@@ -99,7 +99,15 @@ pub fn group_menu(
                         move |sub, window, cx| {
                             let dir_agent = dir_agent.clone();
                             let ws_cascade = ws_agent.clone();
-                            let agent_models = agent_models.clone();
+                            // Per-agent visibility (the registration-time
+                            // effective_agents column): a row the agent
+                            // cannot run never enters the cascade —
+                            // clicking it could only ever toast.
+                            let agent_models = agent_models
+                                .iter()
+                                .filter(|r| r.agents.iter().any(|a| a == agent_id))
+                                .cloned()
+                                .collect::<Vec<_>>();
                             build_model_menu(
                                 sub,
                                 agent_models,
@@ -109,13 +117,15 @@ pub fn group_menu(
                                             ws: &ws_cascade,
                                             agent: (agent_id, display, svg),
                                             // The launch args are the cx
-                                            // CONFIG identity (AgentBuilder
-                                            // matches providers by config
-                                            // name — the display name never
-                                            // resolves) and the bare model
-                                            // id.
+                                            // CONFIG identity: the provider
+                                            // by config name (display names
+                                            // never resolve) and the model
+                                            // by its CONFIG-level id — the
+                                            // registry's parsed id (suffix
+                                            // stripped) is a different
+                                            // vocabulary and never matches.
                                             provider: row.cx_name.clone(),
-                                            model: row.id.clone(),
+                                            model: row.config_id.clone(),
                                             wire: launch_wire_key(&row.api),
                                             dir: dir_agent.clone(),
                                         },

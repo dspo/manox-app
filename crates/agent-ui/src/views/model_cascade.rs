@@ -200,6 +200,8 @@ mod tests {
             provider: provider.into(),
             cx_name: provider.into(),
             provider_display: display.into(),
+            config_id: id.into(),
+            agents: vec!["claude".into(), "codex".into(), "copilot".into()],
             id: id.into(),
             name: id.into(),
             api: "anthropic".into(),

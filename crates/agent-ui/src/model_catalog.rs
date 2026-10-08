@@ -11,7 +11,7 @@ use manox_agent::provider_glue;
 
 /// One model row across all registered provider endpoints.
 #[derive(Debug, Clone)]
-pub(crate) struct ModelRow {
+pub struct ModelRow {
     /// Registration key: `"{provider}-{wire_api}"`, unique per endpoint.
     pub provider: String,
     /// The cx CONFIG provider name behind the registration (the config
@@ -23,6 +23,16 @@ pub(crate) struct ModelRow {
     pub cx_name: String,
     /// The provider's human display name (picker submenu label).
     pub provider_display: String,
+    /// The CONFIG-level model id (metadata `config_id` — the raw id as
+    /// written in the cx yaml, context suffixes included, e.g.
+    /// `glm-5.3[1m]`). The registry's own `id` is the PARSED id (suffix
+    /// stripped), which never matches the launch APIs' config-side
+    /// vocabulary — every spawn argument rides THIS field.
+    pub config_id: String,
+    /// The agent ids this model is visible to (registration-time
+    /// `effective_agents`, canonicalized). Pickers scoped to one agent
+    /// filter on it; `["*"]`-style entries are expanded at registration.
+    pub agents: Vec<String>,
     /// Bare model id (e.g. `glm-5.2`).
     pub id: String,
     /// Display name (metadata `name`, else the id).
@@ -32,7 +42,7 @@ pub(crate) struct ModelRow {
 }
 
 /// Every registered model row, sorted by provider then id (registry order).
-pub(crate) fn rows() -> Vec<ModelRow> {
+pub fn rows() -> Vec<ModelRow> {
     let registry = provider_glue::global();
     registry
         .models()
@@ -42,9 +52,21 @@ pub(crate) fn rows() -> Vec<ModelRow> {
                 .provider_config(&m.provider)
                 .and_then(|c| c.name)
                 .unwrap_or_else(|| m.provider.clone());
+            let agents = m
+                .metadata
+                .get("agents")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
             ModelRow {
                 cx_name,
                 provider_display: provider_glue::display_provider_name(&m),
+                config_id: provider_glue::config_id(&m),
+                agents,
                 name: provider_glue::display_name(&m),
                 provider: m.provider.clone(),
                 id: m.id.clone(),
@@ -55,7 +77,7 @@ pub(crate) fn rows() -> Vec<ModelRow> {
 }
 
 /// Exact registration match of a canonical `{provider}/{id}` identity.
-pub(crate) fn resolve(provider: &str, id: &str) -> Option<ModelRow> {
+pub fn resolve(provider: &str, id: &str) -> Option<ModelRow> {
     rows()
         .into_iter()
         .find(|r| r.provider == provider && r.id == id)
@@ -64,7 +86,7 @@ pub(crate) fn resolve(provider: &str, id: &str) -> Option<ModelRow> {
 /// The wire api → the picker row's visual vocabulary (tag variant + label +
 /// the tint the composer chip reuses). Every surface that renders a wire
 /// distinction reads this one mapping.
-pub(crate) fn wire_visual(
+pub fn wire_visual(
     api: &str,
 ) -> (
     gpui_component::tag::TagVariant,
