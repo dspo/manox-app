@@ -346,6 +346,7 @@ fn load_rows() -> Vec<SessionRow> {
         .into_iter()
         .map(|(t, running)| SessionRow {
             id: t.id.clone(),
+            short_id: "abcd1234".into(),
             title: t
                 .title_override
                 .clone()

@@ -76,6 +76,10 @@ pub type OnGroupMenu = Rc<dyn Fn(&str, Option<&str>, gpui::Point<Pixels>, &mut W
 #[derive(Clone, PartialEq)]
 pub struct SessionRowData {
     pub id: String,
+    /// The id chip's text — the host-supplied short form (a thread's uuid
+    /// prefix, an external row's uuid segment), uniform 8 chars across row
+    /// kinds. The chip's CLICK still copies the full id.
+    pub short_id: String,
     pub title: String,
     /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
@@ -857,7 +861,7 @@ fn session_row(
                 .flex()
                 .items_center()
                 .gap(px(4.))
-                .child(id_tag(&data.id))
+                .child(id_tag(&data.short_id, &data.id))
                 .children(match (&list.tag_edit, &data.tag) {
                     (Some((edit_id, input)), _) if edit_id == &data.id => Some(
                         tag_edit_input(input, list.on_tag_edit_cancel.clone()).into_any_element(),
@@ -945,8 +949,8 @@ fn tag_edit_input(input: &Entity<InputState>, on_cancel: Option<OnWindowApp>) ->
 }
 
 /// Short-id tag chip (click copies the full id).
-fn id_tag(id: &str) -> impl IntoElement {
-    let short: String = id.chars().take(7).collect();
+fn id_tag(short_id: &str, id: &str) -> impl IntoElement {
+    let short = short_id.to_string();
     let full = id.to_string();
     div()
         .id(SharedString::from(format!("tag-{id}")))

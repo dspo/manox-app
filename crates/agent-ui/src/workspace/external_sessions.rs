@@ -173,6 +173,17 @@ impl Workspace {
                     crate::sidebar_projection::project_label(project.as_deref().unwrap_or(""));
                 SessionRow {
                     id: s.id.clone(),
+                    // The chip shows the uuid SEGMENT (the row id's
+                    // `external:{agent}:` namespace stays out of the chip) —
+                    // the same 8-char shape a thread's uuid prefix shows.
+                    short_id: s
+                        .id
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or(&s.id)
+                        .chars()
+                        .take(8)
+                        .collect(),
                     title: s.label.clone(),
                     workspace,
                     project,

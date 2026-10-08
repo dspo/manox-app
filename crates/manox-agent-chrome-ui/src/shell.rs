@@ -36,6 +36,8 @@ actions!(manox_agent_chrome_ui, [NewSession]);
 #[derive(Clone, PartialEq)]
 pub struct SessionRow {
     pub id: String,
+    /// The id chip's short form (host-supplied; see SessionRowData).
+    pub short_id: String,
     pub title: String,
     /// Workspace (project) display name — the grouping key.
     pub workspace: String,
@@ -76,6 +78,7 @@ impl SessionRow {
             .into_iter()
             .map(|r| SessionRow {
                 id: r.id,
+                short_id: r.short_id,
                 title: r.title,
                 workspace: group.name.clone(),
                 project: group.project.clone(),
@@ -94,6 +97,7 @@ impl SessionRow {
     fn row_data(&self) -> SessionRowData {
         SessionRowData {
             id: self.id.clone(),
+            short_id: self.short_id.clone(),
             title: self.title.clone(),
             updated_at: self.updated_at,
             sort_stamp: self.sort_stamp,

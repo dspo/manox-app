@@ -102,6 +102,7 @@ pub type UnreadMirrors = HashMap<String, bool>;
 pub fn project_row(item: &ThreadRow, unread_override: Option<bool>) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),
+        short_id: item.id.chars().take(8).collect(),
         title: item.title.clone(),
         updated_at: item.updated_at,
         sort_stamp: item.updated_at,

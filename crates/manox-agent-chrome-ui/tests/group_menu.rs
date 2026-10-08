@@ -46,6 +46,7 @@ type MenuLog = Rc<RefCell<Vec<(String, Option<String>)>>>;
 fn project_row(id: &str, workspace: &str, project: &str) -> SessionRow {
     SessionRow {
         id: id.into(),
+        short_id: "abcd1234".into(),
         title: "把 sidebar 的 thread 行改成三行布局".into(),
         workspace: workspace.into(),
         project: Some(project.into()),
@@ -63,6 +64,7 @@ fn project_row(id: &str, workspace: &str, project: &str) -> SessionRow {
 fn chats_row(id: &str) -> SessionRow {
     SessionRow {
         id: id.into(),
+        short_id: "abcd1234".into(),
         title: "把 sidebar 的 thread 行改成三行布局".into(),
         workspace: "Chats".into(),
         project: None,
@@ -378,6 +380,7 @@ fn external_row_menu_closes_the_session(cx: &mut TestAppContext) {
         shell.update(cx, |s, _| {
             s.set_sessions(vec![SessionRow {
                 id: "ext-0001".into(),
+                short_id: "abcd1234".into(),
                 title: "Claude Code".into(),
                 workspace: "manox".into(),
                 project: Some("/p/manox".into()),
