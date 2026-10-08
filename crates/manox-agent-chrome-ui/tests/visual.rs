@@ -212,6 +212,7 @@ mod macos {
             .into_iter()
             .map(|(t, running)| SessionRow {
                 id: t.id.clone(),
+                short_id: "abcd1234".into(),
                 title: t
                     .title_override
                     .clone()
@@ -225,6 +226,7 @@ mod macos {
                     .unwrap_or("Chats")
                     .to_string(),
                 project: (!t.project.is_empty()).then(|| t.project.clone()),
+                kind: manox_agent_chrome_ui::session_list::SessionRowKind::Thread,
                 status: if t.errored {
                     SessionStatus::Errored
                 } else if running {

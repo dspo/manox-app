@@ -52,6 +52,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // New-session intent returns the main column to the conversation
+        // (an on-screen external session parks, still running).
+        self.leave_external_session();
         // The park/draft bookkeeping is identical to `attach_thread`'s switch
         // arm, but there is no outgoing-thread double-bind to preserve: the
         // outgoing thread is detached on the park, the incoming id is unknown
@@ -657,7 +660,14 @@ impl Workspace {
         // The incoming thread's cwd / worktree may differ from the outgoing
         // one; refresh the rail's git stats/branch display for it.
         self.spawn_git_status_refresh(cx);
-        self.view_mode = ViewMode::Workspace;
+        // A stale attach tail must not steal the main column back: the user
+        // may have re-entered an external session (or anything else) while
+        // this async attach was landing — the synchronous leave in
+        // open_thread already handled the normal transition.
+        if !matches!(self.view_mode, ViewMode::ExternalSession) {
+            self.active_external = None;
+            self.view_mode = ViewMode::Workspace;
+        }
         cx.notify();
     }
 
@@ -842,6 +852,9 @@ impl Workspace {
     }
 
     pub fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Opening a thread is an implicit park for the external session on
+        // screen (its terminal keeps running) — the conversation returns.
+        self.leave_external_session();
         self.open_thread_inner(id, true, window, cx);
     }
 

@@ -76,6 +76,10 @@ pub type OnGroupMenu = Rc<dyn Fn(&str, Option<&str>, gpui::Point<Pixels>, &mut W
 #[derive(Clone, PartialEq)]
 pub struct SessionRowData {
     pub id: String,
+    /// The id chip's text — the host-supplied short form (a thread's uuid
+    /// prefix, an external row's uuid segment), uniform 8 chars across row
+    /// kinds. The chip's CLICK still copies the full id.
+    pub short_id: String,
     pub title: String,
     /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
@@ -84,6 +88,11 @@ pub struct SessionRowData {
     /// survives a pin re-order) as one unit, contiguous under its chevron.
     pub sort_stamp: i64,
     pub status: SessionStatus,
+    /// What the row IS — the leading slot's glyph and the row menu's
+    /// semantics ride this (the legacy sidebar's RowIcon/RowKind pair,
+    /// unified: threads show the five-state machine, live non-thread
+    /// sessions show their brand mark and close instead of archive).
+    pub kind: SessionRowKind,
     pub pinned: bool,
     /// The store-partition flag behind the menu's archive/unarchive toggle.
     /// Premise: the wire snapshot rides the ACTIVE partition only, so this
@@ -110,6 +119,22 @@ pub enum SessionStatus {
     PendingAuth,
     PendingPlan,
     Errored,
+}
+
+/// What a session row is: the legacy sidebar's unified item abstraction —
+/// manox threads and live non-thread sessions (launched CLI agents, plain
+/// terminals) render through ONE row component whose leading slot and menu
+/// semantics branch on this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SessionRowKind {
+    /// A manox thread: the five-state status glyph leads; the row menu is
+    /// the thread's (pin / archive / tag / copy id).
+    #[default]
+    Thread,
+    /// A live non-thread session: its brand mark leads (the five-state
+    /// machine does not apply to a PTY); the row menu closes the session.
+    /// `icon` is the host-supplied brand asset path.
+    External { icon: IconAsset },
 }
 
 /// One workspace group.
@@ -811,7 +836,19 @@ fn session_row(
                         .flex_shrink_0()
                         .items_center()
                         .justify_center()
-                        .child(status_slot(&data.id, data.status)),
+                        // The leading slot branches on the row kind: threads
+                        // run the five-state machine; a live non-thread
+                        // session wears its brand mark (the legacy
+                        // RowIcon::External slot).
+                        .child(match data.kind {
+                            SessionRowKind::Thread => {
+                                status_slot(&data.id, data.status).into_any_element()
+                            }
+                            SessionRowKind::External { icon: brand } => div()
+                                .text_color(FG_FAINT)
+                                .child(icon(brand, 14.))
+                                .into_any_element(),
+                        }),
                 )
                 .child(title_line(list, data, selected, hovered, window)),
         )
@@ -824,7 +861,7 @@ fn session_row(
                 .flex()
                 .items_center()
                 .gap(px(4.))
-                .child(id_tag(&data.id))
+                .child(id_tag(&data.short_id, &data.id))
                 .children(match (&list.tag_edit, &data.tag) {
                     (Some((edit_id, input)), _) if edit_id == &data.id => Some(
                         tag_edit_input(input, list.on_tag_edit_cancel.clone()).into_any_element(),
@@ -912,8 +949,8 @@ fn tag_edit_input(input: &Entity<InputState>, on_cancel: Option<OnWindowApp>) ->
 }
 
 /// Short-id tag chip (click copies the full id).
-fn id_tag(id: &str) -> impl IntoElement {
-    let short: String = id.chars().take(7).collect();
+fn id_tag(short_id: &str, id: &str) -> impl IntoElement {
+    let short = short_id.to_string();
     let full = id.to_string();
     div()
         .id(SharedString::from(format!("tag-{id}")))

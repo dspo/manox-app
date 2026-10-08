@@ -61,10 +61,12 @@ fn shell_config(main: gpui::AnyView, set_tag_log: TagLog) -> ShellConfig {
 fn sample_row(id: &str) -> SessionRow {
     SessionRow {
         id: id.into(),
+        short_id: "abcd1234".into(),
         title: "把 sidebar 的 thread 行改成三行布局".into(),
         workspace: "Chats".into(),
         project: None,
         status: SessionStatus::Idle,
+        kind: manox_agent_chrome_ui::session_list::SessionRowKind::Thread,
         updated_at: 0,
         sort_stamp: 0,
         pinned: false,
@@ -79,10 +81,12 @@ fn sample_row(id: &str) -> SessionRow {
 fn row_data(id: &str, updated_at: i64, sort_stamp: i64, team_leader: bool) -> SessionRowData {
     SessionRowData {
         id: id.into(),
+        short_id: "abcd1234".into(),
         title: "把 sidebar 的 thread 行改成三行布局".into(),
         updated_at,
         sort_stamp,
         status: SessionStatus::Idle,
+        kind: manox_agent_chrome_ui::session_list::SessionRowKind::Thread,
         pinned: false,
         archived: false,
         tag: None,
@@ -501,10 +505,12 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
 fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
     let titled = |id: &str, title: &str, stamp: i64| SessionRowData {
         id: id.into(),
+        short_id: "abcd1234".into(),
         title: title.into(),
         updated_at: stamp,
         sort_stamp: stamp,
         status: SessionStatus::Idle,
+        kind: manox_agent_chrome_ui::session_list::SessionRowKind::Thread,
         pinned: false,
         archived: false,
         tag: None,
