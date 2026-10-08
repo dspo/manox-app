@@ -66,28 +66,6 @@ pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {
         .is_ok()
 }
 
-/// Close one open tab of `id` in the live pane (the external session's
-/// 关闭会话: the tab's close callback reaps the sidebar row); `false` when
-/// no shell or window is live. The caller MUST be off the window's dispatch
-/// (a spawned task) — the same nested-update rule `open_tool_tab` obeys.
-pub fn close_tool_tab(id: &str, cx: &mut App) -> bool {
-    let Some(shell) = shell_handle() else {
-        return false;
-    };
-    let Some(handle) = crate::dispatch::window_global() else {
-        return false;
-    };
-    handle
-        .update(cx, |_, window, cx| {
-            shell.update(cx, |shell, cx| {
-                shell
-                    .right
-                    .update(cx, |pane, cx| pane.close_tab(id, window, cx));
-            });
-        })
-        .is_ok()
-}
-
 /// Close every open tab of `kind` in the live pane; `false` when no shell or
 /// window is live. The workspace retires the ephemeral observation panels
 /// through this when it leaves a thread: a panel's content is the child
@@ -254,8 +232,12 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .read(cx)
             .active
             .as_deref()
-            .map(crate::workspace::external_sessions::is_external_row)
-            .unwrap_or(false);
+            .filter(|id| crate::workspace::external_sessions::is_external_row(id))
+            // The prefix alone lies after a close: a closed foreground
+            // external leaves its dead id in `active`, and honoring it here
+            // would leave the sidebar highlight-less until the next click.
+            .filter(|id| ws.read(cx).external_is_live(id))
+            .is_some();
         shell.update(cx, |shell, cx| {
             shell.set_sessions(sessions);
             if !active_is_external && shell.active != fg {

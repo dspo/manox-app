@@ -117,6 +117,15 @@ impl Workspace {
         Some(self.externals.iter().find(|s| s.id == id)?.label.clone())
     }
 
+    /// Whether `id` names a still-live external session row. The assembly
+    /// layer's active guard needs this beyond the `ext-` prefix check: a
+    /// closed foreground external leaves its dead id in the chrome's
+    /// `active`, and a prefix-only guard would leave the sidebar
+    /// highlight-less until the next click.
+    pub(crate) fn external_is_live(&self, id: &str) -> bool {
+        self.externals.iter().any(|s| s.id == id)
+    }
+
     /// The sidebar rows: one per live session, stamped with the external
     /// kind (brand-mark leading slot, close-session menu on the chrome
     /// side) and the project grouping key.

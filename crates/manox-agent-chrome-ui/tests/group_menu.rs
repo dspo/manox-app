@@ -251,7 +251,9 @@ fn time_grouping_hides_the_group_menu(cx: &mut TestAppContext) {
 /// runs INSIDE the window's dispatch, and the pane open round-trips through
 /// the window handle (`handle.update` → `shell.update`). This test pins what
 /// that nested round-trip does when dispatched from a live click — the
-/// reason the host must DEFER the open (agent-ui::external_sessions::focus).
+/// reason the external open is a pure workspace update
+/// (`Workspace::open_external_session`) instead of a window-handle
+/// round-trip.
 #[gpui::test]
 fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
     let nested_ran = Rc::new(RefCell::new(false));
@@ -325,10 +327,10 @@ fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
 
     assert!(*nested_ran.borrow(), "the select hook ran on the click");
     // The nested round-trip FAILS while the window is dispatching (the
-    // shell.update re-enters the mid-update window): `open_tool_tab` from a
-    // click path is a silent no-op. The host must defer it past the
-    // dispatch (agent-ui::external_sessions::focus does, via cx.spawn);
-    // this assertion pins the semantics that forces the deferral.
+    // shell.update re-enters the mid-update window): a window-handle
+    // round-trip from a click path is a silent no-op. That is the semantics
+    // that forced the external open's shape — a pure workspace update, no
+    // handle round-trip; this assertion pins it.
     assert_eq!(
         *nested_ok.borrow(),
         Some(false),

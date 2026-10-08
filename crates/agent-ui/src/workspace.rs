@@ -1880,6 +1880,11 @@ impl Workspace {
             self.settings_view = Some(settings);
             self.settings_sub = Some(sub);
         }
+        // Leaving the external session for Settings drops its ownership:
+        // the invariant is `view_mode == ExternalSession` ⟺
+        // `active_external` names a live session — a mode flip that keeps
+        // the id leaves the title face reading a session not on screen.
+        self.active_external = None;
         self.view_mode = ViewMode::Settings;
         // Clear any pending exit animation: clicking Settings… while the
         // panel is still sliding out re-opens the overlay. Bumping the
@@ -1916,7 +1921,15 @@ impl Workspace {
                         if this.settings_transition_gen != exit_gen {
                             return;
                         }
+                        // The user may have re-entered an external session
+                        // while the panel was sliding out — the exit must
+                        // not steal the column or drop its ownership id
+                        // (the attach tail carries the same guard).
+                        if matches!(this.view_mode, ViewMode::ExternalSession) {
+                            return;
+                        }
                         this.view_mode = ViewMode::default();
+                        this.active_external = None;
                         this.exiting_settings = false;
                         cx.notify();
                     });
@@ -1926,8 +1939,10 @@ impl Workspace {
         })
     }
 
-    /// Switch to the conversation pane.
+    /// Switch to the conversation pane. Drops external ownership with the
+    /// mode flip (same invariant as the Settings arm).
     pub fn focus_conversation(&mut self, cx: &mut Context<Self>) {
+        self.active_external = None;
         self.view_mode = ViewMode::Workspace;
         cx.notify();
     }

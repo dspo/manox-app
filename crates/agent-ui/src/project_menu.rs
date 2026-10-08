@@ -102,7 +102,14 @@ pub fn group_menu(
                             // Per-agent visibility (the registration-time
                             // effective_agents column): a row the agent
                             // cannot run never enters the cascade —
-                            // clicking it could only ever toast.
+                            // clicking it could only ever toast. Premise:
+                            // the agents column is populated by every
+                            // registration path that feeds this menu —
+                            // the cx yaml registry stamps effective_agents,
+                            // and a row registered WITHOUT the key reads as
+                            // an empty column and silently drops out of
+                            // every agent submenu (bare `register_provider`
+                            // rows must not rely on that fallback).
                             let agent_models = agent_models
                                 .iter()
                                 .filter(|r| r.agents.iter().any(|a| a == agent_id))

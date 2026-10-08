@@ -966,7 +966,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 **外部会话 = 主列会话**（`agent_ui::workspace::external_sessions`，旧壳 external-session 家族的 chrome 回归）：AHP 无外部会话通道，注册表是客户端状态、挂在 Workspace 实体上（`externals: Vec<ExternalSessionRecord>` + `active_external`，各记录持 live `TerminalView` 实体）——项目菜单拉起 agent/终端即注册并**顶替会话列占主列**（`ViewMode::ExternalSession`，与 Settings 同一条主列换页轨道；壳子套主列，终端/TUI 就放主列，不放右栏）。切走即停靠（点 thread 行/新建会话隐式 `leave_external_session`，终端保活）；侧栏行走 `on_select` 的 `ext-` 前缀分叉 → `open_external_session` 切回主列（同步 ws 更新，无 window handle 往返，无 dispatch 时序坑）；行菜单「关闭会话」→ `close_external_session`（drop 记录 = 拆进程树，正在前台则回落会话列）。行投影 `external_session_rows` 并入装配层快照、壳按显示名归入项目组；高亮不被前台线程规则抢走（`active_is_external` 不回写）。主列标题（`PendingMain::title`）在外部会话前台时显示会话名。**进程级寿命**：PTY 属于 Workspace（进程单例），窗口重开仍在（比右栏 stash 的窗口级寿命更强，与 legacy 一致）。行级抽象同款 `SessionRowKind::{Thread, External{icon}}`——品牌位 + 关闭会话菜单；时序律仍有效：open/close_tool_tab（右栏页签通用路径）在 click dispatch 内会被拒（探针测试钉死），外部会话已改为纯 ws 更新不受其辖。
 
-> Source: `crates/agent-ui/src/project_menu.rs`, `crates/agent-ui/src/project_registry.rs`, `crates/agent-ui/src/external_sessions.rs`, `crates/agent-ui/src/chrome_assembly.rs`, `crates/manox-agent-chrome-ui/src/shell.rs`
+> Source: `crates/agent-ui/src/project_menu.rs`, `crates/agent-ui/src/project_registry.rs`, `crates/agent-ui/src/workspace/external_sessions.rs`, `crates/agent-ui/src/chrome_assembly.rs`, `crates/manox-agent-chrome-ui/src/shell.rs`
 
 #### SidebarProjection
 

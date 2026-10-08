@@ -665,6 +665,7 @@ impl Workspace {
         // this async attach was landing — the synchronous leave in
         // open_thread already handled the normal transition.
         if !matches!(self.view_mode, ViewMode::ExternalSession) {
+            self.active_external = None;
             self.view_mode = ViewMode::Workspace;
         }
         cx.notify();
