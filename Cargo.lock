@@ -316,7 +316,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -327,7 +327,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2356,7 +2356,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2614,7 +2614,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3494,7 +3494,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.62.2",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -4628,13 +4628,13 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
- "windows-registry 0.6.1",
+ "windows-registry 0.4.0",
 ]
 
 [[package]]
 name = "hyperlinks"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 
 [[package]]
 name = "iana-time-zone"
@@ -4648,7 +4648,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -5727,7 +5727,7 @@ dependencies = [
 [[package]]
 name = "manox-agent"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5828,7 +5828,7 @@ dependencies = [
 [[package]]
 name = "manox-ahp"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -5848,7 +5848,7 @@ dependencies = [
 [[package]]
 name = "manox-ahp-runtime"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -5916,7 +5916,7 @@ dependencies = [
 [[package]]
 name = "manox-harness"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5966,7 +5966,7 @@ dependencies = [
 [[package]]
 name = "manox-journal"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -5977,7 +5977,7 @@ dependencies = [
 [[package]]
 name = "manox-providers"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -5990,7 +5990,7 @@ dependencies = [
 [[package]]
 name = "manox-session-core"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -6018,7 +6018,7 @@ dependencies = [
 [[package]]
 name = "manox-terminal"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -6076,7 +6076,7 @@ dependencies = [
 [[package]]
 name = "manox-workspace"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6301,7 +6301,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6332,7 +6332,7 @@ dependencies = [
  "once_cell",
  "png 0.18.1",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6556,7 +6556,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8124,7 +8124,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8932,7 +8932,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9507,7 +9507,7 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
- "dirs 6.0.0",
+ "dirs 5.0.1",
 ]
 
 [[package]]
@@ -9676,7 +9676,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9885,7 +9885,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "supervisor"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?rev=15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd#15c6e7c767a3db365a7a7ed48f70bb56efc2e3cd"
+source = "git+https://github.com/dspo/manox.git?tag=v0.2.0#75101a045b967cdb5b9df57369e8188f71cc4b8d"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -10219,7 +10219,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -10282,7 +10282,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -10822,7 +10822,7 @@ dependencies = [
  "once_cell",
  "png 0.18.1",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11283,7 +11283,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12369,7 +12369,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
