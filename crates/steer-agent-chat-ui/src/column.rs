@@ -174,6 +174,27 @@ pub struct ConfirmationAction {
 pub struct ConfirmationSnapshot {
     pub auth_id: String,
     pub actions: Vec<ConfirmationAction>,
+    /// AHP 1.0's edit-preview face (`edits` on the pending state): one row
+    /// per file the call will touch, with its line counts. The durable
+    /// authority is the journal's own parameters — this is the display copy.
+    pub edits: Vec<ConfirmationEdit>,
+}
+
+/// One file's footprint on a pending edit-family call, for the confirmation
+/// card's diff-stat row.
+#[derive(Clone, PartialEq)]
+pub struct ConfirmationEdit {
+    /// The file, as a display path (the URI's path component).
+    pub path: String,
+    /// Lines the call adds; `None` when the producer could not know (the
+    /// projection's lower-bound cases).
+    pub added: Option<i64>,
+    /// Lines the call removes; same lower-bound caveat.
+    pub removed: Option<i64>,
+    /// `true` when the edit is a creation (no before side), `false` for a
+    /// modification; a deletion carries no after side.
+    pub creation: bool,
+    pub deletion: bool,
 }
 
 /// A parsed `AskUserQuestion` prompt awaiting the user's selections.

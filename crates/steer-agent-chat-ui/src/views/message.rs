@@ -2837,12 +2837,89 @@ pub fn render_tool_call(
     // carries loses its snapshot (and with it the row) on the next sync.
     if item.status == ToolCallStatus::PendingApproval
         && let Some(confirmation) = tool_ctx.and_then(|c| c.confirmation.as_ref())
-        && let Some(host) = tool_ctx.map(|c| c.host.clone())
-        && let Some(actions) = render_confirmation_actions(item, ix, theme, confirmation, host)
     {
-        card = card.child(actions);
+        // The edit-preview face (AHP 1.0 `edits`): one diff-stat row per file
+        // the call will touch — the counts come from the call's own journaled
+        // parameters, so the user sees the footprint before the verdict. A
+        // lower-bound count (the projection cannot statically know a block
+        // op's span) renders without its number rather than inventing one.
+        if !confirmation.edits.is_empty() {
+            card = card.child(render_confirmation_edits(ix, theme, &confirmation.edits));
+        }
+        if let Some(host) = tool_ctx.map(|c| c.host.clone())
+            && let Some(actions) = render_confirmation_actions(item, ix, theme, confirmation, host)
+        {
+            card = card.child(actions);
+        }
     }
     card.into_any_element()
+}
+
+/// The confirmation card's diff-stat block: one row per file the pending
+/// call touches — creation/deletion markers and `+added -removed` counts in
+/// the git-stat idiom, mono-fonted like the tool header it sits under.
+fn render_confirmation_edits(
+    ix: usize,
+    theme: &Theme,
+    edits: &[crate::column::ConfirmationEdit],
+) -> gpui::AnyElement {
+    let rows = gpui::div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .px_2()
+        .py_1p5()
+        .border_t_1()
+        .border_color(theme.border)
+        .children(edits.iter().enumerate().map(|(ei, edit)| {
+            let marker = if edit.deletion {
+                "deleted"
+            } else if edit.creation {
+                "created"
+            } else {
+                "modified"
+            };
+            let added = edit
+                .added
+                .map(|n| format!("+{n}"))
+                .unwrap_or_else(|| "+?".to_string());
+            let removed = edit
+                .removed
+                .map(|n| format!("-{n}"))
+                .unwrap_or_else(|| "-?".to_string());
+            gpui::div()
+                .id(format!("confirm-edit-{ix}-{ei}"))
+                .flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .text_sm()
+                .font_family(theme.mono_font_family.clone())
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_x_hidden()
+                        .text_color(theme.foreground)
+                        .child(truncate(&edit.path, 72)),
+                )
+                .child(gpui::div().text_color(theme.muted_foreground).child(marker))
+                .child(
+                    gpui::div()
+                        .flex()
+                        .gap_1()
+                        .text_color(theme.success)
+                        .child(added),
+                )
+                .child(
+                    gpui::div()
+                        .flex()
+                        .gap_1()
+                        .text_color(theme.danger)
+                        .child(removed),
+                )
+        }));
+    rows.into_any_element()
 }
 
 /// The confirmation card's action row: one button per fold option, the
