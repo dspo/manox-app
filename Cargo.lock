@@ -9599,6 +9599,7 @@ dependencies = [
  "manox-ahp-runtime",
  "manox-harness",
  "manox-session-core",
+ "manox-terminal",
  "open",
  "serde",
  "serde_json",

@@ -693,6 +693,11 @@ impl AhpStore {
             if this
                 .update(cx, |store, _| {
                     store.client = Some(client.clone());
+                    // The terminal bridge reads the process's client handle
+                    // from here (one host per process): dock terminals spawn
+                    // against it without threading the store through every
+                    // panel context.
+                    crate::terminal_bridge::set_client(Some(client.clone()));
                     store.replay_pending = true;
                 })
                 .is_err()
@@ -832,6 +837,7 @@ impl AhpStore {
                 }
             }
             tracing::error!("ahp pump exited (transport closed)");
+            crate::terminal_bridge::set_client(None);
             let _ = this.update(cx, |store, cx| {
                 store.client = None;
                 cx.notify();
