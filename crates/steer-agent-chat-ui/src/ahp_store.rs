@@ -36,7 +36,9 @@ use ahp_types::state::{ChatInputAnswer, ChatInputResponseKind, PendingMessageKin
 use ahp_types::state::{ChatState, RootState, SessionState, SessionSummary, SnapshotState};
 use manox_ahp::ext;
 use manox_ahp::ext::reducer::{Outcome as ExtOutcome, XManoxState, apply as apply_ext};
-use manox_ahp::translate::actions::config_keys;
+// The config-value keys the projection writes onto `session/configChanged`
+// (the naming authority lives beside the projector since #879).
+use manox_ahp_runtime::ahp::projection::config_keys;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -571,6 +573,8 @@ impl AhpStore {
             modified_at: now,
             changes: None,
             meta: None,
+            chats: None,
+            default_chat: None,
         }])
     }
 
@@ -602,7 +606,14 @@ impl AhpStore {
                 let init = client
                     .initialize(
                         CLIENT_ID.to_string(),
-                        vec![ahp_types::version::PROTOCOL_VERSION.to_string()],
+                        // The full supported list, not just the preferred
+                        // entry: the host picks the highest caret-compatible
+                        // offer, so a newer build also speaks to a host one
+                        // baseline behind.
+                        ahp_types::version::SUPPORTED_PROTOCOL_VERSIONS
+                            .iter()
+                            .map(|version| version.to_string())
+                            .collect(),
                         vec![ROOT_RESOURCE_URI.to_string()],
                     )
                     .await
@@ -2057,6 +2068,40 @@ mod tests {
             })),
         );
         assert_eq!(effect, FoldEffect::Ignored);
+    }
+
+    #[test]
+    fn unknown_baseline_channel_actions_are_a_no_op() {
+        // Forward compatibility against a newer host: an action type this
+        // build's `StateAction` does not know must deserialize to the
+        // `Unknown` fallback — the client drops unparseable envelopes
+        // instead — and then fold to nothing rather than panic or corrupt
+        // state.
+        let action: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/someFutureAction",
+            "unheard": "of"
+        }))
+        .expect("unknown action types must not break deserialization");
+        assert!(matches!(action, StateAction::Unknown(_)));
+        let mut book = ChannelBook::default();
+        let effect = book.apply(&chat_uri("c-1"), &action);
+        assert_eq!(effect, FoldEffect::Ignored);
+    }
+
+    #[test]
+    fn a_chat_state_with_unknown_future_fields_still_parses() {
+        // Forward compatibility against a newer protocol: snapshots may carry
+        // fields this build has never heard of; they must not break parsing.
+        let chat: ChatState = serde_json::from_value(serde_json::json!({
+            "resource": "ahp-chat:/c-1",
+            "title": "t",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [],
+            "someFutureField": { "nested": true },
+        }))
+        .expect("unknown fields must not break deserialization");
+        assert!(chat.turns.is_empty());
     }
 
     #[test]

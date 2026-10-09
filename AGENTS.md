@@ -44,7 +44,7 @@ manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（d
 
 - **数据面**：`crates/steer-agent-chat-ui/src/ahp_store.rs`（`AhpStore`：一个 `ahp::Client` 挂宿主进程单例的 in-proc 腿，折叠 root/session/chat/extension 通道，类型化写面）+ `chat_fold.rs`（`ChatState` → 显示词汇）。视图只许读 AhpStore（grep 门禁 `script/check-no-v2-wire.sh` 冻结 v2 词汇）。
 - **生命周期**：`agent-ui/src/multiplexer.rs` 只管 attach（订阅）/focus（GW5）/unread/create-fork 命令缝；不再有 per-session 线程泵。
-- **客户端 SDK**：crates.io `ahp`/`ahp-types` `=0.9.0` 精确 pin（与上游 workspace 一致）；x-manox 扩展通道的 fold 与声明常量经上游 `manox-ahp::ext`。
+- **客户端 SDK**：crates.io `ahp`/`ahp-types` `=1.0.0` 精确 pin（与上游 workspace 一致）；x-manox 扩展通道的 fold 与声明常量经上游 `manox-ahp::ext`。
 - 已知降级（接 x-manox 通道未建模的部分）：sub-agent 树、UI 本地注释卡不持久、终端走内核 PTY 直连不走 AHP terminal 通道。
 
 ### 与 manox 仓的联动开发
