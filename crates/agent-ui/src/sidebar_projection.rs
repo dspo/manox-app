@@ -44,9 +44,9 @@ pub struct ThreadRow {
     /// Last-active unix seconds, from the summary's `modified_at` (the same
     /// clock the list order sorts by); 0 when the stamp fails to parse.
     pub updated_at: i64,
-    /// The AHP face carries no archived partition — always false today; the
-    /// chrome menu's unarchive half is for the archived surface the wire
-    /// will grow.
+    /// The protocol's archived bit (`SessionStatus::IsArchived` on the
+    /// summary): the host persists it (`session/isArchivedChanged`), the
+    /// chrome menu's archive toggle dispatches it back.
     pub archived: bool,
 }
 
@@ -64,6 +64,7 @@ impl ThreadRow {
             running: bits & WireStatus::InProgress.bits() != 0,
             unread: bits & WireStatus::IsRead.bits() == 0,
             errored: bits & WireStatus::Error.bits() != 0,
+            archived: bits & WireStatus::IsArchived.bits() != 0,
             pending_auth: bits & WireStatus::InputNeeded.bits() != 0,
             pending_plan,
             pinned,
@@ -87,7 +88,6 @@ impl ThreadRow {
             updated_at: chrono::DateTime::parse_from_rfc3339(&summary.modified_at)
                 .map(|t| t.timestamp())
                 .unwrap_or(0),
-            archived: false,
         }
     }
 }
@@ -242,12 +242,12 @@ mod tests {
             pending_auth: false,
             pending_plan: false,
             pinned: false,
+            archived: false,
             parent_id: parent.map(|p| p.to_string()),
             depth,
             project: Some("/p/wire".into()),
             tag: None,
             updated_at: 0,
-            archived: false,
         }
     }
 

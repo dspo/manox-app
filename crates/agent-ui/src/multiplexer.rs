@@ -3,12 +3,11 @@
 //! One [`AhpStore`] carries every session over the host's in-proc leg; the
 //! store's own pump folds all channels (see `ahp_store`). What remains here
 //! is the *lifecycle* the views drive: which sessions are attached
-//! (subscribed), which one is focused (GW5 unread suppression), the local
-//! unread map, and the create/fork command seams. The sidebar and model
+//! (subscribed), which one is focused (GW5 unread suppression — the official
+//! bit now), and the create/fork command seams. The sidebar and model
 //! surfaces read the store's book through the accessors below — the protocol
 //! state has exactly one home.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::sidebar_projection::ThreadRow;
@@ -28,8 +27,6 @@ pub struct SessionMultiplexer {
     /// The client-owned focus (GW5): the attached session's unread rises are
     /// suppressed while it is the foreground leaf.
     focused: Option<String>,
-    /// Local unread flags keyed by session id (GW5).
-    unread: HashMap<String, bool>,
     /// Unsubscribes deferred for a Context-bearing call site.
     unsubscribe_queue: Vec<String>,
 }
@@ -70,7 +67,6 @@ impl SessionMultiplexer {
             attached: Vec::new(),
             focused: None,
             unsubscribe_queue: Vec::new(),
-            unread: HashMap::new(),
         }
     }
 
@@ -142,53 +138,75 @@ impl SessionMultiplexer {
         }
     }
 
-    /// Detach (unsubscribe) a session — the park leg of a thread switch.
-    /// Only the session channel is unsubscribed; the chat channel's
-    /// subscription is deliberately retained so a parked thread keeps
-    /// folding (a re-attach re-seeds an open ask card from it).
+    /// Detach a session — the park leg of a thread switch. Channels STAY
+    /// subscribed (only the bookkeeping above parks): the official unread
+    /// bit rides `session/isReadChanged` echoes on the session channel, so
+    /// a parked thread keeps its live dot and a re-attach re-seeds an open
+    /// ask card — the protocol's own answer where the local unread map and
+    /// the unsubscribe queue used to be.
     pub fn forget(&mut self, session_id: &str) {
         self.attached.retain(|id| id != session_id);
-        self.unread.remove(session_id);
         if self.focused.as_deref() == Some(session_id) {
             self.focused = None;
         }
-        let uri = session_uri(session_id);
-        self.unsubscribe_queue.push(uri);
     }
 
-    /// The client-owned focus (GW5).
+    /// The client-owned focus (GW5): the store publishes it (the official
+    /// unread rise suppresses for the foreground) and clears the focused
+    /// session's bit through the protocol — the echo lands for every
+    /// subscriber, this one included.
     pub fn set_focused(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
         let changed = self.focused.as_deref() != session_id;
         self.focused = session_id.map(str::to_string);
-        if let Some(id) = session_id
-            && self.unread.remove(id).is_some()
-        {
-            cx.notify();
-        }
+        self.store.update(cx, |store, _| {
+            store.set_focused_session(session_id);
+        });
         if changed {
             cx.notify();
         }
     }
 
-    /// Record a local unread rise (GW5: suppressed for the focused session).
-    pub fn note_unread(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.focused.as_deref() == Some(session_id) {
-            return;
-        }
-        if !self.unread.get(session_id).copied().unwrap_or(false) {
-            self.unread.insert(session_id.to_string(), true);
-            cx.notify();
-        }
+    /// Flip a session's archived bit through the protocol
+    /// (`session/isArchivedChanged`): the host journals and persists the
+    /// decision (the store row, the sidecar) and echoes the action back —
+    /// the summary's IsArchived bit is the single state every client reads.
+    pub fn toggle_archived(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let view = self.store.read(cx);
+        let archived = view
+            .book
+            .sessions
+            .get(session_id)
+            .map(|state| state.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0)
+            .or_else(|| {
+                view.book
+                    .summaries
+                    .values()
+                    .find(|summary| {
+                        steer_agent_chat_ui::ahp_store::id_of(&summary.resource) == session_id
+                    })
+                    .map(|summary| {
+                        summary.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0
+                    })
+            })
+            .unwrap_or(false);
+        self.store.update(cx, |store, _| {
+            store.dispatch(
+                steer_agent_chat_ui::ahp_store::session_uri(session_id),
+                ahp_types::actions::StateAction::SessionIsArchivedChanged(
+                    ahp_types::actions::SessionIsArchivedChangedAction {
+                        is_archived: !archived,
+                    },
+                ),
+            );
+        });
     }
 
-    /// The unread map the sidebar dots read.
-    pub fn unread_map(&self) -> HashMap<String, bool> {
-        self.unread.clone()
-    }
-
-    /// The sidebar attention count (GW5, the dock badge source).
-    pub fn attention_count(&self) -> usize {
-        self.unread.values().filter(|v| **v).count()
+    /// The sidebar attention count (GW5, the dock badge source): the
+    /// OFFICIAL unread bits (live fold first, the summary row as the parked
+    /// fallback) — the same protocol state the sidebar dots read, no local
+    /// map behind it.
+    pub fn attention_count(&self, cx: &App) -> usize {
+        self.store.read(cx).unread_sessions()
     }
 
     /// Whether a session is currently attached.
@@ -217,6 +235,14 @@ impl SessionMultiplexer {
                 let pinned = ext_and_meta_pinned(book, Some(summary), &thread_uri(sid));
                 let pending_plan = steer_agent_chat_ui::ahp_store::plan_review_proposed(book, sid);
                 let mut row = ThreadRow::from_summary(summary, pinned, pending_plan);
+                // The live fold wins over the summary row for the unread
+                // bit (the pin-read pattern): the official
+                // `session/isReadChanged` echoes land on the session state
+                // the moment they happen, while the summary row trails the
+                // host's next list refresh.
+                if let Some(state) = book.sessions.get(sid) {
+                    row.unread = state.status & ahp_types::state::SessionStatus::IsRead.bits() == 0;
+                }
                 // The host's project field trails a brand-new session (its
                 // store row lands with the first persistence), but the fold's
                 // effective cwd is already live — and it is exactly what the
