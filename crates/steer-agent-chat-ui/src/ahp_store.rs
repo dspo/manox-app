@@ -496,6 +496,11 @@ pub struct AhpStore {
     /// Display events derived from chat-channel folds since the last drain —
     /// the live-streaming leg the conversation applier consumes.
     chat_events: Vec<crate::chat_fold::ChatEvent>,
+    /// The foreground session id (the multiplexer publishes on focus
+    /// changes): chat activity in any OTHER session rises the official
+    /// unread bit (`session/isReadChanged` — client-owned observation
+    /// state, echoed to every subscriber) instead of a local map.
+    focused_session: Option<String>,
     /// Optimistic writes the host has not confirmed yet, oldest first:
     /// (session id, config key, the value the key had before). A rejection
     /// restores the remembered values so a refused pick does not linger.
@@ -530,6 +535,7 @@ impl AhpStore {
             client: None,
             replay_pending: false,
             chat_events: Vec::new(),
+            focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
             request_hook: None,
@@ -558,6 +564,7 @@ impl AhpStore {
             client: None,
             replay_pending: false,
             chat_events: Vec::new(),
+            focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
             request_hook: None,
@@ -607,6 +614,43 @@ impl AhpStore {
                 (kind, text)
             })
             .collect()
+    }
+
+    /// Publish the foreground session (the multiplexer's focus call): chat
+    /// activity elsewhere rises the official unread bit, and the newly
+    /// focused session's bit clears through the same protocol (the echo
+    /// lands for every subscriber, this one included).
+    pub fn set_focused_session(&mut self, session_id: Option<&str>) {
+        self.focused_session = session_id.map(str::to_string);
+        if let Some(session_id) = session_id {
+            self.dispatch(
+                session_uri(session_id),
+                StateAction::SessionIsReadChanged(ahp_types::actions::SessionIsReadChangedAction {
+                    is_read: true,
+                }),
+            );
+        }
+    }
+
+    /// The sessions whose official unread bit is raised (live fold first,
+    /// the summary row as the parked fallback) — the dock badge's source.
+    pub fn unread_sessions(&self) -> usize {
+        self.book
+            .summaries
+            .values()
+            .filter(|summary| {
+                let sid = id_of(&summary.resource);
+                // Both bits read live-fold-first: the isReadChanged and
+                // isArchivedChanged echoes land on the session state the
+                // moment they happen; the summary row is the parked fallback.
+                let bit = |mask: u32| match self.book.sessions.get(sid) {
+                    Some(state) => state.status & mask != 0,
+                    None => summary.status & mask != 0,
+                };
+                !bit(ahp_types::state::SessionStatus::IsRead.bits())
+                    && !bit(ahp_types::state::SessionStatus::IsArchived.bits())
+            })
+            .count()
     }
 
     pub fn seed_local_summary(&mut self, session_id: &str, title: &str) -> bool {
@@ -906,6 +950,27 @@ impl AhpStore {
                 };
                 match self.book.apply(&envelope.channel, &envelope.action) {
                     FoldEffect::Changed => {
+                        // The official unread rise (#870's app half):
+                        // visible chat activity in a session that is not the
+                        // foreground clears the IsRead bit through the
+                        // protocol — the host echoes the action to every
+                        // subscriber, so all clients (and this book's live
+                        // fold) see the same dot. The guard dispatches once:
+                        // only while the session state still reads as read.
+                        if let Some(chat_id) = &chat_id
+                            && self.focused_session.as_deref() != Some(chat_id)
+                            && let Some(session) = self.book.sessions.get(chat_id)
+                            && session.status & ahp_types::state::SessionStatus::IsRead.bits() != 0
+                        {
+                            self.dispatch(
+                                session_uri(chat_id),
+                                StateAction::SessionIsReadChanged(
+                                    ahp_types::actions::SessionIsReadChangedAction {
+                                        is_read: false,
+                                    },
+                                ),
+                            );
+                        }
                         if let Some(chat_id) = chat_id
                             && let Some(chat) = self.book.chats.get(&chat_id)
                             && let Some(event) = crate::chat_fold::ChatEvent::from_action(
@@ -2276,6 +2341,94 @@ mod tests {
         assert!(!plan_review_proposed(&book, "s-2"));
     }
 
+    /// The official unread count (#870's app half): the live session fold
+    /// wins over the summary row (the isReadChanged echoes land there the
+    /// moment they happen), the row is the parked fallback, and archived
+    /// sessions never count.
+    #[test]
+    fn unread_sessions_reads_the_live_fold_first_and_skips_archived() {
+        let mut store = AhpStore {
+            book: ChannelBook::default(),
+            client: None,
+            replay_pending: false,
+            chat_events: Vec::new(),
+            focused_session: None,
+            optimistic_undo: Vec::new(),
+            pending_writes: Vec::new(),
+            request_hook: None,
+            rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
+            _tasks: Vec::new(),
+        };
+        let session_state = |unread: bool, archived: bool| {
+            let mut bits = 0u32;
+            if !unread {
+                bits |= ahp_types::state::SessionStatus::IsRead.bits();
+            }
+            if archived {
+                bits |= ahp_types::state::SessionStatus::IsArchived.bits();
+            }
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri("s-x"),
+                "provider": "manox",
+                "title": "x",
+                "status": bits,
+                "modifiedAt": "2026-10-09T00:00:00.000Z",
+                "lifecycle": "ready",
+                "activeClients": [],
+                "chats": [],
+            }))
+            .expect("the session state parses")
+        };
+        // Row says READ, the live fold says UNREAD: the fold wins.
+        store.book.seed_summaries(vec![
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri("s-x"),
+                "provider": "manox",
+                "title": "x",
+                "status": ahp_types::state::SessionStatus::IsRead.bits()
+                    | ahp_types::state::SessionStatus::Idle.bits(),
+                "createdAt": "2026-10-09T00:00:00.000Z",
+                "modifiedAt": "2026-10-09T00:00:00.000Z",
+            }))
+            .expect("the summary parses"),
+        ]);
+        store
+            .book
+            .sessions
+            .insert("s-x".to_string(), session_state(true, false));
+        assert_eq!(store.unread_sessions(), 1, "the live fold wins");
+
+        // The focus clear lands on the fold: the count drops.
+        store
+            .book
+            .sessions
+            .insert("s-x".to_string(), session_state(false, false));
+        assert_eq!(store.unread_sessions(), 0);
+
+        // Parked (no fold) + an unread ROW: the row is the fallback.
+        store.book.sessions.remove("s-x");
+        store.book.seed_summaries(vec![
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri("s-x"),
+                "provider": "manox",
+                "title": "x",
+                "status": ahp_types::state::SessionStatus::Idle.bits(),
+                "createdAt": "2026-10-09T00:00:00.000Z",
+                "modifiedAt": "2026-10-09T00:00:00.000Z",
+            }))
+            .expect("the summary parses"),
+        ]);
+        assert_eq!(store.unread_sessions(), 1, "the parked row reads unread");
+
+        // Archived never counts, even unread.
+        store
+            .book
+            .sessions
+            .insert("s-x".to_string(), session_state(true, true));
+        assert_eq!(store.unread_sessions(), 0, "archived is out of the badge");
+    }
+
     #[test]
     fn thread_subscriptions_are_due_once_per_row_per_run() {
         let mut store = AhpStore {
@@ -2283,6 +2436,7 @@ mod tests {
             client: None,
             replay_pending: false,
             chat_events: Vec::new(),
+            focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
             request_hook: None,
@@ -2351,6 +2505,7 @@ mod tests {
             client: None,
             replay_pending: false,
             chat_events: Vec::new(),
+            focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
             request_hook: None,

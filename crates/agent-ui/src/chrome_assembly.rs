@@ -204,7 +204,11 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .detach();
         }
         let rows = mux.read(cx).thread_list(cx);
-        let unread = mux.read(cx).unread_map();
+        // The unread override map retired with the local GW5 machinery
+        // (#870's app half): the official IsRead bit rides the summary
+        // itself (and the live session fold for subscribed sessions), so
+        // the projection needs no override layer.
+        let unread = std::collections::HashMap::new();
         let removed = crate::project_registry::removed_projects();
         let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
             crate::sidebar_projection::project_groups(&rows, &unread, &removed)
@@ -411,27 +415,18 @@ fn shell_config(
                     });
                 }
             })),
-            // The menu's archive toggle flips the CURRENT partition.
-            // Premise: the wire snapshot rides the ACTIVE partition only, so
-            // every row the shell sees is unarchived and the unarchive half
-            // is for the archived-partition rows the wire will grow. The
-            // store journals a decision (and fires SessionEnd) even for a
-            // missing id, so an unknown id is refused here instead of
-            // written — callers pass live rows only.
-            on_archive: Some(Box::new(|id, _w, _cx| {
-                let store = manox_agent::thread_store_global();
-                let archived = store.read(|st| {
-                    if st.summaries().iter().any(|s| s.id.as_str() == id) {
-                        Some(false)
-                    } else {
-                        st.archived_summaries()
-                            .iter()
-                            .any(|s| s.id.as_str() == id)
-                            .then_some(true)
-                    }
-                });
-                if let Some(archived) = archived {
-                    store.with_mut(|st| st.archive_thread(id, !archived));
+            // The menu's archive toggle is protocol state now
+            // (#870's app half): `session/isArchivedChanged` dispatches on
+            // the session channel, the host journals + persists it and
+            // echoes back, and the summary's IsArchived bit flips for every
+            // client. The current state reads the same official bit (the
+            // v2 store's own partitions are no longer touched from here).
+            on_archive: Some(Box::new({
+                let mux = mux.clone();
+                move |id, _w, cx| {
+                    mux.update(cx, |mux, cx| {
+                        mux.toggle_archived(id, cx);
+                    });
                 }
             })),
             // Thread-tag write-back (`None` clears) — the same store write
