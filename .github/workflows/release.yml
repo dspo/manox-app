@@ -282,11 +282,21 @@ jobs:
           fi
           rpm -q steer
 
+      # Stage into a flat dist/: upload-artifact keeps the directory structure
+      # below the glob's common ancestor, so pointing it at RPMS/*/*.rpm would
+      # nest the file under x86_64/ and trip the publish job's flat dist/ walk.
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp target/rpm/RPMS/*/*.rpm dist/
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: rpm-x86_64
-          path: target/rpm/RPMS/*/*.rpm
+          path: dist/*.rpm
           if-no-files-found: error
 
   publish:
