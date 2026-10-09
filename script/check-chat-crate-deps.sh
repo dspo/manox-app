@@ -7,12 +7,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-banned=("terminal-ui" "manox-webview" "manox-ext-agents")
+banned=("terminal-ui" "steer-webview" "steer-ext-agents")
 status=0
 for dep in "${banned[@]}"; do
-    if cargo tree -p manox-agent-chat-ui -i "$dep" >/dev/null 2>&1; then
-        echo "violation: manox-agent-chat-ui depends on $dep"
-        cargo tree -p manox-agent-chat-ui -i "$dep" || true
+    if cargo tree -p steer-agent-chat-ui -i "$dep" >/dev/null 2>&1; then
+        echo "violation: steer-agent-chat-ui depends on $dep"
+        cargo tree -p steer-agent-chat-ui -i "$dep" || true
         status=1
     fi
 done

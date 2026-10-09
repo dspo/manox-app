@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, ElementExt as _};
 use manox_agent::ToolCallStatus;
-use manox_components::markdown::{Markdown, PanelKind, TerminalPanel};
+use steer_components::markdown::{Markdown, PanelKind, TerminalPanel};
 
 struct ListProbe {
     state: ListState,
@@ -241,7 +241,7 @@ const EXPLORE_SUMMARY_WITH_TABLE: &str = r#"3 个 Explore agent 全部成功完�
 
 | # | 探索角度 | 产出亮点 |
 |---|---|---|
-| 1 | **整体架构与 crate 布局** | 15 个 workspace 成员、三层主架构 + pi harness 层 + 终端栈 + 7 个支撑 crate 的完整职责表；构建入口（`manox` bin、`crates/manox/src/main.rs`）；GPUI 版本锁定与 patch 说明 |
+| 1 | **整体架构与 crate 布局** | 15 个 workspace 成员、三层主架构 + pi harness 层 + 终端栈 + 7 个支撑 crate 的完整职责表；构建入口（`steer` bin、`crates/steer-app/src/main.rs`）；GPUI 版本锁定与 patch 说明 |
 | 2 | **pi harness 分层**（内核/扩展边界） | 内核 8 大模块 + 8 个显式「缝隙」清单（`AgentTool::requires_approval`、`BashOperations`、`HookPoint`、`BackgroundTaskRegistry` 等）；扩展层 6 类实现如何经缝隙接入；宿主 `pi_engine.rs`/`pi_approval.rs` 的装配点；附 40+ 条符号索引表 |
 | 3 | **agent 宿主 + agent-ui UI** | agent 侧 12 大能力模块路径；UI 组件与文件映射；i18n 边界（`en.ftl`/`zh-CN.ftl` + `t()` 调用示例）；5 类运行时配置的读取位置；并指出 CLAUDE.md 与代码的一处偏差（`system_prompt.md` 已退役，现行是 `.tera.md` 双语言模板） |
 
@@ -496,7 +496,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
             },
             "DeepSeek".into(),
             0,
-            manox_agent_chat_ui::host::noop_host(),
+            steer_agent_chat_ui::host::noop_host(),
         )
     });
     let tail = cx.new(|_| {
@@ -511,7 +511,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
             },
             "DeepSeek".into(),
             1,
-            manox_agent_chat_ui::host::noop_host(),
+            steer_agent_chat_ui::host::noop_host(),
         )
     });
     let state = ListState::new(2, ListAlignment::Bottom, px(2048.));
@@ -620,7 +620,7 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
                 kind,
                 "deepseek-v4-flash".into(),
                 ix,
-                manox_agent_chat_ui::host::noop_host(),
+                steer_agent_chat_ui::host::noop_host(),
             )
         });
         item.update(cx, |item, cx| {

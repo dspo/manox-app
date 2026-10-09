@@ -4,45 +4,45 @@ Guidance for coding agents working in this repo.（本文件是 manox-app 仓库
 
 ## 项目概述
 
-manox-app 是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端、webview、系统托盘）与 cx 启动器（外部 agent CLI）。agent runtime（harness/agent/session-core/providers/supervisor，外加回流的终端仿真核心 manox-terminal 与 hyperlinks）来自 **dspo/manox**，经 git 依赖（tag 锁发布，见「与 manox 仓的联动开发」）+ 提交的 Cargo.lock 消费。单二进制、单进程。逐文件架构靠读代码获得——本文件只承载不可从代码推导的约束。
+manox-app（应用品牌 **Steer**，应用侧 crate 一律 steer-* 前缀；仓库名保持 dspo/manox-app）是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端、webview、系统托盘）与 cx 启动器（外部 agent CLI）。agent runtime（harness/agent/session-core/providers/supervisor，外加回流的终端仿真核心 manox-terminal 与 hyperlinks）来自 **dspo/manox**，经 git 依赖（tag 锁发布，见「与 manox 仓的联动开发」）+ 提交的 Cargo.lock 消费。单二进制、单进程。逐文件架构靠读代码获得——本文件只承载不可从代码推导的约束。
 
 ### 代码结构
 
 ```
 crates/                    # 全部 workspace 成员平铺于此（本仓只有一个交付物：桌面 app + 独立 bin 的 cx CLI）
-  manox/                   # 主二进制入口（窗口 + 主题 + 托盘 + 接线）
+  steer-app/              # 主二进制入口（应用品牌 Steer；crate steer-app，bin steer；窗口 + 主题 + 托盘 + 接线）
   agent-ui/                # 状态 + 装配层（multiplexer/client_store/browser_host/
                            #   dispatch/侧栏投影）+ 会话列（Workspace 的状态机与渲染）
-  manox-agent-chrome-ui/   # 唯一壳 crate（2026-Light 令牌/SessionList/右栏 ToolTab/
+  steer-agent-chrome-ui/   # 唯一壳 crate（2026-Light 令牌/SessionList/右栏 ToolTab/
                            #   底部 dock/工具栏/MainSurface 槽；无数据源，example shell
                            #   为目视验收面，装配在 agent-ui::chrome_assembly）
-  manox-agent-chat-ui/     # 会话列的状态机与消息管线（chat crate 依赖面见
+  steer-agent-chat-ui/     # 会话列的状态机与消息管线（chat crate 依赖面见
                            #   script/check-chat-crate-deps.sh）
   terminal-ui/             # 终端渲染层（TerminalElement/TerminalView；仿真核心在 dspo/manox 的 manox-terminal）
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
-  manox-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
-  manox-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
-  manox-webview/           # wry 原生 webview + Tauri 式 IPC
-  manox-webview-macros/    # webview IPC 过程宏
+  steer-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
+  steer-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
+  steer-webview/           # wry 原生 webview + Tauri 式 IPC
+  steer-webview-macros/    # webview IPC 过程宏
   cx/                      # cx headless 库（配置核心、launch-home、
                            #   chatgpt/vscode launch、probe db）
   cx-cli/                  # cx CLI bin（clap + ratatui TUI + relay + stats + `cx web`）
-  manox-ext-agents/        # ext-agent 启动 API、会话管理、IPC relay、
+  steer-ext-agents/        # ext-agent 启动 API、会话管理、IPC relay、
                            #   cx_session 桥（SessionHandle → PtySource）
 ```
 
 组件层边界：`ai-elements` 承载 agent 对话语义（Reasoning、工具、消息流），渲染机械
-（markdown、终端输出）归 `manox-components`。`ai-elements` 不依赖
+（markdown、终端输出）归 `steer-components`。`ai-elements` 不依赖
 `manox-agent`/`agent-ui` —— 正文与本地化文案由调用方注入，所以组件级验证走
 `cargo run -p ai-elements --example gallery`。
 
-上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真核心（manox-terminal）与 hyperlinks 已回流 dspo/manox（同经 git 依赖消费），`CxSessionSource` 桥留在本仓 manox-ext-agents。
+上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真核心（manox-terminal）与 hyperlinks 已回流 dspo/manox（同经 git 依赖消费），`CxSessionSource` 桥留在本仓 steer-ext-agents。
 
 ### 交互协议 v3 = AHP（2026-09-28 切换）
 
 manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（dspo/manox#818 删除 manox-protocol）：journal 仍是唯一 durable 权威，宿主把 journal 折叠成 AHP 通道状态，本仓退化为纯 AHP 客户端。规范与映射表唯一事实源在 dspo/manox 的 `docs/ahp-v3-architecture.md`（§G.W3 = 本仓切换、§F.2 = 本仓删除清单）。
 
-- **数据面**：`crates/manox-agent-chat-ui/src/ahp_store.rs`（`AhpStore`：一个 `ahp::Client` 挂宿主进程单例的 in-proc 腿，折叠 root/session/chat/extension 通道，类型化写面）+ `chat_fold.rs`（`ChatState` → 显示词汇）。视图只许读 AhpStore（grep 门禁 `script/check-no-v2-wire.sh` 冻结 v2 词汇）。
+- **数据面**：`crates/steer-agent-chat-ui/src/ahp_store.rs`（`AhpStore`：一个 `ahp::Client` 挂宿主进程单例的 in-proc 腿，折叠 root/session/chat/extension 通道，类型化写面）+ `chat_fold.rs`（`ChatState` → 显示词汇）。视图只许读 AhpStore（grep 门禁 `script/check-no-v2-wire.sh` 冻结 v2 词汇）。
 - **生命周期**：`agent-ui/src/multiplexer.rs` 只管 attach（订阅）/focus（GW5）/unread/create-fork 命令缝；不再有 per-session 线程泵。
 - **客户端 SDK**：crates.io `ahp`/`ahp-types` `=0.9.0` 精确 pin（与上游 workspace 一致）；x-manox 扩展通道的 fold 与声明常量经上游 `manox-ahp::ext`。
 - 已知降级（接 x-manox 通道未建模的部分）：sub-agent 树、UI 本地注释卡不持久、终端走内核 PTY 直连不走 AHP terminal 通道。
@@ -81,15 +81,15 @@ Rust **1.95.0**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`ru
 
 ### 出 UI 图（chrome 壳）
 
-UI 静态图**从真实渲染出**，不要另画一套：`crates/manox-agent-chrome-ui/tests/visual.rs`
+UI 静态图**从真实渲染出**，不要另画一套：`crates/steer-agent-chrome-ui/tests/visual.rs`
 用 gpui 官方离屏渲染（`VisualTestAppContext` + Metal 回读）把**真实的 `Shell`** 截成 PNG，
 不需要录屏权限，窗口在 (-10000,-10000) 渲染、不会闪屏。
 
 ```bash
-CHROME_SHOT=/tmp/shell.png cargo test -p manox-agent-chrome-ui --test visual
-CHROME_SHOT=/tmp/right.png CHROME_RIGHT=1 cargo test -p manox-agent-chrome-ui --test visual   # 展开右栏 + 一个 dummy 页签
-CHROME_SHOT=/tmp/panel.png CHROME_PANEL=1 cargo test -p manox-agent-chrome-ui --test visual   # 展开底部 dock
-CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p manox-agent-chrome-ui --test visual  # 两个不同宽度的页签 + 切回第一个
+CHROME_SHOT=/tmp/shell.png cargo test -p steer-agent-chrome-ui --test visual
+CHROME_SHOT=/tmp/right.png CHROME_RIGHT=1 cargo test -p steer-agent-chrome-ui --test visual   # 展开右栏 + 一个 dummy 页签
+CHROME_SHOT=/tmp/panel.png CHROME_PANEL=1 cargo test -p steer-agent-chrome-ui --test visual   # 展开底部 dock
+CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p steer-agent-chrome-ui --test visual  # 两个不同宽度的页签 + 切回第一个
 ```
 
 - 诊断开关 `CHROME_SWITCH=1`：开第二个（更宽的）页签、等布局稳定后切回第一个——**这是唯一能触达页签指示器滑动动画的路径**，单页签出图看不到「从哪来」。
@@ -120,15 +120,15 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 
 ## 提示词与 i18n
 
-本仓是 i18n 的**唯一归属地**：`crates/manox-i18n` 自带 Fluent 栈与全部资源（`crates/manox-i18n/locales/{zh-CN,en}.ftl`），中文为第一语言（primary + 默认），英文为次（fallback）。调用经 `agent_ui::i18n::t("key")`（gpui 层 `SharedString` 包装）或 `manox_i18n::t`（无 gpui 依赖的层）。
+本仓是 i18n 的**唯一归属地**：`crates/steer-i18n` 自带 Fluent 栈与全部资源（`crates/steer-i18n/locales/{zh-CN,en}.ftl`），中文为第一语言（primary + 默认），英文为次（fallback）。调用经 `agent_ui::i18n::t("key")`（gpui 层 `SharedString` 包装）或 `steer_i18n::t`（无 gpui 依赖的层）。
 
 **i18n 只覆盖 app chrome**：侧栏、设置面板、菜单栏、托盘、About、终端 overlay 等本仓自产的界面文案。
 
-**manox runtime 传入的值一律原样渲染，禁止二次本地化**——工具 title/summary、slash 命令 description（runtime 给英文）、plan 文本、`AskUserQuestion` 的 header、模型产出内容。新增 UI 文案 = 在 `crates/manox-i18n/locales/` 两个 `.ftl` 各加一个键（缺一不可，parity 由单测守护）+ 调用处换 `t("key")`。
+**manox runtime 传入的值一律原样渲染，禁止二次本地化**——工具 title/summary、slash 命令 description（runtime 给英文）、plan 文本、`AskUserQuestion` 的 header、模型产出内容。新增 UI 文案 = 在 `crates/steer-i18n/locales/` 两个 `.ftl` 各加一个键（缺一不可，parity 由单测守护）+ 调用处换 `t("key")`。
 
 模型面向字符串（提示词模板、工具 description）一律英文且**不在本仓维护**：多段落提示词散文全部在 dspo/manox 仓，本仓不得内嵌。
 
-语言配置 `ui_language` 由本仓拥有（`manox_i18n::{load_ui_language, persist_ui_language}`，读写 `~/.manox/settings.toml` 中该键且只碰该键）；`agent_language` 键已随 manox 侧语言轴退役而废除，不再有意涵。
+语言配置 `ui_language` 由本仓拥有（`steer_i18n::{load_ui_language, persist_ui_language}`，读写 `~/.manox/settings.toml` 中该键且只碰该键）；`agent_language` 键已随 manox 侧语言轴退役而废除，不再有意涵。
 
 ## 工作流约定
 

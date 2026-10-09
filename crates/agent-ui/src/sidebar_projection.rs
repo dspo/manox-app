@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ahp_types::state::{SessionStatus as WireStatus, SessionSummary};
-use manox_agent_chrome_ui::session_list::{
+use steer_agent_chrome_ui::session_list::{
     SessionGroup, SessionRowData, SessionRowKind, SessionStatus,
 };
 

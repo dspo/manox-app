@@ -18,4 +18,4 @@ gpui_platform.workspace = true
 gpui-kit-assets.workspace = true
 # The gallery renders reasoning bodies through the real markdown component, so
 # the demonstrated content is what the app shows rather than a stand-in.
-manox-components.workspace = true
+steer-components.workspace = true

@@ -60,8 +60,8 @@ new path automatically on first use.
 
 The provider list is per-machine and stays out of this repo. The repo ships the
 format contract and a sanitized sample instead:
-`crates/manox-ext-agents/config/cx.providers.config.schema.yaml` and
-`crates/manox-ext-agents/config/providers.example.yaml`. Typical workflows:
+`crates/steer-ext-agents/config/cx.providers.config.schema.yaml` and
+`crates/steer-ext-agents/config/providers.example.yaml`. Typical workflows:
 
 ```bash
 cx add

@@ -9,7 +9,7 @@
 //! The set lives under the app's own `removed_projects` key in the shared
 //! `~/.manox/settings.toml`, read-modify-written with the same
 //! only-touch-my-key discipline as the `ui_language` accessor in
-//! `manox_i18n` — every other key is preserved. Re-binding a session to a
+//! `steer_i18n` — every other key is preserved. Re-binding a session to a
 //! removed path (new thread with that project) clears the entry: launching
 //! into a folder is the re-registration.
 

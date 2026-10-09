@@ -14,7 +14,7 @@ mod common;
 use ahp_types::actions::{ChatTurnCompleteAction, ChatTurnStartedAction, StateAction};
 use common::{init_harness, open_workspace};
 use gpui::{AppContext as _, TestAppContext, VisualTestContext};
-use manox_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
+use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
 
 fn user_message() -> ahp_types::state::Message {
     serde_json::from_value(serde_json::json!({

@@ -20,7 +20,7 @@ impl Workspace {
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                manox_agent_chat_ui::ahp_store::plan_mode_of(&view.book, sid)
+                steer_agent_chat_ui::ahp_store::plan_mode_of(&view.book, sid)
             })
             .unwrap_or(false)
     }

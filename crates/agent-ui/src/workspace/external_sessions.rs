@@ -21,8 +21,8 @@
 
 use std::path::PathBuf;
 
-use manox_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
-use manox_agent_chrome_ui::shell::SessionRow;
+use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
+use steer_agent_chrome_ui::shell::SessionRow;
 
 use super::Workspace;
 
@@ -189,7 +189,7 @@ impl Workspace {
                     project,
                     status: SessionStatus::Running,
                     kind: SessionRowKind::External {
-                        icon: manox_agent_chrome_ui::theme::icons::IconAsset(s.svg),
+                        icon: steer_agent_chrome_ui::theme::icons::IconAsset(s.svg),
                     },
                     updated_at: s.created_at,
                     sort_stamp: s.created_at,

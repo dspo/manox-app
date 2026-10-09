@@ -2,7 +2,7 @@
 //! `gpui-kit-assets`（原 `gpui-component-assets`，0.6 更名）。
 //!
 //! `gpui-kit-assets` ships the icon set `IconName` resolves to, but it
-//! cannot carry manox's own brand icons (the Manox / Claude / Codex / GitHub Copilot
+//! cannot carry manox's own brand icons (the Steer / Claude / Codex / GitHub Copilot
 //! marks used in the sidebar and the new-session menu). `ExtrasAssetSource`
 //! layers those on top: a `rust-embed` lookup of `assets/icons/**` wins, then
 //! it falls through to `gpui-kit-assets` for everything else. The fallback is
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn embeds_every_new_session_brand_icon() {
         for path in [
-            "icons/manox.svg",
+            "icons/steer.svg",
             "icons/claude.svg",
             "icons/codex.svg",
             "icons/githubcopilot.svg",
@@ -149,7 +149,7 @@ mod tests {
         // would blank these out while every test that bypasses `load` stays
         // green.
         let extras = ExtrasAssetSource::new();
-        let mut paths: Vec<&str> = manox_agent_chrome_ui::theme::icons::ALL
+        let mut paths: Vec<&str> = steer_agent_chrome_ui::theme::icons::ALL
             .iter()
             .map(|glyph| glyph.0)
             .collect();

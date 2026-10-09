@@ -98,7 +98,7 @@ pub struct SubagentPanel {
     /// The chat host handle the panel's future interaction rows will need
     /// (notice pushes, answer routing); unused while the panel is read-only.
     #[allow(dead_code)]
-    host: manox_agent_chat_ui::host::ChatHostHandle,
+    host: steer_agent_chat_ui::host::ChatHostHandle,
     scroll_handle: ScrollHandle,
     stick_to_bottom: bool,
 }
@@ -113,7 +113,7 @@ impl SubagentPanel {
         backfill: &[SubagentChildEvent],
         prompt: Option<(String, i64)>,
         final_text: Option<String>,
-        host: manox_agent_chat_ui::host::ChatHostHandle,
+        host: steer_agent_chat_ui::host::ChatHostHandle,
         cx: &mut App,
     ) -> Entity<Self> {
         let ctx = ApplyCtx {

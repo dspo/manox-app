@@ -1,0 +1,9 @@
+{
+  "name": "steer-bundle-install",
+  "version": "0.1.0",
+  "description": "Bundle the latest manox-app main as Steer.app with the nested cx CLI and install both on macOS",
+  "author": {
+    "name": "dspo"
+  },
+  "skills": "./skills"
+}

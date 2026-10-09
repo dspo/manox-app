@@ -1,0 +1,925 @@
+//! The chat column's state types (PLAN-CHROME-CHAT-SPLIT Phase 2 tail):
+//! the `ChatColumn` entity's fields, the ask/queue/recall state families it
+//! carries, and the `AskUserQuestion` payload parser. The struct lives here;
+//! the workspace (agent-ui) embeds it as an `Entity<ChatColumn>` and
+//! orchestrates the wire-facing halves.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use gpui::{Entity, FocusHandle, ListState, Subscription};
+use gpui_component::input::{InputState, TextareaState};
+use gpui_component::menu::PopupMenu;
+
+use crate::ahp_store::AhpStore;
+use crate::conversation::{ConversationState, UserImage, UserTurnMeta};
+use crate::host::ChatHostHandle;
+use crate::views::completion::CompletionState;
+use crate::views::message::MessageItem;
+use crate::views::turn_navigator::TurnNavigator;
+
+/// Parse an `AskUserQuestion` tool input into a `PendingAsk`. The per-question
+/// `InputState` entities are allocated lazily on first render (they need a
+/// `Window`, which the event handler lacks). Returns `None` when the input is
+/// malformed (the generic question overlay then takes over as a fallback).
+pub fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk> {
+    let questions = input.get("questions")?.as_array()?;
+    // B2-PR-1 removed the 1..=3 question cap (and the 2..=3 option cap) from
+    // the tool contract; the card steps through any count. Empty stays
+    // malformed.
+    if questions.is_empty() {
+        return None;
+    }
+    let mut parsed: Vec<AskQuestion> = Vec::with_capacity(questions.len());
+    let mut selections: Vec<Vec<bool>> = Vec::with_capacity(questions.len());
+    for (i, q) in questions.iter().enumerate() {
+        let question = q.get("question")?.as_str()?.to_string();
+        // The server mints a stable id onto each parked question; answers are
+        // id-routed and unknown ids are dropped at the settle boundary.
+        // Inputs predating the mint (fixtures, older servers) fall back to a
+        // positional id, mirroring how the card keys its per-step state. The
+        // positional fallback is index-derived (`q{i}`) — a fixed small set of
+        // names collided past 3 questions once the count cap was lifted, which
+        // made two answers share an id and mis-route at the settle boundary.
+        let id = match q
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            Some(explicit) => explicit.to_string(),
+            None => format!("q{i}"),
+        };
+        // B2-PR-1 L1 vocabulary: `detail` is optional markdown support text
+        // rendered beneath the question; `intent` names a specialised surface
+        // (`kind`, e.g. "plan-review") with the option label that carries the
+        // affirmative verdict (`approve`). Both ride the snapshot so the card
+        // renders them; later PRs branch on `intent`.
+        let detail = q
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let intent = q.get("intent").and_then(|v| v.as_object()).map(|obj| {
+            let read = |k: &str| {
+                obj.get(k)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            AskIntent {
+                kind: read("kind"),
+                approve: read("approve"),
+            }
+        });
+        let header = q
+            .get("header")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let multi_select = q
+            .get("multiSelect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut opts: Vec<AskOption> = Vec::new();
+        if let Some(arr) = q.get("options").and_then(|v| v.as_array()) {
+            for o in arr {
+                let raw_label = o
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = o
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let explicit_recommended = o
+                    .get("recommended")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let (label, suffix_recommended) = strip_recommended_suffix(raw_label);
+                opts.push(AskOption {
+                    label,
+                    description,
+                    recommended: explicit_recommended || suffix_recommended,
+                });
+            }
+        }
+        // B2-PR-1: options are optional and unbounded (a detail/intent-only
+        // question is legal) — the old 2..=3 cap is gone server-side, so the
+        // card must not degrade on counts it now receives.
+        selections.push(vec![false; opts.len()]);
+        parsed.push(AskQuestion {
+            id,
+            question,
+            header,
+            detail,
+            intent,
+            multi_select,
+            options: opts,
+        });
+    }
+    Some(PendingAsk {
+        id,
+        questions: parsed,
+        selections,
+    })
+}
+
+pub fn strip_recommended_suffix(label: String) -> (String, bool) {
+    let lower = label.to_lowercase();
+    for suffix in [" (Recommended)", "（推荐）", " (推荐)", "（Recommended）"] {
+        let suffix_lower = suffix.to_lowercase();
+        if lower.ends_with(&suffix_lower) {
+            let stripped = &label[..label.len() - suffix.len()];
+            return (stripped.trim().to_string(), true);
+        }
+    }
+    (label, false)
+}
+
+/// A tool confirmation parked on the user's decision — a sandbox
+/// escalation or any gate the runtime raises before a call runs. The
+/// verdict rides the conversation's own tool row (the unified
+/// confirmation card); this state only names the live park so the
+/// workspace can attach the decision snapshot to the right row.
+pub struct PendingConfirmation {
+    /// The confirmation's auth id — the identity the verdict must carry
+    /// in its `_meta` stamp for the host to settle it.
+    pub auth_id: String,
+    /// The parked call's tool-call id — the conversation row the decision
+    /// snapshot attaches to (usually equal to `auth_id`, but the journal
+    /// may name them separately).
+    pub tool_call_id: String,
+}
+
+/// One decision button on the unified confirmation card. The fold's own
+/// `ConfirmationOption`, reduced to what the row renders: the label is
+/// runtime data and renders verbatim (never re-localized), `approve`
+/// picks the primary vs outline presentation and the verdict bool, and
+/// `option_id` rides the verdict so the host learns WHICH option the user
+/// chose — a label may promise semantics ("Always allow") a bare
+/// approve/deny bool would silently break.
+#[derive(Clone, PartialEq)]
+pub struct ConfirmationAction {
+    pub option_id: String,
+    pub label: String,
+    pub approve: bool,
+}
+
+/// The decision surface the workspace budgets onto the parked call's
+/// conversation row before the list measures, so the row's render stays a
+/// read-only projection (the ask snapshot's same contract).
+#[derive(Clone, PartialEq)]
+pub struct ConfirmationSnapshot {
+    pub auth_id: String,
+    pub actions: Vec<ConfirmationAction>,
+}
+
+/// A parsed `AskUserQuestion` prompt awaiting the user's selections.
+pub struct PendingAsk {
+    pub id: String,
+    pub questions: Vec<AskQuestion>,
+    /// Per-question toggled option flags, aligned with `questions[i].options`.
+    pub selections: Vec<Vec<bool>>,
+}
+
+pub struct AskQuestion {
+    /// Stable question id (server-minted) used to route the canonical
+    /// `AskAnswer` back through the settle boundary.
+    pub id: String,
+    pub question: String,
+    pub header: String,
+    pub detail: String,
+    pub intent: Option<AskIntent>,
+    pub multi_select: bool,
+    pub options: Vec<AskOption>,
+}
+
+/// Parsed form of a question's `intent` object: the specialised-surface kind
+/// (e.g. "plan-review") and the option label carrying the affirmative verdict.
+pub struct AskIntent {
+    pub kind: String,
+    pub approve: String,
+}
+
+pub struct AskOption {
+    pub label: String,
+    pub description: String,
+    pub recommended: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ComposerPlaceholderMode {
+    Normal,
+    FollowUp,
+    Ask,
+}
+
+pub struct DeferredUserTurn {
+    pub text: String,
+    pub images: Vec<manox_agent::language_model::MessageContent>,
+    pub meta: UserTurnMeta,
+    pub user_images: Vec<UserImage>,
+}
+
+/// Lifecycle of a follow-up submitted while a turn is running. A queued item
+/// renders above the composer; clicking Steer promotes it to `SteerPending`,
+/// which is handed to the server's steer queue for the running turn and STAYS
+/// parked in the composer queue (at the head of the steer group) until the
+/// model actually consumes it. Consumption is observed at the earliest point
+/// the wire offers: the injected `user` journal row landing
+/// (`ThreadEvent::UserRowLanded`, id == the client-minted `message_id` thanks
+/// to the server's stable-id threading) retires the card immediately; the
+/// turn-boundary `TurnFinished` (now journal-delivered) is the fallback for a
+/// row that raced the settle, and the strand path for a cancelled turn.
+pub enum FollowUpState {
+    /// Parked, waiting to flush as the next user turn at the turn boundary (or
+    /// to be promoted to a steer via the Steer action).
+    Queued,
+    /// Promoted to the server steer queue for the running turn. Carries the
+    /// client-minted id the steer dispatch carries: the
+    /// injected row's durable identity (the retire-on-injection key) and the
+    /// stranded-verdict key at settle. Not removable (no steer-withdrawal
+    /// channel in the protocol). A normal settle the injection row missed
+    /// promotes it into the message list; a cancelled/failed turn strands it
+    /// into [`FollowUpState::Failed`].
+    SteerPending { message_id: String },
+    /// The running turn exited abnormally (Abort/Error) before injecting the
+    /// steer. Stays parked, marked red, retryable via the Steer action (which
+    /// re-sends a fresh online steer under a fresh id). Removable. Carries no
+    /// id: the retry never reuses the retracted one.
+    Failed,
+}
+
+/// A follow-up submitted while a turn is running. Every new item starts queued;
+/// only an explicit Steer action promotes it to `SteerPending`.
+pub struct QueuedFollowUp {
+    pub turn: DeferredUserTurn,
+    pub state: FollowUpState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QueueDragEdge {
+    Top,
+    Bottom,
+}
+
+/// In-flight queue-row drag: the row being dragged, the row whose edge
+/// carries the insertion line, and which edge that is (the sidebar's
+/// `RowDrag` shape, index-keyed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QueueRowDrag {
+    pub dragged: usize,
+    pub line_on: usize,
+    pub edge: QueueDragEdge,
+}
+
+/// An attachment staged in the composer but not yet submitted. Either a file
+/// picked from the `+` menu or an image pasted straight from the clipboard
+/// (resized off-thread on submit). Browser tool-suite chips are tracked
+/// separately by the workspace (they persist across submits).
+#[derive(Debug, Clone)]
+pub enum PendingAttachment {
+    File { path: PathBuf, is_image: bool },
+    ClipboardImage(gpui::Image),
+}
+
+impl PendingAttachment {
+    pub fn new(path: PathBuf) -> Self {
+        Self::File {
+            is_image: is_image_path(&path),
+            path,
+        }
+    }
+
+    pub fn is_image(&self) -> bool {
+        matches!(
+            self,
+            Self::ClipboardImage(_) | Self::File { is_image: true, .. }
+        )
+    }
+
+    /// The chip's file label. No filename on the clipboard; a localized
+    /// label stands in instead.
+    pub fn file_name(&self) -> String {
+        match self {
+            Self::File { path, .. } => path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+                .to_string(),
+            Self::ClipboardImage(_) => steer_i18n::t("composer-pasted-image"),
+        }
+    }
+}
+
+fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+    )
+}
+
+pub struct ChatColumn {
+    /// The port the moved chat views call through (see `host.rs` in
+    /// steer-agent-chat-ui and agent-ui's `WorkspaceChatHost`).
+    pub host: ChatHostHandle,
+
+    pub thread: manox_agent::thread::ThreadHandle,
+    /// The AHP store plus this column's session id. Views derive every
+    /// former mirror field from the book's channel state. Written at
+    /// landing, re-handled on thread switch.
+    pub store: Option<(gpui::Entity<AhpStore>, String)>,
+    /// γ-3: the AgentServer session_id for the landing thread. Used as the
+    /// `session_id` field in the command payloads.
+    pub session_id: Option<String>,
+    /// Generation counter for git-status refreshes: bumping it means any
+    /// prior in-flight refresh self-cancels instead of overwriting newer
+    /// state. The refresh runs on the global tokio runtime and delivers its
+    /// result back via `async_channel`, the same bridge the worktree tool uses.
+    pub git_status_gen: u64,
+    pub conversation: Entity<ConversationState>,
+    pub input_state: Entity<TextareaState>,
+    /// Per-thread unsent composer text, keyed by thread id. Saved when
+    /// switching away and restored on return, so each thread keeps its own
+    /// in-progress draft instead of a single shared input bleeding across.
+    pub drafts: HashMap<String, String>,
+    /// Composer history-recall position into the newest-first user-turn texts;
+    /// -1 means the walk is not running. Only `alt-up` / `alt-down` move along
+    /// it, so nothing about the text or the caret has to be watched to leave it.
+    pub recall_index: i64,
+    /// The walk's working line: what the composer held when the walk was
+    /// entered, or the last recalled turn once the user has changed it. `Down`
+    /// past the newest turn restores it and ends the walk.
+    pub recall_draft: Option<String>,
+    /// A pending `AskUserQuestion` card rendered inline in the message list.
+    pub pending_ask: Option<PendingAsk>,
+    /// Whether the pending ask was seeded by the live ask edge (the fold's
+    /// open elicitation). Only a live-seeded card is retired when its request
+    /// leaves the fold — a diagnostic-seeded one belongs to the test, not to
+    /// the wire.
+    pub pending_ask_live: bool,
+    /// Same liveness marker for the tool confirmation: only a live-seeded
+    /// card is retired when its request leaves the fold.
+    pub pending_confirmation_live: bool,
+    pub pending_confirmation: Option<PendingConfirmation>,
+    /// Whether the CURRENT pending ASK's id has been observed in the leaf's
+    /// input-needed list. Arms the remote-settle reconciliation for the ASK
+    /// card only (the confirmation card keeps its own flag — one park
+    /// settling remotely must never retire the other card).
+    pub ask_projection_confirmed: bool,
+    /// Same arm for the unified confirmation card, tracked independently:
+    /// the two parks are separate interactions and settle separately.
+    pub confirmation_projection_confirmed: bool,
+    /// Tool row currently carrying the Workspace-derived ask snapshot. This is
+    /// synchronized before list construction; the row factory itself remains
+    /// a read-only projection during measurement and prepaint.
+    pub ask_snapshot_item: Option<Entity<MessageItem>>,
+    /// Tool row currently carrying the Workspace-derived confirmation
+    /// snapshot (the unified card's decision buttons), under the same
+    /// pre-measure contract as `ask_snapshot_item`.
+    pub confirmation_snapshot_item: Option<Entity<MessageItem>>,
+    /// The tool-call id of the row this workspace PROMOTED for the
+    /// confirmation card (the ask snapshot's synthesis leg). Set only when
+    /// the row was minted by the sync — a park's retirement removes the
+    /// promoted row, while a row that already existed stays.
+    pub confirmation_row_synthesized: Option<String>,
+    /// Current question index in the ask drawer (0-based).
+    pub ask_step: usize,
+    /// Animation generation counter for the ask drawer slide, bumped on every
+    /// open/close so a fresh tween fires rather than replaying a cached delta.
+    pub ask_transition_gen: u64,
+    /// Per-question free-text `custom` inputs for the pending ask card, one
+    /// slot per question (index-aligned with `pending_ask.questions`). Created
+    /// lazily at render time because an `InputState` needs a `Window`, which
+    /// the park event handler lacks; reset whenever the ask is (re)seeded or
+    /// retired. A tri-state answer is `{selected, custom}` — `custom` overrides
+    /// a single-select and supplements a multi-select at the settle fold, and
+    /// an empty selection with no `custom` is an explicit skip.
+    pub ask_custom_inputs: Vec<Option<Entity<InputState>>>,
+    /// Subscriptions keeping the card repainted as the custom inputs change.
+    pub ask_custom_subs: Vec<Subscription>,
+    /// Authoritative per-question custom text (index-aligned with
+    /// `pending_ask.questions`), the value `resolve_ask` folds
+    /// into each canonical `AskAnswer`. The `InputState` entities above mirror
+    /// this for live editing; tests drive this directly. Reset with the ask.
+    pub ask_custom_text: Vec<String>,
+    /// Per-question explicit-skip markers (index-aligned with
+    /// `pending_ask.questions`): set by the footer Skip, cleared with the ask.
+    /// The submit completeness gate reads them — an untouched question is
+    /// never silently folded to a skip, but an explicitly skipped one counts
+    /// as completed (dsh `QuestionDraftAnswer.skipped` parity).
+    pub ask_skipped: Vec<bool>,
+    /// Scroll handles for the ask card's body scrollport — the plan-review
+    /// card's plan body and the generic card's capped body — one slot per
+    /// question (index-aligned with `pending_ask.questions`). The body is a
+    /// scrollport nested inside the message list, so its wheel handler needs
+    /// the live offset to tell whether the gesture is consumed there or
+    /// chained to the enclosing list (`contain_body_scroll` in the message
+    /// views), and `track_scroll` stores the offset in the handle, so it must
+    /// outlive a frame. Rebuilt with the ask scratch, reset with it.
+    pub ask_body_scroll: Vec<gpui::ScrollHandle>,
+    pub model_open: bool,
+    /// PopupMenu entity for the open model selector; created on open, destroyed on close.
+    pub model_menu: Option<Entity<PopupMenu>>,
+    pub model_menu_sub: Option<Subscription>,
+    pub plus_open: bool,
+    pub plus_menu: Option<Entity<PopupMenu>>,
+    pub plus_menu_sub: Option<Subscription>,
+    /// Access-chip dropdown (permission modes). Mirrors the model selector pattern.
+    pub access_open: bool,
+    /// Project-chip dropdown (recent projects + new project submenu).
+    pub project_chip_open: bool,
+    pub project_chip_menu: Option<Entity<PopupMenu>>,
+    pub project_chip_menu_sub: Option<Subscription>,
+    /// Composer typeahead completion popover (`/` commands, `@` skills/agents).
+    /// `None` when no trigger token is active at the caret. A pure render
+    /// overlay — it never grabs focus, so the `InputState` keeps focus and the
+    /// query filters live on every keystroke.
+    pub completion: Option<CompletionState>,
+    /// Searchable, newest-first snapshot of the active thread's user turns.
+    pub turn_navigator: Option<Entity<TurnNavigator>>,
+    pub turn_navigator_sub: Option<Subscription>,
+    pub turn_navigator_previous_focus: Option<FocusHandle>,
+    /// Left-edge turn rail state (`views::turn_rail`). Marks are re-derived
+    /// from the conversation every frame; these fields carry only the
+    /// interaction and tween bookkeeping. `turn_rail_active` is the mark the
+    /// list's scroll position resolves to, with `turn_rail_active_from`
+    /// snapshotting the previous active mark (only when it changes) and
+    /// `turn_rail_active_gen` keying the tick tween so each change starts a
+    /// fresh run. The hover preview mirrors that discipline through
+    /// `turn_rail_preview_{mark,top,gen}`: the last painted top is the next
+    /// travel origin, `top` cleared when the pointer leaves.
+    /// `turn_rail_pointer_inside` pauses active-follow so the marks never
+    /// travel under the hand; `turn_rail_followed` records the last
+    /// auto-followed `(active, count)` pair so the render-time follow cannot
+    /// loop. `turn_rail_box_h` is the rail strip's height, captured at
+    /// prepaint for the preview's clamp.
+    pub turn_rail_active: Option<usize>,
+    pub turn_rail_active_from: Option<usize>,
+    pub turn_rail_active_gen: u64,
+    pub turn_rail_hover: Option<usize>,
+    /// The hover wave's from-snapshots (dsh's indicator_from discipline for
+    /// ticks): the mark that just gained hover tweens up from rest while the
+    /// mark in `turn_rail_hover_prev` tweens back down, both under the id
+    /// keyed by `turn_rail_hover_gen`. `turn_rail_hover_painted` is what the
+    /// last render saw — the change detector, so one pointer sweep across
+    /// several marks runs exactly one tween pair, not one per frame.
+    pub turn_rail_hover_prev: Option<usize>,
+    pub turn_rail_hover_gen: u64,
+    pub turn_rail_hover_painted: Option<usize>,
+    pub turn_rail_pointer_inside: bool,
+    pub turn_rail_followed: Option<(usize, usize)>,
+    pub turn_rail_scroll: gpui::UniformListScrollHandle,
+    pub turn_rail_preview_mark: Option<usize>,
+    pub turn_rail_preview_top: Option<gpui::Pixels>,
+    pub turn_rail_preview_gen: u64,
+    pub turn_rail_box_h: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
+    /// Follow-ups submitted while a turn is running. Steer items are injected
+    /// into the running turn at the next safe join point; queue items flush as
+    /// the next user turn at `TurnFinished`.
+    pub queued_follow_ups: std::collections::VecDeque<QueuedFollowUp>,
+    /// Session-only per-thread queue stash. Switching tasks moves the active
+    /// deque here and restores it on return; no database persistence is used.
+    pub queued_follow_ups_by_thread: HashMap<String, std::collections::VecDeque<QueuedFollowUp>>,
+    /// In-flight queue-row drag (the composer queue's grip handle): the
+    /// insertion marker cleared on commit / cancel / thread switch. Mirrors
+    /// the sidebar's `drag_row` cue for the same gesture.
+    pub queue_drag: Option<QueueRowDrag>,
+    /// Tracks which composer placeholder is installed, so render only mutates
+    /// the input state on mode transitions.
+    pub composer_placeholder_mode: ComposerPlaceholderMode,
+    /// Files picked via the `+` menu, not yet sent. Cleared on submit.
+    pub pending_attachments: Vec<PendingAttachment>,
+    /// Opt-in browser tool suites activated via the `+` menu. Unlike file
+    /// attachments these persist across submits (they track session-level tool
+    /// activation); removing a chip deactivates the suite.
+    pub active_browser_suites: Vec<manox_agent::engine::BrowserSuite>,
+    /// True while a native directory picker is open from the "Choose project" row.
+    /// Guards against the user submitting a message before the picker resolves
+    /// (which would make `set_project` a silent no-op once `messages` is non-empty).
+    pub project_picker_pending: bool,
+    /// Parent directory selected for "Create blank project"; waiting for name input.
+    pub blank_project_parent: Option<PathBuf>,
+    /// Input state for the blank project folder name overlay.
+    pub blank_project_name_input: Option<Entity<InputState>>,
+    pub thread_sub: Option<Subscription>,
+    /// Observes the foreground leaf store itself (beyond `thread_sub`'s
+    /// events): a projection-only frame (mid-session `SetModel` →
+    /// `Projections` delta) writes the chip fields and notifies the LEAF, but
+    /// the entry event's re-render can land in an earlier tick — without this
+    /// observe the workspace never repaints and the chip stays stale (the
+    /// #765 "picks a model, nothing happens" repro: the journal had both
+    /// changes, the render never showed them).
+    pub store_observe: Option<Subscription>,
+    /// A successor session the foreground must switch to at the next render
+    /// (a bind's identity hand-off arrived while this workspace held the
+    /// predecessor). Taken once, so the switch cannot re-trigger.
+    pub pending_successor: Option<String>,
+    /// A `ForkSession` round trip is outstanding. The fork control is a button
+    /// on every forkable reply, and the verdict takes a round trip, so without
+    /// this a double click mints two children for one intent. Cleared on both
+    /// verdicts so a failed fork stays retryable.
+    pub fork_in_flight: bool,
+    /// A reopened thread is waiting for its chat snapshot: the attach bound a
+    /// landing mirror while the fold still holds no chat channel for the new
+    /// session. The workspace swaps the hero screen for the history-loading
+    /// view while this is set (render re-checks the fold). `None` clears the
+    /// gate — when the snapshot lands (rebuild with history, or the store
+    /// observe for a genuinely empty session) and when the wait exceeds the
+    /// view's timeout so a failed reopen cannot pin the page forever.
+    pub awaiting_history: Option<std::time::Instant>,
+    /// The last conversation rebuild ran against a fold that had not yet
+    /// received its authoritative chat snapshot (first replay deltas beat the
+    /// subscribe answer). The store observe heals it with one more rebuild
+    /// once the snapshot lands with more settled turns than the build saw.
+    pub rebuilt_pre_snapshot: bool,
+    /// Settled-turn count the current conversation was built from — the
+    /// rebuild-heal watermark's comparison base.
+    pub built_turns: usize,
+    /// The ask the user most recently dismissed, with when. The engine's
+    /// restore re-parks an unsettled question (upstream #840), so a dismiss
+    /// can race the restore and reduce to NoOp on the host; when the fold
+    /// re-opens the same request inside the window, the live-ask edge
+    /// re-issues the decline instead of re-seeding the card the user closed.
+    pub last_declined_ask: Option<(String, std::time::Instant)>,
+    /// The chat id whose plan channel is subscribed. Plan rows ride
+    /// `x-manox-plan:/<active chat id>`; the attach-time subscription rides
+    /// the session id, and once the default-chat pointer lands the
+    /// subscription is re-issued for the real chat id (the two diverge on
+    /// session continuation, where reading the session form would receive
+    /// nothing).
+    pub plan_chat_subscribed: Option<String>,
+    pub input_sub: Option<Subscription>,
+    /// Height-invalidation subscription: any `ConversationState` mutation may
+    /// change a row's height (including off-screen rows whose height is cached
+    /// in the list sum tree). Remeasure all rows on every conversation notify —
+    /// the same cure a window resize applies — so a stale cached height can
+    /// never survive to paint an overlapping row.
+    pub conversation_sub: Option<Subscription>,
+    /// Scroll/virtualization state for the message column, held natively by
+    /// `gpui::ListState`. `ListAlignment::Bottom` gives chat-log semantics:
+    /// short histories sit at the bottom, long ones scroll. `FollowMode::Tail`
+    /// pins to the live end on each layout while following, disengages on an
+    /// upward user scroll, and re-arms when a scroll lands back at the bottom.
+    /// `MSG_LIST_OVERDRAW` rows below the viewport are pre-measured; a width
+    /// change invalidates every cached height, and visible rows re-measure
+    /// every frame (so a height change without an explicit signal self-
+    /// corrects). Count changes are reconciled via `splice`, in-place
+    /// mutations via `remeasure_items`, both driven by `ApplyOutcome`. Only
+    /// the visible items render.
+    pub list_state: ListState,
+    /// Exact width of the list child from the previous prepaint. Official GPUI
+    /// at the pinned revision does not invalidate off-screen row heights when
+    /// this changes, so the application explicitly remeasures the cache.
+    pub message_list_width: crate::views::MessageListWidthInvalidator,
+    /// Exact width of the conversation card from the previous prepaint — the
+    /// width every card-relative budget (the rail's fit gate, the turn
+    /// navigator's panel) is computed from, never the window's.
+    pub card_width: crate::views::CardWidth,
+    /// Cached `items().len()`; the event handler reconciles the list count via
+    /// `splice` whenever the conversation grows or shrinks.
+    pub list_count: usize,
+    /// Whether the goal status popover is open (toggled by the `◎ /goal active`
+    /// chip or the bare `/goal` command).
+    pub goal_popover_open: bool,
+    /// Generation counter for the goal elapsed-time ticker. Incremented when a
+    /// goal is cleared or the active thread changes so the prior ticker
+    /// self-terminates instead of notifying a stale chip. Mirrors
+    /// `settings_transition_gen`.
+    pub goal_ticker_gen: u64,
+    /// True while the active thread has a turn in flight, so the Thinking
+    /// status row's "for Xs" counter ticks every second. Set on `TurnStarted`,
+    /// cleared on a terminal `Stop`/`Error`. The ticker task polls this and
+    /// self-terminates when it goes false.
+    pub turn_active: bool,
+    /// Generation counter for the thinking elapsed-time ticker. Incremented
+    /// on every `TurnStarted` and on thread switch so a prior ticker
+    /// self-terminates instead of driving a stale container.
+    pub thinking_ticker_gen: u64,
+    /// Right-hand context rail. Owns the cockpit state (run phase, the model's
+    /// plan snapshot, per-cell counter animation state) that used to live
+    /// directly on `Workspace`, plus strong handles to the active thread and conversation
+    /// it renders against. Writes flow through `self.context_rail.update`.
+    pub context_rail: Entity<crate::views::context_rail::ContextRail>,
+}
+
+// ── ask-family state operations (Phase 2 tail) ─────────────────────────────
+// The wire halves (replies, thread responds, subscriptions) stay on the
+// workspace; these are the pure state machines the card renders against.
+
+impl ChatColumn {
+    /// Reset the turn rail's interaction and tween state. Called when the
+    /// conversation is re-projected (thread switch, diagnostic replace): a
+    /// stale hover index would otherwise mount a preview card the pointer is
+    /// not on, a stale `pointer_inside` would keep active-follow paused
+    /// forever, and a stale `hover_painted` would fire a spurious tween pair
+    /// on the first remounted frame. The `_gen` counters are deliberately
+    /// kept — they only key animation ids, and fresh runs are what a
+    /// remount wants anyway.
+    pub fn reset_turn_rail_interaction(&mut self) {
+        self.turn_rail_hover = None;
+        self.turn_rail_hover_prev = None;
+        self.turn_rail_hover_painted = None;
+        self.turn_rail_preview_mark = None;
+        self.turn_rail_preview_top = None;
+        self.turn_rail_pointer_inside = false;
+        self.turn_rail_active = None;
+        self.turn_rail_active_from = None;
+        self.turn_rail_followed = None;
+    }
+
+    /// The snapshot for the pending ask card at its current step.
+    pub fn ask_card_snapshot(&self, id: &str) -> Option<crate::ask_card::AskCardSnapshot> {
+        let ask = self.pending_ask.as_ref()?;
+        if ask.id != id || ask.questions.is_empty() {
+            return None;
+        }
+        let step = self.ask_step.min(ask.questions.len() - 1);
+        let q = ask.questions.get(step)?;
+        let custom = self.ask_custom_text.get(step).cloned().unwrap_or_default();
+        Some(crate::ask_card::AskCardSnapshot {
+            id: ask.id.clone(),
+            step,
+            total: ask.questions.len(),
+            transition_gen: self.ask_transition_gen,
+            question: crate::ask_card::AskCardQuestion {
+                question: q.question.clone(),
+                header: q.header.clone(),
+                detail: q.detail.clone(),
+                intent: q.intent.as_ref().map(|i| crate::ask_card::AskCardIntent {
+                    kind: i.kind.clone(),
+                    approve: i.approve.clone(),
+                }),
+                multi_select: q.multi_select,
+                options: q
+                    .options
+                    .iter()
+                    .map(|o| crate::ask_card::AskCardOption {
+                        label: o.label.clone(),
+                        description: o.description.clone(),
+                        recommended: o.recommended,
+                    })
+                    .collect(),
+            },
+            selections: ask.selections.get(step).cloned().unwrap_or_default(),
+            custom,
+        })
+    }
+
+    /// Whether the pending card carries any user intent (a toggled option or
+    /// non-blank custom text) — the submit gate.
+    pub fn pending_ask_has_selection(&self) -> bool {
+        self.pending_ask.as_ref().is_some_and(|ask| {
+            ask.selections.iter().flatten().any(|s| *s)
+                || self.ask_custom_text.iter().any(|c| !c.trim().is_empty())
+        })
+    }
+
+    /// The first question that is neither answered nor explicitly skipped —
+    /// the completeness gate's jump target. An untouched question must never
+    /// silently fold to a skip at the settle boundary.
+    pub fn first_incomplete_ask_question(&self) -> Option<usize> {
+        let ask = self.pending_ask.as_ref()?;
+        (0..ask.questions.len()).find(|&qi| {
+            let answered = ask
+                .selections
+                .get(qi)
+                .is_some_and(|sel| sel.iter().any(|s| *s))
+                || self
+                    .ask_custom_text
+                    .get(qi)
+                    .is_some_and(|c| !c.trim().is_empty());
+            let skipped = self.ask_skipped.get(qi).copied().unwrap_or(false);
+            !answered && !skipped
+        })
+    }
+
+    /// Toggle an option in the pending card. Single-select questions reset
+    /// siblings; multi-select toggles in place.
+    pub fn toggle_ask_option(&mut self, qi: usize, oi: usize) {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            let multi = ask
+                .questions
+                .get(qi)
+                .map(|q| q.multi_select)
+                .unwrap_or(false);
+            let prev = sel.get(oi).copied().unwrap_or(false);
+            if multi {
+                if let Some(slot) = sel.get_mut(oi) {
+                    *slot = !*slot;
+                }
+            } else {
+                for s in sel.iter_mut() {
+                    *s = false;
+                }
+                if let Some(slot) = sel.get_mut(oi) {
+                    *slot = !prev;
+                }
+            }
+        }
+    }
+
+    /// One-click verdict: fold option `oi` of question `qi` in as that
+    /// question's single selection (plan-review cards are single-select by
+    /// construction). The caller settles the card afterwards.
+    pub fn decide_ask_option(&mut self, qi: usize, oi: usize) {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            for s in sel.iter_mut() {
+                *s = false;
+            }
+            if let Some(slot) = sel.get_mut(oi) {
+                *slot = true;
+            }
+        }
+    }
+
+    pub fn ask_prev(&mut self) {
+        if self.ask_step > 0 {
+            self.ask_step -= 1;
+        }
+    }
+
+    pub fn ask_next(&mut self) {
+        if let Some(ask) = self.pending_ask.as_ref()
+            && self.ask_step < ask.questions.len() - 1
+        {
+            self.ask_step += 1;
+        }
+    }
+
+    /// Drop the custom-answer state — call whenever the pending ask is
+    /// seeded, resolved, dismissed, or reconciled away so a stale custom
+    /// never leaks into the next card. The explicit-skip markers ride the
+    /// same lifecycle.
+    pub fn reset_ask_custom(&mut self) {
+        self.ask_custom_inputs.clear();
+        self.ask_custom_subs.clear();
+        self.ask_custom_text.clear();
+        self.ask_skipped.clear();
+        self.ask_body_scroll.clear();
+    }
+
+    /// Skip question `qi` (clear its selection + custom, mark it explicitly
+    /// skipped) and report the walk target: `Some(step)` to advance to,
+    /// `None` when the card should settle now.
+    pub fn skip_ask_question_state(&mut self, qi: usize) -> Option<usize> {
+        if let Some(ask) = self.pending_ask.as_mut()
+            && let Some(sel) = ask.selections.get_mut(qi)
+        {
+            for s in sel.iter_mut() {
+                *s = false;
+            }
+        }
+        if let Some(slot) = self.ask_custom_text.get_mut(qi) {
+            slot.clear();
+        }
+        if let Some(slot) = self.ask_skipped.get_mut(qi) {
+            *slot = true;
+        }
+        let has_next = self
+            .pending_ask
+            .as_ref()
+            .is_some_and(|ask| qi + 1 < ask.questions.len());
+        if has_next {
+            Some(qi + 1)
+        } else {
+            self.first_incomplete_ask_question()
+        }
+    }
+
+    /// Land one recall step's state (the walk index and the displaced
+    /// working line).
+    pub fn set_recall(&mut self, index: i64, draft: Option<String>) {
+        self.recall_index = index;
+        self.recall_draft = draft;
+    }
+
+    /// End a running recall walk and drop its working line.
+    pub fn end_recall_walk(&mut self) {
+        self.recall_index = -1;
+        self.recall_draft = None;
+    }
+
+    /// Take the pending ask (the settle path) and reset the walk counters in
+    /// the same move.
+    pub fn take_pending_ask(&mut self) -> Option<PendingAsk> {
+        let v = self.pending_ask.take();
+        self.ask_step = 0;
+        self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        v
+    }
+}
+
+// ── follow-up queue state operations (Phase 2 tail) ────────────────────────
+
+impl ChatColumn {
+    /// The insertion index for a queue-row drag (the sidebar's drag rule,
+    /// index-keyed): `None` when the move is a no-op or the source row is
+    /// not a queued card.
+    pub fn queue_move_index(&self, drag: QueueRowDrag) -> Option<usize> {
+        Self::queue_move_index_in(&self.queued_follow_ups, drag)
+    }
+
+    /// The pure drag rule over any queue (the unit-tested form).
+    pub fn queue_move_index_in(
+        queue: &std::collections::VecDeque<QueuedFollowUp>,
+        drag: QueueRowDrag,
+    ) -> Option<usize> {
+        let from = drag.dragged;
+        if from == drag.line_on {
+            return None;
+        }
+        if !matches!(queue.get(from)?.state, FollowUpState::Queued) {
+            return None;
+        }
+        let target = match drag.edge {
+            QueueDragEdge::Top => drag.line_on,
+            QueueDragEdge::Bottom => drag.line_on + 1,
+        }
+        .min(queue.len());
+        let insert = if target > from { target - 1 } else { target };
+        // The `Queued` group is the queue's contiguous tail (invariant):
+        // anything below the first `Queued` row belongs to the committed
+        // group and is not a legal destination.
+        let head = queue
+            .iter()
+            .position(|item| matches!(item.state, FollowUpState::Queued))
+            .unwrap_or(queue.len());
+        if insert < head || insert > queue.len() - 1 {
+            return None;
+        }
+        (insert != from).then_some(insert)
+    }
+
+    /// Commit a queue-row drag: consume the marker and move the dragged row
+    /// to its insertion index.
+    pub fn commit_queue_drag(&mut self) {
+        let Some(drag) = self.queue_drag.take() else {
+            return;
+        };
+        if let Some(insert) = self.queue_move_index(drag)
+            && let Some(item) = self.queued_follow_ups.remove(drag.dragged)
+        {
+            self.queued_follow_ups.insert(insert, item);
+        }
+    }
+
+    /// Drain a parked thread's queue for flushing: every `Queued` card's
+    /// turn is returned, every parked card (Failed / SteerPending) rides
+    /// back into the stash. A fixed-length rotation — a pop/push loop would
+    /// cycle forever on an all-parked queue.
+    pub fn drain_parked_queue(&mut self, thread_id: &str) -> Vec<DeferredUserTurn> {
+        let Some(mut queue) = self.queued_follow_ups_by_thread.remove(thread_id) else {
+            return Vec::new();
+        };
+        let mut drained = Vec::new();
+        for _ in 0..queue.len() {
+            if let Some(item) = queue.pop_front() {
+                if matches!(item.state, FollowUpState::Queued) {
+                    drained.push(item.turn);
+                } else {
+                    queue.push_back(item);
+                }
+            }
+        }
+        if !queue.is_empty() {
+            self.queued_follow_ups_by_thread
+                .insert(thread_id.to_string(), queue);
+        }
+        drained
+    }
+
+    /// Settle a parked steer group with the server's stranded verdict: the
+    /// first `n - stranded` SteerPending cards were injected (promoted into
+    /// the visible queue), the last `stranded` retract to Failed.
+    pub fn settle_parked_group(&mut self, thread_id: &str, stranded: usize) {
+        let Some(queue) = self.queued_follow_ups_by_thread.get_mut(thread_id) else {
+            return;
+        };
+        let positions: Vec<usize> = queue
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| matches!(item.state, FollowUpState::SteerPending { .. }))
+            .map(|(ix, _)| ix)
+            .collect();
+        let n = positions.len();
+        let to_fail = stranded.min(n);
+        for &ix in &positions[n - to_fail..] {
+            queue[ix].state = FollowUpState::Failed;
+        }
+        let mut drop_ixs: Vec<usize> = positions[..n - to_fail].to_vec();
+        drop_ixs.sort_unstable_by(|a, b| b.cmp(a));
+        for ix in drop_ixs {
+            queue.remove(ix);
+        }
+        if queue.is_empty() {
+            self.queued_follow_ups_by_thread.remove(thread_id);
+        }
+    }
+}

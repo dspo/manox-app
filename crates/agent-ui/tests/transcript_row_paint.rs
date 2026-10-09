@@ -16,7 +16,7 @@ mod common;
 
 use common::{init_harness, open_workspace};
 use gpui::{AppContext as _, TestAppContext, VisualTestContext, px};
-use manox_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
+use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
 
 fn rich_chat_snapshot() -> serde_json::Value {
     let turn = |id: &str, q: &str, a: &str| {

@@ -30,7 +30,7 @@ impl Workspace {
             let launch_model = model.clone();
             let result = cx
                 .background_spawn(async move {
-                    manox_ext_agents::launch_chatgpt_app(&launch_provider, &launch_model)
+                    steer_ext_agents::launch_chatgpt_app(&launch_provider, &launch_model)
                 })
                 .await;
             let _ = this.update_in(cx, |_, window, cx| match result {
@@ -80,7 +80,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    manox_ext_agents::launch_vscode_app_from_settings(folder.as_deref())
+                    steer_ext_agents::launch_vscode_app_from_settings(folder.as_deref())
                 })
                 .await;
             let _ = this.update_in(cx, |_, window, cx| match result {

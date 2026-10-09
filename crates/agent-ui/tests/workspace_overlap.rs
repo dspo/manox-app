@@ -57,16 +57,16 @@ fn register_lilex(cx: &mut TestAppContext) {
         cx.text_system()
             .add_fonts(vec![
                 Cow::Borrowed(include_bytes!(
-                    "../../manox/assets/fonts/lilex/Lilex-Light.ttf"
+                    "../../steer-app/assets/fonts/lilex/Lilex-Light.ttf"
                 )),
                 Cow::Borrowed(include_bytes!(
-                    "../../manox/assets/fonts/lilex/Lilex-Medium.ttf"
+                    "../../steer-app/assets/fonts/lilex/Lilex-Medium.ttf"
                 )),
                 Cow::Borrowed(include_bytes!(
-                    "../../manox/assets/fonts/lilex/Lilex-LightItalic.ttf"
+                    "../../steer-app/assets/fonts/lilex/Lilex-LightItalic.ttf"
                 )),
                 Cow::Borrowed(include_bytes!(
-                    "../../manox/assets/fonts/lilex/Lilex-MediumItalic.ttf"
+                    "../../steer-app/assets/fonts/lilex/Lilex-MediumItalic.ttf"
                 )),
             ])
             .expect("Lilex fonts");
@@ -131,7 +131,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
             manox_agent::MessageAuthor::Lead,
             true,
             agent_ui::conversation::ApplyCtx {
-                host: manox_agent_chat_ui::host::noop_host(),
+                host: steer_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },
@@ -208,7 +208,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
             manox_agent::MessageAuthor::Lead,
             true,
             agent_ui::conversation::ApplyCtx {
-                host: manox_agent_chat_ui::host::noop_host(),
+                host: steer_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },

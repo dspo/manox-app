@@ -2,17 +2,17 @@
 //! headless 能力（配置核心、launch-home、chatgpt/vscode launch、probe db）来自 cx 库。
 use cx::*;
 
-use manox_ext_agents::api::Agent;
-use manox_ext_agents::send::SendSelector;
-use manox_ext_agents::{
+#[cfg(test)]
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use steer_ext_agents::api::Agent;
+use steer_ext_agents::send::SendSelector;
+use steer_ext_agents::{
     LaunchSpec, ModelOption, ResolvedProvider, Selection, build_launch_spec,
     launch_vscode_app_from_settings,
 };
 #[cfg(test)]
-use manox_ext_agents::{pick_vscode_provider, resolve_binary, resolve_vscode_claude_part};
-#[cfg(test)]
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use steer_ext_agents::{pick_vscode_provider, resolve_binary, resolve_vscode_claude_part};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -510,7 +510,7 @@ fn run_launcher(
         let apikey = resolve_chatgpt_app_apikey_interactive(&selection.provider)?;
         apply_selected_model_tab_name(&selection)?;
         let chatgpt_settings = config.chatgpt_app.clone().unwrap_or_default();
-        return manox_ext_agents::chatgpt_app::launch_with_injection(
+        return steer_ext_agents::chatgpt_app::launch_with_injection(
             &selection,
             &apikey,
             &passthrough_args,
@@ -554,7 +554,7 @@ fn parse_selector(session: Option<&str>) -> SendSelector {
 
 fn run_send(session: Option<String>, clear_buffer: bool, text: Option<String>) -> Result<()> {
     let selector = crate::parse_selector(session.as_deref());
-    let target = manox_ext_agents::send::send(&selector, text.as_deref(), clear_buffer)?;
+    let target = steer_ext_agents::send::send(&selector, text.as_deref(), clear_buffer)?;
     println!("已注入到 session {} ({})", target.id, target.agent);
     Ok(())
 }
@@ -1026,7 +1026,7 @@ fn launch_agent(spec: LaunchSpec) -> Result<()> {
 
     // Warp 集成：在启动 agent 前发出 session_start 事件
     let warp_session =
-        manox_ext_agents::warp::maybe_emit_session_start(&spec.agent_id, spec.model_id.as_deref());
+        steer_ext_agents::warp::maybe_emit_session_start(&spec.agent_id, spec.model_id.as_deref());
 
     // PTY 中继路径（opt-in，`cx --pty`）：cx 持 master，终端 IO 透传，并暴露 IPC 注入入口。
     // relay::run 自行打印摘要、spawn、进 raw mode、收尾，返回 `!`。
@@ -1084,7 +1084,7 @@ fn finalize_agent_exit(
     status: &std::process::ExitStatus,
     started_at: std::time::Instant,
     started_sys: std::time::SystemTime,
-    warp_session: &Option<manox_ext_agents::warp::WarpSession>,
+    warp_session: &Option<steer_ext_agents::warp::WarpSession>,
     cwd: &Path,
 ) -> ! {
     let exit_code = exit_code_from(status);
@@ -1118,7 +1118,7 @@ pub(crate) fn finalize_exit_common(
     started_sys: std::time::SystemTime,
     exit_code: i32,
     termination: Option<&str>,
-    warp_session: &Option<manox_ext_agents::warp::WarpSession>,
+    warp_session: &Option<steer_ext_agents::warp::WarpSession>,
     cwd: &Path,
     session_id: Option<&str>,
 ) -> ! {
@@ -1148,7 +1148,7 @@ pub(crate) fn finalize_exit_common(
 
     // Relay path owns an IPC socket + registry; remove them so they don't linger.
     if let Some(id) = session_id {
-        manox_ext_agents::session::cleanup_session(id);
+        steer_ext_agents::session::cleanup_session(id);
     }
 
     std::process::exit(exit_code);

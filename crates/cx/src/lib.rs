@@ -4,7 +4,7 @@
 //! ChatGPT.app / VS Code Claude 的非交互 launch 与设置 API、probe 缓存 db。
 //! 交互面（clap CLI、ratatui TUI、relay、stats 面板、`cx web`）在 cx-cli bin crate。
 #![allow(clippy::empty_line_after_doc_comments)]
-use manox_ext_agents::*;
+use steer_ext_agents::*;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -31,17 +31,17 @@ pub use manox_providers::{
     effective_agents_for_model, read_config_file, resolve_apikey, resolved_agents,
 };
 
-// mod chatgpt_app; -- moved to manox-ext-agents
-// mod session; -- moved to manox-ext-agents
-// mod vscode_app; -- moved to manox-ext-agents
-// mod warp; -- moved to manox-ext-agents
+// mod chatgpt_app; -- moved to steer-ext-agents
+// mod session; -- moved to steer-ext-agents
+// mod vscode_app; -- moved to steer-ext-agents
+// mod warp; -- moved to steer-ext-agents
 pub mod probe;
 
 pub const LAUNCH_HOME_DIR_NAME: &str = "cx-launch-homes";
 pub const LAUNCH_HOME_TTL_SECS: u64 = 60 * 60 * 24;
 // Single owner of the first-run baseline: cx and its embedders both read the
-// copy manox-ext-agents embeds.
-pub use manox_ext_agents::DEFAULT_PROVIDER_CONFIG_YAML;
+// copy steer-ext-agents embeds.
+pub use steer_ext_agents::DEFAULT_PROVIDER_CONFIG_YAML;
 // Add-wizard 词汇：providers_for_agent 追加的哨兵 provider 与操作标签（cx-cli 的
 // Add 向导与嵌入方按同名识别）。
 pub const ADD_PROVIDER_SENTINEL: &str = "+ 添加 Provider";
@@ -495,9 +495,9 @@ pub fn merge_codex_config(
     Ok(rendered)
 }
 
-// Single implementation lives in manox-ext-agents; re-exported so `cx::` stays
+// Single implementation lives in steer-ext-agents; re-exported so `cx::` stays
 // the one-stop vocabulary for consumers of this crate.
-pub use manox_ext_agents::parse_model_context_suffix;
+pub use steer_ext_agents::parse_model_context_suffix;
 
 /// 在 merge_codex_config 渲染结果中注入 `supports_websockets = <bool>`。
 /// 插入点是首个 `wire_api = ...` 行之后——merge_codex_config 会整体丢弃用户
@@ -558,7 +558,7 @@ pub fn prepare_codex_launch_home(
 /// reasoning_effort 是解析出的（或默认 "high"）推理强度，供注入脚本与下拉默认值保持一致。
 
 /// `prepare_chatgpt_launch_home_for_app` 的产物，供 chatgpt_app 启动编排使用。
-// struct ChatGptAppPrepared -- now in manox-ext-agents
+// struct ChatGptAppPrepared -- now in steer-ext-agents
 
 pub fn load_config() -> Result<CxConfig> {
     let path = active_provider_config_path()?;
@@ -841,7 +841,7 @@ pub fn launch_chatgpt_app(provider_name: &str, default_model_id: &str) -> Result
     apply_probe_cache(&mut all_models);
     let selection = build_chatgpt_selection(&config, &all_models, provider_name, default_model_id)?;
     let apikey = resolve_chatgpt_app_apikey(&selection.provider)?;
-    manox_ext_agents::chatgpt_app::launch_with_injection(
+    steer_ext_agents::chatgpt_app::launch_with_injection(
         &selection,
         &apikey,
         &[],
@@ -1056,7 +1056,7 @@ pub fn normalize_vscode_app_settings(settings: VsCodeAppSettings) -> Option<VsCo
 }
 
 /// VS Code 的 Claude Code 扩展注入部分（ANTHROPIC_* BYOK env）。
-// VsCode types and functions -- now in manox-ext-agents
+// VsCode types and functions -- now in steer-ext-agents
 
 // ══════════════════════════════════════════════════
 // Secret Prompting — 交互式补齐缺失的 API Key

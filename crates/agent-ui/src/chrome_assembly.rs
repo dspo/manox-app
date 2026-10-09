@@ -24,8 +24,8 @@ use gpui::{
     WeakEntity, Window,
 };
 use gpui_component::{Root, WindowExt as _, notification::Notification};
-use manox_agent_chrome_ui::right_pane::ToolTab;
-use manox_agent_chrome_ui::{
+use steer_agent_chrome_ui::right_pane::ToolTab;
+use steer_agent_chrome_ui::{
     CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, icons,
 };
 
@@ -172,7 +172,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     // falls back to its `threads.db` snapshot — the pane's durable account —
     // and starts on the fresh new-tab page only when
     // neither exists).
-    let mut right_stash: HashMap<String, manox_agent_chrome_ui::right_pane::RightPaneSession> =
+    let mut right_stash: HashMap<String, steer_agent_chrome_ui::right_pane::RightPaneSession> =
         HashMap::new();
     // Persist the pane on every change: the shell's own notify is the
     // change signal (tab open/close/activate, visibility, dock), so an
@@ -206,10 +206,10 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         let rows = mux.read(cx).thread_list(cx);
         let unread = mux.read(cx).unread_map();
         let removed = crate::project_registry::removed_projects();
-        let mut sessions: Vec<manox_agent_chrome_ui::shell::SessionRow> =
+        let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
             crate::sidebar_projection::project_groups(&rows, &unread, &removed)
                 .into_iter()
-                .flat_map(manox_agent_chrome_ui::shell::SessionRow::from_group)
+                .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
         // Launched external sessions (project-menu agents/terminals) merge
         // into the snapshot as sidebar rows; the shell regroups them under
@@ -358,24 +358,24 @@ fn shell_config(
         fixed_rows: vec![
             FixedRow {
                 icon: icons::CALENDAR,
-                label: manox_i18n::t("chrome-sidebar-automations"),
+                label: steer_i18n::t("chrome-sidebar-automations"),
                 badge: None,
             },
             FixedRow {
                 icon: icons::COMMENT_DISCUSSION,
-                label: manox_i18n::t("chrome-sidebar-chats"),
+                label: steer_i18n::t("chrome-sidebar-chats"),
                 badge: None,
             },
         ],
         customizations: vec![
             CustomizationRow {
                 icon: icons::HOME,
-                label: manox_i18n::t("chrome-sidebar-overview"),
+                label: steer_i18n::t("chrome-sidebar-overview"),
                 count: None,
             },
             CustomizationRow {
                 icon: icons::SETTINGS_GEAR,
-                label: manox_i18n::t("chrome-sidebar-mcp"),
+                label: steer_i18n::t("chrome-sidebar-mcp"),
                 count: None,
             },
         ],
@@ -512,7 +512,7 @@ fn shell_config(
                     .clone()
                 else {
                     window.push_notification(
-                        Notification::error(manox_i18n::t("vscode-open-no-project")),
+                        Notification::error(steer_i18n::t("vscode-open-no-project")),
                         cx,
                     );
                     return;
@@ -521,7 +521,7 @@ fn shell_config(
                 cx.spawn(async move |cx| {
                     let launch_err = cx
                         .background_spawn(async move {
-                            manox_ext_agents::vscode_app::launch_plain(Some(&project)).err()
+                            steer_ext_agents::vscode_app::launch_plain(Some(&project)).err()
                         })
                         .await;
                     if let Some(handle) = handle
@@ -531,7 +531,7 @@ fn shell_config(
                                 window.push_notification(
                                     Notification::error(format!(
                                         "{}: {e}",
-                                        manox_i18n::t("vscode-open-failed")
+                                        steer_i18n::t("vscode-open-failed")
                                     )),
                                     cx,
                                 );
@@ -576,9 +576,9 @@ fn shell_config(
                 .size(gpui::px(13.))
                 .child(
                     gpui::svg()
-                        .path("icons/manox.svg")
+                        .path("icons/steer.svg")
                         .size_full()
-                        .text_color(manox_agent_chrome_ui::theme::BADGE_BLUE_FG),
+                        .text_color(steer_agent_chrome_ui::theme::BADGE_BLUE_FG),
                 )
                 .into_any_element()
         })),
@@ -601,7 +601,7 @@ impl MainSurface for PendingMain {
             return label.into();
         }
         // The active thread's display title from the foreground store;
-        // "manox" before any interaction.
+        // "steer" before any interaction.
         self.ws
             .read(cx)
             .chat
@@ -615,7 +615,7 @@ impl MainSurface for PendingMain {
                     .map(str::to_string)
             })
             .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| "Manox".to_string())
+            .unwrap_or_else(|| "Steer".to_string())
             .into()
     }
 }

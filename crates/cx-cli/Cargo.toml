@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 cx.workspace = true
 manox-agent.workspace = true
-manox-ext-agents.workspace = true
+steer-ext-agents.workspace = true
 manox-providers.workspace = true
 manox-session-core.workspace = true
 anyhow = "1.0"

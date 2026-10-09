@@ -41,7 +41,7 @@ use tokio::sync::oneshot;
 
 use manox_agent::capability::CapabilityClient;
 use manox_agent::thread_engine::{BrowserOp, BrowserReply, BrowserTabId};
-use manox_webview::{BrowserInboundWrite as WvInboundWrite, BrowserNotification as WvNotification};
+use steer_webview::{BrowserInboundWrite as WvInboundWrite, BrowserNotification as WvNotification};
 
 use crate::workspace::Workspace;
 
@@ -152,7 +152,7 @@ impl WorkspaceBrowserHost {
     /// first attached webview actually publishes them — but every `BrowserView`
     /// attaches the same closures, so a later open never finds a stale
     /// different handler.
-    pub fn attach_to_builder(builder: manox_webview::Builder<'_>) -> manox_webview::Builder<'_> {
+    pub fn attach_to_builder(builder: steer_webview::Builder<'_>) -> steer_webview::Builder<'_> {
         match Self::concrete() {
             Some(host) => {
                 let routes_n = host.routes.clone();

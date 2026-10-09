@@ -78,10 +78,10 @@ fn register_lilex(cx: &mut TestAppContext) {
         cx.text_system()
             .add_fonts(vec![
                 Cow::Borrowed(include_bytes!(
-                    "../../../manox/assets/fonts/lilex/Lilex-Light.ttf"
+                    "../../../steer-app/assets/fonts/lilex/Lilex-Light.ttf"
                 )),
                 Cow::Borrowed(include_bytes!(
-                    "../../../manox/assets/fonts/lilex/Lilex-Medium.ttf"
+                    "../../../steer-app/assets/fonts/lilex/Lilex-Medium.ttf"
                 )),
             ])
             .expect("Lilex fonts");
@@ -213,7 +213,7 @@ impl Render for AskCardProbe {
         // A geometry probe needs no live host: the noop host mirrors the
         // old invalid-weak trick (no custom row, controls render inert).
         let card = self.ws.update(cx, |ws, cx| {
-            ws.diagnostic_ask_card_element(manox_agent_chat_ui::host::noop_host(), 0, cx)
+            ws.diagnostic_ask_card_element(steer_agent_chat_ui::host::noop_host(), 0, cx)
         });
         card.unwrap_or_else(|| gpui::div().into_any_element())
     }
