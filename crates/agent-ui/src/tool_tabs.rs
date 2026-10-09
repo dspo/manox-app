@@ -868,11 +868,21 @@ pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
     cx: &mut App,
 ) -> Result<Entity<terminal_ui::TerminalView>, String> {
-    let source: Box<dyn manox_terminal::pty_source::PtySource> =
-        manox_terminal::pty::default_source(cwd, 80, 24).map_err(|e| e.to_string())?;
-    let id = format!("chrome-assembly:$SHELL:{}", next_instance_id("pty"));
-    let handle = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, source)
-        .map_err(|e| e.to_string())?;
+    // The dock shell lives in the HOST's terminal registry (#886's
+    // companion): `createTerminal` spawns the PTY host-side, and the view's
+    // emulation core mirrors it over the AHP terminal channel. The app no
+    // longer owns the process — closing the view drops the mirror, the
+    // host's `disposeTerminal` reclaims the PTY.
+    let (_terminal_id, source) =
+        steer_agent_chat_ui::terminal_bridge::spawn_host_terminal(cwd, 80, 24)?;
+    let handle = manox_terminal::Terminal::spawn(
+        format!("chrome-assembly:$SHELL:{}", next_instance_id("channel")),
+        cwd.to_path_buf(),
+        80,
+        24,
+        Box::new(source),
+    )
+    .map_err(|e| e.to_string())?;
     let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(handle, cx));
     Ok(terminal_ui::TerminalView::new(proxy, cx))
 }
