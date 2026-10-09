@@ -974,7 +974,7 @@ pub mod ipc {
     // Route a `steer://` request to the notify or inbound-write dispatch. The
     // response is always 200 with permissive CORS: the bridges fetch
     // fire-and-forget and never read the body, and cross-origin (https page →
-    // manox scheme) fetches need the header or WKWebView rejects the response.
+    // steer scheme) fetches need the header or WKWebView rejects the response.
     pub(crate) fn handle_browser_protocol(
         webview_id: WebViewId<'_>,
         request: http::Request<Vec<u8>>,

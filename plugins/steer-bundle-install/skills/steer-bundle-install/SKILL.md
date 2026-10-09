@@ -54,7 +54,7 @@ release 构建增量约 2 分钟、冷启动更久——用后台任务跑，完
 指向 bundle 内嵌的 `Contents/MacOS/cx`（已存在的非软链 cx 会自动挪到
 `cx.bak-<timestamp>`）。
 
-变体仅在用户点名时用：`--harness pi`（另一 harness 口味的共存包）、
+变体仅在用户点名时用：
 `-d`（debug 构建，仅调试用）、`--no-cx-link`（不建软链）、
 `--cx-link-dir <dir>`（软链到别处）。
 

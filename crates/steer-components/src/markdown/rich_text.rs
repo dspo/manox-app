@@ -1,4 +1,4 @@
-//! `RichText` — Manox-owned shaping, painting and document selection.
+//! `RichText` — Steer-owned shaping, painting and document selection.
 //!
 //! GPUI's old `StyledText` cache is intentionally not used here. It keyed
 //! wrapped layouts incompletely, so a min-content or transient zero-width

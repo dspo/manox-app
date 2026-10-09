@@ -2,7 +2,7 @@
 //! `gpui-kit-assets`（原 `gpui-component-assets`，0.6 更名）。
 //!
 //! `gpui-kit-assets` ships the icon set `IconName` resolves to, but it
-//! cannot carry manox's own brand icons (the Manox / Claude / Codex / GitHub Copilot
+//! cannot carry manox's own brand icons (the Steer / Claude / Codex / GitHub Copilot
 //! marks used in the sidebar and the new-session menu). `ExtrasAssetSource`
 //! layers those on top: a `rust-embed` lookup of `assets/icons/**` wins, then
 //! it falls through to `gpui-kit-assets` for everything else. The fallback is

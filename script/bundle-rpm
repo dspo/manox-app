@@ -29,9 +29,6 @@ set -euo pipefail
 # ldd + dpkg -S. The script prints nothing about them, but warns if the set came
 # out empty.
 #
-# Note: the pi-harness flavor metadata still exists but its cargo feature was
-# removed — bundle-mac's --harness option is stale; this script deliberately has
-# no flavor switch.
 
 build_flag="--release"
 target_dir="release"
@@ -163,7 +160,7 @@ DESKTOP
 # Icons are optional repository resources, and rpmbuild refuses to package a
 # %files entry that %install never created: collect the install command and the
 # file-list line together so the two cannot drift apart.
-icon_resources_dir="apps/desktop/steer/resources"
+icon_resources_dir="crates/steer-app/resources"
 icon_install=""
 icon_files=""
 add_icon() {

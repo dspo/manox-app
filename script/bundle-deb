@@ -26,9 +26,7 @@ set -euo pipefail
 # Runtime Depends are computed from the linked binary by mapping every NEEDED
 # shared object to its owning package (ldd + dpkg -S); the static fallback
 # covers the gpui/wry stack (GTK3, WebKit2GTK, JavaScriptCore, libsoup,
-# xkbcommon). Note: the pi-harness flavor metadata still exists but its cargo
-# feature was removed — bundle-mac's --harness option is stale; this script
-# deliberately has no flavor switch.
+# xkbcommon).
 
 build_flag="--release"
 target_dir="release"

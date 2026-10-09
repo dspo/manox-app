@@ -32,7 +32,7 @@ command -v magick >/dev/null || {
   exit 0
 }
 
-SHOT="${CHROME_SHOT:-$(mktemp -t manox-tab-indicator).png}"
+SHOT="${CHROME_SHOT:-$(mktemp -t steer-tab-indicator).png}"
 CHROME_SHOT="$SHOT" CHROME_RIGHT=1 \
   cargo test -p steer-agent-chrome-ui --test visual >/dev/null 2>&1
 
@@ -44,7 +44,7 @@ CHROME_SHOT="$SHOT" CHROME_RIGHT=1 \
 # Second pass: the same assertions after a real switch (CHROME_SWITCH opens two
 # tabs and switches back), so the sliding end state is covered too — the
 # single-tab shot only exercises the initial layout.
-SW_SHOT="$(mktemp -t manox-tab-indicator-sw).png"
+SW_SHOT="$(mktemp -t steer-tab-indicator-sw).png"
 CHROME_SHOT="$SW_SHOT" CHROME_RIGHT=1 CHROME_SWITCH=1 \
   cargo test -p steer-agent-chrome-ui --test visual >/dev/null 2>&1
 
