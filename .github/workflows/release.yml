@@ -1,0 +1,330 @@
+name: release
+
+# Tag-triggered release pipeline. Pushing a semantic-version tag
+# (vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]) builds the three shipping
+# artifacts and attaches them to a GitHub Release:
+#
+#   - macOS arm64:  Steer.app, ad-hoc signed, zipped (script/bundle-mac)
+#   - deb amd64:    steer + cx, Depends from the linked binaries (script/bundle-deb)
+#   - rpm x86_64:   built inside a Fedora container so glibc/WebKit sonames and
+#                   rpmbuild's dependency generators match the target distro
+#
+# The tag version must equal [workspace.package].version — the bundle scripts
+# read that version as their single source of truth, so a drifting tag is
+# rejected before anything is built. Every job smoke-tests its own artifact
+# (install + link check) and the publish job is skipped unless all of them pass.
+#
+# workflow_dispatch runs the same pipeline on any branch without publishing
+# (artifacts land on the workflow run only) — that is how pipeline changes get
+# validated before they land.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: resolve version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Same source of truth the bundle scripts read (they resolve it via
+      # cargo metadata); parsed straight out of [workspace.package] so this
+      # job needs no Rust toolchain.
+      - name: Resolve release version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          ws_version=$(awk '
+              $0 == "[workspace.package]" { in_section = 1; next }
+              /^\[/ { in_section = 0 }
+              in_section && $1 == "version" && $2 == "=" {
+                  line = $0
+                  sub(/^[^"]*"/, "", line)
+                  sub(/".*$/, "", line)
+                  print line
+                  exit
+              }
+          ' Cargo.toml)
+          [[ -n "${ws_version}" ]] || { echo "::error::no version under [workspace.package] in Cargo.toml"; exit 1; }
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              tag="${GITHUB_REF_NAME}"
+              if ! [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+                  echo "::error::tag '${tag}' is not a semantic version (vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD])"
+                  exit 1
+              fi
+              tag_version="${tag#v}"
+              if [[ "${tag_version}" != "${ws_version}" ]]; then
+                  echo "::error::tag '${tag}' does not match the workspace version ${ws_version} — bump [workspace.package] version (or move the tag)"
+                  exit 1
+              fi
+              publish=true
+          else
+              # workflow_dispatch: build-only pipeline validation, nothing publishes.
+              publish=false
+          fi
+
+          {
+              echo "version=${ws_version}"
+              echo "publish=${publish}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build-macos:
+    name: macos arm64 (Steer.app)
+    needs: prepare
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # The script builds both binaries itself (--release, explicit --target)
+      # and assembles/signs Steer.app from [package.metadata.bundle].
+      - name: Bundle Steer.app
+        run: ./script/bundle-mac --no-cx-link
+
+      - name: Verify and zip the bundle
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          target_dir="target/aarch64-apple-darwin/release"
+          app="${target_dir}/Steer.app"
+          [[ -d "${app}" ]] || { echo "::error::${app} missing after bundle-mac"; exit 1; }
+          lipo -archs "${target_dir}/steer" | grep -qw arm64
+          codesign --verify --strict "${app}"
+          codesign --verify --strict "${app}/Contents/MacOS/cx"
+          mkdir dist
+          ditto -c -k --sequesterRsrc --keepParent "${app}" "dist/Steer_${VERSION}_macos_arm64.zip"
+          unzip -t "dist/Steer_${VERSION}_macos_arm64.zip" > /dev/null
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/Steer_*_macos_arm64.zip
+          if-no-files-found: error
+
+  build-deb:
+    name: deb amd64
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Same set as the build workflow (the -dev packages pull their runtime
+      # counterparts, which both the build and the smoke-test install need),
+      # plus desktop-file-utils for the desktop-entry check.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libfontconfig1-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxrender-dev \
+            libxrandr-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxinerama-dev \
+            libglib2.0-dev \
+            libwayland-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            desktop-file-utils
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      # Same key namespace as the build workflow: on release builds this
+      # restores the registry warm from main-branch CI runs.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Bundle .deb
+        run: ./script/bundle-deb
+
+      - name: Smoke-test the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb_path=$(ls target/deb/*.deb)
+          sudo apt-get install -y "./${deb_path}"
+          dpkg -L steer
+          test -x /usr/bin/steer
+          test -x /usr/bin/cx
+          test -f /usr/share/applications/dev.dspo.steer.desktop
+          desktop-file-validate /usr/share/applications/dev.dspo.steer.desktop
+          if ldd /usr/bin/steer | grep -F 'not found'; then
+              echo "::error::the installed steer binary has unresolved libraries"
+              exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-amd64
+          path: target/deb/*.deb
+          if-no-files-found: error
+
+  build-rpm:
+    name: rpm x86_64 (Fedora)
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    # Build inside Fedora so the glibc baseline, the WebKit/JavaScriptCore
+    # sonames and rpmbuild's dependency generators match the target distro.
+    container:
+      image: fedora:latest
+    steps:
+      - name: Install git
+        run: dnf install -y git curl
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Fedora-side translation of the build workflow's apt list (the -devel
+      # packages pull their runtime counterparts for the smoke test), plus the
+      # toolchain bits the container image lacks: a C linker, python3 (the
+      # bundle script parses cargo metadata with it), file(1) for rpmbuild's
+      # ELF dependency generators and rpm-build itself.
+      - name: Install build dependencies
+        run: >
+          dnf install -y gcc python3 file rpm-build pkgconf-pkg-config
+          fontconfig-devel libX11-devel libxcb-devel libXrender-devel
+          libXrandr-devel libxkbcommon-devel libxkbcommon-x11-devel
+          libXi-devel libXcursor-devel libXinerama-devel glib2-devel
+          wayland-devel gtk3-devel webkit2gtk4.1-devel libsoup3-devel
+          javascriptcoregtk4.1-devel
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Bundle .rpm
+        run: ./script/bundle-rpm
+
+      # The real validation: dnf resolves the generated Requires against the
+      # actual Fedora repositories, so a broken dependency set fails here.
+      - name: Smoke-test the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rpm_path=$(ls target/rpm/RPMS/*/*.rpm)
+          rpm -qp --requires "${rpm_path}" | grep '^lib'
+          dnf install -y --nogpgcheck "$(realpath "${rpm_path}")"
+          test -x /usr/bin/steer
+          test -x /usr/bin/cx
+          test -f /usr/share/applications/dev.dspo.steer.desktop
+          if ldd /usr/bin/steer | grep -F 'not found'; then
+              echo "::error::the installed steer binary has unresolved libraries"
+              exit 1
+          fi
+          rpm -q steer
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-x86_64
+          path: target/rpm/RPMS/*/*.rpm
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, build-macos, build-deb, build-rpm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l dist
+          (cd dist && sha256sum ./* > SHA256SUMS.txt)
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          extra_args=(--title "Steer ${tag}" --generate-notes)
+          # semver prerelease (e.g. 0.2.0-rc.1) — mark the release accordingly
+          if [[ "${VERSION}" == *-* ]]; then
+              extra_args+=(--prerelease)
+          fi
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+              # Pipeline re-run for an existing tag: replace the assets.
+              gh release upload "${tag}" ./dist/* --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+              gh release create "${tag}" ./dist/* "${extra_args[@]}" --repo "${GITHUB_REPOSITORY}"
+          fi
