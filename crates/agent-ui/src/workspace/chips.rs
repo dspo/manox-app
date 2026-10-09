@@ -227,14 +227,42 @@ impl Workspace {
                         // The promoted row renders the fold's own name and
                         // intention so the decision is readable without the
                         // call's (nested) argument row.
-                        let (tool_name, title) = match &confirmation.tool_call {
+                        let (tool_name, title, edits) = match &confirmation.tool_call {
                             ahp_types::state::ToolCallConfirmationState::PendingConfirmation(c) => {
+                                let edits = c
+                                    .edits
+                                    .as_ref()
+                                    .map(|collection| {
+                                        collection
+                                            .items
+                                            .iter()
+                                            .map(|edit| {
+                                                steer_agent_chat_ui::column::ConfirmationEdit {
+                                                    path: edit
+                                                        .after
+                                                        .as_ref()
+                                                        .or(edit.before.as_ref())
+                                                        .map(|side| display_path(&side.uri))
+                                                        .unwrap_or_default(),
+                                                    added: edit.diff.as_ref().and_then(|d| d.added),
+                                                    removed: edit
+                                                        .diff
+                                                        .as_ref()
+                                                        .and_then(|d| d.removed),
+                                                    creation: edit.before.is_none(),
+                                                    deletion: edit.after.is_none(),
+                                                }
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
                                 (
                                     c.tool_name.clone(),
                                     c.intention.clone().map(|t| t.to_string()),
+                                    edits,
                                 )
                             }
-                            _ => (String::new(), None),
+                            _ => (String::new(), None, Vec::new()),
                         };
                         (
                             tool_call_id,
@@ -243,6 +271,7 @@ impl Workspace {
                             steer_agent_chat_ui::column::ConfirmationSnapshot {
                                 auth_id: confirmation.id.clone(),
                                 actions,
+                                edits,
                             },
                         )
                     })
@@ -263,6 +292,10 @@ impl Workspace {
                             steer_agent_chat_ui::column::ConfirmationSnapshot {
                                 auth_id: parked.auth_id.clone(),
                                 actions: Vec::new(),
+                                // The parked fallback has no fold behind it,
+                                // so no preview face either — the buttons-less
+                                // card stays honest about what it knows.
+                                edits: Vec::new(),
                             },
                         )
                     })
@@ -1726,4 +1759,21 @@ impl Workspace {
                 .into_any_element(),
         )
     }
+}
+
+/// A file URI lowered to its display path: strips the `file://` scheme and
+/// any host segment, so the card reads `src/main.rs` rather than
+/// `file:///Users/…/src/main.rs`.
+fn display_path(uri: &str) -> String {
+    uri.strip_prefix("file://")
+        .map(|rest| {
+            // `file://host/path` carries an authority; `file:///path` does
+            // not. Strip up to the first `/` after any non-slash host.
+            match rest.find('/') {
+                Some(0) => rest.to_string(),
+                Some(at) => rest[at..].to_string(),
+                None => rest.to_string(),
+            }
+        })
+        .unwrap_or_else(|| uri.to_string())
 }
