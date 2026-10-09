@@ -1657,6 +1657,27 @@ impl Workspace {
             chat.awaiting_history = None;
             cx.notify();
         });
+        // The annotations channel's unresolved cards ride after the journal
+        // transcript (#884's read face): the journal replay does not
+        // interleave annotation rows yet (a manox-side mapping that rides the
+        // next batch), so the cards append at the end rather than vanish.
+        if let Some((store, sid)) = self.chat_store(cx) {
+            let cards = store.read(cx).annotation_cards(&sid);
+            if !cards.is_empty() {
+                let host = self.chat.read(cx).host.clone();
+                let conv = self.chat_conversation(cx);
+                conv.update(cx, |conv, cx| {
+                    for (_kind, text) in cards {
+                        conv.push_notice(
+                            text,
+                            steer_agent_chat_ui::conversation::NoticeAnchor::TurnEnd,
+                            host.clone(),
+                            cx,
+                        );
+                    }
+                });
+            }
+        }
         self.sync_list_count(cx);
         cx.notify();
     }
@@ -2581,7 +2602,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(sid) = self.chat.read(cx).session_id.clone() {
-            self.append_ui_note_for(&sid, kind, text, tool_call_id);
+            self.append_ui_note_for(&sid, kind, text, tool_call_id, cx);
         }
     }
 
@@ -2596,23 +2617,59 @@ impl Workspace {
         kind: manox_agent::db::UiNoteKind,
         text: String,
         tool_call_id: Option<&str>,
+        cx: &mut Context<Self>,
     ) {
-        let mut data = serde_json::json!({ "text": text });
-        // A tool-anchored notice carries the tool call id so the rebuild can
-        // splice it next to the tool item, matching the live placement.
-        // `data` is raw JSON — no schema change.
-        if let Some(id) = tool_call_id {
-            data["tool_call_id"] = serde_json::Value::String(id.to_owned());
-        }
         let kind_str = match kind {
             manox_agent::db::UiNoteKind::Error => "error",
             manox_agent::db::UiNoteKind::Notice => "notice",
             manox_agent::db::UiNoteKind::PlanReview => "plan_review",
         };
-        // v3: a UI note is a client-local annotation card — the protocol
-        // has no client-side transcript write, so it renders from local
-        // state only (accepted tradeoff: it does not survive a reload).
-        let _ = (session_id, kind_str, data);
+        // The annotations channel (dspo/manox#884) is the durable face: the
+        // dispatch lands an `annotation_set` journal row host-side, so the
+        // card survives reloads and reaches every client. The card's own
+        // render payload (kind, tool anchoring) rides `_meta["x-manox"]`,
+        // the protocol's extension slot.
+        let Some((store, _)) = self.chat_store(cx) else {
+            return;
+        };
+        let note_id = format!("note-{}", uuid::Uuid::new_v4().simple());
+        let mut xmanox = serde_json::Map::new();
+        xmanox.insert("uiNoteKind".to_string(), serde_json::json!(kind_str));
+        if let Some(id) = tool_call_id {
+            xmanox.insert("toolCallId".to_string(), serde_json::json!(id));
+        }
+        let session = steer_agent_chat_ui::ahp_store::session_uri(session_id);
+        let annotation = ahp_types::state::Annotation {
+            id: note_id.clone(),
+            origin: ahp_types::state::AnnotationOrigin {
+                session: session.clone(),
+                chat: None,
+                turn_id: None,
+            },
+            // A UI note has no file to anchor to — the session itself is the
+            // anchor, and `_meta` carries the render payload.
+            resource: session,
+            range: None,
+            resolved: false,
+            entries: vec![ahp_types::state::AnnotationEntry {
+                id: format!("{note_id}-e1"),
+                text: ahp_types::common::StringOrMarkdown::Plain(text),
+                meta: None,
+            }],
+            meta: Some({
+                let mut meta = ahp_types::common::JsonObject::new();
+                meta.insert("x-manox".to_string(), serde_json::Value::Object(xmanox));
+                meta
+            }),
+        };
+        store.update(cx, |store, _| {
+            store.dispatch(
+                manox_ahp::channels::annotations::uri(session_id),
+                ahp_types::actions::StateAction::AnnotationsSet(
+                    ahp_types::actions::AnnotationsSetAction { annotation },
+                ),
+            );
+        });
     }
 
     /// Abort the current turn.
