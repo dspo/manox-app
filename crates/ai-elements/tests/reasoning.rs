@@ -14,7 +14,7 @@ use gpui::{
     VisualTestContext, Window, div, px,
 };
 use gpui_component::Theme;
-use manox_components::markdown::Markdown;
+use steer_components::markdown::Markdown;
 
 /// One block on screen. The body carries no selector of its own — the block's
 /// own `{id}-content` hook is what the mounting tests read.

@@ -18,7 +18,7 @@ use ahp_types::state::{
 };
 use common::{init_harness, open_workspace};
 use gpui::{AppContext as _, TestAppContext, VisualTestContext};
-use manox_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
+use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
 
 fn select_request(id: &str) -> ChatInputRequest {
     ChatInputRequest {

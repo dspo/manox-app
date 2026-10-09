@@ -43,7 +43,7 @@ pub fn webview_label_for(tab_id: BrowserTabId) -> String {
 
 pub struct BrowserView {
     tab_id: BrowserTabId,
-    webview: Entity<manox_webview::webview::WebView>,
+    webview: Entity<steer_webview::webview::WebView>,
     address: Entity<InputState>,
     url: String,
     /// The page's `<title>`, polled by the workspace's title ticker through
@@ -70,9 +70,9 @@ impl BrowserView {
         cx: &mut Context<Self>,
     ) -> Self {
         let label = webview_label_for(tab_id);
-        let builder = manox_webview::Builder::default()
+        let builder = steer_webview::Builder::default()
             .with_webview_id(label.as_str())
-            .trust_mode(manox_webview::TrustMode::Untrusted);
+            .trust_mode(steer_webview::TrustMode::Untrusted);
         // Attach the process-wide notify/inbound bridges. The host is the
         // single owner of routing; the webview crate's OnceLock keeps the
         // first-attached closures, so every BrowserView attaches the same
@@ -81,11 +81,11 @@ impl BrowserView {
         let wry = builder
             .apply(|b| b.with_url(url))
             .build_as_child(window)
-            .expect("manox-webview: build_as_child failed");
-        let webview = cx.new(|cx| manox_webview::webview::WebView::new(wry, window, cx));
+            .expect("steer-webview: build_as_child failed");
+        let webview = cx.new(|cx| steer_webview::webview::WebView::new(wry, window, cx));
 
         let address = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(manox_i18n::t("browser-address-placeholder"))
+            InputState::new(window, cx).placeholder(steer_i18n::t("browser-address-placeholder"))
         });
         address.update(cx, |s, cx| s.set_value(url, window, cx));
 
@@ -138,7 +138,7 @@ impl BrowserView {
     }
 
     /// The underlying webview entity, for host-driven eval/navigation.
-    pub fn webview(&self) -> &Entity<manox_webview::webview::WebView> {
+    pub fn webview(&self) -> &Entity<steer_webview::webview::WebView> {
         &self.webview
     }
 
@@ -244,13 +244,13 @@ impl Render for BrowserView {
                             .min_w_0()
                             .text_color(theme.foreground)
                             .text_sm()
-                            .child(manox_i18n::t("browser-yield-hint")),
+                            .child(steer_i18n::t("browser-yield-hint")),
                     )
                     .child(
                         Button::new("browser-yield-complete")
                             .small()
                             .primary()
-                            .label(manox_i18n::t("browser-yield-complete"))
+                            .label(steer_i18n::t("browser-yield-complete"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 // Resume the parked yield Task via the host;
                                 // clear the banner locally either way.
@@ -267,7 +267,7 @@ impl Render for BrowserView {
                     .text_color(theme.muted_foreground)
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(manox_i18n::t("browser-read-hint"))
+                    .child(steer_i18n::t("browser-read-hint"))
             }))
             .child(
                 div()

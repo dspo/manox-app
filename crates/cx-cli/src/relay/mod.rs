@@ -8,9 +8,9 @@
 // handle owns the spawn/IPC/writer-thread lifecycle; `relay::run` owns the
 // terminal interaction.
 
-// pub(crate) mod ipc; -- moved to manox-ext-agents
-// pub(crate) mod pty; -- moved to manox-ext-agents
-// pub(crate) mod transfer; -- moved to manox-ext-agents
+// pub(crate) mod ipc; -- moved to steer-ext-agents
+// pub(crate) mod pty; -- moved to steer-ext-agents
+// pub(crate) mod transfer; -- moved to steer-ext-agents
 
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -21,13 +21,13 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use signal_hook::consts::signal::SIGWINCH;
 use signal_hook::flag as sig_flag;
 
-use manox_ext_agents::LaunchSpec;
-use manox_ext_agents::api::SessionHandle;
-use manox_ext_agents::warp::WarpSession;
+use steer_ext_agents::LaunchSpec;
+use steer_ext_agents::api::SessionHandle;
+use steer_ext_agents::warp::WarpSession;
 
-use manox_ext_agents::relay::transfer::WriteReq;
 use std::sync::mpsc;
 use std::thread;
+use steer_ext_agents::relay::transfer::WriteReq;
 
 /// Read raw stdin verbatim and forward to the writer channel.
 fn stdin_forward(tx: mpsc::Sender<WriteReq>) {
@@ -141,7 +141,7 @@ pub(crate) fn run(spec: &LaunchSpec, warp_session: Option<WarpSession>) -> ! {
 /// Print the inline exit summary (agent/provider/model/duration/tokens/termination),
 /// matching `finalize_exit_common`'s formatting for the direct-launch path.
 fn print_exit_summary(
-    res: &manox_ext_agents::SessionResult,
+    res: &steer_ext_agents::SessionResult,
     started_sys: SystemTime,
     cwd: &std::path::Path,
 ) {

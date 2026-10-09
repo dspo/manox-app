@@ -35,7 +35,7 @@ async fn turn_rail_marks_render_and_a_click_lands_on_the_turn(cx: &mut TestAppCo
             manox_agent::MessageAuthor::Lead,
             true,
             ApplyCtx {
-                host: manox_agent_chat_ui::host::noop_host(),
+                host: steer_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },

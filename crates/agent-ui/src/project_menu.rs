@@ -3,7 +3,7 @@
 //! agents, a terminal or the editor IN the project directory, and remove the
 //! project from the sidebar.
 //!
-//! The chrome (manox-agent-chrome-ui) supplies only the menu SURFACE — the
+//! The chrome (steer-agent-chrome-ui) supplies only the menu SURFACE — the
 //! header's ellipsis button / right-click and the anchored mount; this module
 //! is the host half that builds the content. Every action targets the group's
 //! project directory:
@@ -52,7 +52,7 @@ pub fn group_menu(
     let ws = ws.clone();
     let ws_menu = ws.clone();
     let ws_terminal = ws.clone();
-    let dir_manox = project_dir.clone();
+    let dir_steer = project_dir.clone();
     let dir_terminal = project_dir.clone();
     let dir_cascade = project_dir.clone();
     let dir_remove = project_dir.clone();
@@ -74,18 +74,18 @@ pub fn group_menu(
         // picker in the app looks and picks the same.
         menu = menu.submenu_with_icon(
             Some(Icon::default().path("icons/plus.svg")),
-            manox_i18n::t("sidebar-new-session-label"),
+            steer_i18n::t("sidebar-new-session-label"),
             window,
             cx,
             move |submenu, window, cx| {
                 let mut submenu = submenu;
-                let ws_manox = ws_menu.clone();
-                let dir_new = dir_manox.clone();
+                let ws_steer = ws_menu.clone();
+                let dir_new = dir_steer.clone();
                 submenu = submenu.item(
-                    PopupMenuItem::new(manox_i18n::t("sidebar-new-session-manox"))
-                        .icon(Icon::default().path("icons/manox.svg"))
+                    PopupMenuItem::new(steer_i18n::t("sidebar-new-session-steer"))
+                        .icon(Icon::default().path("icons/steer.svg"))
                         .on_click(move |_, _window, cx| {
-                            new_thread_at(&ws_manox, dir_new.clone(), cx);
+                            new_thread_at(&ws_steer, dir_new.clone(), cx);
                         }),
                 );
                 for (agent_id, display, svg) in EXTERNAL_AGENTS {
@@ -152,7 +152,7 @@ pub fn group_menu(
         );
         // 新建终端: a plain shell PTY rooted at the project.
         menu = menu.item(
-            PopupMenuItem::new(manox_i18n::t("sidebar-new-terminal"))
+            PopupMenuItem::new(steer_i18n::t("sidebar-new-terminal"))
                 .icon(Icon::default().path("icons/terminal.svg"))
                 .on_click(move |_, window, cx| {
                     let cwd = dir_terminal.clone().unwrap_or_else(fallback_cwd);
@@ -162,7 +162,7 @@ pub fn group_menu(
                             ExternalSessionLaunch {
                                 agent_id: "terminal",
                                 cx_session_id: String::new(),
-                                label: manox_i18n::t("chrome-tab-terminal").to_string(),
+                                label: steer_i18n::t("chrome-tab-terminal").to_string(),
                                 svg: "icons/terminal.svg",
                                 project: dir_terminal.clone(),
                             },
@@ -171,7 +171,7 @@ pub fn group_menu(
                             cx,
                         ),
                         Err(e) => spawn_failed_notification(
-                            &manox_i18n::t("chrome-tab-terminal"),
+                            &steer_i18n::t("chrome-tab-terminal"),
                             &e,
                             window,
                             cx,
@@ -182,7 +182,7 @@ pub fn group_menu(
         menu = menu.item(
             PopupMenuItem::new("VS Code")
                 .icon(Icon::default().path("icons/vscode.svg"))
-                .disabled(!manox_ext_agents::vscode_app::is_installed() || vscode_target.is_none())
+                .disabled(!steer_ext_agents::vscode_app::is_installed() || vscode_target.is_none())
                 .on_click(move |_, _window, cx| launch_vscode(vscode_target.clone(), cx)),
         );
         // 移除项目: only a real project group can be removed. The overlay
@@ -193,7 +193,7 @@ pub fn group_menu(
         if let Some(dir_remove) = dir_remove {
             let ws_remove = ws.clone();
             menu = menu.separator().item(
-                PopupMenuItem::new(manox_i18n::t("sidebar-remove-project"))
+                PopupMenuItem::new(steer_i18n::t("sidebar-remove-project"))
                     .icon(Icon::default().path("icons/trash-2.svg"))
                     .on_click(move |_, _window, cx| {
                         let path = dir_remove.to_string_lossy();
@@ -299,7 +299,7 @@ fn launch_external(
 /// row passes its localized name, an agent row its display name.
 fn spawn_failed_notification(prog: &str, error: &str, window: &mut Window, cx: &mut App) {
     window.push_notification(
-        Notification::error(manox_i18n::t_str(
+        Notification::error(steer_i18n::t_str(
             "chrome-spawn-failed",
             &[("prog", prog), ("err", error)],
         )),
@@ -316,7 +316,7 @@ fn launch_vscode(folder: Option<PathBuf>, cx: &mut App) {
     cx.spawn(async move |cx| {
         let launch_err = cx
             .background_spawn(async move {
-                manox_ext_agents::launch_vscode_app_from_settings(folder.as_deref())
+                steer_ext_agents::launch_vscode_app_from_settings(folder.as_deref())
             })
             .await;
         if let Some(handle) = handle
@@ -326,7 +326,7 @@ fn launch_vscode(folder: Option<PathBuf>, cx: &mut App) {
                     window.push_notification(
                         Notification::error(format!(
                             "{}: {e}",
-                            manox_i18n::t("vscode-app-launch-failed")
+                            steer_i18n::t("vscode-app-launch-failed")
                         )),
                         cx,
                     );

@@ -2,9 +2,9 @@
 //! public `send` API via `cx::` paths, so the export surface is verified to
 //! compile from outside the crate (not just via `crate::`).
 //!
-//! The `send` module is re-exported from `manox-ext-agents` via `cx`.
+//! The `send` module is re-exported from `steer-ext-agents` via `cx`.
 
-use manox_ext_agents::send;
+use steer_ext_agents::send;
 
 #[test]
 fn send_rejects_empty_without_clear_via_public_api() {

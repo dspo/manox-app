@@ -4,8 +4,8 @@
 //! sites inside the moved views had before the split.
 
 use gpui::{App, Entity, WeakEntity, Window};
-use manox_agent_chat_ui::conversation::ConversationState;
-use manox_agent_chat_ui::host::ChatHost;
+use steer_agent_chat_ui::conversation::ConversationState;
+use steer_agent_chat_ui::host::ChatHost;
 
 use crate::Workspace;
 

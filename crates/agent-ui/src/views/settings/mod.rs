@@ -259,7 +259,7 @@ impl SettingsView {
             // The endonym is fixed per language and never re-localized, so the
             // picker always reads `简体中文` / `English` regardless of the
             // current UI locale.
-            ui_language: manox_i18n::load_ui_language().endonym().into(),
+            ui_language: steer_i18n::load_ui_language().endonym().into(),
             show_in_menu_bar: true,
             bottom_panel: true,
             terminal_location: i18n::t("settings-value-bottom"),
@@ -306,7 +306,7 @@ impl SettingsView {
             tracing::warn!(token = %token, "ignoring non-canonical ui_language token");
             return Ok(());
         };
-        if let Err(e) = manox_i18n::persist_ui_language(lang) {
+        if let Err(e) = steer_i18n::persist_ui_language(lang) {
             tracing::warn!(error = %e, "failed to save ui_language");
             return Err(e.to_string());
         }

@@ -190,7 +190,7 @@ impl Workspace {
             String,
             String,
             Option<String>,
-            manox_agent_chat_ui::column::ConfirmationSnapshot,
+            steer_agent_chat_ui::column::ConfirmationSnapshot,
         )> = self
             .chat
             .read(cx)
@@ -215,7 +215,7 @@ impl Workspace {
                         let actions = options
                             .unwrap_or(&[])
                             .iter()
-                            .map(|option| manox_agent_chat_ui::column::ConfirmationAction {
+                            .map(|option| steer_agent_chat_ui::column::ConfirmationAction {
                                 option_id: option.id.clone(),
                                 label: option.label.clone(),
                                 approve: matches!(
@@ -240,7 +240,7 @@ impl Workspace {
                             tool_call_id,
                             tool_name,
                             title,
-                            manox_agent_chat_ui::column::ConfirmationSnapshot {
+                            steer_agent_chat_ui::column::ConfirmationSnapshot {
                                 auth_id: confirmation.id.clone(),
                                 actions,
                             },
@@ -260,7 +260,7 @@ impl Workspace {
                             parked.tool_call_id.clone(),
                             parked.auth_id.clone(),
                             None,
-                            manox_agent_chat_ui::column::ConfirmationSnapshot {
+                            steer_agent_chat_ui::column::ConfirmationSnapshot {
                                 auth_id: parked.auth_id.clone(),
                                 actions: Vec::new(),
                             },
@@ -327,12 +327,12 @@ impl Workspace {
                 // on the echo, so neither matches this criterion.)
                 let shell = matches!(
                     previous.read(cx).kind(),
-                    manox_agent_chat_ui::conversation::ConvItem::ToolCall(t)
+                    steer_agent_chat_ui::conversation::ConvItem::ToolCall(t)
                         if t.status == manox_agent::ToolCallStatus::PendingApproval
                 );
                 if shell {
                     let row_id = match previous.read(cx).kind() {
-                        manox_agent_chat_ui::conversation::ConvItem::ToolCall(t) => t.id.clone(),
+                        steer_agent_chat_ui::conversation::ConvItem::ToolCall(t) => t.id.clone(),
                         _ => unreachable!("shell checked above"),
                     };
                     let un_parked = next.as_ref().is_none_or(|(id, _, _)| id != &row_id);
@@ -530,7 +530,7 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_ask_card_element(
         &self,
-        host: manox_agent_chat_ui::host::ChatHostHandle,
+        host: steer_agent_chat_ui::host::ChatHostHandle,
         ix: usize,
         cx: &mut App,
     ) -> Option<gpui::AnyElement> {
@@ -551,7 +551,7 @@ impl Workspace {
         };
         // The diagnostic mount shows the card's controls but nothing copies
         // from it, so the copy-feedback context is ownerless.
-        let copy_registry = manox_components::copy_feedback::CopiedRegistry::default();
+        let copy_registry = steer_components::copy_feedback::CopiedRegistry::default();
         Some(crate::views::message::render_ask_user_card(
             &item,
             ix,

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-# Bundle manox and the cx CLI as a Debian package (.deb) — the Linux analog of
+# Bundle steer and the cx CLI as a Debian package (.deb) — the Linux analog of
 # bundle-mac.
 #
 # Usage: script/bundle-deb [options]
@@ -13,12 +13,12 @@ set -euo pipefail
 #   -h    Display this help and exit
 #
 # Installed layout:
-#   /usr/bin/<exe>                                   the manox binary
+#   /usr/bin/<exe>                                   the steer binary
 #   /usr/bin/cx                                      the cx CLI, same build
 #   /usr/share/applications/<bundle-id>.desktop      desktop entry
 #   /usr/share/icons/hicolor/{128x128,256x256}/apps/<bundle-id>.png
 #
-# Identity comes from [package.metadata.bundle] in crates/manox/Cargo.toml
+# Identity comes from [package.metadata.bundle] in crates/steer-app/Cargo.toml
 # (the same single source of truth bundle-mac reads); the executable name is
 # the bundle display name lowercased with spaces mapped to dashes, so future
 # flavor bundles can coexist as distinct /usr/bin entries.
@@ -38,7 +38,7 @@ run_result=false
 help_info() {
     echo "
 Usage: ${0##*/} [options]
-Bundle manox as a Debian package (.deb).
+Bundle steer as a Debian package (.deb).
 
 Options:
   -d    Compile in debug mode
@@ -78,17 +78,17 @@ fi
 deb_arch=$(dpkg --print-architecture)
 
 # --- Build ---
-echo "Building manox and cx binaries"
-cargo build ${build_flag} --package manox --package cx-cli
-bin_path="target/${target_dir}/manox"
+echo "Building steer and cx binaries"
+cargo build ${build_flag} --package steer-app --package cx-cli
+bin_path="target/${target_dir}/steer"
 cx_bin_path="target/${target_dir}/cx"
 [[ -f "${bin_path}" ]] || { echo "Error: ${bin_path} missing after build"; exit 1; }
 [[ -f "${cx_bin_path}" ]] || { echo "Error: ${cx_bin_path} missing after build"; exit 1; }
 
 # --- Read bundle configuration from Cargo.toml ---
 # Same extraction as bundle-mac: [package.metadata.bundle] in
-# crates/manox/Cargo.toml is the single source of truth.
-bundle_toml="crates/manox/Cargo.toml"
+# crates/steer-app/Cargo.toml is the single source of truth.
+bundle_toml="crates/steer-app/Cargo.toml"
 read_bundle_value() {
     local section="$1" key="$2"
     awk -v section="$section" -v key="$key" '
@@ -106,11 +106,11 @@ read_bundle_value() {
 bundle_id=$(read_bundle_value "package.metadata.bundle" "identifier")
 app_name=$(read_bundle_value "package.metadata.bundle" "name")
 [[ -n "${bundle_id}" ]] || { echo "Error: no [package.metadata.bundle] identifier in ${bundle_toml}"; exit 1; }
-[[ -n "${app_name}" ]] || app_name="Manox"
+[[ -n "${app_name}" ]] || app_name="Steer"
 # version is workspace-inherited; resolve via cargo metadata
 app_version=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
     | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
-                   p=[x for x in pkgs if x['name']=='manox']; \
+                   p=[x for x in pkgs if x['name']=='steer']; \
                    print(p[0]['version'] if p else '0.1.0')")
 
 pkg_name=$(echo "${app_name}" | tr '[:upper:] ' '[:lower:]-')
@@ -154,7 +154,7 @@ chmod 755 "${pkg_root}/usr/bin/${exe_name}"
 cp "${cx_bin_path}" "${pkg_root}/usr/bin/cx"
 chmod 755 "${pkg_root}/usr/bin/cx"
 
-icon_resources_dir="crates/manox/resources"
+icon_resources_dir="crates/steer-app/resources"
 if [[ -f "${icon_resources_dir}/app-icon.png" ]]; then
     cp "${icon_resources_dir}/app-icon.png" "${pkg_root}/usr/share/icons/hicolor/128x128/apps/${bundle_id}.png"
 fi

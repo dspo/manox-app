@@ -71,8 +71,8 @@ mod macos {
         let mut cx = VisualTestAppContext::with_asset_source(platform, Arc::new(ExtrasAssetSource));
         cx.update(|cx| {
             gpui_component::init(cx);
-            manox_i18n::init();
-            manox_agent_chrome_ui::register_fonts(cx);
+            steer_i18n::init();
+            steer_agent_chrome_ui::register_fonts(cx);
         });
 
         let handle = cx

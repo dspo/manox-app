@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn embeds_every_new_session_brand_icon() {
         for path in [
-            "icons/manox.svg",
+            "icons/steer.svg",
             "icons/claude.svg",
             "icons/codex.svg",
             "icons/githubcopilot.svg",
@@ -149,7 +149,7 @@ mod tests {
         // would blank these out while every test that bypasses `load` stays
         // green.
         let extras = ExtrasAssetSource::new();
-        let mut paths: Vec<&str> = manox_agent_chrome_ui::theme::icons::ALL
+        let mut paths: Vec<&str> = steer_agent_chrome_ui::theme::icons::ALL
             .iter()
             .map(|glyph| glyph.0)
             .collect();

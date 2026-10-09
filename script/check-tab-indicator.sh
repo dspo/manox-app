@@ -34,7 +34,7 @@ command -v magick >/dev/null || {
 
 SHOT="${CHROME_SHOT:-$(mktemp -t manox-tab-indicator).png}"
 CHROME_SHOT="$SHOT" CHROME_RIGHT=1 \
-  cargo test -p manox-agent-chrome-ui --test visual >/dev/null 2>&1
+  cargo test -p steer-agent-chrome-ui --test visual >/dev/null 2>&1
 
 [ -f "$SHOT" ] || {
   echo "check-tab-indicator: no screenshot at $SHOT" >&2
@@ -46,7 +46,7 @@ CHROME_SHOT="$SHOT" CHROME_RIGHT=1 \
 # single-tab shot only exercises the initial layout.
 SW_SHOT="$(mktemp -t manox-tab-indicator-sw).png"
 CHROME_SHOT="$SW_SHOT" CHROME_RIGHT=1 CHROME_SWITCH=1 \
-  cargo test -p manox-agent-chrome-ui --test visual >/dev/null 2>&1
+  cargo test -p steer-agent-chrome-ui --test visual >/dev/null 2>&1
 
 python3 - "$SHOT" "$SW_SHOT" <<'PYEOF'
 import subprocess

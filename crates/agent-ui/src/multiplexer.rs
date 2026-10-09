@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use crate::sidebar_projection::ThreadRow;
 use ahp_types::state::AgentInfo;
 use gpui::{App, Context, Entity};
-use manox_agent_chat_ui::ahp_store::{
+use steer_agent_chat_ui::ahp_store::{
     AhpStore, CLIENT_ID, chat_uri, plan_uri, session_uri, thread_uri, work_uri,
 };
 
@@ -41,7 +41,7 @@ pub struct SessionMultiplexer {
 /// snapshot's `_meta.x-manox.pinned` (upstream #863) — the store row's pin
 /// authority reached the client with the list itself.
 pub(crate) fn ext_and_meta_pinned(
-    book: &manox_agent_chat_ui::ahp_store::ChannelBook,
+    book: &steer_agent_chat_ui::ahp_store::ChannelBook,
     summary: Option<&ahp_types::state::SessionSummary>,
     thread_channel: &str,
 ) -> bool {
@@ -120,7 +120,7 @@ impl SessionMultiplexer {
         &mut self,
         session_id: &str,
         cx: &mut Context<Self>,
-    ) -> manox_agent_chat_ui::ahp_store::Reply {
+    ) -> steer_agent_chat_ui::ahp_store::Reply {
         // The create is queued when the handshake is still in flight and
         // resolved by the replay in order (before this session's subscribes).
         let reply = self.store.update(cx, |store, _| {
@@ -212,10 +212,10 @@ impl SessionMultiplexer {
             .summaries
             .values()
             .map(|summary| {
-                let sid = manox_agent_chat_ui::ahp_store::id_of(&summary.resource);
+                let sid = steer_agent_chat_ui::ahp_store::id_of(&summary.resource);
                 // The row pin read: see `ext_and_meta_pinned`.
                 let pinned = ext_and_meta_pinned(book, Some(summary), &thread_uri(sid));
-                let pending_plan = manox_agent_chat_ui::ahp_store::plan_review_proposed(book, sid);
+                let pending_plan = steer_agent_chat_ui::ahp_store::plan_review_proposed(book, sid);
                 let mut row = ThreadRow::from_summary(summary, pinned, pending_plan);
                 // The host's project field trails a brand-new session (its
                 // store row lands with the first persistence), but the fold's
@@ -296,7 +296,7 @@ impl SessionMultiplexer {
 #[cfg(test)]
 mod pin_read_tests {
     use super::*;
-    use manox_agent_chat_ui::ahp_store::ChannelBook;
+    use steer_agent_chat_ui::ahp_store::ChannelBook;
 
     fn summary_with_meta(pinned: bool) -> ahp_types::state::SessionSummary {
         serde_json::from_value(serde_json::json!({

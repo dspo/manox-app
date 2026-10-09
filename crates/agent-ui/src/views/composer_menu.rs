@@ -20,7 +20,7 @@ use gpui_component::{
     v_flex,
 };
 use manox_agent::language_model::MessageContent;
-pub use manox_agent_chat_ui::column::PendingAttachment;
+pub use steer_agent_chat_ui::column::PendingAttachment;
 
 /// Static row for the `+` menu: an icon, a name, and a description.
 /// `name`/`desc` are fluent message ids for localized rows, or literal English

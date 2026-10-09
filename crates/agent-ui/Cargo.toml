@@ -20,7 +20,7 @@ default = []
 # walk test (`tests/workspace_overlap.rs`). The walk additionally requires the
 # local session fixture and is a no-op without it. Run locally via:
 #   cargo test -p agent-ui --features test-support --test workspace_overlap
-test-support = ["manox-agent-chat-ui/test-support"]
+test-support = ["steer-agent-chat-ui/test-support"]
 
 
 [dependencies]
@@ -45,19 +45,19 @@ lyon.workspace = true
 rust-embed.workspace = true
 
 manox-agent.workspace = true
-manox-i18n.workspace = true
-manox-agent-chat-ui.workspace = true
-manox-agent-chrome-ui.workspace = true
+steer-i18n.workspace = true
+steer-agent-chat-ui.workspace = true
+steer-agent-chrome-ui.workspace = true
 manox-terminal.workspace = true
 terminal-ui.workspace = true
-manox-components.workspace = true
+steer-components.workspace = true
 ai-elements.workspace = true
 open.workspace = true
-manox-webview.workspace = true
+steer-webview.workspace = true
 
 # cx library —— `AgentBuilder` / `SessionHandle` to spawn external agent CLIs
 # (claude/codex/copilot) and hold the PTY handle for an `ExternalSession`.
-manox-ext-agents.workspace = true
+steer-ext-agents.workspace = true
 
 # cx provider config schema —— the Settings → Models panel edits
 # `cx.providers.config.yaml` through these structs.

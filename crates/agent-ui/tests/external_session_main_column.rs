@@ -14,7 +14,7 @@ use agent_ui::Workspace;
 use common::init_harness;
 use gpui::{AppContext as _, TestAppContext, VisualTestContext, px, size};
 use gpui_component::Root;
-use manox_agent_chrome_ui::register_fonts;
+use steer_agent_chrome_ui::register_fonts;
 
 /// A PTY source that never starts — the test never renders terminal content,
 /// only mounts the view and exercises the session state machine.
@@ -153,11 +153,11 @@ fn open_assembly(
     cx: &mut TestAppContext,
 ) -> (
     gpui::WindowHandle<Root>,
-    gpui::Entity<manox_agent_chrome_ui::Shell>,
+    gpui::Entity<steer_agent_chrome_ui::Shell>,
     gpui::Entity<Workspace>,
 ) {
     let shell_cell: std::rc::Rc<
-        std::cell::RefCell<Option<gpui::Entity<manox_agent_chrome_ui::Shell>>>,
+        std::cell::RefCell<Option<gpui::Entity<steer_agent_chrome_ui::Shell>>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(None));
     let ws_cell: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -165,7 +165,7 @@ fn open_assembly(
 
     cx.update(gpui_component::init);
     cx.update(|_cx| {
-        manox_i18n::init();
+        steer_i18n::init();
     });
     let window = cx.open_window(size(px(1_280.), px(820.)), move |window, cx| {
         register_fonts(cx);

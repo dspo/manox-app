@@ -661,7 +661,7 @@ impl Render for TerminalView {
                     .py_1()
                     .bg(cx.theme().background)
                     .child(div().text_xs().text_color(cx.theme().foreground).child(
-                        manox_i18n::t_str_count(
+                        steer_i18n::t_str_count(
                             "terminal-search-status",
                             &[("pattern", pattern.as_str())],
                             count as i64,
@@ -718,7 +718,7 @@ impl Render for TerminalView {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(manox_i18n::t("terminal-starting")),
+                        .child(steer_i18n::t("terminal-starting")),
                 ),
             );
         }

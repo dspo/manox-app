@@ -33,7 +33,7 @@ async fn preview_tracks_the_hovered_mark_when_the_ladder_scrolls(cx: &mut TestAp
             manox_agent::MessageAuthor::Lead,
             true,
             ApplyCtx {
-                host: manox_agent_chat_ui::host::noop_host(),
+                host: steer_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },
@@ -81,7 +81,7 @@ async fn preview_tracks_the_hovered_mark_when_the_ladder_scrolls(cx: &mut TestAp
             manox_agent::MessageAuthor::Lead,
             true,
             ApplyCtx {
-                host: manox_agent_chat_ui::host::noop_host(),
+                host: steer_agent_chat_ui::host::noop_host(),
                 cwd: None,
                 fork_source: None,
             },

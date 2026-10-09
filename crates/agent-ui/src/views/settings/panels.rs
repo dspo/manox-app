@@ -580,7 +580,7 @@ pub fn render_general(view: &mut SettingsView, cx: &mut Context<SettingsView>) -
                     view.ui_language.clone(),
                     // Endonym is the label, token the persisted value; both come
                     // from the enum so the picker cannot drift from the parser.
-                    [manox_i18n::Language::ZhCn, manox_i18n::Language::En]
+                    [steer_i18n::Language::ZhCn, steer_i18n::Language::En]
                         .into_iter()
                         .map(|lang| {
                             (

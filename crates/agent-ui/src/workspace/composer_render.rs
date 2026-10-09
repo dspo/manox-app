@@ -38,7 +38,7 @@ impl gpui_component::Selectable for ContextPillTrigger {
     }
 }
 use lyon::tessellation::LineCap;
-pub use manox_agent_chat_ui::column::{QueueDragEdge, QueueRowDrag};
+pub use steer_agent_chat_ui::column::{QueueDragEdge, QueueRowDrag};
 
 // ── Context-usage ring geometry ───────────────────────────────────────────
 // The dsh ContextMeter's numbers verbatim: a 14px box, r 5.5, 2px stroke —

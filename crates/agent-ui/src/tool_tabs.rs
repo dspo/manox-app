@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, SharedString, Window, px,
 };
-use manox_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
-use manox_agent_chrome_ui::theme::{IconAsset, icon, icons};
-use manox_ext_agents::cx_session::CxSessionSource;
+use steer_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
+use steer_agent_chrome_ui::theme::{IconAsset, icon, icons};
+use steer_ext_agents::cx_session::CxSessionSource;
 
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
 
@@ -60,7 +60,7 @@ impl ToolTabFactory for TerminalTool {
     }
 
     fn quick_action(&self) -> Option<SharedString> {
-        Some(manox_i18n::t("chrome-quick-terminal").into())
+        Some(steer_i18n::t("chrome-quick-terminal").into())
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
@@ -82,7 +82,7 @@ impl ToolTab for TerminalTab {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        manox_i18n::t("chrome-tab-terminal").into()
+        steer_i18n::t("chrome-tab-terminal").into()
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
@@ -94,13 +94,13 @@ impl ToolTab for TerminalTab {
         _window: &mut Window,
         cx: &mut App,
         store: &mut TabStore,
-        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
         match spawn_standalone_terminal(&thread_cwd_or_home(), cx) {
             Ok(view) => store.put(&self.id, view),
             Err(e) => store.set_error(
                 &self.id,
-                manox_i18n::t_str("chrome-spawn-failed", &[("prog", "$SHELL"), ("err", &e)]),
+                steer_i18n::t_str("chrome-spawn-failed", &[("prog", "$SHELL"), ("err", &e)]),
             ),
         }
     }
@@ -193,7 +193,7 @@ impl ToolTabFactory for BrowserTool {
     }
 
     fn quick_action(&self) -> Option<SharedString> {
-        Some(manox_i18n::t("chrome-quick-browser").into())
+        Some(steer_i18n::t("chrome-quick-browser").into())
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
@@ -230,7 +230,7 @@ impl ToolTab for BrowserTab {
     fn title(&self, _cx: &App) -> SharedString {
         let live = self.title.lock().expect("browser title lock").clone();
         if live.is_empty() {
-            manox_i18n::t("chrome-tab-browser").into()
+            steer_i18n::t("chrome-tab-browser").into()
         } else {
             live.into()
         }
@@ -245,7 +245,7 @@ impl ToolTab for BrowserTab {
         window: &mut Window,
         cx: &mut App,
         store: &mut TabStore,
-        pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+        pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
         // The production browser-tab path on the embedded workspace: the
         // view registers with the browser host (IPC routing) and lives in
@@ -440,7 +440,7 @@ impl ToolTab for SubagentTab {
         _window: &mut Window,
         _cx: &mut App,
         store: &mut TabStore,
-        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
         store.put(&self.id, self.panel.clone());
     }
@@ -502,7 +502,7 @@ impl ToolTabFactory for AgentTool {
     }
 
     fn quick_action(&self) -> Option<SharedString> {
-        Some(manox_i18n::t_str("chrome-quick-agent", &[("agent", self.display)]).into())
+        Some(steer_i18n::t_str("chrome-quick-agent", &[("agent", self.display)]).into())
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
@@ -540,7 +540,7 @@ impl ToolTab for AgentTab {
         _window: &mut Window,
         cx: &mut App,
         store: &mut TabStore,
-        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
         // The tab opens on the MODEL PICKER; picking one spawns the agent
         // under that endpoint and the
@@ -581,12 +581,12 @@ pub(crate) fn spawn_agent_terminal(
     cx: &mut App,
 ) -> Result<(Entity<terminal_ui::TerminalView>, String), String> {
     let agent = match agent_id {
-        "claude" => manox_ext_agents::Agent::Claude,
-        "codex" => manox_ext_agents::Agent::Codex,
-        "copilot" => manox_ext_agents::Agent::Copilot,
+        "claude" => steer_ext_agents::Agent::Claude,
+        "codex" => steer_ext_agents::Agent::Codex,
+        "copilot" => steer_ext_agents::Agent::Copilot,
         other => return Err(format!("unknown agent: {other}")),
     };
-    let mut builder = manox_ext_agents::AgentBuilder::new()
+    let mut builder = steer_ext_agents::AgentBuilder::new()
         .agent(agent)
         .pty(true)
         .provider(provider.to_string())
@@ -681,7 +681,7 @@ impl gpui::Render for AgentPicker {
                 .into_any_element();
         }
 
-        let heading = manox_i18n::t_str("chrome-agent-pick-model", &[("agent", self.display)]);
+        let heading = steer_i18n::t_str("chrome-agent-pick-model", &[("agent", self.display)]);
         let groups = self.groups(cx);
         let mut list = v_flex().w_full().flex_1().min_h_0().gap_1();
         if let Some(err) = self.error.clone() {
@@ -689,7 +689,7 @@ impl gpui::Render for AgentPicker {
                 div()
                     .py_2()
                     .text_color(theme.danger)
-                    .child(manox_i18n::t_str(
+                    .child(steer_i18n::t_str(
                         "chrome-spawn-failed",
                         &[("prog", self.display), ("err", &err)],
                     )),
@@ -700,7 +700,7 @@ impl gpui::Render for AgentPicker {
                 div()
                     .py_4()
                     .text_color(theme.muted_foreground)
-                    .child(manox_i18n::t("external-wizard-no-model")),
+                    .child(steer_i18n::t("external-wizard-no-model")),
             );
         }
         for (provider, rows) in groups {
@@ -796,7 +796,7 @@ impl ToolTabFactory for EditorTool {
     }
 
     fn quick_action(&self) -> Option<SharedString> {
-        Some(manox_i18n::t("chrome-quick-editor").into())
+        Some(steer_i18n::t("chrome-quick-editor").into())
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
@@ -818,7 +818,7 @@ impl ToolTab for EditorTab {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        manox_i18n::t("chrome-tab-editor").into()
+        steer_i18n::t("chrome-tab-editor").into()
     }
 
     fn icon(&self, _cx: &App) -> AnyElement {
@@ -830,7 +830,7 @@ impl ToolTab for EditorTab {
         window: &mut Window,
         cx: &mut App,
         store: &mut TabStore,
-        _pane: &gpui::WeakEntity<manox_agent_chrome_ui::RightPane>,
+        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
         let view = cx.new(|cx| {
             gpui_component::input::EditorState::new(window, cx)
@@ -839,7 +839,7 @@ impl ToolTab for EditorTab {
                 .folding(false)
                 .soft_wrap(true)
                 .submit_on_enter(false)
-                .placeholder(manox_i18n::t("chrome-editor-placeholder"))
+                .placeholder(steer_i18n::t("chrome-editor-placeholder"))
         });
         store.put(&self.id, view);
     }
@@ -893,9 +893,9 @@ fn brand_icon(svg_path: &'static str) -> AnyElement {
 /// so the dock follows the conversation.
 pub struct ThreadTerminalPanelSurface;
 
-impl manox_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
+impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
     fn title(&self) -> SharedString {
-        manox_i18n::t("chrome-tab-terminal").into()
+        steer_i18n::t("chrome-tab-terminal").into()
     }
 
     fn icon(&self) -> IconAsset {

@@ -19,7 +19,7 @@ impl Workspace {
     pub(super) fn subscribe_background_thread(
         &self,
         _store: &(
-            gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+            gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
             String,
         ),
         _id: String,
@@ -897,7 +897,7 @@ impl Workspace {
     }
 
     /// The ←/→ moves' availability (the history's edges).
-    pub(crate) fn nav_avail(&self) -> manox_agent_chrome_ui::shell::NavAvail {
+    pub(crate) fn nav_avail(&self) -> steer_agent_chrome_ui::shell::NavAvail {
         self.nav.avail()
     }
 

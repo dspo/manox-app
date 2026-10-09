@@ -7,7 +7,7 @@
 //! implementation is this repo's own.
 //!
 //! Boundary: this crate owns agent-conversation semantics. Rendering machinery
-//! (markdown, terminal output) belongs to `manox-components`; conversation
+//! (markdown, terminal output) belongs to `steer-components`; conversation
 //! state and the agent runtime belong to `agent-ui` and must not be reachable
 //! from here. Components therefore take content and localized strings from the
 //! caller rather than reading them from a session.

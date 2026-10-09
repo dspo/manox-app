@@ -7,10 +7,10 @@
 pub mod assets;
 pub(crate) mod chat_host;
 pub use chat_host::WorkspaceChatHost;
-// The chat foundation now lives in manox-agent-chat-ui (Phase 2); these
+// The chat foundation now lives in steer-agent-chat-ui (Phase 2); these
 // re-exports keep every `crate::…` path inside agent-ui (and the tests)
 // resolving unchanged.
-pub use manox_agent_chat_ui::{
+pub use steer_agent_chat_ui::{
     ahp_store, chat_fold, cockpit, conversation, git_status, overlap_diag,
 };
 pub mod browser_host;
@@ -40,8 +40,8 @@ pub use vscode_app::LaunchVSCode;
 // action that flips the Workspace into the Settings overlay. AskPrev/AskNext
 // navigate between questions in the ask drawer (bound to arrow keys within the
 // drawer's focus context).
-pub use manox_agent_chat_ui::turn_navigator_key_bindings;
-pub use manox_agent_chat_ui::{
+pub use steer_agent_chat_ui::turn_navigator_key_bindings;
+pub use steer_agent_chat_ui::{
     AskCancel, AskNext, AskPrev, CompletionConfirm, CompletionDismiss, CompletionDown,
     CompletionUp, ComposerRecallDown, ComposerRecallUp, CopySelectedTurn, FillComposerTurn,
     ToggleTurnNavigator, UndoLastQueued,
@@ -78,7 +78,7 @@ pub fn composer_recall_key_bindings() -> Vec<gpui::KeyBinding> {
 #[cfg(test)]
 mod tests {
     use super::composer_recall_key_bindings;
-    use manox_agent_chat_ui::turn_navigator_key_bindings;
+    use steer_agent_chat_ui::turn_navigator_key_bindings;
 
     /// `KeyBinding::new` panics on an unparseable context predicate, so
     /// constructing every binding set is a startup crash regression test.

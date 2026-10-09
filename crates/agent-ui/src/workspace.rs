@@ -61,7 +61,7 @@ mod attach;
 mod catch_up;
 mod chat_column;
 use chat_column::ChatColumn;
-use manox_agent_chat_ui::ask_card::AskCardSnapshot;
+use steer_agent_chat_ui::ask_card::AskCardSnapshot;
 mod chips;
 mod composer_render;
 mod render;
@@ -95,7 +95,7 @@ fn goal_popover_row(label: &str, value: &str, fg: gpui::Hsla, muted: gpui::Hsla)
 fn thread_cwd(
     thread: &manox_agent::thread::ThreadHandle,
     store: &Option<(
-        gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
         String,
     )>,
     cx: &App,
@@ -120,7 +120,7 @@ fn thread_cwd(
 /// elicitation lowering and the rebuild path parse, so every path to the
 /// card agrees on one input contract.
 fn ask_input_json(
-    ask: &manox_agent_chat_ui::column::PendingAsk,
+    ask: &steer_agent_chat_ui::column::PendingAsk,
     request_id: &str,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -297,7 +297,7 @@ struct SubagentPrompt {
 struct BackgroundThread {
     id: String,
     store: Option<(
-        gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
         String,
     )>,
     session_id: Option<String>,
@@ -312,10 +312,10 @@ enum RegistryTurnKind {
     Skill,
 }
 
-// The chat-column state types moved to manox-agent-chat-ui's `column`
+// The chat-column state types moved to steer-agent-chat-ui's `column`
 // module (Phase 2 tail); these re-exports keep every bare/`super::` name in
 // the workspace family resolving unchanged.
-pub use manox_agent_chat_ui::column::{
+pub use steer_agent_chat_ui::column::{
     AskIntent, AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState,
     PendingAsk, PendingConfirmation, QueuedFollowUp, parse_pending_ask,
 };
@@ -380,12 +380,12 @@ impl NavHistory {
         Some(self.entries[i + 1].clone())
     }
 
-    fn avail(&self) -> manox_agent_chrome_ui::shell::NavAvail {
+    fn avail(&self) -> steer_agent_chrome_ui::shell::NavAvail {
         let (back, forward) = match self.index {
             None => (false, false),
             Some(i) => (i > 0 && i < self.entries.len(), i + 1 < self.entries.len()),
         };
-        manox_agent_chrome_ui::shell::NavAvail { back, forward }
+        steer_agent_chrome_ui::shell::NavAvail { back, forward }
     }
 
     fn current(&self) -> Option<&str> {
@@ -451,7 +451,7 @@ pub struct Workspace {
     /// Lazily-built browser tab entities, keyed by `BrowserTabId`. A browser
     /// tab keeps its `BrowserView` (and the underlying native webview) across
     /// tab switches; dropped when the tab closes, which detaches the native
-    /// view via [`manox_webview::webview::WebView`]'s `Drop`.
+    /// view via [`steer_webview::webview::WebView`]'s `Drop`.
     pub(crate) browser_views: BTreeMap<BrowserTabId, Entity<BrowserView>>,
     /// Top-level view mode. `Settings` replaces the entire window content
     /// with the SettingsView overlay until the user requests exit.
@@ -600,7 +600,7 @@ impl Workspace {
     pub(crate) fn with_foreground_store<R>(
         &self,
         cx: &mut gpui::Context<Self>,
-        f: impl FnOnce(&mut manox_agent_chat_ui::ahp_store::AhpStore, String) -> R,
+        f: impl FnOnce(&mut steer_agent_chat_ui::ahp_store::AhpStore, String) -> R,
     ) -> Option<R> {
         let pair = self.chat.read(cx).store.clone()?;
         let (store, sid) = pair;
@@ -613,7 +613,7 @@ impl Workspace {
     pub(crate) fn chat_store(
         &self,
         cx: &App,
-    ) -> Option<(Entity<manox_agent_chat_ui::ahp_store::AhpStore>, String)> {
+    ) -> Option<(Entity<steer_agent_chat_ui::ahp_store::AhpStore>, String)> {
         self.chat.read(cx).store.clone()
     }
     pub(crate) fn chat_conversation(&self, cx: &App) -> Entity<ConversationState> {
@@ -688,7 +688,7 @@ impl Workspace {
         // dials the host over the in-proc leg.
         let _agent_server = manox_session_core::agent_server::global(cwd.clone());
         let ahp_store =
-            cx.new(|cx| manox_agent_chat_ui::ahp_store::AhpStore::connect(cwd.clone(), cx));
+            cx.new(|cx| steer_agent_chat_ui::ahp_store::AhpStore::connect(cwd.clone(), cx));
         // The landing session id is client-minted (the createSession
         // idempotency key), so the session the workspace renders and the one
         // the server drives are the same conversation.
@@ -734,7 +734,7 @@ impl Workspace {
         // lag).
         let rail_updates = cx.observe(&context_rail, |_, _, cx| cx.notify());
         let weak_ws = cx.weak_entity();
-        let chat_host: manox_agent_chat_ui::host::ChatHostHandle =
+        let chat_host: steer_agent_chat_ui::host::ChatHostHandle =
             std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
 
         let mut ws = Self {
@@ -986,7 +986,7 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_bind_store(
         &mut self,
-        store: gpui::Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        store: gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
         session_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
@@ -1163,7 +1163,7 @@ impl Workspace {
     /// alone. Runs on every store notify, ahead of the drain.
     fn sync_live_ask(
         &mut self,
-        store: &Entity<manox_agent_chat_ui::ahp_store::AhpStore>,
+        store: &Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
         cx: &mut Context<Self>,
     ) {
         // A stale observer (the outgoing thread's, before its rebind) must
@@ -1393,7 +1393,7 @@ impl Workspace {
                     );
                     self.chat.update(cx, |chat, cx| {
                         chat.pending_confirmation =
-                            Some(manox_agent_chat_ui::column::PendingConfirmation {
+                            Some(steer_agent_chat_ui::column::PendingConfirmation {
                                 auth_id: auth_id.clone(),
                                 tool_call_id,
                             });
@@ -2630,7 +2630,7 @@ impl Workspace {
         let pair = self.chat.read(cx).store.clone();
         if let Some((store, sid)) = pair {
             let view = store.read(cx);
-            let turn_id = manox_agent_chat_ui::ahp_store::leaf(&view.book, &sid)
+            let turn_id = steer_agent_chat_ui::ahp_store::leaf(&view.book, &sid)
                 .chat
                 .and_then(|c| c.active_turn.as_ref().map(|t| t.id.clone()));
             tracing::info!(

@@ -27,7 +27,7 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, Theme, button::Button, h_flex,
     shimmer::ShimmerText, v_flex,
 };
-use manox_components::markdown::{HeadingMode, Markdown};
+use steer_components::markdown::{HeadingMode, Markdown};
 
 /// The scripted reasoning text. A scripted stream feeds it a few characters at a
 /// time — the cadence a provider actually delivers, and the thing that makes a
