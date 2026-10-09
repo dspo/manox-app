@@ -233,12 +233,14 @@ jobs:
 
       # Fedora-side translation of the build workflow's apt list (the -devel
       # packages pull their runtime counterparts for the smoke test), plus the
-      # toolchain bits the container image lacks: a C linker, python3 (the
-      # bundle script parses cargo metadata with it), file(1) for rpmbuild's
-      # ELF dependency generators and rpm-build itself.
+      # bits the GitHub ubuntu image preinstalls but this container lacks:
+      # a C linker, openssl/zlib headers (ubuntu ships libssl-dev/zlib1g-dev),
+      # python3 (the bundle script parses cargo metadata with it), file(1) for
+      # rpmbuild's ELF dependency generators and rpm-build itself.
       - name: Install build dependencies
         run: >
-          dnf install -y gcc python3 file rpm-build pkgconf-pkg-config
+          dnf install -y gcc python3 file rpm-build openssl-devel zlib-devel
+          pkgconf-pkg-config
           fontconfig-devel libX11-devel libxcb-devel libXrender-devel
           libXrandr-devel libxkbcommon-devel libxkbcommon-x11-devel
           libXi-devel libXcursor-devel libXinerama-devel glib2-devel
