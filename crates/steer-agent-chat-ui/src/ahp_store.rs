@@ -63,6 +63,9 @@ pub struct ChannelBook {
     pub ext: HashMap<String, XManoxState>,
     /// Metrics channel URI → aggregated Q face.
     pub metrics: HashMap<String, ConversationMetrics>,
+    /// Annotations channel state by session id (`ahp-session:/<id>/
+    /// annotations`), folded with the SDK reducer.
+    pub annotations: std::collections::HashMap<String, ahp_types::state::AnnotationsState>,
     /// Connection-level catalogue channels (`x-manox-workspaces://`,
     /// `x-manox-commands://`): their baseline state is an open payload the
     /// XManoxState fold has no slots for, so it is kept verbatim.
@@ -98,6 +101,7 @@ impl Default for ChannelBook {
             chats: HashMap::new(),
             ext: HashMap::new(),
             metrics: HashMap::new(),
+            annotations: HashMap::new(),
             catalogues: HashMap::new(),
             chat_snapshots: HashSet::new(),
             server_seq: 0,
@@ -149,6 +153,20 @@ impl ChannelBook {
             // action is tolerated rather than folded. MCP / changeset channels
             // are host-managed state the desktop reads through its own
             // surfaces, not client folds.
+            // Annotations fold with the SDK reducer: the channel's state
+            // is the durable user notes (durable, cross-client), and this
+            // book is what the notes card reads.
+            Channel::Annotations(id) => {
+                let state = self.annotations.entry(id).or_insert_with(|| {
+                    ahp_types::state::AnnotationsState {
+                        annotations: Vec::new(),
+                    }
+                });
+                matches!(
+                    ahp::reducers::apply_action_to_annotations(state, action),
+                    ReduceOutcome::Applied
+                )
+            }
             Channel::Terminal(_)
             | Channel::Extension(_)
             | Channel::Mcp(_)
@@ -554,6 +572,43 @@ impl AhpStore {
     /// store row (what `listSessions` serves) lands with the first
     /// persistence, which can lag a whole turn. The host's summary upserts
     /// over the placeholder (`seed_summaries` keys by id).
+    /// The session's unresolved annotation cards as (kind, text) render
+    /// pairs — the annotations channel's read face for the transcript
+    /// rebuild. Kinds ride `_meta["x-manox"]["uiNoteKind"]`; an annotation
+    /// without one reads as a plain notice.
+    pub fn annotation_cards(&self, session_id: &str) -> Vec<(String, String)> {
+        let Some(state) = self.book.annotations.get(session_id) else {
+            return Vec::new();
+        };
+        state
+            .annotations
+            .iter()
+            .filter(|annotation| !annotation.resolved)
+            .map(|annotation| {
+                let kind = annotation
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("x-manox"))
+                    .and_then(|x| x.get("uiNoteKind"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("notice")
+                    .to_string();
+                let text = annotation
+                    .entries
+                    .iter()
+                    .map(|entry| match &entry.text {
+                        ahp_types::common::StringOrMarkdown::Plain(text) => text.clone(),
+                        ahp_types::common::StringOrMarkdown::Markdown { markdown } => {
+                            markdown.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (kind, text)
+            })
+            .collect()
+    }
+
     pub fn seed_local_summary(&mut self, session_id: &str, title: &str) -> bool {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.book.seed_summaries(vec![SessionSummary {
