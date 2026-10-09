@@ -330,6 +330,58 @@ pub fn pi_wire_text_color(api: &str, theme: &gpui_component::Theme) -> gpui::Hsl
 }
 
 impl ContextRail {
+    /// The session's uncommitted footprint (AHP 1.0 `ChatState.changes`):
+    /// touched-file count and `+added -removed` line totals, the same
+    /// git-stat vocabulary the confirmation card's preview rows use. Absent
+    /// when the host reported no scan — the section simply does not render,
+    /// which is the honest shape for a directory set with no repository.
+    fn render_changes_section(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
+        let (store, sid) = self.store.as_ref()?;
+        let leaf = leaf_of(&store.read(cx).book, sid);
+        let changes = leaf.change_footprint()?;
+        let files = changes.files?;
+        if files == 0 {
+            return None;
+        }
+        let added = changes
+            .additions
+            .map(|n| format!("+{n}"))
+            .unwrap_or_else(|| "+?".to_string());
+        let removed = changes
+            .deletions
+            .map(|n| format!("-{n}"))
+            .unwrap_or_else(|| "-?".to_string());
+        Some(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(i18n::t("workspace-info-changes")),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .child(
+                            gpui::div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(theme.muted_foreground)
+                                .child(i18n::t_count("workspace-info-changes-files", files)),
+                        )
+                        .child(gpui::div().text_color(theme.success).child(added))
+                        .child(gpui::div().text_color(theme.danger).child(removed)),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub fn new(store: Option<(gpui::Entity<AhpStore>, String)>, cx: &mut App) -> Self {
         Self {
             store,
@@ -548,6 +600,11 @@ impl ContextRail {
             &mut sections,
             &theme,
             rail.render_models_section(expanded.models, &weak, &theme, cx),
+        );
+        push_section(
+            &mut sections,
+            &theme,
+            rail.render_changes_section(&theme, cx),
         );
         push_section(&mut sections, &theme, render_sources_section(&theme));
 

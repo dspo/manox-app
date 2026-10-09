@@ -875,6 +875,11 @@ titlebar-new-window = Open in new window
 # ── Environment info panel ──────────────────────────────────────────────
 
 workspace-env-no-sources = No sources yet
+workspace-info-changes = Changes
+workspace-info-changes-files = { $count ->
+    [one] {$count} file
+   *[other] {$count} files
+}
 
 workspace-env-git-unavailable = git unavailable
 

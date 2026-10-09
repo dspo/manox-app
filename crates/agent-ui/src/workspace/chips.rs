@@ -242,7 +242,7 @@ impl Workspace {
                                                         .after
                                                         .as_ref()
                                                         .or(edit.before.as_ref())
-                                                        .map(|side| side.uri.clone())
+                                                        .map(|side| display_path(&side.uri))
                                                         .unwrap_or_default(),
                                                     added: edit.diff.as_ref().and_then(|d| d.added),
                                                     removed: edit
@@ -1759,4 +1759,21 @@ impl Workspace {
                 .into_any_element(),
         )
     }
+}
+
+/// A file URI lowered to its display path: strips the `file://` scheme and
+/// any host segment, so the card reads `src/main.rs` rather than
+/// `file:///Users/…/src/main.rs`.
+fn display_path(uri: &str) -> String {
+    uri.strip_prefix("file://")
+        .map(|rest| {
+            // `file://host/path` carries an authority; `file:///path` does
+            // not. Strip up to the first `/` after any non-slash host.
+            match rest.find('/') {
+                Some(0) => rest.to_string(),
+                Some(at) => rest[at..].to_string(),
+                None => rest.to_string(),
+            }
+        })
+        .unwrap_or_else(|| uri.to_string())
 }
