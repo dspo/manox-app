@@ -859,6 +859,11 @@ titlebar-new-window = 在新窗口中打开
 # ── 环境信息面板 ──────────────────────────────────────────────────────
 
 workspace-env-no-sources = 暂无来源
+workspace-info-changes = 变更
+workspace-info-changes-files = { $count ->
+    [one] {$count} 个文件
+   *[other] {$count} 个文件
+}
 
 workspace-env-git-unavailable = git 不可用
 

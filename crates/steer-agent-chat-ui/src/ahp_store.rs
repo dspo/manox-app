@@ -1696,6 +1696,15 @@ impl<'a> LeafView<'a> {
             .or_else(|| chat.turns.last().and_then(|t| t.usage.clone()))
     }
 
+    /// AHP 1.0's change footprint (`ChatState.changes`): the session's
+    /// uncommitted footprint as the changeset engine's last scan reported it
+    /// (dspo/manox#880's host half) — file count and line totals for the
+    /// rail's changes section. `None` when the host carried no scan (a
+    /// directory set with no repository).
+    pub fn change_footprint(&self) -> Option<&ahp_types::state::ChangesSummary> {
+        self.chat?.changes.as_ref()
+    }
+
     /// The effective working directory: the config value the host publishes
     /// on every cwd change. AHP's working-directories set is a grant ledger
     /// in grant order — its first entry is the session's creation directory,
