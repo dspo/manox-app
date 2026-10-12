@@ -65,6 +65,10 @@ fn configure(cx: &mut gpui::App) {
     manox_terminal::runtime::set_runtime(manox_agent::runtime::handle().clone());
     manox_terminal::init();
     terminal_ui::init(cx);
+    // GTK bring-up + the glib pump wry's Linux child webviews need; the
+    // shipped app does the same at its init (see steer-webview `linux`).
+    #[cfg(target_os = "linux")]
+    steer_webview::linux::spawn_glib_pump(cx);
     register_fonts(cx);
 
     // The global component-theme choice belongs to the HOST (the shipped app
@@ -651,8 +655,9 @@ impl ToolTab for BrowserTab {
     fn on_active(&self, visible: bool, cx: &mut gpui::App, store: &TabStore) {
         // The wry subview is an OS-level child window: without hide it
         // floats above every other tab.
-        if let Some(view) = store.get::<BrowserTabView>(&self.id) {
-            let webview = view.read(cx).webview.clone();
+        if let Some(view) = store.get::<BrowserTabView>(&self.id)
+            && let Some(webview) = view.read(cx).webview.clone()
+        {
             webview.update(cx, |w, _| {
                 if visible {
                     w.show();
@@ -665,7 +670,10 @@ impl ToolTab for BrowserTab {
 }
 
 struct BrowserTabView {
-    webview: Entity<steer_webview::webview::WebView>,
+    /// `None` when the platform refused the embed (e.g. a native Wayland gpui
+    /// window — wry parents Linux child webviews through Xlib only); the tab
+    /// then renders the failure in place of the page.
+    webview: Option<Entity<steer_webview::webview::WebView>>,
     address: Entity<gpui_component::input::InputState>,
     #[allow(dead_code)] // kept for future page-title mirroring
     url: String,
@@ -676,11 +684,14 @@ impl BrowserTabView {
         let builder = steer_webview::Builder::new()
             .with_webview_id("chrome-shell-browser")
             .trust_mode(steer_webview::TrustMode::Untrusted);
-        let wry = builder
-            .apply(|b| b.with_url(url))
-            .build_as_child(window)
-            .expect("steer-webview: build_as_child failed");
-        let webview = cx.new(|cx| steer_webview::webview::WebView::new(wry, window, cx));
+        let wry = builder.apply(|b| b.with_url(url)).build_as_child(window);
+        let webview = match wry {
+            Ok(wry) => Some(cx.new(|cx| steer_webview::webview::WebView::new(wry, window, cx))),
+            Err(e) => {
+                eprintln!("shell example: embedded webview build failed: {e} ({url})");
+                None
+            }
+        };
         let address =
             cx.new(|cx| gpui_component::input::InputState::new(window, cx).placeholder("https://"));
         address.update(cx, |s, cx| s.set_value(url, window, cx));
@@ -707,7 +718,9 @@ impl BrowserTabView {
 
     fn load_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.url = url.to_string();
-        self.webview.update(cx, |w, _| w.load_url(url));
+        if let Some(webview) = &self.webview {
+            webview.update(cx, |w, _| w.load_url(url));
+        }
         self.address
             .update(cx, |s, cx| s.set_value(url, window, cx));
         cx.notify();
@@ -786,7 +799,21 @@ impl Render for BrowserTabView {
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme::BORDER)
-                    .child(webview),
+                    .children(webview)
+                    .children((self.webview.is_none()).then(|| {
+                        div()
+                            .id("browser-build-error")
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(theme::FG_FAINT)
+                                    .child(steer_i18n::t("browser-webview-unavailable")),
+                            )
+                    })),
             )
     }
 }

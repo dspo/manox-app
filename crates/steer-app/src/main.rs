@@ -30,7 +30,70 @@ const MIN_WINDOW_W: f32 = 860.0;
 /// footer hairline, with breathing room.
 const MIN_WINDOW_H: f32 = 520.0;
 
+/// Prefer an XWayland (X11) gpui backend when a Wayland session also exposes
+/// `DISPLAY`. wry's Linux child webviews parent only through an Xlib window
+/// handle — a native Wayland gpui window cannot host the embedded browser, so
+/// every browser tab / `web_explore_*` surface would degrade. XWayland keeps
+/// the whole feature set working; `STEER_FORCE_WAYLAND=1` opts back into the
+/// native Wayland backend (browser tabs then render an error card instead of
+/// embedding).
+///
+/// XWayland sessions additionally hide the hardware Vulkan ICDs (unless
+/// `STEER_XWAYLAND_VULKAN=1`): some stacks deadlock in the Vulkan X11 WSI —
+/// on Fedora 44 (mutter 50.4 / XWayland 24.1.13 / ANV) `AcquireNextImageKHR`
+/// blocks forever in `wsi_drm_wait_for_explicit_sync_release`, freezing any
+/// actively repainting window within seconds. With no Vulkan driver visible,
+/// gpui's wgpu context selects the Mesa GL adapter, which has no Vulkan
+/// swapchain and sidesteps the deadlock. An explicit `VK_ICD_FILENAMES` /
+/// `VK_DRIVER_FILES` / `VK_LOADER_DRIVERS_SELECT` from the user wins over
+/// this default. Runs before `application()` reads the environment, and
+/// before any other thread exists (same phase justification as the env
+/// writes below).
+#[cfg(target_os = "linux")]
+fn prefer_xwayland_for_embedded_webview() {
+    let forced_wayland = std::env::var_os("STEER_FORCE_WAYLAND").is_some_and(|v| v == "1");
+    let on_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    let has_x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+    if on_wayland && has_x11 && !forced_wayland {
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+        let keep_vulkan = std::env::var_os("STEER_XWAYLAND_VULKAN").is_some_and(|v| v == "1");
+        let loader_pinned = [
+            "VK_ICD_FILENAMES",
+            "VK_DRIVER_FILES",
+            "VK_LOADER_DRIVERS_SELECT",
+        ]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+        if !keep_vulkan && !loader_pinned {
+            unsafe { std::env::set_var("VK_LOADER_DRIVERS_DISABLE", "*") };
+        }
+    }
+}
+
+/// Durable per-user directory for the panic log.
+#[cfg(target_os = "macos")]
+fn panic_log_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(|home| std::path::Path::new(&home).join("Library/Logs/Steer"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steer-panic"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn panic_log_dir() -> std::path::PathBuf {
+    if let Some(state) = std::env::var_os("XDG_STATE_HOME")
+        && !state.is_empty()
+    {
+        return std::path::Path::new(&state).join("steer");
+    }
+    std::env::var_os("HOME")
+        .map(|home| std::path::Path::new(&home).join(".local/state/steer"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steer-panic"))
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    prefer_xwayland_for_embedded_webview();
+
     // Install a panic hook before anything else so a panic anywhere — main
     // thread, gpui foreground task, or a detached tokio worker — surfaces with
     // location and a forced backtrace. Without this a panic in a spawned task
@@ -64,18 +127,18 @@ fn main() {
         tracing::error!("{msg}");
         // Persist every panic to a durable log: launchd swallows stderr, so a
         // panicking process would otherwise leave no record for diagnosis.
-        if let Some(home) = std::env::var_os("HOME") {
-            let dir = std::path::Path::new(&home).join("Library/Logs/Steer");
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dir.join("panic.log"))
-                .and_then(|mut f| {
-                    use std::io::Write as _;
-                    writeln!(f, "{msg}")
-                });
-        }
+        // Platform log homes: macOS `~/Library/Logs/Steer`, elsewhere the
+        // XDG state dir (`$XDG_STATE_HOME` or `~/.local/state`) + `/steer`.
+        let dir = panic_log_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("panic.log"))
+            .and_then(|mut f| {
+                use std::io::Write as _;
+                writeln!(f, "{msg}")
+            });
     }));
 
     tracing_subscriber::fmt()
@@ -117,6 +180,10 @@ fn main() {
         agent_ui::slash_command::init(cx);
         manox_terminal::init();
         terminal_ui::init(cx);
+        // GTK bring-up + the glib pump that wry's Linux child webviews need
+        // (webkit widgets live on this thread; see steer-webview `linux`).
+        #[cfg(target_os = "linux")]
+        steer_webview::linux::spawn_glib_pump(cx);
 
         // Embedded OFL typefaces. Lilex ships only Light/Medium in upright and
         // italic cuts: message body inherits Light, markdown bold/headings and

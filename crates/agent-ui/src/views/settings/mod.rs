@@ -20,9 +20,15 @@ use manox_agent::settings as user_settings;
 
 use crate::views::plugin_manager::PluginManagerView;
 
+// The external-tool panels drive macOS app launches (ChatGPT.app / VS Code
+// app bundles via osascript); on other platforms the actions can never
+// succeed, so the panels and their nav group stay mac-only instead of
+// dead-ending in error notifications.
+#[cfg(target_os = "macos")]
 mod chatgpt;
 mod models;
 mod panels;
+#[cfg(target_os = "macos")]
 mod vscode;
 
 /// Sidebar width the upstream `Settings` shell starts at; the user can drag
@@ -49,9 +55,11 @@ pub struct SettingsView {
     models_panel: models::ModelsPanelState,
     /// Form state for the `chatgpt_app:` section of `cx.providers.config.yaml`,
     /// seeded from the file when the Settings view is created.
+    #[cfg(target_os = "macos")]
     chatgpt_panel: chatgpt::ChatGptPanelState,
     /// Form state for the `vscode_app:` section of `cx.providers.config.yaml`,
     /// seeded from the file when the Settings view is created.
+    #[cfg(target_os = "macos")]
     vscode_panel: vscode::VsCodePanelState,
     /// Server names switched off by the user; persisted to `settings.toml`
     /// on toggle (`manox_agent::settings::set_mcp_disabled`). Seeded from settings
@@ -84,7 +92,9 @@ impl SettingsView {
             mcp_servers: mcp_server_names(),
             ui_language: steer_i18n::load_ui_language(),
             models_panel: models::ModelsPanelState::load(window, cx),
+            #[cfg(target_os = "macos")]
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
+            #[cfg(target_os = "macos")]
             vscode_panel: vscode::VsCodePanelState::load(window, cx),
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
         }
@@ -336,6 +346,9 @@ fn build_pages(
                 |view, _cx| view.plugins.clone().into_any_element(),
             ))
             .group(mcp_group(view, mcp_servers, mcp_disabled)),
+        // macOS only — the two external-tool panels drive .app launches
+        // that cannot exist elsewhere (see the module gates above).
+        #[cfg(target_os = "macos")]
         SettingPage::new(i18n::t("settings-group-external-tools"))
             .icon(IconName::Bot)
             .default_open(true)

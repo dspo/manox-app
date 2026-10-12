@@ -25,5 +25,9 @@ rfd.workspace = true
 arboard.workspace = true
 open.workspace = true
 
+# GTK bring-up + glib pump for wry's Linux child webviews (`linux` module).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk.workspace = true
+
 [lints.clippy]
 dbg_macro = "deny"

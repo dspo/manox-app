@@ -897,6 +897,12 @@ inbound 写入请求桥 —— 页面没有 Tauri 命令面。进程级桥在构
 - **Read hint** —— `read_text` / `read_dom` / `screenshot` / `eval_script` 从 `https://` 源取到内容后
   显示的一行弱化提示，表明登录态页面内容已暴露给 agent。
 
+构建永不 panic：平台拒绝嵌入时（Linux 原生 Wayland 窗口 —— wry 的 Linux 子 webview 只能经
+Xlib 句柄挂载）视图退化为一条居中错误卡（`browser-webview-unavailable`），tab 不注册进
+`browser_views` / 宿主路由，`open_browser_tab` 返回 `None` 并弹错误通知，agent 侧 `open_tab`
+收到干净的 tool 错误。steer-app 在 Linux 上检测到 Wayland 会话同时存在 `DISPLAY` 时默认改走
+XWayland（`STEER_FORCE_WAYLAND=1` 可强制原生 Wayland，接受浏览器降级）。
+
 > Source: `crates/agent-ui/src/views/browser_view.rs`
 
 
@@ -926,7 +932,7 @@ Absolute-positioned `TitleBar` overlay (`h(TITLE_BAR_HEIGHT)`, `top_0/left_0`) a
 
 #### SettingsShell
 
-The upstream `gpui_component::setting::Settings` component, mounted below the TitleBar strip. It owns the sidebar (a built-in search input on top of a grouped, collapsible `SidebarMenu`), the resizable split (starts at 240px, draggable) and the per-page group stack (virtualized list + scrollbar). Three pages mirror the former nav groups: **General** (the language group — a `Fill` card whose single row is the UI-language dropdown — plus the Models panel group), **Integrations** (Plugins + MCP), **External Tools** (ChatGPT.app + VS Code). Group titles double as the sidebar's sub-items; clicking one selects the page and scrolls to the group. Search filters groups by item title/description/keywords. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface), each with English keywords so search reaches them. MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself.
+The upstream `gpui_component::setting::Settings` component, mounted below the TitleBar strip. It owns the sidebar (a built-in search input on top of a grouped, collapsible `SidebarMenu`), the resizable split (starts at 240px, draggable) and the per-page group stack (virtualized list + scrollbar). Three pages mirror the former nav groups: **General** (the language group — a `Fill` card whose single row is the UI-language dropdown — plus the Models panel group), **Integrations** (Plugins + MCP), **External Tools** (ChatGPT.app + VS Code — macOS only: the panels drive `.app` bundle launches that cannot exist elsewhere, so the whole page is cfg'd out on non-macOS). Group titles double as the sidebar's sub-items; clicking one selects the page and scrolls to the group. Search filters groups by item title/description/keywords. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface), each with English keywords so search reaches them. MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself.
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
