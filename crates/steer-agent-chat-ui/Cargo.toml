@@ -44,6 +44,7 @@ manox-harness.workspace = true
 ahp.workspace = true
 ahp-types.workspace = true
 manox-ahp.workspace = true
+manox-terminal.workspace = true
 manox-ahp-runtime.workspace = true
 manox-session-core.workspace = true
 

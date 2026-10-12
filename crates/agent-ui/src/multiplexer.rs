@@ -151,6 +151,9 @@ impl SessionMultiplexer {
         self.unread.remove(session_id);
         if self.focused.as_deref() == Some(session_id) {
             self.focused = None;
+            // The bridge's focus mirror follows every clear site — a dock
+            // spawn after this park must not claim the detached session.
+            steer_agent_chat_ui::terminal_bridge::set_focused_session(None);
         }
         let uri = session_uri(session_id);
         self.unsubscribe_queue.push(uri);
@@ -160,6 +163,10 @@ impl SessionMultiplexer {
     pub fn set_focused(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
         let changed = self.focused.as_deref() != session_id;
         self.focused = session_id.map(str::to_string);
+        // The terminal bridge claims the foreground session for dock
+        // terminals (the host derives ownership and the default cwd from
+        // the claim).
+        steer_agent_chat_ui::terminal_bridge::set_focused_session(self.focused.clone());
         if let Some(id) = session_id
             && self.unread.remove(id).is_some()
         {
