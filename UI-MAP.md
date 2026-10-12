@@ -25,7 +25,7 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
 | 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
-| Settings | 主区卡内的 nav｜panel 换位（`Workspace::render_settings_card`） |
+| Settings | 主区卡内换页：上游 `gpui_component::setting::Settings` 壳（`Workspace::render_settings_card`） |
 
 共享状态层不变：`agent-ui`（multiplexer / client_store / browser_host / dispatch / 侧栏投影 /
 slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与消息管线）、`terminal-ui`、
@@ -139,7 +139,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Settings
 
-- [SettingsView](#settingsview) · [SettingsTitleBar](#settingstitlebar) · [SettingsLeftNav](#settingsleftnav) · [SettingsSearchInput](#settingssearchinput) · [SettingsGroupList](#settingsgrouplist) · [SettingsGroup](#settingsgroup) · [SettingsItem](#settingsitem) · [SettingsRightPane](#settingsrightpane) · [SettingsPanel](#settingspanel) · [SettingsModelsPanel](#settingsmodelspanel) · [SettingsChatGptAppPanel](#settingschatgptapppanel) · [SettingsSectionCard](#settingssectioncard) · [SettingsRow](#settingsrow) · [SettingsSectionHeader](#settingssectionheader) · [SettingsHairline](#settingshairline)
+- [SettingsView](#settingsview) · [SettingsTitleBar](#settingstitlebar) · [SettingsShell](#settingsshell) · [SettingsModelsPanel](#settingsmodelspanel) · [SettingsChatGptAppPanel](#settingschatgptapppanel) · [SettingsSectionCard](#settingssectioncard) · [SettingsRow](#settingsrow) · [SettingsSectionHeader](#settingssectionheader) · [SettingsHairline](#settingshairline)
 
 ### Terminal
 
@@ -832,69 +832,33 @@ inbound 写入请求桥 —— 页面没有 Tauri 命令面。进程级桥在构
 
 ## 4. ViewMode::Settings
 
-Settings page rendered inside the shell's main card (`SettingsLeftNav | divider | main`, the nav
-column fixed at 240px), swapping the conversation column until the back control exits. The exit
-waits 200ms before flipping the mode back.
+Settings page rendered inside the shell's main card as the upstream `gpui_component::setting::Settings`
+shell (its own sidebar + resizable split + page stack, starting at 240px), swapping the conversation
+column until the back control exits. The exit waits 200ms before flipping the mode back.
 
 #### ManagementBackControl
 
-Unified "back to app" control — `ArrowLeft` + label row (px_2/py_1p5/gap_2, accent hover wash, `theme.radius`). Mounted as the first row of the [SettingsLeftNav](#settingsleftnav) pinned top slot (above the search input and group list) so the back affordance reads as a peer of the sidebar menu items, not an isolated button. The settings page no longer ships a shared management TitleBar — each management surface reuses the app-page scaffold (sidebar + overlay TitleBar in the main column), and the back control lives in the sidebar.
+Unified "back to app" control — `ArrowLeft` + label row (px_2/py_1p5/gap_2, accent hover wash, `theme.radius`). Mounted at the left edge of the [SettingsTitleBar](#settingstitlebar) strip, over the settings sidebar column. The settings page no longer ships a shared management TitleBar — each management surface reuses the app-page scaffold (overlay TitleBar in the main column), and the back control lives in that strip.
 
 > Source: `crates/agent-ui/src/views/management_shell.rs`
 
 #### SettingsView
 
-Settings page state + renderers. `render_nav` produces the sidebar slot element and `render_main` the main-column element; the Workspace mounts both into the shared shell. Holds the sidebar `width` (synced from `Workspace::sidebar_width` by the divider drag, and seeded on entry) so the settings sidebar resizes exactly like the app sidebar. The main column is a relative `v_flex` with an absolute [SettingsTitleBar](#settingstitlebar) overlay on top and [SettingsRightPane](#settingsrightpane) content below `pt(TITLE_BAR_HEIGHT)`.
+Settings page state + page factory. `render` hands `build_pages()` to the upstream `Settings` shell each frame (titles re-resolve through Fluent, so they track the live locale); selection and the search query live in the shell's window-keyed state (stable id `settings`). Holds the panel sub-states — the Models / ChatGPT / VS Code form states, the MCP disabled set, the plugins view — and the persisted `ui_language`, bound to the language dropdown through `SettingField` value/setter closures (persist-then-flip; a failed save emits `SettingsEvent::SaveFailed`, surfaced by the Workspace as a toast).
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsTitleBar
 
-Absolute-positioned `TitleBar` overlay (`h(TITLE_BAR_HEIGHT)`, `top_0/left_0/right_0`) in the settings main column — same chrome as the conversation column's TitleBar. Pure window-drag region: it renders no text (the selected item's identity is carried by each panel's own big page heading, mirroring ChatGPT.app Settings). Carries macOS traffic-light avoidance. No back button — back lives in [SettingsLeftNav](#settingsleftnav).
+Absolute-positioned `TitleBar` overlay (`h(TITLE_BAR_HEIGHT)`, `top_0/left_0`) across the whole settings card — same chrome as the conversation column's TitleBar. A window-drag region that renders no text; the [ManagementBackControl](#managementbackcontrol) sits at its left edge, above the sidebar column.
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
-#### SettingsLeftNav
+#### SettingsShell
 
-Settings sidebar (`bg:background`, right border) rendered at the shared sidebar width; no standalone TitleBar, the macOS traffic-light buttons float over its transparent top (`pt(top_inset)`, 28px on macOS / 8px elsewhere). The back control + search input live in a pinned top slot that never scrolls; only the [SettingsGroupList](#settingsgrouplist) scrolls (`overflow_y_scroll`) beneath them.
-
-> Source: `crates/agent-ui/src/views/settings/mod.rs`
-
-#### SettingsSearchInput
-
-Search/filter input in left nav.
+The upstream `gpui_component::setting::Settings` component, mounted below the TitleBar strip. It owns the sidebar (a built-in search input on top of a grouped, collapsible `SidebarMenu`), the resizable split (starts at 240px, draggable) and the per-page group stack (virtualized list + scrollbar). Three pages mirror the former nav groups: **General** (the language group — a `Fill` card whose single row is the UI-language dropdown — plus the Models panel group), **Integrations** (Plugins + MCP), **External Tools** (ChatGPT.app + VS Code). Group titles double as the sidebar's sub-items; clicking one selects the page and scrolls to the group. Search filters groups by item title/description/keywords. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface), each with English keywords so search reaches them. MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself.
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
-
-#### SettingsGroupList
-
-Scrollable list of settings groups with section headers.
-
-> Source: `crates/agent-ui/src/views/settings/mod.rs`
-
-#### SettingsGroup
-
-A labeled group of settings items. Groups: General, Integrations, Coding, External Tools, Archived.
-
-> Source: `crates/agent-ui/src/views/settings/mod.rs`
-
-#### SettingsItem
-
-Single settings row: icon + label, clickable, highlights when selected. An item may carry an optional `custom_icon` (an embedded SVG asset path, e.g. `icons/blocks.svg`) rendered via `Icon::default().path(...)` in preference to the `IconName` (same mechanism as the sidebar's external-session rows); the General → Models item (`blocks`) and the External Tools → ChatGPT.app / VS Code items use it.
-
-> Source: `crates/agent-ui/src/views/settings/mod.rs`
-
-#### SettingsRightPane
-
-Right content area, dispatches to panel renderers. Each panel/content view owns its own scroll and padding.
-
-> Source: `crates/agent-ui/src/views/settings/mod.rs`
-
-#### SettingsPanel
-
-A specific settings panel rendered in the right pane. Implemented panels: General, Config, Models (the cx provider config editor, see [SettingsModelsPanel](#settingsmodelspanel)), Personalization, Environment, ChatGPT.app (External Tools, see [SettingsChatGptAppPanel](#settingschatgptapppanel)). Every other left-nav item (Appearance, Pets, Keyboard, Snapshots, Plugins, Browser, Computer, Hooks, …) renders the shared "Coming soon" placeholder.
-
-> Source: `crates/agent-ui/src/views/settings/panels.rs`
 
 #### SettingsModelsPanel
 
@@ -936,8 +900,7 @@ Small bold label for a subsection.
 
 ## 5. PluginManager (in Settings)
 
-The plugin/skill management UI (PluginManagerView, tab bar, marketplace/plugin/skill cards) was retired with the manox harness. The Settings → Plugins item remains in the left nav and renders the shared "Coming soon" placeholder; the backend registry (`manox_agent::plugin::PluginManager`) stays in the agent crate. MCP server management has its own panel: Settings → MCP servers lists the merged config (mcp.toml + plugin declarations) with live connection state and persistent per-server switches (`[mcp] disabled` in settings.toml, applied on next launch).
-Plugin management lives under Settings → Plugins (`PluginManagerView`): a Marketplace tab (add/refresh/remove marketplaces, browse + install their plugins) and a Plugin tab (installed set with update/enable/disable/uninstall), all async with a busy spinner + notice banner; registry changes apply on restart (notice texts say so). Skill authoring and mcp.toml server authoring tabs from the retired harness are not ported yet (need shared-layer write APIs).
+Plugin management lives under Settings → Plugins (`PluginManagerView`): a Marketplace tab (add/refresh/remove marketplaces, browse + install their plugins) and a Plugin tab (installed set with update/enable/disable/uninstall), all async with a busy spinner + notice banner; registry changes apply on restart (notice texts say so). Skill authoring and mcp.toml server authoring tabs from the retired harness are not ported yet (need shared-layer write APIs). The backend registry (`manox_agent::plugin::PluginManager`) stays in the agent crate.
 ---
 
 ## 6. 壳（Shell）

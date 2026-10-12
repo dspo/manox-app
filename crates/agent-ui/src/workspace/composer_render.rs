@@ -577,12 +577,7 @@ impl Workspace {
                         (true, true) => "plan-mode-on-notice",
                         _ => "plan-mode-off-notice",
                     };
-                    this.add_info_message(
-                        i18n::t(key).to_string(),
-                        NoticeAnchor::TurnEnd,
-                        None,
-                        cx,
-                    );
+                    this.add_info_message(i18n::t(key).to_string(), cx);
                 }))
                 .child(
                     Icon::new(IconName::LayoutDashboard)

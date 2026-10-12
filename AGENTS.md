@@ -79,6 +79,10 @@ cargo fmt --all
 
 Rust **1.95.0**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单）。
 
+### Release（tag 触发）
+
+push 语义化版本 tag（`vMAJOR.MINOR.PATCH[-PRERELEASE]`）触发 `.github/workflows/release.yml`：三路构建并发布 GitHub Release——macOS arm64（`script/bundle-mac` 产 ad-hoc 签名的 Steer.app 后 zip）、deb amd64（`script/bundle-deb`）、rpm x86_64（`script/bundle-rpm`，在 fedora 容器内构建 + `dnf` 冒烟安装）；tag 版本必须等于 `[workspace.package].version`（bundle 脚本以它为唯一版本源，发版前先 bump 再打 tag）。`workflow_dispatch` 可在任意分支跑同一管线做纯构建验证（不发布）。制品内均含 steer 与 cx 双 bin。
+
 ### 出 UI 图（chrome 壳）
 
 UI 静态图**从真实渲染出**，不要另画一套：`crates/steer-agent-chrome-ui/tests/visual.rs`
