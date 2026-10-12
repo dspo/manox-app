@@ -193,39 +193,11 @@ settings-group-general = 通用
 
 settings-item-general = 常规
 
-settings-item-appearance = 外观
-
-settings-item-config = 配置
-
 settings-item-models = 模型
-
-settings-item-personalization = 个性化
-
-settings-item-pets = 宠物
-
-settings-item-keyboard = 键盘快捷键
 
 settings-group-integrations = 集成
 
-settings-item-snapshots = 应用快照
-
 settings-item-plugins = 插件
-
-settings-item-browser = 浏览器
-
-settings-item-computer = 电脑操控
-
-settings-group-coding = 编码
-
-settings-item-hooks = 钩子
-
-settings-item-connections = 连接
-
-settings-item-git = Git
-
-settings-item-environment = 环境
-
-settings-item-worktrees = 工作树
 
 settings-group-external-tools = 外部工具
 
@@ -233,55 +205,13 @@ settings-item-chatgpt-app = ChatGPT.app
 
 settings-item-vscode-app = Visual Studio Code.app
 
-settings-group-archived = 已归档
-
-settings-item-archived = 已归档对话
-
-settings-item-chat-settings = 聊天设置
-
 settings-search-placeholder = 搜索设置…
 
 settings-back = 返回应用
 
-settings-coming-soon = Coming soon…
-
-settings-coming-soon-label = Coming soon… {$label}
-
 ### views/settings.rs — 常规面板
 
-settings-section-work-mode = 工作模式
-
-settings-desc-work-mode = 选择 steer 显示多少技术细节
-
-settings-row-work-mode-programming = 适用于编程
-
-settings-desc-work-mode-programming = 更具技术性的回复和控制
-
-settings-row-work-mode-workday = 适用于日常工作
-
-settings-desc-work-mode-workday = 同样强大，技术细节更少
-
-settings-section-permissions = 权限
-
-settings-row-permission-readonly = 只读
-
-settings-desc-permission-readonly = bash 可运行但不可写文件（网络不受限）；读取对整个文件系统保持开放。适合审查与调研场景。
-
-settings-row-permission-workspaceread = 工作区访问
-
-settings-desc-permission-workspaceread = steer 可以在工作区内写入文件并运行沙箱内的 shell 命令；工作区之外的写入会被拒绝。
-
-settings-row-permission-dangerfullaccess = 完全访问
-
-settings-desc-permission-dangerfullaccess = steer 可以不受限制地编辑你电脑上的任何文件，并在沙箱外运行命令。这会显著增加数据丢失、泄露或意外行为的风险。
-
-settings-link-learn-more = 了解更多
-
 settings-section-general-misc = 常规
-
-settings-row-file-target = 默认文件打开目标
-
-settings-desc-file-target = 默认打开文件和文件夹的位置
 
 settings-row-ui-language = 用户界面语言
 
@@ -371,153 +301,7 @@ settings-vscode-models-empty-anthropic = 未找到可注入的模型（需要支
 
 settings-vscode-models-empty-responses = 未找到可注入的模型（需要支持 Responses 的端点）。
 
-settings-row-menu-bar = 在菜单栏中显示
-
-settings-desc-menu-bar = 关闭窗口后，仍在 macOS 菜单栏中保留 steer
-
-settings-row-bottom-panel = 底部面板
-
-settings-desc-bottom-panel = 在应用标题栏中显示底部面板控件
-
-settings-row-terminal-location = 默认终端位置
-
-settings-desc-terminal-location = 选择终端快捷键和环境操作在何处打开终端标签页
-
-settings-row-keep-awake = 运行时防止休眠
-
-settings-desc-keep-awake = 在 steer 运行聊天时，保持电脑唤醒
-
-settings-row-code-review = 代码审查
-
-settings-desc-code-review = 尽可能在当前对话中启动 /review，或发起单独的审查对话
-
-settings-row-import = 从其他 AI 应用导入工作内容
-
-settings-desc-import = 导入您的设置、项目和最近聊天记录
-
-settings-row-licenses = 打开源许可证
-
-settings-desc-licenses = 捆绑依赖项的第三方声明
-
-settings-btn-import = 导入
-
-settings-btn-view = 查看
-
-settings-value-vscode = VS Code
-
-settings-value-bottom = 底部
-
-settings-value-right = 右侧
-
-settings-value-inline = 行内视图
-
-settings-value-detached = 分离视图
-
-settings-section-editor = 编辑器
-
-settings-row-send-shortcut = 发送快捷键
-
-settings-desc-send-shortcut = 选择 Enter 何时发送提示或插入新行
-
-settings-value-enter-shift = ⌘ + Enter for multiline prompts
-
-settings-section-pop-up = 弹出窗口
-
-settings-row-pop-up-shortcut = 弹出窗口快捷键
-
-settings-desc-pop-up-shortcut = 为弹出窗口设置全局快捷键。留空则保持关闭
-
-settings-value-disabled = 禁用
-
-settings-value-configured = 设置
-
-settings-btn-set = 设置
-
-settings-row-default-no-project = 默认使用无项目聊天
-
-settings-desc-default-no-project = 无需项目即可开始新聊天
-
-settings-section-dictation = 听写
-
-settings-row-microphone = 麦克风
-
-settings-desc-microphone = 用于听写
-
-settings-value-system-default = 系统默认
-
-settings-row-press-dictate = 按住听写快捷键
-
-settings-desc-press-dictate = 在桌面任意位置按住，即可在光标处听写
-
-settings-row-toggle-dictate = 切换听写快捷键
-
-settings-desc-toggle-dictate = 在桌面任意位置按一次开始听写，再按一次停止
-
-settings-row-keep-dictation-bar = 保持听写栏可见
-
-settings-desc-keep-dictation-bar = 听写未激活时显示小型快捷键提醒
-
-settings-value-off = 关闭
-
-settings-value-on = 开启
-
-settings-section-notifications = 通知
-
-settings-row-turn-completion = 轮次完成通知
-
-settings-desc-turn-completion = 设置 steer 完成任任务时的提醒
-
-settings-value-focus-only = 仅当应用失焦时
-
-settings-row-permission-notify = 启用权限通知
-
-settings-desc-permission-notify = 在需要通知权限时显示提醒
-
-settings-row-question-notify = 启用问题通知
-
-settings-desc-question-notify = 需要输入才能继续时显示提醒
-
 ### views/settings.rs — 配置面板
-
-settings-panel-config = 配置
-
-settings-desc-config-top = 配置审批策略和沙盒设置
-
-settings-section-config-toml = 自定义 config.toml 设置
-
-settings-row-config-user = 用户配置
-
-settings-link-open-config = 打开 config.toml
-
-settings-row-config-approval = 批准策略
-
-settings-desc-config-approval = 选择 steer 何时请求批准
-
-settings-value-on-request = 按请求
-
-settings-row-config-sandbox = 沙盒设置
-
-settings-desc-config-sandbox = 选择 steer 的命令执行权限
-
-settings-value-read-only = 只读
-
-settings-section-workspace-deps = 工作空间依赖项
-
-settings-row-config-version = 当前版本
-
-settings-btn-diagnose = 🔍 诊断
-
-settings-desc-config-diagnose = 检查当前捆绑包并记录诊断日志
-
-settings-row-config-builtin-deps = 内置依赖项
-
-settings-desc-config-builtin-deps = 允许 steer 安装并提供随附的 Node.js 和 Python 工具
-
-settings-row-config-reinstall = 重置并安装工作空间
-
-settings-desc-config-reinstall = 删除本地捆绑包，重新下载后重新加载工具
-
-settings-btn-reinstall = 重新安装
 
 ### views/settings.rs — 模型面板
 
@@ -621,49 +405,9 @@ settings-models-err-env-key = Provider「{$name}」：环境变量名不能为�
 
 ### views/settings.rs — 个性化面板
 
-settings-section-personality = 个性
-
-settings-row-personality = 个性
-
-settings-desc-personality = 选择 steer 回复的默认语气
-
-settings-value-friendly = 亲和
-
-settings-section-memory = 记忆
-
-settings-tag-experimental = 实验性
-
-settings-desc-memory = 设置 steer 如何收集、保留和整合记忆
-
-settings-row-memory-enabled = 启用记忆
-
-settings-desc-memory-enabled = 从聊天中生成新记忆，并将其带入新聊天
-
-settings-row-memory-skip-tool = 跳过工具辅助对话
-
-settings-desc-memory-skip-tool = 请勿从使用了 MCP 工具或网页搜索的对话中生成记忆
-
-settings-btn-reset = 重置
-
-settings-row-memory-reset = 重置记忆
-
-settings-desc-memory-reset = 删除所有 steer 记忆
-
 ### views/settings.rs — MCP 面板
 ### views/plugin_manager.rs
 ### views/settings.rs — 环境面板
-
-settings-panel-environment = 环境
-
-settings-desc-environment = 本地环境用于指示 steer 如何为项目设置工作树
-
-settings-section-projects = 选择项目
-
-settings-btn-add-project = 添加项目
-
-settings-tag-saas = saas
-
-settings-tag-dspo = dspo
 
 ### workspace.rs
 
@@ -689,7 +433,6 @@ workspace-ask-supplement-label = 补充说明
 
 workspace-ask-supplement-placeholder = 添加可选补充说明
 
-
 workspace-ask-recommended = 推荐
 
 workspace-ask-plan-review-label = Plan 评审
@@ -703,10 +446,6 @@ workspace-ask-submit = 提交
 workspace-ask-skip = 跳过
 
 workspace-cancel = 取消
-
-
-
-
 
 workspace-mode-readonly-title = 只读
 

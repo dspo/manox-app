@@ -874,7 +874,7 @@ Scrollable list of settings groups with section headers.
 
 #### SettingsGroup
 
-A labeled group of settings items. Groups: General, Integrations, Coding, External Tools, Archived.
+A labeled group of settings items. Groups: General (General, Models), Integrations (Plugins, MCP), External Tools (ChatGPT.app, VS Code).
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
@@ -892,7 +892,7 @@ Right content area, dispatches to panel renderers. Each panel/content view owns 
 
 #### SettingsPanel
 
-A specific settings panel rendered in the right pane. Implemented panels: General, Config, Models (the cx provider config editor, see [SettingsModelsPanel](#settingsmodelspanel)), Personalization, Environment, ChatGPT.app (External Tools, see [SettingsChatGptAppPanel](#settingschatgptapppanel)). Every other left-nav item (Appearance, Pets, Keyboard, Snapshots, Plugins, Browser, Computer, Hooks, …) renders the shared "Coming soon" placeholder.
+A specific settings panel rendered in the right pane. Every nav item owns a panel — no "Coming soon" placeholders. Implemented panels: General (the UI language picker, the one row with a real persistence backend), Models (the cx provider config editor, see [SettingsModelsPanel](#settingsmodelspanel)), Plugins (the PluginManagerView mount), MCP (merged mcp.toml + live server registry with per-server persisted switches), ChatGPT.app and VS Code (External Tools, see [SettingsChatGptAppPanel](#settingschatgptapppanel)).
 
 > Source: `crates/agent-ui/src/views/settings/panels.rs`
 
@@ -936,8 +936,7 @@ Small bold label for a subsection.
 
 ## 5. PluginManager (in Settings)
 
-The plugin/skill management UI (PluginManagerView, tab bar, marketplace/plugin/skill cards) was retired with the manox harness. The Settings → Plugins item remains in the left nav and renders the shared "Coming soon" placeholder; the backend registry (`manox_agent::plugin::PluginManager`) stays in the agent crate. MCP server management has its own panel: Settings → MCP servers lists the merged config (mcp.toml + plugin declarations) with live connection state and persistent per-server switches (`[mcp] disabled` in settings.toml, applied on next launch).
-Plugin management lives under Settings → Plugins (`PluginManagerView`): a Marketplace tab (add/refresh/remove marketplaces, browse + install their plugins) and a Plugin tab (installed set with update/enable/disable/uninstall), all async with a busy spinner + notice banner; registry changes apply on restart (notice texts say so). Skill authoring and mcp.toml server authoring tabs from the retired harness are not ported yet (need shared-layer write APIs).
+Plugin management lives under Settings → Plugins (`PluginManagerView`): a Marketplace tab (add/refresh/remove marketplaces, browse + install their plugins) and a Plugin tab (installed set with update/enable/disable/uninstall), all async with a busy spinner + notice banner; registry changes apply on restart (notice texts say so). Skill authoring and mcp.toml server authoring tabs from the retired harness are not ported yet (need shared-layer write APIs). The backend registry (`manox_agent::plugin::PluginManager`) stays in the agent crate.
 ---
 
 ## 6. 壳（Shell）

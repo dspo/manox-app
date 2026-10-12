@@ -2,10 +2,8 @@
 //! preferences window. Mounts inline over the Workspace via
 //! `Workspace::view_mode`; clicks on sidebar items update a local
 //! `selected` highlight and the right pane dispatches to one of the shipped
-//! panels (General / Config / Models / Personalization / MCP /
-//! Environment / External Tools → ChatGPT.app). Items with no matching panel
-//! fall back to a "Coming soon…"
-//! placeholder, matching the pre-panels behavior.
+//! panels (General / Models / Plugins / MCP / External Tools → ChatGPT.app,
+//! VS Code).
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, Entity, EventEmitter, Pixels, SharedString,
@@ -18,7 +16,7 @@ use gpui_component::{
 };
 
 use crate::i18n;
-use manox_agent::{settings as user_settings, thread::PermissionMode};
+use manox_agent::settings as user_settings;
 
 use crate::views::management_shell::back_control;
 use crate::views::plugin_manager::PluginManagerView;
@@ -55,33 +53,15 @@ const GROUPS: &[SettingsGroup] = &[
         title: "settings-group-general",
         items: &[
             SettingsItem::new(IconName::Settings, "settings-item-general", None),
-            SettingsItem::new(IconName::Sun, "settings-item-appearance", None),
-            SettingsItem::new(IconName::Cpu, "settings-item-config", None),
             SettingsItem::new(IconName::MemoryStick, "settings-item-models", None)
                 .with_custom_icon("icons/blocks.svg"),
-            SettingsItem::new(IconName::Star, "settings-item-personalization", None),
-            SettingsItem::new(IconName::Heart, "settings-item-pets", None),
-            SettingsItem::new(IconName::Frame, "settings-item-keyboard", None),
         ],
     },
     SettingsGroup {
         title: "settings-group-integrations",
         items: &[
-            SettingsItem::new(IconName::Bot, "settings-item-snapshots", None),
             SettingsItem::new(IconName::Frame, "settings-item-plugins", None),
             SettingsItem::new(IconName::ChartPie, "settings-item-mcp", None),
-            SettingsItem::new(IconName::Globe, "settings-item-browser", None),
-            SettingsItem::new(IconName::Ellipsis, "settings-item-computer", None),
-        ],
-    },
-    SettingsGroup {
-        title: "settings-group-coding",
-        items: &[
-            SettingsItem::new(IconName::Asterisk, "settings-item-hooks", None),
-            SettingsItem::new(IconName::Ellipsis, "settings-item-connections", None),
-            SettingsItem::new(IconName::Github, "settings-item-git", None),
-            SettingsItem::new(IconName::Folder, "settings-item-environment", None),
-            SettingsItem::new(IconName::FolderOpen, "settings-item-worktrees", None),
         ],
     },
     SettingsGroup {
@@ -91,17 +71,6 @@ const GROUPS: &[SettingsGroup] = &[
                 .with_custom_icon("icons/chatgpt.svg"),
             SettingsItem::new(IconName::Bot, "settings-item-vscode-app", None)
                 .with_custom_icon("icons/vscode.svg"),
-        ],
-    },
-    SettingsGroup {
-        title: "settings-group-archived",
-        items: &[
-            SettingsItem::new(IconName::Inbox, "settings-item-archived", None),
-            SettingsItem::new(
-                IconName::Map,
-                "settings-item-chat-settings",
-                Some(IconName::ExternalLink),
-            ),
         ],
     },
 ];
@@ -123,44 +92,6 @@ impl SettingsItem {
     }
 }
 
-/// Work mode preference in the General panel. Two-card selector for the
-/// "For Programming / For Daily Work" pair. Persisted to
-/// `Settings` only conceptually — the field is read by the panel on render
-/// and any in-memory edit stays local until a follow-up wires it through.
-#[derive(Clone, Copy, PartialEq, Default)]
-pub enum WorkMode {
-    #[default]
-    Programming,
-    Workday,
-}
-
-/// A mocked project entry in the Environment panel. The `tag` renders as a
-/// pill next to the project name (e.g. "saas" or "dspo"). Real project data
-/// is not yet modeled, so all entries are static placeholders.
-pub struct MockProject {
-    pub name: &'static str,
-    pub tag: Option<&'static str>,
-}
-
-const MOCK_PROJECTS: &[MockProject] = &[
-    MockProject {
-        name: "cvat",
-        tag: None,
-    },
-    MockProject {
-        name: "floraldet-training",
-        tag: Some("saas"),
-    },
-    MockProject {
-        name: "cx",
-        tag: Some("dspo"),
-    },
-    MockProject {
-        name: "huaji-skm",
-        tag: Some("saas"),
-    },
-];
-
 pub struct SettingsView {
     search: Entity<InputState>,
 
@@ -181,31 +112,7 @@ pub struct SettingsView {
     click_gen: u64,
 
     // --- General panel state ---
-    work_mode: WorkMode,
-    permission_mode: PermissionMode,
-    file_target: SharedString,
     ui_language: SharedString,
-    show_in_menu_bar: bool,
-    bottom_panel: bool,
-    terminal_location: SharedString,
-    keep_awake: bool,
-    code_review_mode: SharedString,
-    send_shortcut: SharedString,
-    pop_up_shortcut_status: SharedString,
-    default_no_project_chat: bool,
-    microphone: SharedString,
-    press_dictate_status: SharedString,
-    toggle_dictate_status: SharedString,
-    keep_dictation_bar: bool,
-    turn_completion_notify: SharedString,
-    permission_notify: bool,
-    question_notify: bool,
-
-    // --- Config panel state ---
-    config_user_target: SharedString,
-    config_approval_policy: SharedString,
-    config_sandbox: SharedString,
-    config_builtin_deps: bool,
 
     // --- Models panel state ---
     /// Form state for editing `cx.providers.config.yaml`, seeded from the
@@ -222,17 +129,11 @@ pub struct SettingsView {
     /// seeded from the file when the Settings view is created.
     vscode_panel: vscode::VsCodePanelState,
 
-    // --- Personalization panel state ---
-    personality: SharedString,
-    memory_enabled: bool,
-    memory_skip_tool: bool,
     // --- MCP panel state ---
     /// Server names switched off by the user; persisted to `settings.toml`
     /// on toggle (`manox_agent::settings::set_mcp_disabled`). Seeded from settings
     /// at view creation.
     pub(crate) mcp_disabled: std::collections::HashSet<String>,
-    // --- Environment panel state ---
-    // Mock project list is static; no per-view state needed.
 }
 
 #[derive(Clone)]
@@ -251,40 +152,17 @@ impl SettingsView {
             search,
             width,
             plugins: cx.new(|cx| PluginManagerView::new(window, cx)),
-            selected: None,
+            // Every nav item owns a panel now, so the pane starts on the
+            // General page instead of an empty placeholder.
+            selected: Some("settings-item-general".into()),
             click_gen: 0,
-            work_mode: WorkMode::default(),
-            permission_mode: PermissionMode::default(),
-            file_target: i18n::t("settings-value-vscode"),
             // The endonym is fixed per language and never re-localized, so the
             // picker always reads `简体中文` / `English` regardless of the
             // current UI locale.
             ui_language: steer_i18n::load_ui_language().endonym().into(),
-            show_in_menu_bar: true,
-            bottom_panel: true,
-            terminal_location: i18n::t("settings-value-bottom"),
-            keep_awake: true,
-            code_review_mode: i18n::t("settings-value-detached"),
-            send_shortcut: i18n::t("settings-value-enter-shift"),
-            pop_up_shortcut_status: i18n::t("settings-value-disabled"),
-            default_no_project_chat: false,
-            microphone: i18n::t("settings-value-system-default"),
-            press_dictate_status: i18n::t("settings-value-off"),
-            toggle_dictate_status: i18n::t("settings-value-off"),
-            keep_dictation_bar: false,
-            turn_completion_notify: i18n::t("settings-value-focus-only"),
-            permission_notify: true,
-            question_notify: true,
-            config_user_target: i18n::t("settings-value-on"),
-            config_approval_policy: i18n::t("settings-value-on-request"),
-            config_sandbox: i18n::t("settings-value-read-only"),
-            config_builtin_deps: true,
             models_panel: models::ModelsPanelState::load(window, cx),
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
             vscode_panel: vscode::VsCodePanelState::load(window, cx),
-            personality: i18n::t("settings-value-friendly"),
-            memory_enabled: false,
-            memory_skip_tool: false,
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
         }
     }
@@ -520,25 +398,14 @@ impl SettingsView {
 
 impl SettingsView {
     /// Dispatch the right pane based on the currently-selected sidebar item.
-    /// Items without a dedicated panel fall through to a "Coming soon…"
-    /// placeholder so the existing user-facing behavior for un-shipped panels
-    /// (Appearance, Pets, Keyboard, …) is preserved verbatim.
+    /// Every item owns a panel; an unknown key falls back to General.
     fn render_right_pane(
         &mut self,
-        theme: &gpui_component::theme::Theme,
+        _theme: &gpui_component::theme::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let key = self.selected.as_deref();
-        match key {
-            Some("settings-item-general") => panels::render_general(self, cx).into_any_element(),
-            Some("settings-item-config") => panels::render_config(self, cx).into_any_element(),
+        match self.selected.as_deref() {
             Some("settings-item-models") => models::render_models(self, cx).into_any_element(),
-            Some("settings-item-personalization") => {
-                panels::render_personalization(self, cx).into_any_element()
-            }
-            Some("settings-item-environment") => {
-                panels::render_environment(self, cx).into_any_element()
-            }
             Some("settings-item-mcp") => panels::render_mcp(self, cx).into_any_element(),
             Some("settings-item-plugins") => self.plugins.clone().into_any_element(),
             Some("settings-item-chatgpt-app") => {
@@ -547,30 +414,7 @@ impl SettingsView {
             Some("settings-item-vscode-app") => {
                 vscode::render_vscode_app(self, cx).into_any_element()
             }
-            _ => {
-                let coming_label: SharedString = match key {
-                    Some(label) => {
-                        let displayed = i18n::t(label);
-                        i18n::t_str(
-                            "settings-coming-soon-label",
-                            &[("label", displayed.as_ref())],
-                        )
-                    }
-                    None => i18n::t("settings-coming-soon"),
-                };
-                h_flex()
-                    .flex_1()
-                    .h_full()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        gpui::div()
-                            .text_base()
-                            .text_color(theme.muted_foreground)
-                            .child(coming_label),
-                    )
-                    .into_any_element()
-            }
+            _ => panels::render_general(self, cx).into_any_element(),
         }
     }
 }
