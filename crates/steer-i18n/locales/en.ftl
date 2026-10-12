@@ -205,39 +205,11 @@ settings-group-general = General
 
 settings-item-general = General
 
-settings-item-appearance = Appearance
-
-settings-item-config = Configuration
-
 settings-item-models = Models
-
-settings-item-personalization = Personalization
-
-settings-item-pets = Pets
-
-settings-item-keyboard = Keyboard shortcuts
 
 settings-group-integrations = Integrations
 
-settings-item-snapshots = App snapshots
-
 settings-item-plugins = Plugins
-
-settings-item-browser = Browser
-
-settings-item-computer = Computer control
-
-settings-group-coding = Coding
-
-settings-item-hooks = Hooks
-
-settings-item-connections = Connections
-
-settings-item-git = Git
-
-settings-item-environment = Environment
-
-settings-item-worktrees = Worktrees
 
 settings-group-external-tools = External Tools
 
@@ -245,55 +217,13 @@ settings-item-chatgpt-app = ChatGPT.app
 
 settings-item-vscode-app = Visual Studio Code.app
 
-settings-group-archived = Archived
-
-settings-item-archived = Archived chats
-
-settings-item-chat-settings = Chat Settings
-
 settings-search-placeholder = Search settings…
 
 settings-back = Back to app
 
-settings-coming-soon = Coming soon…
-
-settings-coming-soon-label = Coming soon… {$label}
-
 ### views/settings.rs — General panel
 
-settings-section-work-mode = Work mode
-
-settings-desc-work-mode = How much technical detail steer shows
-
-settings-row-work-mode-programming = For programming
-
-settings-desc-work-mode-programming = More technical responses and controls
-
-settings-row-work-mode-workday = For daily work
-
-settings-desc-work-mode-workday = Just as capable, with less technical detail
-
-settings-section-permissions = Permissions
-
-settings-row-permission-readonly = Read Only
-
-settings-desc-permission-readonly = Bash runs but cannot write files (network is unrestricted); reads stay open across the filesystem. Choose this for review and research sessions.
-
-settings-row-permission-workspaceread = Workspace Access
-
-settings-desc-permission-workspaceread = steer can write files inside its workspace and run sandboxed shell commands there. Writes outside the workspace are denied.
-
-settings-row-permission-dangerfullaccess = Full Access
-
-settings-desc-permission-dangerfullaccess = steer can edit any file on your computer and run commands outside the sandbox without restriction. This significantly increases the risk of data loss, leaks, or unintended actions.
-
-settings-link-learn-more = Learn more
-
 settings-section-general-misc = General
-
-settings-row-file-target = Default file open target
-
-settings-desc-file-target = Where files and folders open by default
 
 settings-row-ui-language = User interface language
 
@@ -383,153 +313,7 @@ settings-vscode-models-empty-anthropic = No injectable models found (needs an An
 
 settings-vscode-models-empty-responses = No injectable models found (needs a Responses-capable endpoint).
 
-settings-row-menu-bar = Show in menu bar
-
-settings-desc-menu-bar = Keep steer in the macOS menu bar after the main window closes
-
-settings-row-bottom-panel = Bottom panel
-
-settings-desc-bottom-panel = Show bottom panel controls in the application title bar
-
-settings-row-terminal-location = Default terminal location
-
-settings-desc-terminal-location = Choose where terminal shortcut and environment actions open the terminal tab
-
-settings-row-keep-awake = Prevent sleep while running
-
-settings-desc-keep-awake = Keep your computer awake while steer is running a chat
-
-settings-row-code-review = Code review
-
-settings-desc-code-review = Start /review in the current chat whenever possible, or open a dedicated review chat
-
-settings-row-import = Import work from other AI apps
-
-settings-desc-import = Import your settings, projects, and recent chats
-
-settings-row-licenses = View open-source licenses
-
-settings-desc-licenses = Third-party notices for bundled dependencies
-
-settings-btn-import = Import
-
-settings-btn-view = View
-
-settings-value-vscode = VS Code
-
-settings-value-bottom = Bottom
-
-settings-value-right = Right
-
-settings-value-inline = Inline view
-
-settings-value-detached = Detached view
-
-settings-section-editor = Editor
-
-settings-row-send-shortcut = Send shortcut
-
-settings-desc-send-shortcut = Choose when Enter sends a prompt or inserts a new line
-
-settings-value-enter-shift = ⌘ + Enter for multiline prompts
-
-settings-section-pop-up = Pop-up window
-
-settings-row-pop-up-shortcut = Pop-up window shortcut
-
-settings-desc-pop-up-shortcut = Set a global shortcut for the pop-up window. Leave blank to keep it disabled
-
-settings-value-disabled = Disabled
-
-settings-value-configured = Configured
-
-settings-btn-set = Set
-
-settings-row-default-no-project = Default to chatting with no project
-
-settings-desc-default-no-project = Start a new chat without needing a project
-
-settings-section-dictation = Dictation
-
-settings-row-microphone = Microphone
-
-settings-desc-microphone = Used for dictation
-
-settings-value-system-default = System default
-
-settings-row-press-dictate = Press to dictate shortcut
-
-settings-desc-press-dictate = Hold at any position on the desktop to dictate at the cursor
-
-settings-row-toggle-dictate = Toggle dictate shortcut
-
-settings-desc-toggle-dictate = Press once at any position on the desktop to start dictating, then again to stop
-
-settings-row-keep-dictation-bar = Keep dictation bar visible
-
-settings-desc-keep-dictation-bar = Show a small shortcut reminder when dictation is not active
-
-settings-value-off = Off
-
-settings-value-on = On
-
-settings-section-notifications = Notifications
-
-settings-row-turn-completion = Turn completion notifications
-
-settings-desc-turn-completion = Configure when steer notifies you that a task is complete
-
-settings-value-focus-only = Only when app loses focus
-
-settings-row-permission-notify = Enable permission notifications
-
-settings-desc-permission-notify = Show a notification when a permission is needed
-
-settings-row-question-notify = Enable question notifications
-
-settings-desc-question-notify = Show a notification when input is required to continue
-
 ### views/settings.rs — Config panel
-
-settings-panel-config = Configuration
-
-settings-desc-config-top = Configure approval policies and sandbox settings
-
-settings-section-config-toml = Custom config.toml settings
-
-settings-row-config-user = User config
-
-settings-link-open-config = Open config.toml
-
-settings-row-config-approval = Approval policy
-
-settings-desc-config-approval = Choose when steer asks for approval
-
-settings-value-on-request = On request
-
-settings-row-config-sandbox = Sandbox settings
-
-settings-desc-config-sandbox = Choose what command execution permissions steer has
-
-settings-value-read-only = Read-only
-
-settings-section-workspace-deps = Workspace dependencies
-
-settings-row-config-version = Current version
-
-settings-btn-diagnose = 🔍 Diagnose
-
-settings-desc-config-diagnose = Check the current bundle and record diagnostic logs
-
-settings-row-config-builtin-deps = Built-in dependencies
-
-settings-desc-config-builtin-deps = Allow steer to install and provide the bundled Node.js and Python tools
-
-settings-row-config-reinstall = Reset and reinstall workspace
-
-settings-desc-config-reinstall = Remove the local bundle, redownload, and reload the tools
-
-settings-btn-reinstall = Reinstall
 
 ### views/settings.rs — Models panel
 
@@ -634,49 +418,9 @@ settings-models-err-env-key = Provider "{$name}": environment variable name is r
 
 ### views/settings.rs — Personalization panel
 
-settings-section-personality = Personality
-
-settings-row-personality = Personality
-
-settings-desc-personality = Choose the default tone of steer's replies
-
-settings-value-friendly = Friendly
-
-settings-section-memory = Memory
-
-settings-tag-experimental = Experimental
-
-settings-desc-memory = Configure how steer collects, retains, and consolidates memory
-
-settings-row-memory-enabled = Enable memory
-
-settings-desc-memory-enabled = Generate new memories from chats and bring them into new chats
-
-settings-row-memory-skip-tool = Skip tool-assisted conversations
-
-settings-desc-memory-skip-tool = Do not generate memories from conversations that used MCP tools or web search
-
-settings-btn-reset = Reset
-
-settings-row-memory-reset = Reset memory
-
-settings-desc-memory-reset = Delete all steer memories
-
 ### views/settings.rs — MCP panel
 ### views/plugin_manager.rs
 ### views/settings.rs — Environment panel
-
-settings-panel-environment = Environment
-
-settings-desc-environment = Local environment for indicating how steer should set up a worktree for a project
-
-settings-section-projects = Select a project
-
-settings-btn-add-project = Add project
-
-settings-tag-saas = saas
-
-settings-tag-dspo = dspo
 
 ### workspace.rs
 
@@ -702,7 +446,6 @@ workspace-ask-supplement-label = Supplemental note
 
 workspace-ask-supplement-placeholder = Add optional context
 
-
 workspace-ask-recommended = Recommended
 
 workspace-ask-plan-review-label = Plan review
@@ -716,10 +459,6 @@ workspace-ask-submit = Submit
 workspace-ask-skip = Skip
 
 workspace-cancel = Cancel
-
-
-
-
 
 workspace-mode-readonly-title = Read Only
 
