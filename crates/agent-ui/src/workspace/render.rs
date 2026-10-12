@@ -172,42 +172,56 @@ impl Workspace {
         .into_any_element()
     }
 
-    /// Settings inside the card: the settings nav column + the selected
-    /// panel, side by side (the shell's sidebar slot belongs to the session
-    /// list, so the nav lives in here).
+    /// Settings inside the card: the upstream `Settings` shell fills the area
+    /// below the TitleBar strip; the strip itself stays a drag region and
+    /// carries the back control at its left edge, over the sidebar column
+    /// (the chrome sidebar slot belongs to the session list, so the whole
+    /// settings surface — nav included — lives inside the card).
     fn render_settings_card(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         use gpui::{ParentElement as _, Styled as _, div};
-        use gpui_component::{h_flex, v_flex};
+        use gpui_component::{TITLE_BAR_HEIGHT, TitleBar, h_flex, v_flex};
+
+        use crate::views::management_shell::back_control;
+        use crate::views::settings::NAV_WIDTH;
         let settings = self
             .settings_view
             .as_ref()
             .expect("enter_settings must have created the SettingsView")
             .clone();
-        let nav = settings.update(cx, |s, cx| s.render_nav(window, cx));
-        let main = settings.update(cx, |s, cx| s.render_main(window, cx));
-        let root = h_flex()
+        let back = back_control(&cx.theme().clone(), i18n::t("settings-back"), {
+            let settings = settings.clone();
+            move |_ev, _window, cx| {
+                settings.update(cx, |_, cx| cx.emit(SettingsEvent::Exit));
+            }
+        });
+        let content = settings.update(cx, |s, cx| s.render(window, cx));
+        let root = v_flex()
             .id("embedded-settings")
             .size_full()
             .min_w_0()
+            .relative()
             .child(
                 v_flex()
-                    .w(px(SETTINGS_NAV_WIDTH))
-                    .h_full()
-                    .flex_shrink_0()
-                    .child(nav),
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .pt(TITLE_BAR_HEIGHT)
+                    .child(content),
             )
             .child(
                 div()
-                    .w(px(1.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .bg(cx.theme().border),
-            )
-            .child(v_flex().flex_1().min_w_0().h_full().child(main));
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(NAV_WIDTH)
+                    .h(TITLE_BAR_HEIGHT)
+                    .child(TitleBar::new().child(h_flex().px_2().child(back))),
+            );
         self.apply_chat_actions(root, window, cx)
     }
 

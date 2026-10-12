@@ -495,23 +495,9 @@ enum ViewMode {
     ExternalSession,
 }
 
-/// The empty band the session list reserves at its top before any content:
-/// macOS floats the traffic lights over it (28px), other platforms need only
-/// a small breathing inset (8px). Shared by the settings nav's scroll body.
-pub(crate) fn sidebar_top_inset() -> Pixels {
-    if cfg!(target_os = "macos") {
-        px(28.)
-    } else {
-        px(8.)
-    }
-}
-
 /// The main card's `border_1` on both edges; width budgets that measure
 /// card-interior space subtract this.
 const CARD_BORDER: f32 = 2.;
-
-/// The settings nav column's width inside the conversation card.
-const SETTINGS_NAV_WIDTH: f32 = 240.;
 
 /// Trailing overdraw for the message list: rows within this many pixels
 /// below the viewport are pre-measured so scrolling never pops an
@@ -1880,8 +1866,8 @@ impl Workspace {
     /// user's last selection (and any scroll position) survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_view.is_none() {
-            let settings = cx.new(|cx| SettingsView::new(px(SETTINGS_NAV_WIDTH), window, cx));
-            let sub = self.subscribe_settings(&settings, cx);
+            let settings = cx.new(|cx| SettingsView::new(window, cx));
+            let sub = self.subscribe_settings(&settings, window, cx);
             self.settings_view = Some(settings);
             self.settings_sub = Some(sub);
         }
@@ -1904,44 +1890,57 @@ impl Workspace {
     fn subscribe_settings(
         &self,
         settings: &Entity<SettingsView>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Subscription {
-        cx.subscribe(settings, |this, _settings, ev: &SettingsEvent, cx| {
-            if matches!(ev, SettingsEvent::Exit) && !this.exiting_settings {
-                // Start the slide-out animation; the actual mode flip and
-                // unmount happen once the animation has finished. The
-                // captured transition gen is the watermark for this exit
-                // attempt — if a new enter supersedes it before the timer
-                // fires, the spawn's update is a no-op.
-                this.exiting_settings = true;
-                this.settings_transition_gen = this.settings_transition_gen.wrapping_add(1);
-                cx.notify();
-                let entity = cx.entity().clone();
-                let exit_gen = this.settings_transition_gen;
-                cx.spawn(async move |_workspace, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(SLIDE_OUT_MS + 20))
-                        .await;
-                    entity.update(cx, |this, cx| {
-                        if this.settings_transition_gen != exit_gen {
-                            return;
-                        }
-                        // The user may have re-entered an external session
-                        // while the panel was sliding out — the exit must
-                        // not steal the column or drop its ownership id
-                        // (the attach tail carries the same guard).
-                        if matches!(this.view_mode, ViewMode::ExternalSession) {
-                            return;
-                        }
-                        this.view_mode = ViewMode::default();
-                        this.active_external = None;
-                        this.exiting_settings = false;
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-        })
+        cx.subscribe_in(
+            settings,
+            window,
+            |this, _settings, ev: &SettingsEvent, window, cx| {
+                if let SettingsEvent::SaveFailed(msg) = ev {
+                    window.push_notification(
+                        Notification::error(msg.clone())
+                            .title(i18n::t("settings-save-failed-title")),
+                        cx,
+                    );
+                    return;
+                }
+                if matches!(ev, SettingsEvent::Exit) && !this.exiting_settings {
+                    // Start the slide-out animation; the actual mode flip and
+                    // unmount happen once the animation has finished. The
+                    // captured transition gen is the watermark for this exit
+                    // attempt — if a new enter supersedes it before the timer
+                    // fires, the spawn's update is a no-op.
+                    this.exiting_settings = true;
+                    this.settings_transition_gen = this.settings_transition_gen.wrapping_add(1);
+                    cx.notify();
+                    let entity = cx.entity().clone();
+                    let exit_gen = this.settings_transition_gen;
+                    cx.spawn(async move |_workspace, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(SLIDE_OUT_MS + 20))
+                            .await;
+                        entity.update(cx, |this, cx| {
+                            if this.settings_transition_gen != exit_gen {
+                                return;
+                            }
+                            // The user may have re-entered an external session
+                            // while the panel was sliding out — the exit must
+                            // not steal the column or drop its ownership id
+                            // (the attach tail carries the same guard).
+                            if matches!(this.view_mode, ViewMode::ExternalSession) {
+                                return;
+                            }
+                            this.view_mode = ViewMode::default();
+                            this.active_external = None;
+                            this.exiting_settings = false;
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+            },
+        )
     }
 
     /// Switch to the conversation pane. Drops external ownership with the
