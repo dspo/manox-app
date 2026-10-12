@@ -747,11 +747,7 @@ settings-desc-mcp = Connect external tools and data sources
 
 settings-mcp-restart-note = Switches apply from the next launch.
 
-settings-section-mcp-servers = Servers
-
 settings-empty-mcp = No MCP servers configured. Add one in mcp.toml or install a plugin that declares servers.
-
-settings-row-mcp-server-name = Server
 
 settings-mcp-status-disabled = Disabled
 

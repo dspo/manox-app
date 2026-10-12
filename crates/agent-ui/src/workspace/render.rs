@@ -173,10 +173,10 @@ impl Workspace {
     }
 
     /// Settings inside the card: the upstream `Settings` shell fills the area
-    /// below the TitleBar strip; the strip itself stays a drag region and
-    /// carries the back control at its left edge, over the sidebar column
-    /// (the chrome sidebar slot belongs to the session list, so the whole
-    /// settings surface — nav included — lives inside the card).
+    /// below the TitleBar strip; the strip spans the whole card as a drag
+    /// region and carries the back control at its left edge, over the sidebar
+    /// column (the chrome sidebar slot belongs to the session list, so the
+    /// whole settings surface — nav included — lives inside the card).
     fn render_settings_card(
         &mut self,
         window: &mut Window,
@@ -186,7 +186,6 @@ impl Workspace {
         use gpui_component::{TITLE_BAR_HEIGHT, TitleBar, h_flex, v_flex};
 
         use crate::views::management_shell::back_control;
-        use crate::views::settings::NAV_WIDTH;
         let settings = self
             .settings_view
             .as_ref()
@@ -218,7 +217,7 @@ impl Workspace {
                     .absolute()
                     .top_0()
                     .left_0()
-                    .w(NAV_WIDTH)
+                    .right_0()
                     .h(TITLE_BAR_HEIGHT)
                     .child(TitleBar::new().child(h_flex().px_2().child(back))),
             );

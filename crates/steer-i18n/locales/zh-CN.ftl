@@ -727,11 +727,7 @@ settings-desc-mcp = 连接外部工具和数据源
 
 settings-mcp-restart-note = 开关将在下次启动时生效。
 
-settings-section-mcp-servers = 服务器
-
 settings-empty-mcp = 尚未配置任何 MCP 服务器。请在 mcp.toml 中添加，或安装声明了服务器的插件。
-
-settings-row-mcp-server-name = 服务器
 
 settings-mcp-status-disabled = 已禁用
 
