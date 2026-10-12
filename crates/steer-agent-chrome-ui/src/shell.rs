@@ -59,7 +59,7 @@ pub struct SessionRow {
     /// concern when teams land.
     pub sort_stamp: i64,
     pub pinned: bool,
-    /// See [`SessionRowData::archived`] — always false on today's wire.
+    /// See [`SessionRowData::archived`] — the protocol's IsArchived bit.
     pub archived: bool,
     /// D2 columns: the user tag chip and the team-leader mark (rows do not
     /// indent — hierarchy lives in the group header and the leader chevron).
