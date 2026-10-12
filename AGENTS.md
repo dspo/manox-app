@@ -77,7 +77,9 @@ cargo clippy --all-targets
 cargo fmt --all
 ```
 
-Rust **1.95.0**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单）。
+Rust **1.95.0**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单；Fedora 等价物：`dnf install gcc gtk3-devel webkit2gtk4.1-devel javascriptcoregtk4.1-devel libsoup3-devel wayland-devel fontconfig-devel libX11-devel libXcursor-devel libXi-devel libXrandr-devel libXrender-devel libXinerama-devel libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel openssl-devel zlib-devel`）。
+
+**Linux 窗口后端**：wry 的 Linux 子 webview 只能经 Xlib 句柄挂载，原生 Wayland 窗口无法承载嵌入式浏览器 —— 因此 steer 在 Wayland 会话且存在 `DISPLAY` 时默认改走 XWayland（`STEER_FORCE_WAYLAND=1` 可强制原生 Wayland，浏览器页签退化为错误卡而非 panic；配套的 GTK 由 steer-webview 的 `linux` 模块钉在 X11 后端并自驱 glib 泵）。XWayland 路径同时以 `VK_LOADER_DRIVERS_DISABLE=*` 隐藏硬件 Vulkan ICD（`STEER_XWAYLAND_VULKAN=1` 或自带 `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`/`VK_LOADER_DRIVERS_SELECT` 可保留）：部分栈（Federa 44 mutter 50.4 + XWayland 24.1 + ANV 实测）在 Vulkan X11 WSI 的 `AcquireNextImageKHR` 里死锁（`wsi_drm_wait_for_explicit_sync_release` 永不返回），活跃重绘的窗口数十秒内冻结；无 Vulkan 驱动可见时 wgpu 落到 Mesa GL 后端，绕开整个 swapchain。托盘同理受宿主限制：无 StatusNotifierWatcher 的桌面（原生 GNOME）上 `tray::install` 刻意失败，应用保持「关窗即退出」而非隐形驻留。
 
 ### Release（tag 触发）
 

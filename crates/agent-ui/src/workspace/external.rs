@@ -107,13 +107,15 @@ impl Workspace {
 
     /// Build a browser tab's webview (app-restart path and the pane's own
     /// "new browser tab"): the view goes into `browser_views` and its routing
-    /// entry into the process-wide host; the caller places the tab.
+    /// entry into the process-wide host; the caller places the tab. Returns
+    /// `None` when the platform could not host the embed — the view is then
+    /// discarded before registration, so no unusable tab id escapes.
     pub fn restore_browser_tab(
         &mut self,
         url: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> BrowserTabId {
+    ) -> Option<BrowserTabId> {
         let url = if url.is_empty() {
             crate::views::browser_view::DEFAULT_URL
         } else {
@@ -122,11 +124,15 @@ impl Workspace {
         let tab_id = crate::views::browser_view::allocate_tab_id();
         let view =
             cx.new(|cx| crate::views::browser_view::BrowserView::new(tab_id, url, window, cx));
+        if view.read(cx).webview().is_none() {
+            tracing::warn!(url = %url, "browser tab not created: embedded webview unavailable");
+            return None;
+        }
         self.browser_views.insert(tab_id, view);
         if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
             host.register_ui_tab(tab_id);
         }
-        tab_id
+        Some(tab_id)
     }
 
     /// Open a browser tab navigated to `url` (the host's own open path — the
@@ -134,19 +140,26 @@ impl Workspace {
     /// surfaced as a right-pane tab; a build with no live pane still leaves
     /// the tab drivable, so the tool call never depends on the UI. The
     /// webview is built untrusted: no Tauri command surface, only the
-    /// notify/inbound bridges.
+    /// notify/inbound bridges. `None` means the embed was refused (the user
+    /// sees a notification; the caller must treat the id as never issued).
     pub fn open_browser_tab(
         &mut self,
         url: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> BrowserTabId {
+    ) -> Option<BrowserTabId> {
         let url = if url.is_empty() {
             crate::views::browser_view::DEFAULT_URL
         } else {
             url
         };
-        let tab_id = self.restore_browser_tab(url, window, cx);
+        let Some(tab_id) = self.restore_browser_tab(url, window, cx) else {
+            window.push_notification(
+                Notification::error(i18n::t("browser-webview-unavailable")),
+                cx,
+            );
+            return None;
+        };
         let tab = crate::tool_tabs::adopt_browser_tab(cx.entity(), tab_id, url);
         // The pane open runs on the event path: this call arrives inside a
         // Workspace update (the host's dispatch), and the tab's own `open`
@@ -164,7 +177,7 @@ impl Workspace {
                 );
             }
         });
-        tab_id
+        Some(tab_id)
     }
 
     /// Drop a browser tab: the view (whose `Drop` hides and detaches the

@@ -9652,12 +9652,14 @@ dependencies = [
  "steer-agent-chrome-ui",
  "steer-ext-agents",
  "steer-i18n",
+ "steer-webview",
  "supervisor",
  "terminal-ui",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "zbus",
 ]
 
 [[package]]
@@ -9719,6 +9721,7 @@ dependencies = [
  "arboard",
  "async-task",
  "gpui-pre",
+ "gtk",
  "http",
  "mime_guess",
  "open",

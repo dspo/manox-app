@@ -381,7 +381,14 @@ impl<'a> Builder<'a> {
 
         use raw_window_handle::HasWindowHandle;
 
+        #[cfg(target_os = "linux")]
+        linux::ensure_ready().map_err(WryError::Io)?;
+
         let window_handle = window.window_handle()?;
+        #[cfg(target_os = "linux")]
+        // gpui's X11 backend hands out `Xcb` handles; wry's Linux child-webview
+        // path only accepts `Xlib`. The numeric XID is identical either way.
+        let window_handle = linux::XlibCompatHandle::wrap(window_handle);
         let webview_id = self.webview_id;
         match self.trust_mode {
             // manos/Tauri default: full __TAURI_INTERNALS__ bundle + plugin
@@ -1970,4 +1977,134 @@ struct InitJavascript<'a> {
     event_initialization_script: &'a str,
     #[raw]
     freeze_prototype: &'a str,
+}
+
+/// Linux embedding support. wry's child-webview path is Xlib-only and
+/// GTK-bound: it reads an `Xlib` raw handle, creates the WebKitGTK widget on
+/// the calling thread, and requires `gtk::init` plus an iterated glib main
+/// loop on that same thread. gpui provides an `Xcb` handle and no GTK loop,
+/// so this module bridges both gaps:
+/// - [`XlibCompatHandle`] rewraps gpui's `Xcb` handle as `Xlib` (the XID is
+///   the same window);
+/// - [`ensure_ready`] pins GTK to the X11 backend (a Wayland GDK display
+///   would panic inside wry's `X11Display` downcast) and initializes it once;
+/// - [`spawn_glib_pump`] drives `gtk::main_iteration_do` on the gpui main
+///   thread from a timer task, so the webkit widgets created there receive
+///   their events without a GTK main loop of their own.
+#[cfg(target_os = "linux")]
+pub mod linux {
+    use std::sync::OnceLock;
+
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle, WindowHandle, XlibWindowHandle};
+
+    /// Why no webview can be built on this Linux session, when one cannot.
+    /// `None` until [`ensure_ready`] has run.
+    static UNAVAILABLE: OnceLock<Option<String>> = OnceLock::new();
+
+    /// A gpui window handle re-exposed with its `Xcb` variant rewrapped as
+    /// `Xlib`, which is the only kind wry 0.53's Linux child-webview path
+    /// accepts. Other handle kinds pass through untouched (wry rejects a
+    /// Wayland handle with a clean error the callers surface as a degraded
+    /// tab).
+    pub struct XlibCompatHandle(RawWindowHandle);
+
+    impl XlibCompatHandle {
+        pub fn wrap(handle: WindowHandle<'_>) -> Self {
+            Self(match handle.as_raw() {
+                RawWindowHandle::Xcb(h) => {
+                    let mut xlib = XlibWindowHandle::new(h.window.get() as _);
+                    xlib.visual_id = h.visual_id.map(|v| v.get() as _).unwrap_or(0);
+                    RawWindowHandle::Xlib(xlib)
+                }
+                other => other,
+            })
+        }
+    }
+
+    impl HasWindowHandle for XlibCompatHandle {
+        fn window_handle(
+            &self,
+        ) -> std::result::Result<WindowHandle<'_>, raw_window_handle::HandleError> {
+            // SAFETY: the wrapped raw handle is the gpui window's own handle
+            // (or the Xlib rewrap of its XID); the gpui window outlives the
+            // synchronous `build_as_child` call this wrapper serves.
+            Ok(unsafe { WindowHandle::borrow_raw(self.0) })
+        }
+    }
+
+    /// One-time GTK bring-up for webview embedding: pin GDK to X11 (the
+    /// embedded webview is an X11 child window even when the host session is
+    /// Wayland, via XWayland) and initialize GTK on the gpui main thread.
+    /// Returns `Err` when no webview can be built on this session — `Ok(())`
+    /// either immediately (already initialized) or after a successful init.
+    pub fn ensure_ready() -> std::result::Result<(), std::io::Error> {
+        if let Some(reason) = UNAVAILABLE.get() {
+            return match reason {
+                Some(why) => Err(std::io::Error::other(why.clone())),
+                None => Ok(()),
+            };
+        }
+        let outcome = (|| {
+            if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+                return Some(
+                    "no X11 display (DISPLAY unset): wry embeds Linux child webviews via Xlib only"
+                        .to_string(),
+                );
+            }
+            // A Wayland GDK display would panic inside wry's X11Display
+            // downcast. Pin GTK to X11 via `GDK_BACKEND` — NOT
+            // `gdk_set_allowed_backends`, whose API path fails
+            // gtk_init_check on some stacks (Fedora 44's GTK 3.24 included)
+            // even with a working X display, while the env variable reliably
+            // opens X11. Edition 2024 marks `set_var` unsafe for cross-thread
+            // reads; the only reader in this process is GTK itself, once,
+            // during the `gtk::init` on this very thread.
+            unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+            if let Err(e) = gtk::init() {
+                return Some(format!("gtk::init failed on the X11 backend: {e}"));
+            }
+            None
+        })();
+        let _ = UNAVAILABLE.set(outcome.clone());
+        match outcome {
+            Some(why) => Err(std::io::Error::other(why)),
+            None => Ok(()),
+        }
+    }
+
+    /// Drive the glib main loop on the gpui main thread (where GTK was
+    /// initialized and the webkit widgets live). A frame-budget tick keeps
+    /// the webkit widgets responsive without a GTK main loop of their own;
+    /// the loop ends with the app (the update fails at teardown).
+    pub fn spawn_glib_pump(cx: &mut gpui::App) {
+        static PUMPED: OnceLock<()> = OnceLock::new();
+        if PUMPED.set(()).is_err() {
+            return;
+        }
+        if UNAVAILABLE.get().is_none() {
+            // First call is typically app startup, before any build_as_child:
+            // bring GTK up now so the pump never iterates an uninitialized
+            // loop. When embedding is impossible the pump stays down; tabs
+            // then degrade through ensure_ready's error path.
+            let _ = ensure_ready();
+        }
+        if UNAVAILABLE.get().is_some_and(|reason| reason.is_some()) {
+            return;
+        }
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                // The foreground executor stops dispatching at app teardown,
+                // which is what ends this loop.
+                cx.update(|_| {
+                    while gtk::events_pending() {
+                        gtk::main_iteration_do(false);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
 }

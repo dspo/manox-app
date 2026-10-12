@@ -99,6 +99,8 @@ browser-yield-complete = 完成
 
 browser-read-hint = Agent 正在读取本页 —— 页面中已登录的内容将暴露给 agent。
 
+browser-webview-unavailable = 无法创建嵌入式浏览器：当前窗口后端不支持嵌入子 webview（Linux 原生 Wayland 窗口不支持，请改以 X11/XWayland 运行）
+
 right-pane-toggle = 切换右侧面板
 
 sidebar-toggle = 切换侧边栏

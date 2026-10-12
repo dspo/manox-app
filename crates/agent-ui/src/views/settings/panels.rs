@@ -261,13 +261,17 @@ fn mock_dropdown_with_post(
 /// Segmented 2-choice group (visual reference: ChatGPT.app Settings
 /// "Default terminal location" bottom/right): active = filled rounded pill
 /// (secondary bg + foreground text), inactive = plain muted text, no border.
+// Only the macOS-only external-tool panels consume the segmented pair.
+#[cfg(target_os = "macos")]
 type SegmentedApply =
     Arc<dyn Fn(&mut SettingsView, &mut Context<SettingsView>) + Send + Sync + 'static>;
 
 /// One segment of the pair: its label bundled with the callback that picks it,
 /// so the builder stays under the argument-count lint without a params struct.
+#[cfg(target_os = "macos")]
 type SegmentedOption = (SharedString, SegmentedApply);
 
+#[cfg(target_os = "macos")]
 fn mock_segmented(
     id: impl Into<gpui::ElementId>,
     active: bool,
@@ -308,6 +312,7 @@ fn mock_segmented(
         .into_any_element()
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn build_segmented_pair(
     id_prefix: &'static str,
     active_is_left: bool,

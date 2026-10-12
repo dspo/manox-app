@@ -16,6 +16,8 @@ gpui-kit-assets.workspace = true
 
 agent-ui.workspace = true
 steer-agent-chrome-ui.workspace = true
+# GTK bring-up for wry's Linux child webviews (spawn_glib_pump at app init).
+steer-webview.workspace = true
 # `chrome-use` links the in-process Chrome engine (rustwright-core) into the
 # gpui app only; the napi host binding (crates/manox-napi — dormant since the
 # VS Code extension was removed; kept for a future host re-implementation)
@@ -43,6 +45,8 @@ tray-icon.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 ksni.workspace = true
+# Watcher-host probe for the ksni tray (see the workspace-level comment).
+zbus.workspace = true
 
 # Dock badge (macOS): NSApplication.dockTile.setBadgeLabel on the gpui main
 # thread; other platforms have no badge backend (see src/badge.rs).

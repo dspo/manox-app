@@ -187,7 +187,9 @@ impl WorkspaceBrowserHost {
         let view = ws
             .read_with(cx, |ws, _| ws.browser_views.get(&id).cloned())
             .ok_or_else(|| format!("browser host: no browser tab with id {id}"))?;
-        let wv = view.read_with(cx, |v, _| v.webview().clone());
+        let wv = view
+            .read_with(cx, |v, _| v.webview().cloned())
+            .ok_or_else(|| "browser host: tab has no webview".to_string())?;
         wv.read_with(cx, |w, _| w.evaluate_script(js))
             .map_err(|e| e.to_string())
     }
@@ -644,6 +646,15 @@ impl WorkspaceBrowserHost {
                 ws.update(cx, |ws, cx| ws.open_browser_tab(url, window, cx))
             })
             .map_err(|e| format!("browser host: window update failed: {e}"))?;
+        // `open_browser_tab` refuses an embed the platform cannot host (and
+        // has already notified the user); the agent gets a clean tool error
+        // instead of an id that would fail every later op.
+        let Some(tab_id) = tab_id else {
+            return Err(
+                "embedded webview unavailable: this window backend cannot host child webviews"
+                    .to_string(),
+            );
+        };
         let label = crate::views::browser_view::webview_label_for(tab_id);
         {
             let mut labels = self

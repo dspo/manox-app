@@ -21,9 +21,15 @@ use manox_agent::settings as user_settings;
 use crate::views::management_shell::back_control;
 use crate::views::plugin_manager::PluginManagerView;
 
+// The external-tool panels drive macOS app launches (ChatGPT.app / VS Code
+// app bundles via osascript); on other platforms the actions can never
+// succeed, so the panels and their nav group stay mac-only instead of
+// dead-ending in error notifications.
+#[cfg(target_os = "macos")]
 mod chatgpt;
 mod models;
 mod panels;
+#[cfg(target_os = "macos")]
 mod vscode;
 
 const CLICK_FLASH_MS: u64 = 280;
@@ -64,6 +70,7 @@ const GROUPS: &[SettingsGroup] = &[
             SettingsItem::new(IconName::ChartPie, "settings-item-mcp", None),
         ],
     },
+    #[cfg(target_os = "macos")]
     SettingsGroup {
         title: "settings-group-external-tools",
         items: &[
@@ -119,14 +126,16 @@ pub struct SettingsView {
     /// file when the Settings view is created.
     models_panel: models::ModelsPanelState,
 
-    // --- External tools → ChatGPT.app panel state ---
+    // --- External tools → ChatGPT.app panel state (macOS-only panels) ---
     /// Form state for the `chatgpt_app:` section of `cx.providers.config.yaml`,
     /// seeded from the file when the Settings view is created.
+    #[cfg(target_os = "macos")]
     chatgpt_panel: chatgpt::ChatGptPanelState,
 
     // --- External tools → Visual Studio Code.app panel state ---
     /// Form state for the `vscode_app:` section of `cx.providers.config.yaml`,
     /// seeded from the file when the Settings view is created.
+    #[cfg(target_os = "macos")]
     vscode_panel: vscode::VsCodePanelState,
 
     // --- MCP panel state ---
@@ -161,7 +170,9 @@ impl SettingsView {
             // current UI locale.
             ui_language: steer_i18n::load_ui_language().endonym().into(),
             models_panel: models::ModelsPanelState::load(window, cx),
+            #[cfg(target_os = "macos")]
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
+            #[cfg(target_os = "macos")]
             vscode_panel: vscode::VsCodePanelState::load(window, cx),
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
         }
@@ -408,9 +419,11 @@ impl SettingsView {
             Some("settings-item-models") => models::render_models(self, cx).into_any_element(),
             Some("settings-item-mcp") => panels::render_mcp(self, cx).into_any_element(),
             Some("settings-item-plugins") => self.plugins.clone().into_any_element(),
+            #[cfg(target_os = "macos")]
             Some("settings-item-chatgpt-app") => {
                 chatgpt::render_chatgpt_app(self, cx).into_any_element()
             }
+            #[cfg(target_os = "macos")]
             Some("settings-item-vscode-app") => {
                 vscode::render_vscode_app(self, cx).into_any_element()
             }

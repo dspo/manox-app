@@ -827,6 +827,12 @@ inbound 写入请求桥 —— 页面没有 Tauri 命令面。进程级桥在构
 - **Read hint** —— `read_text` / `read_dom` / `screenshot` / `eval_script` 从 `https://` 源取到内容后
   显示的一行弱化提示，表明登录态页面内容已暴露给 agent。
 
+构建永不 panic：平台拒绝嵌入时（Linux 原生 Wayland 窗口 —— wry 的 Linux 子 webview 只能经
+Xlib 句柄挂载）视图退化为一条居中错误卡（`browser-webview-unavailable`），tab 不注册进
+`browser_views` / 宿主路由，`open_browser_tab` 返回 `None` 并弹错误通知，agent 侧 `open_tab`
+收到干净的 tool 错误。steer-app 在 Linux 上检测到 Wayland 会话同时存在 `DISPLAY` 时默认改走
+XWayland（`STEER_FORCE_WAYLAND=1` 可强制原生 Wayland，接受浏览器降级）。
+
 > Source: `crates/agent-ui/src/views/browser_view.rs`
 
 
@@ -874,7 +880,7 @@ Scrollable list of settings groups with section headers.
 
 #### SettingsGroup
 
-A labeled group of settings items. Groups: General (General, Models), Integrations (Plugins, MCP), External Tools (ChatGPT.app, VS Code).
+A labeled group of settings items. Groups: General (General, Models), Integrations (Plugins, MCP), External Tools (ChatGPT.app, VS Code — macOS only: the panels drive `.app` bundle launches that cannot exist elsewhere, so the whole group is cfg'd out on non-macOS).
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
@@ -892,7 +898,7 @@ Right content area, dispatches to panel renderers. Each panel/content view owns 
 
 #### SettingsPanel
 
-A specific settings panel rendered in the right pane. Every nav item owns a panel — no "Coming soon" placeholders. Implemented panels: General (the UI language picker, the one row with a real persistence backend), Models (the cx provider config editor, see [SettingsModelsPanel](#settingsmodelspanel)), Plugins (the PluginManagerView mount), MCP (merged mcp.toml + live server registry with per-server persisted switches), ChatGPT.app and VS Code (External Tools, see [SettingsChatGptAppPanel](#settingschatgptapppanel)).
+A specific settings panel rendered in the right pane. Every nav item owns a panel — no "Coming soon" placeholders. Implemented panels: General (the UI language picker, the one row with a real persistence backend), Models (the cx provider config editor, see [SettingsModelsPanel](#settingsmodelspanel)), Plugins (the PluginManagerView mount), MCP (merged mcp.toml + live server registry with per-server persisted switches), ChatGPT.app and VS Code (External Tools, macOS only, see [SettingsChatGptAppPanel](#settingschatgptapppanel)).
 
 > Source: `crates/agent-ui/src/views/settings/panels.rs`
 
