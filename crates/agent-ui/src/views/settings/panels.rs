@@ -13,21 +13,13 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, AnyWindowHandle, App, Context, Entity, Focusable, Hsla, InteractiveElement,
+    AnyElement, AnyWindowHandle, App, Context, Entity, Focusable, Hsla, InteractiveElement,
     IntoElement, MouseDownEvent, ParentElement as _, SharedString, StatefulInteractiveElement,
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::theme::Theme;
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, WindowExt as _,
-    button::Button,
-    h_flex,
-    menu::{DropdownMenu, PopupMenuItem},
-    notification::Notification,
-    switch::Switch,
-    v_flex,
-};
+use gpui_component::{ActiveTheme as _, h_flex, switch::Switch, v_flex};
 
 use crate::i18n;
 
@@ -155,15 +147,6 @@ pub(super) fn muted_text(label: SharedString, muted: Hsla) -> AnyElement {
 // --- Common controls ------------------------------------------------------
 
 type BoolApply = Arc<dyn Fn(&mut SettingsView, bool) + Send + Sync + 'static>;
-/// Persists a pick. The display value must flip only on a successful save, so
-/// the whole save-then-apply sequence lives in one closure that returns the
-/// outcome — the caller (which has the window) surfaces a failure as a toast.
-type PostApply = Arc<
-    dyn Fn(&mut SettingsView, &SharedString, &mut Context<SettingsView>) -> Result<(), String>
-        + Send
-        + Sync
-        + 'static,
->;
 
 /// Re-enter the view entity through the window handle at the end of the
 /// current effect cycle. Blur-flush subscriptions need this: their dispatch
@@ -216,44 +199,6 @@ fn mock_switch(
                 apply(this, new_val);
                 cx.notify();
             });
-        })
-        .into_any_element()
-}
-
-/// A dropdown whose pick persists via `post`. The display value flips only on
-/// a successful save (enforced inside `post`); a save failure is surfaced as an
-/// in-app toast here, where the window is in scope.
-fn mock_dropdown_with_post(
-    id: impl Into<gpui::ElementId>,
-    label: SharedString,
-    options: Vec<(SharedString, SharedString)>,
-    view: Entity<SettingsView>,
-    post: PostApply,
-) -> AnyElement {
-    Button::new(id)
-        .label(label)
-        .dropdown_caret(true)
-        .outline()
-        .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _window, _cx| {
-            options.iter().fold(menu, |menu, (display, token)| {
-                let display = display.clone();
-                let token = token.clone();
-                let view = view.clone();
-                let post = post.clone();
-                menu.item(
-                    PopupMenuItem::new(display.clone()).on_click(move |_ev, window, cx| {
-                        if let Err(msg) = view.update(cx, |this, cx| post(this, &token, cx))
-                            && !msg.is_empty()
-                        {
-                            window.push_notification(
-                                Notification::error(msg)
-                                    .title(i18n::t("settings-save-failed-title")),
-                                cx,
-                            );
-                        }
-                    }),
-                )
-            })
         })
         .into_any_element()
 }
@@ -339,53 +284,14 @@ pub(super) fn build_segmented_pair(
         .into_any_element()
 }
 
-// --- General panel --------------------------------------------------------
-
-/// The General panel hosts the UI language picker — the one row with a real
-/// persistence backend (`settings.toml` `ui_language`).
-pub fn render_general(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> AnyElement {
-    let theme = cx.theme().clone();
-    let entity = cx.entity();
-    let muted = theme.muted_foreground;
-
-    let language_section = section_card(
-        &theme,
-        vec![
-            section_header("settings-section-general-misc"),
-            row_with_control(
-                i18n::t("settings-row-ui-language"),
-                Some(muted_text(i18n::t("settings-desc-ui-language"), muted)),
-                mock_dropdown_with_post(
-                    "ui-language",
-                    view.ui_language.clone(),
-                    // Endonym is the label, token the persisted value; both come
-                    // from the enum so the picker cannot drift from the parser.
-                    [steer_i18n::Language::ZhCn, steer_i18n::Language::En]
-                        .into_iter()
-                        .map(|lang| {
-                            (
-                                SharedString::from(lang.endonym()),
-                                SharedString::from(lang.token()),
-                            )
-                        })
-                        .collect(),
-                    entity,
-                    Arc::new(|this, value, cx| this.persist_ui_language(value.clone(), cx)),
-                ),
-            ),
-        ],
-    );
-
-    panel_scroll(v_flex().w_full().gap_4().child(language_section))
-}
-
 // --- MCP panel ------------------------------------------------------------
 
 /// MCP servers: the merged config (mcp.toml + plugin `.mcp.json` layers)
 /// with live connection state from the process registry. Each switch
 /// persists to `settings.toml` (`[mcp] disabled`) and applies from the next
-/// launch — the registry is built once at startup.
-pub fn render_mcp(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> AnyElement {
+/// launch — the registry is built once at startup. Page identity (title,
+/// description, restart note) lives on the surrounding `SettingGroup`.
+pub fn render_mcp_servers(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> AnyElement {
     let theme = cx.theme().clone();
     let entity = cx.entity();
     let muted = theme.muted_foreground;
@@ -401,36 +307,6 @@ pub fn render_mcp(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> An
                 .collect()
         })
         .unwrap_or_default();
-
-    let top_header = v_flex()
-        .gap_1()
-        .child(
-            h_flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_base()
-                        .font_weight(gpui::FontWeight::BLACK)
-                        .child(i18n::t("settings-panel-mcp")),
-                )
-                .child(
-                    Button::new("add-mcp")
-                        .label(i18n::t("settings-btn-add-server"))
-                        .outline()
-                        .icon(Icon::new(IconName::Plus))
-                        .on_click(|_ev, _window, _cx| {
-                            // Server registration lives in mcp.toml / plugin
-                            // manifests; a guided adder is a follow-up.
-                            tracing::info!("add MCP server clicked (no-op in this build)");
-                        })
-                        .into_any_element(),
-                )
-                .into_any_element(),
-        )
-        .child(muted_text(i18n::t("settings-desc-mcp"), muted))
-        .child(muted_text(i18n::t("settings-mcp-restart-note"), muted))
-        .into_any_element();
 
     let mut server_rows: Vec<AnyElement> = vec![section_header("settings-section-mcp-servers")];
     if servers.is_empty() {
@@ -489,11 +365,5 @@ pub fn render_mcp(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> An
     }
     let servers_section = section_card(&theme, server_rows);
 
-    panel_scroll(
-        v_flex()
-            .w_full()
-            .gap_4()
-            .child(top_header)
-            .child(servers_section),
-    )
+    v_flex().w_full().child(servers_section).into_any_element()
 }

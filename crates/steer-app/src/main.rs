@@ -107,6 +107,10 @@ fn main() {
         // UI-chrome locale before anything renders: menus, the tray, and the
         // first window all resolve labels through `steer_i18n::t`.
         steer_i18n::init();
+        // gpui-component's built-in strings (the settings shell's search
+        // placeholder, …) render through its own rust_i18n bundle; keep it on
+        // the app's locale.
+        gpui_component::set_locale(steer_i18n::current().token());
         // `terminal` runs its PTY pumps on the shared process-global tokio
         // runtime; hand it the handle before `manox_terminal::init` builds the store.
         manox_terminal::runtime::set_runtime(manox_agent::runtime::handle().clone());

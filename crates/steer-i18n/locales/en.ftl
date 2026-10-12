@@ -217,13 +217,9 @@ settings-item-chatgpt-app = ChatGPT.app
 
 settings-item-vscode-app = Visual Studio Code.app
 
-settings-search-placeholder = Search settings…
-
 settings-back = Back to app
 
 ### views/settings.rs — General panel
-
-settings-section-general-misc = General
 
 settings-row-ui-language = User interface language
 
@@ -747,8 +743,6 @@ goal-status-complete = Goal complete
 
 settings-item-mcp = MCP servers
 
-settings-panel-mcp = MCP servers
-
 settings-desc-mcp = Connect external tools and data sources
 
 settings-mcp-restart-note = Switches apply from the next launch.
@@ -756,8 +750,6 @@ settings-mcp-restart-note = Switches apply from the next launch.
 settings-section-mcp-servers = Servers
 
 settings-empty-mcp = No MCP servers configured. Add one in mcp.toml or install a plugin that declares servers.
-
-settings-btn-add-server = Add server
 
 settings-row-mcp-server-name = Server
 

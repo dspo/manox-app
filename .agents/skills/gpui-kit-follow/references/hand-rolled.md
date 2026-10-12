@@ -15,7 +15,7 @@
 | 粘贴图片 | `crates/agent-ui/src/workspace/composer.rs`（stage clipboard image） | 待评估 | 0.6.2 Input/Textarea/Editor `on_paste` 原生事件（可拿剪贴板图片/文件） |
 | 标题栏 session picker / 模型选择器弹出 | `steer-agent-chrome-ui/src/titlebar.rs`；`agent-ui/src/workspace/chips.rs` | 待评估 | Combobox（0.6.0）；Popover `offset`（0.7.0）——#123 落地后组件 Popover 已是仓内成熟路径 |
 | 「No chats」空态 | `steer-agent-chrome-ui/src/session_list.rs` | 待评估 | 0.6.2 `Empty` 组件族 |
-| 设置页表单 | `agent-ui/src/views/settings/` | 待评估 | Form / Field（0.7.0 `Field::visible(false)`）、GroupBox/SettingGroup footer（0.7.0） |
+| 设置页表单 | `agent-ui/src/views/settings/` | **已迁移**（feat/settings-adoption）：sidebar/搜索/过滤/分页由 `Settings` 组件承担，语言行为 `SettingField::dropdown`；Models/ChatGPT/VSCode/Plugins 仍为 `SettingItem::render` Element 整块，其内部原语（section_card/row_with_control 等）保留 | `setting` 模块（0.7.0 `Settings`/`SettingPage`/`SettingGroup`/`SettingItem`/`SettingField`，比 Form/Field 更贴合的映射）；Form / Field（0.7.0 `Field::visible(false)`）、GroupBox/SettingGroup footer（0.7.0）备查 |
 
 ## 已评估、暂不跟进的结论（仅作背景缓存，不构成免评）
 

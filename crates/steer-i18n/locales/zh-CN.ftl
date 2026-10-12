@@ -205,13 +205,9 @@ settings-item-chatgpt-app = ChatGPT.app
 
 settings-item-vscode-app = Visual Studio Code.app
 
-settings-search-placeholder = 搜索设置…
-
 settings-back = 返回应用
 
 ### views/settings.rs — 常规面板
-
-settings-section-general-misc = 常规
 
 settings-row-ui-language = 用户界面语言
 
@@ -727,8 +723,6 @@ goal-status-complete = 目标已完成
 
 settings-item-mcp = MCP 服务器
 
-settings-panel-mcp = MCP 服务器
-
 settings-desc-mcp = 连接外部工具和数据源
 
 settings-mcp-restart-note = 开关将在下次启动时生效。
@@ -736,8 +730,6 @@ settings-mcp-restart-note = 开关将在下次启动时生效。
 settings-section-mcp-servers = 服务器
 
 settings-empty-mcp = 尚未配置任何 MCP 服务器。请在 mcp.toml 中添加，或安装声明了服务器的插件。
-
-settings-btn-add-server = 添加服务器
 
 settings-row-mcp-server-name = 服务器
 
