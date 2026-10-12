@@ -36,6 +36,14 @@ pub struct SettingsView {
     /// the Integrations page. Owned here rather than as a top-level Workspace
     /// mode so plugins live under Settings.
     plugins: Entity<PluginManagerView>,
+    /// Keeps the plugin-change observer alive for the view's lifetime.
+    _plugins_sub: gpui::Subscription,
+    /// Server names from the merged config (mcp.toml + plugin declarations),
+    /// sorted. Cached so the settings render path never re-reads the config
+    /// files; refreshed when the plugin view reports a change (installs and
+    /// uninstalls alter the declared server set). The per-row registry status
+    /// reads live off the process registry instead.
+    mcp_servers: Vec<String>,
     /// The persisted UI language; the value source for the language dropdown.
     ui_language: i18n::Language,
     /// Form state for editing `cx.providers.config.yaml`, seeded from the
@@ -64,8 +72,18 @@ impl EventEmitter<SettingsEvent> for SettingsView {}
 
 impl SettingsView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let plugins = cx.new(|cx| PluginManagerView::new(window, cx));
+        // Plugin installs and uninstalls change the declared MCP server set;
+        // the cached list follows those changes instead of re-reading the
+        // config files on every render.
+        let _plugins_sub = cx.observe(&plugins, |this, _, cx| {
+            this.mcp_servers = mcp_server_names();
+            cx.notify();
+        });
         Self {
-            plugins: cx.new(|cx| PluginManagerView::new(window, cx)),
+            plugins,
+            _plugins_sub,
+            mcp_servers: mcp_server_names(),
             ui_language: steer_i18n::load_ui_language(),
             models_panel: models::ModelsPanelState::load(window, cx),
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
@@ -101,20 +119,27 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Toggle one MCP server and persist the whole disabled set. A failed
-    /// write surfaces as `SettingsEvent::SaveFailed`; the persisted set is
-    /// what the registry consults on the next launch.
+    /// Toggle one MCP server and persist the whole disabled set.
+    /// Persist-then-flip: the set commits only on a successful write, so a
+    /// failed save leaves the switch at its prior value (it re-reads the
+    /// unchanged set on the next render) while the error surfaces as a
+    /// `SettingsEvent::SaveFailed` toast. The persisted set is what the
+    /// registry consults on the next launch.
     fn apply_mcp_server(&mut self, name: &str, enabled: bool, cx: &mut Context<Self>) {
+        let mut disabled = self.mcp_disabled.clone();
         if enabled {
-            self.mcp_disabled.remove(name);
+            disabled.remove(name);
         } else {
-            self.mcp_disabled.insert(name.to_string());
+            disabled.insert(name.to_string());
         }
-        let disabled: Vec<String> = self.mcp_disabled.iter().cloned().collect();
-        if let Err(e) = user_settings::set_mcp_disabled(disabled) {
+        let list: Vec<String> = disabled.iter().cloned().collect();
+        if let Err(e) = user_settings::set_mcp_disabled(list) {
             tracing::warn!(error = %e, "failed to persist MCP switch");
             cx.emit(SettingsEvent::SaveFailed(e.to_string().into()));
+            cx.notify();
+            return;
         }
+        self.mcp_disabled = disabled;
         cx.notify();
     }
 
@@ -140,7 +165,8 @@ type PanelRender = fn(&mut SettingsView, &mut Context<SettingsView>) -> AnyEleme
 /// as `SettingItem` rows. `GroupBoxVariant` defaults to `Normal`, so the
 /// panel draws without a group card surface around it. The keywords keep
 /// the panel reachable from the search box (element items match the query
-/// only through keywords).
+/// only through keywords); the localized group title rides along so the
+/// panel is findable by its own displayed name in either locale.
 fn panel_group(
     view: &Entity<SettingsView>,
     title: &'static str,
@@ -149,17 +175,30 @@ fn panel_group(
 ) -> SettingGroup {
     let view = view.clone();
     SettingGroup::new().title(i18n::t(title)).item(
-        SettingItem::render(move |_, _window, cx| view.update(cx, render))
-            .keywords(keywords.iter().copied()),
+        SettingItem::render(move |_, _window, cx| view.update(cx, render)).keywords(
+            keywords
+                .iter()
+                .copied()
+                .map(SharedString::from)
+                .chain(std::iter::once(i18n::t(title))),
+        ),
     )
+}
+
+/// The merged-config server names, in stable sorted order (BTreeMap keys).
+fn mcp_server_names() -> Vec<String> {
+    manox_agent::mcp::load_merged_config()
+        .mcp_servers
+        .keys()
+        .cloned()
+        .collect()
 }
 
 /// The MCP group: one `SettingField::switch` row per server in the merged
 /// config, with the live registry status as the row description. Toggles
 /// persist immediately and apply from the next launch.
 fn mcp_group(view: &Entity<SettingsView>, cx: &App) -> SettingGroup {
-    let config = manox_agent::mcp::load_merged_config();
-    let servers: Vec<String> = config.mcp_servers.keys().cloned().collect();
+    let servers = view.read(cx).mcp_servers.clone();
     let connected: std::collections::HashMap<String, usize> = manox_agent::mcp::try_global()
         .map(|registry| {
             registry
@@ -184,7 +223,7 @@ fn mcp_group(view: &Entity<SettingsView>, cx: &App) -> SettingGroup {
                     .text_color(cx.theme().muted_foreground)
                     .child(i18n::t("settings-empty-mcp"))
             })
-            .keywords(["mcp", "server"]),
+            .keywords(mcp_keywords()),
         );
     }
 
@@ -212,10 +251,22 @@ fn mcp_group(view: &Entity<SettingsView>, cx: &App) -> SettingGroup {
                 ),
             )
             .description(status)
-            .keywords(["mcp", "server", "tools"]),
+            .keywords(mcp_keywords()),
         );
     }
     group
+}
+
+/// Search keywords for the MCP rows: the English terms plus the localized
+/// group title, so the rows stay reachable from the search box in either
+/// locale (element-adjacent matching only sees keywords, titles and
+/// descriptions — the localized group title is otherwise unsearched).
+fn mcp_keywords() -> Vec<SharedString> {
+    ["mcp", "server", "tools"]
+        .into_iter()
+        .map(SharedString::from)
+        .chain(std::iter::once(i18n::t("settings-item-mcp")))
+        .collect()
 }
 
 /// The three pages of the settings shell, mirroring the previous nav groups:
