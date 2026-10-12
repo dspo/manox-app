@@ -201,12 +201,7 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 this.send_user_turn(text, extra, cx);
                 if failed > 0 {
-                    this.add_info_message(
-                        i18n::t("composer-image-process-failed").to_string(),
-                        NoticeAnchor::TurnEnd,
-                        None,
-                        cx,
-                    );
+                    this.add_info_message(i18n::t("composer-image-process-failed").to_string(), cx);
                 }
             })
             .ok();
