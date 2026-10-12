@@ -41,7 +41,7 @@ use crate::OpenSettings;
 use crate::ToggleTurnNavigator;
 use crate::cockpit::format_elapsed;
 use crate::conversation::ConvItem;
-use crate::conversation::{ApplyOutcome, ConversationState, NoticeAnchor, UserImage, UserTurnMeta};
+use crate::conversation::{ApplyOutcome, ConversationState, UserImage, UserTurnMeta};
 use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
@@ -1657,27 +1657,6 @@ impl Workspace {
             chat.awaiting_history = None;
             cx.notify();
         });
-        // The annotations channel's unresolved cards ride after the journal
-        // transcript (#884's read face): the journal replay does not
-        // interleave annotation rows yet (a manox-side mapping that rides the
-        // next batch), so the cards append at the end rather than vanish.
-        if let Some((store, sid)) = self.chat_store(cx) {
-            let cards = store.read(cx).annotation_cards(&sid);
-            if !cards.is_empty() {
-                let host = self.chat.read(cx).host.clone();
-                let conv = self.chat_conversation(cx);
-                conv.update(cx, |conv, cx| {
-                    for (_kind, text) in cards {
-                        conv.push_notice(
-                            text,
-                            steer_agent_chat_ui::conversation::NoticeAnchor::TurnEnd,
-                            host.clone(),
-                            cx,
-                        );
-                    }
-                });
-            }
-        }
         self.sync_list_count(cx);
         cx.notify();
     }
@@ -1796,17 +1775,22 @@ impl Workspace {
                 match &event {
                     crate::chat_fold::ChatEvent::Notice { text } => {
                         let host = this.chat.read(cx).host.clone();
-                        this.chat.update(cx, |chat, cx| {
-                            chat.conversation.update(cx, |c, cx| {
+                        let ix = this.chat.update(cx, |chat, cx| {
+                            let ix = chat.conversation.update(cx, |c, cx| {
                                 c.push_notice(
                                     text.clone(),
                                     crate::conversation::NoticeAnchor::TurnEnd,
                                     host.clone(),
                                     cx,
-                                );
+                                )
                             });
                             cx.notify();
+                            ix
                         });
+                        // The note cards' live leg: this arm is their only
+                        // display (the dispatch site no longer pushes locally),
+                        // so the virtualized list must learn about the row.
+                        this.apply_list_insert(ix, cx);
                         continue;
                     }
                     crate::chat_fold::ChatEvent::Usage { .. } => {
@@ -2556,53 +2540,30 @@ impl Workspace {
         }
     }
 
-    /// Push a system-styled notice into the conversation (no thread message,
-    /// no model turn). Used by slash commands and mode toggles to report
-    /// outcomes — e.g. the mode-change acknowledgement. Renders as a
-    /// neutral-toned `ConvItem::Notice` card (distinct from the red
-    /// `ConvItem::Error`).
-    ///
-    /// The notice is inserted at `anchor` — `TurnEnd` (the end of the current
-    /// turn, i.e. the list tail when idle) or `After(ix)` for a tool-call-
-    /// adjacent record. Also persists the notice as a session `custom` entry
-    /// so a reloaded thread reproduces it at the same position (entries
-    /// carrying `tool_call_id` are re-spliced right after their tool item by
-    /// the rebuild).
-    pub fn add_info_message(
-        &mut self,
-        text: String,
-        anchor: NoticeAnchor,
-        tool_call_id: Option<&str>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Report a system outcome into the conversation (no thread message, no
+    /// model turn). Used by slash commands and mode toggles — e.g. the
+    /// mode-change acknowledgement. The card's single live display is the
+    /// chat-face echo of its own `annotation_set` row (dspo/manox#889): the
+    /// dispatch lands the row, the projection answers with a
+    /// `systemNotification` part, and the live pump renders it — the same
+    /// source the rebuild folds, so the card can never double-display.
+    pub fn add_info_message(&mut self, text: String, cx: &mut Context<Self>) {
         let _weak = cx.weak_entity();
-        let ix = self.chat_conversation(cx).update(cx, |c, cx| {
-            c.push_notice(text.clone(), anchor, self.chat.read(cx).host.clone(), cx)
-        });
-        self.apply_list_insert(ix, cx);
-        self.append_ui_note(manox_agent::db::UiNoteKind::Notice, text, tool_call_id, cx);
-        // Tail-follow keeps the viewport pinned to the live end, so a
-        // `TurnEnd`-anchored notice is revealed by the follow; an `After`
-        // anchored one sits above the viewport by design (a record near its
-        // tool call, not an alert).
+        self.append_ui_note(manox_agent::db::UiNoteKind::Notice, text, cx);
         cx.notify();
     }
 
-    /// Persist a UI annotation (`Error` / `Notice` / `PlanReview`) as a
-    /// `custom` entry in the session jsonl at the current leaf. The append
-    /// order IS the reload order, so rebuilt conversations place the card
-    /// where it appeared live; entries carrying `tool_call_id` are re-spliced
-    /// next to their tool item by the rebuild instead. Fire-and-forget via
-    /// the engine's command queue, which orders it against prompts.
+    /// Persist a UI annotation (`Error` / `Notice` / `PlanReview`) as an
+    /// `annotation_set` row on the session journal. Fire-and-forget; the
+    /// chat-face echo displays it live and the rebuild folds it back in place.
     fn append_ui_note(
         &self,
         kind: manox_agent::db::UiNoteKind,
         text: String,
-        tool_call_id: Option<&str>,
         cx: &mut Context<Self>,
     ) {
         if let Some(sid) = self.chat.read(cx).session_id.clone() {
-            self.append_ui_note_for(&sid, kind, text, tool_call_id, cx);
+            self.append_ui_note_for(&sid, kind, text, cx);
         }
     }
 
@@ -2616,7 +2577,6 @@ impl Workspace {
         session_id: &str,
         kind: manox_agent::db::UiNoteKind,
         text: String,
-        tool_call_id: Option<&str>,
         cx: &mut Context<Self>,
     ) {
         let kind_str = match kind {
@@ -2626,18 +2586,14 @@ impl Workspace {
         };
         // The annotations channel (dspo/manox#884) is the durable face: the
         // dispatch lands an `annotation_set` journal row host-side, so the
-        // card survives reloads and reaches every client. The card's own
-        // render payload (kind, tool anchoring) rides `_meta["x-manox"]`,
-        // the protocol's extension slot.
+        // card survives reloads and reaches every client. The card's kind
+        // rides `_meta["x-manox"]`, the protocol's extension slot.
         let Some((store, _)) = self.chat_store(cx) else {
             return;
         };
         let note_id = format!("note-{}", uuid::Uuid::new_v4().simple());
         let mut xmanox = serde_json::Map::new();
         xmanox.insert("uiNoteKind".to_string(), serde_json::json!(kind_str));
-        if let Some(id) = tool_call_id {
-            xmanox.insert("toolCallId".to_string(), serde_json::json!(id));
-        }
         let session = steer_agent_chat_ui::ahp_store::session_uri(session_id);
         let annotation = ahp_types::state::Annotation {
             id: note_id.clone(),
@@ -2862,8 +2818,6 @@ impl Workspace {
         });
         self.add_info_message(
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),
-            NoticeAnchor::TurnEnd,
-            None,
             cx,
         );
         self.close_access_menu(cx);

@@ -30,7 +30,6 @@ use crate::i18n;
 use manox_agent::command::CommandDefinition;
 use manox_agent::skill::SkillDefinition;
 
-use crate::conversation::NoticeAnchor;
 use crate::views::completion::CompletionKind;
 use crate::workspace::Workspace;
 
@@ -368,8 +367,6 @@ impl SlashCommand for ModeCommand {
             Err(_) => {
                 workspace.add_info_message(
                     i18n::t_str("slash-mode-unknown", &[("mode", name)]).to_string(),
-                    NoticeAnchor::TurnEnd,
-                    None,
                     cx,
                 );
             }
@@ -399,22 +396,12 @@ impl SlashCommand for PlanCommand {
         // alongside becomes the first planning turn. Leaving: the gate lifts.
         if workspace.thread_plan_mode(cx) {
             workspace.set_thread_plan_mode(false, cx);
-            workspace.add_info_message(
-                i18n::t("plan-mode-off-notice").to_string(),
-                NoticeAnchor::TurnEnd,
-                None,
-                cx,
-            );
+            workspace.add_info_message(i18n::t("plan-mode-off-notice").to_string(), cx);
             return SlashResult::Handled;
         }
         workspace.set_thread_plan_mode(true, cx);
         if args.trim().is_empty() {
-            workspace.add_info_message(
-                i18n::t("plan-mode-on-notice").to_string(),
-                NoticeAnchor::TurnEnd,
-                None,
-                cx,
-            );
+            workspace.add_info_message(i18n::t("plan-mode-on-notice").to_string(), cx);
             SlashResult::Handled
         } else {
             SlashResult::InjectUserTurn(args.to_string())
