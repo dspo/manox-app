@@ -151,6 +151,9 @@ impl SessionMultiplexer {
         self.unread.remove(session_id);
         if self.focused.as_deref() == Some(session_id) {
             self.focused = None;
+            // The bridge's focus mirror follows every clear site — a dock
+            // spawn after this park must not claim the detached session.
+            steer_agent_chat_ui::terminal_bridge::set_focused_session(None);
         }
         let uri = session_uri(session_id);
         self.unsubscribe_queue.push(uri);

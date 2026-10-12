@@ -868,13 +868,12 @@ pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
     cx: &mut App,
 ) -> Result<Entity<terminal_ui::TerminalView>, String> {
-    // The dock shell lives in the HOST's terminal registry (#886's
-    // companion): `createTerminal` spawns the PTY host-side, and the view's
-    // emulation core mirrors it over the AHP terminal channel. The app no
-    // longer owns the process — closing the view drops the mirror, the
-    // host's `disposeTerminal` reclaims the PTY.
-    let (_terminal_id, source) =
-        steer_agent_chat_ui::terminal_bridge::spawn_host_terminal(cwd, 80, 24)?;
+    // The dock shell lives in the HOST's terminal registry: `createTerminal`
+    // spawns the PTY host-side, and the view's emulation core mirrors it over
+    // the AHP terminal channel. The app no longer owns the process — closing
+    // the view drops the source, whose teardown disposes the host terminal
+    // (the shell dies with the panel).
+    let source = steer_agent_chat_ui::terminal_bridge::spawn_host_terminal(cwd, 80, 24)?;
     let handle = manox_terminal::Terminal::spawn(
         format!("chrome-assembly:$SHELL:{}", next_instance_id("channel")),
         cwd.to_path_buf(),

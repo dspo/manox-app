@@ -1,20 +1,21 @@
-//! The AHP terminal channel as a [`PtySource`] (#886's companion).
+//! The AHP terminal channel as a [`PtySource`].
 //!
 //! `TerminalView` and its whole rendering/selection/keyboard machinery stay
 //! untouched — what changes is where the bytes come from: instead of a
 //! kernel-side PTY the app owns, the terminal lives in the HOST's registry
 //! (`createTerminal`), its output rides `terminal/data` actions on
 //! `ahp-terminal:/<id>`, and keystrokes go back as `terminal/input`
-//! dispatches. The in-proc leg measured well under the perception threshold
-//! (dspo/manox#886's latency gate), so the emulation mirror costs nothing a
-//! user can feel.
+//! dispatches. The in-proc leg stays well under the perception threshold, so
+//! the emulation mirror costs nothing a user can feel.
 
 use std::io;
 use std::sync::Mutex;
 
 use ahp::{Client, SubscriptionEvent};
 use ahp_types::actions::{StateAction, TerminalInputAction, TerminalResizedAction};
+use ahp_types::state::SnapshotState;
 use async_channel::Sender;
+use manox_ahp::channels::terminal;
 use manox_terminal::event::TerminalEvent;
 use manox_terminal::pty_source::PtySource;
 
@@ -48,19 +49,14 @@ pub fn set_focused_session(session_id: Option<String>) {
     }
 }
 
-/// `ahp-terminal:/<id>`.
-fn terminal_uri(id: &str) -> String {
-    format!("ahp-terminal:/{id}")
-}
-
-/// Ask the host to spawn a terminal in its registry and answer the minted
-/// channel-backed view pair: `(terminal id, source)`. The caller wires the
-/// source into `manox_terminal::Terminal::spawn` exactly as a PTY source.
+/// Ask the host to spawn a terminal in its registry and answer the
+/// channel-backed source. The caller wires the source into
+/// `manox_terminal::Terminal::spawn` exactly as a PTY source.
 pub fn spawn_host_terminal(
     cwd: &std::path::Path,
     cols: u16,
     rows: u16,
-) -> Result<(String, ChannelTerminalSource), String> {
+) -> Result<ChannelTerminalSource, String> {
     let (client, session_id) = {
         let guard = shared().lock().map_err(|e| e.to_string())?;
         let client = guard.client.clone().ok_or_else(|| {
@@ -73,7 +69,7 @@ pub fn spawn_host_terminal(
         (client, session)
     };
     let terminal_id = format!("t-{}", uuid::Uuid::new_v4().simple());
-    let uri = terminal_uri(&terminal_id);
+    let uri = terminal::uri(&terminal_id);
     let params = ahp_types::commands::CreateTerminalParams {
         channel: uri.clone(),
         meta: None,
@@ -99,10 +95,7 @@ pub fn spawn_host_terminal(
             .map_err(|err| err.to_string())?;
         Ok::<(), String>(())
     })?;
-    Ok((
-        terminal_id.clone(),
-        ChannelTerminalSource::new(client, terminal_id),
-    ))
+    Ok(ChannelTerminalSource::new(client, terminal_id))
 }
 
 /// A [`PtySource`] over the AHP terminal channel: reads `terminal/data`
@@ -112,6 +105,9 @@ pub fn spawn_host_terminal(
 pub struct ChannelTerminalSource {
     client: Client,
     terminal_id: String,
+    /// Close signal for the reader task; dropped with the source (the panel
+    /// is gone, so the mirror and the host terminal both come down).
+    shutdown: Option<Sender<()>>,
 }
 
 impl ChannelTerminalSource {
@@ -119,6 +115,79 @@ impl ChannelTerminalSource {
         Self {
             client,
             terminal_id,
+            shutdown: None,
+        }
+    }
+}
+
+/// One event into the mirror; `Err` means the panel is gone.
+async fn forward(tx: &Sender<TerminalEvent>, event: TerminalEvent) -> Result<(), ()> {
+    tx.send(event).await.map_err(|_| ())
+}
+
+/// The exited settlement: the child code lands on the core's exit state and
+/// the mirror stops expecting further output.
+async fn settle(event_tx: &Sender<TerminalEvent>, exit_code: i32) -> Result<(), ()> {
+    forward(event_tx, TerminalEvent::ChildExit(exit_code)).await?;
+    forward(event_tx, TerminalEvent::Exit).await?;
+    Ok(())
+}
+
+/// Seed the mirror from the subscribe snapshot: output emitted between the
+/// host-side spawn and this subscribe never arrives as actions — the visible
+/// grid is what AHP's reconstruction contract owes a late subscriber.
+/// `Some(code)` means the snapshot already shows an exited process.
+async fn seed_from_snapshot(
+    snapshot: Option<ahp_types::state::Snapshot>,
+    event_tx: &Sender<TerminalEvent>,
+) -> Result<Option<i32>, ()> {
+    let Some(SnapshotState::Terminal(state)) = snapshot.map(|s| s.state) else {
+        return Ok(None);
+    };
+    for part in state.content {
+        // The raw VT stream: an unclassified part contributes its text
+        // verbatim, a command part contributes its captured output (the
+        // command line was already echoed into the grid), unknown parts
+        // carry nothing answerable.
+        let bytes = match part {
+            ahp_types::state::TerminalContentPart::Unclassified(part) => part.value,
+            ahp_types::state::TerminalContentPart::Command(part) => part.output,
+            ahp_types::state::TerminalContentPart::Unknown(_) => continue,
+        };
+        forward(event_tx, TerminalEvent::PtyOutput(bytes.into_bytes())).await?;
+    }
+    match state.lifecycle {
+        ahp_types::state::TerminalLifecycleState::Exited(exited) => {
+            Ok(Some(exited.exit_code.unwrap_or(-1) as i32))
+        }
+        ahp_types::state::TerminalLifecycleState::Running(_) => Ok(None),
+    }
+}
+
+/// The live reader: `Ok(code)` when the stream is over (the exited action's
+/// code, or `-1` when it simply ended); `Err` when the panel is gone.
+async fn pump_subscription(
+    mut subscription: ahp::SessionSubscription,
+    event_tx: &Sender<TerminalEvent>,
+    shutdown_rx: async_channel::Receiver<()>,
+) -> Result<i32, ()> {
+    loop {
+        let event = tokio::select! {
+            event = subscription.recv() => event,
+            // The source dropped: the panel is gone, nothing left to mirror.
+            _ = shutdown_rx.recv() => return Err(()),
+        };
+        let Some(SubscriptionEvent::Action(envelope)) = event else {
+            return Ok(-1);
+        };
+        match envelope.action {
+            StateAction::TerminalData(data) => {
+                forward(event_tx, TerminalEvent::PtyOutput(data.data.into_bytes())).await?;
+            }
+            StateAction::TerminalExited(exited) => {
+                return Ok(exited.exit_code.unwrap_or(-1) as i32);
+            }
+            _ => {}
         }
     }
 }
@@ -126,41 +195,38 @@ impl ChannelTerminalSource {
 impl PtySource for ChannelTerminalSource {
     fn start(&mut self, event_tx: Sender<TerminalEvent>) {
         let client = self.client.clone();
-        let uri = terminal_uri(&self.terminal_id);
-        // The reader leg: subscribe, then pump this channel's data actions
-        // into the emulation core as raw bytes. The stream ends with the
-        // transport; an `Exit` then settles the local mirror.
+        let uri = terminal::uri(&self.terminal_id);
+        let (shutdown_tx, shutdown_rx) = async_channel::bounded::<()>(1);
+        self.shutdown = Some(shutdown_tx);
+        // The reader leg: the per-channel subscription (not the all-events
+        // firehose — a lagging broadcast consumer silently skips frames, and
+        // a terminal stream must not re-order or drop), seeded from the
+        // subscribe snapshot, ending with the transport or the source.
         manox_agent::runtime::handle().spawn(async move {
-            if let Err(err) = client
-                .request::<_, serde_json::Value>("subscribe", serde_json::json!({ "channel": uri }))
-                .await
-            {
-                tracing::warn!(channel = %uri, %err, "terminal bridge: subscribe failed");
-                let _ = event_tx.send(TerminalEvent::Exit).await;
-                return;
-            }
-            let mut events = client.events();
-            while let Some(event) = events.recv().await {
-                if event.channel != uri {
-                    continue;
+            let (result, subscription) = match client.subscribe(uri.clone()).await {
+                Ok(pair) => pair,
+                Err(err) => {
+                    tracing::warn!(channel = %uri, %err, "terminal bridge: subscribe failed");
+                    let _ = settle(&event_tx, -1).await;
+                    return;
                 }
-                if let SubscriptionEvent::Action(envelope) = event.event {
-                    match envelope.action {
-                        StateAction::TerminalData(data) => {
-                            let _ = event_tx
-                                .send(TerminalEvent::PtyOutput(data.data.into_bytes()))
-                                .await;
-                        }
-                        // The exited lifecycle settles the local mirror: the
-                        // host's retained grid stays answerable for history,
-                        // but a live panel's process is gone.
-                        StateAction::TerminalCwdChanged(_) => {}
-                        _ => {}
-                    }
+            };
+            match seed_from_snapshot(result.snapshot, &event_tx).await {
+                Err(()) => return,
+                // The host-side process is already gone (a re-attach to a
+                // retained grid): settle and stop mirroring.
+                Ok(Some(code)) => {
+                    let _ = settle(&event_tx, code).await;
+                    return;
                 }
+                Ok(None) => {}
             }
-            tracing::info!(channel = %uri, "terminal bridge: transport closed");
-            let _ = event_tx.send(TerminalEvent::Exit).await;
+            // The stream over (transport closed or the exited action) settles
+            // the mirror; a gone panel leaves teardown to the source's drop.
+            if let Ok(exit_code) = pump_subscription(subscription, &event_tx, shutdown_rx).await {
+                tracing::info!(channel = %uri, "terminal bridge: stream ended");
+                let _ = settle(&event_tx, exit_code).await;
+            }
         });
     }
 
@@ -169,7 +235,7 @@ impl PtySource for ChannelTerminalSource {
         // runtime's task queue, never the caller's thread.
         let data = String::from_utf8_lossy(bytes).into_owned();
         let client = self.client.clone();
-        let uri = terminal_uri(&self.terminal_id);
+        let uri = terminal::uri(&self.terminal_id);
         manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client
                 .dispatch(
@@ -186,7 +252,7 @@ impl PtySource for ChannelTerminalSource {
 
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         let client = self.client.clone();
-        let uri = terminal_uri(&self.terminal_id);
+        let uri = terminal::uri(&self.terminal_id);
         manox_agent::runtime::handle().spawn(async move {
             if let Err(err) = client
                 .dispatch(
@@ -202,5 +268,35 @@ impl PtySource for ChannelTerminalSource {
             }
         });
         Ok(())
+    }
+}
+
+impl Drop for ChannelTerminalSource {
+    fn drop(&mut self) {
+        // The panel is gone: release the host terminal so the shell dies
+        // with its view (the PTY-handle drop this replaces killed the
+        // child), and let the reader task see the close signal.
+        self.shutdown = None;
+        let Some(handle) = manox_agent::runtime::try_handle() else {
+            return;
+        };
+        let client = self.client.clone();
+        let uri = terminal::uri(&self.terminal_id);
+        handle.spawn(async move {
+            // The typed unsubscribe also tears down the client's local fan-out
+            // for the URI; a raw request would strand the per-channel sender.
+            if let Err(err) = client.unsubscribe(uri.clone()).await {
+                tracing::warn!(channel = %uri, %err, "terminal bridge: unsubscribe failed");
+            }
+            if let Err(err) = client
+                .request::<_, serde_json::Value>(
+                    "disposeTerminal",
+                    serde_json::json!({ "channel": uri }),
+                )
+                .await
+            {
+                tracing::warn!(channel = %uri, %err, "terminal bridge: dispose failed");
+            }
+        });
     }
 }
