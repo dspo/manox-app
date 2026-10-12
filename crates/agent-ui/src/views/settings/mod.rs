@@ -8,9 +8,7 @@
 
 use std::collections::HashSet;
 
-use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px,
-};
+use gpui::{AnyElement, Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px};
 use gpui_component::{
     ActiveTheme as _, IconName,
     group_box::GroupBoxVariant,
@@ -148,9 +146,12 @@ impl SettingsView {
     /// locale; selection lives in the component's window-keyed state.
     pub(crate) fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity();
+        // build_pages runs while this view holds its update lease, so the
+        // state it needs is passed by reference — reaching back through the
+        // entity handle here would panic (no reads on an updated entity).
         Settings::new("settings")
             .sidebar_width(NAV_WIDTH)
-            .pages(build_pages(&view, cx))
+            .pages(build_pages(&view, &self.mcp_servers, &self.mcp_disabled))
             .into_any_element()
     }
 }
@@ -197,8 +198,11 @@ fn mcp_server_names() -> Vec<String> {
 /// The MCP group: one `SettingField::switch` row per server in the merged
 /// config, with the live registry status as the row description. Toggles
 /// persist immediately and apply from the next launch.
-fn mcp_group(view: &Entity<SettingsView>, cx: &App) -> SettingGroup {
-    let servers = view.read(cx).mcp_servers.clone();
+fn mcp_group(
+    view: &Entity<SettingsView>,
+    servers: &[String],
+    disabled: &HashSet<String>,
+) -> SettingGroup {
     let connected: std::collections::HashMap<String, usize> = manox_agent::mcp::try_global()
         .map(|registry| {
             registry
@@ -228,8 +232,11 @@ fn mcp_group(view: &Entity<SettingsView>, cx: &App) -> SettingGroup {
     }
 
     for name in servers {
-        let disabled = view.read(cx).mcp_disabled.contains(&name);
-        let status: SharedString = if disabled {
+        // Field closures are 'static, so each row takes an owned name even
+        // though the list itself is only borrowed.
+        let name = name.clone();
+        let is_disabled = disabled.contains(&name);
+        let status: SharedString = if is_disabled {
             i18n::t("settings-mcp-status-disabled")
         } else if let Some(count) = connected.get(&name) {
             i18n::t_str("settings-mcp-tool-count", &[("count", &count.to_string())])
@@ -271,7 +278,11 @@ fn mcp_keywords() -> Vec<SharedString> {
 
 /// The three pages of the settings shell, mirroring the previous nav groups:
 /// General (language + Models), Integrations (Plugins + MCP), External Tools.
-fn build_pages(view: &Entity<SettingsView>, cx: &App) -> Vec<SettingPage> {
+fn build_pages(
+    view: &Entity<SettingsView>,
+    mcp_servers: &[String],
+    mcp_disabled: &HashSet<String>,
+) -> Vec<SettingPage> {
     let language_group = {
         let value_view = view.clone();
         let set_view = view.clone();
@@ -324,7 +335,7 @@ fn build_pages(view: &Entity<SettingsView>, cx: &App) -> Vec<SettingPage> {
                 &["plugins", "marketplace", "extensions", "插件"],
                 |view, _cx| view.plugins.clone().into_any_element(),
             ))
-            .group(mcp_group(view, cx)),
+            .group(mcp_group(view, mcp_servers, mcp_disabled)),
         SettingPage::new(i18n::t("settings-group-external-tools"))
             .icon(IconName::Bot)
             .default_open(true)
