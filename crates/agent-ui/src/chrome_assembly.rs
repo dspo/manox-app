@@ -204,14 +204,9 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .detach();
         }
         let rows = mux.read(cx).thread_list(cx);
-        // The unread override map retired with the local GW5 machinery
-        // (#870's app half): the official IsRead bit rides the summary
-        // itself (and the live session fold for subscribed sessions), so
-        // the projection needs no override layer.
-        let unread = std::collections::HashMap::new();
         let removed = crate::project_registry::removed_projects();
         let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
-            crate::sidebar_projection::project_groups(&rows, &unread, &removed)
+            crate::sidebar_projection::project_groups(&rows, &removed)
                 .into_iter()
                 .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();

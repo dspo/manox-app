@@ -27,8 +27,6 @@ pub struct SessionMultiplexer {
     /// The client-owned focus (GW5): the attached session's unread rises are
     /// suppressed while it is the foreground leaf.
     focused: Option<String>,
-    /// Unsubscribes deferred for a Context-bearing call site.
-    unsubscribe_queue: Vec<String>,
 }
 
 /// The ONE sidebar row pin read (write faces included — `on_pin` flips
@@ -66,7 +64,6 @@ impl SessionMultiplexer {
             cwd,
             attached: Vec::new(),
             focused: None,
-            unsubscribe_queue: Vec::new(),
         }
     }
 
@@ -130,20 +127,12 @@ impl SessionMultiplexer {
         reply
     }
 
-    /// Drain deferred unsubscribes (call from a Context-bearing site).
-    pub fn flush_unsubscribes(&mut self, cx: &mut Context<Self>) {
-        let uris = std::mem::take(&mut self.unsubscribe_queue);
-        for uri in uris {
-            self.store.update(cx, |store, _| store.unsubscribe(uri));
-        }
-    }
-
     /// Detach a session — the park leg of a thread switch. Channels STAY
     /// subscribed (only the bookkeeping above parks): the official unread
     /// bit rides `session/isReadChanged` echoes on the session channel, so
     /// a parked thread keeps its live dot and a re-attach re-seeds an open
-    /// ask card — the protocol's own answer where the local unread map and
-    /// the unsubscribe queue used to be.
+    /// ask card — the protocol's own answer where the local unread map used
+    /// to be.
     pub fn forget(&mut self, session_id: &str) {
         self.attached.retain(|id| id != session_id);
         if self.focused.as_deref() == Some(session_id) {
@@ -156,12 +145,16 @@ impl SessionMultiplexer {
     /// session's bit through the protocol — the echo lands for every
     /// subscriber, this one included.
     pub fn set_focused(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
-        let changed = self.focused.as_deref() != session_id;
-        self.focused = session_id.map(str::to_string);
-        self.store.update(cx, |store, _| {
-            store.set_focused_session(session_id);
-        });
-        if changed {
+        // Publish only on a real transition: the store entity outlives
+        // switches (chat.store drops a handle, not the store), so a no-op
+        // focus call has nothing to re-publish — and every real change
+        // (fresh multiplexer, switch, post-forget re-focus) moves
+        // `focused` here.
+        if self.focused.as_deref() != session_id {
+            self.focused = session_id.map(str::to_string);
+            self.store.update(cx, |store, _| {
+                store.set_focused_session(session_id);
+            });
             cx.notify();
         }
     }
@@ -172,23 +165,31 @@ impl SessionMultiplexer {
     /// the summary's IsArchived bit is the single state every client reads.
     pub fn toggle_archived(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let view = self.store.read(cx);
-        let archived = view
-            .book
-            .sessions
-            .get(session_id)
-            .map(|state| state.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0)
-            .or_else(|| {
-                view.book
-                    .summaries
-                    .values()
-                    .find(|summary| {
-                        steer_agent_chat_ui::ahp_store::id_of(&summary.resource) == session_id
-                    })
-                    .map(|summary| {
-                        summary.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0
-                    })
-            })
-            .unwrap_or(false);
+        // The live fold outranks the summary row — except a zero-status fold
+        // entry (the pre-snapshot empty_session placeholder), which carries
+        // no archive fact and defers to the summary. Neither source knowing
+        // the id refuses the flip: callers pass live rows, and a dispatch
+        // into the void would only land in the diagnostics deque.
+        let archived = match view.book.sessions.get(session_id) {
+            Some(state) if state.status != 0 => {
+                Some(state.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0)
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            view.book
+                .summaries
+                .values()
+                .find(|summary| {
+                    steer_agent_chat_ui::ahp_store::id_of(&summary.resource) == session_id
+                })
+                .map(|summary| {
+                    summary.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0
+                })
+        });
+        let Some(archived) = archived else {
+            return;
+        };
         self.store.update(cx, |store, _| {
             store.dispatch(
                 steer_agent_chat_ui::ahp_store::session_uri(session_id),

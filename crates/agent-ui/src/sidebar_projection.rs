@@ -92,21 +92,18 @@ impl ThreadRow {
     }
 }
 
-/// The client-owned unread mirrors (leaf entity ids → live flags), keyed by
-/// thread id; `None` entries fall back to the wire row's flag.
-pub type UnreadMirrors = HashMap<String, bool>;
-
-/// Project one wire row (GW5: `unread_override` from the live leaf wins).
-/// The sort stamp defaults to the row's own last-active time; a team's
-/// members are re-stamped to their leader's by [`project_forest`].
-pub fn project_row(item: &ThreadRow, unread_override: Option<bool>) -> SessionRowData {
+/// Project one wire row: the row's own wire flag is the single unread
+/// source (the official IsRead bit folded from the protocol). The sort
+/// stamp defaults to the row's own last-active time; a team's members are
+/// re-stamped to their leader's by [`project_forest`].
+pub fn project_row(item: &ThreadRow) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),
         short_id: item.id.chars().take(8).collect(),
         title: item.title.clone(),
         updated_at: item.updated_at,
         sort_stamp: item.updated_at,
-        status: five_state(item, unread_override),
+        status: five_state(item),
         kind: SessionRowKind::Thread,
         pinned: item.pinned,
         archived: item.archived,
@@ -116,7 +113,7 @@ pub fn project_row(item: &ThreadRow, unread_override: Option<bool>) -> SessionRo
 }
 
 /// The five-state machine over a wire row.
-pub fn five_state(item: &ThreadRow, unread_override: Option<bool>) -> SessionStatus {
+pub fn five_state(item: &ThreadRow) -> SessionStatus {
     if item.errored {
         SessionStatus::Errored
     } else if item.pending_auth {
@@ -125,7 +122,7 @@ pub fn five_state(item: &ThreadRow, unread_override: Option<bool>) -> SessionSta
         SessionStatus::PendingPlan
     } else if item.running {
         SessionStatus::Running
-    } else if unread_override.unwrap_or(item.unread) {
+    } else if item.unread {
         SessionStatus::Unread
     } else {
         SessionStatus::Idle
@@ -141,12 +138,12 @@ pub fn five_state(item: &ThreadRow, unread_override: Option<bool>) -> SessionSta
 /// a pin re-order) as one unit. Orphans (a parent that is missing,
 /// archived, or outside the partition) flatten to top-level rather than
 /// vanishing, keeping their own stamp.
-pub fn project_forest(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<SessionRowData> {
+pub fn project_forest(rows: &[ThreadRow]) -> Vec<SessionRowData> {
     let by_id: HashMap<&str, &ThreadRow> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         if row.depth == 0 {
-            let mut leader = project_row(row, unread.get(&row.id).copied());
+            let mut leader = project_row(row);
             let members: Vec<&ThreadRow> = rows
                 .iter()
                 .filter(|r| r.depth > 0 && r.parent_id.as_deref() == Some(row.id.as_str()))
@@ -155,7 +152,7 @@ pub fn project_forest(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<Session
             let unit_stamp = leader.sort_stamp;
             out.push(leader);
             for m in members {
-                let mut member = project_row(m, unread.get(&m.id).copied());
+                let mut member = project_row(m);
                 member.sort_stamp = unit_stamp;
                 out.push(member);
             }
@@ -167,7 +164,7 @@ pub fn project_forest(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<Session
                 .and_then(|p| by_id.get(p))
                 .is_some_and(|l| l.depth == 0);
             if !leader_present {
-                out.push(project_row(row, unread.get(&row.id).copied()));
+                out.push(project_row(row));
             }
         }
     }
@@ -180,11 +177,7 @@ pub fn project_forest(rows: &[ThreadRow], unread: &UnreadMirrors) -> Vec<Session
 /// overlay ([`crate::project_registry`]): a row whose effective project sits
 /// in the set groups as loose, the v2 store's remove-project semantics — the
 /// folder dissolves, the history stays.
-pub fn project_groups(
-    rows: &[ThreadRow],
-    unread: &UnreadMirrors,
-    removed: &HashSet<String>,
-) -> Vec<SessionGroup> {
+pub fn project_groups(rows: &[ThreadRow], removed: &HashSet<String>) -> Vec<SessionGroup> {
     // The effective grouping project: the row's own, minus removed paths (a
     // removed row keeps its row data — it re-buckets, it does not vanish).
     let effective = |row: &ThreadRow| -> Option<String> {
@@ -207,7 +200,7 @@ pub fn project_groups(
     order
         .into_iter()
         .map(|name| SessionGroup {
-            rows: project_forest(buckets.get(&name).expect("bucket just built"), unread),
+            rows: project_forest(buckets.get(&name).expect("bucket just built")),
             key: name.clone(),
             project: bucket_project.get(&name).cloned().flatten(),
             name,
@@ -254,25 +247,22 @@ mod tests {
     #[test]
     fn five_state_priority_order() {
         let mut r = row("s", 0, None);
-        assert_eq!(five_state(&r, None), SessionStatus::Idle);
+        assert_eq!(five_state(&r), SessionStatus::Idle);
         r.unread = true;
-        assert_eq!(five_state(&r, None), SessionStatus::Unread);
+        assert_eq!(five_state(&r), SessionStatus::Unread);
         r.running = true;
-        assert_eq!(five_state(&r, None), SessionStatus::Running);
+        assert_eq!(five_state(&r), SessionStatus::Running);
         r.pending_plan = true;
-        assert_eq!(five_state(&r, None), SessionStatus::PendingPlan);
+        assert_eq!(five_state(&r), SessionStatus::PendingPlan);
         r.pending_auth = true;
-        assert_eq!(five_state(&r, None), SessionStatus::PendingAuth);
+        assert_eq!(five_state(&r), SessionStatus::PendingAuth);
         r.errored = true;
-        assert_eq!(five_state(&r, None), SessionStatus::Errored);
-        // The leaf mirror wins over the wire flag (GW5).
-        assert_eq!(five_state(&r, Some(false)), SessionStatus::Errored);
+        assert_eq!(five_state(&r), SessionStatus::Errored);
         r.errored = false;
         r.pending_auth = false;
         r.pending_plan = false;
         r.running = false;
-        assert_eq!(five_state(&r, Some(false)), SessionStatus::Idle);
-        assert_eq!(five_state(&r, Some(true)), SessionStatus::Unread);
+        assert_eq!(five_state(&r), SessionStatus::Unread);
     }
 
     #[test]
@@ -287,7 +277,7 @@ mod tests {
         rows[0].updated_at = 300;
         rows[1].updated_at = 150;
         rows[2].archived = true;
-        let out = project_forest(&rows, &UnreadMirrors::new());
+        let out = project_forest(&rows);
         let ids: Vec<(&str, bool)> = out.iter().map(|r| (r.id.as_str(), r.team_leader)).collect();
         assert_eq!(
             ids,
@@ -316,7 +306,7 @@ mod tests {
         rows[1].project = None;
         rows[1].tag = Some("mytag".into());
         rows[1].pinned = true;
-        let groups = project_groups(&rows, &UnreadMirrors::new(), &HashSet::new());
+        let groups = project_groups(&rows, &HashSet::new());
         let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, vec!["wire", "Chats"]);
         let chats = &groups[1].rows[0];
@@ -334,7 +324,7 @@ mod tests {
         rows[1].project = Some("/p/wire".into());
         rows[2].project = Some("/p/wire".into());
         let removed: HashSet<String> = ["/p/wire".to_string()].into_iter().collect();
-        let groups = project_groups(&rows, &UnreadMirrors::new(), &removed);
+        let groups = project_groups(&rows, &removed);
         // Everything loose: one "Chats" bucket, no project path on it.
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].name, "Chats");
@@ -346,7 +336,7 @@ mod tests {
         );
 
         // Without the removal, the bucket is the project group with the path.
-        let groups = project_groups(&rows, &UnreadMirrors::new(), &HashSet::new());
+        let groups = project_groups(&rows, &HashSet::new());
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].name, "Chats");
         assert_eq!(groups[0].project, None);

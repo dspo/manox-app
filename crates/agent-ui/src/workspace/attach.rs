@@ -300,9 +300,8 @@ impl Workspace {
             // (the session itself survives for a later `OpenSession`), then
             // drop the local handle. No owner leak — the pre-multiplex path
             // leaked because the in-process transport never signalled drop.
-            self.multiplexer.update(cx, |m, cx| {
+            self.multiplexer.update(cx, |m, _cx| {
                 m.forget(&old_id);
-                m.flush_unsubscribes(cx);
             });
             self.chat.update(cx, |chat, cx| {
                 chat.store = None;

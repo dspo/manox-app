@@ -110,6 +110,19 @@ impl Default for ChannelBook {
 }
 
 impl ChannelBook {
+    /// The session id owning a chat id: the session whose catalogue (or
+    /// default-chat pointer) carries the chat. A chat id equals its session
+    /// id only in the landing form — the two diverge on session continuation
+    /// — so protocol writes keyed by a chat id resolve the owner first.
+    pub fn session_of_chat(&self, chat_id: &str) -> Option<&str> {
+        let uri = chat_uri(chat_id);
+        self.sessions.iter().find_map(|(id, state)| {
+            let owned = state.default_chat.as_deref() == Some(uri.as_str())
+                || state.chats.iter().any(|chat| chat.resource == uri);
+            owned.then_some(id.as_str())
+        })
+    }
+
     /// Apply one action envelope's action. Typed actions fold through the AHP
     /// reducers; extension actions (and the baseline) fold through the x-manox
     /// reducer, which is unknown-tolerant by design.
@@ -519,6 +532,11 @@ pub struct AhpStore {
     /// the pin dispatch both read `x-manox-thread` state), re-issued only
     /// for rows that appear after their subscription.
     thread_subs: std::collections::HashSet<String>,
+    /// Sessions with an unread-rise write in flight (issued, the host echo
+    /// not folded yet): the rise fires at most once per read→unread
+    /// transition instead of once per background action while a turn
+    /// streams.
+    pending_unread: std::collections::HashSet<String>,
     _tasks: Vec<gpui::Task<()>>,
 }
 
@@ -541,6 +559,7 @@ impl AhpStore {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            pending_unread: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
         store.spawn_handshake(cwd, event_tx, req_tx, cx);
@@ -570,6 +589,7 @@ impl AhpStore {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            pending_unread: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         }
     }
@@ -955,15 +975,36 @@ impl AhpStore {
                         // foreground clears the IsRead bit through the
                         // protocol — the host echoes the action to every
                         // subscriber, so all clients (and this book's live
-                        // fold) see the same dot. The guard dispatches once:
-                        // only while the session state still reads as read.
-                        if let Some(chat_id) = &chat_id
-                            && self.focused_session.as_deref() != Some(chat_id)
-                            && let Some(session) = self.book.sessions.get(chat_id)
+                        // fold) see the same dot. The owning session is
+                        // resolved from the chat (a chat id equals its
+                        // session id only in the landing form), and the rise
+                        // fires at most once per read→unread transition: an
+                        // in-flight gate blocks re-fires until the fold
+                        // shows the bit back down (this write's echo, or
+                        // another client's), so one streaming background
+                        // turn dispatches once — not once per action.
+                        let owning = if let Some(chat_id) = &chat_id {
+                            self.book.session_of_chat(chat_id).map(str::to_string)
+                        } else if envelope.channel.starts_with("ahp-session:/") {
+                            Some(id_of(&envelope.channel).to_string())
+                        } else {
+                            None
+                        };
+                        if let Some(session_id) = &owning
+                            && self.book.sessions.get(session_id).is_some_and(|state| {
+                                state.status & ahp_types::state::SessionStatus::IsRead.bits() == 0
+                            })
+                        {
+                            self.pending_unread.remove(session_id);
+                        }
+                        if let Some(session_id) = &owning
+                            && self.focused_session.as_deref() != Some(session_id.as_str())
+                            && let Some(session) = self.book.sessions.get(session_id)
                             && session.status & ahp_types::state::SessionStatus::IsRead.bits() != 0
+                            && self.pending_unread.insert(session_id.clone())
                         {
                             self.dispatch(
-                                session_uri(chat_id),
+                                session_uri(session_id),
                                 StateAction::SessionIsReadChanged(
                                     ahp_types::actions::SessionIsReadChangedAction {
                                         is_read: false,
@@ -990,6 +1031,12 @@ impl AhpStore {
                             .push_back(format!("{}: {reason}", envelope.channel));
                         while self.rejections.len() > 32 {
                             self.rejections.pop_front();
+                        }
+                        // A refused unread-rise write never dropped the bit,
+                        // so the gate must re-arm — the next background
+                        // action may retry the rise.
+                        if envelope.channel.starts_with("ahp-session:/") {
+                            self.pending_unread.remove(id_of(&envelope.channel));
                         }
                         // An optimistic write (model pick, cwd, …) that the
                         // host refused must not linger on the UI: roll the
@@ -2358,6 +2405,7 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            pending_unread: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
         let session_state = |unread: bool, archived: bool| {
@@ -2442,6 +2490,7 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            pending_unread: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
         store.book.seed_summaries(vec![
@@ -2511,6 +2560,7 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            pending_unread: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         }
     }
