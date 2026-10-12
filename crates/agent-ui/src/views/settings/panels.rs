@@ -1,7 +1,5 @@
-//! Right-pane renderers for the Settings overlay. Each `render_*_panel` is a
-//! free function that takes `&mut SettingsView` so the closures it builds for
-//! the various controls can update view state directly through the
-//! `Entity<Self>` handle captured at render time.
+//! Layout + control primitives shared by the large element panels (Models,
+//! ChatGPT.app, VS Code) that still draw their own interiors.
 //!
 //! Visual style: a vertical stack of section
 //! cards. Each card is a rounded rectangle with a subtle secondary background
@@ -19,7 +17,7 @@ use gpui::{
 };
 use gpui_component::input::InputState;
 use gpui_component::theme::Theme;
-use gpui_component::{ActiveTheme as _, h_flex, switch::Switch, v_flex};
+use gpui_component::{h_flex, v_flex};
 
 use crate::i18n;
 
@@ -146,8 +144,6 @@ pub(super) fn muted_text(label: SharedString, muted: Hsla) -> AnyElement {
 
 // --- Common controls ------------------------------------------------------
 
-type BoolApply = Arc<dyn Fn(&mut SettingsView, bool) + Send + Sync + 'static>;
-
 /// Re-enter the view entity through the window handle at the end of the
 /// current effect cycle. Blur-flush subscriptions need this: their dispatch
 /// leases the view for the whole callback, while the flush needs `&mut
@@ -182,25 +178,6 @@ pub(super) fn blur_on_click_out(
             window.blur(cx);
         }
     }
-}
-
-/// Build a Switch bound to a field via the view entity. The `apply` closure
-/// runs inside `Entity::update`, so it can mutate view state freely.
-fn mock_switch(
-    id: impl Into<gpui::ElementId>,
-    checked: bool,
-    view: Entity<SettingsView>,
-    apply: BoolApply,
-) -> AnyElement {
-    Switch::new(id)
-        .checked(checked)
-        .on_click(move |&new_val, _window, cx| {
-            view.update(cx, |this, cx| {
-                apply(this, new_val);
-                cx.notify();
-            });
-        })
-        .into_any_element()
 }
 
 /// Segmented 2-choice group (visual reference: ChatGPT.app Settings
@@ -282,88 +259,4 @@ pub(super) fn build_segmented_pair(
             pick_right,
         ))
         .into_any_element()
-}
-
-// --- MCP panel ------------------------------------------------------------
-
-/// MCP servers: the merged config (mcp.toml + plugin `.mcp.json` layers)
-/// with live connection state from the process registry. Each switch
-/// persists to `settings.toml` (`[mcp] disabled`) and applies from the next
-/// launch — the registry is built once at startup. Page identity (title,
-/// description, restart note) lives on the surrounding `SettingGroup`.
-pub fn render_mcp_servers(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> AnyElement {
-    let theme = cx.theme().clone();
-    let entity = cx.entity();
-    let muted = theme.muted_foreground;
-
-    let config = manox_agent::mcp::load_merged_config();
-    let servers: Vec<String> = config.mcp_servers.keys().cloned().collect();
-    let connected: std::collections::HashMap<String, usize> = manox_agent::mcp::try_global()
-        .map(|registry| {
-            registry
-                .servers()
-                .iter()
-                .map(|s| (s.name.clone(), s.tools.len()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut server_rows: Vec<AnyElement> = vec![section_header("settings-section-mcp-servers")];
-    if servers.is_empty() {
-        server_rows.push(
-            v_flex()
-                .px_3()
-                .py_3()
-                .child(muted_text(i18n::t("settings-empty-mcp"), muted))
-                .into_any_element(),
-        );
-    } else {
-        for (ix, name) in servers.iter().enumerate() {
-            let entity = entity.clone();
-            let name = name.clone();
-            let checked = !view.mcp_disabled.contains(&name);
-            let status: SharedString = if !checked {
-                i18n::t("settings-mcp-status-disabled")
-            } else if let Some(tool_count) = connected.get(&name) {
-                i18n::t_str(
-                    "settings-mcp-tool-count",
-                    &[("count", &tool_count.to_string())],
-                )
-            } else {
-                i18n::t("settings-mcp-status-not-connected")
-            };
-            server_rows.push(row_with_control(
-                i18n::t("settings-row-mcp-server-name"),
-                None,
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().text_sm().child(name.clone()))
-                    .child(div().text_xs().text_color(muted).child(status))
-                    .child(mock_switch(
-                        format!("mcp-{}", name),
-                        checked,
-                        entity,
-                        Arc::new(move |this, enabled| {
-                            if enabled {
-                                this.mcp_disabled.remove(&name);
-                            } else {
-                                this.mcp_disabled.insert(name.clone());
-                            }
-                            let disabled: Vec<String> = this.mcp_disabled.iter().cloned().collect();
-                            if let Err(err) = manox_agent::settings::set_mcp_disabled(disabled) {
-                                tracing::warn!(error = %err, "failed to persist MCP switch");
-                            }
-                        }),
-                    ))
-                    .into_any_element(),
-            ));
-            if ix + 1 < servers.len() {
-                server_rows.push(hairline(theme.border.opacity(0.6)));
-            }
-        }
-    }
-    let servers_section = section_card(&theme, server_rows);
-
-    v_flex().w_full().child(servers_section).into_any_element()
 }

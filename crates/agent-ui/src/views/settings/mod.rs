@@ -8,9 +8,11 @@
 
 use std::collections::HashSet;
 
-use gpui::{AnyElement, Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px,
+};
 use gpui_component::{
-    IconName,
+    ActiveTheme as _, IconName,
     group_box::GroupBoxVariant,
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
@@ -99,13 +101,31 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Toggle one MCP server and persist the whole disabled set. A failed
+    /// write surfaces as `SettingsEvent::SaveFailed`; the persisted set is
+    /// what the registry consults on the next launch.
+    fn apply_mcp_server(&mut self, name: &str, enabled: bool, cx: &mut Context<Self>) {
+        if enabled {
+            self.mcp_disabled.remove(name);
+        } else {
+            self.mcp_disabled.insert(name.to_string());
+        }
+        let disabled: Vec<String> = self.mcp_disabled.iter().cloned().collect();
+        if let Err(e) = user_settings::set_mcp_disabled(disabled) {
+            tracing::warn!(error = %e, "failed to persist MCP switch");
+            cx.emit(SettingsEvent::SaveFailed(e.to_string().into()));
+        }
+        cx.notify();
+    }
+
     /// The settings shell — the whole two-column surface below the TitleBar
     /// strip. Pages are rebuilt on every render so titles track the live
     /// locale; selection lives in the component's window-keyed state.
     pub(crate) fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity();
         Settings::new("settings")
             .sidebar_width(NAV_WIDTH)
-            .pages(build_pages(cx.entity()))
+            .pages(build_pages(&view, cx))
             .into_any_element()
     }
 }
@@ -118,23 +138,89 @@ type PanelRender = fn(&mut SettingsView, &mut Context<SettingsView>) -> AnyEleme
 /// One group hosting a full existing panel renderer as an opaque element —
 /// the transitional shape for panels whose internals are not yet expressed
 /// as `SettingItem` rows. `GroupBoxVariant` defaults to `Normal`, so the
-/// panel draws without a group card surface around it.
+/// panel draws without a group card surface around it. The keywords keep
+/// the panel reachable from the search box (element items match the query
+/// only through keywords).
 fn panel_group(
     view: &Entity<SettingsView>,
     title: &'static str,
+    keywords: &[&'static str],
     render: PanelRender,
 ) -> SettingGroup {
     let view = view.clone();
-    SettingGroup::new()
-        .title(i18n::t(title))
-        .item(SettingItem::render(move |_, _window, cx| {
-            view.update(cx, render)
-        }))
+    SettingGroup::new().title(i18n::t(title)).item(
+        SettingItem::render(move |_, _window, cx| view.update(cx, render))
+            .keywords(keywords.iter().copied()),
+    )
+}
+
+/// The MCP group: one `SettingField::switch` row per server in the merged
+/// config, with the live registry status as the row description. Toggles
+/// persist immediately and apply from the next launch.
+fn mcp_group(view: &Entity<SettingsView>, cx: &App) -> SettingGroup {
+    let config = manox_agent::mcp::load_merged_config();
+    let servers: Vec<String> = config.mcp_servers.keys().cloned().collect();
+    let connected: std::collections::HashMap<String, usize> = manox_agent::mcp::try_global()
+        .map(|registry| {
+            registry
+                .servers()
+                .iter()
+                .map(|s| (s.name.clone(), s.tools.len()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut group = SettingGroup::new()
+        .title(i18n::t("settings-item-mcp"))
+        .description(i18n::t("settings-desc-mcp"))
+        .footer(|_, _| div().child(i18n::t("settings-mcp-restart-note")));
+
+    if servers.is_empty() {
+        return group.item(
+            SettingItem::render(|_, _, cx| {
+                div()
+                    .py_3()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(i18n::t("settings-empty-mcp"))
+            })
+            .keywords(["mcp", "server"]),
+        );
+    }
+
+    for name in servers {
+        let disabled = view.read(cx).mcp_disabled.contains(&name);
+        let status: SharedString = if disabled {
+            i18n::t("settings-mcp-status-disabled")
+        } else if let Some(count) = connected.get(&name) {
+            i18n::t_str("settings-mcp-tool-count", &[("count", &count.to_string())])
+        } else {
+            i18n::t("settings-mcp-status-not-connected")
+        };
+        let value_view = view.clone();
+        let set_view = view.clone();
+        let set_name = name.clone();
+        group = group.item(
+            SettingItem::new(
+                SharedString::from(name.clone()),
+                SettingField::switch(
+                    move |cx| !value_view.read(cx).mcp_disabled.contains(&name),
+                    move |enabled, cx| {
+                        set_view
+                            .update(cx, |this, cx| this.apply_mcp_server(&set_name, enabled, cx));
+                    },
+                ),
+            )
+            .description(status)
+            .keywords(["mcp", "server", "tools"]),
+        );
+    }
+    group
 }
 
 /// The three pages of the settings shell, mirroring the previous nav groups:
 /// General (language + Models), Integrations (Plugins + MCP), External Tools.
-fn build_pages(view: Entity<SettingsView>) -> Vec<SettingPage> {
+fn build_pages(view: &Entity<SettingsView>, cx: &App) -> Vec<SettingPage> {
     let language_group = {
         let value_view = view.clone();
         let set_view = view.clone();
@@ -162,19 +248,9 @@ fn build_pages(view: Entity<SettingsView>) -> Vec<SettingPage> {
                         },
                     ),
                 )
-                .description(i18n::t("settings-desc-ui-language")),
+                .description(i18n::t("settings-desc-ui-language"))
+                .keywords(["language", "locale", "语言", "english"]),
             )
-    };
-
-    let mcp_group = {
-        let servers_view = view.clone();
-        SettingGroup::new()
-            .title(i18n::t("settings-item-mcp"))
-            .description(i18n::t("settings-desc-mcp"))
-            .footer(|_, _| div().child(i18n::t("settings-mcp-restart-note")))
-            .item(SettingItem::render(move |_, _window, cx| {
-                servers_view.update(cx, panels::render_mcp_servers)
-            }))
     };
 
     vec![
@@ -183,28 +259,34 @@ fn build_pages(view: Entity<SettingsView>) -> Vec<SettingPage> {
             .default_open(true)
             .group(language_group)
             .group(panel_group(
-                &view,
+                view,
                 "settings-item-models",
+                &["models", "providers", "llm", "api key", "endpoint"],
                 models::render_models,
             )),
         SettingPage::new(i18n::t("settings-group-integrations"))
             .icon(IconName::Frame)
             .default_open(true)
-            .group(panel_group(&view, "settings-item-plugins", |view, _cx| {
-                view.plugins.clone().into_any_element()
-            }))
-            .group(mcp_group),
+            .group(panel_group(
+                view,
+                "settings-item-plugins",
+                &["plugins", "marketplace", "extensions", "插件"],
+                |view, _cx| view.plugins.clone().into_any_element(),
+            ))
+            .group(mcp_group(view, cx)),
         SettingPage::new(i18n::t("settings-group-external-tools"))
             .icon(IconName::Bot)
             .default_open(true)
             .group(panel_group(
-                &view,
+                view,
                 "settings-item-chatgpt-app",
+                &["chatgpt", "codex", "injection", "external tools"],
                 chatgpt::render_chatgpt_app,
             ))
             .group(panel_group(
-                &view,
+                view,
                 "settings-item-vscode-app",
+                &["vscode", "visual studio code", "extension", "inject"],
                 vscode::render_vscode_app,
             )),
     ]
