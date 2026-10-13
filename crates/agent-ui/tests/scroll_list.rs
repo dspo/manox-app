@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, ElementExt as _};
 use manox_agent::ToolCallStatus;
-use steer_components::markdown::{Markdown, PanelKind, TerminalPanel};
+use steer_components::markdown::{PanelKind, TerminalPanel, TextViewState, message_document};
 
 struct ListProbe {
     state: ListState,
@@ -184,12 +184,19 @@ async fn list_clamps_scroll_anchor_when_visible_row_shrinks(cx: &mut TestAppCont
 }
 
 struct PersistentMarkdownRow {
-    markdown: gpui::Entity<Markdown>,
+    markdown: gpui::Entity<TextViewState>,
 }
 
 impl Render for PersistentMarkdownRow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        agent_ui::views::centered(self.markdown.clone())
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        agent_ui::views::centered(
+            message_document(
+                &self.markdown,
+                &cx.theme().clone(),
+                agent_ui::views::message::MESSAGE_BODY_SIZE,
+            )
+            .into_any_element(),
+        )
     }
 }
 
@@ -219,12 +226,12 @@ impl Render for MarkdownListProbe {
 
 fn markdown_rows(
     cx: &mut TestAppContext,
-    first: gpui::Entity<Markdown>,
+    first: gpui::Entity<TextViewState>,
 ) -> (
     gpui::Entity<PersistentMarkdownRow>,
     gpui::Entity<PersistentMarkdownRow>,
 ) {
-    let tail = cx.new(|cx| Markdown::new("markdown-tail", "tail message").theme(cx.theme()));
+    let tail = cx.new(|cx| TextViewState::markdown("tail message", cx));
     (
         cx.new(|_| PersistentMarkdownRow { markdown: first }),
         cx.new(|_| PersistentMarkdownRow { markdown: tail }),
@@ -260,10 +267,7 @@ const EXPLORE_SUMMARY_WITH_TABLE: &str = r#"3 个 Explore agent 全部成功完�
 #[gpui::test]
 async fn real_table_message_height_converges_across_width_changes(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
-    let markdown = cx.new(|cx| {
-        Markdown::new("explore-summary-table", EXPLORE_SUMMARY_WITH_TABLE).theme(cx.theme())
-    });
-    markdown.update(cx, |markdown, cx| markdown.finalize(cx));
+    let markdown = cx.new(|cx| TextViewState::markdown(EXPLORE_SUMMARY_WITH_TABLE, cx));
     let (first, tail) = markdown_rows(cx, markdown);
     let state = ListState::new(2, ListAlignment::Bottom, px(2048.));
     state.set_follow_mode(FollowMode::Tail);
@@ -346,7 +350,7 @@ async fn list_measures_persistent_wrapped_markdown_rows(cx: &mut TestAppContext)
         .map(|ix| format!("- item {ix}: 这是一段需要在确定宽度下换行的 markdown 内容。"))
         .collect::<Vec<_>>()
         .join("\n");
-    let markdown = cx.new(|cx| Markdown::new("long-markdown", long).theme(cx.theme()));
+    let markdown = cx.new(|cx| TextViewState::markdown(&long, cx));
     let (first, tail) = markdown_rows(cx, markdown);
     let state = ListState::new(2, ListAlignment::Bottom, px(2048.));
     state.set_follow_mode(FollowMode::Tail);
@@ -381,11 +385,7 @@ async fn list_measures_persistent_wrapped_markdown_rows(cx: &mut TestAppContext)
 async fn list_remeasures_streaming_markdown_child_growth(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     let prefix = "# Plan\n\nInitial paragraph.\n".to_string();
-    let markdown = cx.new(|cx| {
-        Markdown::new("streaming-plan", prefix.clone())
-            .theme(cx.theme())
-            .streaming(true)
-    });
+    let markdown = cx.new(|cx| TextViewState::markdown(&prefix, cx));
     let (first, tail) = markdown_rows(cx, markdown.clone());
     let state = ListState::new(2, ListAlignment::Bottom, px(2048.));
     state.set_follow_mode(FollowMode::Tail);
@@ -404,7 +404,7 @@ async fn list_remeasures_streaming_markdown_child_growth(cx: &mut TestAppContext
         .map(|ix| format!("\n## Section {ix}\n\n- streamed wrapped content {ix}\n"))
         .collect::<String>();
     markdown.update(&mut visual.cx, |markdown, cx| {
-        markdown.replace(format!("{prefix}{suffix}"), cx)
+        markdown.set_text(&format!("{prefix}{suffix}"), cx)
     });
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -748,7 +748,7 @@ async fn production_list_recovers_after_narrow_width_without_blank_range(cx: &mu
 struct TerminalListProbe {
     state: ListState,
     panel: gpui::Entity<TerminalPanel>,
-    tail: gpui::Entity<Markdown>,
+    tail: gpui::Entity<TextViewState>,
 }
 
 impl Render for TerminalListProbe {
@@ -788,7 +788,7 @@ async fn list_measures_persistent_terminal_panel_rows(cx: &mut TestAppContext) {
         panel.set_output(output, cx);
         panel
     });
-    let tail = cx.new(|cx| Markdown::new("terminal-tail", "assistant tail").theme(cx.theme()));
+    let tail = cx.new(|cx| TextViewState::markdown("assistant tail", cx));
     let state = ListState::new(2, ListAlignment::Bottom, px(2048.));
     state.set_follow_mode(FollowMode::Tail);
     let window = cx.open_window(size(px(760.), px(600.)), {
@@ -827,7 +827,7 @@ async fn terminal_load_more_remeasures_row_without_overlap(cx: &mut TestAppConte
         panel.set_output(output, cx);
         panel
     });
-    let tail = cx.new(|cx| Markdown::new("load-more-tail", "assistant tail").theme(cx.theme()));
+    let tail = cx.new(|cx| TextViewState::markdown("assistant tail", cx));
     let state = ListState::new(2, ListAlignment::Bottom, px(2048.));
     state.set_follow_mode(FollowMode::Tail);
     let window = cx.open_window(size(px(760.), px(600.)), {

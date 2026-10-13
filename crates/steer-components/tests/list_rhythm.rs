@@ -1,10 +1,9 @@
-//! List blocks must occupy the same vertical footprint as equivalent body
-//! paragraphs, and `body_size`/heading tiers must render at their configured
-//! sizes. The first guard catches the marker-wrap regression (a too-narrow
-//! marker column wrapped "• " / "N. " onto an invisible extra line, inflating
-//! every item by a full line box). The second mounts the real `Root` (which
-//! pins `rem` to `theme.font_size`, 14px in the app) and pins the rendered
-//! line boxes: body 13px, H1 at 1rem (14px), H2+ back at body size.
+//! List items must stack as pure line boxes — no marker-wrap may inflate an
+//! item by an invisible extra line, and no per-item margin may creep in (the
+//! upstream renderer spaces list items tighter than paragraph gaps; the guard
+//! pins that density). The heading ladder must hold its configured sizes under
+//! the message-density style: H2–H6 at body size (plus the renderer's constant
+//! heading pad), H1 one step up.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -13,8 +12,9 @@ use gpui::{
     AnyElement, App, AppContext, Bounds, Element, GlobalElementId, InspectorElementId, IntoElement,
     LayoutId, ParentElement, Pixels, Render, Style, Styled, Window, div, px,
 };
+use gpui_base::TextView;
 use gpui_component::{Root, Theme};
-use steer_components::markdown::{HeadingMode, Markdown};
+use steer_components::markdown::{TextViewState, message_style};
 
 struct Measure {
     child: AnyElement,
@@ -80,22 +80,21 @@ struct Host {
 }
 
 impl Render for Host {
-    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let mut md = Markdown::new("m", self.source.clone())
-            .theme(&Theme::default())
-            .heading_mode(HeadingMode::Uniform);
-        if let Some(b) = self.body {
-            md = md.body_size(b);
-        }
-        let md = cx.new(|_cx| md);
-        div().w(px(600.)).text_base().child(Measure {
-            child: md.into_any_element(),
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let theme = Theme::default();
+        let text_size = self.body.unwrap_or(px(13.));
+        let view = TextView::markdown("m", self.source.clone())
+            .style(message_style(&theme, text_size))
+            .text_size(text_size);
+        div().w(px(600.)).child(Measure {
+            child: view.into_any_element(),
             out: self.out.clone(),
         })
     }
 }
 
 fn measure_raw(cx: &mut gpui::TestAppContext, source: &str, body: Option<Pixels>) -> f32 {
+    cx.update(gpui_base::init);
     let out = Rc::new(Cell::new(px(0.)));
     let src = source.to_string();
     let o2 = out.clone();
@@ -109,7 +108,7 @@ fn measure_raw(cx: &mut gpui::TestAppContext, source: &str, body: Option<Pixels>
 }
 
 fn measure(cx: &mut gpui::TestAppContext, source: &str) -> f32 {
-    measure_raw(cx, source, None)
+    measure_raw(cx, source, Some(px(13.)))
 }
 
 #[gpui::test]
@@ -150,66 +149,96 @@ fn list_vertical_footprint_matches_body_paragraphs(cx: &mut gpui::TestAppContext
         (one_list - one_par).abs() <= 1.0,
         "single-item list {one_list}px must match single paragraph {one_par}px"
     );
+    // Upstream list items carry no per-item margin: N items stack as N line
+    // boxes. A marker wrap or stray item margin would break the equality.
+    let line = one_par;
     assert!(
-        (twelve_tight - twelve_par).abs() <= 1.0,
-        "12-item list {twelve_tight}px must match 12 paragraphs {twelve_par}px"
+        (twelve_tight - 12.0 * line).abs() <= 1.0,
+        "12-item list {twelve_tight}px must be 12 bare line boxes ({line}px each)"
     );
     assert!(
-        (twelve_ordered - twelve_par).abs() <= 1.0,
-        "12-item ordered list {twelve_ordered}px must match 12 paragraphs {twelve_par}px"
+        (twelve_ordered - twelve_tight).abs() <= 1.0,
+        "12-item ordered list {twelve_ordered}px must match the tight list {twelve_tight}px"
+    );
+    // The paragraphs equivalence is density-relative: paragraphs pay the
+    // paragraph gap between blocks, so 12 paragraphs must be taller than the
+    // tight list but not absurdly so (11 gaps at ≤ 1rem each).
+    assert!(
+        twelve_par > twelve_tight && twelve_par - twelve_tight <= 11.0 * 16.0,
+        "12 paragraphs {twelve_par}px must exceed the tight list {twelve_tight}px by gaps only"
     );
 }
 
-/// Mirrors the app: `Root` pins `rem` to `theme.font_size` (14px), so `1rem`
-/// headings render at 14 while a `body_size(px(13.))` document renders at 13.
-/// Line box = phi (≈1.618) × font size, pixel-snapped: 13px → 21, 14px → 23.
-/// The root col's Sentinel child plus its gap_2 add a constant 7px (0.5rem @
-/// rem 14) to every single-block document, so measured heights are line + 7.
+/// Heading ladder under the message-density style: H2–H6 hold the body line
+/// box; H1 steps up. Every heading is at most one step above the body, so no
+/// heading dwarfs dense conversation text.
 #[gpui::test]
-fn body_size_and_heading_tiers_render_at_configured_sizes(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
-    cx.update(|cx| {
-        gpui_component::Theme::global_mut(cx).font_size = px(14.);
-    });
+fn heading_ladder_stays_at_body_size_with_one_h1_step(cx: &mut gpui::TestAppContext) {
+    let body = measure(cx, "alpha bravo charlie");
+    let h1 = measure(cx, "# alpha");
+    let h2 = measure(cx, "## alpha");
+    let h4 = measure(cx, "#### alpha");
 
-    // Wrap the host in the real Root so set_rem_size(14) applies, like the app.
-    let measure = |cx: &mut gpui::TestAppContext, source: &str, body: Option<Pixels>| {
-        let out = Rc::new(Cell::new(px(0.)));
-        let src = source.to_string();
-        let o2 = out.clone();
-        let (_view, cx) = cx.add_window_view(move |window, cx| {
-            let host = cx.new(|_cx| Host {
-                source: src,
-                body,
-                out: o2,
-            });
-            Root::new(host, window, cx)
+    // Every heading carries the renderer's constant bottom pad, so H2/H4 read
+    // as the body line box plus that one constant — never more.
+    assert!(
+        (h2 - h4).abs() <= 0.5,
+        "H2 and H4 share the body size, so their line boxes must match: {h2} vs {h4}"
+    );
+    let (body_f, h2_f) = (body, h2);
+    assert!(
+        h2_f > body_f && h2_f - body_f <= 8.0,
+        "H2 must be the body line plus the constant heading pad: {h2} vs {body}"
+    );
+    let h1_f = h1;
+    assert!(
+        h1_f > h2_f && h1_f - h2_f <= 10.0,
+        "H1 must sit one visible step above H2, got {h1} vs {h2}"
+    );
+}
+
+/// A document entity fed text through `set_text` renders the same footprint as
+/// the same source mounted statically — the persistent-body path used by the
+/// conversation must not carry extra layout.
+#[gpui::test]
+fn persistent_entity_footprint_matches_static_mount(cx: &mut gpui::TestAppContext) {
+    let static_height = measure(cx, "alpha bravo charlie\n\ndelta echo foxtrot");
+
+    let out = Rc::new(Cell::new(px(0.)));
+    let o2 = out.clone();
+    let (_view, cx) = cx.add_window_view(move |window, cx| {
+        let state = cx.new(|cx| TextViewState::markdown("alpha bravo charlie", cx));
+        state.update(cx, |s, cx| {
+            s.set_text("alpha bravo charlie\n\ndelta echo foxtrot", cx)
         });
-        cx.run_until_parked();
-        f32::from(out.get())
-    };
+        let view = TextView::new(&state)
+            .style(message_style(&Theme::default(), px(13.)))
+            .text_size(px(13.));
+        let host = cx.new(|_cx| HeightHost {
+            view,
+            out: o2.clone(),
+        });
+        Root::new(host, window, cx)
+    });
+    let _ = cx;
+    cx.run_until_parked();
+    let entity_height = f32::from(out.get());
+    assert!(
+        (entity_height - static_height).abs() <= 1.0,
+        "persistent entity {entity_height}px must match static mount {static_height}px"
+    );
+}
 
-    let body_default = measure(cx, "alpha bravo charlie", None);
-    let body_13 = measure(cx, "alpha bravo charlie", Some(px(13.)));
-    let h1_at_13 = measure(cx, "# alpha", Some(px(13.)));
-    let h4_at_13 = measure(cx, "#### alpha", Some(px(13.)));
+struct HeightHost {
+    view: TextView,
+    out: Rc<Cell<Pixels>>,
+}
 
-    assert!(
-        (body_13 - 28.0).abs() <= 1.0,
-        "body_size(13px) single line ≈21px + 7px sentinel gap, got {body_13}"
-    );
-    assert!(
-        (body_default - body_13 - 1.6).abs() <= 1.0,
-        "1rem body must exceed 13px body by one phi step (≈1.6px), got {body_default} vs {body_13}"
-    );
-    // H1 carries mb_2 (space_after), hence one extra 7px over body_default.
-    assert!(
-        (h1_at_13 - body_default - 7.0).abs() <= 1.0,
-        "Uniform H1 line must equal the 1rem body line (+mb_2), got {h1_at_13} vs {body_default}"
-    );
-    // H4+ has no space_after: pure line-box comparison against the 13px body.
-    assert!(
-        (h4_at_13 - body_13).abs() <= 0.5,
-        "Uniform H4 must follow the 13px body, got {h4_at_13} vs {body_13}"
-    );
+impl Render for HeightHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div().w(px(600.)).child(Measure {
+            child: self.view.clone().into_any_element(),
+            out: self.out.clone(),
+        })
+    }
 }

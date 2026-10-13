@@ -9664,13 +9664,12 @@ dependencies = [
 name = "steer-components"
 version = "0.1.0"
 dependencies = [
+ "gpui-base",
  "gpui-component",
  "gpui-pre",
  "hyperlinks",
  "log",
- "markdown",
  "ropey",
- "unicode-linebreak",
  "vte",
 ]
 

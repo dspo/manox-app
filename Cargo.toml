@@ -164,13 +164,10 @@ rfd = "0.15"
 arboard = "3"
 open = "5"
 
-# markdown-rs (mdast) — markdown 解析。经 gpui-component 已在 Cargo.lock,workspace 声明复用同一版本（0.6.1 锁 markdown 1.0.0）。
-markdown = "1"
 # ropey — SyntaxHighlighter::update 接收 &Rope;版本对齐 gpui-component 在 Cargo.lock 锁定的 2.0.0-beta.1（0.6.1 不变）。
 ropey = "2.0.0-beta.1"
 # vte — ANSI escape parser (alacritty/wezterm 的同款,仅解析器)。TerminalPanel 用其 Handler trait 解析工具输出着色。
 vte = { version = "0.13", default-features = false, features = ["ansi"] }
-unicode-linebreak = "0.1.5"
 log = "0.4"
 
 # Terminal emulator stack. alacritty_terminal provides the Term/Grid/Selection
@@ -205,6 +202,11 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = 
 # per-language feature 的聚合别名，底层个别语法换源如 sql→sequel）。
 gpui-component = { version = "=0.7.0", features = ["tree-sitter-languages"] }
 gpui-kit-assets = { version = "=0.7.0" }
+# gpui-base — the same rich-text core gpui-component 0.7.0 builds on (same
+# release train). The markdown stack drives the base-layer TextView directly:
+# the component wrapper exposes neither the per-instance code-block
+# highlighter nor heading weights, and both are hard requirements here.
+gpui-base = "=0.7.0"
 
 # （旧栈的 `[patch.crates-io] psm = stacker` 已随 zed gpui 退出删除：gpui-pre
 # 0.3.7 依赖闭包不含 psm/stacker，kit lock 同样零命中。）

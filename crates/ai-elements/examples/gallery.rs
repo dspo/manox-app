@@ -27,7 +27,7 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, Theme, button::Button, h_flex,
     shimmer::ShimmerText, v_flex,
 };
-use steer_components::markdown::{HeadingMode, Markdown};
+use steer_components::markdown::{TextViewState, message_document, stream_fade_motion};
 
 /// The scripted reasoning text. A scripted stream feeds it a few characters at a
 /// time — the cadence a provider actually delivers, and the thing that makes a
@@ -221,7 +221,7 @@ struct Demo {
     /// The reasoning body. Rebuilt per scripted run, exactly as the
     /// conversation mounts one per reasoning round: a streaming document is
     /// created mid-stream and finalized when the round ends.
-    markdown: Entity<Markdown>,
+    markdown: Entity<TextViewState>,
     /// The in-flight scripted feed. Holding it here is what cancels a run the
     /// user restarts, instead of two feeds interleaving into one body.
     stream_task: Option<gpui::Task<()>>,
@@ -334,9 +334,7 @@ impl Gallery {
 
         let mut demos = Vec::new();
         let mut subscriptions = Vec::new();
-        for (ix, (title, note, mounts_streaming, custom_message, default_open)) in
-            specs.iter().enumerate()
-        {
+        for (title, note, mounts_streaming, custom_message, default_open) in specs.iter() {
             let mounts_streaming = *mounts_streaming;
             let state = cx.new(|cx| {
                 let state = match *default_open {
@@ -353,7 +351,7 @@ impl Gallery {
             // The settled demos open with a body in place, so a folded block
             // has something to show before any control is touched.
             let seeded = *default_open == Some(true);
-            let markdown = mount_body(cx, ix, false, if seeded { SCRIPT } else { "" });
+            let markdown = mount_body(cx, if seeded { SCRIPT } else { "" });
             demos.push(Demo {
                 title,
                 note,
@@ -380,7 +378,7 @@ impl Gallery {
         // A fresh streaming document per run, as the conversation mounts one per
         // reasoning round: the streaming flag is a mount-time property, and it is
         // what puts the trailing cursor at the end of the growing body.
-        self.reasoning[ix].markdown = mount_body(cx, ix, true, "");
+        self.reasoning[ix].markdown = mount_body(cx, "");
         self.reasoning[ix].state.update(cx, |state, cx| {
             state.set_duration(None, cx);
             // A block mounted mid-run is already streaming; feeding it another
@@ -412,14 +410,11 @@ impl Gallery {
     fn feed_delta(&mut self, ix: usize, delta: &str, cx: &mut Context<Self>) {
         self.reasoning[ix]
             .markdown
-            .update(cx, |md, cx| md.append(delta, cx));
+            .update(cx, |md, cx| md.push_str(delta, cx));
     }
 
     fn finish_stream(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.reasoning[ix].stream_task = None;
-        self.reasoning[ix]
-            .markdown
-            .update(cx, |md, cx| md.finalize_streaming(cx));
         self.reasoning[ix]
             .state
             .update(cx, |state, cx| state.set_streaming(false, cx));
@@ -515,10 +510,13 @@ impl Gallery {
         cx.notify();
     }
 
-    fn demo_block(&self, ix: usize) -> impl IntoElement {
+    fn demo_block(&self, ix: usize, cx: &App) -> impl IntoElement {
         let demo = &self.reasoning[ix];
-        let mut block =
-            Reasoning::new(("reasoning", ix), &demo.state).content(demo.markdown.clone());
+        let mut block = Reasoning::new(("reasoning", ix), &demo.state).content(
+            message_document(&demo.markdown, Theme::global(cx), px(13.))
+                .motion(stream_fade_motion())
+                .into_any_element(),
+        );
         if demo.custom_message {
             block = block.get_thinking_message(|streaming, duration, _window, _cx| {
                 if streaming {
@@ -596,7 +594,7 @@ impl Gallery {
                             ),
                     ),
             )
-            .child(self.demo_block(ix))
+            .child(self.demo_block(ix, cx))
             .into_any_element()
     }
 
@@ -927,23 +925,11 @@ impl Render for Gallery {
     }
 }
 
-/// Mount a body the way the conversation mounts one for a reasoning round: the
-/// theme's style table (without it the renderer paints nothing), uniform
-/// headings and the message-list body size, and the streaming flag that carries
-/// the trailing cursor.
-fn mount_body(
-    cx: &mut Context<Gallery>,
-    ix: usize,
-    streaming: bool,
-    source: &'static str,
-) -> Entity<Markdown> {
-    cx.new(|cx| {
-        Markdown::new(("reasoning-body", ix), source)
-            .theme(Theme::global(cx))
-            .heading_mode(HeadingMode::Uniform)
-            .body_size(px(13.))
-            .streaming(streaming)
-    })
+/// Mount a body the way the conversation mounts one for a reasoning round: a
+/// persistent document entity that `feed_delta` grows through the incremental
+/// `push_str` path.
+fn mount_body(cx: &mut Context<Gallery>, source: &'static str) -> Entity<TextViewState> {
+    cx.new(|cx| TextViewState::markdown(source, cx))
 }
 
 fn main() {

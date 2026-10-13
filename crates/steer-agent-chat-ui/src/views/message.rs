@@ -1,7 +1,7 @@
 //! Rendering of a single conversation message.
 //!
-//! - Text blocks render via `Markdown` with per-block copy buttons (cross-block
-//!   selection + Cmd+C copy lands in a follow-up).
+//! - Text blocks render via upstream `TextView` (assembled by
+//!   `steer_components::markdown`) with per-block copy buttons.
 //! - User: a full-width bordered turn block with a muted metadata header
 //!   (role · model · project) — the Claude Code TUI turn-block look, not a
 //!   chat bubble.
@@ -9,13 +9,11 @@
 //! - Reasoning: a collapsible block, indented secondary text with a left border.
 //! - ToolCall: a card with title + status icon + monospace output.
 //!
-//! Streaming assistant / reasoning bodies render formatted markdown throughout
-//! the stream via `Markdown::blocks` (blocks from an `IncrementalParser`), with
-//! a trailing cursor on the last block. `Stop` finalizes the parser (one full
-//! parse for consistency) and flips the streaming flag off — no reflow jump.
-//! Streaming tool output is stricter: while lines are still arriving we paint
-//! a plain monospace run and only mount the syntax-highlighted `Markdown` once
-//! the final `ToolResult` lands.
+//! Streaming assistant / reasoning bodies fade new text in word by word
+//! (`stream_fade` motion); a finalized body adopts updates at once. Streaming
+//! tool output is stricter: while lines are still arriving we paint a plain
+//! monospace run and only mount the syntax-highlighted document once the
+//! final `ToolResult` lands.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,9 +47,11 @@ use manox_agent::language_model::{LanguageModelToolResult, MessageContent, Role}
 use manox_agent::thread::PermissionMode;
 use manox_agent::{Message, TokenUsage, ToolCallStatus};
 use steer_components::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_button};
-use steer_components::markdown::ast::LinkKind;
-use steer_components::markdown::terminal_panel::GitSummary;
-use steer_components::markdown::{HeadingMode, Markdown, PanelKind, TerminalPanel, hashline_text};
+use steer_components::markdown::GitSummary;
+use steer_components::markdown::{
+    ChatDocument, LinkKind, PanelKind, TerminalPanel, classify_target, code_copy_actions,
+    hashline_text, message_document, static_document, stream_fade_motion, table_copy_actions,
+};
 
 /// Message body type size: one step below the chrome `text_base` (14px) so
 /// dense conversation text reads lighter. Composer + Editor tab pin the same
@@ -85,50 +85,81 @@ pub struct ToolCallCtx {
     pub confirmation: Option<ConfirmationSnapshot>,
 }
 
-/// Markdown renderer with theme-aware syntax highlighting.
+/// Mount a markdown document element for a text body.
 ///
-/// `scrollable = true` mounts an internal vertical scrollbar; the renderer
-/// sizes to its parent's box, so the parent must carry a fixed height (use
-/// `h(...)` rather than `max_h(...)`).
-///
-/// `scrollable = false` clips overflow horizontally — the renderer itself is a
-/// `w_full` + `min_w_0` column, so a long unbreakable run cannot push past the
-/// env-card gutter.
-///
-/// Mounts a fresh `Entity<Markdown>` per frame — used for static chrome and
-/// defensive fallbacks (sub-message bodies, tool-output / reasoning fallbacks)
-/// where cross-block selection is not required (code blocks carry their own
-/// hover copy button). Text bodies use the `MessageItem`'s persistent
-/// `Entity<Markdown>` directly (see `ensure_markdown`).
-fn markdown_tv(
+/// `static_document` keys its state off the element id, so selection persists
+/// across frames without the caller owning an entity — used for static chrome
+/// and defensive fallbacks (sub-message bodies, tool-output / reasoning
+/// fallbacks). Text bodies use the `MessageItem`'s persistent `ChatDocument`
+/// (see `ensure_markdown`), passed via `body_or_static`.
+fn static_body(
     id: impl Into<gpui::ElementId>,
     text: impl Into<gpui::SharedString>,
     theme: &Theme,
-    scrollable: bool,
-    cx: &mut App,
+    owner: Option<WeakEntity<MessageItem>>,
 ) -> gpui::AnyElement {
-    cx.new(|_cx| {
-        Markdown::new(id, text)
-            .theme(theme)
-            .scrollable(scrollable)
-            .heading_mode(HeadingMode::Uniform)
-            .body_size(MESSAGE_BODY_SIZE)
-    })
-    .into_any_element()
+    let view = static_document(id, text, theme);
+    match owner {
+        Some(owner) => view
+            .code_block_actions(code_copy_actions(owner.clone()))
+            .table_actions(table_copy_actions(owner))
+            .into_any_element(),
+        None => view.into_any_element(),
+    }
+}
+
+/// Chain the interaction layer every user-facing document carries: the link
+/// dispatcher (bare URL → browser, detected path → VS Code), the streaming
+/// motion, and the per-block copy controls wired to the item's copy-feedback
+/// registry when one is available.
+fn decorate_document(
+    view: steer_components::markdown::TextView,
+    streaming: bool,
+    owner: Option<WeakEntity<MessageItem>>,
+) -> gpui::AnyElement {
+    let view = view
+        .motion(if streaming {
+            stream_fade_motion()
+        } else {
+            Default::default()
+        })
+        .on_link_click(|url: &SharedString, _event, _window, _cx| {
+            let cwd = std::env::current_dir().ok();
+            match classify_target(url) {
+                LinkKind::Url => {
+                    let _ = open::that(url.as_ref());
+                }
+                LinkKind::FilePath => open_file_in_vscode(url, cwd.as_deref()),
+            }
+        });
+    match owner {
+        Some(owner) => view
+            .code_block_actions(code_copy_actions(owner.clone()))
+            .table_actions(table_copy_actions(owner))
+            .into_any_element(),
+        None => view.into_any_element(),
+    }
 }
 
 /// Mount the item's persistent text body when present; otherwise fall back to a
-/// per-frame `markdown_tv` mount so the same renderer output appears while
-/// selection degrades to per-frame. Every text-body render shares this path.
+/// per-frame `static_body` mount so the same renderer output appears. Every
+/// text-body render shares this path.
 fn body_or_static(
-    body: Option<Entity<Markdown>>,
+    body: Option<ChatDocument>,
     id: impl Into<gpui::ElementId>,
     text: String,
     theme: &Theme,
-    cx: &mut App,
+    streaming: bool,
+    owner: Option<WeakEntity<MessageItem>>,
 ) -> gpui::AnyElement {
-    body.map(|md| md.into_any_element())
-        .unwrap_or_else(|| markdown_tv(id, text, theme, false, cx))
+    match body.as_ref().and_then(ChatDocument::state) {
+        Some(state) => decorate_document(
+            message_document(state, theme, MESSAGE_BODY_SIZE),
+            streaming,
+            owner,
+        ),
+        None => static_body(id, text, theme, owner),
+    }
 }
 
 /// The persistent text body for a conversation item, if it has one: the
@@ -161,7 +192,7 @@ fn text_body_of(kind: &ConvItem) -> Option<(bool, String)> {
 /// creation time so a finished bubble keeps its model label after the user
 /// switches models.
 ///
-/// `markdown` holds the owned `Entity<Markdown>` for items with a text body
+/// `markdown` holds the owned `ChatDocument` for items with a text body
 /// (Assistant, User, Error, Recap, Retry): a
 /// stateful document carrying parse-once incremental parsing + document-level
 /// selection, so a streaming delta re-parses only the tail and a cross-block
@@ -169,9 +200,8 @@ fn text_body_of(kind: &ConvItem) -> Option<(bool, String)> {
 /// items (Thinking, ToolCall, AgentTask, Notice, …): reasoning and tool-call
 /// bodies own their own persistent entities, a `Notice` body is a persistent
 /// `TerminalPanel` (`notice_panel`, paginating long notices like tool
-/// output), and the remaining static chrome mounts a fresh `Entity<Markdown>`
-/// per frame via `markdown_tv` (no persistent selection; code blocks carry
-/// their own hover copy button).
+/// output), and the remaining static chrome mounts per-frame documents that
+/// still carry the per-block hover copy controls.
 pub struct MessageItem {
     kind: ConvItem,
     role: String,
@@ -179,7 +209,7 @@ pub struct MessageItem {
     /// Weak handle to the owning `Workspace`, used by interactive message
     /// rows such as `AgentTask` to open their peer right-pane view.
     host: ChatHostHandle,
-    markdown: Option<Entity<Markdown>>,
+    markdown: Option<ChatDocument>,
     /// Persistent `Entity<TerminalPanel>` for a `ConvItem::Notice` body: the
     /// same paginated surface as tool output (default `PAGE_SIZE` lines, `+N`
     /// to reveal more) so a long notice — e.g. an escalated approval reason —
@@ -236,62 +266,25 @@ impl MessageItem {
         self.id
     }
 
-    /// Lazily create (or re-sync) the owned `Entity<Markdown>` for an item with
-    /// a text body, seeded with the kind's streaming flag (true mid-stream,
-    /// false for finalized/historical bodies) and the body's current source.
-    /// Returns the entity handle so the caller can mount it. `None` for items
-    /// without a text body (they have no owned markdown body).
-    fn ensure_markdown(&mut self, cx: &mut gpui::Context<Self>) -> Option<Entity<Markdown>> {
-        let (streaming, current) = text_body_of(&self.kind)?;
-        match &self.markdown {
-            None => {
-                let id = self.id;
-                let cwd = std::env::current_dir().ok();
-                self.markdown = Some(cx.new(|cx| {
-                    Markdown::new(("md", id), current)
-                        .theme(cx.theme())
-                        .heading_mode(HeadingMode::Uniform)
-                        .body_size(MESSAGE_BODY_SIZE)
-                        .streaming(streaming)
-                        .on_open_link(Some(Arc::new(move |url, kind| match kind {
-                            LinkKind::Url => {
-                                let _ = open::that(&url);
-                            }
-                            LinkKind::FilePath => open_file_in_vscode(&url, cwd.as_deref()),
-                        })))
-                }));
-            }
-            // A streaming body is synced incrementally by `update_text`; a
-            // finalized body is re-synced here because it can be rewritten in
-            // place (e.g. `Retry` coalescing a new detail) — the mounted entity
-            // must never lag the item's current text.
-            Some(md) if !streaming => {
-                md.update(cx, |m, cx| {
-                    if m.source() != current {
-                        m.replace(current.clone(), cx);
-                    }
-                });
-            }
-            Some(_) => {}
-        }
+    /// Lazily mount (or re-sync) the owned [`ChatDocument`] for an item with a
+    /// text body. The document syncs against the body's current source:
+    /// unchanged text is a no-op, an appended delta rides upstream's
+    /// incremental `push_str`, a rewrite (e.g. `Retry` coalescing a new
+    /// detail) falls back to a full `set_text`. Returns a clone so the caller
+    /// can mount it. `None` for items without a text body.
+    fn ensure_markdown(&mut self, cx: &mut gpui::Context<Self>) -> Option<ChatDocument> {
+        let (_, current) = text_body_of(&self.kind)?;
+        self.markdown.get_or_insert_default().sync(&current, cx);
         self.markdown.clone()
     }
 
-    /// Feed a full text snapshot to the owned markdown document. `replace` runs
-    /// the incremental parser's append-only fast path (re-parse only the tail),
-    /// so a streaming delta pays proportional to the delta, not the full body.
+    /// Feed a full text snapshot to the owned markdown document. An appended
+    /// delta rides upstream's incremental `push_str`, so a streaming delta
+    /// pays proportional to the delta, not the full body.
     pub fn update_text(&mut self, full_text: &str, cx: &mut gpui::Context<Self>) {
-        if let Some(md) = self.ensure_markdown(cx) {
-            md.update(cx, |m, cx| m.replace(full_text, cx));
-        }
-    }
-
-    /// Run the parser's final full parse so the frozen prefix + tail match a
-    /// one-shot parse. Used by `rebuild_from_display` for non-streaming text
-    /// items loaded from history.
-    pub fn finalize_parser(&mut self, cx: &mut gpui::Context<Self>) {
-        if let Some(md) = &self.markdown {
-            md.update(cx, |m, cx| m.finalize(cx));
+        let _ = self.ensure_markdown(cx);
+        if let Some(md) = self.markdown.as_mut() {
+            md.sync(full_text, cx);
         }
     }
     /// Mount (lazily) the persistent `TerminalPanel` body for a `Notice` item,
@@ -315,46 +308,26 @@ impl MessageItem {
         self.notice_panel.clone()
     }
 
-    /// Ensure the `eix`-th activity entry's persistent `Entity<Markdown>` exists
+    /// Ensure the `eix`-th activity entry's persistent `ChatDocument` exists
     /// and feed it the entry's current text. Mirrors `update_text` for the
-    /// activity-tree reasoning rounds: a streaming delta drives the incremental
-    /// parser's append-only fast path while document-level selection + focus
-    /// survive across frames (drag + Cmd/Ctrl+C), so a reasoning round selects
-    /// and copies just like the top-level body.
+    /// activity-tree reasoning rounds: an appended delta rides upstream's
+    /// incremental `push_str` while selection survives across frames (drag +
+    /// Cmd/Ctrl+C), so a reasoning round selects and copies just like the
+    /// top-level body.
     pub fn sync_reasoning_entry(&mut self, eix: usize, cx: &mut gpui::Context<Self>) {
         let ConvItem::Thinking(t) = &mut self.kind else {
             return;
         };
-        let Some(ActivityEntry::Reasoning {
-            text,
-            streaming,
-            markdown,
-            ..
-        }) = t.entries.get_mut(eix)
-        else {
+        let Some(ActivityEntry::Reasoning { text, markdown, .. }) = t.entries.get_mut(eix) else {
             return;
         };
-        if markdown.is_none() {
-            let streaming = *streaming;
-            let id = eix;
-            *markdown = Some(cx.new(|cx| {
-                Markdown::new(("reasoning-md", id), "")
-                    .theme(cx.theme())
-                    .heading_mode(HeadingMode::Uniform)
-                    .body_size(MESSAGE_BODY_SIZE)
-                    .streaming(streaming)
-            }));
-        }
-        if let Some(md) = markdown.as_ref().cloned() {
-            let text = text.clone();
-            md.update(cx, |m, cx| m.replace(&text, cx));
-        }
+        markdown.get_or_insert_default().sync(text, cx);
     }
 
-    /// For a rebuilt (historical) `Thinking` container, mount + finalize the
-    /// persistent markdown for every reasoning round so document-level
-    /// selection works on reloaded history (not just live-streamed turns).
-    /// Mirrors `update_text` + `finalize_parser` for the top-level text bodies.
+    /// For a rebuilt (historical) `Thinking` container, mount the persistent
+    /// markdown for every reasoning round so window-level selection works on
+    /// reloaded history (not just live-streamed turns). Mirrors `update_text`
+    /// for the top-level text bodies.
     pub fn rebuild_activity_reasoning(&mut self, cx: &mut gpui::Context<Self>) {
         let eixs: Vec<usize> = {
             let ConvItem::Thinking(t) = &mut self.kind else {
@@ -369,12 +342,6 @@ impl MessageItem {
         };
         for eix in eixs {
             self.sync_reasoning_entry(eix, cx);
-            if let ConvItem::Thinking(t) = &mut self.kind
-                && let Some(ActivityEntry::Reasoning { markdown, .. }) = t.entries.get_mut(eix)
-                && let Some(md) = markdown.as_ref()
-            {
-                md.update(cx, |m, cx| m.finalize(cx));
-            }
         }
     }
 
@@ -507,9 +474,7 @@ impl MessageItem {
     /// (pins elapsed, schedules the entries' delayed auto-collapse) and the
     /// tool-call cards; a ToolUse stop only finalizes the assistant/reasoning
     /// text streaming so the next model response's tool calls fold into the
-    /// same segment. The markdown document
-    /// always gets a final pass so the frozen prefix + tail match a one-shot
-    /// full parse exactly.
+    /// same segment.
     pub fn finalize_streaming(&mut self, terminal: bool, cx: &mut gpui::Context<Self>) {
         match &mut self.kind {
             ConvItem::Assistant { streaming, .. } => *streaming = false,
@@ -525,15 +490,11 @@ impl MessageItem {
                             streaming,
                             collapsed,
                             user_toggled,
-                            markdown,
                             ..
                         } => {
                             *streaming = false;
                             if !*user_toggled && !*collapsed {
                                 schedule_auto_collapse(AutoCollapseTarget::ReasoningEntry(eix), cx);
-                            }
-                            if let Some(md) = markdown.as_ref() {
-                                md.update(cx, |m, cx| m.finalize_streaming(cx));
                             }
                         }
                         ActivityEntry::Tool(tool) => {
@@ -568,16 +529,12 @@ impl MessageItem {
                         streaming: false,
                         collapsed,
                         user_toggled,
-                        markdown,
                         ..
                     } = entry
+                        && !*user_toggled
+                        && !*collapsed
                     {
-                        if !*user_toggled && !*collapsed {
-                            schedule_auto_collapse(AutoCollapseTarget::ReasoningEntry(eix), cx);
-                        }
-                        if let Some(md) = markdown.as_ref() {
-                            md.update(cx, |m, cx| m.finalize_streaming(cx));
-                        }
+                        schedule_auto_collapse(AutoCollapseTarget::ReasoningEntry(eix), cx);
                     }
                 }
             }
@@ -600,9 +557,6 @@ impl MessageItem {
             ConvItem::AgentTask(_) => {}
             _ => {}
         }
-        if let Some(md) = &self.markdown {
-            md.update(cx, |m, cx| m.finalize_streaming(cx));
-        }
     }
     /// Close the activity segment when assistant text arrives mid-turn —
     /// mirrors `build_items`'s `close_segment` on `MessageContent::Text` so
@@ -617,25 +571,19 @@ impl MessageItem {
         // A text boundary settles the segment: fold to the cover unless the
         // user pinned it open — mirrors `close_segment` on the rebuild path.
         t.collapsed = !t.user_toggled;
-        // Finalize reasoning markdown so the streaming cursor stops and the
-        // final parse matches a one-shot parse; schedule the rounds' delayed
-        // auto-collapse so a finished round folds ~1s after it stops
-        // streaming.
+        // Schedule the finished rounds' delayed auto-collapse so a round folds
+        // ~1s after it stops streaming.
         for (eix, entry) in t.entries.iter_mut().enumerate() {
             if let ActivityEntry::Reasoning {
                 streaming: false,
                 collapsed,
                 user_toggled,
-                markdown,
                 ..
             } = entry
+                && !*user_toggled
+                && !*collapsed
             {
-                if !*user_toggled && !*collapsed {
-                    schedule_auto_collapse(AutoCollapseTarget::ReasoningEntry(eix), cx);
-                }
-                if let Some(md) = markdown.as_ref() {
-                    md.update(cx, |m, cx| m.finalize_streaming(cx));
-                }
+                schedule_auto_collapse(AutoCollapseTarget::ReasoningEntry(eix), cx);
             }
         }
     }
@@ -736,7 +684,7 @@ impl Render for MessageItem {
         });
         // The owned markdown document for text-bearing items (persistent across
         // frames → selection + streaming state survive). `None` for non-text
-        // items; their chrome mounts a fresh `Entity<Markdown>` per frame.
+        // items; their chrome mounts a per-frame document.
         let body = self.ensure_markdown(cx);
         let diag_id = self.id;
         let diag_enabled = crate::overlap_diag::enabled();
@@ -775,11 +723,11 @@ impl Render for MessageItem {
 /// for `ToolCall` cards to flip their own collapse flag. `None` renders them
 /// in a static state with no-op clicks (used when the owning Workspace is gone).
 ///
-/// `body` is the owned `Entity<Markdown>` for a top-level text body
+/// `body` is the owned `ChatDocument` for a top-level text body
 /// (Assistant / Reasoning); `notice_panel` is the owned paginated
 /// `TerminalPanel` for a `Notice` body. The recursive `render_item` calls for
 /// embedded sub-messages pass `None` for both, falling back to a per-frame
-/// `Entity<Markdown>`.
+/// per-frame document.
 //
 // Each arg is a distinct render input; the function is a leaf dispatch, not a
 // public API. Bundling would only forward the same values through an
@@ -792,7 +740,7 @@ pub fn render_item(
     theme: &Theme,
     agent_ctx: Option<&AgentTaskCtx>,
     tool_ctx: Option<&ToolCallCtx>,
-    body: Option<Entity<Markdown>>,
+    body: Option<ChatDocument>,
     notice_panel: Option<Entity<TerminalPanel>>,
     host: Option<ChatHostHandle>,
     copy: &CopyFeedback,
@@ -814,7 +762,7 @@ pub fn render_item(
         ),
         ConvItem::Assistant {
             text,
-            streaming: _,
+            streaming,
             token_usage: _,
             activity_header,
             entry_id,
@@ -824,6 +772,7 @@ pub fn render_item(
                 text,
                 role,
                 activity_header: *activity_header,
+                streaming: *streaming,
             },
             ix,
             theme,
@@ -836,7 +785,7 @@ pub fn render_item(
             copy,
             cx,
         ),
-        ConvItem::Thinking(t) => render_thinking(t, ix, role, theme, tool_ctx, cx),
+        ConvItem::Thinking(t) => render_thinking(t, ix, role, theme, tool_ctx, copy, cx),
         ConvItem::ToolCall(t) => {
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
                 render_ask_user_card(t, ix, theme, tool_ctx, copy, cx)
@@ -987,9 +936,9 @@ fn render_user(
     ix: usize,
     model: &str,
     theme: &Theme,
-    body: Option<Entity<Markdown>>,
+    body: Option<ChatDocument>,
     copy: &CopyFeedback,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> gpui::AnyElement {
     let UserRenderContent { text, images, meta } = content;
     let model_id = meta
@@ -1036,7 +985,14 @@ fn render_user(
             .child(i18n::t("message-steered-badge"))
     });
 
-    let body_el = body_or_static(body, ("user-text", ix), text.to_string(), theme, cx);
+    let body_el = body_or_static(
+        body,
+        ("user-text", ix),
+        text.to_string(),
+        theme,
+        false,
+        copy.owner.clone(),
+    );
     let mut header_el = h_flex()
         .items_center()
         .gap_1()
@@ -1155,6 +1111,7 @@ pub struct AssistantRenderContent<'a> {
     text: &'a str,
     role: &'a str,
     activity_header: bool,
+    streaming: bool,
 }
 
 /// Render an assistant message. A reply that follows an activity segment
@@ -1165,22 +1122,27 @@ pub fn render_assistant(
     content: AssistantRenderContent<'_>,
     ix: usize,
     theme: &Theme,
-    body: Option<Entity<Markdown>>,
+    body: Option<ChatDocument>,
     actions: AssistantActions,
     copy: &CopyFeedback,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> gpui::AnyElement {
     let AssistantRenderContent {
         text,
         role,
         activity_header,
+        streaming,
     } = content;
-    // Owned `Entity<Markdown>` (persistent → selection + streaming survive);
-    // fall back to a per-frame mount for embedded sub-message bodies.
-    let body_el = match body {
-        Some(md) => md.into_any_element(),
-        None => markdown_tv(("assistant", ix), text.to_string(), theme, false, cx),
-    };
+    // Owned `Entity<TextViewState>` (persistent → selection + streaming
+    // survive); fall back to a per-frame mount for embedded sub-message bodies.
+    let body_el = body_or_static(
+        body,
+        ("assistant", ix),
+        text.to_string(),
+        theme,
+        streaming,
+        copy.owner.clone(),
+    );
     let group = format!("assistant-{ix}");
     let mut col = v_flex().group(group.clone()).w_full().min_w_0().gap_1();
     if !activity_header {
@@ -1376,9 +1338,9 @@ pub fn render_error(
     msg: &str,
     ix: usize,
     theme: &Theme,
-    body: Option<Entity<Markdown>>,
+    body: Option<ChatDocument>,
     copy: &CopyFeedback,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> gpui::AnyElement {
     render_banner(
         theme.danger,
@@ -1388,7 +1350,14 @@ pub fn render_error(
         ix,
         "copy-error",
         msg.to_string(),
-        body_or_static(body, ("error", ix), msg.to_string(), theme, cx),
+        body_or_static(
+            body,
+            ("error", ix),
+            msg.to_string(),
+            theme,
+            false,
+            copy.owner.clone(),
+        ),
         theme,
         None,
         copy,
@@ -1440,9 +1409,9 @@ pub fn render_recap(
     ix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
-    body: Option<Entity<Markdown>>,
+    body: Option<ChatDocument>,
     copy: &CopyFeedback,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> gpui::AnyElement {
     let host = tool_ctx.map(|c| c.host.clone());
     let on_click = Box::new(move |_cx: &mut App| {
@@ -1479,7 +1448,14 @@ pub fn render_recap(
         ix,
         "copy-recap",
         summary.to_string(),
-        body_or_static(body, ("recap", ix), summary.to_string(), theme, cx),
+        body_or_static(
+            body,
+            ("recap", ix),
+            summary.to_string(),
+            theme,
+            false,
+            copy.owner.clone(),
+        ),
         theme,
         Some(CollapsibleBanner {
             collapsed,
@@ -1508,9 +1484,9 @@ pub fn render_retry(
     ix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
-    body: Option<Entity<Markdown>>,
+    body: Option<ChatDocument>,
     copy: &CopyFeedback,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> gpui::AnyElement {
     let badge: SharedString = i18n::t_str(
         "retry-badge",
@@ -1549,7 +1525,16 @@ pub fn render_retry(
         });
     }) as Box<dyn Fn(&mut App) + 'static>;
     let body_el = detail
-        .map(|d| body_or_static(body, ("retry", ix), d.to_string(), theme, cx))
+        .map(|d| {
+            body_or_static(
+                body,
+                ("retry", ix),
+                d.to_string(),
+                theme,
+                false,
+                copy.owner.clone(),
+            )
+        })
         .unwrap_or_else(|| gpui::div().into_any_element());
     let collapsible = if detail.is_some() {
         Some(CollapsibleBanner {
@@ -1693,6 +1678,7 @@ pub fn render_thinking(
     role: &str,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
+    copy: &CopyFeedback,
     cx: &mut App,
 ) -> gpui::AnyElement {
     if t.entries.is_empty() {
@@ -1715,6 +1701,7 @@ pub fn render_thinking(
             ix,
             theme,
             tool_ctx,
+            copy.owner.clone(),
             cx,
         ));
     }
@@ -1843,6 +1830,7 @@ fn render_activity_entry(
     cix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
+    owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
 ) -> ChainOfThoughtStep {
     let id = format!("message-overflow-activity-entry-{cix}-{eix}");
@@ -1861,13 +1849,14 @@ fn render_activity_entry(
             *streaming,
             *collapsed,
             markdown.clone(),
+            owner.clone(),
             eix,
             cix,
             theme,
             tool_ctx,
             cx,
         ),
-        ActivityEntry::Tool(tool) => tool_step(id, tool, eix, cix, theme, tool_ctx, cx),
+        ActivityEntry::Tool(tool) => tool_step(id, tool, eix, cix, theme, tool_ctx, owner, cx),
     }
 }
 
@@ -1883,12 +1872,13 @@ fn reasoning_step(
     text: &str,
     streaming: bool,
     collapsed: bool,
-    markdown: Option<Entity<Markdown>>,
+    markdown: Option<ChatDocument>,
+    owner: Option<WeakEntity<MessageItem>>,
     eix: usize,
     cix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> ChainOfThoughtStep {
     let host = tool_ctx.map(|c| c.host.clone());
     let toggle_id = entry_id.to_string();
@@ -1944,13 +1934,20 @@ fn reasoning_step(
             });
         });
     if !collapsed && !text.is_empty() {
-        // The persistent `Entity<Markdown>` (synced by the streaming/rebuild
-        // path) carries parse-once incremental parsing + document-level
-        // selection; fall back to a per-frame mount only before the first sync.
-        let body = match markdown {
-            Some(md) => md.into_any_element(),
-            None => markdown_tv(("reasoning-entry-body", eix), text, theme, false, cx),
-        };
+        // The persistent `ChatDocument` (synced by the streaming/rebuild path)
+        // carries the document; fall back to a per-frame mount only before the
+        // first sync.
+        let body = markdown
+            .as_ref()
+            .and_then(ChatDocument::state)
+            .map(|state| {
+                decorate_document(
+                    message_document(state, theme, MESSAGE_BODY_SIZE),
+                    streaming,
+                    owner.clone(),
+                )
+            })
+            .unwrap_or_else(|| static_body(("reasoning-entry-body", eix), text, theme, owner));
         step = step.content(
             gpui::div()
                 .id(("reasoning-body", eix))
@@ -1970,6 +1967,9 @@ fn reasoning_step(
 /// A tool call's step: the marker carries the call's status, the label is its
 /// command summary, and the body is the terminal-styled output panel (which
 /// keeps its own frame — the single bordered box is the panel's, not the row's).
+// One arg per slot the step is assembled from — same shape as
+// `reasoning_step`, same reasoning.
+#[allow(clippy::too_many_arguments)]
 fn tool_step(
     id: String,
     e: &ToolCallItem,
@@ -1977,6 +1977,7 @@ fn tool_step(
     cix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
+    owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
 ) -> ChainOfThoughtStep {
     use manox_agent::ToolCallStatus;
@@ -2053,7 +2054,7 @@ fn tool_step(
                 .w_full()
                 .min_w_0()
                 .debug_selector(move || format!("message-overflow-activity-entry-body-{cix}-{eix}"))
-                .child(render_tool_output(e, eix, theme, cx)),
+                .child(render_tool_output(e, eix, theme, owner.clone(), cx)),
         );
     }
     step
@@ -2134,9 +2135,24 @@ pub fn render_ask_user_card(
     if snapshot.total == 1
         && let Some(approve_ix) = plan_review_approve_index(&snapshot.question)
     {
-        return render_plan_review_card(ix, theme, ctx.host.clone(), &snapshot, approve_ix, cx);
+        return render_plan_review_card(
+            ix,
+            theme,
+            ctx.host.clone(),
+            &snapshot,
+            approve_ix,
+            copy.owner.clone(),
+            cx,
+        );
     }
-    render_question_card(ix, theme, ctx.host.clone(), snapshot, cx)
+    render_question_card(
+        ix,
+        theme,
+        ctx.host.clone(),
+        snapshot,
+        copy.owner.clone(),
+        cx,
+    )
 }
 
 /// The plan-review decision presentation's approve option: the ask must carry
@@ -2210,6 +2226,7 @@ fn render_plan_review_card(
     host: ChatHostHandle,
     snapshot: &AskCardSnapshot,
     approve_ix: usize,
+    owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let host_esc = host.clone();
@@ -2239,12 +2256,11 @@ fn render_plan_review_card(
         .text_color(theme.foreground)
         .child(snapshot.question.question.clone());
     let plan_body = (!snapshot.question.detail.trim().is_empty()).then(|| {
-        markdown_tv(
+        static_body(
             format!("plan-review-detail-{ix}"),
             snapshot.question.detail.clone(),
             theme,
-            false,
-            cx,
+            owner.clone(),
         )
     });
     let body = gpui::div()
@@ -2368,6 +2384,7 @@ fn render_question_card(
     theme: &Theme,
     host: ChatHostHandle,
     snapshot: AskCardSnapshot,
+    owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let host_close = host.clone();
@@ -2421,14 +2438,13 @@ fn render_question_card(
 
     // B2-PR-1 L1: `detail` is optional markdown support text beneath the
     // question (the plan-review body rides here). Static, so a per-frame
-    // `markdown_tv` mount is fine — no persistent selection across frames.
+    // document mount is fine.
     let detail_block = (!snapshot.question.detail.trim().is_empty()).then(|| {
-        markdown_tv(
+        static_body(
             format!("ask-card-detail-{ix}-{step}"),
             snapshot.question.detail.clone(),
             theme,
-            false,
-            cx,
+            owner,
         )
     });
 
@@ -2829,7 +2845,7 @@ pub fn render_tool_call(
         );
 
     if show_body && !item.output.is_empty() {
-        card = card.child(render_tool_output(item, ix, theme, cx));
+        card = card.child(render_tool_output(item, ix, theme, copy.owner.clone(), cx));
     }
     // The unified confirmation card: the parked call's own row carries the
     // decision. The buttons ARE the fold's options, rendered verbatim —
@@ -2973,7 +2989,8 @@ fn render_tool_output(
     item: &ToolCallItem,
     ix: usize,
     theme: &Theme,
-    cx: &mut App,
+    owner: Option<WeakEntity<MessageItem>>,
+    _cx: &mut App,
 ) -> gpui::AnyElement {
     // B2-PR-2: once the server's model-facing ask result is canonical JSON
     // (`{"answers":[{"id","selected","custom"?}]}`), the answered-state card
@@ -3025,7 +3042,7 @@ fn render_tool_output(
     } else {
         format!("```\n{display}\n```")
     };
-    let container = gpui::div()
+    gpui::div()
         .id(("tool-output", ix))
         .w_full()
         .min_w_0()
@@ -3034,15 +3051,8 @@ fn render_tool_output(
         .py_2()
         .border_t_1()
         .border_color(theme.border)
-        .text_color(theme.muted_foreground);
-    container
-        .child(markdown_tv(
-            ("tool-output-text", ix),
-            code,
-            theme,
-            false,
-            cx,
-        ))
+        .text_color(theme.muted_foreground)
+        .child(static_body(("tool-output-text", ix), code, theme, owner))
         .into_any_element()
 }
 
@@ -5252,9 +5262,9 @@ mod tests {
     }
 
     /// Regression: user messages (and every other text-bearing kind) must feed
-    /// a persistent `Entity<Markdown>`. A per-frame `markdown_tv` mount would
-    /// reset document selection each frame, so the body could not be selected
-    /// or copied; `text_body_of` decides which kinds own a persistent body.
+    /// a persistent `ChatDocument`. A per-frame mount would reset document
+    /// selection each frame, so the body could not be selected or copied;
+    /// `text_body_of` decides which kinds own a persistent body.
     #[test]
     fn text_body_of_identifies_all_selectable_bodies() {
         let user = ConvItem::User {
