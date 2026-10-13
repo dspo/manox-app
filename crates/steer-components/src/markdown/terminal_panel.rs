@@ -1,17 +1,16 @@
-//! `TerminalPanel` — a first-party selectable text panel that renders tool
-//! output in a terminal-like shell: a prompt block (cwd + git status / `❯`
-//! command) followed by the body, composed as one selectable document. NOT a
-//! real terminal — no PTY, no grid; it reuses the markdown renderer's `Sentinel`
-//! / `RichText` / `DocSelection` for drag-select + Cmd/Ctrl+C + double/triple-
-//! click word/line selection across the whole panel.
+//! `TerminalPanel` — a selectable text panel that renders tool output in a
+//! terminal-like shell: a prompt block (cwd + git status / `❯` command)
+//! followed by the body, composed as one document. NOT a real terminal — no
+//! PTY, no grid; the composed document renders through an `ansi`-fenced
+//! TextView code block, so drag-select + Cmd/Ctrl+C come from the same
+//! window-level selection every other markdown surface uses.
 //!
-//! The panel renders only the body — transparent, no background tint, at the
-//! same size as the thinking body — so it reads as inline selectable text in the
-//! message list. The terminal chrome (a clickable titlebar that shows the
-//! command summary and toggles this body) is mounted by the agent-ui layer,
-//! which owns the collapse state. A persistent `Entity<TerminalPanel>` (one per
-//! `ToolCallItem`, owned by the conversation) holds the selection state across
-//! frames, so a drag that starts on one frame survives the re-render.
+//! The panel renders only the body — transparent, no background tint — so it
+//! reads as inline selectable text in the message list. The terminal chrome (a
+//! clickable titlebar that shows the command summary and toggles this body) is
+//! mounted by the agent-ui layer, which owns the collapse state. A persistent
+//! `Entity<TerminalPanel>` (one per `ToolCallItem`, owned by the conversation)
+//! holds the composed output across frames.
 //!
 //! Pagination: a finalized body renders `PAGE_SIZE` lines at a time; a "load
 //! more" affordance below the body grows the window by another page. Streaming
@@ -25,17 +24,13 @@ use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::{
-    FocusHandle, FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, div,
+    FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement, Render, SharedString, Window, div,
 };
+use gpui_base::text::TextViewMotion;
 use gpui_component::{Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
 use vte::ansi::{Attr, Color, Handler, NamedColor};
 
-use crate::markdown::rich_text::RichText;
-use crate::markdown::selection::DocSelection;
-use crate::markdown::theme::MdStyles;
-
-use super::Sentinel;
+use crate::markdown::text_view::{panel_document, stream_fade_motion};
 
 /// Lines a finalized panel renders before the "load more" affordance. Streaming
 /// panels ignore the limit and show the whole live output.
@@ -68,8 +63,7 @@ pub enum PanelKind {
 }
 
 /// One tool invocation's shell-like rendering surface. Owned as a persistent
-/// `Entity` by the conversation so the document selection (and its focus handle)
-/// survive across re-renders.
+/// `Entity` by the conversation so the composed output survives re-renders.
 pub struct TerminalPanel {
     kind: PanelKind,
     command: Option<SharedString>,
@@ -79,10 +73,7 @@ pub struct TerminalPanel {
     streaming: bool,
     /// Pagination cursor: how many body lines a finalized panel renders.
     visible: usize,
-    selection: DocSelection,
-    focus: Option<FocusHandle>,
-    styles: MdStyles,
-    mono_family: SharedString,
+    theme: Theme,
 }
 
 impl TerminalPanel {
@@ -103,10 +94,7 @@ impl TerminalPanel {
             git: None,
             streaming: false,
             visible: PAGE_SIZE,
-            selection: DocSelection::new(),
-            focus: None,
-            styles: MdStyles::from_theme(theme),
-            mono_family: theme.mono_font_family.clone(),
+            theme: theme.clone(),
         }
     }
 
@@ -167,7 +155,7 @@ impl TerminalPanel {
             s: String::new(),
             runs: Vec::new(),
         };
-        let fg = self.styles.foreground;
+        let fg = self.theme.foreground;
         // Guidance text (cwd / `git:` / branch / markers / `❯`) reads upright at
         // foreground; the echoed command reads italic at foreground. The upright/
         // italic split, plus the body's muted-italic base, separates prompt
@@ -254,7 +242,7 @@ impl TerminalPanel {
                 let total = parts.len();
                 let v = self.visible_count(total);
                 let width = digits(total);
-                let muted = style_color(self.styles.muted);
+                let muted = style_color(self.theme.muted_foreground);
                 let mut s = String::new();
                 let mut runs = Vec::new();
                 for (i, line) in parts.iter().take(v).enumerate() {
@@ -284,7 +272,7 @@ impl TerminalPanel {
                     .max()
                     .unwrap_or(0);
                 let width = digits(widest as usize);
-                let muted = style_color(self.styles.muted);
+                let muted = style_color(self.theme.muted_foreground);
                 let mut s = String::new();
                 let mut runs = Vec::new();
                 for line in lines.iter().take(v) {
@@ -313,7 +301,7 @@ impl TerminalPanel {
                 let parts = body_parts(&self.output);
                 let total = parts.len();
                 let v = self.visible_count(total);
-                let muted = self.styles.muted;
+                let muted = self.theme.muted_foreground;
                 let mut s = String::new();
                 let mut runs = Vec::new();
                 for line in parts.iter().take(v) {
@@ -351,17 +339,14 @@ impl TerminalPanel {
 
 impl Render for TerminalPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
-        let selection_bg = self.styles.selection_bg;
-        let border = self.styles.border;
-        let hover_bg = self.styles.selection_bg;
-        let muted = self.styles.muted;
+        let muted = self.theme.muted_foreground;
+        let border = self.theme.border;
 
         let (body_text, body_runs, total, visible) = self.body();
         let has_more = !self.streaming && visible < total;
         let next = total - visible;
 
-        // Compose the prompt block + visible body into one selectable document.
+        // Compose the prompt block + visible body into one document.
         let (mut s, mut runs) = self.prompt_block();
         if !body_text.is_empty() {
             if !s.is_empty() {
@@ -374,15 +359,16 @@ impl Render for TerminalPanel {
             }
         }
 
-        // The body is the secondary, italic text: `.italic()` sets the base the
-        // RichText unstyled ranges inherit (so command output / file content /
-        // diff context all read muted + italic). The prompt-block guidance and
-        // command runs pin their own slant via `styled`, overriding back.
-        let doc = div().w_full().min_w_0().overflow_hidden().italic().child(
-            RichText::new(SharedString::from(s), 0, self.selection.clone())
-                .highlights(runs)
-                .selection_bg(selection_bg),
-        );
+        // The body is the secondary, italic text (the base run in
+        // `panel_document` paints it so); the prompt-block guidance and command
+        // runs pin their own slant via `styled`, overriding back. Streaming
+        // bodies ride the fade-in motion; settled ones adopt updates at once.
+        let motion = if self.streaming {
+            stream_fade_motion()
+        } else {
+            TextViewMotion::default()
+        };
+        let doc = panel_document("panel-doc", &s, runs, &self.theme, motion);
 
         let mut panel = v_flex()
             .id("terminal-panel")
@@ -390,17 +376,6 @@ impl Render for TerminalPanel {
             .min_w_0()
             .px_3()
             .py_2()
-            .text_sm()
-            // The body (tool output) is the secondary text; the prompt block — the
-            // input echo (cwd / git / `❯ command`) — overrides to foreground via its
-            // own highlight runs, so input reads as primary and output as muted.
-            .text_color(self.styles.muted)
-            .font_family(self.mono_family.clone())
-            .cursor_text()
-            .track_focus(&focus)
-            .child(Sentinel {
-                selection: self.selection.clone(),
-            })
             .child(doc);
         if has_more {
             panel = panel.child(
@@ -412,7 +387,7 @@ impl Render for TerminalPanel {
                     .py_1()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(move |style| style.bg(hover_bg))
+                    .hover(move |style| style.bg(muted.opacity(0.1)))
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted))
                     .child(
                         div()
@@ -425,50 +400,6 @@ impl Render for TerminalPanel {
             );
         }
         panel
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                    if let Some(ix) = this.selection.hit(e.position) {
-                        match e.click_count {
-                            2 => this.selection.select_word(ix),
-                            n if n >= 3 => this.selection.select_line(ix),
-                            _ => this.selection.begin(ix),
-                        }
-                        window.focus(this.focus.as_ref().expect("focus init in render"), cx);
-                    }
-                    cx.notify();
-                }),
-            )
-            .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _window, cx| {
-                if this.selection.is_dragging()
-                    && let Some(ix) = this.selection.hit(e.position)
-                {
-                    this.selection.extend(ix);
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _e: &MouseUpEvent, _window, cx| {
-                    this.selection.end();
-                    cx.notify();
-                }),
-            )
-            .on_key_down(
-                cx.listener(move |this, e: &gpui::KeyDownEvent, _window, cx| {
-                    let k = &e.keystroke;
-                    if k.modifiers.secondary() && k.key == "c" {
-                        if this.selection.range().is_some() {
-                            this.selection.copy_to_clipboard(cx);
-                            cx.stop_propagation();
-                        }
-                    } else if k.key == "escape" {
-                        this.selection.end();
-                        cx.notify();
-                    }
-                }),
-            )
-            .into_any_element()
     }
 }
 

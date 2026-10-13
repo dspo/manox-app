@@ -14,7 +14,7 @@ use gpui::{
     VisualTestContext, Window, div, px,
 };
 use gpui_component::Theme;
-use steer_components::markdown::Markdown;
+use steer_components::markdown::{TextViewState, message_document};
 
 /// One block on screen. The body carries no selector of its own — the block's
 /// own `{id}-content` hook is what the mounting tests read.
@@ -423,29 +423,27 @@ fn the_trigger_answers_the_keyboard(cx: &mut TestAppContext) {
 /// in, so the body slot is exercised end to end.
 struct MarkdownHarness {
     state: Entity<ReasoningState>,
-    body: Entity<Markdown>,
+    body: Entity<TextViewState>,
 }
 
 impl Render for MarkdownHarness {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         Reasoning::new(("reasoning", 0usize), &self.state).content(
             div()
                 .debug_selector(|| "body-probe".into())
-                .child(self.body.clone()),
+                .child(message_document(&self.body, Theme::global(cx), px(13.)).into_any_element()),
         )
     }
 }
 
-/// Both the gallery and the conversation pass a *themed* `Markdown` as the
-/// body. An unthemed one still occupies the tree while painting nothing, which
-/// reads as "the block opened and stayed blank" — so pin the painted height,
-/// not just the element's presence.
+/// The body is a real themed document, as the gallery and the conversation
+/// mount. A body that only occupies the tree while painting nothing reads as
+/// "the block opened and stayed blank" — so pin the painted height, not just
+/// the element's presence.
 #[gpui::test]
 fn a_themed_markdown_body_paints_inside_the_block(cx: &mut TestAppContext) {
     init(cx);
-    let body = cx.update(|cx| {
-        cx.new(|cx| Markdown::new("body", "the thinking itself").theme(Theme::global(cx)))
-    });
+    let body = cx.update(|cx| cx.new(|cx| TextViewState::markdown("the thinking itself", cx)));
     let state = cx.update(|cx| cx.new(|cx| ReasoningState::new(cx).default_open(true)));
     let (_, visual) = cx.add_window_view(|_, _| MarkdownHarness { state, body });
     visual.update(|window, cx| window.draw(cx).clear(cx));

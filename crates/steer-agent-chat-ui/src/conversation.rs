@@ -283,7 +283,7 @@ pub enum ActivityEntry {
         /// `None` until first sync (`MessageItem::sync_reasoning_entry`), so a
         /// freshly constructed entry renders a per-frame fallback until the
         /// streaming/rebuild path mounts the persistent document.
-        markdown: Option<Entity<steer_components::markdown::Markdown>>,
+        markdown: Option<Entity<steer_components::markdown::TextViewState>>,
     },
     /// One tool invocation (reuses `ToolCallItem` for status/output/collapse).
     Tool(ToolCallItem),
@@ -1981,12 +1981,11 @@ fn new_history_item(
             _ => None,
         };
         let mut item = MessageItem::new(kind, role.to_string(), id, host);
-        // For rebuilt (non-streaming) text items, do a full parse + finalize
-        // so blocks are populated and the frozen prefix is the entire
-        // document (no further updates expected).
+        // For rebuilt (non-streaming) text items, feed the full snapshot so the
+        // mounted document matches the reloaded history exactly (no further
+        // updates expected).
         if let Some(text) = text {
             item.update_text(&text, cx);
-            item.finalize_parser(cx);
         }
         // Mount + finalize persistent markdown for every historical reasoning
         // round inside a `Thinking` segment, so selection works on reloaded
