@@ -259,16 +259,18 @@ fn layer_runs(
     let mut active: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
     let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
     let mut position = runs[0].0.start;
+    // Cursor into the sorted candidates: every run is admitted exactly once,
+    // when the sweep first reaches its start, so the sweep stays linear.
+    let mut next = 0usize;
     while position < max_end {
         active.retain(|(range, _)| range.end > position);
+        while next < runs.len() && runs[next].0.start <= position {
+            active.push(runs[next].clone());
+            next += 1;
+        }
         let mut end = max_end;
-        for (range, style) in &runs {
-            if range.start == position {
-                active.push((range.clone(), *style));
-            }
-            if range.start > position {
-                end = end.min(range.start);
-            }
+        if let Some((range, _)) = runs.get(next) {
+            end = end.min(range.start);
         }
         for (range, _) in &active {
             end = end.min(range.end);
@@ -648,5 +650,53 @@ mod tests {
             "earlier field survives where the later layer sets nothing"
         );
         assert_eq!(layered[2].0, 4..6);
+    }
+
+    /// The rendered plain text of a synced [`ChatDocument`].
+    fn chat_document_text(doc: &ChatDocument, cx: &mut gpui::TestAppContext) -> String {
+        cx.update(|cx: &mut App| {
+            doc.state()
+                .expect("synced document")
+                .read(cx)
+                .rendered_text()
+                .as_str()
+                .trim_end_matches('\n')
+                .to_string()
+        })
+    }
+
+    #[gpui::test]
+    fn chat_document_appends_extend_and_rewrites_replace(cx: &mut gpui::TestAppContext) {
+        let mut doc = ChatDocument::default();
+        doc.sync("alpha beta", cx);
+        cx.run_until_parked();
+        assert_eq!(chat_document_text(&doc, cx), "alpha beta");
+
+        // An appended raw delta keeps the prefix and lands the suffix.
+        doc.sync("alpha beta gamma", cx);
+        cx.run_until_parked();
+        assert_eq!(chat_document_text(&doc, cx), "alpha beta gamma");
+
+        // A wholesale rewrite replaces the document.
+        doc.sync("other text", cx);
+        cx.run_until_parked();
+        assert_eq!(chat_document_text(&doc, cx), "other text");
+    }
+
+    #[gpui::test]
+    fn chat_document_mid_stream_linkify_rewrite_lands_the_full_source(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut doc = ChatDocument::default();
+        doc.sync("see https://examp", cx);
+        cx.run_until_parked();
+        assert_eq!(chat_document_text(&doc, cx), "see https://examp");
+
+        // Completing the URL rewrites an earlier span, so the new linkified
+        // source no longer extends the previous one: the sync must fall back
+        // to the full-replace path and still land the complete source.
+        doc.sync("see https://example.com done", cx);
+        cx.run_until_parked();
+        assert_eq!(chat_document_text(&doc, cx), "see https://example.com done");
     }
 }
