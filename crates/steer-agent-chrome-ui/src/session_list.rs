@@ -995,6 +995,20 @@ fn status_slot(id: &str, status: SessionStatus) -> impl IntoElement {
     }
 }
 
+/// The title flattened to one rendering line: every hard line break
+/// collapses to a single space. `.truncate()`'s `whitespace_nowrap`
+/// suppresses soft wraps only — gpui's line layout still splits on the
+/// literal `\n`, which first-message-derived titles carry verbatim.
+pub(crate) fn single_line_title(title: &str) -> String {
+    title
+        .replace('\r', "\n")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The title line: a clip box whose width is recorded every frame (the
 /// marquee's truncation test reads the last painted value). Hovered +
 /// truncated → the marquee runs; otherwise a plain truncated title.
@@ -1010,7 +1024,8 @@ fn title_line(
     } else {
         FontWeight::NORMAL
     };
-    let text_w = natural_title_width(window, &data.title, weight);
+    let title = single_line_title(&data.title);
+    let text_w = natural_title_width(window, &title, weight);
     let box_w = list
         .title_box_w
         .borrow()
@@ -1054,7 +1069,7 @@ fn title_line(
         } else {
             SHELL_BG.into()
         };
-        let title = data.title.clone();
+        let title = title.clone();
         clip.child(
             div()
                 .absolute()
@@ -1111,7 +1126,7 @@ fn title_line(
                 .text_size(px(TITLE_SIZE))
                 .font_weight(weight)
                 .text_color(color)
-                .child(data.title.clone()),
+                .child(title),
         )
         .into_any_element()
     }
@@ -1340,5 +1355,20 @@ mod tests {
             "MM-DD HH:MM digit shape, got {stamp:?}"
         );
         assert_eq!(format_active_time(now + 30, now), "刚刚");
+    }
+
+    /// The row title renders as exactly one line: every hard break (\n,
+    /// \r\n, runs) collapses to one space, and leading/trailing breaks
+    /// vanish.
+    #[test]
+    fn title_flattens_hard_line_breaks() {
+        assert_eq!(
+            single_line_title("https://ebwkms2o.mirror.aliyuncs.com\n阿里云镜像"),
+            "https://ebwkms2o.mirror.aliyuncs.com 阿里云镜像"
+        );
+        assert_eq!(single_line_title("a\r\n\rb"), "a b");
+        assert_eq!(single_line_title("a \n b"), "a b");
+        assert_eq!(single_line_title("\n  a  "), "a");
+        assert_eq!(single_line_title("no breaks"), "no breaks");
     }
 }

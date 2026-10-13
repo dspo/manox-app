@@ -9,7 +9,7 @@
 //! propagation themselves.
 
 use crate::primitives::{IconButtonState, icon_button};
-use crate::session_list::SessionStatus;
+use crate::session_list::{SessionStatus, single_line_title};
 use crate::shell::Shell;
 use crate::theme::{
     ACCENT, BORDER, CARD_BG, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, icon, icons,
@@ -213,7 +213,7 @@ fn session_picker(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
         .active
         .as_ref()
         .and_then(|id| shell.sessions.iter().find(|s| &s.id == id))
-        .map(|s| s.title.clone())
+        .map(|s| single_line_title(&s.title))
         .unwrap_or_else(|| shell.main.title(cx).to_string());
 
     let open_picker = cx.listener(|this, e: &ClickEvent, window, cx| {
@@ -275,7 +275,7 @@ pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement
         .map(|s| {
             (
                 s.id.clone(),
-                s.title.clone(),
+                single_line_title(&s.title),
                 s.workspace.clone(),
                 matches!(s.status, SessionStatus::Unread),
             )
