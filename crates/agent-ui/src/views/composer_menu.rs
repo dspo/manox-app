@@ -95,9 +95,10 @@ const PLUS_PLUGIN_ROWS: &[MenuRow] = &[
 ];
 
 /// `+` menu "Browser" group. "Chrome" activates ChromeUse browser automation
-/// tools; "Internal Web Browser" activates the built-in webview browser tools.
-/// Both are wired by the caller (the workspace activates/deactivates the tool
-/// subset and tracks the chip).
+/// tools; "Internal Web Browser" activates the built-in webview browser tools
+/// (compiled out on Linux/FreeBSD, where the embedded webview cannot exist).
+/// Wired by the caller (the workspace activates/deactivates the tool subset
+/// and tracks the chip).
 const PLUS_BROWSER_ROWS: &[MenuRow] = &[
     MenuRow {
         icon: IconName::Globe,
@@ -105,6 +106,7 @@ const PLUS_BROWSER_ROWS: &[MenuRow] = &[
         name: "composer-add-chrome",
         desc: "composer-add-chrome-desc",
     },
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     MenuRow {
         icon: IconName::Frame,
         icon_path: None,
@@ -148,7 +150,10 @@ pub fn build_plus_menu(
     on_files: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
     on_goal: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
     on_chrome: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
-    on_internal_browser: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))] on_internal_browser: impl Fn(
+        &mut gpui::Window,
+        &mut gpui::App,
+    ) + 'static,
 ) -> PopupMenu {
     let mut menu = menu.max_w(gpui::px(360.)).scrollable(true);
     menu = menu.label(i18n::t("composer-add-label"));
@@ -175,6 +180,7 @@ pub fn build_plus_menu(
     }
     menu = menu.separator().label(i18n::t("composer-browser-label"));
     let on_chrome = std::rc::Rc::new(on_chrome);
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let on_internal_browser = std::rc::Rc::new(on_internal_browser);
     for (ix, row) in PLUS_BROWSER_ROWS.iter().enumerate() {
         match ix {
@@ -184,6 +190,7 @@ pub fn build_plus_menu(
                     menu_row_item(row, theme).on_click(move |_, window, cx| on_chrome(window, cx)),
                 );
             }
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             1 => {
                 let on_internal_browser = on_internal_browser.clone();
                 menu = menu.item(
@@ -302,8 +309,18 @@ pub fn render_attachment_chips(
 fn browser_chip_meta(suite: manox_agent::engine::BrowserSuite) -> (IconName, &'static str) {
     match suite {
         manox_agent::engine::BrowserSuite::ChromeUse => (IconName::Globe, "composer-add-chrome"),
+        // Unreachable where the integrated browser is compiled out — the only
+        // activation entry is the (gated) `+` menu row — but the enum comes
+        // from manox-agent and stays exhaustive.
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         manox_agent::engine::BrowserSuite::WebExplore => {
             (IconName::Frame, "composer-add-internal-browser")
+        }
+        // A WebExplore suite persisted by another platform's session still
+        // renders a removable chip rather than matching nothing.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        manox_agent::engine::BrowserSuite::WebExplore => {
+            (IconName::Frame, "composer-browser-label")
         }
     }
 }

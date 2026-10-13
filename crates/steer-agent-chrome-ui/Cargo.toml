@@ -37,7 +37,6 @@ steer-agent-chat-ui.workspace = true
 ai-elements.workspace = true
 manox-terminal.workspace = true
 terminal-ui.workspace = true
-steer-webview.workspace = true
 rust-embed.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
@@ -52,3 +51,8 @@ gpui-pre-macos = { version = "=0.3.7", features = ["test-support"] }
 
 [lints.clippy]
 dbg_macro = "deny"
+
+# The example shell's browser tab rides the integrated browser, which is
+# compiled out on Linux/FreeBSD (see agent-ui's gate).
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dev-dependencies]
+steer-webview.workspace = true

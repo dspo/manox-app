@@ -16,8 +16,6 @@ gpui-kit-assets.workspace = true
 
 agent-ui.workspace = true
 steer-agent-chrome-ui.workspace = true
-# GTK bring-up for wry's Linux child webviews (spawn_glib_pump at app init).
-steer-webview.workspace = true
 # `chrome-use` links the in-process Chrome engine (rustwright-core) into the
 # gpui app only; the napi host binding (crates/manox-napi — dormant since the
 # VS Code extension was removed; kept for a future host re-implementation)

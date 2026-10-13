@@ -2,16 +2,15 @@
 //! browser, plus the routing that connects an untrusted page's notifications
 //! and inbound-write requests back to the owning thread.
 //!
-//! The host is a process-wide singleton registered as the `CapabilityClient`
-//! provider at App startup, reached by the `web_explore_*` tools through
-//! `manox_agent::capability::provider()`. It owns a `WeakEntity<Workspace>` for the
+//! The host is a process-wide singleton registered at App startup, reached by
+//! the `web_explore_*` tools through the capability provider's browser loop
+//! (`capability_host::GpuiCapability`). It owns a `WeakEntity<Workspace>` for the
 //! outbound operations (open/navigate/eval, which touch the live `BrowserView`
 //! entities) and a routing table that maps each tab's webview label to its
 //! owning `Thread`.
 //!
-//! This module also contains `GpuiCapability`, the gpui-backed `CapabilityClient`
-//! that bridges browser ops and clipboard requests from the kernel (tokio) to the
-//! gpui main thread (the `WorkspaceBrowserHost`).
+//! The gpui-backed `CapabilityClient` lives in `capability_host` (clipboard is
+//! platform-wide; browser ops reach this host only where it is compiled in).
 //!
 //! Two trust axes meet here:
 //! - Outbound (agent → page): `eval_script` / `click` / `type_text` / `scroll`
@@ -35,11 +34,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
-use futures::future::BoxFuture;
 use gpui::{App, AppContext as _, AsyncApp, Entity, Task, WeakEntity};
 use tokio::sync::oneshot;
 
-use manox_agent::capability::CapabilityClient;
 use manox_agent::thread_engine::{BrowserOp, BrowserReply, BrowserTabId};
 use steer_webview::{BrowserInboundWrite as WvInboundWrite, BrowserNotification as WvNotification};
 
@@ -122,8 +119,8 @@ impl WorkspaceBrowserHost {
 
     /// One-shot App-startup wiring: build the host bound to `workspace`,
     /// register it in the agent-ui concrete registry (`BrowserView` attaches
-    /// the notify/inbound bridges at build), register the `GpuiCapability`
-    /// provider so the kernel drives the browser through
+    /// the notify/inbound bridges at build); the kernel drives the browser
+    /// through
     /// `capability::provider()`, then spawn the notify/inbound drainer on the
     /// Workspace. The OnceLock notify/inbound closures run with no `&mut App`;
     /// the drainer (owning an `AsyncApp`) is the cx-bearing sink that emits
@@ -131,11 +128,8 @@ impl WorkspaceBrowserHost {
     pub fn install(workspace: Entity<Workspace>, cx: &mut AsyncApp) {
         let (host, rx) = Self::new(workspace.clone());
         Self::set_concrete(host);
-        // Register the capability provider on the same seam: the kernel drives
-        // the browser through `capability::provider()` without holding an
-        // `&mut App` (capability inversion; the host→client browser request
-        // later).
-        manox_agent::capability::set_provider(GpuiCapability::start(cx));
+        // The capability provider itself is platform-wide (`capability_host`);
+        // it reaches this host through `concrete()` from its browser loop.
         cx.update(|cx| {
             workspace.update(cx, |_, cx| {
                 cx.spawn(async move |_, _| {
@@ -471,121 +465,11 @@ fn handle_inbound(
     }
 }
 
-// ─── GpuiCapability: the gpui-backed capability provider ──────────────────
-
-/// A browser op parked on the capability channel with its reply slot.
-struct BrowserCapabilityMsg {
-    op: BrowserOp,
-    reply: futures::channel::oneshot::Sender<Result<BrowserReply, String>>,
-}
-
-/// A clipboard request parked on its own channel: gpui `App` is main-thread
-/// only, so the kernel side hops to the foreground through this channel
-/// rather than holding an `AsyncApp` (which is not `Send`).
-enum ClipboardMsg {
-    Write {
-        text: String,
-    },
-    Read {
-        reply: futures::channel::oneshot::Sender<Result<Option<String>, String>>,
-    },
-}
-
-/// The gpui-backed capability provider. It is `Send + Sync` (it holds only a
-/// channel sender); the browser work itself runs on a main-thread service loop
-/// that owns the [`gpui::AsyncApp`], bridged by the channel. The kernel
-/// invokes [`manox_agent::capability::CapabilityClient`] without holding an
-/// `&mut App`.
-pub struct GpuiCapability {
-    tx: async_channel::Sender<BrowserCapabilityMsg>,
-    clipboard_tx: async_channel::Sender<ClipboardMsg>,
-}
-
-impl GpuiCapability {
-    /// Create the provider and spawn its main-thread service loop on `cx`.
-    pub fn start(cx: &gpui::AsyncApp) -> Arc<Self> {
-        let (tx, rx) = async_channel::unbounded::<BrowserCapabilityMsg>();
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            while let Ok(msg) = rx.recv().await {
-                // One task per op so a suspending op (e.g. `YieldToUser`,
-                // parked until the user hands the tab back) does not serialize
-                // later ops — parity with the prior per-request `cx.spawn`.
-                cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                    let result = execute_browser_op(msg.op, cx).await;
-                    let _ = msg.reply.send(result);
-                })
-                .detach();
-            }
-        })
-        .detach();
-        // Clipboard ops ride their own main-thread loop: `gpui::App` is
-        // confined to the foreground and `AsyncApp` is not `Send`, so the
-        // kernel side reaches the system clipboard through this channel
-        // rather than holding the app.
-        let (clipboard_tx, clipboard_rx) = async_channel::unbounded::<ClipboardMsg>();
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            while let Ok(msg) = clipboard_rx.recv().await {
-                match msg {
-                    ClipboardMsg::Write { text } => {
-                        cx.update(|cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
-                        });
-                    }
-                    ClipboardMsg::Read { reply } => {
-                        let text =
-                            cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
-                        let _ = reply.send(Ok(text));
-                    }
-                }
-            }
-        })
-        .detach();
-        Arc::new(Self { tx, clipboard_tx })
-    }
-}
-
-impl CapabilityClient for GpuiCapability {
-    /// OSC 52 copy: parked on the clipboard channel and run on the
-    /// foreground; fire-and-forget, so a closed channel is the only failure.
-    fn clipboard_write(&self, text: String) -> Result<(), String> {
-        self.clipboard_tx
-            .try_send(ClipboardMsg::Write { text })
-            .map_err(|_| "clipboard capability closed".to_string())
-    }
-    /// OSC 52 paste: text entries only; an image-only clipboard reads as
-    /// empty rather than failing. Awaits the foreground round-trip — never
-    /// blocks, so it is safe to call from a runtime worker.
-    fn clipboard_read(&self) -> BoxFuture<'static, Result<Option<String>, String>> {
-        let tx = self.clipboard_tx.clone();
-        Box::pin(async move {
-            let (reply, rx) = futures::channel::oneshot::channel();
-            if tx
-                .try_send(ClipboardMsg::Read { reply })
-                .map_err(|_| "clipboard capability closed".to_string())
-                .is_err()
-            {
-                return Err("clipboard capability closed".to_string());
-            }
-            rx.await
-                .unwrap_or_else(|_| Err("clipboard capability dropped".to_string()))
-        })
-    }
-
-    fn browser_op(&self, op: BrowserOp) -> BoxFuture<'static, Result<BrowserReply, String>> {
-        let tx = self.tx.clone();
-        Box::pin(async move {
-            let (reply, rx) = futures::channel::oneshot::channel();
-            if tx.send(BrowserCapabilityMsg { op, reply }).await.is_err() {
-                return Err("browser capability channel closed".to_string());
-            }
-            rx.await
-                .unwrap_or_else(|_| Err("browser capability dropped".to_string()))
-        })
-    }
-}
-
 /// Execute one browser op on the main thread through the registered host.
-async fn execute_browser_op(op: BrowserOp, app: &gpui::AsyncApp) -> Result<BrowserReply, String> {
+pub(crate) async fn execute_browser_op(
+    op: BrowserOp,
+    app: &gpui::AsyncApp,
+) -> Result<BrowserReply, String> {
     let Some(host) = WorkspaceBrowserHost::concrete() else {
         return Err("browser host not available".to_string());
     };

@@ -30,46 +30,6 @@ const MIN_WINDOW_W: f32 = 860.0;
 /// footer hairline, with breathing room.
 const MIN_WINDOW_H: f32 = 520.0;
 
-/// Prefer an XWayland (X11) gpui backend when a Wayland session also exposes
-/// `DISPLAY`. wry's Linux child webviews parent only through an Xlib window
-/// handle — a native Wayland gpui window cannot host the embedded browser, so
-/// every browser tab / `web_explore_*` surface would degrade. XWayland keeps
-/// the whole feature set working; `STEER_FORCE_WAYLAND=1` opts back into the
-/// native Wayland backend (browser tabs then render an error card instead of
-/// embedding).
-///
-/// XWayland sessions additionally hide the hardware Vulkan ICDs (unless
-/// `STEER_XWAYLAND_VULKAN=1`): some stacks deadlock in the Vulkan X11 WSI —
-/// on Fedora 44 (mutter 50.4 / XWayland 24.1.13 / ANV) `AcquireNextImageKHR`
-/// blocks forever in `wsi_drm_wait_for_explicit_sync_release`, freezing any
-/// actively repainting window within seconds. With no Vulkan driver visible,
-/// gpui's wgpu context selects the Mesa GL adapter, which has no Vulkan
-/// swapchain and sidesteps the deadlock. An explicit `VK_ICD_FILENAMES` /
-/// `VK_DRIVER_FILES` / `VK_LOADER_DRIVERS_SELECT` from the user wins over
-/// this default. Runs before `application()` reads the environment, and
-/// before any other thread exists (same phase justification as the env
-/// writes below).
-#[cfg(target_os = "linux")]
-fn prefer_xwayland_for_embedded_webview() {
-    let forced_wayland = std::env::var_os("STEER_FORCE_WAYLAND").is_some_and(|v| v == "1");
-    let on_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
-    let has_x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
-    if on_wayland && has_x11 && !forced_wayland {
-        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
-        let keep_vulkan = std::env::var_os("STEER_XWAYLAND_VULKAN").is_some_and(|v| v == "1");
-        let loader_pinned = [
-            "VK_ICD_FILENAMES",
-            "VK_DRIVER_FILES",
-            "VK_LOADER_DRIVERS_SELECT",
-        ]
-        .iter()
-        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
-        if !keep_vulkan && !loader_pinned {
-            unsafe { std::env::set_var("VK_LOADER_DRIVERS_DISABLE", "*") };
-        }
-    }
-}
-
 /// Durable per-user directory for the panic log.
 #[cfg(target_os = "macos")]
 fn panic_log_dir() -> std::path::PathBuf {
@@ -91,9 +51,6 @@ fn panic_log_dir() -> std::path::PathBuf {
 }
 
 fn main() {
-    #[cfg(target_os = "linux")]
-    prefer_xwayland_for_embedded_webview();
-
     // Install a panic hook before anything else so a panic anywhere — main
     // thread, gpui foreground task, or a detached tokio worker — surfaces with
     // location and a forced backtrace. Without this a panic in a spawned task
@@ -180,10 +137,6 @@ fn main() {
         agent_ui::slash_command::init(cx);
         manox_terminal::init();
         terminal_ui::init(cx);
-        // GTK bring-up + the glib pump that wry's Linux child webviews need
-        // (webkit widgets live on this thread; see steer-webview `linux`).
-        #[cfg(target_os = "linux")]
-        steer_webview::linux::spawn_glib_pump(cx);
 
         // Embedded OFL typefaces. Lilex ships only Light/Medium in upright and
         // italic cuts: message body inherits Light, markdown bold/headings and
@@ -466,18 +419,6 @@ fn main() {
                 badge::spawn_pump(cx);
             });
 
-            // Wire the process-wide browser host: bind it to the main
-            // Workspace, register it as the `CapabilityClient` provider (so the
-            // `web_explore_*` tools reach it via `manox_agent::capability::provider()`)
-            // and the agent-ui concrete registry (so `BrowserView` attaches the
-            // notify/inbound bridges at build), then spawn the notify/inbound
-            // drainer on the Workspace — a notify ships through the OnceLock
-            // closure with no `&mut App`, so the drainer (which owns an
-            // `AsyncApp`) is the cx-bearing sink that emits onto the owning
-            // thread.
-            if let Some(workspace) = agent_ui::dispatch::workspace_global() {
-                agent_ui::browser_host::WorkspaceBrowserHost::install(workspace.clone(), cx);
-            }
         })
         .detach();
     });
