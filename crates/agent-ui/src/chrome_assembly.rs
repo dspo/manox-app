@@ -559,6 +559,16 @@ fn shell_config(
                     let _ = ws.update(cx, |ws, cx| ws.close_external_session(id, cx));
                 }
             })),
+            // The external row menu's 重命名: retitle the record — the
+            // sidebar row and the main-column titlebar both read it. The
+            // terminal's own OSC titles may claim the label back; last
+            // writer wins.
+            on_set_external_title: Some(Box::new({
+                let ws = ws.downgrade();
+                move |id, title, _w, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.set_external_title(id, title, cx));
+                }
+            })),
         },
         // The titlebar's avatar slot wears the app's own mark.
         brand: Some(Arc::new(|| {

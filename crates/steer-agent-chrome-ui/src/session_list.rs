@@ -240,6 +240,9 @@ pub struct SessionList {
     /// The inline tag editor (row id + input), mounted on that row's tag
     /// line. At most one edit in flight.
     pub tag_edit: Option<(String, Entity<InputState>)>,
+    /// The inline title editor (row id + input), mounted on that row's
+    /// title line (the external-session rename). At most one in flight.
+    pub title_edit: Option<(String, Entity<InputState>)>,
     /// The sidebar grouping mode (the sort button's state).
     pub grouping: SidebarGrouping,
     /// The sort button: workspace grouping ↔ time buckets.
@@ -272,6 +275,8 @@ pub struct SessionList {
     pub on_group_menu: Option<OnGroupMenu>,
     /// Escape inside the inline tag editor.
     pub on_tag_edit_cancel: Option<OnWindowApp>,
+    /// Escape inside the inline title editor.
+    pub on_title_edit_cancel: Option<OnWindowApp>,
     /// Double-click on a row's user tag chip: begin the RENAME editor (the
     /// old shell's chip double-click semantics).
     pub on_tag_rename: OnId,
@@ -850,7 +855,13 @@ fn session_row(
                                 .into_any_element(),
                         }),
                 )
-                .child(title_line(list, data, selected, hovered, window)),
+                .child(match &list.title_edit {
+                    Some((edit_id, input)) if edit_id == &data.id => {
+                        title_edit_input(input, list.on_title_edit_cancel.clone())
+                            .into_any_element()
+                    }
+                    _ => title_line(list, data, selected, hovered, window),
+                }),
         )
         // Line 2: tag line — id chip first, then the user tag (or editor).
         .child(
@@ -938,6 +949,29 @@ fn tag_edit_input(input: &Entity<InputState>, on_cancel: Option<OnWindowApp>) ->
         .id("tag-edit")
         .w(px(90.))
         .flex_shrink_0()
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .when_some(on_cancel, |el, cancel| {
+            el.on_action(move |_: &gpui_component::input::Escape, w, cx| {
+                cx.stop_propagation();
+                cancel(w, cx);
+            })
+        })
+        .child(Input::new(input).appearance(false).xsmall())
+}
+
+/// The inline title editor, mounted on the title line in place of the
+/// title: the same invisible-border xsmall input as the tag editor, but
+/// filling the line. Clicks never reach the row's open click; the input's
+/// propagated `Escape` cancels (Enter/blur commit through the shell's
+/// subscription).
+fn title_edit_input(
+    input: &Entity<InputState>,
+    on_cancel: Option<OnWindowApp>,
+) -> impl IntoElement {
+    div()
+        .id("title-edit")
+        .flex_1()
+        .min_w_0()
         .on_click(|_, _, cx| cx.stop_propagation())
         .when_some(on_cancel, |el, cancel| {
             el.on_action(move |_: &gpui_component::input::Escape, w, cx| {

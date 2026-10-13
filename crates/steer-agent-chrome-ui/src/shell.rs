@@ -117,6 +117,8 @@ pub type HookOnId = Box<dyn Fn(&str, &mut Window, &mut App)>;
 pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
 /// Host tag write (row id, `Some(tag)` to set / `None` to clear).
 pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>;
+/// External-session title write-back (row id, new title).
+pub type HookOnSetTitle = Box<dyn Fn(&str, String, &mut Window, &mut App)>;
 /// Host-built group menu (state key, the group's project path when it is a
 /// workspace group, open position) → the menu entity to mount, or `None` to
 /// open nothing. The chrome supplies the surface (anchor + dismissal); the
@@ -182,6 +184,10 @@ pub struct HostHooks {
     /// the host closes its tab AND reaps the sidebar row. Absent → the menu
     /// item fires nothing (a host that surfaces external rows owes this).
     pub on_close_external: Option<HookOnId>,
+    /// Rename a live external session (the external row menu's 重命名): the
+    /// host retitles its record — the sidebar row and the main-column
+    /// titlebar both read it. Absent → the item fires nothing.
+    pub on_set_external_title: Option<HookOnSetTitle>,
 }
 
 /// Everything the shell needs from its host at construction.
@@ -203,10 +209,14 @@ pub struct ShellConfig {
 
 /// Thread-tag character ceiling (the sidebar editor's rule).
 const MAX_THREAD_TAG_CHARS: usize = 10;
+/// External-session title ceiling — a title is a name, not a paragraph. The
+/// host's OSC-title capture clamps to the same budget as the rename editor.
+pub const MAX_EXTERNAL_TITLE_CHARS: usize = 80;
 
-/// The inline tag editor in flight (one at a time); the subscription commits
-/// on Enter/blur and clamps on Change.
-struct TagEdit {
+/// One inline row editor in flight (the tag line's tag editor, the title
+/// line's rename editor); the subscription commits on Enter/blur and clamps
+/// on Change.
+struct InlineEdit {
     id: String,
     input: Entity<gpui_component::input::InputState>,
     _sub: gpui::Subscription,
@@ -250,7 +260,10 @@ pub struct Shell {
     group_menu_sub: Option<gpui::Subscription>,
     /// The inline tag editor (row + input); Escape cancels, Enter/blur
     /// commits, an empty value is silently discarded.
-    tag_edit: Option<TagEdit>,
+    tag_edit: Option<InlineEdit>,
+    /// The inline title editor for an external row (same lifecycle as the
+    /// tag editor, mounted on the title line instead of the tag line).
+    title_edit: Option<InlineEdit>,
     // ── layout ──
     pub show_sidebar: bool,
     pub show_panel: bool,
@@ -310,6 +323,7 @@ impl Shell {
             group_menu: None,
             group_menu_sub: None,
             tag_edit: None,
+            title_edit: None,
             show_sidebar: true,
             show_panel: false,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
@@ -553,10 +567,14 @@ impl Shell {
             return;
         };
         // The external-session branch: 关闭会话 (the hook reaps the row AND
-        // closes its tab) + copy id. No thread semantics on a PTY.
+        // closes its tab), 重命名 (retitle the host record — the row and the
+        // main-column titlebar follow) + copy id. No thread semantics on a
+        // PTY.
         if let crate::session_list::SessionRowKind::External { .. } = sess.kind {
             let this = cx.entity();
+            let this_rename = this.clone();
             let id_close = id.to_string();
+            let id_rename = id.to_string();
             let id_copy = id.to_string();
             let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
                 menu.max_w(gpui::px(220.))
@@ -569,6 +587,16 @@ impl Shell {
                                         hook(&id_close, window, cx);
                                     }
                                     this.close_row_menu(cx);
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(steer_i18n::t("sidebar-rename-external"))
+                            .icon(crate::theme::icons::TEXT_CASE)
+                            .on_click(move |_, window, cx| {
+                                this_rename.update(cx, |this, cx| {
+                                    this.close_row_menu(cx);
+                                    this.begin_title_edit(id_rename.clone(), window, cx);
                                 });
                             }),
                     )
@@ -855,13 +883,95 @@ impl Shell {
                 _ => {}
             },
         );
-        self.tag_edit = Some(TagEdit {
+        self.tag_edit = Some(InlineEdit {
             id,
             input: input.clone(),
             _sub: sub,
         });
         input.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
+    }
+
+    /// The inline title editor on an external row's title line: prefilled
+    /// with the current title, focused immediately, clamped to
+    /// [`MAX_EXTERNAL_TITLE_CHARS`] on every edit.
+    pub fn begin_title_edit(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let prefill = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.title.clone());
+        let input = cx.new(|cx| {
+            let mut state = gpui_component::input::InputState::new(window, cx)
+                .placeholder(steer_i18n::t("sidebar-rename-external"));
+            if let Some(value) = &prefill {
+                state.set_value(value.clone(), window, cx);
+            }
+            state
+        });
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &gpui_component::input::InputEvent, window, cx| match event {
+                gpui_component::input::InputEvent::Change => {
+                    input.update(cx, |state, cx| {
+                        let value = state.value();
+                        if value.chars().count() > MAX_EXTERNAL_TITLE_CHARS {
+                            let truncated: String =
+                                value.chars().take(MAX_EXTERNAL_TITLE_CHARS).collect();
+                            state.set_value(truncated, window, cx);
+                        }
+                    });
+                }
+                gpui_component::input::InputEvent::PressEnter { .. }
+                | gpui_component::input::InputEvent::Blur => {
+                    this.commit_title_edit(window, cx);
+                }
+                _ => {}
+            },
+        );
+        self.title_edit = Some(InlineEdit {
+            id,
+            input: input.clone(),
+            _sub: sub,
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Commit the in-flight title edit: a non-empty trimmed value rides the
+    /// host hook (the record retitle) and the local row, so the chip and the
+    /// titlebar update without waiting for the next snapshot. An empty value
+    /// is discarded silently. Idempotent — a blur may race an Enter.
+    pub fn commit_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.title_edit.take() else {
+            return;
+        };
+        let value = edit.input.read(cx).value().trim().to_string();
+        if !value.is_empty() {
+            if let Some(hook) = &self.hooks.on_set_external_title {
+                hook(&edit.id, value.clone(), window, cx);
+            }
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == edit.id) {
+                s.title = value;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Escape in the title editor: unmount without writing.
+    pub fn cancel_title_edit(&mut self, cx: &mut Context<Self>) {
+        if self.title_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The in-flight inline title editor, if any — the row id and its input
+    /// (read face for hosts/tests that need to drive the value).
+    pub fn title_edit_input(&self) -> Option<(String, Entity<gpui_component::input::InputState>)> {
+        self.title_edit
+            .as_ref()
+            .map(|e| (e.id.clone(), e.input.clone()))
     }
 
     /// Commit the in-flight tag edit: a non-empty value rides
@@ -1417,6 +1527,10 @@ impl Shell {
             .tag_edit
             .as_ref()
             .map(|e| (e.id.clone(), e.input.clone()));
+        let title_edit = self
+            .title_edit
+            .as_ref()
+            .map(|e| (e.id.clone(), e.input.clone()));
         let title_box_w = Rc::clone(&self.title_box_w);
 
         // Focus handles track the VISIBLE row set: prune the stale ids, then
@@ -1486,6 +1600,10 @@ impl Shell {
         let on_tag_edit_cancel: crate::session_list::OnWindowApp = Rc::new(move |_w, cx| {
             this.update(cx, |this, cx| this.cancel_tag_edit(cx));
         });
+        let this = cx.entity();
+        let on_title_edit_cancel: crate::session_list::OnWindowApp = Rc::new(move |_w, cx| {
+            this.update(cx, |this, cx| this.cancel_title_edit(cx));
+        });
         let on_move_group = cx.listener(
             |this, (dragged, target, before): &(String, String, bool), _w, cx| {
                 this.move_group(dragged, target, *before);
@@ -1527,6 +1645,7 @@ impl Shell {
                 no_chats_hint: !has_chats,
                 hovered,
                 tag_edit,
+                title_edit,
                 title_box_w,
                 row_focus,
                 grouping,
@@ -1561,6 +1680,7 @@ impl Shell {
                     Some(cb)
                 },
                 on_tag_edit_cancel: Some(on_tag_edit_cancel),
+                on_title_edit_cancel: Some(on_title_edit_cancel),
                 on_tag_rename: std::rc::Rc::new(move |id, w, cx| on_tag_rename(id, w, cx)),
                 on_toggle_grouping: std::rc::Rc::new(move |e, w, cx| on_toggle_grouping(e, w, cx)),
                 on_toggle_search: std::rc::Rc::new(move |e, w, cx| on_toggle_search(e, w, cx)),

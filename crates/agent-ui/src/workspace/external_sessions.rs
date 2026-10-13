@@ -21,8 +21,9 @@
 
 use std::path::PathBuf;
 
+use manox_terminal::event::TerminalEvent;
 use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
-use steer_agent_chrome_ui::shell::SessionRow;
+use steer_agent_chrome_ui::shell::{MAX_EXTERNAL_TITLE_CHARS, SessionRow};
 
 use super::Workspace;
 
@@ -40,14 +41,21 @@ pub(crate) struct ExternalSessionRecord {
     /// bind failed — the association the row id resolves to.
     pub cx_session_id: String,
     /// Row title / main-column heading (the agent's display name, or the
-    /// localized terminal name).
+    /// localized terminal name — until the program inside claims its own
+    /// title).
     pub label: String,
+    /// The launch-time label — what a terminal title reset (`Title(None)`)
+    /// restores; the OSC stream's default, never the rename editor's concern.
+    pub default_label: String,
     pub svg: &'static str,
     /// The project directory the session was launched in — the sidebar
     /// group it merges into; `None` → the loose Chats bucket.
     pub project: Option<PathBuf>,
     pub created_at: i64,
     pub view: gpui::Entity<terminal_ui::TerminalView>,
+    /// The terminal's `Title` events → [`Self::label`]. Lives (and dies)
+    /// with the record: the session's PTY outlives nothing else.
+    _title_sub: gpui::Subscription,
 }
 
 fn mint_row_id(agent_id: &str) -> String {
@@ -77,14 +85,38 @@ impl Workspace {
         cx: &mut gpui::Context<Self>,
     ) {
         let id = mint_row_id(launch.agent_id);
+        // The terminal may carry a title already — the program claims it
+        // through the PTY as soon as it boots — and that claim beats the
+        // launch label for the initial row.
+        let default_label = launch.label.clone();
+        let label = view
+            .read(cx)
+            .terminal()
+            .read(cx)
+            .title()
+            .map(|t| clamp_external_title(&t))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| default_label.clone());
+        // Title events ride the PROXY's gpui event face, never the kernel
+        // handle's broadcast: the proxy pump assumes it is the handle's sole
+        // subscriber (its `Arc::try_unwrap` drops every event otherwise).
+        let proxy = view.read(cx).terminal().clone();
+        let id_for_title = id.clone();
+        let title_sub = cx.subscribe(&proxy, move |this, _, ev: &TerminalEvent, cx| {
+            if let TerminalEvent::Title(title) = ev {
+                this.apply_terminal_title(&id_for_title, title.clone(), cx);
+            }
+        });
         self.externals.push(ExternalSessionRecord {
             id: id.clone(),
             cx_session_id: launch.cx_session_id,
-            label: launch.label,
+            default_label,
+            label,
             svg: launch.svg,
             project: launch.project,
             created_at: chrono::Utc::now().timestamp(),
             view: view.clone(),
+            _title_sub: title_sub,
         });
         // The identity link, read from the record: a row id traces back to
         // the cx session's socket on disk.
@@ -137,6 +169,50 @@ impl Workspace {
             self.active_external = None;
             self.view_mode = super::ViewMode::Workspace;
         }
+        cx.notify();
+    }
+
+    /// The external row menu's 重命名 write-back (the shell's host hook):
+    /// retitle the record — the sidebar row and the main-column titlebar
+    /// both read it. The next terminal `Title` event may claim the title
+    /// back; last writer wins.
+    pub fn set_external_title(&mut self, id: &str, title: String, cx: &mut gpui::Context<Self>) {
+        let Some(record) = self.externals.iter_mut().find(|s| s.id == id) else {
+            return;
+        };
+        if record.label == title {
+            return;
+        }
+        record.label = title;
+        cx.notify();
+    }
+
+    /// The terminal's own title claim (the PTY's OSC 0/2 stream): retitles
+    /// the row; `None` (a program's title reset) restores the launch label.
+    /// No-op on an unchanged or empty title — TUIs re-emit constantly and
+    /// each emission must not churn the sidebar.
+    fn apply_terminal_title(
+        &mut self,
+        id: &str,
+        title: Option<String>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let next = match title {
+            Some(t) => clamp_external_title(&t),
+            None => self
+                .externals
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.default_label.clone())
+                .unwrap_or_default(),
+        };
+        let Some(record) = self.externals.iter_mut().find(|s| s.id == id) else {
+            return;
+        };
+        if next.is_empty() || record.label == next {
+            return;
+        }
+        record.label = next;
         cx.notify();
     }
 
@@ -203,6 +279,13 @@ impl Workspace {
     }
 }
 
+/// Clamp a terminal's raw title to the chrome's title budget (chars, not
+/// bytes — the OSC stream is arbitrary program output) and trim it; an
+/// empty result means "not a title", the caller keeps the old label.
+fn clamp_external_title(raw: &str) -> String {
+    raw.trim().chars().take(MAX_EXTERNAL_TITLE_CHARS).collect()
+}
+
 /// Focus a session's terminal (the event-path face — open/spawn call this
 /// so the TUI takes keyboard input immediately; `render` may not focus).
 fn focus_terminal(
@@ -226,5 +309,18 @@ mod tests {
         assert!(id.starts_with("external:claude:"));
         assert!(mint_row_id("claude") != id, "ids are unique");
         assert!(!id.starts_with("0197"), "never a bare thread-uuid shape");
+    }
+
+    /// The OSC stream is arbitrary program output: the clamp trims and caps
+    /// it at the chrome's title budget (char-counted, emoji included).
+    #[test]
+    fn titles_are_trimmed_and_capped() {
+        assert_eq!(clamp_external_title("  ✳ my task  "), "✳ my task");
+        let long = "x".repeat(MAX_EXTERNAL_TITLE_CHARS + 40);
+        assert_eq!(
+            clamp_external_title(&long).chars().count(),
+            MAX_EXTERNAL_TITLE_CHARS
+        );
+        assert_eq!(clamp_external_title("   "), "", "blank is not a title");
     }
 }

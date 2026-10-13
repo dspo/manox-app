@@ -29,6 +29,8 @@ session-kind-terminal = Terminal
 
 sidebar-close-external = Close session
 
+sidebar-rename-external = Rename
+
 sidebar-resume-external = Resume session
 
 external-session-resume-failed = Failed to resume external agent
