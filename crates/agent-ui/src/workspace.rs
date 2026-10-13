@@ -2552,6 +2552,14 @@ impl Workspace {
                         .thread
                         .read(|t| t.model().cloned())
                         .map(|model| manox_agent::provider_glue::display_name(&model))
+                        // Same rule as the chip's identity read: a fresh
+                        // session's engine already runs the registry default,
+                        // so show it — "no model" only when nothing is
+                        // registered at all.
+                        .or_else(|| {
+                            manox_agent::provider_glue::default_model()
+                                .map(|m| manox_agent::provider_glue::display_name(&m))
+                        })
                         .unwrap_or_else(|| i18n::t("workspace-no-model").to_string())
                 })
         }
