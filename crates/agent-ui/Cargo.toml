@@ -55,12 +55,12 @@ ai-elements.workspace = true
 open.workspace = true
 steer-webview.workspace = true
 
-# cx library —— `AgentBuilder` / `SessionHandle` to spawn external agent CLIs
-# (claude/codex/copilot) and hold the PTY handle for an `ExternalSession`.
+# steer-ext-agents — spawn external agent CLIs (claude/codex/copilot) and hold
+# the PTY handle for an `ExternalSession`.
 steer-ext-agents.workspace = true
 
-# cx provider config schema —— the Settings → Models panel edits
-# `cx.providers.config.yaml` through these structs.
+# manox-providers — the cx provider config schema behind the Settings →
+# Models panel (`cx.providers.config.yaml`).
 manox-providers.workspace = true
 
 # pi harness backend.

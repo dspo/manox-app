@@ -27,7 +27,6 @@ pub mod git_status;
 pub mod host;
 pub mod i18n;
 pub mod overlap_diag;
-pub mod terminal_bridge;
 pub mod views;
 
 gpui::actions!(

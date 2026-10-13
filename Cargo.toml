@@ -1,31 +1,9 @@
-# manox-app（应用品牌 Steer）—— GPUI 桌面应用与 cx 启动器（完整应用仓；
-# 仓库名保持 dspo/manox-app。应用侧 crate 一律 steer-* 前缀，runtime 侧
-# manox-* 依赖名原样来自 dspo/manox）。
-#
-# workspace 根。全部成员平铺在 crates/ 下（本仓只有一个交付物：桌面应用 +
-# 独立 bin 的 cx CLI），按「应用侧 / 运行时侧 / 组件层」三档排列：
-#   - crates/steer-app:                   主二进制（窗口 + 主题 + 托盘 + 接线）
-#   - crates/agent-ui:                GPUI UI 层（Workspace/ConversationState/views）
-#   - crates/terminal-ui:             终端渲染层（TerminalElement/TerminalView）
-#   - crates/ai-elements:             agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements
-#   - crates/steer-components:        app chrome 与基础渲染件（markdown/终端面板）
-#   - crates/steer-webview:           wry 原生 webview + Tauri 式 IPC
-#   - crates/steer-webview-macros:    webview IPC 过程宏
-#   - crates/cx:                      cx headless 库（SessionHandle 驱动、chatgpt/
-#                                     vscode 设置与 launch、probe db、配置核心）
-#   - crates/cx-cli:                  cx CLI bin（clap + ratatui TUI + `cx web`）
-#   - crates/steer-ext-agents:        ext-agent 启动 API、会话管理、IPC relay、
-#                                     cx_session 桥（SessionHandle → PtySource）
-#
-# agent runtime（harness/agent/session-core/providers/supervisor，
-# 以及已回流的 manox-terminal 与 hyperlinks）来自 dspo/manox，经 git 依赖 +
-# tag 锁发布消费（v0.1.x 修复轨 / v0.2.x 特性轨）；上游侧注明 CxSessionSource 桥
-# 留在本仓。本地联动开发用 .cargo/config.toml 的 [patch] 覆盖
-# （见 script/local-manox.sh，勿提交）。
-#
-# GPUI 栈整体走 longbridge/gpui-kit 轨：gpui 本体是 crates.io 上的 gpui-pre 快照，
-# 组件是 gpui-component 0.7；本仓不直接依赖 zed-industries/zed（防回潮见
-# script/check-no-zed-git.sh）。
+# manox-app (product name: Steer) — GPUI desktop app + the standalone cx CLI.
+# App-side crates are flat in crates/; the agent runtime (manox-*) comes from
+# dspo/manox via git tags, with local joint development overridden by
+# .cargo/config.toml [patch] (script/local-manox.sh). The GPUI stack is the
+# longbridge/gpui-kit line (gpui-pre snapshots + gpui-component); this repo
+# never depends on zed-industries/zed directly (script/check-no-zed-git.sh).
 [workspace]
 members = [
 	"crates/cx",
@@ -50,30 +28,24 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
-# —— agent runtime（dspo/manox；9 依赖共用同一声明，v0.2.x 特性轨）——
-# DEV PIN：指向 dspo/manox main head（f0365ebd → 7329c969：消费 #888 edit
-# preview 语义修正 + #889 注释卡重放交错——引擎镜像与投影 chat 面双折，
-# app 侧 rebuild 尾部追加与 live 本地 push 随本批退役）。用户裁决：
-# 开发期 pin main head，发版窗口一次换 release tag，避免逐特性发版。
+# Agent runtime from dspo/manox, consumed via git tags; the CxSessionSource
+# bridge (SessionHandle → PtySource) stays in this repo's steer-ext-agents.
 manox-agent = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
 manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
 manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
 manox-providers = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
 supervisor = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
-# 终端仿真核心与 hyperlinks 已回流 runtime 仓（dspo/manox#773），本仓经
-# git 依赖消费；CxSessionSource 桥留在本仓的 steer-ext-agents。
 manox-terminal = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
 hyperlinks = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
-# v3 交互协议 = AHP（dspo/manox#818 删除了 manox-protocol）。app 是纯 AHP 客户端：
-# `ahp`/`ahp-types` 是官方客户端 SDK（client + 纯 reducer），`manox-ahp` 提
-# x-manox 扩展通道的声明常量与客户端 fold，`manox-ahp-runtime` 提进程单例
-# AhpRuntime 与桌面 in-proc 传输腿。与上游 workspace 同为 =1.0.0 精确 pin。
+
+# AHP is the v3 interaction protocol; the app is a pure AHP client (official
+# SDK + the manox extension-channel and in-proc runtime crates). Exact-pinned
+# to match the upstream workspace.
 ahp = "=1.0.0"
 ahp-types = "=1.0.0"
 manox-ahp = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
 manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.3.0" }
 
-# —— 本仓成员（path 依赖；经 `foo.workspace = true` 引用）——
 agent-ui = { path = "crates/agent-ui" }
 steer-app = { path = "crates/steer-app" }
 ai-elements = { path = "crates/ai-elements" }
@@ -82,7 +54,6 @@ steer-components = { path = "crates/steer-components" }
 steer-webview = { path = "crates/steer-webview" }
 steer-webview-macros = { path = "crates/steer-webview-macros" }
 steer-ext-agents = { path = "crates/steer-ext-agents" }
-# cx —— headless 库（原 dspo/cx 仓库并入 manox，拆分时随应用侧迁入本仓）。
 cx = { path = "crates/cx" }
 cx-cli = { path = "crates/cx-cli" }
 steer-i18n = { path = "crates/steer-i18n" }
@@ -101,61 +72,43 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 http = "1"
-# fluent + BCP47 —— manox-app 自己的 UI chrome 本地化栈（crates/steer-i18n）。
-# 仅服务 app chrome；manox runtime 传入的值不经过它。
+# fluent + BCP47 — localization stack for the app chrome only (steer-i18n);
+# values coming from the manox runtime never pass through it.
 fluent = "0.17"
 unic-langid = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 zstd = "0.13"
-# image —— clipboard image resize + PNG re-encode before sending to the provider
-# (Anthropic long-edge cap 1568px / 5MB). CPU-bound work runs on the background executor.
+# image — clipboard image resize + PNG re-encode before provider upload
+# (Anthropic caps: 1568px long edge / 5MB).
 image = "0.25"
 
-# tray-icon —— macOS / Windows system tray (status item + menu). The tray keeps
-# manox reachable after the main window closes; menu events are drained by a
+# tray-icon — macOS/Windows system tray; menu events are drained by a
 # foreground polling task since gpui exposes no cross-thread wake primitive.
 tray-icon = "0.24"
-# ksni —— Linux system tray via the freedesktop StatusNotifierItem D-Bus spec.
-# Pure Rust (zbus), no GTK main loop required, so it coexists with gpui's own
-# X11/Wayland event loop. The `blocking` feature gives the synchronous
-# spawn/update API used from the gpui main thread (the service loop moves to
-# its own thread after registration).
-# `default-features = false` + `async-io`: ksni's default `tokio` feature
-# turns on zbus's `tokio` feature, which makes every zbus connection call
-# `tokio::runtime::Handle::current()` from whichever thread polls it. gpui's
-# event-loop threads are outside our tokio runtime, so XDP/accesskit zbus
-# users panic with "there is no reactor running" (file dialogs on Linux die
-# with the main-thread panic). ksni's `async-io` executor keeps zbus on its
-# runtime-agnostic path, which also fixes ashpd and accesskit_unix
-# (see manox PR #767).
+# ksni — Linux tray via the StatusNotifierItem D-Bus spec; no GTK main loop,
+# coexists with gpui's event loop. default-features = false + async-io: the
+# default `tokio` feature makes zbus call tokio::runtime::Handle::current(),
+# which panics on gpui's event-loop threads (outside our runtime, e.g. file
+# dialogs); `blocking` gives the sync spawn/update API used from the main
+# thread.
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
-# objc2 / objc2-foundation / objc2-app-kit —— macOS Dock badge
-# (NSDockTile.setBadgeLabel). Exact-pinned to the copies the gpui stack
-# already locks, so no new duplicate versions enter the tree (the older
-# 0.2.2/0.5.2 generation in Cargo.lock belongs to accesskit_macos, the
-# accessibility stack behind gpui-pre-macos; wry rides this same
-# 0.3.2/0.6.4 generation via objc2-web-kit).
+# Exact-pinned to the copies the gpui stack already locks (macOS dock badge),
+# so no duplicate objc2 versions enter the tree.
 objc2 = "=0.6.4"
 objc2-foundation = "=0.3.2"
 objc2-app-kit = "=0.3.2"
-# rust-embed — embed SVG icons into the binary at compile time so manox stays a
-# single-binary deliverable; the ExtrasAssetSource overlays custom agent icons
-# (claude/codex/copilot) on top of gpui-kit-assets.
+# rust-embed — embed SVG icons into the binary so manox stays single-binary.
 rust-embed = "8"
 
-# wry stack — native webview embedded as a child of a gpui window. raw-window-handle
-# is already pulled transitively by gpui (0.6.x); pinned here so the webview crate
-# resolves the same major as the gpui WindowHandle it parents to.
+# wry — native webview parented to a gpui window; raw-window-handle pinned to
+# the major gpui itself uses so the webview resolves the same generation.
 wry = "0.53"
 raw-window-handle = { version = "0.6", features = ["std"] }
 
-# webview crate extras — Tauri-style IPC layer + plugins ported from manos.
-# serialize-to-javascript embeds the Tauri IPC bundle + init scripts as
-# `&[u8]` JS literals; async-task backs the PlatformDispatcher main-thread
-# marshal; the rest are plugin backends (clipboard/dialog/opener) the
-# Trusted-mode webview can invoke.
+# Tauri-style IPC layer + plugin backends (clipboard/dialog/opener) for the
+# Trusted-mode webview in steer-webview.
 serialize-to-javascript = "0.1.2"
 mime_guess = "2.0"
 pollster = "0.4"
@@ -164,42 +117,28 @@ rfd = "0.15"
 arboard = "3"
 open = "5"
 
-# ropey — SyntaxHighlighter::update 接收 &Rope;版本对齐 gpui-component 在 Cargo.lock 锁定的 2.0.0-beta.1（0.6.1 不变）。
+# ropey / vte — the same versions gpui-component already locks (Rope input
+# to SyntaxHighlighter, ANSI escape parsing for the TerminalPanel).
 ropey = "2.0.0-beta.1"
-# vte — ANSI escape parser (alacritty/wezterm 的同款,仅解析器)。TerminalPanel 用其 Handler trait 解析工具输出着色。
 vte = { version = "0.13", default-features = false, features = ["ansi"] }
 log = "0.4"
 
-# Terminal emulator stack. alacritty_terminal provides the Term/Grid/Selection
-# data-structure layer (its own EventLoop/mio/tty are unused — manox drives the
-# PTY via portable-pty and feeds bytes to `Processor::advance(&mut term, ..)`
-# since `Term` itself implements `vte::ansi::Handler`). vte is not declared
-# separately; it is re-exported by alacritty_terminal, keeping a single version.
+# alacritty_terminal — Term/Grid/Selection data structures only; its own
+# EventLoop/PTY layer is unused (manox drives portable-pty and feeds bytes
+# to Processor::advance). vte is re-exported by it, keeping one version.
 alacritty_terminal = "0.24"
 portable-pty = "0.9"
 
-# sysinfo — process-tree enumeration for terminal teardown (descendant kill)
-# and the foreground-process indicator.
+# sysinfo — descendant kill on terminal teardown + foreground-process indicator.
 sysinfo = "0.39"
 
-# GPUI 栈 —— 全面退出对 zed-industries/zed 的直接构建耦合（本段取代旧的
-# 「gpui-component 锁定 zed rev 1d217ee 三者必须一致」纪律）。gpui 本体 =
-# Longbridge 每周从 zed main 重打包的 `gpui-pre*` 快照（bump-gpui.ts 机械改名，
-# [lib] 名保留，`use gpui::*` 照旧；每个版本自带 [package.metadata] zed-rev
-# 映射可审计）。升级 = `cargo update -p gpui-pre --precise`，用 `=` 精确 pin
-# 防周更快照漂移。gpui-pre 0.3.7 = zed@1a28cff（zed 0.2.2），仍含
-# 上游 gpui#60295 的
-# element-arena 崩溃修复（ec3d887507，即旧栈上「开 About 窗口后 mouseUp
-# deref 已清空 Arena」SIGABRT 的修复）。gpui-component/-assets 与 gpui-pre
-# 同线发布：0.7.0 精确要求 gpui-pre 0.3.7。
+# GPUI stack: gpui-pre is Longbridge's weekly repackaged snapshot of zed's
+# gpui, exact-pinned against weekly drift; gpui-component is co-released
+# against it (0.7.0 ↔ gpui-pre 0.3.7). Upgrades go through
+# `cargo update -p gpui-pre --precise <ver>`.
 gpui = { package = "gpui-pre", version = "=0.3.7" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 
-# gpui-kit（longbridge/gpui-kit，原 gpui-component 仓改名重组）组件层，
-# crates.io 发布。资产 crate 已更名 gpui-component-assets → gpui-kit-assets
-# （Rust 路径 `gpui_kit_assets`）。组件与 gpui-pre 同线版本管理，不再需要
-# 跨仓对齐 zed rev；tree-sitter-languages feature 仍在（0.6 起为 35 个
-# per-language feature 的聚合别名，底层个别语法换源如 sql→sequel）。
 gpui-component = { version = "=0.7.0", features = ["tree-sitter-languages"] }
 gpui-kit-assets = { version = "=0.7.0" }
 # gpui-base — the same rich-text core gpui-component 0.7.0 builds on (same
@@ -208,25 +147,20 @@ gpui-kit-assets = { version = "=0.7.0" }
 # highlighter nor heading weights, and both are hard requirements here.
 gpui-base = "=0.7.0"
 
-# （旧栈的 `[patch.crates-io] psm = stacker` 已随 zed gpui 退出删除：gpui-pre
-# 0.3.7 依赖闭包不含 psm/stacker，kit lock 同样零命中。）
-
-# lyon —— gpui PathBuilder 的描边/填充曲面引擎（gpui-pre 自身依赖）。精确 pin 到
-# lock 既有版本，让 composer context ring 的 LineCap::Round 复用 gpui 栈里同一份
-# 类型，不引入重复版本。
+# lyon — pinned to the version already locked so the composer context ring's
+# LineCap::Round is the same copy gpui's StrokeOptions re-exports.
 lyon = "=1.0.19"
 
-# Full DWARF makes the largest test targets (`cx` integration tests and `cx-cli`
-# bin tests) large enough to crash `ld.lld` on GitHub-hosted Linux runners.
-# Keep file/line backtraces while shrinking debug sections across dev/test links.
+# Full DWARF grows the largest test targets (cx integration, cx-cli bin tests)
+# past ld.lld's limits on GitHub-hosted Linux runners; keep file/line only.
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.test]
 debug = "line-tables-only"
 
-# gpui 在 debug 下也需要 opt-level 3，否则渲染极慢（对齐 gpui-kit；
-# package 名 = 实际 crate 名 gpui-pre*，workspace 别名 `gpui` 不作用于 profile）
+# gpui needs opt-level 3 even in debug, or rendering crawls. Profile keys use
+# the real package names (gpui-pre*), not the workspace alias.
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
 gpui-pre-platform = { opt-level = 3 }

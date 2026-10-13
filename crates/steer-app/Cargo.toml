@@ -32,7 +32,7 @@ steer-i18n.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# image —— resize the embedded app icon down to tray-icon size at startup.
+# image — resize the embedded app icon to tray-icon size at startup.
 image.workspace = true
 
 # System tray backends. macOS/Windows use tray-icon (status item + native menu,
@@ -57,8 +57,9 @@ objc2-app-kit.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
-# Cargo.lock 是本次构建所 pin 依赖的唯一事实来源（GPUI 栈版本、dspo/manox rev）；
-# About 窗口直接报告它，而不是手工维护的常量表。
+# Cargo.lock is the single source of truth for the pinned dependency versions
+# (GPUI stack, dspo/manox rev); the About window reports it directly instead
+# of hand-maintained constants.
 toml.workspace = true
 
 [package.metadata.bundle]
