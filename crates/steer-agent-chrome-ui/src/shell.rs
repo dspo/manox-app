@@ -331,9 +331,14 @@ impl Shell {
     // ── sessions ─────────────────────────────────────────────────────
 
     /// Replace the session snapshot (a ThreadStore-style push). The active
-    /// selection survives by id.
+    /// selection survives by id. The rows enter display order here — pinned
+    /// first, then the team-unit sort stamp descending — so a freshly
+    /// created session (the newest stamp) leads its group in EVERY grouping
+    /// mode; the time buckets re-apply the same key per group, the workspace
+    /// groups inherit the sorted walk.
     pub fn set_sessions(&mut self, rows: Vec<SessionRow>) {
         self.sessions = rows;
+        self.sort_sessions();
     }
 
     pub fn select(&mut self, id: &str, window: &mut Window, cx: &mut App) {

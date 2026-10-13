@@ -902,6 +902,24 @@ impl Workspace {
         self.chat.read(cx).awaiting_history
     }
 
+    /// The foreground session id (the store pair's id half) — the
+    /// regression read for a new-thread landing.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_foreground_session(&self, cx: &App) -> Option<String> {
+        self.chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone())
+    }
+
+    /// Whether the AHP client leg finished its handshake — the gate the
+    /// host-wired regression binaries wait on before driving the workspace.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ahp_connected(&self, cx: &App) -> bool {
+        self.multiplexer.read(cx).store().read(cx).is_connected()
+    }
+
     /// Fold an empty chat snapshot for the foreground session into the book
     /// and notify the store — the wire shape of "the reopen's chat snapshot
     /// landed, and the session is genuinely empty". Diagnostic-only.

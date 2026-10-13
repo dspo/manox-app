@@ -84,8 +84,8 @@ pub fn group_menu(
                 submenu = submenu.item(
                     PopupMenuItem::new(steer_i18n::t("sidebar-new-session-steer"))
                         .icon(Icon::default().path("icons/steer.svg"))
-                        .on_click(move |_, _window, cx| {
-                            new_thread_at(&ws_steer, dir_new.clone(), cx);
+                        .on_click(move |_, window, cx| {
+                            new_thread_at(&ws_steer, dir_new.clone(), window, cx);
                         }),
                 );
                 for (agent_id, display, svg) in EXTERNAL_AGENTS {
@@ -216,22 +216,22 @@ const EXTERNAL_AGENTS: [(&str, &str, &str); 3] = [
 ];
 
 /// A Manox thread bound to `dir` (inheritance and the create-session intent
-/// live in the workspace). Re-registering a removed path rides the
-/// workspace's own bind seam ([`crate::workspace::Workspace`]'s project
-/// registration) — launching into a folder is the re-registration.
-fn new_thread_at(ws: &gpui::WeakEntity<Workspace>, dir: Option<PathBuf>, cx: &mut App) {
-    // The window handle supplies the `&mut Window` the switch path needs
-    // (attach, drafts stash); a stale handle means the window is gone and
-    // the action has no surface left.
-    if let Some(handle) = crate::dispatch::window_global() {
-        let ws = ws.clone();
-        let _ = handle.update(cx, move |_, window, cx| {
-            let _ = ws.update(cx, |ws, cx| {
-                ws.start_new_thread(dir.clone(), window, cx);
-                cx.notify();
-            });
-        });
-    }
+/// live in the workspace). The click's own `&mut Window` rides through — a
+/// `window_global().update` here re-enters the window the click dispatch
+/// already holds leased and fails as "window not found". Re-registering a
+/// removed path rides the workspace's own bind seam
+/// ([`crate::workspace::Workspace`]'s project registration) — launching
+/// into a folder is the re-registration.
+fn new_thread_at(
+    ws: &gpui::WeakEntity<Workspace>,
+    dir: Option<PathBuf>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let _ = ws.update(cx, |ws, cx| {
+        ws.start_new_thread(dir.clone(), window, cx);
+        cx.notify();
+    });
 }
 
 /// One cascade pick's spawn request (bundled — the call would otherwise
