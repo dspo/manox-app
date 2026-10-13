@@ -53,7 +53,6 @@ terminal-ui.workspace = true
 steer-components.workspace = true
 ai-elements.workspace = true
 open.workspace = true
-steer-webview.workspace = true
 
 # cx library —— `AgentBuilder` / `SessionHandle` to spawn external agent CLIs
 # (claude/codex/copilot) and hold the PTY handle for an `ExternalSession`.
@@ -87,3 +86,9 @@ gpui-pre-macos = { version = "=0.3.7", features = ["test-support"] }
 
 [lints.clippy]
 dbg_macro = "deny"
+
+# The integrated browser (embedded webview) is compiled out on Linux/FreeBSD
+# — wry parents Linux child webviews through Xlib only, so a window there
+# cannot host one. Clipboard capability (`capability_host`) needs none of it.
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
+steer-webview.workspace = true

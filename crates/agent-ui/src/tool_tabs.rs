@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, SharedString, Window, px,
 };
+// Serves the browser tab's open() notification; compiled out with it.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use gpui_component::WindowExt as _;
 use steer_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
 use steer_agent_chrome_ui::theme::{IconAsset, icon, icons};
@@ -128,10 +130,13 @@ impl ToolTab for TerminalTab {
 /// web tools reach: notify/inbound routing, eval oneshots, yields). The tab
 /// body is the app's own `BrowserView` (its address bar + navigation chrome
 /// included), so the webview is a true instance of the shipping surface.
+/// Compiled out on Linux/FreeBSD with the integrated browser.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub struct BrowserTool {
     ws: Entity<crate::Workspace>,
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 impl BrowserTool {
     pub fn new(ws: Entity<crate::Workspace>) -> Self {
         Self { ws }
@@ -157,6 +162,7 @@ impl BrowserTool {
     }
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 impl ToolTabFactory for BrowserTool {
     fn kind(&self) -> &'static str {
         "browser"
@@ -202,6 +208,7 @@ impl ToolTabFactory for BrowserTool {
     }
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 struct BrowserTab {
     id: String,
     ws: Entity<crate::Workspace>,
@@ -219,6 +226,7 @@ struct BrowserTab {
     ticker_visible: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 impl ToolTab for BrowserTab {
     fn kind(&self) -> &'static str {
         "browser"
@@ -391,6 +399,7 @@ impl ToolTab for BrowserTab {
 
 /// Surface a browser tab the host opened as a right-pane tab (see
 /// [`crate::Workspace::open_browser_tab`]).
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub fn adopt_browser_tab(
     ws: Entity<crate::Workspace>,
     tab_id: manox_agent::thread_engine::BrowserTabId,
@@ -936,7 +945,11 @@ pub fn registry(
     mux: &Entity<crate::multiplexer::SessionMultiplexer>,
     ws: &Entity<crate::Workspace>,
 ) -> Vec<Arc<dyn ToolTabFactory>> {
+    // The only consumer of `ws` is the (platform-gated) browser factory.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    let _ = ws;
     vec![
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         Arc::new(BrowserTool::new(ws.clone())),
         Arc::new(TerminalTool),
         Arc::new(AgentTool::new(

@@ -122,22 +122,29 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     };
     let mux = ws.read(cx).multiplexer.clone();
     // The process-lifetime registries the app wires at startup:
-    // the dispatch slot (dock badge pump + reopen-focus read it) and the
-    // process-wide browser host (IPC routing + the agent's web capability).
+    // the dispatch slot (dock badge pump + reopen-focus read it), the
+    // process-wide capability provider (clipboard everywhere; browser ops
+    // only where the integrated browser is compiled in), and the browser
+    // host itself.
     crate::dispatch::set_workspace(ws.clone());
     {
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let ws = ws.clone();
         cx.spawn(async move |cx| {
-            crate::browser_host::WorkspaceBrowserHost::install(ws.clone(), cx);
-            // The install lands asynchronously, so a tab restored from
-            // threads.db before it (startup) missed its route registration:
-            // re-register every live view now that the host exists.
-            if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
-                let ids = ws.read_with(cx, |ws, _| {
-                    ws.browser_views.keys().copied().collect::<Vec<_>>()
-                });
-                for id in ids {
-                    host.register_ui_tab(id);
+            crate::capability_host::install(cx);
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+            {
+                crate::browser_host::WorkspaceBrowserHost::install(ws.clone(), cx);
+                // The install lands asynchronously, so a tab restored from
+                // threads.db before it (startup) missed its route registration:
+                // re-register every live view now that the host exists.
+                if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
+                    let ids = ws.read_with(cx, |ws, _| {
+                        ws.browser_views.keys().copied().collect::<Vec<_>>()
+                    });
+                    for id in ids {
+                        host.register_ui_tab(id);
+                    }
                 }
             }
         })
@@ -196,6 +203,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         // the dispatch slot (dock badge pump + reopen-focus read it) and the
         // process-wide browser host (IPC routing + the agent's web capability).
         crate::dispatch::set_workspace(ws.clone());
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         {
             let ws = ws.clone();
             cx.spawn(async move |cx| {

@@ -110,12 +110,13 @@ impl Workspace {
     /// entry into the process-wide host; the caller places the tab. Returns
     /// `None` when the platform could not host the embed — the view is then
     /// discarded before registration, so no unusable tab id escapes.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub fn restore_browser_tab(
         &mut self,
         url: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<BrowserTabId> {
+    ) -> Option<manox_agent::thread_engine::BrowserTabId> {
         let url = if url.is_empty() {
             crate::views::browser_view::DEFAULT_URL
         } else {
@@ -142,12 +143,13 @@ impl Workspace {
     /// webview is built untrusted: no Tauri command surface, only the
     /// notify/inbound bridges. `None` means the embed was refused (the user
     /// sees a notification; the caller must treat the id as never issued).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub fn open_browser_tab(
         &mut self,
         url: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<BrowserTabId> {
+    ) -> Option<manox_agent::thread_engine::BrowserTabId> {
         let url = if url.is_empty() {
             crate::views::browser_view::DEFAULT_URL
         } else {
@@ -183,7 +185,12 @@ impl Workspace {
     /// Drop a browser tab: the view (whose `Drop` hides and detaches the
     /// native subview) and the host's routing entry. No-op if the id is not
     /// live.
-    pub fn close_browser_tab(&mut self, tab_id: BrowserTabId, cx: &mut Context<Self>) {
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    pub fn close_browser_tab(
+        &mut self,
+        tab_id: manox_agent::thread_engine::BrowserTabId,
+        cx: &mut Context<Self>,
+    ) {
         if self.browser_views.remove(&tab_id).is_none() {
             return;
         }

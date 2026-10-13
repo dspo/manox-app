@@ -9,7 +9,10 @@
 //!
 //! Enter in the input box → append a user message + run_turn + persist (the sidebar shows the new entry immediately).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+// Backs the platform-gated `browser_views` map.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::i18n;
@@ -34,7 +37,6 @@ use gpui_component::{
 use gpui_component::{WindowExt as _, notification::Notification, tooltip::Tooltip};
 use manox_agent::PermissionDecision;
 use manox_agent::thread::PermissionMode;
-use manox_agent::thread_engine::BrowserTabId;
 use manox_agent::{Thread, ThreadId};
 
 use crate::OpenSettings;
@@ -42,7 +44,6 @@ use crate::ToggleTurnNavigator;
 use crate::cockpit::format_elapsed;
 use crate::conversation::ConvItem;
 use crate::conversation::{ApplyOutcome, ConversationState, UserImage, UserTurnMeta};
-use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
     CompletionState, SelectHandler, build_replacement, build_replacement_content, detect,
@@ -452,7 +453,12 @@ pub struct Workspace {
     /// tab keeps its `BrowserView` (and the underlying native webview) across
     /// tab switches; dropped when the tab closes, which detaches the native
     /// view via [`steer_webview::webview::WebView`]'s `Drop`.
-    pub(crate) browser_views: BTreeMap<BrowserTabId, Entity<BrowserView>>,
+    /// Compiled out on Linux/FreeBSD with the integrated browser.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    pub(crate) browser_views: BTreeMap<
+        manox_agent::thread_engine::BrowserTabId,
+        Entity<crate::views::browser_view::BrowserView>,
+    >,
     /// Top-level view mode. `Settings` replaces the entire window content
     /// with the SettingsView overlay until the user requests exit.
     view_mode: ViewMode,
@@ -748,6 +754,7 @@ impl Workspace {
             subagent_transcripts: HashMap::new(),
             subagent_final_text: HashMap::new(),
             subagent_prompts: HashMap::new(),
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
             externals: Vec::new(),

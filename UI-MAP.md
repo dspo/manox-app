@@ -23,7 +23,7 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 根视图 | `steer_agent_chrome_ui::Shell`（壳：38px 工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
 | 侧栏 | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影） |
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
-| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
+| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器——浏览器仅 macOS/Windows，Linux/FreeBSD 编译排除）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
 | Settings | 主区卡内的 nav｜panel 换位（`Workspace::render_settings_card`） |
 
@@ -63,7 +63,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 后台线程（ctrl-b 置底 / 切换自动 park） | ✅ | `background_threads` + `attach_thread` parking |
 | CLI agent 终端（Claude Code / Codex / GitHub Copilot） | ✅ | 右栏 ToolTab：先落 provider→model 级联（共享投影 `cascade_provider_groups`），选中即以该端点 `AgentBuilder` 拉起 CLI（PTY relay → `TerminalView`；cwd = 前台线程项目目录） |
 | 集成终端 / VS Code 注入 / ChatGPT.app 注入 | ✅ | 右栏终端页签（$SHELL，独立 PTY）+ 工具菜单的 VS Code / ChatGPT.app 注入启动（后台线程 + 通知，应用独立存活） |
-| Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface |
+| Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface（Browser 标签仅 macOS/Windows——Linux/FreeBSD 上集成浏览器整体不编译） |
 | TurnNavigator | ✅ | cmd-m 打开；↑/↓ 选条、enter 定位、⌘↵ 回填 composer、⌘C 复制；历史回溯另有 ⌥↑/⌥↓ |
 | TurnRail（左缘轮次导航） | ✅ | 常驻左缘刻度 rail（dsh TurnNavigator 移植，≥2 轮且卡宽 ≥640px 显示）；悬停预览、点击定位、active 随滚动追踪 |
 | 图片附件 | ✅ | 剪贴板粘贴 / plus 选择 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
@@ -827,11 +827,11 @@ inbound 写入请求桥 —— 页面没有 Tauri 命令面。进程级桥在构
 - **Read hint** —— `read_text` / `read_dom` / `screenshot` / `eval_script` 从 `https://` 源取到内容后
   显示的一行弱化提示，表明登录态页面内容已暴露给 agent。
 
-构建永不 panic：平台拒绝嵌入时（Linux 原生 Wayland 窗口 —— wry 的 Linux 子 webview 只能经
-Xlib 句柄挂载）视图退化为一条居中错误卡（`browser-webview-unavailable`），tab 不注册进
-`browser_views` / 宿主路由，`open_browser_tab` 返回 `None` 并弹错误通知，agent 侧 `open_tab`
-收到干净的 tool 错误。steer-app 在 Linux 上检测到 Wayland 会话同时存在 `DISPLAY` 时默认改走
-XWayland（`STEER_FORCE_WAYLAND=1` 可强制原生 Wayland，接受浏览器降级）。
+**平台范围**：整个集成浏览器（本视图、`WorkspaceBrowserHost`、`BrowserTool` 注册表项、
+composer「内部浏览器」菜单行、steer-webview crate 及其 wry/WebKitGTK/GTK 依赖）在
+Linux/FreeBSD 上经 `#[cfg(not(any(linux, freebsd)))]` 编译排除 —— 无 UI 入口，`web_explore_*`
+工具经 capability provider 收到干净的「not available」拒绝（剪贴板能力保留在
+`capability_host`，全平台）。持久快照里的 browser kind 行在恢复时被右栏静默跳过。
 
 > Source: `crates/agent-ui/src/views/browser_view.rs`
 
@@ -989,7 +989,7 @@ wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar
 
 #### ToolTabRegistry
 
-chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮）。
+chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮；**仅 macOS/Windows，Linux/FreeBSD 编译排除**——见 [BrowserView](#browserview)）。
 
 > Source: `crates/agent-ui/src/tool_tabs.rs`
 
