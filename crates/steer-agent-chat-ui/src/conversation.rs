@@ -278,12 +278,13 @@ pub enum ActivityEntry {
         streaming: bool,
         collapsed: bool,
         user_toggled: bool,
-        /// Persistent `Entity<Markdown>` carrying parse-once incremental parsing
-        /// and document-level selection, mirroring the top-level reasoning body.
-        /// `None` until first sync (`MessageItem::sync_reasoning_entry`), so a
-        /// freshly constructed entry renders a per-frame fallback until the
-        /// streaming/rebuild path mounts the persistent document.
-        markdown: Option<Entity<steer_components::markdown::TextViewState>>,
+        /// Persistent `ChatDocument` (upstream `TextViewState` plus the source
+        /// cache that keeps streaming deltas on the incremental `push_str`
+        /// path), mirroring the top-level reasoning body. `None` until first
+        /// sync (`MessageItem::sync_reasoning_entry`), so a freshly constructed
+        /// entry renders a per-frame fallback until the streaming/rebuild path
+        /// mounts the persistent document.
+        markdown: Option<steer_components::markdown::ChatDocument>,
     },
     /// One tool invocation (reuses `ToolCallItem` for status/output/collapse).
     Tool(ToolCallItem),
@@ -1127,7 +1128,7 @@ impl ConversationState {
                     } else {
                         None
                     };
-                    // Mount/sync the persistent `Entity<Markdown>` so streaming
+                    // Mount/sync the persistent `ChatDocument` so streaming
                     // deltas drive incremental parsing + document-level
                     // selection (drag + Cmd/Ctrl+C), mirroring the top-level body.
                     if let Some(eix) = eix {

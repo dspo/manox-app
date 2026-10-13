@@ -202,9 +202,10 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = 
 # per-language feature 的聚合别名，底层个别语法换源如 sql→sequel）。
 gpui-component = { version = "=0.7.0", features = ["tree-sitter-languages"] }
 gpui-kit-assets = { version = "=0.7.0" }
-# gpui-base —— gpui-component 0.7.0 依赖的同一 rich-text 内核（同线 semver）。
-# markdown 栈直接驱动 base 层 TextView：组件包装不暴露 per-实例 code-block
-# 高亮器与标题字重，两者都是本仓硬需求。
+# gpui-base — the same rich-text core gpui-component 0.7.0 builds on (same
+# release train). The markdown stack drives the base-layer TextView directly:
+# the component wrapper exposes neither the per-instance code-block
+# highlighter nor heading weights, and both are hard requirements here.
 gpui-base = "=0.7.0"
 
 # （旧栈的 `[patch.crates-io] psm = stacker` 已随 zed gpui 退出删除：gpui-pre

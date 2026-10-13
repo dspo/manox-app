@@ -334,9 +334,7 @@ impl Gallery {
 
         let mut demos = Vec::new();
         let mut subscriptions = Vec::new();
-        for (ix, (title, note, mounts_streaming, custom_message, default_open)) in
-            specs.iter().enumerate()
-        {
+        for (title, note, mounts_streaming, custom_message, default_open) in specs.iter() {
             let mounts_streaming = *mounts_streaming;
             let state = cx.new(|cx| {
                 let state = match *default_open {
@@ -353,7 +351,7 @@ impl Gallery {
             // The settled demos open with a body in place, so a folded block
             // has something to show before any control is touched.
             let seeded = *default_open == Some(true);
-            let markdown = mount_body(cx, ix, false, if seeded { SCRIPT } else { "" });
+            let markdown = mount_body(cx, if seeded { SCRIPT } else { "" });
             demos.push(Demo {
                 title,
                 note,
@@ -380,7 +378,7 @@ impl Gallery {
         // A fresh streaming document per run, as the conversation mounts one per
         // reasoning round: the streaming flag is a mount-time property, and it is
         // what puts the trailing cursor at the end of the growing body.
-        self.reasoning[ix].markdown = mount_body(cx, ix, true, "");
+        self.reasoning[ix].markdown = mount_body(cx, "");
         self.reasoning[ix].state.update(cx, |state, cx| {
             state.set_duration(None, cx);
             // A block mounted mid-run is already streaming; feeding it another
@@ -927,16 +925,10 @@ impl Render for Gallery {
     }
 }
 
-/// Mount a body the way the conversation mounts one for a reasoning round: the
-/// theme's style table (without it the renderer paints nothing), uniform
-/// headings and the message-list body size, and the streaming flag that carries
-/// the trailing cursor.
-fn mount_body(
-    cx: &mut Context<Gallery>,
-    _ix: usize,
-    _streaming: bool,
-    source: &'static str,
-) -> Entity<TextViewState> {
+/// Mount a body the way the conversation mounts one for a reasoning round: a
+/// persistent document entity that `feed_delta` grows through the incremental
+/// `push_str` path.
+fn mount_body(cx: &mut Context<Gallery>, source: &'static str) -> Entity<TextViewState> {
     cx.new(|cx| TextViewState::markdown(source, cx))
 }
 

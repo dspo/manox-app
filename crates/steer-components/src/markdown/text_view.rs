@@ -97,6 +97,69 @@ pub fn panel_style(theme: &Theme) -> gpui_base::TextViewStyle {
 
 // --- document constructors ----------------------------------------------------
 
+/// A persistent markdown document plus the source cache that keeps streaming
+/// deltas on upstream's incremental path.
+///
+/// Upstream `set_text` re-parses from an empty baseline every call — only
+/// `push_str` takes the incremental append path. This type remembers the last
+/// raw text and its linkified form, so a delta whose linkified source merely
+/// appends feeds just the suffix through `push_str` (and lands the more
+/// accurate extend-style fade); a mid-stream linkify rewrite (a URL completing)
+/// or a wholesale rewrite falls back to `set_text`. An unchanged raw source
+/// skips both the rewrite and the parse.
+#[derive(Clone, Default)]
+pub struct ChatDocument {
+    state: Option<Entity<TextViewState>>,
+    raw: Option<String>,
+    linkified: Option<String>,
+}
+
+impl std::fmt::Debug for ChatDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatDocument")
+            .field("mounted", &self.state.is_some())
+            .field("raw_len", &self.raw.as_ref().map(String::len))
+            .finish()
+    }
+}
+
+impl ChatDocument {
+    /// Mount (or adopt) the document for `text`, reusing the existing entity
+    /// and incremental path when already present.
+    pub fn sync(&mut self, text: &str, cx: &mut impl gpui::AppContext) {
+        if self.raw.as_deref() == Some(text) {
+            return;
+        }
+        let next = linkify_markdown(text);
+        let state = match &self.state {
+            Some(state) => state.clone(),
+            None => {
+                let state = cx.new(|cx| TextViewState::markdown(&next, cx));
+                self.state = Some(state.clone());
+                self.raw = Some(text.to_string());
+                self.linkified = Some(next);
+                return;
+            }
+        };
+        let appended = self
+            .linkified
+            .as_ref()
+            .filter(|prev| next.len() > prev.len() && next.starts_with(prev.as_str()))
+            .map(|prev| next[prev.len()..].to_string());
+        match appended {
+            Some(delta) => state.update(cx, |s, cx| s.push_str(&delta, cx)),
+            None => state.update(cx, |s, cx| s.set_text(&next, cx)),
+        }
+        self.raw = Some(text.to_string());
+        self.linkified = Some(next);
+    }
+
+    /// The mounted document entity, if [`Self::sync`] has run.
+    pub fn state(&self) -> Option<&Entity<TextViewState>> {
+        self.state.as_ref()
+    }
+}
+
 /// A persistent markdown document rendered with message density. The element
 /// is rebuilt every frame; the state entity carries content, selection and
 /// focus. Chain [`TextView::on_link_click`], [`TextView::code_block_actions`]
@@ -175,28 +238,47 @@ pub fn stream_fade_motion() -> TextViewMotion {
 /// ranges override only the fields they set, so the base run's italic slant
 /// survives under an ANSI color run that pins no slant of its own (the same
 /// field-wise merge the old renderer applied).
+///
+/// Single sweep: candidates stably sorted by start (ties keep feed order, so
+/// the base run still folds first), an in-order active list carries every
+/// range covering the current position, and each segment between boundaries
+/// folds the active list front to back. Later layers win per field because
+/// they fold after earlier ones.
 fn layer_runs(
     mut runs: Vec<(Range<usize>, HighlightStyle)>,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     runs.retain(|(range, _)| !range.is_empty());
-    let mut bounds: Vec<usize> = runs.iter().flat_map(|(r, _)| [r.start, r.end]).collect();
-    bounds.sort_unstable();
-    bounds.dedup();
+    if runs.is_empty() {
+        return runs;
+    }
+    runs.sort_by_key(|(range, _)| range.start);
+    let max_end = runs.iter().map(|(r, _)| r.end).max().unwrap_or(0);
 
-    let mut out = Vec::with_capacity(runs.len());
-    for window in bounds.windows(2) {
-        let (start, end) = (window[0], window[1]);
-        let mut style = HighlightStyle::default();
-        let mut covered = false;
-        for (range, layer) in &runs {
-            if range.start <= start && end <= range.end {
-                style = style.highlight(*layer);
-                covered = true;
+    // `active` keeps covering ranges in insertion (= feed) order; an entry
+    // leaves once the sweep passes its end.
+    let mut active: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    let mut position = runs[0].0.start;
+    while position < max_end {
+        active.retain(|(range, _)| range.end > position);
+        let mut end = max_end;
+        for (range, style) in &runs {
+            if range.start == position {
+                active.push((range.clone(), *style));
+            }
+            if range.start > position {
+                end = end.min(range.start);
             }
         }
-        if covered {
-            out.push((start..end, style));
+        for (range, _) in &active {
+            end = end.min(range.end);
         }
+        let mut style = HighlightStyle::default();
+        for (_, layer) in &active {
+            style = style.highlight(*layer);
+        }
+        out.push((position..end, style));
+        position = end;
     }
     out
 }
@@ -273,20 +355,19 @@ pub fn steer_code_highlighter(
     let add_fg = theme.success;
     let del_fg = theme.danger;
     move |block: &CodeBlock| {
-        let code = block.code().to_string();
-        let lang = block
-            .lang()
-            .as_ref()
-            .map(|l| l.to_ascii_lowercase())
-            .unwrap_or_else(|| "text".to_string());
-        match lang.as_str() {
-            "ansi" => ansi_runs(&code),
-            _ if is_conflict(&code) => {
-                conflict_runs(&code, foreground, muted, secondary, add_fg, del_fg)
-            }
-            "diff" => diff_runs(&code, foreground, muted, secondary, add_fg, del_fg),
-            _ => tree_sitter_runs(&code, &lang, &highlight_theme),
+        let code = block.code();
+        let lang_holder = block.lang();
+        let lang = lang_holder.as_deref().unwrap_or("text");
+        if lang.eq_ignore_ascii_case("ansi") {
+            return ansi_runs(&code);
         }
+        if is_conflict(&code) {
+            return conflict_runs(&code, foreground, muted, secondary, add_fg, del_fg);
+        }
+        if lang.eq_ignore_ascii_case("diff") {
+            return diff_runs(&code, foreground, muted, secondary, add_fg, del_fg);
+        }
+        tree_sitter_runs(&code, lang, &highlight_theme)
     }
 }
 
@@ -438,11 +519,20 @@ fn ansi_runs(code: &str) -> Vec<(Range<usize>, HighlightStyle)> {
 // frame, so this cache is what keeps a long conversation from re-highlighting
 // every completed block on each streaming delta. Lives on the render thread —
 // `SyntaxHighlighter` owns a thread-local `Parser` and is not `Send`.
-type HighlightCache = HashMap<(String, u64, usize), Vec<(Range<usize>, HighlightStyle)>>;
+//
+// The cache is bounded because a streaming block writes one entry per
+// intermediate shape and none of them expire on their own: past [`CODE_HL_
+// CACHE_MAX`] entries the table clears wholesale (completed blocks re-highlight
+// once), and a single block above [`CODE_HL_CACHE_MAX_BYTES`] highlights but
+// never caches, so one giant fence cannot evict the table for everyone.
+type HighlightCache = HashMap<(u64, usize), Vec<(Range<usize>, HighlightStyle)>>;
 
 thread_local! {
     static CODE_HL_CACHE: RefCell<HighlightCache> = RefCell::new(HashMap::new());
 }
+
+const CODE_HL_CACHE_MAX: usize = 1024;
+const CODE_HL_CACHE_MAX_BYTES: usize = 64 * 1024;
 
 fn tree_sitter_runs(
     value: &str,
@@ -451,16 +541,25 @@ fn tree_sitter_runs(
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let theme_ptr = Arc::as_ptr(theme) as usize;
     let mut hasher = DefaultHasher::new();
+    lang.hash(&mut hasher);
     value.hash(&mut hasher);
-    let key = (lang.to_string(), hasher.finish(), theme_ptr);
+    let key = (hasher.finish(), theme_ptr);
     if let Some(hit) = CODE_HL_CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return hit;
     }
     let rope = Rope::from_str(value);
-    let mut hl = SyntaxHighlighter::new(lang);
+    let mut hl = SyntaxHighlighter::new(&lang.to_ascii_lowercase());
     let _ = hl.update(None, &rope, None);
     let result = hl.styles(&(0..value.len()), theme.as_ref()).clone();
-    CODE_HL_CACHE.with(|c| c.borrow_mut().insert(key, result.clone()));
+    if value.len() <= CODE_HL_CACHE_MAX_BYTES {
+        CODE_HL_CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            if cache.len() >= CODE_HL_CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(key, result.clone());
+        });
+    }
     result
 }
 
@@ -486,5 +585,68 @@ mod tests {
         assert!(is_conflict("<<<<<<< ours\nx\n>>>>>>> theirs"));
         assert!(!is_conflict("<<<<<<< ours\nx"));
         assert!(!is_conflict("just a > quote"));
+    }
+
+    #[test]
+    fn layer_runs_keeps_feed_order_for_overlapping_starts() {
+        // The panel feeds a base run first, then specific runs that share its
+        // start: the specific layer must win color on its range while the base
+        // slant survives underneath, and the tail keeps the base alone.
+        let base = HighlightStyle {
+            font_style: Some(FontStyle::Italic),
+            ..Default::default()
+        };
+        let accent = HighlightStyle {
+            color: Some(Hsla {
+                h: 0.,
+                s: 1.,
+                l: 0.5,
+                a: 1.,
+            }),
+            ..Default::default()
+        };
+        let layered = layer_runs(vec![(0..10, base), (0..4, accent)]);
+        assert_eq!(layered.len(), 2);
+        assert_eq!(layered[0].0, 0..4);
+        assert_eq!(layered[0].1.color, accent.color);
+        assert_eq!(layered[0].1.font_style, Some(FontStyle::Italic));
+        assert_eq!(layered[1].0, 4..10);
+        assert_eq!(layered[1].1.color, None);
+        assert_eq!(layered[1].1.font_style, Some(FontStyle::Italic));
+    }
+
+    #[test]
+    fn layer_runs_later_layer_wins_per_field() {
+        let first = HighlightStyle {
+            color: Some(Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 1.,
+            }),
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        let second = HighlightStyle {
+            color: Some(Hsla {
+                h: 0.5,
+                s: 0.,
+                l: 0.5,
+                a: 1.,
+            }),
+            ..Default::default()
+        };
+        let layered = layer_runs(vec![(0..6, first), (2..4, second)]);
+        assert_eq!(layered.len(), 3);
+        assert_eq!(layered[0].0, 0..2);
+        assert_eq!(layered[0].1.color, first.color);
+        assert_eq!(layered[1].0, 2..4);
+        assert_eq!(layered[1].1.color, second.color, "later layer wins color");
+        assert_eq!(
+            layered[1].1.font_weight,
+            Some(FontWeight::BOLD),
+            "earlier field survives where the later layer sets nothing"
+        );
+        assert_eq!(layered[2].0, 4..6);
     }
 }
