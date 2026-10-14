@@ -117,6 +117,8 @@ pub type HookOnId = Box<dyn Fn(&str, &mut Window, &mut App)>;
 pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
 /// Host tag write (row id, `Some(tag)` to set / `None` to clear).
 pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>;
+/// External-session title write-back (row id, new title).
+pub type HookOnSetTitle = Box<dyn Fn(&str, String, &mut Window, &mut App)>;
 /// Host-built group menu (state key, the group's project path when it is a
 /// workspace group, open position) → the menu entity to mount, or `None` to
 /// open nothing. The chrome supplies the surface (anchor + dismissal); the
@@ -182,6 +184,10 @@ pub struct HostHooks {
     /// the host closes its tab AND reaps the sidebar row. Absent → the menu
     /// item fires nothing (a host that surfaces external rows owes this).
     pub on_close_external: Option<HookOnId>,
+    /// Rename a live external session (the external row menu's 重命名): the
+    /// host retitles its record — the sidebar row and the main-column
+    /// titlebar both read it. Absent → the item fires nothing.
+    pub on_set_external_title: Option<HookOnSetTitle>,
 }
 
 /// Everything the shell needs from its host at construction.
@@ -203,10 +209,14 @@ pub struct ShellConfig {
 
 /// Thread-tag character ceiling (the sidebar editor's rule).
 const MAX_THREAD_TAG_CHARS: usize = 10;
+/// External-session title ceiling — a title is a name, not a paragraph. The
+/// host's OSC-title capture clamps to the same budget as the rename editor.
+pub const MAX_EXTERNAL_TITLE_CHARS: usize = 80;
 
-/// The inline tag editor in flight (one at a time); the subscription commits
-/// on Enter/blur and clamps on Change.
-struct TagEdit {
+/// One inline row editor in flight (the tag line's tag editor, the title
+/// line's rename editor); the subscription commits on Enter/blur and clamps
+/// on Change.
+struct InlineEdit {
     id: String,
     input: Entity<gpui_component::input::InputState>,
     _sub: gpui::Subscription,
@@ -250,7 +260,10 @@ pub struct Shell {
     group_menu_sub: Option<gpui::Subscription>,
     /// The inline tag editor (row + input); Escape cancels, Enter/blur
     /// commits, an empty value is silently discarded.
-    tag_edit: Option<TagEdit>,
+    tag_edit: Option<InlineEdit>,
+    /// The inline title editor for an external row (same lifecycle as the
+    /// tag editor, mounted on the title line instead of the tag line).
+    title_edit: Option<InlineEdit>,
     // ── layout ──
     pub show_sidebar: bool,
     pub show_panel: bool,
@@ -273,9 +286,7 @@ pub struct Shell {
     // ── bottom dock ──
     panel: Option<PanelSlot>,
     // ── titlebar session picker ──
-    pub session_picker_open: bool,
-    /// Picker anchor (window space, the triggering click position).
-    picker_anchor: gpui::Point<Pixels>,
+    pub(crate) session_picker_open: bool,
     /// Picker search term (created on open; an InputState needs a Window, so
     /// it is built on the event path).
     pub(crate) picker_query: Option<Entity<gpui_component::input::InputState>>,
@@ -310,6 +321,7 @@ impl Shell {
             group_menu: None,
             group_menu_sub: None,
             tag_edit: None,
+            title_edit: None,
             show_sidebar: true,
             show_panel: false,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
@@ -320,7 +332,6 @@ impl Shell {
             _filter_sub: None,
             panel,
             session_picker_open: false,
-            picker_anchor: gpui::Point::default(),
             picker_query: None,
             _picker_sub: None,
             main: config.main,
@@ -331,9 +342,14 @@ impl Shell {
     // ── sessions ─────────────────────────────────────────────────────
 
     /// Replace the session snapshot (a ThreadStore-style push). The active
-    /// selection survives by id.
+    /// selection survives by id. The rows enter display order here — pinned
+    /// first, then the team-unit sort stamp descending — so a freshly
+    /// created session (the newest stamp) leads its group in EVERY grouping
+    /// mode; the time buckets re-apply the same key per group, the workspace
+    /// groups inherit the sorted walk.
     pub fn set_sessions(&mut self, rows: Vec<SessionRow>) {
         self.sessions = rows;
+        self.sort_sessions();
     }
 
     pub fn select(&mut self, id: &str, window: &mut Window, cx: &mut App) {
@@ -548,10 +564,14 @@ impl Shell {
             return;
         };
         // The external-session branch: 关闭会话 (the hook reaps the row AND
-        // closes its tab) + copy id. No thread semantics on a PTY.
+        // closes its tab), 重命名 (retitle the host record — the row and the
+        // main-column titlebar follow) + copy id. No thread semantics on a
+        // PTY.
         if let crate::session_list::SessionRowKind::External { .. } = sess.kind {
             let this = cx.entity();
+            let this_rename = this.clone();
             let id_close = id.to_string();
+            let id_rename = id.to_string();
             let id_copy = id.to_string();
             let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
                 menu.max_w(gpui::px(220.))
@@ -564,6 +584,16 @@ impl Shell {
                                         hook(&id_close, window, cx);
                                     }
                                     this.close_row_menu(cx);
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(steer_i18n::t("sidebar-rename-external"))
+                            .icon(crate::theme::icons::TEXT_CASE)
+                            .on_click(move |_, window, cx| {
+                                this_rename.update(cx, |this, cx| {
+                                    this.close_row_menu(cx);
+                                    this.begin_title_edit(id_rename.clone(), window, cx);
                                 });
                             }),
                     )
@@ -792,13 +822,17 @@ impl Shell {
     }
 
     /// Thread-tag write-back: the hook (the store seam) then the local row,
-    /// so the chip updates without waiting for the next snapshot.
+    /// so the chip updates without waiting for the next snapshot. A host
+    /// without the hook commits nothing — the same contract as
+    /// [`Self::commit_title_edit`]: the row write is the optimistic half of
+    /// the hook write, and alone it would only flash until the next
+    /// snapshot reverts it.
     pub fn set_tag(&mut self, id: &str, tag: Option<String>, window: &mut Window, cx: &mut App) {
         if let Some(hook) = &self.hooks.on_set_tag {
             hook(id, tag.clone(), window, cx);
-        }
-        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
-            s.tag = tag;
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+                s.tag = tag;
+            }
         }
     }
 
@@ -812,6 +846,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // One inline editor at a time: the title editor in flight commits
+        // here rather than living beside its replacement.
+        self.commit_title_edit(window, cx);
         let prefill = rename.then(|| {
             self.sessions
                 .iter()
@@ -850,13 +887,101 @@ impl Shell {
                 _ => {}
             },
         );
-        self.tag_edit = Some(TagEdit {
+        self.tag_edit = Some(InlineEdit {
             id,
             input: input.clone(),
             _sub: sub,
         });
         input.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
+    }
+
+    /// The inline title editor on an external row's title line: prefilled
+    /// with the current title, focused immediately, clamped to
+    /// [`MAX_EXTERNAL_TITLE_CHARS`] on every edit.
+    pub fn begin_title_edit(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // One inline editor at a time: the tag editor in flight commits
+        // here rather than living beside its replacement.
+        self.commit_tag_edit(window, cx);
+        let prefill = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.title.clone());
+        let input = cx.new(|cx| {
+            let mut state = gpui_component::input::InputState::new(window, cx)
+                .placeholder(steer_i18n::t("sidebar-rename-external"));
+            if let Some(value) = &prefill {
+                state.set_value(value.clone(), window, cx);
+            }
+            state
+        });
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &gpui_component::input::InputEvent, window, cx| match event {
+                gpui_component::input::InputEvent::Change => {
+                    input.update(cx, |state, cx| {
+                        let value = state.value();
+                        if value.chars().count() > MAX_EXTERNAL_TITLE_CHARS {
+                            let truncated: String =
+                                value.chars().take(MAX_EXTERNAL_TITLE_CHARS).collect();
+                            state.set_value(truncated, window, cx);
+                        }
+                    });
+                }
+                gpui_component::input::InputEvent::PressEnter { .. }
+                | gpui_component::input::InputEvent::Blur => {
+                    this.commit_title_edit(window, cx);
+                }
+                _ => {}
+            },
+        );
+        self.title_edit = Some(InlineEdit {
+            id,
+            input: input.clone(),
+            _sub: sub,
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Commit the in-flight title edit: a non-empty trimmed value rides the
+    /// host hook (the record retitle) and the local row, so the chip and the
+    /// titlebar update without waiting for the next snapshot. An empty value
+    /// is discarded silently, and a host without the hook commits nothing —
+    /// the row write is the optimistic half of the hook write, and alone it
+    /// would only flash until the next snapshot reverts it. Idempotent — a
+    /// blur may race an Enter.
+    pub fn commit_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.title_edit.take() else {
+            return;
+        };
+        let value = edit.input.read(cx).value().trim().to_string();
+        if !value.is_empty()
+            && let Some(hook) = self.hooks.on_set_external_title.as_ref()
+        {
+            hook(&edit.id, value.clone(), window, cx);
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == edit.id) {
+                s.title = value;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Escape in the title editor: unmount without writing.
+    pub fn cancel_title_edit(&mut self, cx: &mut Context<Self>) {
+        if self.title_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The in-flight inline title editor, if any — the row id and its input
+    /// (read face for hosts/tests that need to drive the value).
+    pub fn title_edit_input(&self) -> Option<(String, Entity<gpui_component::input::InputState>)> {
+        self.title_edit
+            .as_ref()
+            .map(|e| (e.id.clone(), e.input.clone()))
     }
 
     /// Commit the in-flight tag edit: a non-empty value rides
@@ -914,7 +1039,11 @@ impl Shell {
             .filter(|s| match &filter {
                 None => true,
                 Some(f) => {
-                    s.title.to_lowercase().contains(f)
+                    // The query matches the one-line face the row renders —
+                    // the raw title's hard breaks never match a typed space.
+                    crate::session_list::single_line_title(&s.title)
+                        .to_lowercase()
+                        .contains(f)
                         || s.workspace.to_lowercase().contains(f)
                         || s.tag
                             .as_deref()
@@ -1025,20 +1154,15 @@ impl Shell {
         groups
     }
 
-    /// Session-picker open/close: records the anchor (the triggering click
-    /// position), builds/clears the search term on open and focuses it;
-    /// closing only collapses.
-    pub fn toggle_session_picker(
-        &mut self,
-        anchor: gpui::Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Session-picker open/close: builds/clears the search term on open and
+    /// focuses it; closing only collapses. The panel's placement is derived
+    /// at render time (window-centered under the titlebar) — no click anchor
+    /// is recorded.
+    pub fn toggle_session_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.session_picker_open = !self.session_picker_open;
         if !self.session_picker_open {
             return;
         }
-        self.picker_anchor = anchor;
         if self.picker_query.is_none() {
             let query = cx.new(|cx| {
                 gpui_component::input::InputState::new(window, cx)
@@ -1269,14 +1393,16 @@ impl gpui::Render for Shell {
             // The picker panel rides the root paint layer through
             // deferred(anchored) — a plain child would be covered by the
             // content sibling layer and stay click-through; occlude() takes
-            // over hit testing.
+            // over hit testing. Placement is fixed, not click-derived:
+            // window-centered at the picker's width, a hair below the
+            // titlebar, so it re-opens exactly over its centered trigger.
             .when(picker_open, |this| {
-                let anchor = self.picker_anchor;
+                let anchor = gpui::point(titlebar::picker_left(window), px(titlebar::TITLE_H));
                 this.child(gpui::deferred(
                     gpui::anchored()
                         .anchor(gpui::Anchor::TopLeft)
                         .position(anchor)
-                        .offset(gpui::point(px(0.), px(30.)))
+                        .offset(gpui::point(px(0.), px(4.)))
                         .child(titlebar::picker_panel(self, cx)),
                 ))
             })
@@ -1412,6 +1538,10 @@ impl Shell {
             .tag_edit
             .as_ref()
             .map(|e| (e.id.clone(), e.input.clone()));
+        let title_edit = self
+            .title_edit
+            .as_ref()
+            .map(|e| (e.id.clone(), e.input.clone()));
         let title_box_w = Rc::clone(&self.title_box_w);
 
         // Focus handles track the VISIBLE row set: prune the stale ids, then
@@ -1481,6 +1611,10 @@ impl Shell {
         let on_tag_edit_cancel: crate::session_list::OnWindowApp = Rc::new(move |_w, cx| {
             this.update(cx, |this, cx| this.cancel_tag_edit(cx));
         });
+        let this = cx.entity();
+        let on_title_edit_cancel: crate::session_list::OnWindowApp = Rc::new(move |_w, cx| {
+            this.update(cx, |this, cx| this.cancel_title_edit(cx));
+        });
         let on_move_group = cx.listener(
             |this, (dragged, target, before): &(String, String, bool), _w, cx| {
                 this.move_group(dragged, target, *before);
@@ -1522,6 +1656,7 @@ impl Shell {
                 no_chats_hint: !has_chats,
                 hovered,
                 tag_edit,
+                title_edit,
                 title_box_w,
                 row_focus,
                 grouping,
@@ -1556,6 +1691,7 @@ impl Shell {
                     Some(cb)
                 },
                 on_tag_edit_cancel: Some(on_tag_edit_cancel),
+                on_title_edit_cancel: Some(on_title_edit_cancel),
                 on_tag_rename: std::rc::Rc::new(move |id, w, cx| on_tag_rename(id, w, cx)),
                 on_toggle_grouping: std::rc::Rc::new(move |e, w, cx| on_toggle_grouping(e, w, cx)),
                 on_toggle_search: std::rc::Rc::new(move |e, w, cx| on_toggle_search(e, w, cx)),

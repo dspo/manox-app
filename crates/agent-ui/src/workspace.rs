@@ -902,6 +902,24 @@ impl Workspace {
         self.chat.read(cx).awaiting_history
     }
 
+    /// The foreground session id (the store pair's id half) — the
+    /// regression read for a new-thread landing.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_foreground_session(&self, cx: &App) -> Option<String> {
+        self.chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone())
+    }
+
+    /// Whether the AHP client leg finished its handshake — the gate the
+    /// host-wired regression binaries wait on before driving the workspace.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_ahp_connected(&self, cx: &App) -> bool {
+        self.multiplexer.read(cx).store().read(cx).is_connected()
+    }
+
     /// Fold an empty chat snapshot for the foreground session into the book
     /// and notify the store — the wire shape of "the reopen's chat snapshot
     /// landed, and the session is genuinely empty". Diagnostic-only.
@@ -2534,6 +2552,14 @@ impl Workspace {
                         .thread
                         .read(|t| t.model().cloned())
                         .map(|model| manox_agent::provider_glue::display_name(&model))
+                        // Same rule as the chip's identity read: a fresh
+                        // session's engine already runs the registry default,
+                        // so show it — "no model" only when nothing is
+                        // registered at all.
+                        .or_else(|| {
+                            manox_agent::provider_glue::default_model()
+                                .map(|m| manox_agent::provider_glue::display_name(&m))
+                        })
                         .unwrap_or_else(|| i18n::t("workspace-no-model").to_string())
                 })
         }

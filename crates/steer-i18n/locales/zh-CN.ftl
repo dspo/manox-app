@@ -29,6 +29,8 @@ session-kind-terminal = 终端
 
 sidebar-close-external = 关闭会话
 
+sidebar-rename-external = 重命名
+
 sidebar-resume-external = 恢复会话
 
 external-session-resume-failed = 恢复外部 agent 失败

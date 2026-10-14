@@ -1,5 +1,5 @@
-//! ToolTab assembly adapters (PLAN-CHROME-CHAT-SPLIT Phase 4): wrap the
-//! app's real surfaces as chrome-shell right-pane tabs.
+//! ToolTab assembly adapters: wrap the app's real surfaces as chrome-shell
+//! right-pane tabs.
 //!
 //! Kinds shipped here:
 //! - integrated terminal ($SHELL, standalone PTY);
@@ -868,20 +868,15 @@ pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
     cx: &mut App,
 ) -> Result<Entity<terminal_ui::TerminalView>, String> {
-    // The dock shell lives in the HOST's terminal registry: `createTerminal`
-    // spawns the PTY host-side, and the view's emulation core mirrors it over
-    // the AHP terminal channel. The app no longer owns the process — closing
-    // the view drops the source, whose teardown disposes the host terminal
-    // (the shell dies with the panel).
-    let source = steer_agent_chat_ui::terminal_bridge::spawn_host_terminal(cwd, 80, 24)?;
-    let handle = manox_terminal::Terminal::spawn(
-        format!("chrome-assembly:$SHELL:{}", next_instance_id("channel")),
-        cwd.to_path_buf(),
-        80,
-        24,
-        Box::new(source),
-    )
-    .map_err(|e| e.to_string())?;
+    // An app-owned PTY rooted at `cwd`: the integrated terminal is an
+    // app-side surface no agent turn touches, and the shell must land where
+    // the caller picked — the foreground thread's project for the dock and
+    // right-pane spawns, the cascade's folder for the project menu.
+    let source: Box<dyn manox_terminal::pty_source::PtySource> =
+        manox_terminal::pty::default_source(cwd, 80, 24).map_err(|e| e.to_string())?;
+    let id = format!("chrome-assembly:$SHELL:{}", next_instance_id("pty"));
+    let handle = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, source)
+        .map_err(|e| e.to_string())?;
     let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(handle, cx));
     Ok(terminal_ui::TerminalView::new(proxy, cx))
 }

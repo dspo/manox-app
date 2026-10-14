@@ -1,5 +1,5 @@
-//! The chat column's port to its host (PLAN-CHROME-CHAT-SPLIT §3.2 — the
-//! dependency-inversion face that lets chat views live outside the shell).
+//! The chat column's port to its host (the dependency-inversion face that
+//! lets chat views live outside the shell).
 //!
 //! The chat crate's views and state must never hold a shell entity. Instead
 //! they hold a [`ChatHost`] and call through it; the host side (agent-ui's
@@ -20,7 +20,7 @@ use crate::conversation::ConversationState;
 pub type ChatHostHandle = Arc<dyn ChatHost>;
 
 /// Host-side actions the chat column mirrors to. Implemented by the shell
-/// assembly (today agent-ui's Workspace; at Phase 4 the new state layer).
+/// assembly (agent-ui's workspace).
 pub trait ChatHost: Send + Sync + 'static {
     /// The conversation entity the message items act on (`None` when the
     /// shell is gone — callers treat it as a no-op, matching the old

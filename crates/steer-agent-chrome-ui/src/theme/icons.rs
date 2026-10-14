@@ -59,6 +59,7 @@ icon_table! {
     SEARCH => "icons/search.svg",
     SETTINGS_GEAR => "icons/settings.svg",
     SORT_PRECEDENCE => "icons/arrow-down-wide-narrow.svg",
+    TEXT_CASE => "icons/case-sensitive.svg",
     SYMBOL_FILE => "icons/file-text.svg",
     TAG => "icons/tag.svg",
     TERMINAL => "icons/terminal.svg",

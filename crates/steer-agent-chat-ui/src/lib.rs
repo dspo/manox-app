@@ -1,14 +1,12 @@
-//! steer-agent-chat-ui — the chat column's state foundation
-//! (PLAN-CHROME-CHAT-SPLIT Phase 2, first tranche).
+//! steer-agent-chat-ui — the chat column's state foundation.
 //!
-//! What lives here today: the journal→UI projection pipeline
+//! What lives here: the journal→UI projection pipeline
 //! (`journal_translate` / `journal_fold` / `server_note_translate`), the
 //! store mirror it feeds (`client_store` + `client_store_handle` — the
-//! foreground leaf the conversation renders against), and the rail's data
-//! sources (`cockpit`, `git_status`). The conversation column's rendering
-//! (ConversationState, message views, composer) follows in later tranches —
-//! those still reach the Workspace shell and need the `ChatHost` inversion
-//! first.
+//! foreground leaf the conversation renders against), the conversation
+//! column's rendering (`conversation` — ConversationState, message views,
+//! composer) behind the [`host::ChatHost`] port, and the rail's data
+//! sources (`cockpit`, `git_status`).
 //!
 //! Dependency invariant (the executable definition of the chrome/chat
 //! decoupling): this crate never touches terminals, webviews, or
@@ -27,7 +25,6 @@ pub mod git_status;
 pub mod host;
 pub mod i18n;
 pub mod overlap_diag;
-pub mod terminal_bridge;
 pub mod views;
 
 gpui::actions!(

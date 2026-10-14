@@ -40,8 +40,9 @@ impl MainSurface for StubMain {
 }
 
 type TagLog = Rc<RefCell<Vec<(String, Option<String>)>>>;
+type TitleLog = Rc<RefCell<Vec<(String, String)>>>;
 
-fn shell_config(main: gpui::AnyView, set_tag_log: TagLog) -> ShellConfig {
+fn shell_config(main: gpui::AnyView, set_tag_log: TagLog, title_log: TitleLog) -> ShellConfig {
     ShellConfig {
         main: Arc::new(StubMain { view: main }),
         tool_kinds: vec![],
@@ -52,6 +53,9 @@ fn shell_config(main: gpui::AnyView, set_tag_log: TagLog) -> ShellConfig {
         hooks: HostHooks {
             on_set_tag: Some(Box::new(move |id, tag, _w, _cx| {
                 set_tag_log.borrow_mut().push((id.to_string(), tag));
+            })),
+            on_set_external_title: Some(Box::new(move |id, title, _w, _cx| {
+                title_log.borrow_mut().push((id.to_string(), title));
             })),
             ..Default::default()
         },
@@ -94,10 +98,46 @@ fn row_data(id: &str, updated_at: i64, sort_stamp: i64, team_leader: bool) -> Se
     }
 }
 
+/// A live external-session row (the rename editor's subject).
+fn external_row(id: &str) -> SessionRow {
+    SessionRow {
+        id: id.into(),
+        short_id: id.chars().take(8).collect(),
+        title: "claude session".into(),
+        workspace: "Chats".into(),
+        project: None,
+        status: SessionStatus::Running,
+        kind: steer_agent_chrome_ui::session_list::SessionRowKind::External {
+            icon: steer_agent_chrome_ui::theme::icons::IconAsset("icons/claude.svg"),
+        },
+        updated_at: 0,
+        sort_stamp: 0,
+        pinned: false,
+        archived: false,
+        tag: None,
+        team_leader: false,
+    }
+}
+
 /// Mount a shell with the given rows; returns (visual, shell).
 fn mount(
     cx: &mut TestAppContext,
     set_tag_log: TagLog,
+    rows: Vec<SessionRow>,
+) -> (VisualTestContext, gpui::Entity<Shell>) {
+    mount_with_config(
+        cx,
+        move |main| shell_config(main, set_tag_log, Default::default()),
+        rows,
+    )
+}
+
+/// `mount` with the caller's own config builder (tests that wire different
+/// hooks); the closure receives the stub main view built inside the window
+/// and must be `'static` — it rides the window-open closure.
+fn mount_with_config(
+    cx: &mut TestAppContext,
+    config: impl FnOnce(gpui::AnyView) -> ShellConfig + 'static,
     rows: Vec<SessionRow>,
 ) -> (VisualTestContext, gpui::Entity<Shell>) {
     cx.update(gpui_component::init);
@@ -107,7 +147,7 @@ fn mount(
         steer_i18n::init();
         register_fonts(cx);
         let main: gpui::AnyView = cx.new(|_| StubView).into();
-        let shell = cx.new(|cx| Shell::new(shell_config(main, set_tag_log), window, cx));
+        let shell = cx.new(|cx| Shell::new(config(main), window, cx));
         shell.update(cx, |s, _| s.set_sessions(rows));
         *slot_for_build.borrow_mut() = Some(shell.clone());
         Root::new(shell, window, cx)
@@ -240,6 +280,150 @@ fn tag_edit_commit_cancel_and_empty_semantics(cx: &mut TestAppContext) {
     });
     assert!(shell.read_with(cx, |s, _| s.tag_edit_input().is_none()));
     assert_eq!(log.borrow().len(), 1, "cancel writes nothing");
+}
+
+/// One inline editor at a time, both directions: opening the title editor
+/// commits an in-flight tag edit (and vice versa) — the displaced value
+/// rides its hook instead of sharing the row with the new editor.
+#[gpui::test]
+fn one_inline_editor_at_a_time(cx: &mut TestAppContext) {
+    let tag_log: TagLog = Rc::new(RefCell::new(Vec::new()));
+    let title_log: TitleLog = Rc::new(RefCell::new(Vec::new()));
+    let tag_for_config = tag_log.clone();
+    let title_for_config = title_log.clone();
+    let (mut visual, shell) = mount_with_config(
+        cx,
+        move |main| shell_config(main, tag_for_config, title_for_config),
+        vec![sample_row("thread-1"), external_row("ext-1")],
+    );
+
+    // A tag edit in flight commits when the title editor opens.
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.begin_tag_edit("thread-1".into(), false, window, cx)
+        });
+    });
+    let (_, tag_input) = shell
+        .read_with(cx, |s, _| s.tag_edit_input())
+        .expect("the tag editor is mounted");
+    visual.update(|window, cx| {
+        tag_input.update(cx, |state, cx| state.set_value("wip", window, cx));
+    });
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.begin_title_edit("ext-1".into(), window, cx));
+    });
+    assert!(
+        shell.read_with(cx, |s, _| s.tag_edit_input().is_none()
+            && s.title_edit_input().is_some()),
+        "the title editor displaces the tag editor, not hosts it"
+    );
+    assert_eq!(
+        tag_log.borrow().as_slice(),
+        &[("thread-1".to_string(), Some("wip".to_string()))],
+        "the displaced tag edit commits through its hook"
+    );
+
+    // And the reverse: a title edit in flight commits when a tag edit opens.
+    let (_, title_input) = shell
+        .read_with(cx, |s, _| s.title_edit_input())
+        .expect("the title editor is mounted");
+    visual.update(|window, cx| {
+        title_input.update(cx, |state, cx| state.set_value("renamed", window, cx));
+    });
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.begin_tag_edit("ext-1".into(), false, window, cx)
+        });
+    });
+    assert!(
+        shell.read_with(cx, |s, _| s.title_edit_input().is_none()
+            && s.tag_edit_input().is_some()),
+        "the tag editor displaces the title editor"
+    );
+    assert_eq!(
+        title_log.borrow().as_slice(),
+        &[("ext-1".to_string(), "renamed".to_string())],
+        "the displaced title edit commits through its hook"
+    );
+    assert!(
+        shell.read_with(cx, |s, _| s
+            .sessions
+            .iter()
+            .any(|r| r.id == "ext-1" && r.title == "renamed")),
+        "the commit lands on the local row too"
+    );
+}
+
+/// A host without `on_set_external_title` commits nothing: the editor
+/// unmounts, but neither the hook nor the local row sees the value (a
+/// hook-less row write would only flash until the next snapshot reverts
+/// it).
+#[gpui::test]
+fn title_edit_without_the_hook_commits_nothing(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount_with_config(
+        cx,
+        |main| {
+            let mut config = shell_config(main, Default::default(), Default::default());
+            config.hooks.on_set_external_title = None;
+            config
+        },
+        vec![external_row("ext-1")],
+    );
+
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.begin_title_edit("ext-1".into(), window, cx));
+    });
+    let (_, input) = shell
+        .read_with(cx, |s, _| s.title_edit_input())
+        .expect("the title editor is mounted");
+    visual.update(|window, cx| {
+        input.update(cx, |state, cx| state.set_value("renamed", window, cx));
+    });
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.commit_title_edit(window, cx));
+    });
+    assert!(
+        shell.read_with(cx, |s, _| s.title_edit_input().is_none()
+            && s.sessions.iter().all(|r| r.title == "claude session")),
+        "a hook-less commit unmounts the editor and writes nothing"
+    );
+}
+
+/// A host without `on_set_tag` commits nothing: the editor unmounts, but
+/// neither the hook nor the local row sees the value (a hook-less row
+/// write would only flash until the next snapshot reverts it) — the same
+/// contract the title side pins above.
+#[gpui::test]
+fn tag_edit_without_the_hook_commits_nothing(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount_with_config(
+        cx,
+        |main| {
+            let mut config = shell_config(main, Default::default(), Default::default());
+            config.hooks.on_set_tag = None;
+            config
+        },
+        vec![external_row("ext-1")],
+    );
+
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.begin_tag_edit("ext-1".into(), false, window, cx)
+        });
+    });
+    let (_, input) = shell
+        .read_with(cx, |s, _| s.tag_edit_input())
+        .expect("the tag editor is mounted");
+    visual.update(|window, cx| {
+        input.update(cx, |state, cx| state.set_value("pinned", window, cx));
+    });
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.commit_tag_edit(window, cx));
+    });
+    assert!(
+        shell.read_with(cx, |s, _| s.tag_edit_input().is_none()
+            && s.sessions.iter().all(|r| r.tag.is_none())),
+        "a hook-less commit unmounts the editor and writes nothing"
+    );
 }
 
 /// Hover must fire regardless of the approach direction: entering a row from
@@ -576,7 +760,7 @@ fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
         steer_i18n::init();
         register_fonts(cx);
         let main: gpui::AnyView = cx.new(|_| StubView).into();
-        let mut config = shell_config(main, Rc::new(RefCell::new(Vec::new())));
+        let mut config = shell_config(main, Default::default(), Default::default());
         config.hooks.nav_avail = Some(Box::new(move |_| NavAvail {
             back: true,
             forward: false,

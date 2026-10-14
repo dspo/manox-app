@@ -105,10 +105,13 @@ impl Workspace {
         if let Some(effort) = &effort_str {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));
         }
-        let cwds = (project.is_none())
-            .then(|| format!("file://{cwd}"))
-            .into_iter()
-            .collect();
+        // `working_directories` is the create intent's only directory
+        // carrier (the host binds its first entry as the session's cwd): a
+        // project launch binds the project — the landing chip and the
+        // sidebar group both read it back — a loose one the fallback cwd.
+        // An empty vector leaves the session directory-less ("choose
+        // project" on a thread the user launched FROM a project).
+        let cwds = vec![format!("file://{cwd}")];
         let reply = self.with_foreground_store(cx, |store, _| {
             store.create_session(&sid, cwds, Some(config))
         });
@@ -791,10 +794,10 @@ impl Workspace {
         if let Some(effort) = &effort_str {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));
         }
-        let cwds = (project.is_none())
-            .then(|| format!("file://{cwd_str}"))
-            .into_iter()
-            .collect();
+        // Same directory rule as `start_new_thread`: the intent's working
+        // directories are the only carrier — bind the inherited cwd so the
+        // fresh thread keeps its project instead of landing directory-less.
+        let cwds = vec![format!("file://{cwd_str}")];
         let reply = self.with_foreground_store(cx, |store, _| {
             store.create_session(&sid, cwds, Some(config))
         });

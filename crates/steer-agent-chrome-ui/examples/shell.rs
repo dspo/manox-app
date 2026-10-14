@@ -179,6 +179,7 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             // real cascade lives in the app's assembly (agent-ui); the
             // example only has to prove the surface anchors and dismisses.
             on_close_external: None,
+            on_set_external_title: None,
             on_group_menu: Some(Box::new(|key, project, _anchor, window, cx| {
                 let label = match project {
                     Some(p) => format!("Project actions: {p}"),

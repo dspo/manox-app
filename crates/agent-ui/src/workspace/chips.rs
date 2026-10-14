@@ -895,13 +895,29 @@ impl Workspace {
     /// `Model` blob. Deserializing the projection into `Model` (an earlier
     /// iteration) always failed on the missing display fields, so the chip
     /// rendered "no model" no matter what the journal said.
+    ///
+    /// A freshly created session's config seat is empty until its first
+    /// journaled pick, while the engine already runs the registry default —
+    /// the fallback shows THAT (the honest "what would run"), so "no model"
+    /// is reserved for a registry with nothing registered at all.
     pub(crate) fn foreground_model_identity(&self, cx: &App) -> Option<(String, String)> {
-        let (store, sid) = self.chat.read(cx).store.clone()?;
-        let view = store.read(cx);
-        let model = crate::ahp_store::leaf(&view.book, &sid)
-            .model_id()?
-            .to_string();
-        let (provider, id) = model.split_once('/')?;
+        let identity = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid)
+                    .model_id()
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                manox_agent::provider_glue::default_model()
+                    .map(|m| format!("{}/{}", m.provider, m.id))
+            });
+        let identity = identity?;
+        let (provider, id) = identity.split_once('/')?;
         (!provider.is_empty() && !id.is_empty()).then(|| (provider.to_string(), id.to_string()))
     }
 

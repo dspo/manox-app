@@ -1,9 +1,8 @@
-//! The multiplexer → chrome-sidebar projection (PLAN-CHROME-CHAT-SPLIT §5.3,
-//! the D2 ruling): pure functions turning the authoritative wire rows
-//! (the AHP summary rows, with the multiplexer's status deltas
-//! deltas merged) into the chrome `SessionList` props. This module owns no
-//! entity and no subscription — the assembly (Phase 4's shell swap) feeds it
-//! snapshots on the multiplexer's notify, exactly like the agent-ui sidebar's
+//! The multiplexer → chrome-sidebar projection: pure functions turning the
+//! authoritative wire rows (the AHP summary rows, with the multiplexer's
+//! status deltas merged) into the chrome `SessionList` props. This module
+//! owns no entity and no subscription — the assembly feeds it snapshots on
+//! the multiplexer's notify, exactly like the agent-ui sidebar's
 //! own `SidebarThreadItem::from_wire`, whose semantics this mirrors:
 //!
 //! - five-state machine: `errored` (danger triangle) → `pending_auth` /

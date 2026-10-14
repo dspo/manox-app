@@ -1,6 +1,6 @@
-//! The chrome-shell assembly for the real app (PLAN-CHROME-CHAT-SPLIT
-//! Phase 4; the sole shell since the legacy workspace shell retired). This
-//! module owns everything the app mounts:
+//! The chrome-shell assembly for the real app (the sole shell since the
+//! legacy workspace shell retired). This module owns everything the app
+//! mounts:
 //!
 //! - the session list fed by the REAL multiplexer (the server wire rows
 //!   projected through `sidebar_projection` — five states, team forest,
@@ -557,6 +557,16 @@ fn shell_config(
                 let ws = ws.downgrade();
                 move |id, _w, cx| {
                     let _ = ws.update(cx, |ws, cx| ws.close_external_session(id, cx));
+                }
+            })),
+            // The external row menu's 重命名: retitle the record — the
+            // sidebar row and the main-column titlebar both read it. The
+            // terminal's own OSC titles may claim the label back; last
+            // writer wins.
+            on_set_external_title: Some(Box::new({
+                let ws = ws.downgrade();
+                move |id, title, _w, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.set_external_title(id, title, cx));
                 }
             })),
         },

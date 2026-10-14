@@ -1,8 +1,7 @@
-//! The chat column's state types (PLAN-CHROME-CHAT-SPLIT Phase 2 tail):
-//! the `ChatColumn` entity's fields, the ask/queue/recall state families it
-//! carries, and the `AskUserQuestion` payload parser. The struct lives here;
-//! the workspace (agent-ui) embeds it as an `Entity<ChatColumn>` and
-//! orchestrates the wire-facing halves.
+//! The chat column's state types: the `ChatColumn` entity's fields, the
+//! ask/queue/recall state families it carries, and the `AskUserQuestion`
+//! payload parser. The struct lives here; the workspace (agent-ui) embeds
+//! it as an `Entity<ChatColumn>` and orchestrates the wire-facing halves.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -626,7 +625,7 @@ pub struct ChatColumn {
     pub context_rail: Entity<crate::views::context_rail::ContextRail>,
 }
 
-// ── ask-family state operations (Phase 2 tail) ─────────────────────────────
+// ── ask-family state operations ────────────────────────────────────────────
 // The wire halves (replies, thread responds, subscriptions) stay on the
 // workspace; these are the pure state machines the card renders against.
 
@@ -837,7 +836,7 @@ impl ChatColumn {
     }
 }
 
-// ── follow-up queue state operations (Phase 2 tail) ────────────────────────
+// ── follow-up queue state operations ───────────────────────────────────────
 
 impl ChatColumn {
     /// The insertion index for a queue-row drag (the sidebar's drag rule,
