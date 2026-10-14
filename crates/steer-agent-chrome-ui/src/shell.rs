@@ -845,6 +845,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // One inline editor at a time: the title editor in flight commits
+        // here rather than living beside its replacement.
+        self.commit_title_edit(window, cx);
         let prefill = rename.then(|| {
             self.sessions
                 .iter()
@@ -896,6 +899,9 @@ impl Shell {
     /// with the current title, focused immediately, clamped to
     /// [`MAX_EXTERNAL_TITLE_CHARS`] on every edit.
     pub fn begin_title_edit(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // One inline editor at a time: the tag editor in flight commits
+        // here rather than living beside its replacement.
+        self.commit_tag_edit(window, cx);
         let prefill = self
             .sessions
             .iter()
@@ -942,13 +948,16 @@ impl Shell {
     /// Commit the in-flight title edit: a non-empty trimmed value rides the
     /// host hook (the record retitle) and the local row, so the chip and the
     /// titlebar update without waiting for the next snapshot. An empty value
-    /// is discarded silently. Idempotent — a blur may race an Enter.
+    /// is discarded silently, and a host without the hook commits nothing —
+    /// the row write is the optimistic half of the hook write, and alone it
+    /// would only flash until the next snapshot reverts it. Idempotent — a
+    /// blur may race an Enter.
     pub fn commit_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.title_edit.take() else {
             return;
         };
         let value = edit.input.read(cx).value().trim().to_string();
-        if !value.is_empty() {
+        if !value.is_empty() && self.hooks.on_set_external_title.is_some() {
             if let Some(hook) = &self.hooks.on_set_external_title {
                 hook(&edit.id, value.clone(), window, cx);
             }
