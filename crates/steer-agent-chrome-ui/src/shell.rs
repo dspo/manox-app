@@ -822,13 +822,17 @@ impl Shell {
     }
 
     /// Thread-tag write-back: the hook (the store seam) then the local row,
-    /// so the chip updates without waiting for the next snapshot.
+    /// so the chip updates without waiting for the next snapshot. A host
+    /// without the hook commits nothing — the same contract as
+    /// [`Self::commit_title_edit`]: the row write is the optimistic half of
+    /// the hook write, and alone it would only flash until the next
+    /// snapshot reverts it.
     pub fn set_tag(&mut self, id: &str, tag: Option<String>, window: &mut Window, cx: &mut App) {
         if let Some(hook) = &self.hooks.on_set_tag {
             hook(id, tag.clone(), window, cx);
-        }
-        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
-            s.tag = tag;
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+                s.tag = tag;
+            }
         }
     }
 
@@ -954,10 +958,10 @@ impl Shell {
             return;
         };
         let value = edit.input.read(cx).value().trim().to_string();
-        if !value.is_empty() && self.hooks.on_set_external_title.is_some() {
-            if let Some(hook) = &self.hooks.on_set_external_title {
-                hook(&edit.id, value.clone(), window, cx);
-            }
+        if !value.is_empty()
+            && let Some(hook) = self.hooks.on_set_external_title.as_ref()
+        {
+            hook(&edit.id, value.clone(), window, cx);
             if let Some(s) = self.sessions.iter_mut().find(|s| s.id == edit.id) {
                 s.title = value;
             }
@@ -1393,10 +1397,7 @@ impl gpui::Render for Shell {
             // window-centered at the picker's width, a hair below the
             // titlebar, so it re-opens exactly over its centered trigger.
             .when(picker_open, |this| {
-                let anchor = gpui::point(
-                    (window.viewport_size().width - px(titlebar::PICKER_WIDTH)) / 2.,
-                    px(titlebar::TITLE_H),
-                );
+                let anchor = gpui::point(titlebar::picker_left(window), px(titlebar::TITLE_H));
                 this.child(gpui::deferred(
                     gpui::anchored()
                         .anchor(gpui::Anchor::TopLeft)

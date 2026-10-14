@@ -22,19 +22,20 @@ use crate::theme::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px,
-    rgba,
+    ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div,
+    px, rgba,
 };
 use gpui_component::input::Input;
 
 /// Content start: the native traffic-light cluster (starting at 12, ≈58
-/// wide) + 6 spacing = 70 — after the first tool button (with its own 12px
-/// left padding) lands, its inner underlay sits exactly at x=82, the
-/// calibrated position. Folded into the left wing as extra padding (the row
-/// itself carries symmetric 12px padding so the picker centers on the
-/// window, not on the padded content box).
+/// wide) + 6 spacing = 70 — the row's left padding; after the first tool
+/// button (with its own 12px left padding) lands, its inner underlay sits
+/// exactly at x=82, the calibrated position. The padding asymmetry (70
+/// left, 12 right) cannot pull the out-of-flow picker off center: Taffy
+/// measures absolute insets from the parent's padding box, which spans the
+/// full-width row.
 const TRAFFIC_SLOT: f32 = 70.;
-/// Row padding; the traffic slot's excess (70 − 12) rides on the left wing.
+/// The row's right padding (the left side is TRAFFIC_SLOT).
 const ROW_PAD: f32 = 12.;
 /// Toolbar height; the picker panel hangs directly below it.
 pub(crate) const TITLE_H: f32 = 38.;
@@ -212,8 +213,9 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
         )
         // The session picker trigger: out-of-flow (mounted last so it paints
         // above both wings), pinned to the window's center line at a fixed
-        // width — the same formula that places its dropdown (see
-        // `Shell::render`), so the panel re-opens exactly over the trigger.
+        // width — [`picker_left`] is the same origin its dropdown derives
+        // from (see `Shell::render`), so the panel re-opens exactly over the
+        // trigger.
         .child(session_picker(shell, window, cx))
         .into_any_element()
 }
@@ -245,6 +247,14 @@ fn nav_button(
     .into_any_element()
 }
 
+/// The picker trigger's and dropdown's shared x origin: the window's
+/// horizontal center line at [`PICKER_WIDTH`]. Both faces derive their
+/// placement from this one helper, so the panel always re-opens exactly
+/// over its trigger.
+pub(crate) fn picker_left(window: &Window) -> Pixels {
+    (window.viewport_size().width - px(PICKER_WIDTH)) / 2.
+}
+
 /// The session picker (trigger + dropdown panel). The trigger row: a folder
 /// glyph + the active session title + a chevron, fixed at [`PICKER_WIDTH`]
 /// (the dropdown's width — the panel re-opens exactly over its trigger);
@@ -253,7 +263,7 @@ fn nav_button(
 /// flex never gets a vote; on a window narrower than the two wings' buttons
 /// plus the trigger it overlays them.
 fn session_picker(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
-    let left = (window.viewport_size().width - px(PICKER_WIDTH)) / 2.;
+    let left = picker_left(window);
     let active_title: String = shell
         .active
         .as_ref()
@@ -301,31 +311,34 @@ fn session_picker(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) -
 /// `deferred(anchored(...))` (see `shell.rs`), window-centered under the
 /// titlebar, so it re-opens exactly over its trigger.
 pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
+    // Trimmed like the sidebar filter: a stray trailing space in the query
+    // must not hide rows whose title ends on the typed term.
     let query = shell
         .picker_query
         .as_ref()
-        .map(|q| q.read(cx).value().to_lowercase());
+        .map(|q| q.read(cx).value().trim().to_lowercase());
     let q = query.unwrap_or_default();
 
     let items: Vec<(String, String, String, bool)> = shell
         .sessions
         .iter()
-        .filter(|s| {
+        .filter_map(|s| {
             // The query matches the one-line face the rows render — the
             // raw title's hard breaks never match a typed space.
-            q.is_empty()
-                || single_line_title(&s.title).to_lowercase().contains(&q)
-                || s.workspace.to_lowercase().contains(&q)
+            let title = single_line_title(&s.title);
+            (q.is_empty()
+                || title.to_lowercase().contains(&q)
+                || s.workspace.to_lowercase().contains(&q))
+            .then(|| {
+                (
+                    s.id.clone(),
+                    title,
+                    s.workspace.clone(),
+                    matches!(s.status, SessionStatus::Unread),
+                )
+            })
         })
         .take(PICKER_LIMIT)
-        .map(|s| {
-            (
-                s.id.clone(),
-                single_line_title(&s.title),
-                s.workspace.clone(),
-                matches!(s.status, SessionStatus::Unread),
-            )
-        })
         .collect();
 
     // Closures in the loop go through the entity handle (a `cx.listener`

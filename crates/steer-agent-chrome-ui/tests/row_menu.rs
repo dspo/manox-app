@@ -389,6 +389,43 @@ fn title_edit_without_the_hook_commits_nothing(cx: &mut TestAppContext) {
     );
 }
 
+/// A host without `on_set_tag` commits nothing: the editor unmounts, but
+/// neither the hook nor the local row sees the value (a hook-less row
+/// write would only flash until the next snapshot reverts it) — the same
+/// contract the title side pins above.
+#[gpui::test]
+fn tag_edit_without_the_hook_commits_nothing(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount_with_config(
+        cx,
+        |main| {
+            let mut config = shell_config(main, Default::default(), Default::default());
+            config.hooks.on_set_tag = None;
+            config
+        },
+        vec![external_row("ext-1")],
+    );
+
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.begin_tag_edit("ext-1".into(), false, window, cx)
+        });
+    });
+    let (_, input) = shell
+        .read_with(cx, |s, _| s.tag_edit_input())
+        .expect("the tag editor is mounted");
+    visual.update(|window, cx| {
+        input.update(cx, |state, cx| state.set_value("pinned", window, cx));
+    });
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| s.commit_tag_edit(window, cx));
+    });
+    assert!(
+        shell.read_with(cx, |s, _| s.tag_edit_input().is_none()
+            && s.sessions.iter().all(|r| r.tag.is_none())),
+        "a hook-less commit unmounts the editor and writes nothing"
+    );
+}
+
 /// Hover must fire regardless of the approach direction: entering a row from
 /// ABOVE (out of the group header) and from BELOW (out of the next row) both
 /// flip the shell's hovered-row state.
