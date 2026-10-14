@@ -210,6 +210,14 @@ impl Workspace {
                         .child(i18n::t("workspace-ask-supplement-label")),
                 )
             })
+            .when_some(
+                self.chat
+                    .read(cx)
+                    .store
+                    .as_ref()
+                    .and_then(|(store, _)| store.read(cx).delivery_failure()),
+                |el, failure| el.child(self.render_delivery_error_strip(&failure, cx)),
+            )
             .child(
                 // Composer input is message content in the mono family (Lilex)
                 // at Light weight — the message-list body typeface. The `Input`
@@ -1098,6 +1106,61 @@ impl Workspace {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// The delivery-error strip: the composer's face for a submit pipeline
+    /// that cannot currently deliver — a dead handshake, a failing
+    /// transport, or a pre-connect queue past its budget. The failure
+    /// states used to be tracing-only, so a user typing into a dead
+    /// composer had no signal at all. Retryable faces carry a redial
+    /// button; the strip reads the store's [`DeliveryFailure`] so the
+    /// reason is always the pipeline's own.
+    pub(super) fn render_delivery_error_strip(
+        &self,
+        failure: &steer_agent_chat_ui::ahp_store::DeliveryFailure,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let retryable = matches!(
+            failure,
+            steer_agent_chat_ui::ahp_store::DeliveryFailure::Handshake(_)
+        );
+        h_flex()
+            .id("delivery-error-strip")
+            .debug_selector(|| "delivery-error-strip".to_string())
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .bg(theme.danger.opacity(0.08))
+            .child(
+                Icon::new(IconName::TriangleAlert)
+                    .xsmall()
+                    .text_color(theme.danger),
+            )
+            .child(
+                gpui::div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(i18n::t("composer-delivery-error")),
+            )
+            .when(retryable, |el| {
+                el.child(
+                    Button::new("delivery-error-retry")
+                        .xsmall()
+                        .label(i18n::t("composer-delivery-retry"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some((store, _)) = this.chat.read(cx).store.clone() {
+                                store.update(cx, |store, cx| store.retry_handshake(cx));
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .into_any_element()
     }
 
     /// Circular icon-only send/stop button.

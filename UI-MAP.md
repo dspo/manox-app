@@ -115,7 +115,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Footer / Composer
 
-- [Footer](#footer) · [Composer](#composer) · [QueuedFollowUps](#queuedfollowups) · [ComposerDivider](#composerdivider) · [AttachmentChips](#attachmentchips) · [AttachmentChip](#attachmentchip) · [BrowserSuiteChip](#browsersuitechip) · [ComposerInputRow](#composerinputrow) · [InputField](#inputfield) · [SendBtn](#sendbtn) · [ModelChip](#modelchip) · [ContextUsagePill](#contextusagepill) · [AccessChip](#accesschip) · [ProjectChip](#projectchip) · [FollowStopProjection](#followstapprojection)
+- [Footer](#footer) · [Composer](#composer) · [DeliveryErrorStrip](#deliveryerrorstrip) · [QueuedFollowUps](#queuedfollowups) · [ComposerDivider](#composerdivider) · [AttachmentChips](#attachmentchips) · [AttachmentChip](#attachmentchip) · [BrowserSuiteChip](#browsersuitechip) · [ComposerInputRow](#composerinputrow) · [InputField](#inputfield) · [SendBtn](#sendbtn) · [ModelChip](#modelchip) · [ContextUsagePill](#contextusagepill) · [AccessChip](#accesschip) · [ProjectChip](#projectchip) · [FollowStopProjection](#followstapprojection)
 
 ### AskDrawer
 
@@ -430,6 +430,20 @@ walk's working line, which `⌥↓` past the newest turn restores. Submitting or
 A [TurnNavigator](#capability-matrix) `⌘↵` fill is a walk landing too: the walk moves onto the filled turn, so
 the draft the fill displaced is the working line `⌥↓` returns — `InputState::set_value` clears the input's undo
 history, so nothing else survives that replacement.
+
+#### DeliveryErrorStrip
+
+Full-width danger strip painted directly above the input while the submit pipeline cannot deliver — a latched
+handshake failure (every write queues behind a dial that never lands), a latched dispatch transport failure, or
+a pre-connect queue past the 10s delivery budget (the stall face is computed lazily on read; no polling pump on
+the healthy path). Row: `triangle-alert` icon + 「连接未就绪，消息可能没有送达」, plus a **Retry** button on the
+handshake face only (`retry_handshake` re-runs the retained dial; a no-op while connected or while a dial is in
+flight). The states used to be tracing-only, so a user typing into a dead composer had no signal at all —
+the black-hole shape where sends vanish without a trace.
+
+> Source: `crates/steer-agent-chat-ui/src/ahp_store.rs` (`DeliveryFailure`, `delivery_failure`,
+> `retry_handshake`, `spawn_delivery_failure_pump`, the handshake failure latch); render in
+> `crates/agent-ui/src/workspace/composer_render.rs` (`render_delivery_error_strip`)
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
