@@ -9,7 +9,8 @@
 mod common;
 
 use ahp_types::actions::{
-    ChatInputCompletedAction, ChatInputRequestedAction, ChatTurnStartedAction, StateAction,
+    ChatInputCompletedAction, ChatInputRequestedAction, ChatTurnCancelledAction,
+    ChatTurnStartedAction, StateAction,
 };
 use ahp_types::state::{
     ChatInputOption, ChatInputQuestion, ChatInputRequest, ChatInputSingleSelectQuestion,
@@ -206,6 +207,72 @@ async fn live_ask_edge_retires_a_card_the_fold_cannot_route(cx: &mut TestAppCont
         workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         None,
         "a plan review settled on the plan channel retires the card"
+    );
+    manox_agent::thread_store::drop_global_for_test();
+}
+
+/// The live-cancel race (the 2026-10 strand): the user cancels the turn
+/// while the card is up. The cancellation archives the turn with the ask
+/// part still unanswered — the gate's decision row loses that race — and
+/// the part can never settle afterwards (the reducer settles active-turn
+/// parts only). The edge must retire the card instead of re-seeding it
+/// forever against a corpse that locked the composer in ask mode until
+/// restart.
+#[gpui::test]
+async fn live_ask_edge_retires_a_card_whose_turn_archived_unanswered(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (_window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(_window.into(), cx);
+
+    let store = cx.update(|cx| cx.new(|_| AhpStore::detached()));
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store.clone(), "sess-1", cx);
+    });
+
+    store.update(&mut visual.cx, |s, _| {
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: "turn-1".to_string(),
+                started_at: "2026-10-14T00:00:00Z".to_string(),
+                message: user_message(),
+                queued_message_id: None,
+                meta: None,
+            }),
+        );
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &StateAction::ChatInputRequested(ChatInputRequestedAction {
+                request: select_request("req-1"),
+            }),
+        );
+    });
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_sync_live_ask(cx);
+    });
+    assert_eq!(
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
+        Some("req-1".to_string()),
+        "the parked ask seeds its card"
+    );
+
+    store.update(&mut visual.cx, |s, _| {
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &StateAction::ChatTurnCancelled(ChatTurnCancelledAction {
+                turn_id: "turn-1".to_string(),
+                duration: 0,
+                meta: None,
+            }),
+        );
+    });
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_sync_live_ask(cx);
+    });
+    assert_eq!(
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
+        None,
+        "a card whose ask archived unanswered retires instead of stranding the composer in ask mode"
     );
     manox_agent::thread_store::drop_global_for_test();
 }
