@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use ai_elements::{
-    BrailleSpinner, ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep, PixelSpinner,
-    PixelSpinnerVariant, Reasoning, ReasoningState,
+    BrailleSpinner, ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep, FRAME_NAMES, Meerkat,
+    PixelSpinner, PixelSpinnerVariant, Reasoning, ReasoningState,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
@@ -189,6 +189,7 @@ enum Component {
     Reasoning,
     ChainOfThought,
     PixelSpinner,
+    HistoryLoading,
 }
 
 impl Component {
@@ -196,6 +197,7 @@ impl Component {
         Component::Reasoning,
         Component::ChainOfThought,
         Component::PixelSpinner,
+        Component::HistoryLoading,
     ];
 
     fn name(self) -> &'static str {
@@ -203,6 +205,7 @@ impl Component {
             Self::Reasoning => "Reasoning",
             Self::ChainOfThought => "Chain of Thought",
             Self::PixelSpinner => "Pixel Spinner",
+            Self::HistoryLoading => "History Loading",
         }
     }
 
@@ -220,6 +223,11 @@ impl Component {
                 "VS Code's session-status glyph on gpui primitives: six 2px dots that drop \
                  through a 16px frame in a quantized cascade while working, or light up in a \
                  clockwise sweep while waiting for input."
+            }
+            Self::HistoryLoading => {
+                "The pixel meerkat the app plays while a reopened thread's chat snapshot is in \
+                 flight — same one-clock approach as the pixel spinner: cycle time picks the \
+                 slot, the slot picks the frame, only the active frame renders."
             }
         }
     }
@@ -915,6 +923,54 @@ impl Gallery {
         ]
     }
 
+    /// The history-loading page's demos: the sprite at its native scale, a
+    /// half-speed pass for reading the loop, and the four frames frozen
+    /// side by side. Time-only again — the clock runs from mount.
+    fn history_loading_rows(
+        &self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+    ) -> Vec<AnyElement> {
+        vec![
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "The loading sprite",
+                "12×14 cells, 4 distinct frames in a 6-slot loop (idle, bob, blink, bob, idle, \
+                 tail flick) at 3 slots per second — the face the main column shows while a \
+                 reopened thread's snapshot is in flight. Half speed lets you see each slot.",
+                h_flex()
+                    .gap_10()
+                    .items_center()
+                    .child(spinner_cell(muted, Meerkat::new(), "cell 10 · 3 slots/s"))
+                    .child(spinner_cell(
+                        muted,
+                        Meerkat::new().speed(0.5),
+                        "cell 10 · speed ½",
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "The four frames, frozen",
+                "Frame 0 is the master grid; the others are hand-derived variants — the bob \
+                 drops the feet row off the grid, the blink collapses the eye patches to an \
+                 outline one row below the brow, the tail flick lifts the tail to head height.",
+                h_flex().gap_10().items_center().children(
+                    FRAME_NAMES
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, name)| spinner_cell(muted, Meerkat::new().freeze(ix), name)),
+                ),
+            )
+            .into_any_element(),
+        ]
+    }
+
     /// The left rail: one row per component, the selected one tinted.
     fn rail(
         &mut self,
@@ -983,6 +1039,7 @@ impl Render for Gallery {
                 .collect(),
             Component::ChainOfThought => self.chain_rows(muted, border, foreground, cx),
             Component::PixelSpinner => self.pixel_spinner_rows(muted, border, foreground),
+            Component::HistoryLoading => self.history_loading_rows(muted, border, foreground),
         };
 
         let pane = v_flex()
@@ -1054,6 +1111,11 @@ fn footer_note(selected: Component) -> &'static str {
             "Clock-only demos: one gpui Animation folds cycle time through the per-dot \
              delays and keyframe tables. The steps() snap is the pixel; speed is a rate \
              multiplier on the same clock."
+        }
+        Component::HistoryLoading => {
+            "Clock-only demos: one gpui Animation maps cycle time to the loop's six slots, \
+             and only the active frame's cells render — no stacked layers. Freeze pins a \
+             frame; speed multiplies the same clock."
         }
         _ => {
             "Auto-open while streaming, auto-fold one second after the stream ends \
