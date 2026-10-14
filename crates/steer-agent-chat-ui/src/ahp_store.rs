@@ -512,6 +512,15 @@ pub enum DeliveryFailure {
     Stalled,
 }
 
+/// One dispatch outcome bound for the store's own pump: a failure latches
+/// the delivery face, a recovery retires a latched `Dispatch` face (a
+/// dispatch that leaves proves the transport answers again).
+#[derive(Clone, Debug)]
+enum DeliverySignal {
+    Failed(DeliveryFailure),
+    DispatchRecovered,
+}
+
 /// The GPUI-facing store. One per process: the host is a singleton (L11) and
 /// this is its only desktop client.
 pub struct AhpStore {
@@ -569,10 +578,10 @@ pub struct AhpStore {
     /// A handshake (initial or retried) is currently dialing: `retry` must
     /// not stack a second dial on top of a slow one.
     handshaking: bool,
-    /// Dispatch failures ride this to the store's own pump — the dispatch
-    /// spawn runs on the manox runtime with no gpui handle, and the latch
+    /// Dispatch outcomes ride this to the store's own pump — the dispatch
+    /// spawn runs on the manox runtime with no gpui handle, and the face
     /// needs the entity.
-    delivery_fail_tx: Option<async_channel::Sender<DeliveryFailure>>,
+    delivery_signal_tx: Option<async_channel::Sender<DeliverySignal>>,
     _tasks: Vec<gpui::Task<()>>,
 }
 
@@ -584,7 +593,7 @@ impl AhpStore {
     pub fn connect(cwd: PathBuf, cx: &mut gpui::Context<Self>) -> Self {
         let (event_tx, event_rx) = async_channel::unbounded::<ahp::ClientEvent>();
         let (req_tx, req_rx) = async_channel::unbounded::<CapabilityRequest>();
-        let (fail_tx, fail_rx) = async_channel::unbounded::<DeliveryFailure>();
+        let (fail_tx, fail_rx) = async_channel::unbounded::<DeliverySignal>();
         let mut store = Self {
             book: ChannelBook::default(),
             client: None,
@@ -601,7 +610,7 @@ impl AhpStore {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
-            delivery_fail_tx: Some(fail_tx),
+            delivery_signal_tx: Some(fail_tx),
             _tasks: Vec::new(),
         };
         store.spawn_handshake(cwd, event_tx, req_tx, cx);
@@ -642,33 +651,51 @@ impl AhpStore {
     /// failure face only — and while the first handshake is still in
     /// flight, so a slow host never gets dialled twice.
     pub fn retry_handshake(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.client.is_some() {
+        if self.client.is_some() || self.handshaking {
             return;
         }
-        if self.handshake_params.is_none() || self.handshaking {
-            return;
-        }
-        self.delivery_failure = None;
         let Some((cwd, event_tx, req_tx)) = self.handshake_params.clone() else {
             return;
         };
+        self.delivery_failure = None;
         self.spawn_handshake(cwd, event_tx, req_tx, cx);
         cx.notify();
     }
 
-    /// Latch dispatch failures onto the store. The dispatch spawn runs on
-    /// the manox runtime with no gpui handle, so failures ride this channel
-    /// to a task that owns the entity.
+    /// Apply one dispatch outcome to the delivery face: a failure latches,
+    /// a recovery retires a latched `Dispatch` face (a `Handshake` face is
+    /// not a dispatch's to clear). Returns whether the face changed — the
+    /// pump notifies only then, so a recovery against no latch stays free.
+    fn absorb_delivery_signal(&mut self, signal: DeliverySignal) -> bool {
+        match signal {
+            DeliverySignal::Failed(failure) => {
+                self.delivery_failure = Some(failure);
+                true
+            }
+            DeliverySignal::DispatchRecovered => {
+                if matches!(self.delivery_failure, Some(DeliveryFailure::Dispatch(_))) {
+                    self.delivery_failure = None;
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
+    /// Fold dispatch outcomes onto the store's delivery face. The dispatch
+    /// spawn runs on the manox runtime with no gpui handle, so outcomes
+    /// ride this channel to a task that owns the entity.
     fn spawn_delivery_failure_pump(
         &mut self,
-        fail_rx: async_channel::Receiver<DeliveryFailure>,
+        fail_rx: async_channel::Receiver<DeliverySignal>,
         cx: &mut gpui::Context<Self>,
     ) {
         let task = cx.spawn(async move |this, cx| {
-            while let Ok(failure) = fail_rx.recv().await {
+            while let Ok(signal) = fail_rx.recv().await {
                 this.update(cx, |store, cx| {
-                    store.delivery_failure = Some(failure);
-                    cx.notify();
+                    if store.absorb_delivery_signal(signal) {
+                        cx.notify();
+                    }
                 })
                 .ok();
             }
@@ -697,7 +724,7 @@ impl AhpStore {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
-            delivery_fail_tx: None,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
     }
@@ -1318,15 +1345,25 @@ impl AhpStore {
             return;
         }
         let client = self.client.clone().expect("guard above");
-        // The failure rides the delivery channel to the store's own pump —
-        // this spawn has no gpui handle, and a transport failure must latch
-        // the composer's error face, not only a tracing line.
-        let fail_tx = self.delivery_fail_tx.clone();
+        // Each outcome rides the delivery channel to the store's own pump —
+        // this spawn has no gpui handle: a transport failure latches the
+        // composer's error face (not only a tracing line), and a dispatch
+        // that leaves retires a latched Dispatch face.
+        let fail_tx = self.delivery_signal_tx.clone();
         manox_agent::runtime::handle().spawn(async move {
-            if let Err(err) = client.dispatch(channel, action).await {
-                tracing::warn!(error = %err, "dispatch failed");
-                if let Some(fail_tx) = fail_tx {
-                    let _ = fail_tx.send_blocking(DeliveryFailure::Dispatch(err.to_string()));
+            match client.dispatch(channel, action).await {
+                Ok(_) => {
+                    if let Some(fail_tx) = fail_tx {
+                        let _ = fail_tx.send_blocking(DeliverySignal::DispatchRecovered);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "dispatch failed");
+                    if let Some(fail_tx) = fail_tx {
+                        let _ = fail_tx.send_blocking(DeliverySignal::Failed(
+                            DeliveryFailure::Dispatch(err.to_string()),
+                        ));
+                    }
                 }
             }
         });
@@ -2574,7 +2611,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
-            delivery_fail_tx: None,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         };
         let session_state = |unread: bool, archived: bool| {
@@ -2664,7 +2701,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
-            delivery_fail_tx: None,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         };
         store.book.seed_summaries(vec![
@@ -2739,7 +2776,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
-            delivery_fail_tx: None,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
     }
@@ -2893,6 +2930,41 @@ mod tests {
         );
     }
 
+    /// A dispatch that leaves retires a latched Dispatch face — the strip
+    /// must not outlive the transport it reports dead.
+    #[test]
+    fn a_recovered_dispatch_retires_a_latched_dispatch_face() {
+        let mut store = test_store();
+        assert!(store.absorb_delivery_signal(DeliverySignal::Failed(
+            DeliveryFailure::Dispatch("dead".into())
+        )));
+        assert!(matches!(
+            store.delivery_failure(),
+            Some(DeliveryFailure::Dispatch(_))
+        ));
+        assert!(store.absorb_delivery_signal(DeliverySignal::DispatchRecovered));
+        assert_eq!(store.delivery_failure(), None);
+        assert!(
+            !store.absorb_delivery_signal(DeliverySignal::DispatchRecovered),
+            "a recovery against no latch changes nothing (no spurious notify)"
+        );
+    }
+
+    /// A handshake face is not a dispatch's to clear: only its own landing
+    /// (or a retry) retires it.
+    #[test]
+    fn a_recovered_dispatch_does_not_retire_a_handshake_face() {
+        let mut store = test_store();
+        assert!(store.absorb_delivery_signal(DeliverySignal::Failed(
+            DeliveryFailure::Handshake("dead".into())
+        )));
+        assert!(!store.absorb_delivery_signal(DeliverySignal::DispatchRecovered));
+        assert!(matches!(
+            store.delivery_failure(),
+            Some(DeliveryFailure::Handshake(_))
+        ));
+    }
+
     /// A bare store for accessor tests: no client, no channels.
     fn test_store() -> AhpStore {
         AhpStore {
@@ -2911,7 +2983,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
-            delivery_fail_tx: None,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
     }

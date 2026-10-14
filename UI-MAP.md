@@ -434,7 +434,8 @@ history, so nothing else survives that replacement.
 #### DeliveryErrorStrip
 
 Full-width danger strip painted directly above the input while the submit pipeline cannot deliver — a latched
-handshake failure (every write queues behind a dial that never lands), a latched dispatch transport failure, or
+handshake failure (every write queues behind a dial that never lands), a latched dispatch transport failure
+(retired by the next dispatch that leaves — the strip must not outlive the transport it reports dead), or
 a pre-connect queue past the 10s delivery budget (the stall face is computed lazily on read; no polling pump on
 the healthy path). Row: `triangle-alert` icon + 「连接未就绪，消息可能没有送达」, plus a **Retry** button on the
 handshake face only (`retry_handshake` re-runs the retained dial; a no-op while connected or while a dial is in
@@ -442,8 +443,8 @@ flight). The states used to be tracing-only, so a user typing into a dead compos
 the black-hole shape where sends vanish without a trace.
 
 > Source: `crates/steer-agent-chat-ui/src/ahp_store.rs` (`DeliveryFailure`, `delivery_failure`,
-> `retry_handshake`, `spawn_delivery_failure_pump`, the handshake failure latch); render in
-> `crates/agent-ui/src/workspace/composer_render.rs` (`render_delivery_error_strip`)
+> `retry_handshake`, `absorb_delivery_signal`, `spawn_delivery_failure_pump`, the handshake failure latch);
+> render in `crates/agent-ui/src/workspace/composer_render.rs` (`render_delivery_error_strip`)
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
