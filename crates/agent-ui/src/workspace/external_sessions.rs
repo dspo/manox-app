@@ -197,17 +197,12 @@ impl Workspace {
         title: Option<String>,
         cx: &mut gpui::Context<Self>,
     ) {
-        let next = match title {
-            Some(t) => clamp_external_title(&t),
-            None => self
-                .externals
-                .iter()
-                .find(|s| s.id == id)
-                .map(|s| s.default_label.clone())
-                .unwrap_or_default(),
-        };
         let Some(record) = self.externals.iter_mut().find(|s| s.id == id) else {
             return;
+        };
+        let next = match title {
+            Some(t) => clamp_external_title(&t),
+            None => record.default_label.clone(),
         };
         if next.is_empty() || record.label == next {
             return;
