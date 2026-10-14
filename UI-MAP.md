@@ -147,7 +147,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Shared Primitives
 
-- [Button](#shared-primitives) · [Input](#shared-primitives) · [PopupMenu](#shared-primitives) · [PopupMenuItem](#shared-primitives) · [TabBar](#shared-primitives) · [Tag](#shared-primitives) · [Markdown](#markdown) · [TerminalPanel](#terminalpanel) · [TurnFrame](#turnframe) · [Icon](#shared-primitives) · [BrailleSpinner](#braillespinner) · [ScrollHandle](#shared-primitives) · [TitleBar](#shared-primitives) · [ContextMenu](#shared-primitives) · [Tooltip](#shared-primitives)
+- [Button](#shared-primitives) · [Input](#shared-primitives) · [PopupMenu](#shared-primitives) · [PopupMenuItem](#shared-primitives) · [TabBar](#shared-primitives) · [Tag](#shared-primitives) · [Markdown](#markdown) · [TerminalPanel](#terminalpanel) · [TurnFrame](#turnframe) · [Icon](#shared-primitives) · [BrailleSpinner](#braillespinner) · [PixelSpinner](#pixelspinner) · [Meerkat](#meerkat) · [ScrollHandle](#shared-primitives) · [TitleBar](#shared-primitives) · [ContextMenu](#shared-primitives) · [Tooltip](#shared-primitives)
 
 ### 状态
 
@@ -279,9 +279,9 @@ Vertically centered welcome area: logo/heading + inline [Composer](#composer).
 
 #### HistoryLoading
 
-Full-column pixel loading page that suppresses the hero, message list, and footer while a reopened thread's chat snapshot is still in flight: `ChatColumn.awaiting_history` is set at reopen attach when the caller declares it expects history (`expect_history`, not the wire-side `reopen` flag — a created session re-opens too) and the fold holds no chat channel. Cleared by the snapshot rebuild (history present), by the store observe (genuinely empty session → hero returns), or by the render-time timeout (`HISTORY_TIMEOUT`, 10s) so a failed reopen cannot pin the page. Render re-checks the fold, so a stale flag cannot pin it either. Layout: a 12×14-cell pixel meerkat sprite played as a 6-slot loop at 3 slots/sec (4 distinct frames: idle, bob, blink, tail flick — each cell a flat solid block, no bevel), centered above the heading (`workspace-history-loading-heading`) and the monospace thread id. No composer while it shows.
+Full-column pixel loading page that suppresses the hero, message list, and footer while a reopened thread's chat snapshot is still in flight: `ChatColumn.awaiting_history` is set at reopen attach when the caller declares it expects history (`expect_history`, not the wire-side `reopen` flag — a created session re-opens too) and the fold holds no chat channel. Cleared by the snapshot rebuild (history present), by the store observe (genuinely empty session → hero returns), or by the render-time timeout (`HISTORY_TIMEOUT`, 10s) so a failed reopen cannot pin the page. Render re-checks the fold, so a stale flag cannot pin it either. Layout: a 12×14-cell pixel meerkat sprite played as a 6-slot loop at 3 slots/sec (4 distinct frames: idle, bob, blink, tail flick — each cell a flat solid block, no bevel), centered above the heading (`workspace-history-loading-heading`) and the monospace thread id. No composer while it shows. The sprite, its grids and its clock live in the shared [`Meerkat`](#meerkat) component (`ai_elements::Meerkat`); this page is the heading, the thread id, and the timeout constant.
 
-> Source: `crates/agent-ui/src/views/history_loading.rs`; gate: `crates/agent-ui/src/workspace/attach.rs` (`attach_thread`), `crates/agent-ui/src/workspace/render.rs` (`render_column`), `crates/steer-agent-chat-ui/src/column.rs` (`awaiting_history`)
+> Source: `crates/agent-ui/src/views/history_loading.rs` (page); sprite: `crates/ai-elements/src/meerkat.rs`. Gate: `crates/agent-ui/src/workspace/attach.rs` (`attach_thread`), `crates/agent-ui/src/workspace/render.rs` (`render_column`), `crates/steer-agent-chat-ui/src/column.rs` (`awaiting_history`)
 
 #### 3.2.2 MessageArea
 
@@ -1049,6 +1049,18 @@ chrome 壳自有图标表在 `steer-agent-chrome-ui/src/theme/icons.rs`：`IconA
 Text-based braille-dot spinner cycling through `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` (10 frames, 800 ms cycle). Used wherever an in-progress indicator is needed, replacing the old rotating-circle `Spinner`.
 
 > Source: `crates/ai-elements/src/spinner.rs`
+
+#### PixelSpinner
+
+VS Code session-status 的像素 spinner，gpui 原语复刻（`ai_elements::PixelSpinner`）：16px 框内六颗 2px 圆点。`Grid` 变体是下落级联（−4px 淡入 → 原位停留 → +7px 坠出，逐点延迟 520/650/260/390/0/130ms，周期 1820ms，Cycle/Long/Short 三种停留时长）；`Ring` 变体是等待输入态（六点压 0.25 透明度，高亮按 200ms 一步顺时针扫一圈，周期 1200ms）。全部动效由单个 `Animation` 时钟驱动：周期时间折算过每点延迟后查关键帧表，每个移动分段经 `steps(6/4, jump-none)` 量化——离散跳变即像素感，`smooth()` 换 linear 是对照臂。旋钮：`zoom`（1=原生 16px）、`speed`（速率倍率）、`sharp`（方点）。**尚未接入 app chrome**：侧栏 `Running` 状态位仍是更早的 `session_list::pixel_grid` 近似（整周期量化、逐周期重置相位），组件化收编是后续 PR。
+
+> Source: `crates/ai-elements/src/pixel_spinner.rs`。目检面：`cargo run -p ai-elements --example gallery` → Pixel Spinner（1×/8×、ring、¼ 速慢放 + linear 对照）。
+
+#### Meerkat
+
+The conversation-loading sprite (`ai_elements::Meerkat`): a 12×14-cell pixel meerkat played as a 6-slot loop (idle → bob → blink → bob → idle → tail flick) at 3 slots/sec — the face the main column shows while a reopened thread's chat snapshot is in flight (see the history-loading page above). Sprite data is character-row grids parsed to one div per solid cell, all under one gpui `Animation` clock: cycle time picks the slot, the slot picks the frame, and only the active frame renders (the pre-component page stacked six full-frame layers and opacity-toggled between them). Knobs: `cell` ([`NATIVE_CELL`] = 10 px, the page's scale), `speed`, `freeze(frame)` for a static render. Consumed by `agent-ui/src/views/history_loading.rs`; acceptance surface is the gallery's History Loading page.
+
+> Source: `crates/ai-elements/src/meerkat.rs`
 
 #### ScrollHandle / ScrollableElement
 
