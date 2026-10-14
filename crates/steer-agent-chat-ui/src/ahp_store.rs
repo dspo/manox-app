@@ -15,7 +15,7 @@
 //! (the host did not fold them either), so the state self-corrects; the store
 //! logs and records rejections for the UI.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -521,6 +521,14 @@ enum DeliverySignal {
     DispatchRecovered,
 }
 
+/// Per-session display-event bucket bound. A bucket is a delta log against
+/// the conversation's build state: the live leg applies it, and a rebuild
+/// from the book — which already folded every event the bucket holds —
+/// consumes it outright. A bucket belonging to a session nobody has bound
+/// since accumulates unread; the oldest entries are dropped, because the
+/// rebuild (not the bucket) is what makes that session's content whole.
+const CHAT_EVENT_BUCKET_CAP: usize = 512;
+
 /// The GPUI-facing store. One per process: the host is a singleton (L11) and
 /// this is its only desktop client.
 pub struct AhpStore {
@@ -529,9 +537,13 @@ pub struct AhpStore {
     /// True while the pre-connect queue is being replayed; writes issued in
     /// that window queue behind the replay instead of racing it.
     replay_pending: bool,
-    /// Display events derived from chat-channel folds since the last drain —
-    /// the live-streaming leg the conversation applier consumes.
-    chat_events: Vec<crate::chat_fold::ChatEvent>,
+    /// Display events derived from chat-channel folds since their last
+    /// drain, bucketed by the owning session — the live-streaming leg the
+    /// conversation applier consumes. AHP stamps every action envelope with
+    /// its channel while chat payloads carry no URI of their own, so a
+    /// derived display event must re-attach the channel's session here;
+    /// consumers drain only the bucket they hold a binding for.
+    chat_events: HashMap<String, VecDeque<crate::chat_fold::ChatEvent>>,
     /// The foreground session id (the multiplexer publishes on focus
     /// changes): chat activity in any OTHER session rises the official
     /// unread bit (`session/isReadChanged` — client-owned observation
@@ -598,7 +610,7 @@ impl AhpStore {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: Vec::new(),
+            chat_events: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -712,7 +724,7 @@ impl AhpStore {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: Vec::new(),
+            chat_events: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -742,6 +754,19 @@ impl AhpStore {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_clear_delivery_failure(&mut self) {
         self.delivery_failure = None;
+    }
+
+    /// Route one wire-shaped event through the production dispatch point.
+    /// Test-support diagnostic: a detached store has no client pump, so
+    /// tests feed envelopes through the same `route` the live pump runs —
+    /// the bucket routing under test lives there.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_route_event(
+        &mut self,
+        event: ahp::ClientEvent,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.route(event, cx);
     }
 
     /// Seed a placeholder summary for a session this client just created, so
@@ -1133,7 +1158,25 @@ impl AhpStore {
         self.request_hook = Some(hook);
     }
 
+    /// Bucket one derived display event under its owning session, dropping
+    /// the oldest entry past [`CHAT_EVENT_BUCKET_CAP`].
+    fn push_chat_event(&mut self, session_id: String, event: crate::chat_fold::ChatEvent) {
+        let bucket = self.chat_events.entry(session_id).or_default();
+        bucket.push_back(event);
+        while bucket.len() > CHAT_EVENT_BUCKET_CAP {
+            bucket.pop_front();
+        }
+    }
+
     /// Route one inbound event into the fold.
+    ///
+    /// This is the client's single dispatch point — the AHP specification
+    /// makes the envelope's `channel` the universal routing key ("dispatch
+    /// any incoming message by inspecting `(method, params.channel)`"), and
+    /// chat payloads carry no URI of their own. Everything derived from an
+    /// envelope here must re-attach that identity before leaving the store:
+    /// the display buckets are keyed by the owning session for exactly that
+    /// reason.
     fn route(&mut self, event: ahp::ClientEvent, cx: &mut gpui::Context<Self>) {
         match event.event {
             ahp::SubscriptionEvent::Action(envelope) => {
@@ -1194,7 +1237,14 @@ impl AhpStore {
                                 Some(chat),
                             )
                         {
-                            self.chat_events.push(event);
+                            // The derived event re-attaches the channel's
+                            // owning session — an envelope with no owning
+                            // session (a chat no session catalog lists) has
+                            // no legitimate display consumer, so the event
+                            // is dropped; the fold's rebuild covers content.
+                            if let Some(session_id) = owning {
+                                self.push_chat_event(session_id, event);
+                            }
                         }
                         cx.notify();
                     }
@@ -1220,12 +1270,15 @@ impl AhpStore {
                         if let Some(keys) = rejected_config_keys(&envelope.action) {
                             let session_id = id_of(&envelope.channel).to_string();
                             self.rollback_optimistic(&session_id, &keys);
-                            self.chat_events.push(crate::chat_fold::ChatEvent::Notice {
-                                text: format!(
-                                    "{}: {reason}",
-                                    steer_i18n::t("workspace-change-rejected")
-                                ),
-                            });
+                            self.push_chat_event(
+                                session_id,
+                                crate::chat_fold::ChatEvent::Notice {
+                                    text: format!(
+                                        "{}: {reason}",
+                                        steer_i18n::t("workspace-change-rejected")
+                                    ),
+                                },
+                            );
                         }
                         cx.notify();
                     }
@@ -1554,10 +1607,19 @@ impl AhpStore {
             .retain(|(sid, k, _)| !(sid == session_id && keys.contains(k)));
     }
 
-    /// Drain the chat display events derived since the last drain (the live
-    /// streaming leg into the conversation applier).
-    pub fn drain_chat_events(&mut self) -> Vec<crate::chat_fold::ChatEvent> {
-        std::mem::take(&mut self.chat_events)
+    /// Drain the display events of one session — the bucket the caller
+    /// holds a binding for (the foreground pair's id half). The LIVE leg
+    /// applies them; a REBUILD caller must call this too and DROP the
+    /// result: the conversation it just synthesized from the book already
+    /// contains everything the bucket holds, so leaving the bucket in place
+    /// would let the next notify replay it onto the rebuilt list (every
+    /// parked delta rendered twice on a switch-back). Buckets of other
+    /// sessions stay theirs until their own bind drains them.
+    pub fn drain_chat_events(&mut self, session_id: &str) -> Vec<crate::chat_fold::ChatEvent> {
+        self.chat_events
+            .remove(session_id)
+            .map(Vec::from)
+            .unwrap_or_default()
     }
 
     /// Recent dispatch rejections, oldest first.
@@ -2599,7 +2661,7 @@ mod tests {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: Vec::new(),
+            chat_events: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -2689,7 +2751,7 @@ mod tests {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: Vec::new(),
+            chat_events: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -2764,7 +2826,7 @@ mod tests {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: Vec::new(),
+            chat_events: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -2969,13 +3031,71 @@ mod tests {
         ));
     }
 
+    /// Derived display events land in the bucket of the session the
+    /// envelope's channel resolves to, and a drain takes exactly one bucket:
+    /// the routing identity the wire only puts on the envelope must survive
+    /// derivation (the cross-thread stream-bleed regression).
+    #[test]
+    fn display_events_bucket_per_session_and_a_drain_takes_one() {
+        let mut store = test_store();
+        store.push_chat_event("s-1".to_string(), crate::chat_fold::ChatEvent::TurnStarted);
+        store.push_chat_event("s-2".to_string(), crate::chat_fold::ChatEvent::TurnStarted);
+        store.push_chat_event("s-1".to_string(), crate::chat_fold::ChatEvent::TurnFinished);
+
+        let drained = store.drain_chat_events("s-1");
+        assert_eq!(drained.len(), 2, "only the bound session's bucket drains");
+        assert!(matches!(
+            drained[0],
+            crate::chat_fold::ChatEvent::TurnStarted
+        ));
+        assert!(matches!(
+            drained[1],
+            crate::chat_fold::ChatEvent::TurnFinished
+        ));
+
+        // The other session's bucket is untouched and drains on its own
+        // binding; events are consumed once.
+        assert_eq!(store.drain_chat_events("s-2").len(), 1);
+        assert!(store.drain_chat_events("s-2").is_empty());
+        // A session with no bucket drains empty rather than panicking.
+        assert!(store.drain_chat_events("s-none").is_empty());
+    }
+
+    /// A bucket nobody drains (a parked session streaming in the background)
+    /// is bounded: the oldest entries drop, the newest survive — correctness
+    /// is the book's job, the bucket only covers the bound session's live
+    /// deltas.
+    #[test]
+    fn a_display_event_bucket_is_bounded_dropping_oldest_first() {
+        let mut store = test_store();
+        let total = CHAT_EVENT_BUCKET_CAP + 2;
+        for ix in 0..total {
+            store.push_chat_event(
+                "s-1".to_string(),
+                crate::chat_fold::ChatEvent::AgentText(ix.to_string()),
+            );
+        }
+        let drained = store.drain_chat_events("s-1");
+        assert_eq!(drained.len(), CHAT_EVENT_BUCKET_CAP, "the bucket is capped");
+        let first = match drained.first() {
+            Some(crate::chat_fold::ChatEvent::AgentText(text)) => text.as_str(),
+            other => panic!("unexpected first event: {other:?}"),
+        };
+        assert_eq!(first, "2", "the two oldest entries dropped");
+        let last = match drained.last() {
+            Some(crate::chat_fold::ChatEvent::AgentText(text)) => text.as_str(),
+            other => panic!("unexpected last event: {other:?}"),
+        };
+        assert_eq!(last, (total - 1).to_string(), "the newest entry survives");
+    }
+
     /// A bare store for accessor tests: no client, no channels.
     fn test_store() -> AhpStore {
         AhpStore {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: Vec::new(),
+            chat_events: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),

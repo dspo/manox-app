@@ -995,9 +995,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let sid = session_id.into();
-        self.chat.update(cx, |chat, cc| {
+        self.chat.update(cx, |chat, cx| {
             chat.store = Some((store, sid));
-            cc.notify();
+            cx.notify();
+        });
+        // Re-aim the store observe at the bound entity: production never
+        // swaps the store half (the multiplexer holds one for its lifetime),
+        // so `subscribe_thread` ran once at construction against it — a test
+        // binding a different entity must re-install the observe or the
+        // production legs (rebuild guard, live-ask edge, event drain) never
+        // fire for it. BOTH subscriptions re-seat: a dropped Subscription is
+        // a cancelled observer.
+        let (thread_events, store_changes) = self.subscribe_thread(cx);
+        self.chat.update(cx, |chat, cx| {
+            chat.thread_sub = Some(thread_events);
+            chat.store_observe = Some(store_changes);
+            cx.notify();
         });
     }
 
@@ -1026,6 +1039,24 @@ impl Workspace {
             chat.built_turns,
             chat.conversation.read(cx).items().len(),
         )
+    }
+
+    /// The transcript's assistant texts, in order — the prose a replayed
+    /// delta would duplicate (a merge-append grows a row's text without
+    /// adding a row, so item counts cannot see it). Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_transcript_texts(&self, cx: &App) -> Vec<String> {
+        self.chat
+            .read(cx)
+            .conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter_map(|item| match item.read(cx).kind() {
+                ConvItem::Assistant { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
     /// Run the live-ask edge against the bound store. Diagnostic-only: the
     /// production edge fires on store notify, which a detached test store
@@ -1692,6 +1723,11 @@ impl Workspace {
             chat.awaiting_history = None;
             cx.notify();
         });
+        // The rebuild synthesized the transcript from the book, which already
+        // folded every event this session's bucket holds — consume the bucket
+        // (drop it) so the next notify's live leg cannot replay those deltas
+        // onto the freshly rebuilt list (the switch-back double-render).
+        let _ = store.update(cx, |s, _| s.drain_chat_events(&sid));
         self.sync_list_count(cx);
         cx.notify();
     }
@@ -1798,10 +1834,18 @@ impl Workspace {
             if rebuilt {
                 return;
             }
-            // Live streaming leg: the pump folded chat actions into the book;
-            // drain the display events they derived and run the conversation
-            // applier over them (the v2 ThreadEvent pump's transcript role).
-            let events = store.update(cx, |s, _| s.drain_chat_events());
+            // Live streaming leg: the pump folded chat actions into the book
+            // and bucketed the derived display events per owning session.
+            // Drain the bucket of the session this workspace binds RIGHT NOW
+            // — the pair's id half, re-read per notify (a switch rebinds the
+            // pair while the store entity stays). A parked session's stream
+            // lands in its own bucket and reaches a transcript only while
+            // that session is the one bound here.
+            let bound_sid = match this.chat.read(cx).store.clone() {
+                Some((bound, sid)) if bound.entity_id() == store.entity_id() => sid,
+                _ => return,
+            };
+            let events = store.update(cx, |s, _| s.drain_chat_events(&bound_sid));
             if events.is_empty() {
                 return;
             }
