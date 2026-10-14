@@ -15,7 +15,7 @@
 //! (the host did not fold them either), so the state self-corrects; the store
 //! logs and records rejections for the UI.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -521,11 +521,12 @@ enum DeliverySignal {
     DispatchRecovered,
 }
 
-/// Per-session display-event bucket bound. A parked session's stream has no
-/// consumer until it is foregrounded again, and the conversation rebuilds
-/// from the book — the durable fold — on switch-back, so a bucket only has
-/// to cover the bound session's live deltas; the oldest entries of a bucket
-/// nobody drains are dropped.
+/// Per-session display-event bucket bound. A bucket is a delta log against
+/// the conversation's build state: the live leg applies it, and a rebuild
+/// from the book — which already folded every event the bucket holds —
+/// consumes it outright. A bucket belonging to a session nobody has bound
+/// since accumulates unread; the oldest entries are dropped, because the
+/// rebuild (not the bucket) is what makes that session's content whole.
 const CHAT_EVENT_BUCKET_CAP: usize = 512;
 
 /// The GPUI-facing store. One per process: the host is a singleton (L11) and
@@ -542,7 +543,7 @@ pub struct AhpStore {
     /// its channel while chat payloads carry no URI of their own, so a
     /// derived display event must re-attach the channel's session here;
     /// consumers drain only the bucket they hold a binding for.
-    chat_events: HashMap<String, Vec<crate::chat_fold::ChatEvent>>,
+    chat_events: HashMap<String, VecDeque<crate::chat_fold::ChatEvent>>,
     /// The foreground session id (the multiplexer publishes on focus
     /// changes): chat activity in any OTHER session rises the official
     /// unread bit (`session/isReadChanged` — client-owned observation
@@ -1161,9 +1162,9 @@ impl AhpStore {
     /// the oldest entry past [`CHAT_EVENT_BUCKET_CAP`].
     fn push_chat_event(&mut self, session_id: String, event: crate::chat_fold::ChatEvent) {
         let bucket = self.chat_events.entry(session_id).or_default();
-        bucket.push(event);
+        bucket.push_back(event);
         while bucket.len() > CHAT_EVENT_BUCKET_CAP {
-            bucket.remove(0);
+            bucket.pop_front();
         }
     }
 
@@ -1607,13 +1608,18 @@ impl AhpStore {
     }
 
     /// Drain the display events of one session — the bucket the caller
-    /// holds a binding for (the foreground pair's id half). Buckets of other
-    /// sessions stay theirs: each workspace drains the session it renders,
-    /// and a bucket nobody binds is bounded by [`CHAT_EVENT_BUCKET_CAP`]
-    /// because the conversation rebuilds from the book on switch-back
-    /// anyway.
+    /// holds a binding for (the foreground pair's id half). The LIVE leg
+    /// applies them; a REBUILD caller must call this too and DROP the
+    /// result: the conversation it just synthesized from the book already
+    /// contains everything the bucket holds, so leaving the bucket in place
+    /// would let the next notify replay it onto the rebuilt list (every
+    /// parked delta rendered twice on a switch-back). Buckets of other
+    /// sessions stay theirs until their own bind drains them.
     pub fn drain_chat_events(&mut self, session_id: &str) -> Vec<crate::chat_fold::ChatEvent> {
-        self.chat_events.remove(session_id).unwrap_or_default()
+        self.chat_events
+            .remove(session_id)
+            .map(Vec::from)
+            .unwrap_or_default()
     }
 
     /// Recent dispatch rejections, oldest first.

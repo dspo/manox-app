@@ -1040,6 +1040,24 @@ impl Workspace {
             chat.conversation.read(cx).items().len(),
         )
     }
+
+    /// The transcript's assistant texts, in order — the prose a replayed
+    /// delta would duplicate (a merge-append grows a row's text without
+    /// adding a row, so item counts cannot see it). Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_transcript_texts(&self, cx: &App) -> Vec<String> {
+        self.chat
+            .read(cx)
+            .conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter_map(|item| match item.read(cx).kind() {
+                ConvItem::Assistant { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
     /// Run the live-ask edge against the bound store. Diagnostic-only: the
     /// production edge fires on store notify, which a detached test store
     /// never produces.
@@ -1705,6 +1723,11 @@ impl Workspace {
             chat.awaiting_history = None;
             cx.notify();
         });
+        // The rebuild synthesized the transcript from the book, which already
+        // folded every event this session's bucket holds — consume the bucket
+        // (drop it) so the next notify's live leg cannot replay those deltas
+        // onto the freshly rebuilt list (the switch-back double-render).
+        let _ = store.update(cx, |s, _| s.drain_chat_events(&sid));
         self.sync_list_count(cx);
         cx.notify();
     }

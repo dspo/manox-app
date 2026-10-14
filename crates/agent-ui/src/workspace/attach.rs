@@ -514,6 +514,14 @@ impl Workspace {
             chat.rebuilt_pre_snapshot = pre_snapshot;
             cx.notify();
         });
+        // The attach rebuilt the conversation from the book, which already
+        // folded every event this session's bucket accumulated while the
+        // thread was parked — consume the bucket (drop it), or the next
+        // notify's live leg replays those deltas onto the rebuilt transcript
+        // (a switch-back renders the parked content twice).
+        if let Some((store, sid)) = self.chat.read(cx).store.clone() {
+            let _ = store.update(cx, |s, _| s.drain_chat_events(&sid));
+        }
         self.observe_conversation(cx);
         // Restore the incoming thread's saved draft, or clear the input if it
         // has none — without this the previous thread's text would bleed into
