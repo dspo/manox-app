@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Dependency invariant for the chrome/chat split (PLAN-CHROME-CHAT-SPLIT §1):
-# the chat crate never touches terminals, webviews, or external-agent wiring.
+# Dependency invariant for the chrome/chat split: the chat crate never
+# touches terminals, webviews, or external-agent wiring.
 # Those live with the chrome crate and the assembly layer. Any hit here means
 # the decoupling regressed.
 set -euo pipefail
