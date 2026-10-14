@@ -1,7 +1,12 @@
 //! The single-row toolbar (38px) — [native traffic-light slot | sidebar
-//! toggle | ←/→ session-history nav | session picker (fills the middle;
-//! opens the "search + 10 most recent" selector) | "open in editor" | layout
-//! toggles ×2 | app brand mark].
+//! toggle | ←/→ session-history nav | session picker (window-centered,
+//! capped at the dropdown's width; opens the "search + 10 most recent"
+//! selector) | "open in editor" | layout toggles ×2 | app brand mark].
+//!
+//! The control groups hang off two `flex_1` wings; the picker trigger is
+//! absolutely positioned (out of flow) so it sits exactly on the window's
+//! horizontal center line — flex distribute rounds and wing budgets would
+//! otherwise pull it off by half the traffic-slot asymmetry.
 //!
 //! Window dragging is carried by the toolbar's empty space
 //! (`app_owns_titlebar_drag = true`): a row-level mouse-down moves the
@@ -25,13 +30,19 @@ use gpui_component::input::Input;
 /// Content start: the native traffic-light cluster (starting at 12, ≈58
 /// wide) + 6 spacing = 70 — after the first tool button (with its own 12px
 /// left padding) lands, its inner underlay sits exactly at x=82, the
-/// calibrated position.
+/// calibrated position. Folded into the left wing as extra padding (the row
+/// itself carries symmetric 12px padding so the picker centers on the
+/// window, not on the padded content box).
 const TRAFFIC_SLOT: f32 = 70.;
-/// Picker dropdown width / max rows.
-const PICKER_WIDTH: f32 = 360.;
+/// Row padding; the traffic slot's excess (70 − 12) rides on the left wing.
+const ROW_PAD: f32 = 12.;
+/// Toolbar height; the picker panel hangs directly below it.
+pub(crate) const TITLE_H: f32 = 38.;
+/// Picker trigger and dropdown width / max dropdown rows.
+pub(crate) const PICKER_WIDTH: f32 = 360.;
 const PICKER_LIMIT: usize = 10;
 
-pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
+pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
     let toggle_sidebar = cx.listener(|this, _: &ClickEvent, _w, cx| {
         this.show_sidebar = !this.show_sidebar;
         cx.notify();
@@ -70,111 +81,140 @@ pub(crate) fn render(shell: &Shell, _window: &mut Window, cx: &mut Context<Shell
             }
         })
         .flex()
+        .relative()
         .w_full()
-        .h(px(38.))
+        .h(px(TITLE_H))
         .flex_shrink_0()
         .pl(px(TRAFFIC_SLOT))
-        .pr(px(12.))
+        .pr(px(ROW_PAD))
         .gap(px(6.))
         .items_center()
         .bg(crate::theme::SHELL_BG)
         .text_size(px(12.5))
         .text_color(FG_DIM)
-        .child(icon_button(
-            "tb-sidebar",
-            icons::LAYOUT_SIDEBAR_LEFT,
-            15.,
-            if shell.show_sidebar {
-                IconButtonState::On
-            } else {
-                IconButtonState::Off
-            },
-            move |e, w, cx| toggle_sidebar(e, w, cx),
-        ))
-        // Session-history navigation: a move with no edge behind/ahead stays
-        // inert and paints dimmed (the host's history stack owns the edges).
-        .child(nav_button(
-            "tb-back",
-            icons::ARROW_LEFT,
-            avail.back,
-            "chrome-titlebar-back",
-            move |e, w, cx| nav_back(e, w, cx),
-        ))
-        .child(nav_button(
-            "tb-fwd",
-            icons::ARROW_RIGHT,
-            avail.forward,
-            "chrome-titlebar-forward",
-            move |e, w, cx| nav_forward(e, w, cx),
-        ))
-        // The session picker: fills the middle span, click opens the
-        // selector.
-        .child(session_picker(shell, cx))
-        // "Open in editor": hands the foreground session's workspace to the
-        // host (which launches the user's editor against it).
-        .child(
-            icon_button(
-                "tb-editor",
-                icons::CODE,
-                13.,
-                IconButtonState::Off,
-                move |e, w, cx| open_editor(e, w, cx),
-            )
-            .tooltip(|window, cx| {
-                gpui_component::tooltip::Tooltip::new(steer_i18n::t("chrome-titlebar-open-editor"))
-                    .build(window, cx)
-            }),
-        )
-        .child(icon_button(
-            "tb-panel",
-            icons::LAYOUT_PANEL,
-            15.,
-            if shell.show_panel {
-                IconButtonState::On
-            } else {
-                IconButtonState::Off
-            },
-            move |e, w, cx| toggle_panel(e, w, cx),
-        ))
-        // Right-pane toggle.
-        .child(icon_button(
-            "tb-right",
-            icons::LAYOUT_SIDEBAR_RIGHT,
-            15.,
-            if shell.right.read(cx).visible {
-                IconButtonState::On
-            } else {
-                IconButtonState::Off
-            },
-            move |e, w, cx| toggle_right(e, w, cx),
-        ))
-        // The app brand mark: a deliberate non-interactive slot, held out of
-        // the window-drag surface (the mouse-down is swallowed) so pressing
-        // it never drags the window; the host injects the mark, the shell
-        // keeps a generic glyph as the fallback.
+        // Two flex_1 wings flank the picker; the picker itself is
+        // out-of-flow (absolute, see session_picker) at the window's center
+        // line. The wings only host the controls — the traffic-slot budget
+        // stays on the row's left padding, so the wings' outer boxes stay
+        // equal and nothing else competes with the center.
         .child(
             div()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .size(px(22.))
-                .rounded_full()
-                .bg(ACCENT)
-                .text_color(crate::theme::BADGE_BLUE_FG)
                 .flex()
+                .flex_1()
+                .min_w_0()
                 .items_center()
-                .justify_center()
-                .flex_shrink_0()
-                .children(match shell.brand_element() {
-                    Some(el) => vec![el],
-                    None => vec![
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon(icons::CODE, 12.))
-                            .into_any_element(),
-                    ],
-                }),
+                .gap(px(6.))
+                .child(icon_button(
+                    "tb-sidebar",
+                    icons::LAYOUT_SIDEBAR_LEFT,
+                    15.,
+                    if shell.show_sidebar {
+                        IconButtonState::On
+                    } else {
+                        IconButtonState::Off
+                    },
+                    move |e, w, cx| toggle_sidebar(e, w, cx),
+                ))
+                // Session-history navigation: a move with no edge behind/ahead
+                // stays inert and paints dimmed (the host's history stack owns
+                // the edges).
+                .child(nav_button(
+                    "tb-back",
+                    icons::ARROW_LEFT,
+                    avail.back,
+                    "chrome-titlebar-back",
+                    move |e, w, cx| nav_back(e, w, cx),
+                ))
+                .child(nav_button(
+                    "tb-fwd",
+                    icons::ARROW_RIGHT,
+                    avail.forward,
+                    "chrome-titlebar-forward",
+                    move |e, w, cx| nav_forward(e, w, cx),
+                )),
         )
+        // Right wing, flush against the row's right padding.
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .justify_end()
+                .gap(px(6.))
+                // "Open in editor": hands the foreground session's workspace to
+                // the host (which launches the user's editor against it).
+                .child(
+                    icon_button(
+                        "tb-editor",
+                        icons::CODE,
+                        13.,
+                        IconButtonState::Off,
+                        move |e, w, cx| open_editor(e, w, cx),
+                    )
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new(steer_i18n::t(
+                            "chrome-titlebar-open-editor",
+                        ))
+                        .build(window, cx)
+                    }),
+                )
+                .child(icon_button(
+                    "tb-panel",
+                    icons::LAYOUT_PANEL,
+                    15.,
+                    if shell.show_panel {
+                        IconButtonState::On
+                    } else {
+                        IconButtonState::Off
+                    },
+                    move |e, w, cx| toggle_panel(e, w, cx),
+                ))
+                // Right-pane toggle.
+                .child(icon_button(
+                    "tb-right",
+                    icons::LAYOUT_SIDEBAR_RIGHT,
+                    15.,
+                    if shell.right.read(cx).visible {
+                        IconButtonState::On
+                    } else {
+                        IconButtonState::Off
+                    },
+                    move |e, w, cx| toggle_right(e, w, cx),
+                ))
+                // The app brand mark: a deliberate non-interactive slot, held
+                // out of the window-drag surface (the mouse-down is swallowed)
+                // so pressing it never drags the window; the host injects the
+                // mark, the shell keeps a generic glyph as the fallback.
+                .child(
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .size(px(22.))
+                        .rounded_full()
+                        .bg(ACCENT)
+                        .text_color(crate::theme::BADGE_BLUE_FG)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_shrink_0()
+                        .children(match shell.brand_element() {
+                            Some(el) => vec![el],
+                            None => vec![
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(icon(icons::CODE, 12.))
+                                    .into_any_element(),
+                            ],
+                        }),
+                ),
+        )
+        // The session picker trigger: out-of-flow (mounted last so it paints
+        // above both wings), pinned to the window's center line at a fixed
+        // width — the same formula that places its dropdown (see
+        // `Shell::render`), so the panel re-opens exactly over the trigger.
+        .child(session_picker(shell, window, cx))
         .into_any_element()
 }
 
@@ -206,9 +246,14 @@ fn nav_button(
 }
 
 /// The session picker (trigger + dropdown panel). The trigger row: a folder
-/// glyph + the active session title + a chevron; clicking opens
-/// "search + the 10 most recent", picking one switches the active session.
-fn session_picker(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
+/// glyph + the active session title + a chevron, fixed at [`PICKER_WIDTH`]
+/// (the dropdown's width — the panel re-opens exactly over its trigger);
+/// clicking opens "search + the 10 most recent", picking one switches the
+/// active session. Absolutely positioned on the window's center line, so
+/// flex never gets a vote; on a window narrower than the two wings' buttons
+/// plus the trigger it overlays them.
+fn session_picker(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
+    let left = (window.viewport_size().width - px(PICKER_WIDTH)) / 2.;
     let active_title: String = shell
         .active
         .as_ref()
@@ -216,12 +261,8 @@ fn session_picker(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
         .map(|s| single_line_title(&s.title))
         .unwrap_or_else(|| shell.main.title(cx).to_string());
 
-    let open_picker = cx.listener(|this, e: &ClickEvent, window, cx| {
-        let anchor = match e {
-            ClickEvent::Mouse(m) => m.down.position,
-            _ => gpui::Point::default(),
-        };
-        this.toggle_session_picker(anchor, window, cx);
+    let open_picker = cx.listener(|this, _: &ClickEvent, window, cx| {
+        this.toggle_session_picker(window, cx);
         cx.notify();
     });
 
@@ -229,8 +270,10 @@ fn session_picker(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
         .id("session-picker-trigger")
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |e, w, cx| open_picker(e, w, cx))
-        .flex_1()
-        .min_w_0()
+        .absolute()
+        .left(left)
+        .top(px((TITLE_H - 24.) / 2.))
+        .w(px(PICKER_WIDTH))
         .h(px(24.))
         .px(px(8.))
         .gap(px(5.))
@@ -255,7 +298,8 @@ fn session_picker(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
 
 /// The dropdown body: a search box + the filtered most-recent list (top 10
 /// by update time). **Not positioned** — the shell root mounts it through
-/// `deferred(anchored(...))` (see `shell.rs`).
+/// `deferred(anchored(...))` (see `shell.rs`), window-centered under the
+/// titlebar, so it re-opens exactly over its trigger.
 pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
     let query = shell
         .picker_query
@@ -308,9 +352,6 @@ pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement
         .collect();
 
     div()
-        .absolute()
-        .top(px(31.))
-        .left_0()
         .w(px(PICKER_WIDTH))
         .max_h(px(360.))
         .rounded(px(6.))

@@ -286,9 +286,7 @@ pub struct Shell {
     // ── bottom dock ──
     panel: Option<PanelSlot>,
     // ── titlebar session picker ──
-    pub session_picker_open: bool,
-    /// Picker anchor (window space, the triggering click position).
-    picker_anchor: gpui::Point<Pixels>,
+    pub(crate) session_picker_open: bool,
     /// Picker search term (created on open; an InputState needs a Window, so
     /// it is built on the event path).
     pub(crate) picker_query: Option<Entity<gpui_component::input::InputState>>,
@@ -334,7 +332,6 @@ impl Shell {
             _filter_sub: None,
             panel,
             session_picker_open: false,
-            picker_anchor: gpui::Point::default(),
             picker_query: None,
             _picker_sub: None,
             main: config.main,
@@ -1153,20 +1150,15 @@ impl Shell {
         groups
     }
 
-    /// Session-picker open/close: records the anchor (the triggering click
-    /// position), builds/clears the search term on open and focuses it;
-    /// closing only collapses.
-    pub fn toggle_session_picker(
-        &mut self,
-        anchor: gpui::Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Session-picker open/close: builds/clears the search term on open and
+    /// focuses it; closing only collapses. The panel's placement is derived
+    /// at render time (window-centered under the titlebar) — no click anchor
+    /// is recorded.
+    pub fn toggle_session_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.session_picker_open = !self.session_picker_open;
         if !self.session_picker_open {
             return;
         }
-        self.picker_anchor = anchor;
         if self.picker_query.is_none() {
             let query = cx.new(|cx| {
                 gpui_component::input::InputState::new(window, cx)
@@ -1397,14 +1389,19 @@ impl gpui::Render for Shell {
             // The picker panel rides the root paint layer through
             // deferred(anchored) — a plain child would be covered by the
             // content sibling layer and stay click-through; occlude() takes
-            // over hit testing.
+            // over hit testing. Placement is fixed, not click-derived:
+            // window-centered at the picker's width, a hair below the
+            // titlebar, so it re-opens exactly over its centered trigger.
             .when(picker_open, |this| {
-                let anchor = self.picker_anchor;
+                let anchor = gpui::point(
+                    (window.viewport_size().width - px(titlebar::PICKER_WIDTH)) / 2.,
+                    px(titlebar::TITLE_H),
+                );
                 this.child(gpui::deferred(
                     gpui::anchored()
                         .anchor(gpui::Anchor::TopLeft)
                         .position(anchor)
-                        .offset(gpui::point(px(0.), px(30.)))
+                        .offset(gpui::point(px(0.), px(4.)))
                         .child(titlebar::picker_panel(self, cx)),
                 ))
             })

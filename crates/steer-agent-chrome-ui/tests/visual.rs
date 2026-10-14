@@ -5,7 +5,8 @@
 //! Run with `CHROME_SHOT=/tmp/chrome.png cargo test -p steer-agent-chrome-ui
 //! --test visual`; `CHROME_RIGHT=1` expands the right pane with a dummy tab
 //! (no PTY/webview — those need a real window), `CHROME_PANEL=1` the bottom
-//! dock. macOS-only: the readback is a Metal texture and the harness's
+//! dock, `CHROME_PICKER=1` the titlebar session picker with its dropdown
+//! open. macOS-only: the readback is a Metal texture and the harness's
 //! imports (`VisualTestAppContext`) exist only on that platform.
 
 #[cfg(not(target_os = "macos"))]
@@ -72,6 +73,12 @@ mod macos {
                 shell.update(cx, |shell, _cx| {
                     shell.set_sessions(snapshot_rows());
                 });
+                if std::env::var("CHROME_PICKER").is_ok() {
+                    shell.update(cx, |shell, cx| {
+                        shell.toggle_session_picker(window, cx);
+                        cx.notify();
+                    });
+                }
                 if right || panel {
                     shell.update(cx, |shell, cx| {
                         if right {
