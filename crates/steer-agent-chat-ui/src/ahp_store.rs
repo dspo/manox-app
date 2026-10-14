@@ -2653,7 +2653,7 @@ mod tests {
         let view = leaf(&book, "s-1");
         assert!(
             view.open_chat_input().is_none(),
-            "a dead ask in an archived turn must not surface — it would re-seed              the card forever and lock the composer in ask mode"
+            "a dead ask in an archived turn must not surface — it would re-seed the card forever and lock the composer in ask mode"
         );
         assert!(view.chat_input("call_ask").is_none());
     }

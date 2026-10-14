@@ -272,7 +272,7 @@ async fn live_ask_edge_retires_a_card_whose_turn_archived_unanswered(cx: &mut Te
     assert_eq!(
         workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_ask_id(cx)),
         None,
-        "a card whose ask archived unanswered retires instead of stranding              the composer in ask mode"
+        "a card whose ask archived unanswered retires instead of stranding the composer in ask mode"
     );
     manox_agent::thread_store::drop_global_for_test();
 }
