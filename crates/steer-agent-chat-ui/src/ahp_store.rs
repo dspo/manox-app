@@ -1960,6 +1960,15 @@ impl<'a> LeafView<'a> {
     /// `chat/inputRequested` into the active turn's response parts — the
     /// session channel's input-needed list is NOT maintained on this path —
     /// so the fold is the only home for both surfacing and answering an ask.
+    ///
+    /// The ACTIVE turn only, deliberately: the runtime parks an ask while its
+    /// turn is running, and a turn that ends with the card unanswered has had
+    /// the question discarded host-side (the gate journals the `cancelled`
+    /// decision). An unanswered part inside an ARCHIVED turn is therefore
+    /// unanswerable by construction — the ahp reducer settles input requests
+    /// on the active turn alone — and scanning archived turns only re-surfaced
+    /// such corpses, locking the composer in ask mode forever (the live
+    /// cancel raced the decision row in 2026-10's strand).
     fn fold_input_request(
         &self,
         id: Option<&str>,
@@ -1988,9 +1997,6 @@ impl<'a> LeafView<'a> {
         let mut latest: Option<&ahp_types::state::InputRequestResponsePart> = None;
         if let Some(active) = &chat.active_turn {
             scan(&active.response_parts, id, &mut latest);
-        }
-        for turn in chat.turns.iter().rev() {
-            scan(&turn.response_parts, id, &mut latest);
         }
         latest.map(|input| (id_of(&chat.resource).to_string(), &input.request))
     }
@@ -2607,5 +2613,80 @@ mod tests {
                 "the host settles by this id and silently ignores a verdict without it"
             );
         }
+    }
+
+    /// An unanswered ask inside an ARCHIVED turn is a corpse the runtime can
+    /// never settle (input requests settle on the active turn only) and no
+    /// client can ever answer: the fold must not surface it, or the composer
+    /// locks in ask mode forever. The live cancel archives the turn before
+    /// the gate's decision row lands — exactly this shape (2026-10 strand).
+    #[test]
+    fn an_unanswered_ask_in_an_archived_turn_stops_surfacing() {
+        let mut book = ChannelBook::default();
+        let chat = chat_uri("s-1");
+        for action in [
+            StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: "t-1".into(),
+                started_at: "2026-10-14T00:00:00.000Z".into(),
+                message: user_message("plan the release".into()),
+                queued_message_id: None,
+                meta: None,
+            }),
+            StateAction::ChatInputRequested(ahp_types::actions::ChatInputRequestedAction {
+                request: ahp_types::state::ChatInputRequest {
+                    id: "call_ask".into(),
+                    message: Some("AskUserQuestion".into()),
+                    url: None,
+                    questions: None,
+                    answers: None,
+                },
+            }),
+            // The live-cancel race: the turn archives with the part unanswered.
+            StateAction::ChatTurnCancelled(ChatTurnCancelledAction {
+                turn_id: "t-1".into(),
+                duration: 0,
+                meta: None,
+            }),
+        ] {
+            book.apply(&chat, &action);
+        }
+        let view = leaf(&book, "s-1");
+        assert!(
+            view.open_chat_input().is_none(),
+            "a dead ask in an archived turn must not surface — it would re-seed              the card forever and lock the composer in ask mode"
+        );
+        assert!(view.chat_input("call_ask").is_none());
+    }
+
+    /// The control: a live ask on the active turn surfaces as before.
+    #[test]
+    fn an_open_ask_on_the_active_turn_still_surfaces() {
+        let mut book = ChannelBook::default();
+        let chat = chat_uri("s-1");
+        for action in [
+            StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: "t-1".into(),
+                started_at: "2026-10-14T00:00:00.000Z".into(),
+                message: user_message("plan the release".into()),
+                queued_message_id: None,
+                meta: None,
+            }),
+            StateAction::ChatInputRequested(ahp_types::actions::ChatInputRequestedAction {
+                request: ahp_types::state::ChatInputRequest {
+                    id: "call_ask".into(),
+                    message: Some("AskUserQuestion".into()),
+                    url: None,
+                    questions: None,
+                    answers: None,
+                },
+            }),
+        ] {
+            book.apply(&chat, &action);
+        }
+        let view = leaf(&book, "s-1");
+        let (chat_id, request) = view.open_chat_input().expect("the live ask surfaces");
+        assert_eq!(chat_id, "s-1");
+        assert_eq!(request.id, "call_ask");
+        assert!(view.chat_input("call_ask").is_some());
     }
 }
