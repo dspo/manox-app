@@ -46,12 +46,16 @@ impl Workspace {
     /// when the server's `{session_id}` receipt lands, binds a detached
     /// rendering mirror to that server-minted id and opens the follow stream.
     /// Creation happens exactly once — on the server.
+    ///
+    /// Returns the client-minted session id: the attach lands asynchronously,
+    /// so a caller that must address the fresh thread (e.g. `/exit`'s closing
+    /// notes) keys on this id instead of the live foreground.
     pub fn start_new_thread(
         &mut self,
         project: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> String {
         // New-session intent returns the main column to the conversation
         // (an on-screen external session parks, still running).
         self.leave_external_session();
@@ -147,6 +151,7 @@ impl Workspace {
         })
         .detach();
         let _ = window;
+        sid
     }
 
     /// Attach the workspace to a freshly created session (whose id the server

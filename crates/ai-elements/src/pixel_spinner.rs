@@ -163,10 +163,11 @@ impl RenderOnce for PixelSpinner {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let zoom = if self.zoom > 0. { self.zoom } else { 1. };
         let rate = if self.speed > 0. { self.speed } else { 1. };
-        let period_ms = match self.variant {
+        let native_ms = match self.variant {
             PixelSpinnerVariant::Grid => GRID_PERIOD_MS,
             PixelSpinnerVariant::Ring => RING_PERIOD_MS,
-        } / rate;
+        };
+        let period_ms = native_ms / rate;
         div()
             .size(px(FRAME * zoom))
             .relative()
@@ -175,7 +176,11 @@ impl RenderOnce for PixelSpinner {
                 "pixel-spinner",
                 Animation::new(Duration::from_millis(period_ms as u64)).repeat(),
                 move |el, t| {
-                    let now_ms = t * period_ms;
+                    // Virtual time advances one NATIVE cycle per (stretched)
+                    // animation period — the per-dot phases below normalize
+                    // by the native constants, so deriving this from the
+                    // scaled period would cancel `rate` out entirely.
+                    let now_ms = t * native_ms;
                     el.children((0..6usize).map(|i| {
                         let (col, row) = ((i % 2) as f32, (i / 2) as f32);
                         let (dy, alpha) = match self.variant {

@@ -267,7 +267,13 @@ impl RightPane {
     /// The distinct kinds currently open, in open order — the `/exit`
     /// teardown's read-only probe of what owns live processes.
     pub fn open_kinds(&self) -> Vec<&str> {
-        self.open.iter().map(|t| t.kind()).collect()
+        let mut kinds: Vec<&str> = Vec::new();
+        for tab in &self.open {
+            if !kinds.contains(&tab.kind()) {
+                kinds.push(tab.kind());
+            }
+        }
+        kinds
     }
 
     /// Open a fresh instance of `kind` (minting a new id) and focus it. Side

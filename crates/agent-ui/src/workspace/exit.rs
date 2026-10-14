@@ -44,6 +44,15 @@ impl Workspace {
         };
         let subagents = self.running_subagent_names(cx);
         cx.spawn(async move |this, cx| {
+            // The teardown must keep targeting the thread `/exit` was invoked
+            // on: the beats leave the UI interactive, and every destructive
+            // step (cancel, pane/dock teardown, archive) resolves through the
+            // LIVE foreground — a sidebar click mid-sequence would otherwise
+            // tear down and archive whatever thread is focused now.
+            if !foreground_is(&this, cx, &sid) {
+                tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
+                return;
+            }
             // ── subagents ──────────────────────────────────────────────
             if !subagents.is_empty() {
                 this.update(cx, |ws, cx| ws.note("exit-stopping-subagents", &[], cx))
@@ -66,6 +75,10 @@ impl Workspace {
             }
             // ── the thread's own turn ──────────────────────────────────
             if turn_running {
+                if !foreground_is(&this, cx, &sid) {
+                    tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
+                    return;
+                }
                 this.update(cx, |ws, cx| {
                     ws.note("exit-stopping-agent", &[("name", &title)], cx)
                 })
@@ -88,6 +101,10 @@ impl Workspace {
                 })
                 .unwrap_or(false);
             if has_terminals {
+                if !foreground_is(&this, cx, &sid) {
+                    tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
+                    return;
+                }
                 this.update(cx, |ws, cx| ws.note("exit-killing-terminal", &[], cx))
                     .ok();
                 beat(cx).await;
@@ -110,6 +127,10 @@ impl Workspace {
                 .update(cx, |ws, _cx| ws.browser_views.len())
                 .unwrap_or(0);
             if browser_tabs > 0 {
+                if !foreground_is(&this, cx, &sid) {
+                    tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
+                    return;
+                }
                 this.update(cx, |ws, cx| ws.note("exit-closing-browser", &[], cx))
                     .ok();
                 beat(cx).await;
@@ -126,6 +147,10 @@ impl Workspace {
                 beat(cx).await;
             }
             // ── archive + fresh thread ─────────────────────────────────
+            if !foreground_is(&this, cx, &sid) {
+                tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
+                return;
+            }
             let archived_id = this
                 .update(cx, |ws, cx| {
                     ws.note("exit-archiving", &[("name", &title)], cx);
@@ -142,16 +167,23 @@ impl Workspace {
                 });
             }
             // The switch lands on the fresh thread; the closing pair rides it.
-            let landed = this.update_in(cx, |ws, window, cx| {
-                ws.start_new_thread(None, window, cx);
-            });
-            if landed.is_err() {
-                tracing::warn!("/exit: the workspace died before the fresh-thread landing");
-                return;
-            }
-            this.update(cx, |ws, cx| ws.note("exit-archived", &[], cx))
-                .ok();
-            this.update(cx, |ws, cx| ws.note("exit-bye", &[], cx)).ok();
+            // The attach is asynchronous (`start_new_thread` returns the
+            // minted id without switching), so the pair is ADDRESSED to that
+            // id — a foreground-targeted note here would journal onto the
+            // thread just archived.
+            let landed = this.update_in(cx, |ws, window, cx| ws.start_new_thread(None, window, cx));
+            let fresh_sid = match landed {
+                Ok(sid) => sid,
+                Err(_) => {
+                    tracing::warn!("/exit: the workspace died before the fresh-thread landing");
+                    return;
+                }
+            };
+            this.update(cx, |ws, cx| {
+                ws.note_for(&fresh_sid, "exit-archived", &[], cx);
+                ws.note_for(&fresh_sid, "exit-bye", &[], cx);
+            })
+            .ok();
         })
         .detach();
     }
@@ -160,6 +192,19 @@ impl Workspace {
     /// face — durable on the current session's journal, displayed live).
     fn note(&mut self, key: &str, args: &[(&str, &str)], cx: &mut Context<Self>) {
         self.add_info_message(i18n::t_str(key, args).to_string(), cx);
+    }
+
+    /// The session-addressed note: same card, but journaled on `sid` rather
+    /// than the live foreground — for beats that must land on a thread the
+    /// workspace has not switched to yet.
+    fn note_for(&mut self, sid: &str, key: &str, args: &[(&str, &str)], cx: &mut Context<Self>) {
+        self.append_ui_note_for(
+            sid,
+            manox_agent::db::UiNoteKind::Notice,
+            i18n::t_str(key, args).to_string(),
+            cx,
+        );
+        cx.notify();
     }
 
     /// The running subagents' display names (task description, falling back
@@ -209,4 +254,13 @@ impl Workspace {
 /// Pause one beat between teardown steps (the visible pacing of `/exit`).
 async fn beat(cx: &mut gpui::AsyncApp) {
     cx.background_executor().timer(BEAT).await;
+}
+
+/// Whether the foreground is still the thread `/exit` was invoked on — the
+/// gate every destructive step passes through (see the task body).
+fn foreground_is(this: &WeakEntity<Workspace>, cx: &mut gpui::AsyncApp, sid: &str) -> bool {
+    this.update(cx, |ws, cx| {
+        ws.chat_store(cx).is_some_and(|(_, live)| live == sid)
+    })
+    .unwrap_or(false)
 }
