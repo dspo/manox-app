@@ -532,6 +532,32 @@ turn-navigator-copied = 消息已复制到剪贴板。
 
 slash-mode-unknown = 未知权限模式“{ $mode }”— 应为 read-only、workspace-write 或 danger-full-access
 
+### /exit 停机序列（workspace/exit.rs）
+
+exit-untitled-thread = 当前会话
+
+exit-stopping-subagents = 正在停止子代理……
+
+exit-subagent-stopped = 子代理“{ $name }”已停止。
+
+exit-stopping-agent = 正在停止 { $name }……
+
+exit-agent-stopped = { $name } 已停止。
+
+exit-killing-terminal = 正在终止终端中的子进程……
+
+exit-terminal-killed = 终端中的子进程已全部终止。
+
+exit-closing-browser = 正在关闭浏览器……
+
+exit-browser-closed = 浏览器已关闭。
+
+exit-archiving = 正在归档 { $name }……
+
+exit-archived = 会话已归档。
+
+exit-bye = 拜拜！
+
 menu-settings = Settings…
 
 menu-quit = 退出

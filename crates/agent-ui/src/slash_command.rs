@@ -618,7 +618,10 @@ impl SlashCommand for ExitCommand {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> SlashResult {
-        workspace.archive_current_thread(window, cx);
+        // The full teardown: stop the turn + subagents, reclaim the pane's
+        // terminals/TUI agents and the browser, then archive and land on a
+        // fresh thread — with each step announced as a progress note.
+        workspace.begin_exit_sequence(window, cx);
         SlashResult::Handled
     }
 }

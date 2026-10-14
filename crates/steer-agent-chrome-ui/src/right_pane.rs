@@ -264,6 +264,12 @@ impl RightPane {
         self.open.iter().any(|t| t.id().starts_with(kind))
     }
 
+    /// The distinct kinds currently open, in open order — the `/exit`
+    /// teardown's read-only probe of what owns live processes.
+    pub fn open_kinds(&self) -> Vec<&str> {
+        self.open.iter().map(|t| t.kind()).collect()
+    }
+
     /// Open a fresh instance of `kind` (minting a new id) and focus it. Side
     /// effects complete on the event path.
     pub fn open_kind(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {

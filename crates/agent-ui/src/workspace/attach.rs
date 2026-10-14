@@ -733,6 +733,10 @@ impl Workspace {
         });
         let store = manox_agent::thread_store_global();
         store.with_mut(|s| s.archive_thread(&id, true));
+        // The sidebar's optimistic drop (the same half the row menu's archive
+        // performs): the row must leave when the gesture fires, not when the
+        // echo + the next list snapshot catch up.
+        crate::chrome_assembly::drop_sidebar_row(&id, cx);
         true
     }
 

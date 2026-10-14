@@ -1203,6 +1203,12 @@ impl Shell {
         view
     }
 
+    /// Whether the dock slot holds a live view (the `/exit` teardown's
+    /// read-only probe — a collapsed dock reads false).
+    pub fn panel_live(&self) -> bool {
+        self.panel.as_ref().is_some_and(|slot| slot.view.is_some())
+    }
+
     /// Install a view into the panel slot (the per-thread restore half of
     /// [`Self::take_panel_view`]); clears any error state. Does not change
     /// visibility — a collapsed dock stays collapsed.

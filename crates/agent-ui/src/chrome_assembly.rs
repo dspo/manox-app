@@ -91,6 +91,68 @@ pub fn close_tool_tabs_of_kind(kind: &str, cx: &mut App) -> bool {
         .is_ok()
 }
 
+/// Take the live dock's panel view and drop it — dropping the terminal view
+/// tears its PTY down (process-tree SIGTERM → SIGKILL), which is how `/exit`
+/// stops the dock's subprocesses. `false` when no shell/window is live or the
+/// dock holds no live content (a collapsed dock has none — collapse already
+/// dropped the view).
+pub fn stop_dock_terminal(cx: &mut App) -> bool {
+    let Some(shell) = shell_handle() else {
+        return false;
+    };
+    let Some(handle) = crate::dispatch::window_global() else {
+        return false;
+    };
+    let mut taken = None;
+    let _ = handle.update(cx, |_, _, cx| {
+        shell.update(cx, |shell, cx| taken = shell.take_panel_view(cx));
+    });
+    let had = taken.is_some();
+    drop(taken);
+    had
+}
+
+/// The distinct tool-tab kinds open in the live pane — `/exit`'s read-only
+/// probe of what owns live processes. Empty when no shell is live.
+pub fn pane_open_kinds(cx: &App) -> Vec<String> {
+    let Some(shell) = shell_handle() else {
+        return Vec::new();
+    };
+    shell
+        .read(cx)
+        .right
+        .read(cx)
+        .open_kinds()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether the bottom dock holds a live view (the `/exit` teardown's probe).
+pub fn dock_terminal_live(cx: &App) -> bool {
+    shell_handle().is_some_and(|shell| shell.read(cx).panel_live())
+}
+
+/// The archive gesture's shell-side reconciliation: drop the row from the
+/// sidebar now (the same optimistic drop the row menu's archive performs),
+/// instead of waiting for the protocol echo + the next list snapshot. The
+/// workspace-side archive paths (`/exit`, `cmd-;`) have no menu handler to
+/// do this half for them. `false` when no shell is live.
+pub fn drop_sidebar_row(id: &str, cx: &mut App) -> bool {
+    let Some(shell) = shell_handle() else {
+        return false;
+    };
+    let Some(handle) = crate::dispatch::window_global() else {
+        return false;
+    };
+    let id = id.to_string();
+    handle
+        .update(cx, |_, _, cx| {
+            shell.update(cx, |shell, cx| shell.set_archived(&id, true, cx));
+        })
+        .is_ok()
+}
+
 /// The open observation panel for a sub-agent address, when one is mounted in
 /// the live pane — how the workspace streams a child event into a panel the
 /// shell owns.

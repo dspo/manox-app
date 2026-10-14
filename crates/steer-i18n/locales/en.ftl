@@ -545,6 +545,32 @@ turn-navigator-copied = Message copied to clipboard.
 
 slash-mode-unknown = Unknown permission mode "{ $mode }" — expected read-only, workspace-write, or danger-full-access
 
+### /exit teardown sequence (workspace/exit.rs)
+
+exit-untitled-thread = this thread
+
+exit-stopping-subagents = Stopping subagents...
+
+exit-subagent-stopped = Subagent "{ $name }" is stopped.
+
+exit-stopping-agent = Stopping { $name }...
+
+exit-agent-stopped = { $name } is stopped.
+
+exit-killing-terminal = Killing subprocesses in the terminal...
+
+exit-terminal-killed = All subprocesses in the terminal are killed.
+
+exit-closing-browser = Closing the browser...
+
+exit-browser-closed = The browser is closed.
+
+exit-archiving = Archiving { $name }...
+
+exit-archived = The thread is archived.
+
+exit-bye = ByeBye!
+
 menu-settings = Settings…
 
 menu-quit = Quit

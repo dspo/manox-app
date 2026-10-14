@@ -56,6 +56,24 @@ pub(crate) fn ext_and_meta_pinned(
         .unwrap_or(false)
 }
 
+/// The ONE sidebar row archived read, live-fold-first: the
+/// `session/isArchivedChanged` echo on the session channel is the instant
+/// fact, the list snapshot's status bit the fallback. A zero-status fold
+/// entry is the pre-snapshot placeholder and carries no archive fact — it
+/// defers to the summary (the same guard `toggle_archived` flips against).
+pub(crate) fn effective_archived(
+    book: &steer_agent_chat_ui::ahp_store::ChannelBook,
+    session_id: &str,
+    summary: &ahp_types::state::SessionSummary,
+) -> bool {
+    match book.sessions.get(session_id) {
+        Some(state) if state.status != 0 => {
+            state.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0
+        }
+        _ => summary.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0,
+    }
+}
+
 impl SessionMultiplexer {
     /// Bind the multiplexer to the connected store.
     pub fn new(store: Entity<AhpStore>, cwd: PathBuf) -> Self {
@@ -223,15 +241,27 @@ impl SessionMultiplexer {
     // ── catalogue accessors (the sidebar/model/command faces) ──────────
 
     /// The sidebar catalogue as projected rows, most recently modified
-    /// first (the host's list order).
+    /// first (the host's list order). Archived rows are excluded: the host
+    /// partitions archived rows out of its own `summaries()`, but the client's
+    /// catalogue seed only upserts — a row that ever entered `book.summaries`
+    /// would otherwise resurface on every re-projection. The row's archived
+    /// bit is read live-fold-first (the pin-read pattern), so the
+    /// `session/isArchivedChanged` echo drops it from the sidebar the moment
+    /// it lands, ahead of any list refresh.
     pub fn thread_list(&self, cx: &App) -> Vec<ThreadRow> {
         let view = self.store.read(cx);
         let book = &view.book;
         let mut rows: Vec<ThreadRow> = book
             .summaries
             .values()
-            .map(|summary| {
+            .filter_map(|summary| {
                 let sid = steer_agent_chat_ui::ahp_store::id_of(&summary.resource);
+                // The sidebar is the ACTIVE list: an archived row leaves it
+                // (see `effective_archived` for the read and the doc on this
+                // method for why the filter lives here).
+                if effective_archived(book, sid, summary) {
+                    return None;
+                }
                 // The row pin read: see `ext_and_meta_pinned`.
                 let pinned = ext_and_meta_pinned(book, Some(summary), &thread_uri(sid));
                 let pending_plan = steer_agent_chat_ui::ahp_store::plan_review_proposed(book, sid);
@@ -254,7 +284,7 @@ impl SessionMultiplexer {
                 {
                     row.project = Some(cwd);
                 }
-                row
+                Some(row)
             })
             .collect();
         rows.sort_by(|a, b| {
@@ -390,5 +420,81 @@ mod pin_read_tests {
             Some(&bare),
             "x-manox-thread:/s-2"
         ));
+    }
+
+    #[test]
+    fn archived_reads_the_fold_first_and_defers_the_placeholder() {
+        use ahp_types::state::SessionStatus;
+
+        fn summary(status: u32) -> ahp_types::state::SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": "ahp-session:/s-1",
+                "provider": "test",
+                "title": "row",
+                "status": status,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            }))
+            .expect("a summary parses")
+        }
+
+        fn state(status: u32) -> ahp_types::state::SessionState {
+            ahp_types::state::SessionState {
+                provider: "test".into(),
+                title: "row".into(),
+                status,
+                activity: None,
+                origin: None,
+                project: None,
+                working_directories: None,
+                annotations: None,
+                lifecycle: ahp_types::state::SessionLifecycle::Ready,
+                creation_error: None,
+                server_tools: None,
+                active_clients: Vec::new(),
+                chats: Vec::new(),
+                default_chat: None,
+                config: None,
+                customizations: None,
+                changesets: None,
+                input_needed: None,
+                meta: None,
+            }
+        }
+
+        let mut book = steer_agent_chat_ui::ahp_store::ChannelBook::default();
+        let idle = summary(0);
+        assert!(
+            !effective_archived(&book, "s-1", &idle),
+            "no fold entry and a clean summary reads unarchived"
+        );
+
+        // The echo landed: the fold's IsArchived bit is the instant fact.
+        book.sessions
+            .insert("s-1".into(), state(SessionStatus::IsArchived.bits()));
+        assert!(
+            effective_archived(&book, "s-1", &summary(0)),
+            "the echo must drop the row ahead of any list refresh"
+        );
+
+        // A zero-status fold entry is the pre-snapshot placeholder: it
+        // carries no archive fact and defers to the summary bit.
+        book.sessions.insert("s-1".into(), state(0));
+        assert!(!effective_archived(&book, "s-1", &summary(0)));
+
+        // The summary bit as the fallback (a snapshot seeded before the
+        // fold spoke).
+        let archived_summary = summary(SessionStatus::IsArchived.bits());
+        assert!(effective_archived(&book, "s-1", &archived_summary));
+
+        // Unarchive: the cleared fold bit wins over a stale archived summary.
+        book.sessions.insert(
+            "s-1".into(),
+            state(SessionStatus::Idle.bits() | SessionStatus::IsRead.bits()),
+        );
+        assert!(
+            !effective_archived(&book, "s-1", &archived_summary),
+            "the cleared echo bit revives the row without a refetch"
+        );
     }
 }
