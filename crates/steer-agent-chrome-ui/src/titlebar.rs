@@ -267,8 +267,10 @@ pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement
         .sessions
         .iter()
         .filter(|s| {
+            // The query matches the one-line face the rows render — the
+            // raw title's hard breaks never match a typed space.
             q.is_empty()
-                || s.title.to_lowercase().contains(&q)
+                || single_line_title(&s.title).to_lowercase().contains(&q)
                 || s.workspace.to_lowercase().contains(&q)
         })
         .take(PICKER_LIMIT)

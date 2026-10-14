@@ -1038,7 +1038,11 @@ impl Shell {
             .filter(|s| match &filter {
                 None => true,
                 Some(f) => {
-                    s.title.to_lowercase().contains(f)
+                    // The query matches the one-line face the row renders —
+                    // the raw title's hard breaks never match a typed space.
+                    crate::session_list::single_line_title(&s.title)
+                        .to_lowercase()
+                        .contains(f)
                         || s.workspace.to_lowercase().contains(f)
                         || s.tag
                             .as_deref()
