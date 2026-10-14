@@ -2935,9 +2935,11 @@ mod tests {
     #[test]
     fn a_recovered_dispatch_retires_a_latched_dispatch_face() {
         let mut store = test_store();
-        assert!(store.absorb_delivery_signal(DeliverySignal::Failed(
-            DeliveryFailure::Dispatch("dead".into())
-        )));
+        assert!(
+            store.absorb_delivery_signal(DeliverySignal::Failed(DeliveryFailure::Dispatch(
+                "dead".into()
+            )))
+        );
         assert!(matches!(
             store.delivery_failure(),
             Some(DeliveryFailure::Dispatch(_))
@@ -2955,9 +2957,11 @@ mod tests {
     #[test]
     fn a_recovered_dispatch_does_not_retire_a_handshake_face() {
         let mut store = test_store();
-        assert!(store.absorb_delivery_signal(DeliverySignal::Failed(
-            DeliveryFailure::Handshake("dead".into())
-        )));
+        assert!(
+            store.absorb_delivery_signal(DeliverySignal::Failed(DeliveryFailure::Handshake(
+                "dead".into()
+            )))
+        );
         assert!(!store.absorb_delivery_signal(DeliverySignal::DispatchRecovered));
         assert!(matches!(
             store.delivery_failure(),
