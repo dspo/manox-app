@@ -15,10 +15,12 @@
 mod animation;
 
 pub mod chain_of_thought;
+pub mod pixel_spinner;
 pub mod reasoning;
 pub mod spinner;
 
 pub use chain_of_thought::{ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep};
+pub use pixel_spinner::{PixelSpinner, PixelSpinnerVariant};
 pub use reasoning::{
     AUTO_CLOSE_DELAY, Reasoning, ReasoningContent, ReasoningEvent, ReasoningState,
     ReasoningTrigger, ThinkingMessage, default_thinking_message,

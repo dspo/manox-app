@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use ai_elements::{
-    BrailleSpinner, ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep, Reasoning,
-    ReasoningState,
+    BrailleSpinner, ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep, PixelSpinner,
+    PixelSpinnerVariant, Reasoning, ReasoningState,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
@@ -188,15 +188,21 @@ struct ChainStep {
 enum Component {
     Reasoning,
     ChainOfThought,
+    PixelSpinner,
 }
 
 impl Component {
-    const ALL: &'static [Component] = &[Component::Reasoning, Component::ChainOfThought];
+    const ALL: &'static [Component] = &[
+        Component::Reasoning,
+        Component::ChainOfThought,
+        Component::PixelSpinner,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Self::Reasoning => "Reasoning",
             Self::ChainOfThought => "Chain of Thought",
+            Self::PixelSpinner => "Pixel Spinner",
         }
     }
 
@@ -209,6 +215,11 @@ impl Component {
             Self::ChainOfThought => {
                 "A controlled list of labeled steps with a connector rail. The component holds no \
                  policy of its own — the host decides what open means."
+            }
+            Self::PixelSpinner => {
+                "VS Code's session-status glyph on gpui primitives: six 2px dots that drop \
+                 through a 16px frame in a quantized cascade while working, or light up in a \
+                 clockwise sweep while waiting for input."
             }
         }
     }
@@ -799,6 +810,111 @@ impl Gallery {
         ]
     }
 
+    /// The pixel spinner's demos: the two variants at native size and zoomed
+    /// in, then a slow-motion pass and the linear-timing contrast arm. These
+    /// are time-only demos — nothing to click, the clock runs from mount.
+    fn pixel_spinner_rows(
+        &self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+    ) -> Vec<AnyElement> {
+        // The two states a session status renders in, in VS Code's palette:
+        // link blue for working, warning yellow for waiting.
+        let accent: gpui::Hsla = gpui::rgb(0x3794ff).into();
+        let warning: gpui::Hsla = gpui::rgb(0xcca700).into();
+
+        vec![
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Grid — the falling cascade",
+                "Six 2px dots on a 1820 ms cycle, staggered 520/650/260/390/0/130 ms; each \
+                 rises from −4 px, holds lit in its cell, and falls +7 px out of the clipped \
+                 frame. Every moving segment snaps through steps(6, jump-none). The 16px tile \
+                 is the size it runs at in a session list.",
+                h_flex()
+                    .gap_10()
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new().color(accent),
+                        "1× (16 px)",
+                    ))
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new().color(accent).zoom(8.),
+                        "8× · steps(6)",
+                    ))
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new().color(accent).zoom(8.).sharp(),
+                        "8× · square dots",
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Ring — waiting for input",
+                "The dots hold their grid positions at a quarter opacity while a highlight \
+                 steps up to full and decays — a clockwise sweep, one dot every 200 ms around \
+                 a 1200 ms cycle, quantized by steps(4, jump-none).",
+                h_flex()
+                    .gap_10()
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new()
+                            .variant(PixelSpinnerVariant::Ring)
+                            .color(warning)
+                            .zoom(8.),
+                        "8× · clockwise",
+                    ))
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new()
+                            .variant(PixelSpinnerVariant::Ring)
+                            .color(warning),
+                        "1× (16 px)",
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Quarter speed, and what linear timing costs",
+                "Slowing the clock to a quarter lets you count each discrete hop — including \
+                 the long/short hold variants that keep the cascade from reading as \
+                 mechanical. The right one is the same keyframes on linear timing: smooth, \
+                 and generic. The steps snap is the pixel.",
+                h_flex()
+                    .gap_10()
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new().color(accent).zoom(6.).speed(0.25),
+                        "grid ×6 · speed ¼",
+                    ))
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new()
+                            .variant(PixelSpinnerVariant::Ring)
+                            .color(warning)
+                            .zoom(6.)
+                            .speed(0.25),
+                        "ring ×6 · speed ¼",
+                    ))
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new().color(muted).zoom(8.).smooth(),
+                        "8× · linear",
+                    )),
+            )
+            .into_any_element(),
+        ]
+    }
+
     /// The left rail: one row per component, the selected one tinted.
     fn rail(
         &mut self,
@@ -866,6 +982,7 @@ impl Render for Gallery {
                 .map(|ix| self.demo_row(ix, muted, border, foreground, cx))
                 .collect(),
             Component::ChainOfThought => self.chain_rows(muted, border, foreground, cx),
+            Component::PixelSpinner => self.pixel_spinner_rows(muted, border, foreground),
         };
 
         let pane = v_flex()
@@ -910,11 +1027,7 @@ impl Render for Gallery {
                     .border_color(border)
                     .text_xs()
                     .text_color(muted)
-                    .child(SharedString::from(
-                        "Auto-open while streaming, auto-fold one second after the stream ends \
-                         (AUTO_CLOSE_DELAY). A hand toggle pins the block: nothing automatic moves \
-                         it afterwards.",
-                    )),
+                    .child(SharedString::from(footer_note(self.selected))),
             );
 
         h_flex()
@@ -930,6 +1043,24 @@ impl Render for Gallery {
 /// `push_str` path.
 fn mount_body(cx: &mut Context<Gallery>, source: &'static str) -> Entity<TextViewState> {
     cx.new(|cx| TextViewState::markdown(source, cx))
+}
+
+/// The pane footer states the contract the selected component's demos are
+/// about: the reasoning blocks' automation contract, or the spinner's
+/// clock-only one.
+fn footer_note(selected: Component) -> &'static str {
+    match selected {
+        Component::PixelSpinner => {
+            "Clock-only demos: one gpui Animation folds cycle time through the per-dot \
+             delays and keyframe tables. The steps() snap is the pixel; speed is a rate \
+             multiplier on the same clock."
+        }
+        _ => {
+            "Auto-open while streaming, auto-fold one second after the stream ends \
+             (AUTO_CLOSE_DELAY). A hand toggle pins the block: nothing automatic moves \
+             it afterwards."
+        }
+    }
 }
 
 fn main() {
@@ -949,6 +1080,28 @@ fn main() {
             },
         );
     });
+}
+
+/// One demo cell: the glyph centered in a fixed stage, its label under it —
+/// same shape as the reference page's zoomed stages.
+fn spinner_cell(
+    muted: gpui::Hsla,
+    stage: impl IntoElement,
+    label: &'static str,
+) -> impl IntoElement {
+    v_flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .w(px(170.))
+                .h(px(150.))
+                .items_center()
+                .justify_center()
+                .child(stage),
+        )
+        .child(div().text_xs().text_color(muted).child(label))
 }
 
 /// One demo card: a title, a note, and the component under test.

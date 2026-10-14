@@ -147,7 +147,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Shared Primitives
 
-- [Button](#shared-primitives) · [Input](#shared-primitives) · [PopupMenu](#shared-primitives) · [PopupMenuItem](#shared-primitives) · [TabBar](#shared-primitives) · [Tag](#shared-primitives) · [Markdown](#markdown) · [TerminalPanel](#terminalpanel) · [TurnFrame](#turnframe) · [Icon](#shared-primitives) · [BrailleSpinner](#braillespinner) · [ScrollHandle](#shared-primitives) · [TitleBar](#shared-primitives) · [ContextMenu](#shared-primitives) · [Tooltip](#shared-primitives)
+- [Button](#shared-primitives) · [Input](#shared-primitives) · [PopupMenu](#shared-primitives) · [PopupMenuItem](#shared-primitives) · [TabBar](#shared-primitives) · [Tag](#shared-primitives) · [Markdown](#markdown) · [TerminalPanel](#terminalpanel) · [TurnFrame](#turnframe) · [Icon](#shared-primitives) · [BrailleSpinner](#braillespinner) · [PixelSpinner](#pixelspinner) · [ScrollHandle](#shared-primitives) · [TitleBar](#shared-primitives) · [ContextMenu](#shared-primitives) · [Tooltip](#shared-primitives)
 
 ### 状态
 
@@ -1049,6 +1049,12 @@ chrome 壳自有图标表在 `steer-agent-chrome-ui/src/theme/icons.rs`：`IconA
 Text-based braille-dot spinner cycling through `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` (10 frames, 800 ms cycle). Used wherever an in-progress indicator is needed, replacing the old rotating-circle `Spinner`.
 
 > Source: `crates/ai-elements/src/spinner.rs`
+
+#### PixelSpinner
+
+VS Code session-status 的像素 spinner，gpui 原语复刻（`ai_elements::PixelSpinner`）：16px 框内六颗 2px 圆点。`Grid` 变体是下落级联（−4px 淡入 → 原位停留 → +7px 坠出，逐点延迟 520/650/260/390/0/130ms，周期 1820ms，Cycle/Long/Short 三种停留时长）；`Ring` 变体是等待输入态（六点压 0.25 透明度，高亮按 200ms 一步顺时针扫一圈，周期 1200ms）。全部动效由单个 `Animation` 时钟驱动：周期时间折算过每点延迟后查关键帧表，每个移动分段经 `steps(6/4, jump-none)` 量化——离散跳变即像素感，`smooth()` 换 linear 是对照臂。旋钮：`zoom`（1=原生 16px）、`speed`（速率倍率）、`sharp`（方点）。**尚未接入 app chrome**：侧栏 `Running` 状态位仍是更早的 `session_list::pixel_grid` 近似（整周期量化、逐周期重置相位），组件化收编是后续 PR。
+
+> Source: `crates/ai-elements/src/pixel_spinner.rs`。目检面：`cargo run -p ai-elements --example gallery` → Pixel Spinner（1×/8×、ring、¼ 速慢放 + linear 对照）。
 
 #### ScrollHandle / ScrollableElement
 
