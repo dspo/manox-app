@@ -1557,6 +1557,37 @@ impl Workspace {
             .map(|a| a.id.clone())
     }
 
+    /// The foreground store's delivery failure face. Test-support
+    /// diagnostic: the strip's render test reads what the composer reads.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_delivery_failure(
+        &self,
+        cx: &App,
+    ) -> Option<steer_agent_chat_ui::ahp_store::DeliveryFailure> {
+        self.chat
+            .read(cx)
+            .store
+            .as_ref()
+            .and_then(|(store, _)| store.read(cx).delivery_failure())
+    }
+
+    /// The delivery-error strip as a standalone element. Test-support
+    /// diagnostic: a geometry probe re-pulls it every frame (an AnyElement
+    /// is consumed by its first paint).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_delivery_error_element(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let failure = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .and_then(|(store, _)| store.read(cx).delivery_failure())?;
+        Some(self.render_delivery_error_strip(&failure, cx))
+    }
+
     /// The ask walk's churn counter. Diagnostic-only: a re-delivery of the
     /// same pending id must not advance it — the walk state belongs to the
     /// user, not to the wire.

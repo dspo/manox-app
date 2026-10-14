@@ -498,6 +498,29 @@ pub struct CapabilityRequest {
     pub reply: async_channel::Sender<Result<Value, String>>,
 }
 
+/// Why the submit pipeline cannot currently deliver. One visible reason —
+/// the composer's error strip reads this instead of the user guessing why
+/// nothing sends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeliveryFailure {
+    /// The in-proc handshake never completed: every write queues forever
+    /// behind it (the silent black hole this face exists to end).
+    Handshake(String),
+    /// The last dispatch failed to leave the client (transport gone).
+    Dispatch(String),
+    /// Pre-connect writes have sat queued past the delivery budget.
+    Stalled,
+}
+
+/// One dispatch outcome bound for the store's own pump: a failure latches
+/// the delivery face, a recovery retires a latched `Dispatch` face (a
+/// dispatch that leaves proves the transport answers again).
+#[derive(Clone, Debug)]
+enum DeliverySignal {
+    Failed(DeliveryFailure),
+    DispatchRecovered,
+}
+
 /// The GPUI-facing store. One per process: the host is a singleton (L11) and
 /// this is its only desktop client.
 pub struct AhpStore {
@@ -537,6 +560,28 @@ pub struct AhpStore {
     /// transition instead of once per background action while a turn
     /// streams.
     pending_unread: std::collections::HashSet<String>,
+    /// The submit pipeline's LATCHED failure: a handshake that never landed
+    /// or a dispatch that failed to leave. The lazy `Stalled` face (a
+    /// pre-connect queue past the budget) is computed on read, never stored.
+    /// The composer's error strip reads [`Self::delivery_failure`].
+    delivery_failure: Option<DeliveryFailure>,
+    /// When the first pre-connect write queued — the stall face's clock.
+    /// `None` while nothing queues; cleared when the replay drains.
+    queue_head_at: Option<std::time::Instant>,
+    /// The handshake's dial parameters, retained so [`Self::retry_handshake`]
+    /// can re-run the same spawn after a failure.
+    handshake_params: Option<(
+        PathBuf,
+        async_channel::Sender<ahp::ClientEvent>,
+        async_channel::Sender<CapabilityRequest>,
+    )>,
+    /// A handshake (initial or retried) is currently dialing: `retry` must
+    /// not stack a second dial on top of a slow one.
+    handshaking: bool,
+    /// Dispatch outcomes ride this to the store's own pump — the dispatch
+    /// spawn runs on the manox runtime with no gpui handle, and the face
+    /// needs the entity.
+    delivery_signal_tx: Option<async_channel::Sender<DeliverySignal>>,
     _tasks: Vec<gpui::Task<()>>,
 }
 
@@ -548,6 +593,7 @@ impl AhpStore {
     pub fn connect(cwd: PathBuf, cx: &mut gpui::Context<Self>) -> Self {
         let (event_tx, event_rx) = async_channel::unbounded::<ahp::ClientEvent>();
         let (req_tx, req_rx) = async_channel::unbounded::<CapabilityRequest>();
+        let (fail_tx, fail_rx) = async_channel::unbounded::<DeliverySignal>();
         let mut store = Self {
             book: ChannelBook::default(),
             client: None,
@@ -560,17 +606,101 @@ impl AhpStore {
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
+            delivery_failure: None,
+            queue_head_at: None,
+            handshake_params: None,
+            handshaking: false,
+            delivery_signal_tx: Some(fail_tx),
             _tasks: Vec::new(),
         };
         store.spawn_handshake(cwd, event_tx, req_tx, cx);
         store.spawn_pump(event_rx, cx);
         store.spawn_capability_pump(req_rx, cx);
+        store.spawn_delivery_failure_pump(fail_rx, cx);
         store
     }
 
     /// Whether the handshake completed (writes before this are queued).
     pub fn is_connected(&self) -> bool {
         self.client.is_some()
+    }
+
+    /// How long a pre-connect queue may sit before the composer reads it as
+    /// a delivery failure. The handshake either lands (the queue drains) or
+    /// latches its own face long before a healthy host crosses this.
+    const DELIVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The submit pipeline's failure face, if any: the latched handshake /
+    /// dispatch failure, or — computed on read, so the healthy path pays
+    /// nothing — a pre-connect queue that has sat past the delivery budget.
+    pub fn delivery_failure(&self) -> Option<DeliveryFailure> {
+        if let Some(failure) = &self.delivery_failure {
+            return Some(failure.clone());
+        }
+        if let Some(queued_at) = self.queue_head_at
+            && self.client.is_none()
+            && queued_at.elapsed() >= Self::DELIVERY_BUDGET
+        {
+            return Some(DeliveryFailure::Stalled);
+        }
+        None
+    }
+
+    /// Re-dial the host after a handshake failure (the composer error
+    /// strip's retry). A no-op while connected — retry exists for the
+    /// failure face only — and while the first handshake is still in
+    /// flight, so a slow host never gets dialled twice.
+    pub fn retry_handshake(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.client.is_some() || self.handshaking {
+            return;
+        }
+        let Some((cwd, event_tx, req_tx)) = self.handshake_params.clone() else {
+            return;
+        };
+        self.delivery_failure = None;
+        self.spawn_handshake(cwd, event_tx, req_tx, cx);
+        cx.notify();
+    }
+
+    /// Apply one dispatch outcome to the delivery face: a failure latches,
+    /// a recovery retires a latched `Dispatch` face (a `Handshake` face is
+    /// not a dispatch's to clear). Returns whether the face changed — the
+    /// pump notifies only then, so a recovery against no latch stays free.
+    fn absorb_delivery_signal(&mut self, signal: DeliverySignal) -> bool {
+        match signal {
+            DeliverySignal::Failed(failure) => {
+                self.delivery_failure = Some(failure);
+                true
+            }
+            DeliverySignal::DispatchRecovered => {
+                if matches!(self.delivery_failure, Some(DeliveryFailure::Dispatch(_))) {
+                    self.delivery_failure = None;
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
+    /// Fold dispatch outcomes onto the store's delivery face. The dispatch
+    /// spawn runs on the manox runtime with no gpui handle, so outcomes
+    /// ride this channel to a task that owns the entity.
+    fn spawn_delivery_failure_pump(
+        &mut self,
+        fail_rx: async_channel::Receiver<DeliverySignal>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(signal) = fail_rx.recv().await {
+                this.update(cx, |store, cx| {
+                    if store.absorb_delivery_signal(signal) {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        });
+        self._tasks.push(task);
     }
 
     /// A store that never dials the host: the folded book is a plain struct
@@ -590,8 +720,28 @@ impl AhpStore {
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
+            delivery_failure: None,
+            queue_head_at: None,
+            handshake_params: None,
+            handshaking: false,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
+    }
+
+    /// Latch a handshake-shaped delivery failure without a real dead
+    /// transport. Test-support diagnostic: the composer strip's render and
+    /// wiring tests drive exactly what the pump latches.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_latch_delivery_failure(&mut self) {
+        self.delivery_failure = Some(DeliveryFailure::Handshake("test: dead transport".into()));
+    }
+
+    /// Clear the latched failure. Test-support diagnostic: the strip's
+    /// render test drives what a successful redial clears.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_clear_delivery_failure(&mut self) {
+        self.delivery_failure = None;
     }
 
     /// Seed a placeholder summary for a session this client just created, so
@@ -702,7 +852,12 @@ impl AhpStore {
         if !self.replay_pending {
             return None;
         }
-        (!self.pending_writes.is_empty()).then(|| self.pending_writes.remove(0))
+        let next = (!self.pending_writes.is_empty()).then(|| self.pending_writes.remove(0));
+        if next.is_some() && self.pending_writes.is_empty() {
+            // The queue drained: the stall face's clock stops.
+            self.queue_head_at = None;
+        }
+        next
     }
 
     fn spawn_handshake(
@@ -712,6 +867,8 @@ impl AhpStore {
         req_tx: async_channel::Sender<CapabilityRequest>,
         cx: &mut gpui::Context<Self>,
     ) {
+        self.handshake_params = Some((cwd.clone(), event_tx.clone(), req_tx.clone()));
+        self.handshaking = true;
         let take = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             let (client, init) = match tokio_wait(move || async move {
                 let runtime = manox_ahp_runtime::ahp::runtime::runtime(cwd);
@@ -751,6 +908,17 @@ impl AhpStore {
                 Ok((client, init)) => (client, init),
                 Err(err) => {
                     tracing::error!(error = %err, "ahp handshake failed");
+                    // The failure must not be silent: every write issued now
+                    // queues behind a handshake that will never answer, and
+                    // `next_pending` gates the drain on a landing that never
+                    // comes — the black hole. Latch the face the composer's
+                    // error strip reads; `retry_handshake` re-dials.
+                    this.update(cx, |store, cx| {
+                        store.handshaking = false;
+                        store.delivery_failure = Some(DeliveryFailure::Handshake(err.clone()));
+                        cx.notify();
+                    })
+                    .ok();
                     return;
                 }
             };
@@ -758,6 +926,13 @@ impl AhpStore {
                 .update(cx, |store, _| {
                     store.client = Some(client.clone());
                     store.replay_pending = true;
+                    store.handshaking = false;
+                    // The handshake landed: its own failure face retires. A
+                    // Dispatch latch (a pre-existing transport death) is not
+                    // this success's to clear.
+                    if matches!(store.delivery_failure, Some(DeliveryFailure::Handshake(_))) {
+                        store.delivery_failure = None;
+                    }
                 })
                 .is_err()
             {
@@ -1162,14 +1337,34 @@ impl AhpStore {
         // first message (the host answers not-found for a session still
         // being created).
         if self.client.is_none() || self.replay_pending {
+            if self.queue_head_at.is_none() {
+                self.queue_head_at = Some(std::time::Instant::now());
+            }
             self.pending_writes
                 .push(PendingWrite::Dispatch(channel, Box::new(action)));
             return;
         }
         let client = self.client.clone().expect("guard above");
+        // Each outcome rides the delivery channel to the store's own pump —
+        // this spawn has no gpui handle: a transport failure latches the
+        // composer's error face (not only a tracing line), and a dispatch
+        // that leaves retires a latched Dispatch face.
+        let fail_tx = self.delivery_signal_tx.clone();
         manox_agent::runtime::handle().spawn(async move {
-            if let Err(err) = client.dispatch(channel, action).await {
-                tracing::warn!(error = %err, "dispatch failed");
+            match client.dispatch(channel, action).await {
+                Ok(_) => {
+                    if let Some(fail_tx) = fail_tx {
+                        let _ = fail_tx.send_blocking(DeliverySignal::DispatchRecovered);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "dispatch failed");
+                    if let Some(fail_tx) = fail_tx {
+                        let _ = fail_tx.send_blocking(DeliverySignal::Failed(
+                            DeliveryFailure::Dispatch(err.to_string()),
+                        ));
+                    }
+                }
             }
         });
     }
@@ -2412,6 +2607,11 @@ mod tests {
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
+            delivery_failure: None,
+            queue_head_at: None,
+            handshake_params: None,
+            handshaking: false,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         };
         let session_state = |unread: bool, archived: bool| {
@@ -2497,6 +2697,11 @@ mod tests {
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
+            delivery_failure: None,
+            queue_head_at: None,
+            handshake_params: None,
+            handshaking: false,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         };
         store.book.seed_summaries(vec![
@@ -2567,6 +2772,11 @@ mod tests {
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
+            delivery_failure: None,
+            queue_head_at: None,
+            handshake_params: None,
+            handshaking: false,
+            delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
     }
@@ -2682,5 +2892,103 @@ mod tests {
         assert_eq!(chat_id, "s-1");
         assert_eq!(request.id, "call_ask");
         assert!(view.chat_input("call_ask").is_some());
+    }
+
+    /// The failure face maps the latch verbatim.
+    #[test]
+    fn a_latched_failure_reports_verbatim() {
+        let mut store = test_store();
+        assert_eq!(store.delivery_failure(), None, "healthy reads as healthy");
+        store.delivery_failure = Some(DeliveryFailure::Handshake("dead".into()));
+        assert_eq!(
+            store.delivery_failure(),
+            Some(DeliveryFailure::Handshake("dead".into())),
+        );
+    }
+
+    /// The stall face is LAZY: a pre-connect queue counts only past the
+    /// delivery budget, and a fresh queue (handshake still dialing) reads
+    /// healthy — no timer, no polling pump on the healthy path.
+    #[test]
+    fn a_stale_pre_connect_queue_reads_as_stalled_not_a_fresh_one() {
+        let mut store = test_store();
+        store.queue_head_at = Some(std::time::Instant::now());
+        assert_eq!(
+            store.delivery_failure(),
+            None,
+            "a fresh queue is in flight, not stalled"
+        );
+        store.queue_head_at = Some(
+            std::time::Instant::now()
+                - AhpStore::DELIVERY_BUDGET
+                - std::time::Duration::from_secs(1),
+        );
+        assert_eq!(
+            store.delivery_failure(),
+            Some(DeliveryFailure::Stalled),
+            "a queue past the budget reads as stalled"
+        );
+    }
+
+    /// A dispatch that leaves retires a latched Dispatch face — the strip
+    /// must not outlive the transport it reports dead.
+    #[test]
+    fn a_recovered_dispatch_retires_a_latched_dispatch_face() {
+        let mut store = test_store();
+        assert!(
+            store.absorb_delivery_signal(DeliverySignal::Failed(DeliveryFailure::Dispatch(
+                "dead".into()
+            )))
+        );
+        assert!(matches!(
+            store.delivery_failure(),
+            Some(DeliveryFailure::Dispatch(_))
+        ));
+        assert!(store.absorb_delivery_signal(DeliverySignal::DispatchRecovered));
+        assert_eq!(store.delivery_failure(), None);
+        assert!(
+            !store.absorb_delivery_signal(DeliverySignal::DispatchRecovered),
+            "a recovery against no latch changes nothing (no spurious notify)"
+        );
+    }
+
+    /// A handshake face is not a dispatch's to clear: only its own landing
+    /// (or a retry) retires it.
+    #[test]
+    fn a_recovered_dispatch_does_not_retire_a_handshake_face() {
+        let mut store = test_store();
+        assert!(
+            store.absorb_delivery_signal(DeliverySignal::Failed(DeliveryFailure::Handshake(
+                "dead".into()
+            )))
+        );
+        assert!(!store.absorb_delivery_signal(DeliverySignal::DispatchRecovered));
+        assert!(matches!(
+            store.delivery_failure(),
+            Some(DeliveryFailure::Handshake(_))
+        ));
+    }
+
+    /// A bare store for accessor tests: no client, no channels.
+    fn test_store() -> AhpStore {
+        AhpStore {
+            book: ChannelBook::default(),
+            client: None,
+            replay_pending: false,
+            chat_events: Vec::new(),
+            focused_session: None,
+            optimistic_undo: Vec::new(),
+            pending_writes: Vec::new(),
+            request_hook: None,
+            rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
+            pending_unread: std::collections::HashSet::new(),
+            delivery_failure: None,
+            queue_head_at: None,
+            handshake_params: None,
+            handshaking: false,
+            delivery_signal_tx: None,
+            _tasks: Vec::new(),
+        }
     }
 }

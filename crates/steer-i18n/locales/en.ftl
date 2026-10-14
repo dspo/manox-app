@@ -500,6 +500,8 @@ follow-stop-indicator-retry = Click to reconnect the live follow
 ### views/composer_menu.rs
 
 composer-add-label = Add
+composer-delivery-error = Connection not ready — your message may not have been delivered
+composer-delivery-retry = Retry
 
 composer-plugins-label = Plugins
 

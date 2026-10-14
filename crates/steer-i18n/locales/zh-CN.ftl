@@ -487,6 +487,8 @@ follow-stop-indicator-retry = 点击重新连接实时跟进
 ### views/composer_menu.rs
 
 composer-add-label = 添加
+composer-delivery-error = 连接未就绪，消息可能没有送达
+composer-delivery-retry = 重试
 
 composer-plugins-label = 插件
 
