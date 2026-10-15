@@ -1033,7 +1033,7 @@ impl AhpStore {
                         {
                             let _ = this.update(cx, |store, cx| {
                                 let uri = snapshot.resource.clone();
-                                if store.book.apply_snapshot(&uri, snapshot.state) {
+                                if store.apply_snapshot_confirmed(&uri, snapshot.state) {
                                     cx.notify();
                                 }
                             });
@@ -1078,7 +1078,7 @@ impl AhpStore {
             let _ = this.update(cx, |store, cx| {
                 for snap in init.snapshots {
                     let uri = snap.resource.clone();
-                    if store.book.apply_snapshot(&uri, snap.state) {
+                    if store.apply_snapshot_confirmed(&uri, snap.state) {
                         cx.notify();
                     }
                 }
@@ -1181,6 +1181,53 @@ impl AhpStore {
         match event.event {
             ahp::SubscriptionEvent::Action(envelope) => {
                 self.book.server_seq = self.book.server_seq.max(envelope.server_seq);
+                let own = envelope
+                    .origin
+                    .as_ref()
+                    .is_some_and(|origin| origin.client_id == CLIENT_ID);
+                // Write-ahead reconciliation (AHP): an envelope carrying
+                // `rejectionReason` is the host's refusal — its action did
+                // not land, so it must not enter the fold, and this
+                // client's optimistic twin rolls back. Folding refusals as
+                // if accepted left a rejected model or mode pick on the
+                // chip forever; the rollback used to be reachable only
+                // through reducer-level rejections, which the session
+                // reducer never produces for config actions.
+                if let Some(reason) = envelope.rejection_reason.clone() {
+                    tracing::warn!(channel = %envelope.channel, %reason, "dispatch rejected");
+                    self.rejections
+                        .push_back(format!("{}: {reason}", envelope.channel));
+                    while self.rejections.len() > 32 {
+                        self.rejections.pop_front();
+                    }
+                    // A refused unread-rise write never dropped the bit,
+                    // so the gate must re-arm — the next background
+                    // action may retry the rise.
+                    if envelope.channel.starts_with("ahp-session:/") {
+                        self.pending_unread.remove(id_of(&envelope.channel));
+                    }
+                    if own && let Some(keys) = touched_config_keys(&envelope.action) {
+                        let session_id = id_of(&envelope.channel).to_string();
+                        self.rollback_optimistic(&session_id, &keys);
+                        self.push_chat_event(
+                            session_id,
+                            crate::chat_fold::ChatEvent::Notice {
+                                text: format!(
+                                    "{}: {reason}",
+                                    steer_i18n::t("workspace-change-rejected")
+                                ),
+                            },
+                        );
+                    }
+                    cx.notify();
+                    return;
+                }
+                // The acceptance half: our own accepted config write's undo
+                // history is spent — a later refusal of another action must
+                // not restore the pre-write value over the confirmed one.
+                if own && let Some(keys) = touched_config_keys(&envelope.action) {
+                    self.confirm_optimistic(id_of(&envelope.channel), &keys);
+                }
                 let chat_id = if envelope.channel.starts_with("ahp-chat:/") {
                     Some(id_of(&envelope.channel).to_string())
                 } else {
@@ -1263,23 +1310,6 @@ impl AhpStore {
                         if envelope.channel.starts_with("ahp-session:/") {
                             self.pending_unread.remove(id_of(&envelope.channel));
                         }
-                        // An optimistic write (model pick, cwd, …) that the
-                        // host refused must not linger on the UI: roll the
-                        // keys it touched out of the fold, and surface the
-                        // refusal on the transcript.
-                        if let Some(keys) = rejected_config_keys(&envelope.action) {
-                            let session_id = id_of(&envelope.channel).to_string();
-                            self.rollback_optimistic(&session_id, &keys);
-                            self.push_chat_event(
-                                session_id,
-                                crate::chat_fold::ChatEvent::Notice {
-                                    text: format!(
-                                        "{}: {reason}",
-                                        steer_i18n::t("workspace-change-rejected")
-                                    ),
-                                },
-                            );
-                        }
                         cx.notify();
                     }
                 }
@@ -1350,7 +1380,7 @@ impl AhpStore {
             if let Some(snapshot) = result.snapshot {
                 let _ = this.update(cx, |store, cx| {
                     let uri = snapshot.resource.clone();
-                    if store.book.apply_snapshot(&uri, snapshot.state) {
+                    if store.apply_snapshot_confirmed(&uri, snapshot.state) {
                         cx.notify();
                     }
                 });
@@ -1580,7 +1610,7 @@ impl AhpStore {
     }
 
     /// Roll back optimistic writes: every remembered (session, key) touched by
-    /// a REJECTED action restores its pre-optimistic value (removing the key
+    /// a REFUSED action restores its pre-optimistic value (removing the key
     /// when there was none — the host does not re-broadcast authority for a
     /// write it refused).
     fn rollback_optimistic(&mut self, session_id: &str, keys: &[String]) {
@@ -1605,6 +1635,28 @@ impl AhpStore {
         }
         self.optimistic_undo
             .retain(|(sid, k, _)| !(sid == session_id && keys.contains(k)));
+    }
+
+    /// Spend the undo history of a CONFIRMED write (the write-ahead
+    /// reconciliation's acceptance half): once the host echoed our config
+    /// change without a refusal, the pre-write value is no longer a truth
+    /// to restore — a later refusal of another action touching the same
+    /// key must roll back to the confirmed value, not past it.
+    fn confirm_optimistic(&mut self, session_id: &str, keys: &[String]) {
+        self.optimistic_undo
+            .retain(|(sid, k, _)| !(sid == session_id && keys.contains(k)));
+    }
+
+    /// Fold a server snapshot and reset that session's write-ahead
+    /// reconciliation: a snapshot is host truth (the reconnect contract
+    /// clears pending state), so the optimistic undo entries it covers are
+    /// spent — restoring against server truth would resurrect values the
+    /// host already replaced.
+    fn apply_snapshot_confirmed(&mut self, uri: &str, state: SnapshotState) -> bool {
+        if matches!(&state, SnapshotState::Session(_)) {
+            self.optimistic_undo.retain(|(sid, _, _)| sid != id_of(uri));
+        }
+        self.book.apply_snapshot(uri, state)
     }
 
     /// Drain the display events of one session — the bucket the caller
@@ -2107,6 +2159,32 @@ impl<'a> LeafView<'a> {
             .and_then(Value::as_str)
     }
 
+    /// The session's effective approval mode for display and turn
+    /// stamping: the folded value, else the host-declared schema default,
+    /// else the host's own default (`WorkspaceWrite`). A seat-less session
+    /// runs under the host default — the retired local `ReadOnly` fallback
+    /// contradicted it, so every reopen of a thread that never journaled a
+    /// mode displayed a restriction the runtime did not enforce.
+    pub fn approval_mode_or_default(&self) -> manox_agent::thread::PermissionMode {
+        let wire = self
+            .approval_mode()
+            .map(str::to_string)
+            .or_else(|| {
+                self.session
+                    .and_then(|s| s.config.as_ref())
+                    .and_then(|c| c.schema.properties.get("approvalMode"))
+                    .and_then(|prop| prop.default.as_ref())
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| {
+                manox_agent::thread::PermissionMode::default()
+                    .wire()
+                    .to_string()
+            });
+        serde_json::from_value(serde_json::Value::String(wire)).unwrap_or_default()
+    }
+
     /// The most recent request's token usage: the in-flight turn's report
     /// while streaming, else the last completed turn's (the `chat/usage`
     /// action rides the channel, so this replays on attach). Cache-write
@@ -2360,10 +2438,12 @@ pub fn pending_ask_from_ahp(
     })
 }
 
-/// The config keys an optimistic write touched, when the action is one the
-/// host can refuse per-key (a session config change). A rejection rolls
-/// these out of the client fold so a refused pick does not linger on the UI.
-fn rejected_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<String>> {
+/// The config keys a write-ahead action touches, for the reconciliation
+/// halves: a refusal (`rejectionReason`) rolls them back out of the client
+/// fold so a refused pick does not linger on the UI, and our own accepted
+/// echo spends their undo history so a later refusal restores to the
+/// confirmed value, not past it.
+fn touched_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<String>> {
     use ahp_types::actions::StateAction as A;
     match action {
         A::SessionConfigChanged(changed) => {
@@ -3110,5 +3190,123 @@ mod tests {
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_accepted_own_config_echo_spends_the_undo_history() {
+        use serde_json::json;
+        let mut store = disconnected_store();
+        let mut pick = serde_json::Map::new();
+        pick.insert("model".to_string(), json!("prov/new"));
+        store.optimistic_config("s-1", &pick);
+        assert_eq!(store.optimistic_undo.len(), 1);
+
+        // The acceptance half of the write-ahead reconciliation: the host
+        // echoed our config change without a refusal.
+        store.confirm_optimistic("s-1", &["model".to_string()]);
+        assert!(
+            store.optimistic_undo.is_empty(),
+            "a confirmed write has no undo left to spend"
+        );
+
+        // A later refusal touching the same key must NOT restore the
+        // pre-write value over the confirmed one.
+        store.rollback_optimistic("s-1", &["model".to_string()]);
+        assert_eq!(leaf(&store.book, "s-1").model_id(), Some("prov/new"));
+    }
+
+    #[test]
+    fn a_snapshot_spends_the_sessions_undo_history() {
+        use serde_json::json;
+        let mut store = disconnected_store();
+        let mut pick = serde_json::Map::new();
+        pick.insert("model".to_string(), json!("prov/new"));
+        store.optimistic_config("s-1", &pick);
+        pick.insert("model".to_string(), json!("prov/other"));
+        store.optimistic_config("s-2", &pick);
+
+        store.apply_snapshot_confirmed(
+            &session_uri("s-1"),
+            SnapshotState::Session(Box::new(empty_session(&session_uri("s-1")))),
+        );
+        assert!(
+            store.optimistic_undo.iter().all(|(sid, _, _)| sid != "s-1"),
+            "server truth replaces the session's write-ahead history"
+        );
+        assert!(
+            store.optimistic_undo.iter().any(|(sid, _, _)| sid == "s-2"),
+            "other sessions keep their pending writes"
+        );
+    }
+
+    #[test]
+    fn approval_mode_defaults_follow_the_seated_value_then_schema_then_host() {
+        use ahp_types::state::{SessionConfigPropertySchema, SessionConfigState};
+        use manox_agent::thread::PermissionMode;
+        use serde_json::json;
+
+        let mut book = ChannelBook::default();
+        // A seat-less session runs under the host default — the retired
+        // `ReadOnly` fallback contradicted it on every such reopen.
+        assert_eq!(
+            leaf(&book, "s-1").approval_mode_or_default(),
+            PermissionMode::WorkspaceWrite
+        );
+
+        {
+            let state = book
+                .sessions
+                .entry("s-1".to_string())
+                .or_insert_with(|| empty_session(&session_uri("s-1")));
+            let mut schema_properties = std::collections::HashMap::new();
+            schema_properties.insert(
+                "approvalMode".to_string(),
+                SessionConfigPropertySchema {
+                    r#type: "string".to_string(),
+                    title: "Approval mode".to_string(),
+                    description: None,
+                    default: Some(json!("read-only")),
+                    r#enum: None,
+                    enum_labels: None,
+                    enum_descriptions: None,
+                    read_only: None,
+                    items: None,
+                    min_items: None,
+                    max_items: None,
+                    properties: None,
+                    required: None,
+                    additional_properties: None,
+                    enum_dynamic: None,
+                    session_mutable: Some(true),
+                },
+            );
+            state.config = Some(SessionConfigState {
+                schema: ahp_types::state::SessionConfigSchema {
+                    r#type: "object".to_string(),
+                    properties: schema_properties,
+                    required: None,
+                },
+                values: serde_json::Map::new(),
+            });
+        }
+        assert_eq!(
+            leaf(&book, "s-1").approval_mode_or_default(),
+            PermissionMode::ReadOnly,
+            "the host-declared schema default is the seat-less truth"
+        );
+
+        book.sessions
+            .get_mut("s-1")
+            .unwrap()
+            .config
+            .as_mut()
+            .unwrap()
+            .values
+            .insert("approvalMode".to_string(), json!("danger-full-access"));
+        assert_eq!(
+            leaf(&book, "s-1").approval_mode_or_default(),
+            PermissionMode::DangerFullAccess,
+            "the seated value outranks the schema default"
+        );
     }
 }
