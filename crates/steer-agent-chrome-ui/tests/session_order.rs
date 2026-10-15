@@ -133,3 +133,76 @@ fn newest_session_leads_its_group_in_the_workspace_grouping(cx: &mut TestAppCont
         "the time buckets order pinned-first then newest-first"
     );
 }
+
+/// The workspace group's state key is its PROJECT PATH (not the display
+/// name), a host-seeded order is respected verbatim, and a drag hands the
+/// full new key list to `on_group_order` for the host to persist.
+#[gpui::test]
+fn group_order_seeds_keys_and_drag_mirrors_to_the_host(cx: &mut TestAppContext) {
+    let slot: Rc<RefCell<Option<gpui::Entity<Shell>>>> = Rc::new(RefCell::new(None));
+    let slot_for_build = slot.clone();
+    let recorded: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+    let recorded_for_assert = recorded.clone();
+    cx.update(gpui_component::init);
+    let _window = cx.open_window(size(px(900.), px(600.)), move |window, cx| {
+        steer_i18n::init();
+        register_fonts(cx);
+        let main: gpui::AnyView = cx.new(|_| StubView).into();
+        let recorded_for_build = recorded.clone();
+        let shell = cx.new(|cx| {
+            Shell::new(
+                ShellConfig {
+                    main: Arc::new(StubMain { view: main }),
+                    tool_kinds: vec![],
+                    panel_surface: None,
+                    brand: None,
+                    fixed_rows: vec![],
+                    customizations: vec![],
+                    hooks: HostHooks {
+                        on_group_order: Some(Box::new(move |keys, _cx| {
+                            recorded_for_build.borrow_mut().push(keys.to_vec());
+                        })),
+                        ..HostHooks::default()
+                    },
+                },
+                window,
+                cx,
+            )
+        });
+        shell.update(cx, |s, _| {
+            s.set_sessions(vec![
+                row("a", 100, false, Some("/p/one")),
+                row("b", 200, false, Some("/p/two")),
+                row("c", 300, false, None),
+            ]);
+            // The host seeds the persisted order: two on top, then one;
+            // the loose bucket trails unlisted.
+            s.set_group_order(vec!["/p/two".into(), "/p/one".into()]);
+        });
+        *slot_for_build.borrow_mut() = Some(shell.clone());
+        Root::new(shell, window, cx)
+    });
+    cx.run_until_parked();
+    let shell = slot.borrow().clone().expect("shell captured");
+
+    shell.read_with(cx, |s, cx| {
+        let (_, groups, _) = s.sidebar_props(cx);
+        let keys: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(keys, vec!["/p/two", "/p/one", "Chats"]);
+    });
+
+    // A drag inserts before the target and hands the FULL key list to the
+    // host — the list the host persists and re-seeds.
+    shell.update(cx, |s, cx| {
+        s.move_group("/p/one", "Chats", false, cx);
+    });
+    assert_eq!(
+        recorded_for_assert.borrow().as_slice(),
+        &[vec![
+            "/p/two".to_string(),
+            "Chats".to_string(),
+            "/p/one".to_string()
+        ]],
+        "the drag mirrors the whole order, keyed by project path"
+    );
+}

@@ -169,6 +169,13 @@ status-cancelled = Cancelled
 
 context-agents-captain = Captain
 
+### agent-ui workspace — Captain status strip (above the composer)
+
+captain-steering-prefix = Captain is steering
+activity-collapse = Collapse
+captain-activity-thinking = Thinking
+captain-activity-replying = Replying
+
 ### views/subagent_panel.rs
 
 subagent-panel-waiting = Waiting for sub-agent activity…
@@ -869,6 +876,8 @@ chrome-sidebar-grouping = Toggle grouping
 chrome-sidebar-search = Search sessions
 chrome-sidebar-search-placeholder = Search sessions
 chrome-sidebar-no-match = No matching sessions
+chrome-sidebar-show-more = Show more ({$count})
+chrome-sidebar-show-less = Show less
 chrome-unimplemented = Not implemented yet
 chrome-group-today = Today
 chrome-group-yesterday = Yesterday

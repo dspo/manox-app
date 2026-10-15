@@ -290,6 +290,20 @@ pub enum ActivityEntry {
     Tool(ToolCallItem),
 }
 
+/// What the foreground turn is doing right now — the composer's status
+/// strip reads this (the message column carries no per-entry status glyphs
+/// anymore; the strip is the one live "running" surface).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveActivity {
+    /// A reasoning round is streaming.
+    Thinking,
+    /// The assistant body is streaming.
+    Replying,
+    /// A tool call is in flight; the payload is its one-line summary
+    /// (runtime-provided, rendered verbatim).
+    Tool(String),
+}
+
 /// One contiguous activity segment within a user turn, rendered as a Claude
 /// Code–style Thinking status line. Entries are `ActivityEntry` (reasoning
 /// rounds + tool calls); the container owns the segment-level summary,
@@ -384,6 +398,24 @@ impl ThinkingContainer {
         }
         self.streaming = false;
     }
+    /// Fold every entry the user has not pinned open: during a live stream
+    /// the NEWEST entry owns the stage, so the one before it folds the moment
+    /// the next arrives (the user's manual expansion is sticky and never
+    /// fought). Runs just before a new entry is pushed.
+    pub fn fold_preceding(&mut self) {
+        for entry in &mut self.entries {
+            match entry {
+                ActivityEntry::Reasoning {
+                    collapsed,
+                    user_toggled,
+                    ..
+                } if !*user_toggled && !*collapsed => *collapsed = true,
+                ActivityEntry::Tool(t) if !t.user_toggled && !t.collapsed => t.collapsed = true,
+                _ => {}
+            }
+        }
+    }
+
     /// Flip every streaming reasoning round's `streaming` flag off and re-derive
     /// `streaming`, WITHOUT closing the segment — `accepting_entries` stays true
     /// so subsequent tool calls still fold in. Called on a mid-turn
@@ -814,6 +846,65 @@ impl ConversationState {
         None
     }
 
+    /// Stamp the segment at `ix` with whether the nearest earlier segment
+    /// already shows the same model — a repeated header must not re-display
+    /// it. Called at every segment push (live and rebuild paths).
+    fn sync_model_repeats(&mut self, ix: usize, cx: &mut App) {
+        let Some(tag) = self.items[ix].read(cx).segment_model().cloned() else {
+            return;
+        };
+        let repeats = self.items[..ix].iter().rev().find_map(|e| {
+            let item = e.read(cx);
+            item.segment_model()
+                .filter(|prev| **prev == tag)
+                .map(|_| ())
+        });
+        self.items[ix].update(cx, |item, _| item.model_repeats = repeats.is_some());
+    }
+
+    /// The trailing turn's live activity for the composer's status strip.
+    /// A streaming assistant body names `Replying`; the trailing segment is
+    /// scanned back to front for a streaming reasoning round or a tool in
+    /// flight (a tool's one-line summary rides verbatim); a streaming
+    /// segment with no live entry — the gap between a tool settling and the
+    /// next round — reads as `Thinking`. `None` when nothing is running.
+    pub fn live_activity(&self, cx: &App) -> Option<LiveActivity> {
+        let last = self.items.last()?.read(cx).kind();
+        match last {
+            ConvItem::Assistant {
+                streaming: true, ..
+            } => Some(LiveActivity::Replying),
+            ConvItem::Thinking(t) => {
+                for entry in t.entries.iter().rev() {
+                    match entry {
+                        ActivityEntry::Reasoning {
+                            streaming: true, ..
+                        } => return Some(LiveActivity::Thinking),
+                        ActivityEntry::Tool(tool)
+                            if tool.streaming
+                                || matches!(
+                                    tool.status,
+                                    ToolCallStatus::Running | ToolCallStatus::PendingApproval
+                                ) =>
+                        {
+                            let title = if !tool.title.is_empty() {
+                                tool.title.clone()
+                            } else if !tool.name.is_empty() {
+                                tool.name.clone()
+                            } else {
+                                crate::i18n::t("thinking-tool-result").to_string()
+                            };
+                            return Some(LiveActivity::Tool(title));
+                        }
+                        _ => {}
+                    }
+                }
+                t.streaming.then_some(LiveActivity::Thinking)
+            }
+            _ => None,
+        }
+    }
+
     /// The index of the active activity segment — a `Thinking` container that
     /// is still accepting entries (the turn is in progress, surviving
     /// `StopReason::ToolUse`). A new `ToolCall` folds into this segment; `None`
@@ -860,6 +951,15 @@ impl ConversationState {
             cwd,
             fork_source: _,
         } = ctx;
+        // A blank text delta is not content: no retry-badge retirement, no
+        // segment close, no empty assistant bubble — thinking across it
+        // stays one segment (the same exemption the rebuild path applies to
+        // an empty text part).
+        if let ThreadEvent::AgentText(d) = &event
+            && d.trim().is_empty()
+        {
+            return ApplyOutcome::Unchanged;
+        }
         // A trailing `Retry` badge is stale the moment a real content or
         // terminal-error event lands — that event means the retry either
         // succeeded (assistant text / tool call) or exhausted the budget
@@ -1099,6 +1199,7 @@ impl ConversationState {
                         (i, true)
                     }
                 };
+                self.sync_model_repeats(cix, cx);
                 let delta = delta.clone();
                 self.items[cix].update(cx, |item, cx| {
                     let eix = if let ConvItem::Thinking(t) = item.kind_mut() {
@@ -1111,7 +1212,9 @@ impl ConversationState {
                             }
                             eix
                         } else {
-                            // Start a new reasoning round.
+                            // Start a new reasoning round: the round before
+                            // it folds unless the user pinned it open.
+                            t.fold_preceding();
                             let eix = t.entries.len();
                             t.entries.push(ActivityEntry::Reasoning {
                                 id: next_reasoning_entry_id(),
@@ -1286,6 +1389,7 @@ impl ConversationState {
                                 (i, true)
                             }
                         };
+                        self.sync_model_repeats(cix, cx);
                         let id = id.clone();
                         let name = name.clone();
                         let title = title.clone();
@@ -1302,18 +1406,15 @@ impl ConversationState {
                                         entry.title = title;
                                         entry.input = input;
                                     }
-                                    if matches!(
-                                        status,
-                                        ToolCallStatus::Success
-                                            | ToolCallStatus::Error
-                                            | ToolCallStatus::Denied
-                                    ) && !entry.streaming
-                                        && !entry.user_toggled
-                                        && !entry.collapsed
-                                    {
-                                        schedule_auto_collapse(AutoCollapseTarget::Tool(id.clone()), cx);
-                                    }
+                                    // A terminal status does NOT fold the
+                                    // entry: the next entry's arrival or the
+                                    // reply text does (fold_preceding /
+                                    // close_segment_for_text) — the result
+                                    // must stay readable until then.
                                 } else {
+                                    // The newest entry owns the stage: fold
+                                    // the ones before it (user pins win).
+                                    t.fold_preceding();
                                     t.entries.push(ActivityEntry::Tool(ToolCallItem {
                                         id,
                                         name,
@@ -1323,11 +1424,12 @@ impl ConversationState {
                                         is_error: false,
                                         input: event_input.unwrap_or(serde_json::Value::Null),
                                         streaming: matches!(status, ToolCallStatus::Running),
-                                        collapsed: !matches!(
-                                            status,
-                                            ToolCallStatus::Running
-                                                | ToolCallStatus::PendingApproval
-                                        ),
+                                        // A tool entry folds by default —
+                                        // the title row names the call; a
+                                        // manual expansion is sticky
+                                        // (`user_toggled`) and nothing
+                                        // re-folds it.
+                                        collapsed: true,
                                         user_toggled: false,
                                         panel: None,
                                     }));
@@ -1404,12 +1506,11 @@ impl ConversationState {
                                 entry.is_error = entry_is_error;
                                 entry.streaming = false;
                                 entry.status = status;
-                                // Delayed auto-collapse: the result played out,
-                                // so the entry folds ~1s later unless the user
-                                // toggled it (now or before the timer fires).
-                                if !entry.user_toggled && !entry.collapsed {
-                                    schedule_auto_collapse(AutoCollapseTarget::Tool(id.clone()), cx);
-                                }
+                                // The result landing does NOT fold the entry:
+                                // the call and its result read as an open pair
+                                // until the next node or the reply text
+                                // arrives (fold_preceding /
+                                // close_segment_for_text).
                             }
                             // A finalized entry does NOT close the segment —
                             // `accepting_entries` stays true across the
@@ -1454,10 +1555,7 @@ impl ConversationState {
                         is_error: *is_error,
                         input: serde_json::Value::Null,
                         streaming: false,
-                        collapsed: !matches!(
-                            status,
-                            ToolCallStatus::Running | ToolCallStatus::PendingApproval
-                        ),
+                        collapsed: true,
                         user_toggled: false,
                         panel: None,
                     };
@@ -1469,6 +1567,7 @@ impl ConversationState {
                     self.items.push(cx.new(|_| {
                         MessageItem::new(ConvItem::Thinking(container), role.to_string(), item_id, host.clone())
                     }));
+                    self.sync_model_repeats(ix, cx);
                     // Mount the orphan entry's persistent panel after push — the
                     // panel needs an `&mut Context<MessageItem>` to create the
                     // Entity, which the `cx.new(|_| …)` closure above lacks.
@@ -1819,6 +1918,7 @@ impl ConversationState {
             fork_source,
         } = ctx;
         let mut builder = ItemBuilder::new(Some(recipient.clone())).with_fork_source(fork_source);
+        let mut prev_segment_model: Option<crate::model_tag::ModelTag> = None;
         let mut kinds: Vec<ConvItem> = Vec::new();
         let mut pending: Vec<Message> = Vec::new();
         let mut deferred: Vec<&UiNoteRecord> = Vec::new();
@@ -1870,7 +1970,19 @@ impl ConversationState {
         let items = kinds
             .into_iter()
             .enumerate()
-            .map(|(id, kind)| new_history_item(kind, id, role, host.clone(), cwd.clone(), cx))
+            .map(|(id, kind)| {
+                let item = new_history_item(kind, id, role, host.clone(), cwd.clone(), cx);
+                // A header only shows a model the nearest earlier segment
+                // has not already shown.
+                let tag = item.read(cx).segment_model().cloned();
+                if let Some(tag) = tag {
+                    let repeats = prev_segment_model.replace(tag);
+                    item.update(cx, |i, _| {
+                        i.model_repeats = repeats.is_some_and(|prev| prev == *i.model_tag())
+                    });
+                }
+                item
+            })
             .collect::<Vec<_>>();
         // A fresh conversation: ids start at 0 and the enumerate above already
         // assigned them in item order, so the counter continues from the item
@@ -1913,18 +2025,20 @@ impl ConversationState {
         let builder = self
             .history_builder
             .get_or_insert_with(|| ItemBuilder::new(Some(builder_recipient.clone())));
+        let mut prev_segment_model: Option<crate::model_tag::ModelTag> = None;
         let mut kinds = Vec::new();
         builder.extend(messages, usage, &mut kinds);
         for kind in kinds {
             let id = self.alloc_id();
-            self.items.push(new_history_item(
-                kind,
-                id,
-                role,
-                host.clone(),
-                cwd.clone(),
-                cx,
-            ));
+            let item = new_history_item(kind, id, role, host.clone(), cwd.clone(), cx);
+            let tag = item.read(cx).segment_model().cloned();
+            if let Some(tag) = tag {
+                let repeats = prev_segment_model.replace(tag);
+                item.update(cx, |i, _| {
+                    i.model_repeats = repeats.is_some_and(|prev| prev == *i.model_tag())
+                });
+            }
+            self.items.push(item);
         }
         ApplyOutcome::Appended
     }
@@ -1976,12 +2090,19 @@ fn new_history_item(
     cwd: Option<SharedString>,
     cx: &mut App,
 ) -> Entity<MessageItem> {
+    // A user item carries its OWN turn's model (the wire stamp in its meta),
+    // not the session's current label the rebuild was invoked with — a
+    // reloaded thread's per-turn headers must stay historical.
+    let own_role = match &kind {
+        ConvItem::User { meta: Some(m), .. } if !m.model_id.is_empty() => m.model_id.clone(),
+        _ => role.to_string(),
+    };
     cx.new(|cx| {
         let text = match &kind {
             ConvItem::Assistant { text, .. } => Some(text.clone()),
             _ => None,
         };
-        let mut item = MessageItem::new(kind, role.to_string(), id, host);
+        let mut item = MessageItem::new(kind, own_role, id, host);
         // For rebuilt (non-streaming) text items, feed the full snapshot so the
         // mounted document matches the reloaded history exactly (no further
         // updates expected).
@@ -3423,8 +3544,10 @@ mod tests {
         });
     }
 
+    /// A live tool entry folds by default even while running: the title
+    /// row names the call, and only a manual expansion opens the body.
     #[gpui::test]
-    fn live_tool_entry_opens_expanded(cx: &mut gpui::TestAppContext) {
+    fn live_tool_entry_folds_by_default(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
@@ -3458,17 +3581,17 @@ mod tests {
                 let ActivityEntry::Tool(entry) = &t.entries[0] else {
                     panic!("expected tool entry");
                 };
-                assert!(!entry.collapsed, "live tool entry plays open");
-                assert!(entry.streaming);
+                assert!(entry.collapsed, "a live tool folds by default");
+                assert!(entry.streaming, "the streaming flag still tracks the run");
             });
         });
     }
 
-    /// The auto-collapse after `ToolResult` is delayed ~1s: the entry stays
-    /// expanded right after the result lands, then folds once the clock
-    /// advances.
+    /// The result landing does NOT fold the pair (not even after the old
+    /// 1s delay — that trigger is gone): the call and its result stay an
+    /// open pair until the NEXT node arrives.
     #[gpui::test]
-    fn tool_result_auto_collapse_is_delayed(cx: &mut gpui::TestAppContext) {
+    fn the_result_landing_does_not_fold_the_pair(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
         let conversation =
             cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
@@ -3480,10 +3603,17 @@ mod tests {
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 let _ = c.apply(
+                    &ThreadEvent::AgentThinking("planning".into()),
+                    "model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let _ = c.apply(
                     &ThreadEvent::ToolCall {
                         id: "tu_1".into(),
-                        name: "Bash".into(),
-                        title: "cargo build".into(),
+                        name: "Read".into(),
+                        title: "Read a.rs".into(),
                         status: ToolCallStatus::Running,
                         input: None,
                     },
@@ -3495,7 +3625,7 @@ mod tests {
                 let _ = c.apply(
                     &ThreadEvent::ToolResult {
                         id: "tu_1".into(),
-                        output: "built".into(),
+                        output: "contents".into(),
                         is_error: false,
                     },
                     "model",
@@ -3505,33 +3635,83 @@ mod tests {
                 );
             });
         });
+        // The tool folds by default; pin it open the way a click does, then
+        // let the old delayed-collapse window pass — the result landing
+        // never folds a pinned pair.
         cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                let ActivityEntry::Tool(entry) = &t.entries[0] else {
-                    panic!("expected tool entry");
-                };
-                assert!(
-                    !entry.collapsed,
-                    "still expanded right after the result (delayed collapse)"
-                );
+            conversation.update(cx, |c, cx| {
+                if let Some(item) = c.items().first() {
+                    item.update(cx, |item, cx| {
+                        if let ConvItem::Thinking(t) = item.kind_mut()
+                            && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(1)
+                        {
+                            entry.collapsed = false;
+                            entry.user_toggled = true;
+                        }
+                        cx.notify();
+                    });
+                }
             });
         });
         cx.executor()
-            .advance_clock(std::time::Duration::from_millis(1000));
+            .advance_clock(std::time::Duration::from_millis(2000));
         cx.run_until_parked();
+        cx.read(|cx| {
+            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
+                panic!("expected thinking item");
+            };
+            assert!(
+                matches!(&t.entries[1], ActivityEntry::Tool(t) if !t.collapsed),
+                "the result landing does not fold a pinned pair, even after the delay"
+            );
+        });
+        // The next node (a fresh reasoning round) folds it.
         cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                let ActivityEntry::Tool(entry) = &t.entries[0] else {
-                    panic!("expected tool entry");
-                };
-                assert!(entry.collapsed, "entry folds ~1s after the result");
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::Stop(StopReason::ToolUse),
+                    "model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("round 2".into()),
+                    "model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
             });
+        });
+        cx.read(|cx| {
+            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
+                panic!("expected thinking item");
+            };
+            assert!(
+                matches!(&t.entries[1], ActivityEntry::Tool(t) if !t.collapsed),
+                "the next node does not fold a user-pinned pair"
+            );
+            assert!(
+                matches!(
+                    &t.entries[0],
+                    ActivityEntry::Reasoning {
+                        collapsed: true,
+                        ..
+                    }
+                ),
+                "the first round folds too"
+            );
+            assert!(
+                matches!(
+                    &t.entries[2],
+                    ActivityEntry::Reasoning {
+                        collapsed: false,
+                        ..
+                    }
+                ),
+                "the new round owns the stage"
+            );
         });
     }
 
@@ -3639,13 +3819,14 @@ mod tests {
                 );
             });
         });
-        // Pin the entry open (what the header click handler does).
+        // Pin the entry open (what a title-row click does: flip + pin).
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
                 c.items[0].update(cx, |item, cx| {
                     if let ConvItem::Thinking(t) = item.kind_mut()
                         && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(0)
                     {
+                        entry.collapsed = false;
                         entry.user_toggled = true;
                     }
                     cx.notify();
@@ -3734,6 +3915,406 @@ mod tests {
         });
     }
 
+    /// The newest entry owns the stage during a live stream: the entry
+    /// before it folds the moment the next one arrives, unless the user
+    /// pinned it open (manual expansion is sticky).
+    #[gpui::test]
+    fn a_new_entry_folds_the_preceding_unless_pinned(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("round 1".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                // The tool's arrival folds the reasoning round before it.
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "tu_1".into(),
+                        name: "Bash".into(),
+                        title: "cargo build".into(),
+                        status: ToolCallStatus::Running,
+                        input: None,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
+                panic!("segment item");
+            };
+            assert!(
+                matches!(
+                    &t.entries[0],
+                    ActivityEntry::Reasoning {
+                        collapsed: true,
+                        ..
+                    }
+                ),
+                "the round folds when the tool arrives"
+            );
+            assert!(
+                matches!(&t.entries[1], ActivityEntry::Tool(t) if t.collapsed),
+                "the arriving tool folds by default (its title row names it)"
+            );
+        });
+
+        // Pin the round open the way a click does, then start a new round:
+        // the pinned round keeps its stage, the tool folds instead.
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                if let Some(item) = c.items().first() {
+                    item.update(cx, |item, cx| {
+                        if let ConvItem::Thinking(t) = item.kind_mut()
+                            && let ActivityEntry::Reasoning {
+                                collapsed,
+                                user_toggled,
+                                ..
+                            } = &mut t.entries[0]
+                        {
+                            *collapsed = false;
+                            *user_toggled = true;
+                        }
+                        cx.notify();
+                    });
+                }
+                let _ = c.apply(
+                    &ThreadEvent::Stop(StopReason::ToolUse),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("round 2".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
+                panic!("segment item");
+            };
+            assert!(
+                matches!(
+                    &t.entries[0],
+                    ActivityEntry::Reasoning {
+                        collapsed: false,
+                        user_toggled: true,
+                        ..
+                    }
+                ),
+                "the pinned round keeps its stage"
+            );
+            assert!(
+                matches!(&t.entries[1], ActivityEntry::Tool(t) if t.collapsed),
+                "the unpinned tool folds for the new round"
+            );
+            assert!(t.entries.len() == 3, "round 2 opened");
+        });
+    }
+
+    /// The status strip's projection: a streaming body reads Replying, the
+    /// trailing segment's live entry names Thinking or the tool's one-line
+    /// summary, and a settled tail reads None.
+    #[gpui::test]
+    fn live_activity_tracks_the_trailing_turn(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.read(|cx| {
+            assert_eq!(conversation.read(cx).live_activity(cx), None);
+        });
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("thinking…".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            assert_eq!(
+                conversation.read(cx).live_activity(cx),
+                Some(LiveActivity::Thinking)
+            );
+        });
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "tu_1".into(),
+                        name: "Bash".into(),
+                        title: "cargo build".into(),
+                        status: ToolCallStatus::Running,
+                        input: None,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            assert_eq!(
+                conversation.read(cx).live_activity(cx),
+                Some(LiveActivity::Tool("cargo build".into()))
+            );
+        });
+        // A streaming reply is the trailing turn's face.
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::AgentText("answer".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            assert_eq!(
+                conversation.read(cx).live_activity(cx),
+                Some(LiveActivity::Replying)
+            );
+        });
+    }
+
+    /// A tool entry folds by default — the title row already names the
+    /// call — and a manual expansion is sticky: neither the result landing
+    /// nor the next node re-folds a user-pinned entry.
+    #[gpui::test]
+    fn a_tool_entry_folds_by_default_and_a_pin_is_sticky(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "tu_1".into(),
+                        name: "Read".into(),
+                        title: "Read src/lib.rs".into(),
+                        status: ToolCallStatus::Success,
+                        input: None,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let _ = c.apply(
+                    &ThreadEvent::ToolResult {
+                        id: "tu_1".into(),
+                        output: "file body".into(),
+                        is_error: false,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        let pin = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                conversation.update(cx, |c, cx| {
+                    if let Some(item) = c.items().first() {
+                        item.update(cx, |item, cx| {
+                            if let ConvItem::Thinking(t) = item.kind_mut()
+                                && let Some(ActivityEntry::Tool(entry)) = t.entries.first_mut()
+                            {
+                                entry.collapsed = false;
+                                entry.user_toggled = true;
+                            }
+                            cx.notify();
+                        });
+                    }
+                });
+            });
+        };
+        cx.read(|cx| {
+            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
+                panic!("segment item");
+            };
+            assert!(
+                matches!(&t.entries[0], ActivityEntry::Tool(t) if t.collapsed),
+                "a tool folds by default, whatever its first status"
+            );
+        });
+        // A user pin opens it, and neither the elapsed window nor the next
+        // node re-folds it.
+        pin(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(2000));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("round 2".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
+                panic!("segment item");
+            };
+            assert!(
+                matches!(&t.entries[0], ActivityEntry::Tool(t) if !t.collapsed),
+                "a user-pinned entry stays open"
+            );
+        });
+    }
+
+    /// A segment's header only shows a model the nearest earlier segment
+    /// has not already shown: repeated segments across a turn's text
+    /// boundaries stay nameless (a turn does not stack its own model).
+    #[gpui::test]
+    fn a_repeated_segment_model_does_not_redisplay(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("one".into()),
+                    "same-model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                // The text boundary closes the segment; the next thinking
+                // opens a second one with the SAME model.
+                let _ = c.apply(
+                    &ThreadEvent::AgentText("answer".into()),
+                    "same-model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("two".into()),
+                    "same-model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let items = conversation.read(cx).items();
+            let thinking: Vec<usize> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| matches!(i.read(cx).kind(), ConvItem::Thinking(_)))
+                .map(|(ix, _)| ix)
+                .collect();
+            assert_eq!(thinking.len(), 2, "the text boundary split the segments");
+            assert!(
+                !items[thinking[0]].read(cx).model_repeats,
+                "the first segment names the model"
+            );
+            assert!(
+                items[thinking[1]].read(cx).model_repeats,
+                "the repeated model does not re-display"
+            );
+        });
+    }
+
+    /// A blank live text delta is not a boundary: no empty assistant bubble,
+    /// no segment close — thinking across it stays one segment.
+    #[gpui::test]
+    fn a_blank_text_delta_is_not_a_boundary(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("round 1".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let outcome = c.apply(
+                    &ThreadEvent::AgentText("   ".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                assert!(matches!(outcome, ApplyOutcome::Unchanged));
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("round 2".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let items = conversation.read(cx).items();
+            assert_eq!(items.len(), 1, "no assistant bubble for the blank delta");
+            let ConvItem::Thinking(t) = items[0].read(cx).kind() else {
+                panic!("segment item");
+            };
+            assert!(
+                t.entries
+                    .iter()
+                    .all(|e| matches!(e, ActivityEntry::Reasoning { .. })),
+                "the blank delta keeps the segment whole"
+            );
+        });
+    }
+
     /// A terminal stop schedules the delayed auto-collapse for every expanded
     /// entry — both the finished reasoning round and the completed tool call.
     #[gpui::test]
@@ -3793,16 +4374,24 @@ mod tests {
                 let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
                     panic!("expected thinking item");
                 };
-                for entry in &t.entries {
-                    let collapsed = match entry {
-                        ActivityEntry::Reasoning { collapsed, .. } => collapsed,
-                        ActivityEntry::Tool(tool) => &tool.collapsed,
-                    };
-                    assert!(
-                        !collapsed,
-                        "entries stay open right after the terminal stop"
-                    );
-                }
+                // The reasoning round already folded when the tool arrived
+                // (the newest entry owns the stage); the tool entry is the
+                // one still open right after the terminal stop, waiting on
+                // the delayed fold.
+                assert!(
+                    matches!(
+                        &t.entries[0],
+                        ActivityEntry::Reasoning {
+                            collapsed: true,
+                            ..
+                        }
+                    ),
+                    "the round folded when the tool arrived"
+                );
+                assert!(
+                    matches!(&t.entries[1], ActivityEntry::Tool(t) if t.collapsed),
+                    "the tool folds by default through the terminal stop"
+                );
             });
         });
         cx.executor()

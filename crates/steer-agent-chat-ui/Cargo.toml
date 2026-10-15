@@ -15,8 +15,9 @@ path = "src/lib.rs"
 [features]
 default = []
 # Diagnostic hooks for the message-rendering overlap walk — enabled by
-# agent-ui's own test-support feature.
-test-support = []
+# agent-ui's own test-support feature; reaches manox-agent so tests can
+# install a deterministic provider registry (`install_for_test`).
+test-support = ["manox-agent/test-support"]
 
 [dependencies]
 anyhow.workspace = true

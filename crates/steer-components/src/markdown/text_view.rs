@@ -536,6 +536,17 @@ thread_local! {
 const CODE_HL_CACHE_MAX: usize = 1024;
 const CODE_HL_CACHE_MAX_BYTES: usize = 64 * 1024;
 
+/// Tree-sitter highlight runs for a bare code fragment (no fence) — the
+/// terminal panel's file-shaped bodies share the markdown stack's dispatch
+/// and thread-local cache.
+pub(crate) fn code_runs(
+    value: &str,
+    lang: &str,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    tree_sitter_runs(value, lang, &theme.highlight_theme)
+}
+
 fn tree_sitter_runs(
     value: &str,
     lang: &str,

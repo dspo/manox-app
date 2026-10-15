@@ -152,7 +152,13 @@ pub struct SessionGroup {
     /// the menu still opens there, scoped to the host's fallback cwd, minus
     /// the remove-project row.
     pub project: Option<String>,
+    /// The rows the group renders. The shell folds a long group at a fixed
+    /// row limit (5): `hidden` counts the rows beyond the fold, and
+    /// `expanded` marks a fold the user (or an active-row reveal) lifted —
+    /// the footer row under the group is the chrome's.
     pub rows: Vec<SessionRowData>,
+    pub hidden: usize,
+    pub expanded: bool,
 }
 
 /// A fixed sidebar row (Automations / Chats …) — labels come from the host.
@@ -287,6 +293,9 @@ pub struct SessionList {
     /// Current drop marker (dragged, target, before?); drives the 2px accent
     /// insertion line.
     pub group_drag_marker: Option<(String, String, bool)>,
+    /// The fold footer under a group (show more / show less); the payload is
+    /// the group's key.
+    pub on_show_more: OnId,
 }
 
 impl RenderOnce for SessionList {
@@ -695,6 +704,41 @@ fn group(
                 .iter()
                 .map(|r| session_row(list, r, order, window).into_any_element()),
         );
+        // The fold footer: hidden rows → show more (with the count), a
+        // lifted fold → show less. A group within the limit carries neither.
+        if g.hidden > 0 || g.expanded {
+            let cb = list.on_show_more.clone();
+            let key = g.key.clone();
+            let selector_key = g.key.clone();
+            let (label, id) = if g.hidden > 0 {
+                (
+                    steer_i18n::t_count("chrome-sidebar-show-more", g.hidden as i64).to_string(),
+                    "more",
+                )
+            } else {
+                (
+                    steer_i18n::t("chrome-sidebar-show-less").to_string(),
+                    "less",
+                )
+            };
+            items.push(
+                div()
+                    .id(SharedString::from(format!("grp-fold-{key}")))
+                    .debug_selector(move || format!("chrome-group-fold-{id}-{selector_key}"))
+                    .on_click(move |_, w, cx| cb(&key, w, cx))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .py(px(3.))
+                    .text_size(px(11.5))
+                    .text_color(FG_FAINT)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(FG).bg(LIST_HOVER))
+                    .child(label)
+                    .into_any_element(),
+            );
+        }
     }
 
     let mut slot = div()

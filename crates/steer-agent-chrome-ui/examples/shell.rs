@@ -144,6 +144,7 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             },
         ],
         hooks: HostHooks {
+            on_group_order: None,
             on_pin: Some(Box::new(|id, _w, _cx| store_toggle_pin(id))),
             on_archive: Some(Box::new(|id, _w, _cx| store_toggle_archived(id))),
             on_set_tag: Some(Box::new(|id, tag, _w, _cx| {

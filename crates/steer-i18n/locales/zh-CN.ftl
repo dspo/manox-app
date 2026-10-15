@@ -157,6 +157,13 @@ status-cancelled = 已取消
 
 context-agents-captain = 船长
 
+### agent-ui workspace — Captain 状态行（composer 上方）
+
+captain-steering-prefix = 船长正在驾驶
+activity-collapse = 收起
+captain-activity-thinking = 思考中
+captain-activity-replying = 正在回复
+
 ### views/subagent_panel.rs
 
 subagent-panel-waiting = 等待子代理活动…
@@ -849,6 +856,8 @@ chrome-sidebar-grouping = 切换分组方式
 chrome-sidebar-search = 搜索会话
 chrome-sidebar-search-placeholder = 搜索会话
 chrome-sidebar-no-match = 无匹配会话
+chrome-sidebar-show-more = 显示更多（{$count} 条）
+chrome-sidebar-show-less = 收起
 chrome-unimplemented = 尚未实现
 chrome-group-today = 今天
 chrome-group-yesterday = 昨天

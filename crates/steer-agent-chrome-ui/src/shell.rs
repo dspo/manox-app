@@ -127,6 +127,9 @@ pub type HookOnSetTitle = Box<dyn Fn(&str, String, &mut Window, &mut App)>;
 pub type HookOnGroupMenu = Box<
     dyn Fn(&str, Option<&str>, gpui::Point<Pixels>, &mut Window, &mut App) -> Option<MenuEntity>,
 >;
+/// Group-order write-back (the full key list, in the user's drag order). The
+/// host persists it; the chrome never learns where the order lives.
+pub type HookOnGroupOrder = Box<dyn Fn(&[String], &mut App)>;
 /// The popup menu entity the host builds and the shell mounts.
 pub type MenuEntity = Entity<gpui_component::menu::PopupMenu>;
 /// Host nav move: opens the previous/next thread in the host's history and
@@ -180,6 +183,9 @@ pub struct HostHooks {
     /// Group-menu builder (the project actions: launch agents / terminal /
     /// editor, remove project). Absent → group headers carry no menu surface.
     pub on_group_menu: Option<HookOnGroupMenu>,
+    /// Group-order write-back: fired with the full key list whenever a drag
+    /// commits. Absent → the drag reorders this session's display only.
+    pub on_group_order: Option<HookOnGroupOrder>,
     /// Close a live external session (the external row menu's 关闭会话):
     /// the host closes its tab AND reaps the sidebar row. Absent → the menu
     /// item fires nothing (a host that surfaces external rows owes this).
@@ -209,6 +215,9 @@ pub struct ShellConfig {
 
 /// Thread-tag character ceiling (the sidebar editor's rule).
 const MAX_THREAD_TAG_CHARS: usize = 10;
+/// How many rows a sidebar group renders before folding behind a
+/// "show more" footer.
+pub const GROUP_ROW_LIMIT: usize = 5;
 /// External-session title ceiling — a title is a name, not a paragraph. The
 /// host's OSC-title capture clamps to the same budget as the rename editor.
 pub const MAX_EXTERNAL_TITLE_CHARS: usize = 80;
@@ -228,6 +237,15 @@ pub struct Shell {
     pub sessions: Vec<SessionRow>,
     pub active: Option<String>,
     collapsed: Vec<String>,
+    /// Groups whose 5-row fold was lifted (show more or an active-row
+    /// reveal); cleared when the group collapses. Interior mutability: the
+    /// reveal lands inside the `&self` projection.
+    expanded_groups: RefCell<Vec<String>>,
+    /// Per group, the active row id it was last auto-revealed for — the
+    /// reveal fires once per active row, so a user's show-less sticks until
+    /// the foreground thread moves again. Interior mutability: the reveal
+    /// lands inside the `&self` projection.
+    revealed_for: RefCell<HashMap<String, String>>,
     /// Group (project) display order: the persisted result of drag
     /// reordering; unlisted groups trail in default order.
     group_order: Vec<String>,
@@ -309,6 +327,8 @@ impl Shell {
             sessions: Vec::new(),
             active: None,
             collapsed: Vec::new(),
+            expanded_groups: RefCell::new(Vec::new()),
+            revealed_for: RefCell::new(HashMap::new()),
             group_order: Vec::new(),
             group_drag_marker: None,
             hovered_row: None,
@@ -500,11 +520,19 @@ impl Shell {
         }
     }
 
+    /// Host-seeded group order (the persisted manual order with the
+    /// unrecorded defaults resolved); `move_group` re-orders within it and
+    /// the host re-seeds the same list on the next snapshot.
+    pub fn set_group_order(&mut self, keys: Vec<String>) {
+        self.group_order = keys;
+    }
+
     /// Group reorder: insert `dragged` before/after `target`'s edge
-    /// (same-name / same-place drops are ignored). Committing clears the
-    /// marker. A no-op in time grouping — drag order is a workspace-mode
-    /// concept only.
-    pub fn move_group(&mut self, dragged: &str, target: &str, before: bool) {
+    /// (same-key / same-place drops are ignored). Committing clears the
+    /// marker and hands the full new key list to
+    /// [`HostHooks::on_group_order`]. A no-op in time grouping — drag order
+    /// is a workspace-mode concept only.
+    pub fn move_group(&mut self, dragged: &str, target: &str, before: bool, cx: &mut App) {
         self.group_drag_marker = None;
         if dragged == target || self.grouping.is_time() {
             return;
@@ -516,7 +544,7 @@ impl Shell {
         let current: Vec<String> = self
             .workspace_groups(&all)
             .iter()
-            .map(|g| g.name.clone())
+            .map(|g| g.key.clone())
             .collect();
         if self.group_order.is_empty() {
             self.group_order = current.clone();
@@ -539,6 +567,9 @@ impl Shell {
             .unwrap_or(order.len());
         order.insert(insert_at, dragged.to_string());
         self.group_order = order;
+        if let Some(hook) = &self.hooks.on_group_order {
+            hook(&self.group_order, cx);
+        }
     }
 
     /// Row menu (right-click on a row): the ONLY action surface. Threads:
@@ -792,6 +823,26 @@ impl Shell {
             self.collapsed.remove(i);
         } else {
             self.collapsed.push(key.to_string());
+            // Collapsing resets the fold: the next expansion starts at the
+            // row limit again.
+            self.expanded_groups.borrow_mut().retain(|k| k != key);
+            self.revealed_for.borrow_mut().remove(key);
+        }
+    }
+
+    /// The fold footer's toggle: lift the group's 5-row fold or lay it back
+    /// down. A manual show-less records the active row as already revealed,
+    /// so the auto-reveal does not immediately lift the fold again.
+    pub fn toggle_show_more(&mut self, key: &str) {
+        let mut expanded = self.expanded_groups.borrow_mut();
+        if let Some(i) = expanded.iter().position(|k| k == key) {
+            expanded.remove(i);
+            drop(expanded);
+            if let Some(a) = self.active.clone() {
+                self.revealed_for.borrow_mut().insert(key.to_string(), a);
+            }
+        } else {
+            expanded.push(key.to_string());
         }
     }
 
@@ -1057,33 +1108,79 @@ impl Shell {
             self.workspace_groups(&visible)
         };
         // While filtering, a group that matched hides nothing: the term is
-        // the visible structure, not the collapse toggles.
+        // the visible structure — every surviving row renders (no 5-row
+        // fold, no collapse toggles).
         if filter.is_some() {
             for g in &mut groups {
                 g.collapsed = false;
+                g.hidden = 0;
+                g.expanded = false;
+            }
+        } else {
+            // The 5-row fold, uniform across both grouping modes. A fold that
+            // hides the ACTIVE row lifts itself once per active row (recorded
+            // in `revealed_for`); a manual show-less after that sticks until
+            // the active row changes. The reveal lands in `expanded_groups` —
+            // the footer's show-less must find the lift to take it down.
+            let active = self.active.clone();
+            for g in &mut groups {
+                if g.rows.len() <= GROUP_ROW_LIMIT {
+                    continue;
+                }
+                let mut lifted = self.expanded_groups.borrow().iter().any(|k| k == &g.key);
+                if !lifted
+                    && let Some(a) = &active
+                    && g.rows[GROUP_ROW_LIMIT..].iter().any(|r| &r.id == a)
+                {
+                    let mut revealed = self.revealed_for.borrow_mut();
+                    if revealed.get(&g.key) != Some(a) {
+                        revealed.insert(g.key.clone(), a.clone());
+                        drop(revealed);
+                        self.expanded_groups.borrow_mut().push(g.key.clone());
+                        lifted = true;
+                    }
+                }
+                if lifted {
+                    g.hidden = 0;
+                    g.expanded = true;
+                } else {
+                    g.hidden = g.rows.len() - GROUP_ROW_LIMIT;
+                    g.expanded = false;
+                    g.rows.truncate(GROUP_ROW_LIMIT);
+                }
             }
         }
         (self.fixed_rows.clone(), groups, self.customizations.clone())
     }
 
     /// Workspace grouping (the default): one group per project display name,
-    /// ordered by the recorded drag order, unrecorded groups trailing. The
-    /// group's project path rides the rows (the host stamps every row of a
-    /// group with it).
+    /// keyed by the project path (the loose bucket keys by its display name —
+    /// "Chats" — which is also its drag/persist identity), ordered by the
+    /// recorded drag order, unrecorded groups trailing. The group's project
+    /// path rides the rows (the host stamps every row of a group with it).
+    ///
+    /// Known wart, accepted: groups MERGE by display name while keys and
+    /// persistence ride the path — two different paths sharing a basename
+    /// render as one header keyed by the first row's path. The other path is
+    /// still stamped and ordered by the host registry; it just never
+    /// surfaces as its own group here.
     fn workspace_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
         let mut groups: Vec<SessionGroup> = Vec::new();
         for s in sessions {
-            let collapsed = self.collapsed.iter().any(|k| k == &s.workspace);
+            let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
+            let collapsed = self.collapsed.iter().any(|k| k == &key);
             if let Some(g) = groups.iter_mut().find(|g| g.name == s.workspace) {
                 g.rows.push(s.row_data());
                 g.collapsed = collapsed;
             } else {
                 groups.push(SessionGroup {
                     name: s.workspace.clone(),
-                    key: s.workspace.clone(),
+                    key,
                     collapsed,
                     project: s.project.clone(),
                     rows: vec![s.row_data()],
+                    hidden: 0,
+                    expanded: false,
                 });
             }
         }
@@ -1096,8 +1193,8 @@ impl Shell {
             .map(|(i, n)| (n.as_str(), i))
             .collect();
         groups.sort_by(|a, b| {
-            let ka = seq.get(a.name.as_str());
-            let kb = seq.get(b.name.as_str());
+            let ka = seq.get(a.key.as_str());
+            let kb = seq.get(b.key.as_str());
             match (ka, kb) {
                 (Some(x), Some(y)) => x.cmp(y),
                 (Some(_), None) => std::cmp::Ordering::Less,
@@ -1133,6 +1230,8 @@ impl Shell {
                     collapsed: self.collapsed.iter().any(|k| k == key),
                     project: None,
                     rows: Vec::new(),
+                    hidden: 0,
+                    expanded: false,
                 }
             })
             .collect();
@@ -1579,6 +1678,10 @@ impl Shell {
             this.toggle_group(name);
             cx.notify();
         });
+        let on_show_more = cx.listener(|this, key: &String, _w, cx| {
+            this.toggle_show_more(key);
+            cx.notify();
+        });
         let on_new = cx.listener(|this, _: &ClickEvent, w, cx| {
             this.new_session(w, cx);
             cx.notify();
@@ -1623,7 +1726,7 @@ impl Shell {
         });
         let on_move_group = cx.listener(
             |this, (dragged, target, before): &(String, String, bool), _w, cx| {
-                this.move_group(dragged, target, *before);
+                this.move_group(dragged, target, *before, cx);
                 cx.notify();
             },
         );
@@ -1709,6 +1812,7 @@ impl Shell {
                     on_drag_move_group(&(dragged.clone(), target.clone(), before), w, cx)
                 }),
                 group_drag_marker: marker,
+                on_show_more: std::rc::Rc::new(move |key, w, cx| on_show_more(key, w, cx)),
             })
     }
 

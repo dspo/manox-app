@@ -1,11 +1,11 @@
 //! A running indicator, as one of the shapes this crate *offers*.
 //!
-//! Nothing here is wired into a component by default. `ChainOfThoughtStep` takes
-//! its marker as a slot, and so does `Reasoning` its icon, so a host picks
-//! whatever says "in flight" in its own product — this spinner, the kit's
-//! rotating `Spinner`, a static glyph, or something of its own. Shipping one
-//! ready-made indicator here is a convenience, not a default: the components
-//! have no opinion about it.
+//! Nothing here is wired into a component by default. A host's step row
+//! takes its marker as a slot, and so does `Reasoning` its icon, so a host
+//! picks whatever says "in flight" in its own product — this spinner, the
+//! kit's rotating `Spinner`, a static glyph, or something of its own.
+//! Shipping one ready-made indicator here is a convenience, not a default:
+//! the components have no opinion about it.
 
 use std::time::Duration;
 

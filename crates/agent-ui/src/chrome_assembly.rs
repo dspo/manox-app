@@ -276,9 +276,27 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         // into the snapshot as sidebar rows; the shell regroups them under
         // their project's header.
         sessions.extend(ws.read(cx).external_session_rows());
+        // The registry stamps first-seen projects (the default order's
+        // newest-added-first clock) and resolves the display order: the
+        // manual drag order, with unrecorded projects newest-first on top.
+        let keys: Vec<String> = {
+            let mut seen: Vec<String> = Vec::new();
+            let mut all: Vec<String> = Vec::new();
+            for s in &sessions {
+                let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
+                if s.project.is_some() && !seen.contains(&s.project.clone().unwrap()) {
+                    seen.push(s.project.clone().unwrap());
+                }
+                if !all.contains(&key) {
+                    all.push(key);
+                }
+            }
+            crate::project_registry::note_seen_projects(&seen);
+            crate::project_registry::order_groups(&all)
+        };
         // The sidebar highlight follows the FOREGROUND thread, not the last
         // click: new-thread landings, /exit replacements and successor
-        // hand-offs all switch without a sidebar click, and a stale
+        // hand-offs all switch without a sidebar click; a stale
         // highlight would advertise the wrong session as active. An external
         // session's highlight is not stolen — it is no thread, so the
         // foreground rule has no opinion on it while it holds the highlight.
@@ -299,6 +317,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .map(|id| ws.read(cx).is_external_session(id))
             .unwrap_or(false);
         shell.update(cx, |shell, cx| {
+            shell.set_group_order(keys);
             shell.set_sessions(sessions);
             if !active_is_external && shell.active != fg {
                 shell.active = fg;
@@ -611,6 +630,11 @@ fn shell_config(
                 move |_key, project, _anchor, window, cx| {
                     Some(crate::project_menu::group_menu(project, &ws, window, cx))
                 }
+            })),
+            // The drag-reorder write-back: the key list the shell recorded
+            // is the registry's manual order, verbatim.
+            on_group_order: Some(Box::new(|keys, _cx| {
+                crate::project_registry::set_manual_order(keys.to_vec());
             })),
             // The external row menu's 关闭会话: drop the session (its
             // terminal view dies with the record) and fall back to the

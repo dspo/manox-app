@@ -25,7 +25,8 @@ use crate::conversation::{
     UserImage, UserTurnMeta, next_reasoning_entry_id,
 };
 use crate::i18n;
-use ai_elements::{BrailleSpinner, ChainOfThought, ChainOfThoughtHeader, ChainOfThoughtStep};
+use crate::views::activity_chain::{ActivityChain, ActivityChainHeader, ActivityStep};
+use ai_elements::BrailleSpinner;
 use base64::Engine as _;
 use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui::prelude::*;
@@ -204,7 +205,13 @@ fn text_body_of(kind: &ConvItem) -> Option<(bool, String)> {
 /// still carry the per-block hover copy controls.
 pub struct MessageItem {
     kind: ConvItem,
-    role: String,
+    /// The turn's model identity, resolved once at construction (the wire
+    /// id never renders verbatim — see [`crate::model_tag`]).
+    model: crate::model_tag::ModelTag,
+    /// Set when the NEAREST earlier activity segment already carries the
+    /// same model: a header must not re-display it (a turn's repeated
+    /// segments would stack the same name over and over).
+    pub(crate) model_repeats: bool,
     id: usize,
     /// Weak handle to the owning `Workspace`, used by interactive message
     /// rows such as `AgentTask` to open their peer right-pane view.
@@ -241,7 +248,8 @@ impl MessageItem {
     pub fn new(kind: ConvItem, role: String, id: usize, host: ChatHostHandle) -> Self {
         Self {
             kind,
-            role,
+            model: crate::model_tag::ModelTag::resolve(&role),
+            model_repeats: false,
             id,
             host,
             markdown: None,
@@ -254,6 +262,17 @@ impl MessageItem {
 
     pub fn kind(&self) -> &ConvItem {
         &self.kind
+    }
+
+    /// The item's resolved model identity.
+    pub fn model_tag(&self) -> &crate::model_tag::ModelTag {
+        &self.model
+    }
+
+    /// The model identity when this item is an activity segment (`None`
+    /// for every other kind) — the repeats walk only crosses segments.
+    pub fn segment_model(&self) -> Option<&crate::model_tag::ModelTag> {
+        matches!(self.kind, ConvItem::Thinking(_)).then_some(&self.model)
     }
 
     pub fn kind_mut(&mut self) -> &mut ConvItem {
@@ -392,6 +411,9 @@ impl MessageItem {
         cwd: Option<SharedString>,
         cx: &mut gpui::Context<MessageItem>,
     ) {
+        // File-shaped bodies highlight as their file's language; the panel
+        // degrades to plain text when the language is unknown.
+        let lang = tool_lang(entry);
         let (kind, body) = tool_panel_body(entry);
         if entry.panel.is_none() {
             // Only the `bash` tool runs a real shell command a human would type in
@@ -437,6 +459,7 @@ impl MessageItem {
             let streaming = entry.streaming;
             panel.update(cx, |p, cx| {
                 p.set_kind(kind, cx);
+                p.set_lang(lang, cx);
                 p.set_streaming(streaming, cx);
                 p.set_output(body, cx);
             });
@@ -698,7 +721,8 @@ impl Render for MessageItem {
         centered(render_item(
             &self.kind,
             self.id,
-            &self.role,
+            &self.model,
+            self.model_repeats,
             &theme,
             agent_ctx.as_ref(),
             tool_ctx.as_ref(),
@@ -736,7 +760,8 @@ impl Render for MessageItem {
 pub fn render_item(
     item: &ConvItem,
     ix: usize,
-    role: &str,
+    model: &crate::model_tag::ModelTag,
+    model_repeats: bool,
     theme: &Theme,
     agent_ctx: Option<&AgentTaskCtx>,
     tool_ctx: Option<&ToolCallCtx>,
@@ -754,7 +779,7 @@ pub fn render_item(
                 meta: meta.as_ref(),
             },
             ix,
-            role,
+            model,
             theme,
             body,
             copy,
@@ -770,7 +795,7 @@ pub fn render_item(
         } => render_assistant(
             AssistantRenderContent {
                 text,
-                role,
+                model,
                 activity_header: *activity_header,
                 streaming: *streaming,
             },
@@ -785,7 +810,9 @@ pub fn render_item(
             copy,
             cx,
         ),
-        ConvItem::Thinking(t) => render_thinking(t, ix, role, theme, tool_ctx, copy, cx),
+        ConvItem::Thinking(t) => {
+            render_thinking(t, ix, model, model_repeats, theme, tool_ctx, copy, cx)
+        }
         ConvItem::ToolCall(t) => {
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
                 render_ask_user_card(t, ix, theme, tool_ctx, copy, cx)
@@ -934,17 +961,17 @@ struct UserRenderContent<'a> {
 fn render_user(
     content: UserRenderContent<'_>,
     ix: usize,
-    model: &str,
+    model: &crate::model_tag::ModelTag,
     theme: &Theme,
     body: Option<ChatDocument>,
     copy: &CopyFeedback,
     _cx: &mut App,
 ) -> gpui::AnyElement {
     let UserRenderContent { text, images, meta } = content;
-    let model_id = meta
-        .map(|m| m.model_id.as_str())
-        .filter(|m| !m.is_empty())
-        .unwrap_or(model);
+    // The item's tag already carries this turn's model (the live push stamps
+    // `meta.model_id`, the history wrap overrides with it), so the header
+    // reads the resolved tag — never the raw wire id.
+    let model_id = model.plain();
     let sender = meta
         .and_then(|m| m.author.as_ref())
         .map(author_display)
@@ -956,7 +983,7 @@ fn render_user(
     let time = meta
         .map(|m| format_user_turn_time(m.timestamp))
         .unwrap_or_default();
-    let header = user_turn_header(&sender, &recipient, model_id, &time);
+    let header = user_turn_header(&sender, &recipient, &model_id, &time);
     let group = format!("user-{ix}");
     // An inbound peer delivery keeps the hue the team banner used, so agent
     // chatter reads apart from the human's own turns.
@@ -1109,7 +1136,7 @@ impl ForkUnavailable {
 /// precedent).
 pub struct AssistantRenderContent<'a> {
     text: &'a str,
-    role: &'a str,
+    model: &'a crate::model_tag::ModelTag,
     activity_header: bool,
     streaming: bool,
 }
@@ -1129,7 +1156,7 @@ pub fn render_assistant(
 ) -> gpui::AnyElement {
     let AssistantRenderContent {
         text,
-        role,
+        model,
         activity_header,
         streaming,
     } = content;
@@ -1147,12 +1174,12 @@ pub fn render_assistant(
     let mut col = v_flex().group(group.clone()).w_full().min_w_0().gap_1();
     if !activity_header {
         col = col.child(
-            h_flex().w_full().min_w_0().gap_1().items_center().child(
-                gpui::div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(role.to_string()),
-            ),
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .items_center()
+                .child(model.render(theme)),
         );
     }
     // The action row sits under the body (never overlaid on it), matching the
@@ -1566,6 +1593,53 @@ pub fn render_retry(
 
 /// Heuristic: map a tool name to a markdown code-block language tag so that
 /// syntax highlighting can colour the output.
+/// The file-shaped tools whose panel bodies render through tree-sitter when
+/// the path's language resolves (`Read`'s hashline body, `Write`'s written
+/// content).
+fn tool_lang(entry: &ToolCallItem) -> Option<String> {
+    let file_shaped = matches!(
+        entry.name.as_str(),
+        manox_agent::tools::READ | manox_agent::tools::WRITE
+    );
+    if !file_shaped {
+        return None;
+    }
+    let path = entry.input.get("path").and_then(|v| v.as_str())?;
+    lang_for_path(path)
+}
+
+/// File extension → fence language, for highlighting a file-shaped tool
+/// body. The highlighter itself degrades gracefully on unknown names, so
+/// this table only needs the common entries.
+fn lang_for_path(path: &str) -> Option<String> {
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    let lang = match ext.as_str() {
+        "rs" => "rust",
+        "py" | "pyi" => "python",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "jsx",
+        "json" => "json",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "sh" | "bash" | "zsh" => "bash",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "go" => "go",
+        "java" => "java",
+        "rb" => "ruby",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "sql" => "sql",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        _ => return None,
+    };
+    Some(lang.to_string())
+}
+
 fn lang_hint_for_tool(name: &str) -> Option<&'static str> {
     match name {
         x if x == manox_agent::tools::BASH => Some("bash"),
@@ -1611,11 +1685,8 @@ fn segment_stats(t: &ThinkingContainer) -> SegmentStats {
 /// The model display name on a segment header row. The assistant reply that
 /// follows a segment renders no model row of its own, so the header is the
 /// single place the turn's model shows.
-fn segment_header_model(role: &str, theme: &Theme) -> gpui::Div {
-    gpui::div()
-        .text_sm()
-        .text_color(theme.muted_foreground)
-        .child(role.to_string())
+fn segment_header_model(model: &crate::model_tag::ModelTag, theme: &Theme) -> gpui::AnyElement {
+    model.render(theme)
 }
 
 /// Which entries of a segment render below its cover row, plus the cover's
@@ -1660,22 +1731,25 @@ fn segment_layout(t: &ThinkingContainer) -> SegmentLayout {
     }
 }
 
-/// Render an activity segment as a chain of thought: a header row carrying the
-/// model display name plus the segment's cover (per-kind counts, elapsed,
-/// failure and approval badges) over one step per entry. Collapsed shows the
-/// header alone (live or settled); expanded lists every entry under it, each
-/// step drawing the connector rail. Segments with fewer than two entries render
-/// flat under a model-name-only header — folding a single row would only add a
-/// click.
+/// Render an activity segment: a header row carrying the model display name
+/// plus the segment's cover (per-kind counts, elapsed, failure and approval
+/// badges) over one step per entry. Collapsed shows the header alone (live or
+/// settled); expanded lists every entry under it, each step drawing the
+/// connector rail. Segments with fewer than two entries render flat under a
+/// model-name-only header — folding a single row would only add a click.
 ///
 /// The block is controlled: `layout.expanded` (which already folds in the
 /// pending-approval force-open) is the open state, and the click writes the
 /// container's own `collapsed` / `user_toggled`. None of the segment's policy
-/// moved into the component.
+/// moved into the view.
+// One render input per slot (the leaf-dispatch convention `render_item`
+// documents — a config struct would only rename the same values).
+#[allow(clippy::too_many_arguments)]
 pub fn render_thinking(
     t: &ThinkingContainer,
     ix: usize,
-    role: &str,
+    model: &crate::model_tag::ModelTag,
+    model_repeats: bool,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
     copy: &CopyFeedback,
@@ -1687,13 +1761,11 @@ pub fn render_thinking(
         return gpui::div().into_any_element();
     }
     let layout = segment_layout(t);
-    // The list caches each row's height, so the segment's fold stays instant:
-    // a reveal that changes height frame by frame would go stale under it. The
-    // chevron, the content fade, and each step's entrance are layout-neutral
-    // and stay on.
-    let mut chain = ChainOfThought::new(("activity-tree", ix))
-        .open(layout.expanded)
-        .animated(false);
+    // The list caches each row's height, so the fold never animates its
+    // height (a reveal that changes height frame by frame would go stale
+    // under it); the chevron, the content fade, and each step's entrance are
+    // layout-neutral and stay on.
+    let mut chain = ActivityChain::new(("activity-tree", ix)).open(layout.expanded);
     for &eix in &layout.visible {
         chain = chain.step(render_activity_entry(
             &t.entries[eix],
@@ -1714,7 +1786,9 @@ pub fn render_thinking(
             .min_w_0()
             .gap_0p5()
             .debug_selector(|| format!("message-overflow-activity-tree-{ix}"))
-            .child(segment_header_model(role, theme))
+            .when(!model_repeats, |el| {
+                el.child(segment_header_model(model, theme))
+            })
             .child(chain)
             .into_any_element();
     }
@@ -1730,9 +1804,9 @@ pub fn render_thinking(
 
     // The header's label is the model display name — the segment is the single
     // place a turn's model shows, so it stays the row's identity rather than a
-    // generic "Chain of Thought". Everything the cover used to carry rides the
+    // generic activity label. Everything the cover used to carry rides the
     // meta slots, in the order it was shown.
-    let mut header = ChainOfThoughtHeader::new(("activity-cover", ix)).label(role.to_string());
+    let mut header = ActivityChainHeader::new(("activity-cover", ix)).label(model.render(theme));
     if t.streaming {
         header = header.meta(
             BrailleSpinner::new()
@@ -1832,7 +1906,7 @@ fn render_activity_entry(
     tool_ctx: Option<&ToolCallCtx>,
     owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
-) -> ChainOfThoughtStep {
+) -> ActivityStep {
     let id = format!("message-overflow-activity-entry-{cix}-{eix}");
     match e {
         ActivityEntry::Reasoning {
@@ -1860,6 +1934,47 @@ fn render_activity_entry(
     }
 }
 
+/// The toggle a reasoning round's two click faces share (the folded preview
+/// row and the expanded collapse row). Address the round by its stable id:
+/// the (container, entry) indices captured at render time can point at the
+/// wrong container by the time the click fires (a notice inserts above the
+/// segment; the toggle must never land on a stranger).
+fn reasoning_round_toggle(
+    host: Option<ChatHostHandle>,
+    entry_id: &str,
+) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut App) + 'static {
+    let toggle_id = entry_id.to_string();
+    move |_, _window, cx: &mut App| {
+        let Some(host) = host.clone() else {
+            return;
+        };
+        let Some(conv) = host.conversation(cx) else {
+            return;
+        };
+        conv.update(cx, |c, cx| {
+            let id = toggle_id.clone();
+            if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
+                && let Some(item) = c.items().get(cix)
+            {
+                item.update(cx, |item, cx| {
+                    if let ConvItem::Thinking(t) = item.kind_mut()
+                        && let Some(ActivityEntry::Reasoning {
+                            collapsed,
+                            user_toggled,
+                            ..
+                        }) = t.entries.get_mut(eix)
+                    {
+                        *collapsed = !*collapsed;
+                        *user_toggled = true;
+                    }
+                    cx.notify();
+                });
+            }
+            cx.notify();
+        });
+    }
+}
+
 /// A reasoning round's step: the marker spins while the round streams, the body
 /// is the persistent markdown document the streaming path keeps in sync.
 // One arg per slot the step is assembled from (selector identity, fold data,
@@ -1879,60 +1994,23 @@ fn reasoning_step(
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
     _cx: &mut App,
-) -> ChainOfThoughtStep {
+) -> ActivityStep {
     let host = tool_ctx.map(|c| c.host.clone());
-    let toggle_id = entry_id.to_string();
-    let marker: gpui::AnyElement = if streaming {
-        BrailleSpinner::new()
-            .xsmall()
-            .color(theme.muted_foreground)
-            .into_any_element()
-    } else {
-        Icon::new(IconName::BookOpen)
-            .xsmall()
-            .text_color(theme.muted_foreground)
-            .into_any_element()
-    };
+    let toggle_preview = reasoning_round_toggle(host.clone(), entry_id);
+    let toggle_collapse = reasoning_round_toggle(host.clone(), entry_id);
 
-    // The row's structure — chevron, hover, click, one-line clipped title — is
-    // the step's; this layer supplies the data and what a click means.
-    let mut step = ChainOfThoughtStep::new(id)
-        .icon(marker)
-        .title(i18n::t("message-reasoning"))
-        .disclosed(!collapsed, move |_, _window, cx: &mut App| {
-            let Some(host) = host.clone() else {
-                return;
-            };
-            let Some(conv) = host.conversation(cx) else {
-                return;
-            };
-            conv.update(cx, |c, cx| {
-                let id = toggle_id.clone();
-                // Address the round by its stable id, exactly like the
-                // tool step: the (container, entry) indices captured at
-                // render time can point at the wrong container by the
-                // time the click fires (a notice inserts above the
-                // segment; the toggle must never land on a stranger).
-                if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
-                    && let Some(item) = c.items().get(cix)
-                {
-                    item.update(cx, |item, cx| {
-                        if let ConvItem::Thinking(t) = item.kind_mut()
-                            && let Some(ActivityEntry::Reasoning {
-                                collapsed,
-                                user_toggled,
-                                ..
-                            }) = t.entries.get_mut(eix)
-                        {
-                            *collapsed = !*collapsed;
-                            *user_toggled = true;
-                        }
-                        cx.notify();
-                    });
-                }
-                cx.notify();
-            });
-        });
+    // No label row: a reasoning round renders its own body (secondary
+    // color) directly; the folded face is the body's own first line, so the
+    // round never shows a generic "thinking" caption. The step's structure —
+    // hover, click, the fold — is the step's; this layer supplies the data.
+    let first_line = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| truncate(l.trim(), 80))
+        .unwrap_or_default();
+    let mut step = ActivityStep::new(id)
+        .when(!first_line.is_empty(), |s| s.preview(first_line))
+        .disclosed(!collapsed, toggle_preview);
     if !collapsed && !text.is_empty() {
         // The persistent `ChatDocument` (synced by the streaming/rebuild path)
         // carries the document; fall back to a per-frame mount only before the
@@ -1948,17 +2026,51 @@ fn reasoning_step(
                 )
             })
             .unwrap_or_else(|| static_body(("reasoning-entry-body", eix), text, theme, owner));
+        // The expanded body carries its own fold-back: a hover-revealed
+        // collapse row pinned above the text (a preview row answers the
+        // folded state; the expanded state has no other click face, and the
+        // prose itself must stay selectable). The row keeps its height
+        // while transparent, so the reveal never reflows the list.
+        let group = format!("reasoning-step-{cix}-{eix}");
+        let muted = theme.muted_foreground;
+        let collapse_row = h_flex()
+            .id(("reasoning-collapse", eix))
+            .h(px(16.))
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .gap_1()
+            .opacity(0.)
+            .group_hover(group.clone(), |s| s.opacity(1.))
+            .cursor_pointer()
+            .on_click(toggle_collapse)
+            .child(Icon::new(IconName::ChevronUp).xsmall().text_color(muted))
+            .child(
+                gpui::div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(i18n::t("activity-collapse")),
+            );
         step = step.content(
-            gpui::div()
+            v_flex()
                 .id(("reasoning-body", eix))
                 .w_full()
                 .min_w_0()
-                .overflow_x_hidden()
-                .py_1()
-                .italic()
-                .text_color(theme.muted_foreground)
-                .debug_selector(move || format!("message-overflow-activity-entry-body-{cix}-{eix}"))
-                .child(body),
+                .group(group)
+                .child(collapse_row)
+                .child(
+                    gpui::div()
+                        .w_full()
+                        .min_w_0()
+                        .overflow_x_hidden()
+                        .py_1()
+                        .italic()
+                        .text_color(theme.muted_foreground)
+                        .debug_selector(move || {
+                            format!("message-overflow-activity-entry-body-{cix}-{eix}")
+                        })
+                        .child(body),
+                ),
         );
     }
     step
@@ -1979,85 +2091,139 @@ fn tool_step(
     tool_ctx: Option<&ToolCallCtx>,
     owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
-) -> ChainOfThoughtStep {
-    use manox_agent::ToolCallStatus;
-    let is_active = matches!(
-        e.status,
-        ToolCallStatus::PendingApproval | ToolCallStatus::Running
-    );
-    let status_color = match e.status {
-        ToolCallStatus::PendingApproval | ToolCallStatus::Running => theme.muted_foreground,
-        ToolCallStatus::Success | ToolCallStatus::Continued => theme.success,
-        ToolCallStatus::Error | ToolCallStatus::Denied => theme.danger,
-        ToolCallStatus::Cancelled => theme.muted_foreground,
-    };
-    let marker: gpui::AnyElement = if is_active {
-        BrailleSpinner::new()
-            .xsmall()
-            .color(status_color)
-            .into_any_element()
-    } else {
-        let icon = match e.status {
-            ToolCallStatus::Success | ToolCallStatus::Continued => {
-                Icon::default().path("icons/circle-check-big.svg")
-            }
-            ToolCallStatus::Error | ToolCallStatus::Denied => Icon::new(IconName::CircleX),
-            ToolCallStatus::Cancelled => Icon::new(IconName::Minus),
-            _ => unreachable!(),
-        };
-        icon.xsmall().text_color(status_color).into_any_element()
-    };
-    // Live tools play open; the delayed auto-collapse folds the output once
-    // the result lands. The status marker still spins while running.
+) -> ActivityStep {
+    // Live tools play open; the next entry's arrival (or the delayed
+    // auto-collapse after a terminal status) folds the output.
     let show_output = !e.collapsed;
+    // The title is the call's own one-line identity (`Read path`, `$ cmd`) —
+    // never a generic "tool result" label; an orphan result with neither a
+    // title nor a name renders its body with no head row at all.
     let title = if !e.title.is_empty() {
-        e.title.clone()
+        Some(e.title.clone())
     } else if !e.name.is_empty() {
-        e.name.clone()
+        Some(e.name.clone())
     } else {
-        i18n::t("thinking-tool-result").to_string()
+        None
     };
     let id_for_toggle = e.id.clone();
     let host = tool_ctx.map(|c| c.host.clone());
 
-    let mut step = ChainOfThoughtStep::new(id)
-        .icon(marker)
-        .title(title)
-        .disclosed(!e.collapsed, move |_, _window, cx: &mut App| {
-            let Some(host) = host.clone() else {
-                return;
-            };
-            let Some(conv) = host.conversation(cx) else {
-                return;
-            };
-            conv.update(cx, |c, cx| {
-                let id = id_for_toggle.clone();
-                if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
-                    && let Some(item) = c.items().get(cix)
-                {
-                    item.update(cx, |item, cx| {
-                        if let ConvItem::Thinking(t) = item.kind_mut()
-                            && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(eix)
-                        {
-                            entry.collapsed = !entry.collapsed;
-                            entry.user_toggled = true;
-                        }
-                        cx.notify();
-                    });
-                }
-                cx.notify();
-            });
+    let mut step = ActivityStep::new(id);
+    if let Some(title) = title {
+        step = step.title(title);
+    }
+    let mut step = step.disclosed(!e.collapsed, move |_, _window, cx: &mut App| {
+        let Some(host) = host.clone() else {
+            return;
+        };
+        let Some(conv) = host.conversation(cx) else {
+            return;
+        };
+        conv.update(cx, |c, cx| {
+            let id = id_for_toggle.clone();
+            if let Some((cix, eix)) = c.find_thinking_entry(&id, &*cx)
+                && let Some(item) = c.items().get(cix)
+            {
+                item.update(cx, |item, cx| {
+                    if let ConvItem::Thinking(t) = item.kind_mut()
+                        && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(eix)
+                    {
+                        entry.collapsed = !entry.collapsed;
+                        entry.user_toggled = true;
+                    }
+                    cx.notify();
+                });
+            }
+            cx.notify();
         });
-    if show_output && !e.output.is_empty() {
-        step = step.framed(true).content(
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .debug_selector(move || format!("message-overflow-activity-entry-body-{cix}-{eix}"))
-                .child(render_tool_output(e, eix, theme, owner.clone(), cx)),
-        );
+    });
+    if show_output {
+        // The call's own input rides above the output (a user expanding a
+        // call wants WHAT it ran with, not only what came back); an empty
+        // output still shows the input alone.
+        let input = render_tool_input(e, eix, theme);
+        if !e.output.is_empty() {
+            step = step.framed(true).content(
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .debug_selector(move || {
+                        format!("message-overflow-activity-entry-body-{cix}-{eix}")
+                    })
+                    .children(input)
+                    .child(render_tool_output(e, eix, theme, owner.clone(), cx)),
+            );
+        } else if input.is_some() {
+            step = step.content(
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .debug_selector(move || {
+                        format!("message-overflow-activity-entry-body-{cix}-{eix}")
+                    })
+                    .children(input),
+            );
+        }
     }
     step
+}
+
+/// The call's input as display rows: one `(key, value)` pair per top-level
+/// field, values flattened to one line (newlines become `⏎`) and clipped.
+/// Non-object inputs and empty values contribute nothing.
+fn tool_input_rows(input: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(map) = input.as_object() else {
+        return Vec::new();
+    };
+    map.iter()
+        .filter_map(|(k, v)| {
+            let flat = match v {
+                serde_json::Value::String(s) => s.replace('\n', "⏎").replace('\r', ""),
+                other => other.to_string(),
+            };
+            let flat = flat.trim().to_string();
+            (!flat.is_empty()).then(|| (k.clone(), truncate(&flat, 160)))
+        })
+        .collect()
+}
+
+/// The call's input region: the argument rows above the output panel, one
+/// muted mono line per `key value` pair (the reference example.html's
+/// `tool-input` block — a user expanding a call reads WHAT it ran with).
+fn render_tool_input(e: &ToolCallItem, eix: usize, theme: &Theme) -> Option<gpui::AnyElement> {
+    let rows = tool_input_rows(&e.input);
+    if rows.is_empty() {
+        return None;
+    }
+    let muted = theme.muted_foreground;
+    Some(
+        v_flex()
+            .id(("tool-input", eix))
+            .w_full()
+            .min_w_0()
+            .gap_0p5()
+            .px_2()
+            .py_1()
+            .border_t_1()
+            .border_color(theme.border)
+            .font_family(theme.mono_font_family.clone())
+            .children(rows.into_iter().map(|(key, value)| {
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .text_xs()
+                    .child(gpui::div().flex_shrink_0().text_color(muted).child(key))
+                    .child(
+                        gpui::div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(muted)
+                            .child(value),
+                    )
+            }))
+            .into_any_element(),
+    )
 }
 
 /// Open a file path in VS Code. Strips `:line` and `:line-end` suffixes
@@ -3586,11 +3752,8 @@ fn live_tail(output: &str) -> String {
 }
 
 /// Collapse `s` to a single line, clipped to `max_chars` with an ellipsis.
-///
-/// `ai-elements`' `chain_of_thought.rs` carries a line-for-line twin,
-/// `one_line` — the crate boundary keeps the two apart, so change one and
-/// change the other.
-fn truncate(s: &str, max_chars: usize) -> String {
+/// Shared with `activity_chain`'s step title row.
+pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
     let one_line = s.replace('\n', " ");
     if one_line.chars().count() > max_chars {
         let t: String = one_line.chars().take(max_chars).collect();
@@ -3786,6 +3949,14 @@ impl ItemBuilder {
                         .any(|c| matches!(c, MessageContent::ToolUse(_)));
                     for c in &m.content {
                         match c {
+                            MessageContent::Text(t) if t.trim().is_empty() => {
+                                // A blank text part is not prose and not a
+                                // boundary: providers on interleaved-thinking
+                                // wire often emit an empty text block between
+                                // reasoning rounds — closing the segment here
+                                // split one continuous run into two headers
+                                // with nothing visible between them.
+                            }
                             MessageContent::Text(t) => {
                                 // Assistant prose interrupts the activity segment:
                                 // reasoning after it starts a fresh round. The
@@ -4425,7 +4596,8 @@ mod tests {
                         .child(render_item(
                             &thinking_item,
                             0,
-                            "test-model",
+                            &crate::model_tag::ModelTag::resolve("test-model"),
+                            false,
                             &theme,
                             None,
                             None,
@@ -4438,7 +4610,8 @@ mod tests {
                         .child(render_item(
                             &agent_item,
                             1,
-                            "test-model",
+                            &crate::model_tag::ModelTag::resolve("test-model"),
+                            false,
                             &theme,
                             None,
                             None,
@@ -4451,7 +4624,8 @@ mod tests {
                         .child(render_item(
                             &bg_task_item,
                             2,
-                            "test-model",
+                            &crate::model_tag::ModelTag::resolve("test-model"),
+                            false,
                             &theme,
                             None,
                             None,
@@ -4597,6 +4771,80 @@ mod tests {
             })
             .collect();
         assert_eq!(tool_ids, vec!["tu_1", "tu_2", "tu_3"]);
+    }
+
+    /// The call's input rows: one flattened `key value` pair per top-level
+    /// field, multiline strings single-lined, empties dropped, non-object
+    /// inputs contribute nothing.
+    #[test]
+    fn tool_input_rows_flatten_and_clip() {
+        use serde_json::json;
+        assert!(tool_input_rows(&json!(null)).is_empty());
+        assert!(tool_input_rows(&json!("bare")).is_empty());
+        let rows = tool_input_rows(&json!({
+            "path": "src/lib.rs",
+            "note": "line one\nline two\nline three",
+            "empty": "",
+            "limit": 40,
+        }));
+        assert_eq!(
+            rows,
+            vec![
+                ("path".to_string(), "src/lib.rs".to_string()),
+                (
+                    "note".to_string(),
+                    "line one⏎line two⏎line three".to_string()
+                ),
+                ("limit".to_string(), "40".to_string()),
+            ]
+        );
+        let long = "x".repeat(300);
+        let rows = tool_input_rows(&json!({ "blob": long }));
+        assert!(rows[0].1.len() < 300, "long values clip");
+        assert!(rows[0].1.ends_with('…'));
+    }
+
+    /// Blank text parts are not prose and not boundaries: providers on
+    /// interleaved-thinking wire often emit an empty text block between
+    /// reasoning rounds — the segment must stay whole (no second header, no
+    /// empty assistant bubble).
+    #[test]
+    fn blank_text_parts_do_not_split_the_segment() {
+        let messages = vec![
+            Message::user("do it".to_string()),
+            Message::assistant(vec![
+                MessageContent::Thinking {
+                    text: "round one".to_string(),
+                    signature: None,
+                },
+                MessageContent::Text(String::new()),
+                MessageContent::Thinking {
+                    text: "round two".to_string(),
+                    signature: None,
+                },
+                MessageContent::Text("   ".to_string()),
+            ]),
+        ];
+        let items = build_items(&messages, &HashMap::new(), false, None);
+        let segments: Vec<&ThinkingContainer> = items
+            .iter()
+            .filter_map(|i| match i {
+                ConvItem::Thinking(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(segments.len(), 1, "the blank parts keep the segment whole");
+        assert_eq!(
+            segments[0].entries.len(),
+            2,
+            "both reasoning rounds fold in"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, ConvItem::Assistant { .. })),
+            "no empty assistant bubble for the blank parts"
+        );
     }
 
     /// The streaming history preview appends messages batch-by-batch through
