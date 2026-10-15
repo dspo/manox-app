@@ -2138,9 +2138,6 @@ fn tool_step(
     owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
 ) -> ActivityStep {
-    // Live tools play open; the next entry's arrival (or the delayed
-    // auto-collapse after a terminal status) folds the output.
-    let show_output = !e.collapsed;
     // The title is the call's own one-line identity (`Read path`, `$ cmd`) —
     // never a generic "tool result" label; an orphan result with neither a
     // title nor a name renders its body with no head row at all.
@@ -2151,6 +2148,10 @@ fn tool_step(
     } else {
         None
     };
+    // A headless step carries no fold affordance (there is no row to click),
+    // so its body shows outright; otherwise the fold state decides — the next
+    // entry's arrival, or the delayed auto-collapse after a terminal status.
+    let show_output = !e.collapsed || title.is_none();
     let id_for_toggle = e.id.clone();
     let host = tool_ctx.map(|c| c.host.clone());
 
@@ -2187,7 +2188,7 @@ fn tool_step(
         // The call's own input rides above the output (a user expanding a
         // call wants WHAT it ran with, not only what came back); an empty
         // output still shows the input alone.
-        let input = render_tool_input(e, eix, theme);
+        let input = render_tool_input(e, theme);
         if !e.output.is_empty() {
             step = step.framed(true).content(
                 v_flex()
@@ -2236,7 +2237,7 @@ fn tool_input_rows(input: &serde_json::Value) -> Vec<(String, String)> {
 /// The call's input region: the argument rows above the output panel, one
 /// muted mono line per `key value` pair (the reference example.html's
 /// `tool-input` block — a user expanding a call reads WHAT it ran with).
-fn render_tool_input(e: &ToolCallItem, eix: usize, theme: &Theme) -> Option<gpui::AnyElement> {
+fn render_tool_input(e: &ToolCallItem, theme: &Theme) -> Option<gpui::AnyElement> {
     let rows = tool_input_rows(&e.input);
     if rows.is_empty() {
         return None;
@@ -2244,7 +2245,9 @@ fn render_tool_input(e: &ToolCallItem, eix: usize, theme: &Theme) -> Option<gpui
     let muted = theme.muted_foreground;
     Some(
         v_flex()
-            .id(("tool-input", eix))
+            // Keyed by the call's own id: the entry index is per segment, so
+            // two segments each holding a first tool would collide on one id.
+            .id(SharedString::from(format!("tool-input-{}", e.id)))
             .w_full()
             .min_w_0()
             .gap_0p5()

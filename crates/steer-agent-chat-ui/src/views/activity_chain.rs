@@ -328,8 +328,10 @@ impl RenderOnce for ActivityStep {
         // Flush left: the identity row and the content each span the
         // column's full width. The identity row (icon + title + folded
         // summary) is the ONE fold face; the content renders only while
-        // open.
-        let open = self.disclosure.as_ref().is_some_and(|d| d.open);
+        // open. A step with no identity row at all (a nameless orphan tool
+        // entry) carries no fold affordance, so its body renders outright
+        // rather than being stranded behind a fold nothing can open.
+        let open = self.disclosure.as_ref().is_some_and(|d| d.open) || self.title.is_none();
         let head = self.title.clone().map(|title| {
             title_row(
                 self.id.clone(),
@@ -337,7 +339,6 @@ impl RenderOnce for ActivityStep {
                 title,
                 (!open).then_some(self.summary.clone()).flatten(),
                 self.disclosure,
-                true,
                 window,
                 cx,
             )
@@ -391,10 +392,11 @@ const TITLE_CHARS: usize = 80;
 
 /// The step's head row: a disclosure chevron (when the step folds), an
 /// optional leading glyph, the text clipped to one line, then the folded
-/// summary sharing the row. `mono` picks the tool command-line voice; a
-/// reasoning summary rides the ambient proportional font. The row IS the
-/// affordance (hover wash, cursor, click; enter / space once focused) — a
-/// tab stop, so the fold is keyboard-reachable exactly like the header row.
+/// summary sharing the row. The title rides the tool command-line voice
+/// (mono); a reasoning round's summary rides the ambient proportional font.
+/// The row IS the affordance (hover wash, cursor, click; enter / space once
+/// focused) — a tab stop, so the fold is keyboard-reachable exactly like the
+/// header row.
 // One render input per slot (the leaf convention `render_item` documents).
 #[allow(clippy::too_many_arguments)]
 fn title_row(
@@ -403,7 +405,6 @@ fn title_row(
     title: SharedString,
     summary: Option<SharedString>,
     disclosure: Option<StepDisclosure>,
-    mono: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -456,12 +457,8 @@ fn title_row(
         .min_w_0()
         .overflow_x_hidden()
         .text_sm()
+        .font_family(mono_font)
         .text_color(muted);
-    let text = if mono {
-        text.font_family(mono_font)
-    } else {
-        text
-    };
     let text = if summary.is_some() {
         text.flex_shrink_0()
     } else {
