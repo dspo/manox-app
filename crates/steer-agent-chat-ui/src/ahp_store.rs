@@ -552,7 +552,11 @@ pub struct AhpStore {
     /// Optimistic writes the host has not confirmed yet, oldest first:
     /// (session id, config key, the value the key had before). A rejection
     /// restores the remembered values so a refused pick does not linger.
-    optimistic_undo: Vec<(String, String, Option<Value>)>,
+    /// Per-key write-ahead undo chains: `(session, key, base, written)` —
+    /// one entry per in-flight optimistic write, in write order. Bases and
+    /// written values are matched by value on refusal/confirmation (see
+    /// `rollback_refused_config` / `confirm_config`).
+    optimistic_undo: Vec<(String, String, Option<Value>, Option<Value>)>,
     /// Writes issued before the handshake completed, replayed in order on
     /// connect. The landing session's create/subscribe rides this: the
     /// workspace constructs the store and binds the chat column in the same
@@ -1206,9 +1210,27 @@ impl AhpStore {
                     if envelope.channel.starts_with("ahp-session:/") {
                         self.pending_unread.remove(id_of(&envelope.channel));
                     }
-                    if own && let Some(keys) = touched_config_keys(&envelope.action) {
+                    if own {
+                        // Every own refusal is visible: a config write
+                        // rolls its optimistic twin back by VALUE (see
+                        // `rollback_refused_config`), a cwd write rolls its
+                        // latest twin, and any other refused action — a
+                        // submit, an answer card, a plan verdict — at least
+                        // says so on the transcript. The composer pushes
+                        // its bubble optimistically, and a refusal IS the
+                        // echo, so silence here would strand the bubble
+                        // with no reply and no explanation.
                         let session_id = id_of(&envelope.channel).to_string();
-                        self.rollback_optimistic(&session_id, &keys);
+                        match config_values_of(&envelope.action) {
+                            Some(config) => {
+                                self.rollback_refused_config(&session_id, config);
+                            }
+                            None => {
+                                if let Some(keys) = touched_config_keys(&envelope.action) {
+                                    self.rollback_latest(&session_id, &keys);
+                                }
+                            }
+                        }
                         self.push_chat_event(
                             session_id,
                             crate::chat_fold::ChatEvent::Notice {
@@ -1222,11 +1244,15 @@ impl AhpStore {
                     cx.notify();
                     return;
                 }
-                // The acceptance half: our own accepted config write's undo
-                // history is spent — a later refusal of another action must
-                // not restore the pre-write value over the confirmed one.
-                if own && let Some(keys) = touched_config_keys(&envelope.action) {
-                    self.confirm_optimistic(id_of(&envelope.channel), &keys);
+                // The acceptance half: our own accepted config write
+                // spends exactly its own undo entry (matched by value) and
+                // everything it superseded — a later refusal of another
+                // in-flight write to the same key restores to this
+                // confirmed value, not past it.
+                if own && let Some(config) = config_values_of(&envelope.action) {
+                    self.confirm_config(id_of(&envelope.channel), config);
+                } else if own && let Some(keys) = touched_config_keys(&envelope.action) {
+                    self.confirm_latest(id_of(&envelope.channel), &keys);
                 }
                 let chat_id = if envelope.channel.starts_with("ahp-chat:/") {
                     Some(id_of(&envelope.channel).to_string())
@@ -1597,54 +1623,144 @@ impl AhpStore {
             values: Default::default(),
         });
         for (k, v) in config {
-            // Remember what the key had before the optimistic write: a host
-            // rejection restores it, so a refused pick does not linger on the
-            // UI as an adopted value.
+            // Remember the (old, new) pair around the optimistic write: a
+            // host refusal matches the refused write BY VALUE and undoes
+            // exactly it (see `rollback_refused_config`), and an accepted
+            // echo spends exactly its own entry (see `confirm_config`).
             self.optimistic_undo.push((
                 session_id.to_string(),
                 k.clone(),
                 seat.values.get(k).cloned(),
+                Some(v.clone()),
             ));
             seat.values.insert(k.clone(), v.clone());
         }
     }
 
-    /// Roll back optimistic writes: every remembered (session, key) touched by
-    /// a REFUSED action restores its pre-optimistic value (removing the key
-    /// when there was none — the host does not re-broadcast authority for a
-    /// write it refused).
-    fn rollback_optimistic(&mut self, session_id: &str, keys: &[String]) {
-        for key in keys {
-            for (sid, k, old) in self.optimistic_undo.iter().rev() {
-                if sid == session_id && k == key {
+    /// Roll back a refused write BY VALUE. The undo log carries one
+    /// `(old, new)` entry per in-flight write; a refusal envelope names the
+    /// exact action it refuses, so the match is on the written value:
+    ///
+    /// - the refused entry leaves the log;
+    /// - if it was the LATEST in-flight write for its key, the fold
+    ///   restores the value the session had before it (removing the key
+    ///   when there was none — the host does not re-broadcast authority
+    ///   for a write it refused);
+    /// - if a LATER write is still in flight, the fold keeps showing that
+    ///   write, and the later entry's remembered base becomes the refused
+    ///   entry's base — the refused value can never resurface as a
+    ///   rollback target.
+    ///
+    /// (Single-slot rollback — restore the latest entry regardless of
+    /// which write was refused — stranding the fold on a REFUSED value
+    /// whenever two writes to one key were in flight; this is the
+    /// reconciliation guide's per-action pending list, collapsed to
+    /// per-key value chains because this client is the only writer of
+    /// these keys.)
+    fn rollback_refused_config(
+        &mut self,
+        session_id: &str,
+        config: &serde_json::Map<String, Value>,
+    ) {
+        for (key, refused) in config {
+            let Some(position) = self.optimistic_undo.iter().rposition(|(sid, k, _, new)| {
+                sid == session_id && k == key && new.as_ref() == Some(refused)
+            }) else {
+                continue;
+            };
+            let (_, _, base, _) = self.optimistic_undo.remove(position);
+            let later = self
+                .optimistic_undo
+                .iter_mut()
+                .rposition(|(sid, k, _, _)| sid == session_id && k == key);
+            match later {
+                // A later in-flight write still owns the fold; its base is
+                // now the refused write's base.
+                Some(later) => {
+                    self.optimistic_undo[later].2 = base;
+                }
+                None => {
                     if let Some(state) = self.book.sessions.get_mut(session_id)
-                        && let Some(config) = &mut state.config
+                        && let Some(seat) = &mut state.config
                     {
-                        match old {
+                        match base {
                             Some(v) => {
-                                config.values.insert(k.clone(), v.clone());
+                                seat.values.insert(key.clone(), v);
                             }
                             None => {
-                                config.values.remove(k);
+                                seat.values.remove(key);
                             }
                         }
                     }
-                    break;
                 }
             }
         }
-        self.optimistic_undo
-            .retain(|(sid, k, _)| !(sid == session_id && keys.contains(k)));
     }
 
-    /// Spend the undo history of a CONFIRMED write (the write-ahead
-    /// reconciliation's acceptance half): once the host echoed our config
-    /// change without a refusal, the pre-write value is no longer a truth
-    /// to restore — a later refusal of another action touching the same
-    /// key must roll back to the confirmed value, not past it.
-    fn confirm_optimistic(&mut self, session_id: &str, keys: &[String]) {
-        self.optimistic_undo
-            .retain(|(sid, k, _)| !(sid == session_id && keys.contains(k)));
+    /// Roll back the LATEST in-flight write for each named key — the
+    /// value-blind fallback for actions whose payload does not echo the
+    /// written value back comparable (the cwd write's directory URI).
+    fn rollback_latest(&mut self, session_id: &str, keys: &[String]) {
+        for key in keys {
+            if let Some(position) = self
+                .optimistic_undo
+                .iter()
+                .rposition(|(sid, k, _, _)| sid == session_id && k == key)
+            {
+                let (_, _, base, _) = self.optimistic_undo.remove(position);
+                if let Some(state) = self.book.sessions.get_mut(session_id)
+                    && let Some(seat) = &mut state.config
+                {
+                    match base {
+                        Some(v) => {
+                            seat.values.insert(key.clone(), v);
+                        }
+                        None => {
+                            seat.values.remove(key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spend a confirmed write's undo entry (matched by value) and every
+    /// earlier entry it superseded: once the host echoed this exact write,
+    /// its pre-write value is no longer a truth to restore — a later
+    /// refusal of another in-flight write to the same key restores to
+    /// THIS value, not past it.
+    fn confirm_config(&mut self, session_id: &str, config: &serde_json::Map<String, Value>) {
+        for (key, confirmed) in config {
+            let Some(position) = self.optimistic_undo.iter().rposition(|(sid, k, _, new)| {
+                sid == session_id && k == key && new.as_ref() == Some(confirmed)
+            }) else {
+                continue;
+            };
+            let keep: Vec<(String, String, Option<Value>, Option<Value>)> = self
+                .optimistic_undo
+                .drain(..)
+                .enumerate()
+                .filter(|(index, (sid, k, _, _))| {
+                    !(sid == session_id && k == key && *index <= position)
+                })
+                .map(|(_, entry)| entry)
+                .collect();
+            self.optimistic_undo = keep;
+        }
+    }
+
+    /// Spend the latest entry per named key — the acceptance half for the
+    /// value-blind actions (see `rollback_latest`).
+    fn confirm_latest(&mut self, session_id: &str, keys: &[String]) {
+        for key in keys {
+            if let Some(position) = self
+                .optimistic_undo
+                .iter()
+                .rposition(|(sid, k, _, _)| sid == session_id && k == key)
+            {
+                self.optimistic_undo.remove(position);
+            }
+        }
     }
 
     /// Fold a server snapshot and reset that session's write-ahead
@@ -1654,7 +1770,7 @@ impl AhpStore {
     /// host already replaced.
     fn apply_snapshot_confirmed(&mut self, uri: &str, state: SnapshotState) -> bool {
         if matches!(&state, SnapshotState::Session(_)) {
-            self.optimistic_undo.retain(|(sid, _, _)| sid != id_of(uri));
+            self.optimistic_undo.retain(|(sid, ..)| sid != id_of(uri));
         }
         self.book.apply_snapshot(uri, state)
     }
@@ -2455,6 +2571,20 @@ fn touched_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<S
     }
 }
 
+/// The written values of a config action, when the action echoes them
+/// back comparable — the value-matched reconciliation half of
+/// `touched_config_keys` (the cwd write's payload is a file URI, not the
+/// config-seat string, so it stays on the value-blind path).
+fn config_values_of(
+    action: &ahp_types::actions::StateAction,
+) -> Option<&serde_json::Map<String, Value>> {
+    use ahp_types::actions::StateAction as A;
+    match action {
+        A::SessionConfigChanged(changed) => Some(&changed.config),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3192,18 +3322,29 @@ mod tests {
         }
     }
 
+    fn single_key(values: &[&str]) -> Vec<serde_json::Map<String, Value>> {
+        use serde_json::json;
+        values
+            .iter()
+            .map(|value| {
+                let mut pick = serde_json::Map::new();
+                pick.insert("model".to_string(), json!(value));
+                pick
+            })
+            .collect()
+    }
+
     #[test]
     fn an_accepted_own_config_echo_spends_the_undo_history() {
-        use serde_json::json;
         let mut store = disconnected_store();
-        let mut pick = serde_json::Map::new();
-        pick.insert("model".to_string(), json!("prov/new"));
-        store.optimistic_config("s-1", &pick);
+        for pick in single_key(&["prov/new"]) {
+            store.optimistic_config("s-1", &pick);
+        }
         assert_eq!(store.optimistic_undo.len(), 1);
 
         // The acceptance half of the write-ahead reconciliation: the host
-        // echoed our config change without a refusal.
-        store.confirm_optimistic("s-1", &["model".to_string()]);
+        // echoed this exact write without a refusal.
+        store.confirm_config("s-1", &single_key(&["prov/new"]).remove(0));
         assert!(
             store.optimistic_undo.is_empty(),
             "a confirmed write has no undo left to spend"
@@ -3211,8 +3352,82 @@ mod tests {
 
         // A later refusal touching the same key must NOT restore the
         // pre-write value over the confirmed one.
-        store.rollback_optimistic("s-1", &["model".to_string()]);
+        store.rollback_refused_config("s-1", &single_key(&["prov/new"]).remove(0));
         assert_eq!(leaf(&store.book, "s-1").model_id(), Some("prov/new"));
+    }
+
+    /// The single-slot undo bug this reconciliation replaces: two writes
+    /// to one key in flight, the FIRST one's refusal arrives — the fold
+    /// must keep showing the second write (still pending), and when the
+    /// second is refused too, the fold restores the original confirmed
+    /// base, never the refused first value.
+    #[test]
+    fn a_refusal_among_two_in_flight_writes_never_surfaces_the_refused_value() {
+        let mut store = disconnected_store();
+        for pick in single_key(&["prov/a", "prov/b"]) {
+            store.optimistic_config("s-1", &pick);
+        }
+        assert_eq!(
+            leaf(&store.book, "s-1").model_id(),
+            Some("prov/b"),
+            "the fold shows the latest in-flight write"
+        );
+
+        // The FIRST write's refusal: the fold keeps the second write, and
+        // the second's rollback base becomes the original base (None —
+        // the seat never carried a model).
+        store.rollback_refused_config("s-1", &single_key(&["prov/a"]).remove(0));
+        assert_eq!(
+            leaf(&store.book, "s-1").model_id(),
+            Some("prov/b"),
+            "a refused EARLIER write does not clobber the later pending one"
+        );
+
+        // The SECOND write's refusal: the fold restores the base, not the
+        // refused first value.
+        store.rollback_refused_config("s-1", &single_key(&["prov/b"]).remove(0));
+        assert_eq!(
+            leaf(&store.book, "s-1").model_id(),
+            None,
+            "both writes refused: the fold is back to the pre-write truth"
+        );
+    }
+
+    /// The confirm half under the same load: the first write confirmed
+    /// while the second is in flight, then the second refused — the fold
+    /// restores the CONFIRMED value, not the pre-first base.
+    #[test]
+    fn a_confirmed_first_write_is_the_rollback_base_for_a_refused_second() {
+        let mut store = disconnected_store();
+        // Seed a confirmed base so the restore target is observable.
+        let mut base = serde_json::Map::new();
+        base.insert(
+            "model".to_string(),
+            serde_json::Value::String("prov/m0".into()),
+        );
+        store.optimistic_config("s-1", &base);
+        store.confirm_config("s-1", &base);
+        for pick in single_key(&["prov/a", "prov/b"]) {
+            store.optimistic_config("s-1", &pick);
+        }
+
+        // The FIRST of the two new writes is confirmed while the second
+        // is still in flight.
+        store.confirm_config("s-1", &single_key(&["prov/a"]).remove(0));
+        assert_eq!(
+            store.optimistic_undo.len(),
+            1,
+            "only the second write stays pending"
+        );
+
+        // The SECOND write is refused: the fold restores the confirmed
+        // `prov/a`, never the older `prov/m0`.
+        store.rollback_refused_config("s-1", &single_key(&["prov/b"]).remove(0));
+        assert_eq!(
+            leaf(&store.book, "s-1").model_id(),
+            Some("prov/a"),
+            "the rollback target is the last CONFIRMED value"
+        );
     }
 
     #[test]
@@ -3230,11 +3445,11 @@ mod tests {
             SnapshotState::Session(Box::new(empty_session(&session_uri("s-1")))),
         );
         assert!(
-            store.optimistic_undo.iter().all(|(sid, _, _)| sid != "s-1"),
+            store.optimistic_undo.iter().all(|(sid, ..)| sid != "s-1"),
             "server truth replaces the session's write-ahead history"
         );
         assert!(
-            store.optimistic_undo.iter().any(|(sid, _, _)| sid == "s-2"),
+            store.optimistic_undo.iter().any(|(sid, ..)| sid == "s-2"),
             "other sessions keep their pending writes"
         );
     }
