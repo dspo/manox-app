@@ -2589,13 +2589,11 @@ impl Workspace {
             .read(cx)
             .store
             .clone()
-            .and_then(|(store, sid)| {
+            .map(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
-                    .approval_mode()
-                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
+                crate::ahp_store::leaf(&view.book, &sid).approval_mode_or_default()
             })
-            .unwrap_or(PermissionMode::ReadOnly);
+            .unwrap_or_default();
         UserTurnMeta::new(
             chrono::Utc::now().timestamp(),
             self.model_label(cx),
@@ -2865,10 +2863,7 @@ impl Workspace {
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid)
-                    .approval_mode()
-                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
-                    .unwrap_or(PermissionMode::ReadOnly)
+                crate::ahp_store::leaf(&view.book, sid).approval_mode_or_default()
             })
             .expect("foreground store present")
         {
@@ -2896,7 +2891,12 @@ impl Workspace {
 
     /// Switch the thread's `PermissionMode`, post a localized notice, and
     /// close the popover. Centralized so slash command, chip click, and the
-    /// settings panel wiring all funnel through one path.
+    /// settings panel wiring all funnel through one path. The write is
+    /// write-ahead: the chip flips optimistically (the model picker's
+    /// semantics) and the transcript notice rides the SAME optimistic
+    /// value, so the two never disagree; the host's echo confirms
+    /// silently, and a refusal always lands a corrective notice that
+    /// names the reason and rolls both back.
     pub(crate) fn apply_permission_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         let mode_key = match mode {
             PermissionMode::ReadOnly => "readonly",
@@ -2910,10 +2910,10 @@ impl Workspace {
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
-        let _ = mode_wire;
         self.with_foreground_store(cx, |store, sid| {
             let mut config = serde_json::Map::new();
             config.insert("approvalMode".into(), serde_json::json!(mode_wire));
+            store.optimistic_config(&sid, &config);
             store.set_config(&sid, config);
         });
         self.add_info_message(

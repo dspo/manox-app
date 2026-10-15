@@ -638,20 +638,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Selector read face (§J11): the composer's access chip derives its
-        // permission mode through `ClientStore::with` instead of reaching the
-        // field directly.
+        // permission mode from the fold — the seated value, the declared
+        // schema default, or the host's own default, never a local guess.
         let mode = self
             .chat
             .read(cx)
             .store
             .as_ref()
-            .and_then(|(store, sid)| {
+            .map(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid)
-                    .approval_mode()
-                    .and_then(|m| serde_json::from_str::<PermissionMode>(&format!("{:?}", m)).ok())
+                crate::ahp_store::leaf(&view.book, sid).approval_mode_or_default()
             })
-            .unwrap_or(PermissionMode::ReadOnly);
+            .unwrap_or_default();
         let open = self.chat.read(cx).access_open;
         // Pre-extract chip visuals so the click handler closure doesn't
         // capture `theme` (which only lives for the method body) — closures

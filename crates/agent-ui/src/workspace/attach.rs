@@ -68,6 +68,12 @@ impl Workspace {
         let inherited = self.chat.read(cx).store.clone().map(|(store, sid)| {
             let view = store.read(cx);
             let leaf = crate::ahp_store::leaf(&view.book, &sid);
+            // Inheritance reads the EXPLICIT values only (no
+            // `approval_mode_or_default`): a seat-less source has nothing
+            // worth pinning into the child, and the child then lands on
+            // the host default — the same value display falls back to, so
+            // inheritance and display cannot diverge unless the host
+            // default itself changes between them.
             (
                 leaf.cwd().filter(|p| !p.is_empty()),
                 leaf.model_id().map(str::to_string),
