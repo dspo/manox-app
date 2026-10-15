@@ -891,3 +891,6 @@ chrome-editor-placeholder = 在此书写 markdown…
 chrome-agent-pick-model = 为 { $agent } 选择模型
 
 workspace-change-rejected = 更改未生效（宿主拒绝）
+
+# Preview tool card (chat column, app-provided client_Preview tool)
+preview-unavailable = 无法渲染预览（文件可能已被移动或删除）

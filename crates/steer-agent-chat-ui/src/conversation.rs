@@ -1426,6 +1426,34 @@ impl ConversationState {
                         }));
                         ApplyOutcome::Appended
                     }
+                } else if name == crate::preview::TOOL_NAME && self.find_tool(id, cx).is_none() {
+                    // Preview: a user-facing artifact, so like the ask card it
+                    // stays a top-level card — the rendered body is the point
+                    // of the call and must never fold into an activity
+                    // segment. Follow-up lifecycle events take the ordinary
+                    // branch's absorb path against the minted row.
+                    let item_id = self.alloc_id();
+                    self.items.push(cx.new(|_| {
+                        MessageItem::new(
+                            ConvItem::ToolCall(ToolCallItem {
+                                id: id.clone(),
+                                name: name.clone(),
+                                title: title.clone(),
+                                status: *status,
+                                output: String::new(),
+                                is_error: false,
+                                input: input.clone().unwrap_or(serde_json::Value::Null),
+                                streaming: matches!(*status, ToolCallStatus::Running),
+                                collapsed: false,
+                                user_toggled: false,
+                                panel: None,
+                            }),
+                            role.to_string(),
+                            item_id,
+                            host,
+                        )
+                    }));
+                    ApplyOutcome::Appended
                 } else {
                     // Ordinary tool call: fold into the active activity
                     // segment, unless a top-level card already owns this id —
@@ -1476,6 +1504,11 @@ impl ConversationState {
                                         | ToolCallStatus::Denied
                                 ) && !t.user_toggled
                                     && !t.collapsed
+                                    // A preview card's body is the artifact
+                                    // the user was shown; folding it away a
+                                    // second after it renders would undo the
+                                    // call's whole purpose.
+                                    && t.name != crate::preview::TOOL_NAME
                                 {
                                     schedule_auto_collapse(AutoCollapseTarget::Tool(t.id.clone()), cx);
                                 }
@@ -1649,7 +1682,12 @@ impl ConversationState {
                             t.status = status;
                             // Delayed auto-collapse: the card folds ~1s after the
                             // terminal status lands unless the user toggled it.
-                            if !t.user_toggled && !t.collapsed {
+                            // Preview cards are exempt — the rendered body is
+                            // the artifact the user was shown.
+                            if !t.user_toggled
+                                && !t.collapsed
+                                && t.name != crate::preview::TOOL_NAME
+                            {
                                 schedule_auto_collapse(AutoCollapseTarget::Tool(t.id.clone()), cx);
                             }
                         }
@@ -4452,6 +4490,160 @@ mod tests {
                 "the answer settles the card"
             );
             assert_eq!(t.output, "answered");
+        });
+    }
+
+    /// A Preview call is a user-facing artifact: it mints a top-level card
+    /// (no activity segment spawns around it), its lifecycle advances ride
+    /// the ordinary absorb path against that row, and the result's outcome
+    /// metadata line lands in `output` for the renderer.
+    #[gpui::test]
+    fn a_live_preview_call_is_a_top_level_card(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        let preview_name = crate::preview::TOOL_NAME.to_string();
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                // 1. The start event seeds the top-level card.
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "pc_1".into(),
+                        name: preview_name.clone(),
+                        title: "Preview".into(),
+                        status: ToolCallStatus::Running,
+                        input: Some(serde_json::json!({"path": "docs/a.md"})),
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                // 2. A nameless lifecycle advance rides the absorb path.
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "pc_1".into(),
+                        name: String::new(),
+                        title: String::new(),
+                        status: ToolCallStatus::Running,
+                        input: None,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                // 3. The result settles it with the outcome metadata line.
+                let _ = c.apply(
+                    &ThreadEvent::ToolResult {
+                        id: "pc_1".into(),
+                        output: crate::preview::encode_outcome(&crate::preview::PreviewOutcome {
+                            path: "/abs/docs/a.md".into(),
+                            kind: crate::preview::PreviewKind::Markdown,
+                            bytes: 42,
+                        }),
+                        is_error: false,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            assert_eq!(
+                c.items().len(),
+                1,
+                "no parallel activity segment spawns for a preview"
+            );
+            let item = c.items()[0].read(cx);
+            let ConvItem::ToolCall(t) = item.kind() else {
+                panic!("the preview stays a top-level tool card");
+            };
+            assert_eq!(
+                t.name, preview_name,
+                "the nameless advance must not wipe the name"
+            );
+            assert_eq!(
+                t.input,
+                serde_json::json!({"path": "docs/a.md"}),
+                "the argument-derived input stays"
+            );
+            assert_eq!(t.status, ToolCallStatus::Success);
+            let outcome = crate::preview::parse_outcome(&t.output).expect("outcome decodes");
+            assert_eq!(outcome.path, std::path::Path::new("/abs/docs/a.md"));
+            assert_eq!(outcome.kind, crate::preview::PreviewKind::Markdown);
+        });
+    }
+
+    /// The terminal auto-collapse that folds an ordinary tool card ~1s after
+    /// its result never touches a preview card — the rendered body is the
+    /// artifact the user was shown.
+    #[gpui::test]
+    fn a_preview_card_never_auto_collapses(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "pc_1".into(),
+                        name: crate::preview::TOOL_NAME.to_string(),
+                        title: "Preview".into(),
+                        status: ToolCallStatus::Running,
+                        input: Some(serde_json::json!({"path": "a.png"})),
+                    },
+                    "model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let _ = c.apply(
+                    &ThreadEvent::ToolResult {
+                        id: "pc_1".into(),
+                        output: crate::preview::encode_outcome(&crate::preview::PreviewOutcome {
+                            path: "/abs/a.png".into(),
+                            kind: crate::preview::PreviewKind::Image,
+                            bytes: 7,
+                        }),
+                        is_error: false,
+                    },
+                    "model",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        // Let the delayed auto-collapse window pass — the preview card must
+        // still be the open artifact.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(2000));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            let item = c.items()[0].read(cx);
+            let ConvItem::ToolCall(t) = item.kind() else {
+                panic!("the preview stays a top-level tool card");
+            };
+            assert_eq!(t.status, ToolCallStatus::Success);
+            assert!(
+                !t.collapsed && !t.user_toggled,
+                "a preview artifact never auto-collapses"
+            );
         });
     }
 

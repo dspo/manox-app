@@ -62,8 +62,13 @@ steer-agent-chrome-ui = { path = "crates/steer-agent-chrome-ui" }
 
 anyhow = "1"
 async-channel = "2"
+async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "process", "io-util", "net"] }
+# tokio-util — CancellationToken, the abort signal type in the AgentTool
+# trait the app-side Preview tool implements (same copy the manox runtime
+# already locks).
+tokio-util = "0.7"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
