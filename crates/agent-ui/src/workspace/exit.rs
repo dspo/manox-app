@@ -233,20 +233,18 @@ impl Workspace {
     }
 
     /// Archive the active thread WITHOUT the idle gate — the `/exit` force
-    /// path. The caller has already cancelled the turn (the host's waterfall
-    /// settles pending verdicts and ask cards), which is the hazard the idle
-    /// guard in `archive_active_thread_if_idle` exists for. Returns the
-    /// archived session id (the caller's sidebar-reconciliation key).
+    /// path, sharing `archive_thread_now`'s body with the gated command. The
+    /// caller has already cancelled the turn (the host's waterfall settles
+    /// pending verdicts and ask cards), which is the hazard the idle guard in
+    /// `archive_active_thread_if_idle` exists for. Returns the archived
+    /// session id (the caller's sidebar-reconciliation key).
     fn archive_active_thread_force(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let pair = self.chat.read(cx).store.clone();
         let Some((_, sid)) = &pair else {
             return None;
         };
         let sid = sid.clone();
-        self.with_foreground_store(cx, |store, sid| {
-            store.set_archived(&sid, true);
-        });
-        manox_agent::thread_store_global().with_mut(|s| s.archive_thread(&sid, true));
+        self.archive_thread_now(&sid, cx);
         Some(sid)
     }
 }

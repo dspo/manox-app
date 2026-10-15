@@ -702,10 +702,22 @@ impl Workspace {
         self.start_new_thread(None, window, cx);
     }
 
+    /// The archiving body every path shares: mark the session archived in the
+    /// book (its optimistic half) and persist through the store, which
+    /// refreshes the sidebar list. The GATE is the caller's (the idle check
+    /// for the archive command, none for `/exit`'s force path) and so is the
+    /// sidebar's optimistic row drop (the command drops in place; `/exit`
+    /// drops inside its own sequence).
+    pub(super) fn archive_thread_now(&mut self, sid: &str, cx: &mut Context<Self>) {
+        self.with_foreground_store(cx, |store, _| {
+            store.set_archived(sid, true);
+        });
+        manox_agent::thread_store_global().with_mut(|s| s.archive_thread(sid, true));
+    }
+
     /// Archive the active thread if it is idle; `false` when a turn is
     /// running (attaching would park the thread and clear `pending_ask`,
-    /// stranding a user verdict). Marks the thread archived and persists via
-    /// the store, which refreshes the sidebar list.
+    /// stranding a user verdict).
     pub(super) fn archive_active_thread_if_idle(&mut self, cx: &mut Context<Self>) -> bool {
         if self
             .chat
@@ -733,11 +745,7 @@ impl Workspace {
                 tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
                 Default::default()
             });
-        self.with_foreground_store(cx, |store, sid| {
-            store.set_archived(&sid, true);
-        });
-        let store = manox_agent::thread_store_global();
-        store.with_mut(|s| s.archive_thread(&id, true));
+        self.archive_thread_now(&id, cx);
         // The sidebar's optimistic drop (the same half the row menu's archive
         // performs): the row must leave when the gesture fires, not when the
         // echo + the next list snapshot catch up.

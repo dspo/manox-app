@@ -888,11 +888,21 @@ impl ConversationState {
         if folded_head != Some(true) {
             return false;
         }
-        // The turn's LAST segment is exempt even under a folded head — it
-        // is the reasoning that faces the answer (dsh's answer-anchor
-        // rule); hiding it would read as "the model answered from nothing".
+        // Hidden iff a LATER segment follows within this same turn — the
+        // turn's last segment is exempt even under a folded head, being the
+        // reasoning that faces the answer (dsh's answer-anchor rule:
+        // hiding it reads as "the model answered from nothing"). The scan
+        // stops at the next turn's markers — its opening user row or its
+        // own process head — so a later turn's segments never decide this
+        // one's exemption.
         self.items[ix + 1..]
             .iter()
+            .take_while(|e| {
+                !matches!(
+                    e.read(cx).kind(),
+                    ConvItem::User { .. } | ConvItem::TurnProcess { .. }
+                )
+            })
             .any(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
     }
 
@@ -4713,8 +4723,8 @@ mod tests {
                 .collect();
             assert_eq!(segs.len(), 3, "one segment in turn one, two in turn two");
             assert!(
-                c.hidden_by_turn_process(segs[0], cx),
-                "turn one's own segment hides under its folded head"
+                !c.hidden_by_turn_process(segs[0], cx),
+                "turn one's answer-facing segment stays visible under its own folded head"
             );
             assert!(
                 !c.hidden_by_turn_process(segs[1], cx),
