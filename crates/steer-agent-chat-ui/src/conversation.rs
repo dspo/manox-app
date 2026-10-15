@@ -123,6 +123,17 @@ pub enum ConvItem {
     /// shows. Segments with fewer than two entries render flat under a
     /// model-name-only header.
     Thinking(ThinkingContainer),
+    /// The whole-turn process head (dsh's TurnProcess row): sits ABOVE the
+    /// turn's first segment once the turn settled —「已完成，用时 N 秒」—
+    /// and folding it hides the turn's segments (the reply is exempt).
+    /// Hiding is a render-layer overlay (the segments stay in the list);
+    /// `hidden_by_turn_process` resolves it.
+    TurnProcess {
+        /// Settled run length; `None`/0 renders the bare「已完成」.
+        secs: Option<i64>,
+        collapsed: bool,
+        user_toggled: bool,
+    },
     /// A top-level tool-call card — the `AskUserQuestion` clarify card while
     /// pending and its answered-state fallback, plus any defensive orphan.
     ToolCall(ToolCallItem),
@@ -610,6 +621,9 @@ pub struct ConversationState {
     /// first `ToolCall`. Falls back to `Instant::now()` for the rebuild path
     /// (where durations are unknown anyway).
     turn_started_at: Instant,
+    /// Where this turn's first activity segment landed — the terminal stop
+    /// splices the [`ConvItem::TurnProcess`] head there.
+    turn_first_process_ix: Option<usize>,
     /// Carry-over state for the streaming history preview
     /// (`append_history_messages`): the item builder's turn/segment state, so
     /// a tool loop spanning a batch boundary folds into one activity segment.
@@ -691,6 +705,7 @@ impl ConversationState {
             items: Vec::new(),
             next_item_id: 0,
             turn_started_at: Instant::now(),
+            turn_first_process_ix: None,
             history_builder: None,
             recipient,
         }
@@ -844,6 +859,60 @@ impl ConversationState {
             }
         }
         None
+    }
+
+    /// Whether the item at `ix` is hidden by a folded whole-turn process
+    /// head. The scope is the item's OWN turn: walking backwards, the first
+    /// turn-scope marker decides — the turn's process head (folded hides,
+    /// open shows) or its user row (a turn without a head above this item
+    /// shows). A head from an EARLIER turn never reaches across the user row
+    /// that opened this one.
+    ///
+    /// The reply is exempt by construction (only `Thinking` hides), and the
+    /// turn's LAST segment is exempt too (see below).
+    pub fn hidden_by_turn_process(&self, ix: usize, cx: &App) -> bool {
+        if !matches!(
+            self.items.get(ix).map(|e| e.read(cx).kind()),
+            Some(ConvItem::Thinking(_))
+        ) {
+            return false;
+        }
+        let folded_head = self.items[..ix]
+            .iter()
+            .rev()
+            .find_map(|e| match e.read(cx).kind() {
+                ConvItem::TurnProcess { collapsed, .. } => Some(*collapsed),
+                ConvItem::User { .. } => Some(false),
+                _ => None,
+            });
+        if folded_head != Some(true) {
+            return false;
+        }
+        // The turn's LAST segment is exempt even under a folded head — it
+        // is the reasoning that faces the answer (dsh's answer-anchor
+        // rule); hiding it would read as "the model answered from nothing".
+        self.items[ix + 1..]
+            .iter()
+            .any(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+    }
+
+    /// Whether the row at `ix` should tighten its bottom gap: an assistant
+    /// body immediately followed by an activity segment — the segment's own
+    /// header padding breathes, so the generic 16px row gap reads as a hole
+    /// (the reverse direction keeps it: a reply needs its air).
+    pub fn tight_gap_after(&self, ix: usize, cx: &App) -> bool {
+        matches!(
+            self.items.get(ix).map(|e| e.read(cx).kind()),
+            Some(ConvItem::Assistant { .. })
+        ) && matches!(
+            self.items.get(ix + 1).map(|e| e.read(cx).kind()),
+            Some(ConvItem::Thinking(_))
+        )
+    }
+
+    /// The running turn's elapsed seconds (the Captain strip's clock).
+    pub fn running_secs(&self) -> u64 {
+        self.turn_started_at.elapsed().as_secs()
     }
 
     /// Stamp the segment at `ix` with whether the nearest earlier segment
@@ -1065,6 +1134,7 @@ impl ConversationState {
             // `ToolCall`.
             ThreadEvent::TurnStarted => {
                 self.turn_started_at = Instant::now();
+                self.turn_first_process_ix = None;
                 ApplyOutcome::Unchanged
             }
             ThreadEvent::TurnFinished { .. } => {
@@ -1200,6 +1270,9 @@ impl ConversationState {
                     }
                 };
                 self.sync_model_repeats(cix, cx);
+                if self.turn_first_process_ix.is_none() {
+                    self.turn_first_process_ix = Some(cix);
+                }
                 let delta = delta.clone();
                 self.items[cix].update(cx, |item, cx| {
                     let eix = if let ConvItem::Thinking(t) = item.kind_mut() {
@@ -1298,18 +1371,28 @@ impl ConversationState {
                         let carries_args = input.is_some();
                         self.items[ix].update(cx, |item, cx| {
                             if let ConvItem::ToolCall(t) = item.kind_mut() {
-                                // Arg-less lifecycle events advance the status
-                                // only; the argument-derived title stays.
+                                // The open card's pending face is owned by the
+                                // live elicitation: a lifecycle advance
+                                // (running/ready) must not disarm the
+                                // interactive gate before the user answers —
+                                // the answer settles the card through the
+                                // result arm. Only an argument-bearing event
+                                // refreshes the title/input.
                                 if carries_args {
                                     t.title = title.clone();
+                                    if let Some(input) = input.clone() {
+                                        t.input = input;
+                                    }
                                 }
-                                t.status = *status;
                                 t.name = name.clone();
                             }
                             cx.notify();
                         });
                         ApplyOutcome::Remeasure(ix)
                     } else {
+                        // A row minted from the lifecycle alone opens on the
+                        // ask's natural face (the result arm corrects it if
+                        // the call is already settled).
                         let item_id = self.alloc_id();
                         self.items.push(cx.new(|_| {
                             MessageItem::new(
@@ -1317,7 +1400,7 @@ impl ConversationState {
                                     id: id.clone(),
                                     name: name.clone(),
                                     title: title.clone(),
-                                    status: *status,
+                                    status: ToolCallStatus::PendingApproval,
                                     output: String::new(),
                                     is_error: false,
                                     input: input.clone().unwrap_or(serde_json::Value::Null),
@@ -1346,7 +1429,28 @@ impl ConversationState {
                         let input = input.clone();
                         self.items[ix].update(cx, |item, cx| {
                             if let ConvItem::ToolCall(t) = item.kind_mut() {
-                                t.name = name;
+                                // An open ask card's face belongs to its
+                                // elicitation: no lifecycle advance may
+                                // rename or disarm it (the ASK arm documents
+                                // the same invariant; this is the defensive
+                                // half for anything that slips past the
+                                // derived events' naming).
+                                if t.name == manox_agent::tools::ASK_USER_QUESTION
+                                    && t.status == ToolCallStatus::PendingApproval
+                                {
+                                    if let Some(input) = input {
+                                        t.title = title;
+                                        t.input = input;
+                                    }
+                                    cx.notify();
+                                    return;
+                                }
+                                // A nameless advance must not wipe the row's
+                                // identity (the derived events name their
+                                // tools; this is defense in depth).
+                                if !name.is_empty() {
+                                    t.name = name;
+                                }
                                 t.status = status;
                                 // Status-only events carry no arguments: they
                                 // must not downgrade the argument-derived
@@ -1390,6 +1494,9 @@ impl ConversationState {
                             }
                         };
                         self.sync_model_repeats(cix, cx);
+                        if self.turn_first_process_ix.is_none() {
+                            self.turn_first_process_ix = Some(cix);
+                        }
                         let id = id.clone();
                         let name = name.clone();
                         let title = title.clone();
@@ -1590,6 +1697,31 @@ impl ConversationState {
                 // A terminal stop (`EndTurn`/`MaxTokens`/`Refusal`) freezes
                 // the segment and auto-collapses everything.
                 let terminal = !matches!(reason, StopReason::ToolUse);
+                if terminal
+                    && let Some(at) = self.turn_first_process_ix.take()
+                    && matches!(self.items.get(at).map(|e| e.read(cx).kind()), Some(ConvItem::Thinking(_)))
+                {
+                    // The settled turn earns its process head above the
+                    // first segment, EXPANDED (folding is the reader's
+                    // call); the reply is exempt from the overlay.
+                    let secs = self.turn_started_at.elapsed().as_secs() as i64;
+                    let head = cx.new(|_| {
+                        MessageItem::new(
+                            ConvItem::TurnProcess {
+                                secs: (secs > 0).then_some(secs),
+                                collapsed: false,
+                                user_toggled: false,
+                            },
+                            role.to_string(),
+                            self.alloc_id(),
+                            host.clone(),
+                        )
+                    });
+                    self.items.insert(at, head);
+                    // Fall through: the turn's items still finalize and the
+                    // arm's tail already returns RemeasureAll for a
+                    // non-empty list.
+                }
                 self.finalize_streaming_items(terminal, cx);
                 // Stamp the per-turn usage onto the last assistant reply so its
                 // footer can show input/output/cache totals for this turn. Walk
@@ -1992,6 +2124,7 @@ impl ConversationState {
             items,
             next_item_id,
             turn_started_at: Instant::now(),
+            turn_first_process_ix: None,
             history_builder: None,
             recipient,
         }
@@ -2465,6 +2598,7 @@ mod tests {
                 ConvItem::Assistant { text, .. } => format!("A:{text}"),
                 ConvItem::Notice(t) => format!("N:{t}"),
                 ConvItem::Error(t) => format!("E:{t}"),
+                ConvItem::TurnProcess { .. } => "P".to_string(),
                 _ => "?".to_string(),
             })
             .collect()
@@ -2567,6 +2701,7 @@ mod tests {
                 signature(&kinds),
                 vec![
                     "U:read it",
+                    "P",
                     "?",          // Thinking container carrying tu_1
                     "N:approved", // tool-anchored → right after its item
                     "U:again",
@@ -2629,7 +2764,7 @@ mod tests {
             assert_eq!(
                 signature(&kinds),
                 vec![
-                    "U:run", "?", // Thinking container carrying tu_1
+                    "U:run", "P", "?", // process head over the Thinking container
                     "N:first", "N:second", "U:next",
                 ]
             );
@@ -4202,6 +4337,392 @@ mod tests {
         });
     }
 
+    /// A live ask card survives its tool call's lifecycle events. The card
+    /// row is seeded pending by the live elicitation; the tool's own
+    /// lifecycle advances (ready → running, and the streaming state's
+    /// nameless catch-all) must not rename it into a generic row nor drop
+    /// its pending face — the interactive gate IS `PendingApproval`, and
+    /// only the answer's result settles it.
+    #[gpui::test]
+    fn a_live_ask_card_survives_its_tool_lifecycle_events(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        let ask = manox_agent::tools::ASK_USER_QUESTION.to_string();
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                // 1. The live elicitation seeds the card row.
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "call_1".into(),
+                        name: ask.clone(),
+                        title: "Clarify".into(),
+                        status: ToolCallStatus::PendingApproval,
+                        input: Some(serde_json::json!({"questions": []})),
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                // 2. The lifecycle advance (ready → running).
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "call_1".into(),
+                        name: ask.clone(),
+                        title: "Clarify".into(),
+                        status: ToolCallStatus::Running,
+                        input: None,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                // 3. The streaming state's advance, historically nameless.
+                let _ = c.apply(
+                    &ThreadEvent::ToolCall {
+                        id: "call_1".into(),
+                        name: String::new(),
+                        title: String::new(),
+                        status: ToolCallStatus::Running,
+                        input: None,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            let item = c.items()[0].read(cx);
+            let ConvItem::ToolCall(t) = item.kind() else {
+                panic!("the card row survives as a top-level tool card");
+            };
+            assert_eq!(t.name, ask, "the lifecycle advances must not wipe the name");
+            assert_eq!(t.title, "Clarify", "the argument-derived title stays");
+            assert_eq!(
+                t.status,
+                ToolCallStatus::PendingApproval,
+                "the open card keeps its interactive face"
+            );
+        });
+        // 4. The answer settles it through the result.
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::ToolResult {
+                        id: "call_1".into(),
+                        output: "answered".into(),
+                        is_error: false,
+                    },
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            let item = c.items()[0].read(cx);
+            let ConvItem::ToolCall(t) = item.kind() else {
+                panic!("the card row survives as a top-level tool card");
+            };
+            assert_eq!(
+                t.status,
+                ToolCallStatus::Success,
+                "the answer settles the card"
+            );
+            assert_eq!(t.output, "answered");
+        });
+    }
+
+    /// A settled turn gains the whole-turn process head above its first
+    /// segment (folded by default); the fold hides the turn's segments —
+    /// a render-layer overlay the reply never joins — and a manual expand
+    /// un-hides them.
+    #[gpui::test]
+    fn a_settled_turn_gains_a_process_head_that_hides_its_segments(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let _ = c.apply(
+                    &ThreadEvent::AgentThinking("plan".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let _ = c.apply(
+                    &ThreadEvent::AgentText("answer".into()),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+                let _ = c.apply(
+                    &ThreadEvent::Stop(StopReason::EndTurn),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            // The head mounts EXPANDED: folding is the reader's call.
+            assert!(matches!(
+                c.items()[0].read(cx).kind(),
+                ConvItem::TurnProcess {
+                    collapsed: false,
+                    ..
+                }
+            ));
+            // The turn's only segment is the answer-facing one: the overlay
+            // never hides it, folded head or not.
+            let seg_ix = c
+                .items()
+                .iter()
+                .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+                .expect("segment");
+            assert!(!c.hidden_by_turn_process(seg_ix, cx));
+        });
+        // Fold the head: the answer-facing (last) segment stays visible.
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                c.items[0].update(cx, |item, cx| {
+                    if let ConvItem::TurnProcess {
+                        collapsed,
+                        user_toggled,
+                        ..
+                    } = item.kind_mut()
+                    {
+                        *collapsed = true;
+                        *user_toggled = true;
+                    }
+                    cx.notify();
+                });
+            });
+        });
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            let seg_ix = c
+                .items()
+                .iter()
+                .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+                .expect("segment");
+            assert!(
+                !c.hidden_by_turn_process(seg_ix, cx),
+                "the answer-facing segment survives a folded head"
+            );
+        });
+        // A manual expand un-hides.
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                c.items[0].update(cx, |item, cx| {
+                    if let ConvItem::TurnProcess {
+                        collapsed,
+                        user_toggled,
+                        ..
+                    } = item.kind_mut()
+                    {
+                        *collapsed = false;
+                        *user_toggled = true;
+                    }
+                    cx.notify();
+                });
+            });
+        });
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            let seg_ix = c
+                .items()
+                .iter()
+                .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+                .expect("segment");
+            assert!(!c.hidden_by_turn_process(seg_ix, cx));
+        });
+    }
+
+    /// Under a folded head, every segment of the turn hides EXCEPT the
+    /// last one (the answer-facing reasoning, dsh's answer-anchor rule).
+    #[gpui::test]
+    fn a_folded_head_hides_all_but_the_answer_facing_segment(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                // Two segments split by the reply text.
+                for round in ["one", "two"] {
+                    let _ = c.apply(
+                        &ThreadEvent::AgentThinking(round.into()),
+                        "m",
+                        None,
+                        ctx.clone(),
+                        cx,
+                    );
+                    let _ = c.apply(
+                        &ThreadEvent::AgentText(format!("answer {round}")),
+                        "m",
+                        None,
+                        ctx.clone(),
+                        cx,
+                    );
+                }
+                let _ = c.apply(
+                    &ThreadEvent::Stop(StopReason::EndTurn),
+                    "m",
+                    None,
+                    ctx.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                c.items[0].update(cx, |item, cx| {
+                    if let ConvItem::TurnProcess {
+                        collapsed,
+                        user_toggled,
+                        ..
+                    } = item.kind_mut()
+                    {
+                        *collapsed = true;
+                        *user_toggled = true;
+                    }
+                    cx.notify();
+                });
+            });
+        });
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            let segs: Vec<usize> = c
+                .items()
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+                .map(|(ix, _)| ix)
+                .collect();
+            assert_eq!(segs.len(), 2);
+            assert!(
+                c.hidden_by_turn_process(segs[0], cx),
+                "an earlier segment hides under the folded head"
+            );
+            assert!(
+                !c.hidden_by_turn_process(segs[1], cx),
+                "the answer-facing segment stays visible"
+            );
+        });
+    }
+
+    /// The process head's fold is scoped to its OWN turn: folding turn
+    /// one's head must not hide turn two's segments (the audit caught a
+    /// cross-turn leak in the first implementation).
+    #[gpui::test]
+    fn a_folded_head_never_reaches_into_a_later_turn(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                // Turn one: one segment. Turn two: TWO segments — its first
+                // one is not the answer-facing (last) segment, so a leaked
+                // fold from turn one would hide it.
+                for (turn, rounds) in [("one", 1), ("two", 2)] {
+                    for round in 0..rounds {
+                        let _ = c.apply(
+                            &ThreadEvent::AgentThinking(format!("round {turn}-{round}")),
+                            "m",
+                            None,
+                            ctx.clone(),
+                            cx,
+                        );
+                        let _ = c.apply(
+                            &ThreadEvent::AgentText(format!("answer {turn}-{round}")),
+                            "m",
+                            None,
+                            ctx.clone(),
+                            cx,
+                        );
+                    }
+                    let _ = c.apply(
+                        &ThreadEvent::Stop(StopReason::EndTurn),
+                        "m",
+                        None,
+                        ctx.clone(),
+                        cx,
+                    );
+                }
+            });
+        });
+        // Fold turn one's head only.
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let heads: Vec<usize> = c
+                    .items()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| matches!(e.read(cx).kind(), ConvItem::TurnProcess { .. }))
+                    .map(|(ix, _)| ix)
+                    .collect();
+                assert_eq!(heads.len(), 2, "each settled turn carries a head");
+                let first = heads[0];
+                c.items[first].update(cx, |item, cx| {
+                    if let ConvItem::TurnProcess { collapsed, .. } = item.kind_mut() {
+                        *collapsed = true;
+                    }
+                    cx.notify();
+                });
+            });
+        });
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            let segs: Vec<usize> = c
+                .items()
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+                .map(|(ix, _)| ix)
+                .collect();
+            assert_eq!(segs.len(), 3, "one segment in turn one, two in turn two");
+            assert!(
+                c.hidden_by_turn_process(segs[0], cx),
+                "turn one's own segment hides under its folded head"
+            );
+            assert!(
+                !c.hidden_by_turn_process(segs[1], cx),
+                "turn two's FIRST segment is outside turn one's fold"
+            );
+        });
+    }
+
     /// A segment's header only shows a model the nearest earlier segment
     /// has not already shown: repeated segments across a turn's text
     /// boundaries stay nameless (a turn does not stack its own model).
@@ -4371,7 +4892,12 @@ mod tests {
         });
         cx.update(|cx| {
             conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
+                let seg_ix = c
+                    .items()
+                    .iter()
+                    .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+                    .expect("the turn's segment survives under the head");
+                let ConvItem::Thinking(t) = c.items()[seg_ix].read(cx).kind() else {
                     panic!("expected thinking item");
                 };
                 // The reasoning round already folded when the tool arrived
@@ -4399,7 +4925,12 @@ mod tests {
         cx.run_until_parked();
         cx.update(|cx| {
             conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
+                let seg_ix = c
+                    .items()
+                    .iter()
+                    .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+                    .expect("the turn's segment survives under the head");
+                let ConvItem::Thinking(t) = c.items()[seg_ix].read(cx).kind() else {
                     panic!("expected thinking item");
                 };
                 for entry in &t.entries {

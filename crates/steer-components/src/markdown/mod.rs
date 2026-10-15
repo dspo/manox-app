@@ -25,5 +25,6 @@ pub use linkify::{LinkKind, classify_target, linkify_markdown};
 pub use terminal_panel::{GitSummary, PanelKind, TerminalPanel, hashline_text};
 pub use text_view::{
     ChatDocument, chrome_style, code_copy_actions, message_document, message_style, panel_document,
-    static_document, steer_code_highlighter, stream_fade_motion, table_copy_actions,
+    reasoning_document, static_document, steer_code_highlighter, stream_fade_motion,
+    table_copy_actions,
 };

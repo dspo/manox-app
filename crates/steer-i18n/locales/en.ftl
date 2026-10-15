@@ -172,7 +172,7 @@ context-agents-captain = Captain
 ### agent-ui workspace — Captain status strip (above the composer)
 
 captain-steering-prefix = Captain is steering
-activity-collapse = Collapse
+turn-process-completed = Completed in 
 captain-activity-thinking = Thinking
 captain-activity-replying = Replying
 

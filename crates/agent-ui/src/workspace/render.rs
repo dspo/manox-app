@@ -405,6 +405,12 @@ impl Workspace {
                         let conversation = self.chat.read(cx).conversation.clone();
                         let diag_enabled = crate::overlap_diag::enabled();
                         let processor = move |ix: usize, _window: &mut Window, cx: &mut App| {
+                            // A folded whole-turn process head hides the
+                            // turn's segments (the reply is exempt) — the
+                            // row renders empty instead.
+                            if conversation.read(cx).hidden_by_turn_process(ix, cx) {
+                                return v_flex().w_full().min_w_0().into_any_element();
+                            }
                             let item = conversation.read(cx).items().get(ix).cloned();
                             match item {
                                 Some(item) => {
@@ -414,10 +420,18 @@ impl Workspace {
                                             item.read(cx).diagnostic_id(),
                                         );
                                     }
+                                    // A reply immediately followed by an
+                                    // activity segment tightens its bottom
+                                    // gap: the segment's own header padding
+                                    // breathes, so the generic 16px reads as
+                                    // a hole (the reverse direction keeps it
+                                    // — a reply needs its air).
+                                    let tight_gap = conversation.read(cx).tight_gap_after(ix, cx);
                                     v_flex()
                                         .w_full()
                                         .pt_1()
-                                        .pb_4()
+                                        .when(tight_gap, |this| this.pb_1())
+                                        .when(!tight_gap, |this| this.pb_4())
                                         .flex_shrink_0()
                                         .min_w_0()
                                         .debug_selector(move || {
@@ -542,7 +556,10 @@ impl Workspace {
         if tag.is_empty() {
             return None;
         }
-        let activity = self.chat.read(cx).conversation.read(cx).live_activity(cx);
+        let (activity, elapsed) = {
+            let conversation = self.chat.read(cx).conversation.read(cx);
+            (conversation.live_activity(cx), conversation.running_secs())
+        };
 
         let muted = theme.muted_foreground;
         let mut row = gpui::div()
@@ -569,6 +586,11 @@ impl Workspace {
                     .text_color(color)
                     .child(text)
             }));
+        if elapsed > 0 {
+            row = row.child(gpui::div().child("·")).child(
+                gpui::div().child(crate::i18n::t_count("thinking-duration", elapsed as i64)),
+            );
+        }
         if let Some(activity) = activity {
             let summary = match &activity {
                 LiveActivity::Thinking => {

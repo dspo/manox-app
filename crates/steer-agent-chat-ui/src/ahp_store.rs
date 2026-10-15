@@ -2664,6 +2664,176 @@ mod tests {
         assert_eq!(leaf(&book, "s-1").cwd().as_deref(), Some("/new"));
     }
 
+    /// The screenshot session's shape (a Read loop whose fold carries the
+    /// tool calls): the LIVE derivation (fold then `from_action`, the
+    /// pump's exact order) must yield tool events, and the rebuild
+    /// lowering (`synth_display` -> `build_items`) must fold them into the
+    /// activity segment as tool entries. This is the pinning test for
+    /// "工具调用看不到".
+    #[test]
+    fn a_tool_loop_surfaces_tools_on_both_paths() {
+        use ahp_types::actions::{
+            ChatDeltaAction, ChatReasoningAction, ChatResponsePartAction,
+            ChatToolCallCompleteAction, ChatToolCallReadyAction, ChatToolCallStartAction,
+            ChatTurnCompleteAction, ChatTurnStartedAction,
+        };
+        use ahp_types::state::{
+            MarkdownResponsePart, Message, MessageKind, MessageOrigin, ResponsePart,
+            ToolCallResult, ToolInput, ToolResultContent, ToolResultTextContent,
+        };
+
+        let mut book = ChannelBook::default();
+        let uri = chat_uri("c-1");
+        let turn_id = "t-1".to_string();
+        let base = Message {
+            text: "调用一个 Read tool!".into(),
+            origin: MessageOrigin {
+                kind: MessageKind::User,
+            },
+            attachments: None,
+            model: None,
+            agent: None,
+            meta: None,
+        };
+        let actions = vec![
+            StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: turn_id.clone(),
+                started_at: "2026-10-15T07:44:00.000Z".into(),
+                message: base,
+                queued_message_id: None,
+                meta: None,
+            }),
+            StateAction::ChatReasoning(ChatReasoningAction {
+                turn_id: turn_id.clone(),
+                part_id: "p-r1".into(),
+                content: "The user wants me to call a Read tool.".into(),
+                meta: None,
+            }),
+            StateAction::ChatToolCallStart(ChatToolCallStartAction {
+                turn_id: turn_id.clone(),
+                tool_call_id: "tc-1".into(),
+                meta: None,
+                tool_name: "Read".into(),
+                display_name: "Read".into(),
+                intention: Some("Read AGENTS.md".into()),
+                contributor: None,
+            }),
+            StateAction::ChatToolCallReady(ChatToolCallReadyAction {
+                turn_id: turn_id.clone(),
+                tool_call_id: "tc-1".into(),
+                meta: None,
+                contributor: None,
+                intention: Some("Read AGENTS.md".into()),
+                invocation_message: ahp_types::StringOrMarkdown::Plain("Read AGENTS.md".into()),
+                tool_input: Some(ToolInput::Inline(r#"{"path":"AGENTS.md"}"#.into())),
+                confirmation_title: None,
+                risk_assessment: None,
+                edits: None,
+                editable: None,
+                confirmed: None,
+                options: None,
+            }),
+            StateAction::ChatToolCallComplete(ChatToolCallCompleteAction {
+                turn_id: turn_id.clone(),
+                tool_call_id: "tc-1".into(),
+                meta: None,
+                result: ToolCallResult {
+                    success: true,
+                    past_tense_message: ahp_types::StringOrMarkdown::Plain("Read AGENTS.md".into()),
+                    content: Some(vec![ToolResultContent::Text(ToolResultTextContent {
+                        text: "# AGENTS.md body".into(),
+                    })]),
+                    structured_content: None,
+                    error: None,
+                },
+                requires_result_confirmation: None,
+            }),
+            StateAction::ChatResponsePart(ChatResponsePartAction {
+                turn_id: turn_id.clone(),
+                part: ResponsePart::Markdown(MarkdownResponsePart {
+                    id: "p-m1".into(),
+                    content: String::new(),
+                }),
+                meta: None,
+            }),
+            StateAction::ChatDelta(ChatDeltaAction {
+                turn_id: turn_id.clone(),
+                part_id: "p-m1".into(),
+                content: "完成。".into(),
+                meta: None,
+            }),
+            StateAction::ChatTurnComplete(ChatTurnCompleteAction {
+                turn_id: turn_id.clone(),
+                duration: 1_000,
+                meta: None,
+            }),
+        ];
+
+        // The pump's exact order: fold first, then derive from the updated
+        // state.
+        let mut derived: Vec<crate::chat_fold::ChatEvent> = Vec::new();
+        for action in &actions {
+            book.apply(&uri, action);
+            if let Some(chat) = book.chats.get("c-1")
+                && let Some(event) = crate::chat_fold::ChatEvent::from_action(action, Some(chat))
+            {
+                derived.push(event);
+            }
+        }
+        let tool_events = derived
+            .iter()
+            .filter(|e| matches!(e, crate::chat_fold::ChatEvent::ToolCall { .. }))
+            .count();
+        let result_events = derived
+            .iter()
+            .filter(|e| matches!(e, crate::chat_fold::ChatEvent::ToolResult { .. }))
+            .count();
+        // Start (streaming) and Ready (running) each derive one advance.
+        assert_eq!(
+            tool_events, 2,
+            "the live derivation yields both tool-call advances"
+        );
+        assert_eq!(
+            result_events, 1,
+            "the completion derives a tool-result event"
+        );
+
+        // The rebuild lowering over the same folded state.
+        let chat = book.chats.get("c-1").expect("the fold holds the chat");
+        let mut usage = crate::chat_fold::UsageTable::new();
+        let display = crate::chat_fold::synth_display(chat, &mut usage);
+        // `rebuild_from_display`'s message half (the display carries no
+        // notes for this sequence, so the two are equivalent here).
+        let messages: Vec<manox_agent::Message> = display
+            .iter()
+            .filter_map(|e| match e {
+                manox_agent::db::HistoryEntry::Message(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect();
+        let items = crate::views::message::build_items(
+            &messages,
+            &std::collections::HashMap::new(),
+            false,
+            None,
+        );
+        let segment = items
+            .iter()
+            .find_map(|i| match i {
+                crate::conversation::ConvItem::Thinking(t) => Some(t),
+                _ => None,
+            })
+            .expect("one activity segment");
+        assert!(
+            segment
+                .entries
+                .iter()
+                .any(|e| matches!(e, crate::conversation::ActivityEntry::Tool(_))),
+            "the tool entry folds into the segment: entries={:?}",
+            segment.entries.len()
+        );
+    }
+
     #[test]
     fn chat_deltas_fold_into_the_chat_state() {
         let mut book = ChannelBook::default();

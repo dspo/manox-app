@@ -160,7 +160,7 @@ context-agents-captain = 船长
 ### agent-ui workspace — Captain 状态行（composer 上方）
 
 captain-steering-prefix = 船长正在驾驶
-activity-collapse = 收起
+turn-process-completed = 已完成，用时 
 captain-activity-thinking = 思考中
 captain-activity-replying = 正在回复
 

@@ -17,11 +17,11 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, ElementId, FocusHandle, IntoElement,
-    RenderOnce, SharedString, Window, div, ease_in_out, ease_out_quint, prelude::*, rems,
+    RenderOnce, SharedString, Window, div, ease_in_out, ease_out_quint, linear_color_stop,
+    linear_gradient, prelude::*, px, rems,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, ThemeStyled as _, collapsible::Collapsible,
-    h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, collapsible::Collapsible, h_flex, v_flex,
 };
 
 use super::message::truncate;
@@ -100,6 +100,10 @@ impl RenderOnce for ActivityChain {
             .map(|step| step.into_any_element())
             .collect();
 
+        // No height cap: `overflow_y_scroll` never established its scroll
+        // frame inside the animation wrapper, so a cap only clipped — the
+        // entries past the limit (tools after a long reasoning) vanished
+        // with no way to scroll to them. The steps play at natural height.
         let body = div()
             .w_full()
             .min_w_0()
@@ -165,9 +169,9 @@ impl ActivityChainHeader {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let (muted, foreground) = {
+        let (muted, foreground, accent) = {
             let theme = cx.theme();
-            (theme.muted_foreground, theme.foreground)
+            (theme.muted_foreground, theme.foreground, theme.accent)
         };
         let chevron = Icon::new(IconName::ChevronDown)
             .xsmall()
@@ -211,11 +215,9 @@ impl ActivityChainHeader {
             .when_some(focus, |row, focus| {
                 row.track_focus(&focus)
                     .tab_index(0)
-                    // The ring is a focus affordance only: a resting row
-                    // draws none.
-                    .when(focus.is_focused(window), |row| {
-                        row.focus_ring_style(window, cx)
-                    })
+                    // Keyboard-only affordance: a mouse click must not
+                    // leave a ring parked on the row.
+                    .focus_visible(|s| s.border_1().border_color(accent))
             })
             .when_some(on_toggle, |row, on_toggle| {
                 row.on_click(move |event, window, cx| on_toggle(event, window, cx))
@@ -230,19 +232,23 @@ impl ActivityChainHeader {
     }
 }
 
-/// One labeled step: a title row over its content, flush left — the whole
+/// One labeled step: a head row over its content, flush left — the whole
 /// column width is the entry's (no marker column, no rail). The step folds
-/// only when the caller gives it a disclosure: the title row itself is the
-/// affordance (hover, click, keyboard — no chevron glyph), never the body
-/// (text a user may be selecting).
+/// only when the caller gives it a disclosure: the head row carries the
+/// disclosure chevron and is itself the affordance (hover, click, keyboard),
+/// never the body (text a user may be selecting).
 #[derive(IntoElement)]
 pub(crate) struct ActivityStep {
     id: ElementId,
-    /// The always-on identity row (a tool's command line) — mono.
+    /// The always-on identity row's leading glyph (the thinking icon) —
+    /// sits before the title, muted.
+    leading_icon: Option<AnyElement>,
+    /// The always-on identity row (a tool's command line, a round's label).
     title: Option<SharedString>,
-    /// The folded-only face (a reasoning round's first-line preview) —
-    /// proportional text, shown instead of the content while folded.
-    preview: Option<SharedString>,
+    /// The identity row's trailing summary — the reasoning round's own
+    /// first line while folded (the dsh disclosure shape: the summary rides
+    /// the title row, never a face of its own).
+    summary: Option<SharedString>,
     disclosure: Option<StepDisclosure>,
     content: Option<AnyElement>,
     framed: bool,
@@ -258,18 +264,24 @@ impl ActivityStep {
     pub(crate) fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
+            leading_icon: None,
             title: None,
-            preview: None,
+            summary: None,
             disclosure: None,
             content: None,
             framed: false,
         }
     }
 
-    /// The folded-only face: one preview line standing in for the body while
-    /// the step is folded (a reasoning round's own first line — no label).
-    pub(crate) fn preview(mut self, preview: impl Into<SharedString>) -> Self {
-        self.preview = Some(preview.into());
+    /// The identity row's leading glyph.
+    pub(crate) fn leading_icon(mut self, icon: impl IntoElement) -> Self {
+        self.leading_icon = Some(icon.into_any_element());
+        self
+    }
+
+    /// The identity row's trailing summary (shown while folded).
+    pub(crate) fn summary(mut self, summary: impl Into<SharedString>) -> Self {
+        self.summary = Some(summary.into());
         self
     }
 
@@ -279,9 +291,9 @@ impl ActivityStep {
         self
     }
 
-    /// Makes the step fold: the title row becomes the affordance — a hover
-    /// wash and a click that reports back (enter / space answer it once the
-    /// row is focused); no chevron glyph.
+    /// Makes the step fold: the head row grows a disclosure chevron and
+    /// becomes the affordance — a hover wash and a click that reports back
+    /// (enter / space answer it once the row is focused).
     pub(crate) fn disclosed(
         mut self,
         open: bool,
@@ -313,28 +325,23 @@ impl RenderOnce for ActivityStep {
             let theme = cx.theme();
             theme.border
         };
-        // Flush left: the head row and the content each span the column's
-        // full width — the marker column and connector rail are gone. The
-        // head is the always-on title (a tool's command line) or, for a
-        // title-less step (a reasoning round), the preview line shown only
-        // while folded; the content renders only while open.
+        // Flush left: the identity row and the content each span the
+        // column's full width. The identity row (icon + title + folded
+        // summary) is the ONE fold face; the content renders only while
+        // open.
         let open = self.disclosure.as_ref().is_some_and(|d| d.open);
-        let head = if let Some(title) = self.title.clone() {
-            Some(title_row(
+        let head = self.title.clone().map(|title| {
+            title_row(
                 self.id.clone(),
+                self.leading_icon,
                 title,
+                (!open).then_some(self.summary.clone()).flatten(),
                 self.disclosure,
                 true,
                 window,
                 cx,
-            ))
-        } else if !open {
-            self.preview.clone().map(|preview| {
-                title_row(self.id.clone(), preview, self.disclosure, false, window, cx)
-            })
-        } else {
-            None
-        };
+            )
+        });
         let content = open.then_some(self.content).flatten();
         let row = v_flex()
             .id(self.id.clone())
@@ -382,48 +389,70 @@ const HOVER_WASH: f32 = 0.3;
 /// call's command summary at this length.
 const TITLE_CHARS: usize = 80;
 
-/// The step's head row: the text clipped to one line. `mono` picks the tool
-/// command-line voice; a reasoning preview rides the ambient proportional
-/// font. A disclosed row carries no chevron glyph — the row IS the
+/// The step's head row: a disclosure chevron (when the step folds), an
+/// optional leading glyph, the text clipped to one line, then the folded
+/// summary sharing the row. `mono` picks the tool command-line voice; a
+/// reasoning summary rides the ambient proportional font. The row IS the
 /// affordance (hover wash, cursor, click; enter / space once focused) — a
 /// tab stop, so the fold is keyboard-reachable exactly like the header row.
+// One render input per slot (the leaf convention `render_item` documents).
+#[allow(clippy::too_many_arguments)]
 fn title_row(
     id: ElementId,
+    leading_icon: Option<AnyElement>,
     title: SharedString,
+    summary: Option<SharedString>,
     disclosure: Option<StepDisclosure>,
     mono: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let focus = disclosure.is_some().then(|| row_focus(window, cx, &id));
-    let (muted, radius, hover_wash, mono_font) = {
+    let (muted, radius, hover_wash, mono_font, accent, background) = {
         let theme = cx.theme();
         (
             theme.muted_foreground,
             theme.radius,
             theme.secondary.opacity(HOVER_WASH),
             theme.mono_font_family.clone(),
+            theme.accent,
+            theme.background,
         )
     };
+    let head_selector = format!("{id}-head");
     let mut row = h_flex()
         .id(id)
+        .debug_selector(move || head_selector.clone())
         .w_full()
         .min_w_0()
         .py_0p5()
         .items_center()
+        .gap_1()
         .italic()
         .rounded(radius);
 
     if let Some(disclosure) = disclosure {
         let on_toggle = disclosure.on_toggle;
+        let open = disclosure.open;
         row = row
             .cursor_pointer()
             .hover(move |row| row.bg(hover_wash))
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall()
+                .text_color(muted),
+            )
             .on_click(move |event, window, cx| on_toggle(event, window, cx));
     }
 
+    // The title takes its natural width whenever a summary shares the row
+    // (the dsh ReasoningRow shape: title, a separator dot, the summary
+    // filling the rest); alone it fills the row and truncates.
     let text = div()
-        .flex_1()
         .min_w_0()
         .overflow_x_hidden()
         .text_sm()
@@ -433,16 +462,58 @@ fn title_row(
     } else {
         text
     };
-    row.when_some(focus, |row, focus| {
-        row.track_focus(&focus)
-            .tab_index(0)
-            // The ring is a focus affordance only: a resting row draws none.
-            .when(focus.is_focused(window), |row| {
-                row.focus_ring_style(window, cx)
-            })
-    })
-    .child(text.child(truncate(&title, TITLE_CHARS)))
-    .into_any_element()
+    let text = if summary.is_some() {
+        text.flex_shrink_0()
+    } else {
+        text.flex_1()
+    };
+    let row = row
+        .when_some(focus, |row, focus| {
+            row.track_focus(&focus)
+                .tab_index(0)
+                // Keyboard-only affordance: a mouse click must not leave a
+                // ring parked on the row.
+                .focus_visible(|s| s.border_1().border_color(accent))
+        })
+        .children(leading_icon)
+        .child(text.child(truncate(&title, TITLE_CHARS)));
+    let row = match summary {
+        Some(summary) => row
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(2.))
+                    .rounded_full()
+                    .bg(muted.opacity(0.6)),
+            )
+            .child(
+                div()
+                    .relative()
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_x_hidden()
+                    .text_sm()
+                    .text_color(muted.opacity(0.85))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .overflow_x_hidden()
+                            .child(truncate(&summary, TITLE_CHARS)),
+                    )
+                    .child(
+                        // The clip reads as a soft preview, not a hard cut.
+                        div().absolute().top_0().bottom_0().right_0().w(px(24.)).bg(
+                            linear_gradient(
+                                90.,
+                                linear_color_stop(gpui::transparent_black(), 0.),
+                                linear_color_stop(background, 1.),
+                            ),
+                        ),
+                    ),
+            ),
+        None => row,
+    };
+    row.into_any_element()
 }
 
 /// The identity a toggle animation is keyed on.

@@ -126,59 +126,104 @@ impl ChatEvent {
     }
 }
 
+/// Locate a tool call by id across the chat's parts.
+///
+/// The ACTIVE turn is searched first and by itself: a live turn's parts live
+/// in `active_turn.response_parts` — `turns` only gains a turn when it is
+/// archived, so the previous shape (resolve the active turn's id against
+/// `turns`, then fall back to `turns.last()`) could never find a live call
+/// and silently dropped every tool event of the running turn (a fresh
+/// session's first turn has no `turns` at all). Archived turns are searched
+/// newest-first for actions that land after their turn settled.
 fn find_tool_call<'a>(chat: &'a ChatState, tool_call_id: &str) -> Option<&'a ToolCallState> {
-    let turn = chat
-        .active_turn
-        .as_ref()
-        .map(|t| &t.id)
-        .and_then(|id| chat.turns.iter().find(|t| &t.id == id))
-        .or_else(|| chat.turns.last())?;
-    turn.response_parts.iter().find_map(|part| match part {
-        ResponsePart::ToolCall(call) if tool_call_id_of(&call.tool_call) == tool_call_id => {
-            Some(&call.tool_call)
-        }
-        _ => None,
-    })
+    fn find_in<'a>(parts: &'a [ResponsePart], tool_call_id: &str) -> Option<&'a ToolCallState> {
+        parts.iter().find_map(|part| match part {
+            ResponsePart::ToolCall(call) if tool_call_id_of(&call.tool_call) == tool_call_id => {
+                Some(&call.tool_call)
+            }
+            _ => None,
+        })
+    }
+    if let Some(active) = &chat.active_turn
+        && let Some(hit) = find_in(&active.response_parts, tool_call_id)
+    {
+        return Some(hit);
+    }
+    chat.turns
+        .iter()
+        .rev()
+        .find_map(|turn| find_in(&turn.response_parts, tool_call_id))
+}
+
+/// A tool state's display identity: the wire name and the human title
+/// (the call's own intention, else its display name).
+fn tool_identity(
+    tool_name: &str,
+    intention: &Option<String>,
+    display_name: &str,
+) -> (String, String) {
+    (
+        tool_name.to_string(),
+        intention
+            .clone()
+            .unwrap_or_else(|| display_name.to_string()),
+    )
 }
 
 fn tool_call_event(id: &str, state: &ToolCallState) -> ChatEvent {
+    // Every state names its tool: an event must never reach the transcript
+    // nameless — a nameless `ToolCall` garbles whatever row its id lands
+    // on, up to wiping an open interaction card's identity (and with it
+    // the card's whole render face).
+    let (name, title) = match state {
+        ToolCallState::Streaming(s) => tool_identity(&s.tool_name, &s.intention, &s.display_name),
+        ToolCallState::PendingConfirmation(s) => {
+            tool_identity(&s.tool_name, &s.intention, &s.display_name)
+        }
+        ToolCallState::Running(s) => tool_identity(&s.tool_name, &s.intention, &s.display_name),
+        ToolCallState::AuthRequired(s) => {
+            tool_identity(&s.tool_name, &s.intention, &s.display_name)
+        }
+        ToolCallState::PendingResultConfirmation(s) => {
+            tool_identity(&s.tool_name, &s.intention, &s.display_name)
+        }
+        ToolCallState::Completed(s) => tool_identity(&s.tool_name, &s.intention, &s.display_name),
+        ToolCallState::Cancelled(s) => tool_identity(&s.tool_name, &s.intention, &s.display_name),
+        ToolCallState::Unknown(_) => (String::new(), String::new()),
+    };
     match state {
-        ToolCallState::PendingConfirmation(p) => ChatEvent::ToolCall {
-            id: id.to_string(),
-            name: p.tool_name.clone(),
-            title: p
-                .intention
-                .clone()
-                .unwrap_or_else(|| p.display_name.clone()),
-            status: ToolCallStatus::PendingApproval,
-            input: tool_input_json(&p.tool_input),
-        },
-        ToolCallState::Running(r) => ChatEvent::ToolCall {
-            id: id.to_string(),
-            name: r.tool_name.clone(),
-            title: r
-                .intention
-                .clone()
-                .unwrap_or_else(|| r.display_name.clone()),
-            status: ToolCallStatus::Running,
-            input: tool_input_json(&r.tool_input),
-        },
         ToolCallState::Completed(c) => ChatEvent::ToolResult {
             id: id.to_string(),
             output: tool_result_text(c.content.as_deref()),
             is_error: !c.success,
         },
+        ToolCallState::PendingConfirmation(p) => ChatEvent::ToolCall {
+            id: id.to_string(),
+            name,
+            title,
+            status: ToolCallStatus::PendingApproval,
+            input: tool_input_json(&p.tool_input),
+        },
+        ToolCallState::Running(r) => ChatEvent::ToolCall {
+            id: id.to_string(),
+            name,
+            title,
+            status: ToolCallStatus::Running,
+            input: tool_input_json(&r.tool_input),
+        },
         ToolCallState::Cancelled(_) => ChatEvent::ToolCall {
             id: id.to_string(),
-            name: String::new(),
-            title: String::new(),
+            name,
+            title,
             status: ToolCallStatus::Cancelled,
             input: None,
         },
+        // Streaming / auth-required / pending-result / unknown: an advance
+        // that settles nothing.
         _ => ChatEvent::ToolCall {
             id: id.to_string(),
-            name: String::new(),
-            title: String::new(),
+            name,
+            title,
             status: ToolCallStatus::Running,
             input: None,
         },
@@ -764,6 +809,70 @@ mod tests {
                 other => panic!("expected a tool use, got {other:?}"),
             },
             other => panic!("expected a message, got {other:?}"),
+        }
+    }
+    /// Every non-terminal tool state names its tool in the derived event:
+    /// a nameless `ToolCall` reaching the transcript garbles whatever row
+    /// its id lands on — historically it wiped an open ask card's identity
+    /// and disarmed its interactive face.
+    #[test]
+    fn tool_state_events_always_carry_the_tool_name() {
+        let streaming: ToolCallState = serde_json::from_value(serde_json::json!({
+            "status": "streaming",
+            "toolCallId": "call_1",
+            "toolName": "AskUserQuestion",
+            "displayName": "AskUserQuestion",
+            "intention": "Clarify the target file",
+            "partialInput": "{\"questions\": [",
+        }))
+        .expect("streaming state parses");
+        match tool_call_event("call_1", &streaming) {
+            ChatEvent::ToolCall {
+                name,
+                title,
+                status,
+                ..
+            } => {
+                assert_eq!(name, "AskUserQuestion");
+                assert_eq!(title, "Clarify the target file");
+                assert_eq!(status, ToolCallStatus::Running);
+            }
+            other => panic!("streaming derives a tool-call advance, got {other:?}"),
+        }
+
+        let running: ToolCallState = serde_json::from_value(serde_json::json!({
+            "status": "running",
+            "toolCallId": "call_2",
+            "toolName": "Read",
+            "displayName": "read",
+            "invocationMessage": "Read a.rs",
+            "confirmed": "approved",
+        }))
+        .expect("running state parses");
+        match tool_call_event("call_2", &running) {
+            ChatEvent::ToolCall { name, title, .. } => {
+                assert_eq!(name, "Read");
+                // No intention: the display name is the title fallback.
+                assert_eq!(title, "read");
+            }
+            other => panic!("running derives a tool-call advance, got {other:?}"),
+        }
+
+        let completed: ToolCallState = serde_json::from_value(serde_json::json!({
+            "status": "completed",
+            "toolCallId": "call_3",
+            "toolName": "Read",
+            "displayName": "read",
+            "invocationMessage": "Read a.rs",
+            "success": true,
+            "pastTenseMessage": "Read a.rs",
+            "confirmed": "approved",
+            "content": [{ "type": "text", "text": "fn main() {}" }],
+        }))
+        .expect("completed state parses");
+        match tool_call_event("call_3", &completed) {
+            ChatEvent::ToolResult { is_error, .. } => assert!(!is_error),
+            other => panic!("completed derives the settle face, got {other:?}"),
         }
     }
 }

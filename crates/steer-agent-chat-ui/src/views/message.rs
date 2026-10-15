@@ -51,7 +51,8 @@ use steer_components::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_but
 use steer_components::markdown::GitSummary;
 use steer_components::markdown::{
     ChatDocument, LinkKind, PanelKind, TerminalPanel, classify_target, code_copy_actions,
-    hashline_text, message_document, static_document, stream_fade_motion, table_copy_actions,
+    hashline_text, message_document, reasoning_document, static_document, stream_fade_motion,
+    table_copy_actions,
 };
 
 /// Message body type size: one step below the chrome `text_base` (14px) so
@@ -813,6 +814,11 @@ pub fn render_item(
         ConvItem::Thinking(t) => {
             render_thinking(t, ix, model, model_repeats, theme, tool_ctx, copy, cx)
         }
+        ConvItem::TurnProcess {
+            secs,
+            collapsed,
+            user_toggled: _,
+        } => render_turn_process(*secs, *collapsed, ix, theme, tool_ctx, cx),
         ConvItem::ToolCall(t) => {
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
                 render_ask_user_card(t, ix, theme, tool_ctx, copy, cx)
@@ -1934,6 +1940,79 @@ fn render_activity_entry(
     }
 }
 
+/// The whole-turn process head (dsh's TurnProcess row): one tertiary line
+/// above the turn's first segment once the turn settled —「已完成，用时 N
+/// 秒」— whose fold hides the turn's segments (render-layer overlay, the
+/// reply exempt). Live/failed turns never carry one.
+fn render_turn_process(
+    secs: Option<i64>,
+    collapsed: bool,
+    ix: usize,
+    theme: &Theme,
+    tool_ctx: Option<&ToolCallCtx>,
+    _cx: &mut App,
+) -> gpui::AnyElement {
+    let muted = theme.muted_foreground;
+    let label: SharedString = match secs {
+        Some(n) => format!(
+            "{}{}",
+            i18n::t("turn-process-completed"),
+            i18n::t_count("thinking-duration", n)
+        )
+        .into(),
+        None => i18n::t("turn-process-completed"),
+    };
+    let mut row = h_flex()
+        .id(("turn-process", ix))
+        .debug_selector(move || format!("message-turn-process-{ix}"))
+        .w_full()
+        .min_w_0()
+        .py_1()
+        .items_center()
+        .gap_1()
+        .text_sm()
+        .text_color(muted.opacity(0.9))
+        .child(gpui::div().min_w_0().truncate().child(label));
+    if let Some(tool_ctx) = tool_ctx {
+        let host = tool_ctx.host.clone();
+        row = row
+            .cursor_pointer()
+            .hover(|s| s.text_color(muted))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronUp
+                })
+                .xsmall()
+                .text_color(muted),
+            )
+            .on_click(move |_, _window, cx: &mut App| {
+                let Some(conv) = host.conversation(cx) else {
+                    return;
+                };
+                conv.update(cx, |c, cx| {
+                    if let Some(item) = c.items().get(ix) {
+                        item.update(cx, |item, cx| {
+                            if let ConvItem::TurnProcess {
+                                collapsed,
+                                user_toggled,
+                                ..
+                            } = item.kind_mut()
+                            {
+                                *collapsed = !*collapsed;
+                                *user_toggled = true;
+                            }
+                            cx.notify();
+                        });
+                    }
+                    cx.notify();
+                });
+            });
+    }
+    row.into_any_element()
+}
+
 /// The toggle a reasoning round's two click faces share (the folded preview
 /// row and the expanded collapse row). Address the round by its stable id:
 /// the (container, entry) indices captured at render time can point at the
@@ -1975,8 +2054,11 @@ fn reasoning_round_toggle(
     }
 }
 
-/// A reasoning round's step: the marker spins while the round streams, the body
-/// is the persistent markdown document the streaming path keeps in sync.
+/// A reasoning round's step — the dsh disclosure shape: a thinking icon and
+/// the localized「思考」title row carrying the round's own first line as the
+/// folded summary (with a right-edge fade); the expanded body is the
+/// reasoning-tier document (muted, one size under the message body) kept in
+/// sync by the streaming path.
 // One arg per slot the step is assembled from (selector identity, fold data,
 // body document, render positions for the debug selectors, host context);
 // a config struct would only rename the same values.
@@ -1996,21 +2078,25 @@ fn reasoning_step(
     _cx: &mut App,
 ) -> ActivityStep {
     let host = tool_ctx.map(|c| c.host.clone());
-    let toggle_preview = reasoning_round_toggle(host.clone(), entry_id);
-    let toggle_collapse = reasoning_round_toggle(host.clone(), entry_id);
+    let toggle = reasoning_round_toggle(host, entry_id);
 
-    // No label row: a reasoning round renders its own body (secondary
-    // color) directly; the folded face is the body's own first line, so the
-    // round never shows a generic "thinking" caption. The step's structure —
-    // hover, click, the fold — is the step's; this layer supplies the data.
     let first_line = text
         .lines()
         .find(|l| !l.trim().is_empty())
         .map(|l| truncate(l.trim(), 80))
         .unwrap_or_default();
-    let mut step = ActivityStep::new(id)
-        .when(!first_line.is_empty(), |s| s.preview(first_line))
-        .disclosed(!collapsed, toggle_preview);
+    let mut step = ActivityStep::new(id).leading_icon(
+        Icon::default()
+            .path("icons/brain.svg")
+            .size(px(14.))
+            .text_color(theme.muted_foreground),
+    );
+    if !first_line.is_empty() {
+        step = step.summary(first_line);
+    }
+    let mut step = step
+        .title(i18n::t("message-reasoning").to_string())
+        .disclosed(!collapsed, toggle);
     if !collapsed && !text.is_empty() {
         // The persistent `ChatDocument` (synced by the streaming/rebuild path)
         // carries the document; fall back to a per-frame mount only before the
@@ -2019,58 +2105,18 @@ fn reasoning_step(
             .as_ref()
             .and_then(ChatDocument::state)
             .map(|state| {
-                decorate_document(
-                    message_document(state, theme, MESSAGE_BODY_SIZE),
-                    streaming,
-                    owner.clone(),
-                )
+                decorate_document(reasoning_document(state, theme), streaming, owner.clone())
             })
             .unwrap_or_else(|| static_body(("reasoning-entry-body", eix), text, theme, owner));
-        // The expanded body carries its own fold-back: a hover-revealed
-        // collapse row pinned above the text (a preview row answers the
-        // folded state; the expanded state has no other click face, and the
-        // prose itself must stay selectable). The row keeps its height
-        // while transparent, so the reveal never reflows the list.
-        let group = format!("reasoning-step-{cix}-{eix}");
-        let muted = theme.muted_foreground;
-        let collapse_row = h_flex()
-            .id(("reasoning-collapse", eix))
-            .h(px(16.))
-            .w_full()
-            .min_w_0()
-            .items_center()
-            .gap_1()
-            .opacity(0.)
-            .group_hover(group.clone(), |s| s.opacity(1.))
-            .cursor_pointer()
-            .on_click(toggle_collapse)
-            .child(Icon::new(IconName::ChevronUp).xsmall().text_color(muted))
-            .child(
-                gpui::div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(i18n::t("activity-collapse")),
-            );
         step = step.content(
-            v_flex()
+            gpui::div()
                 .id(("reasoning-body", eix))
                 .w_full()
                 .min_w_0()
-                .group(group)
-                .child(collapse_row)
-                .child(
-                    gpui::div()
-                        .w_full()
-                        .min_w_0()
-                        .overflow_x_hidden()
-                        .py_1()
-                        .italic()
-                        .text_color(theme.muted_foreground)
-                        .debug_selector(move || {
-                            format!("message-overflow-activity-entry-body-{cix}-{eix}")
-                        })
-                        .child(body),
-                ),
+                .overflow_x_hidden()
+                .py_1()
+                .debug_selector(move || format!("message-overflow-activity-entry-body-{cix}-{eix}"))
+                .child(body),
         );
     }
     step
@@ -3793,6 +3839,40 @@ fn close_segment(items: &mut [ConvItem], seg_ix: Option<usize>) {
     }
 }
 
+/// Splice a settled turn's [`ConvItem::TurnProcess`] head above its first
+/// segment. `first_ts`/`last_ts` are the turn's opening prompt and final
+/// message timestamps — the settled run length. A missing anchor or a
+/// non-segment at it (the anchor belongs to a prior append batch) drops the
+/// head: only the authoritative one-shot rebuild guarantees the turn's span.
+fn flush_turn_process_head(
+    items: &mut Vec<ConvItem>,
+    at: Option<usize>,
+    first_ts: Option<i64>,
+    last_ts: Option<i64>,
+) {
+    let Some(at) = at.filter(|&at| at < items.len()) else {
+        return;
+    };
+    if !matches!(items.get(at), Some(ConvItem::Thinking(_))) {
+        return;
+    }
+    let secs = match (first_ts, last_ts) {
+        (Some(f), Some(l)) => (l - f).max(0),
+        _ => 0,
+    };
+    items.insert(
+        at,
+        ConvItem::TurnProcess {
+            secs: (secs > 0).then_some(secs),
+            // Expanded on mount: folding is the reader's call — a settled
+            // turn's process vanishing on arrival read as "tools never
+            // render" (the overlay keeps the answer-facing segment anyway).
+            collapsed: false,
+            user_toggled: false,
+        },
+    );
+}
+
 /// Stateful item builder: appends `ConvItem`s from a message sequence while
 /// carrying the turn/segment state (last user id, open activity segment)
 /// across calls. `build_items` uses it for one-shot rebuilds; the streaming
@@ -3813,6 +3893,11 @@ pub struct ItemBuilder {
     /// id does not name an entry the session has, so offering a fork on it
     /// would build a button that can only fail.
     fork_source: Option<String>,
+    /// The current turn's first segment position and wall-clock span — the
+    /// settled turn's [`ConvItem::TurnProcess`] head splices there.
+    turn_first_seg_ix: Option<usize>,
+    turn_first_ts: Option<i64>,
+    turn_last_ts: Option<i64>,
 }
 
 impl ItemBuilder {
@@ -3840,6 +3925,13 @@ impl ItemBuilder {
         usage: &HashMap<String, TokenUsage>,
         items: &mut Vec<ConvItem>,
     ) {
+        // A fresh (empty) target Vec with a leftover anchor means the anchor
+        // pointed into a batch already handed off — it is dead here. A
+        // shared Vec across extends (the incremental-preview shape) keeps
+        // it: the position still resolves inside this Vec.
+        if items.is_empty() {
+            self.turn_first_seg_ix = None;
+        }
         for m in messages {
             match m.role {
                 Role::User => {
@@ -3864,7 +3956,17 @@ impl ItemBuilder {
                         // a turn boundary.
                         close_segment(items, self.active_segment_ix);
                         self.active_segment_ix = None;
+                        // The boundary also settles the prior turn: splice
+                        // its process head and restart the tracker.
+                        flush_turn_process_head(
+                            items,
+                            self.turn_first_seg_ix.take(),
+                            self.turn_first_ts.take(),
+                            self.turn_last_ts.take(),
+                        );
+                        self.turn_first_ts = Some(m.timestamp);
                     }
+                    self.turn_last_ts = Some(m.timestamp);
                     if !external_event {
                         self.last_user_id = Some(m.id.clone());
                     }
@@ -4008,6 +4110,9 @@ impl ItemBuilder {
                                         }
                                     }
                                     None => {
+                                        if self.turn_first_seg_ix.is_none() {
+                                            self.turn_first_seg_ix = Some(items.len());
+                                        }
                                         self.active_segment_ix = Some(items.len());
                                         items.push(ConvItem::Thinking(ThinkingContainer {
                                             entries: vec![entry],
@@ -4097,6 +4202,9 @@ impl ItemBuilder {
                                             }
                                         }
                                         None => {
+                                            if self.turn_first_seg_ix.is_none() {
+                                                self.turn_first_seg_ix = Some(items.len());
+                                            }
                                             self.active_segment_ix = Some(items.len());
                                             items.push(ConvItem::Thinking(ThinkingContainer {
                                                 entries: vec![entry],
@@ -4142,8 +4250,18 @@ impl ItemBuilder {
     /// `AgentText`/`AgentThinking` deltas append to it instead of spawning a
     /// second bubble). Consumes the builder: `finish` is terminal, so a
     /// caller cannot forget the mandatory close.
-    pub fn finish(self, items: &mut [ConvItem], trailing_streaming: bool) {
+    pub fn finish(self, items: &mut Vec<ConvItem>, trailing_streaming: bool) {
         close_segment(items, self.active_segment_ix);
+        // A trailing live turn takes no head (the live path inserts one at
+        // its terminal stop); a settled one does.
+        if !trailing_streaming {
+            flush_turn_process_head(
+                items,
+                self.turn_first_seg_ix,
+                self.turn_first_ts,
+                self.turn_last_ts,
+            );
+        }
         if trailing_streaming && let Some(last) = items.last_mut() {
             match last {
                 ConvItem::Assistant { streaming, .. } => {
