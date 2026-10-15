@@ -2288,7 +2288,7 @@ impl<'a> LeafView<'a> {
             .or_else(|| {
                 self.session
                     .and_then(|s| s.config.as_ref())
-                    .and_then(|c| c.schema.properties.get("approvalMode"))
+                    .and_then(|c| c.schema.properties.get(config_keys::APPROVAL_MODE))
                     .and_then(|prop| prop.default.as_ref())
                     .and_then(Value::as_str)
                     .map(str::to_string)
@@ -2298,7 +2298,7 @@ impl<'a> LeafView<'a> {
                     .wire()
                     .to_string()
             });
-        serde_json::from_value(serde_json::Value::String(wire)).unwrap_or_default()
+        manox_agent::thread::PermissionMode::from_wire(&wire).unwrap_or_default()
     }
 
     /// The most recent request's token usage: the in-flight turn's report

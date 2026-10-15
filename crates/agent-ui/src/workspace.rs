@@ -2893,9 +2893,10 @@ impl Workspace {
     /// close the popover. Centralized so slash command, chip click, and the
     /// settings panel wiring all funnel through one path. The write is
     /// write-ahead: the chip flips optimistically (the model picker's
-    /// semantics), the host's echo confirms, and a refusal rolls the chip
-    /// back with a corrective notice — never a notice vouching for a
-    /// switch the host did not adopt.
+    /// semantics) and the transcript notice rides the SAME optimistic
+    /// value, so the two never disagree; the host's echo confirms
+    /// silently, and a refusal always lands a corrective notice that
+    /// names the reason and rolls both back.
     pub(crate) fn apply_permission_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         let mode_key = match mode {
             PermissionMode::ReadOnly => "readonly",
