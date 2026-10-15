@@ -177,7 +177,7 @@ pub enum ConvItem {
         collapsed: bool,
         user_toggled: bool,
     },
-    /// A background task status card — shows a Monitor or background Bash
+    /// A background task status card — shows a background Bash or subagent
     /// task's kind, description, task ID, status, event count, and Stop
     /// button while running. Updated in-place by task ID.
     BackgroundTask(BackgroundTaskItem),
@@ -2351,8 +2351,8 @@ mod tests {
     fn background_task_card_keeps_latest_twenty_output_events() {
         let events = (0..25)
             .map(|ix| manox_agent::background_task::TaskEvent {
-                task_id: manox_agent::background_task::TaskId("monitor-test".into()),
-                kind: manox_agent::background_task::TaskKind::MonitorCommand,
+                task_id: manox_agent::background_task::TaskId("bg-test".into()),
+                kind: manox_agent::background_task::TaskKind::BackgroundBash,
                 owner_goal_id: None,
                 event: manox_agent::background_task::TaskEventKind::Output(format!("event-{ix}")),
                 task_seq: ix,

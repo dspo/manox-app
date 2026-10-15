@@ -3785,8 +3785,6 @@ fn render_background_task(
 
     let is_running = matches!(bt.status, TaskStatus::Running | TaskStatus::Stopping);
     let kind_str = match bt.kind {
-        TaskKind::MonitorCommand => i18n::t("background-task-kind-command"),
-        TaskKind::MonitorWebSocket => i18n::t("background-task-kind-websocket"),
         TaskKind::BackgroundBash => i18n::t("background-task-kind-bash"),
         TaskKind::Subagent => i18n::t("background-task-kind-subagent"),
     };
