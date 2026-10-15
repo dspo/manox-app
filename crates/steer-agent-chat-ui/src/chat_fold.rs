@@ -84,15 +84,15 @@ impl ChatEvent {
             }
             A::ChatToolCallStart(start) => {
                 let state = find_tool_call(chat, &start.tool_call_id)?;
-                Some(tool_call_event(&start.tool_call_id, state))
+                tool_call_event(&start.tool_call_id, state)
             }
             A::ChatToolCallReady(ready) => {
                 let state = find_tool_call(chat, &ready.tool_call_id)?;
-                Some(tool_call_event(&ready.tool_call_id, state))
+                tool_call_event(&ready.tool_call_id, state)
             }
             A::ChatToolCallConfirmed(confirmed) => {
                 let state = find_tool_call(chat, &confirmed.tool_call_id)?;
-                Some(tool_call_event(&confirmed.tool_call_id, state))
+                tool_call_event(&confirmed.tool_call_id, state)
             }
             A::ChatToolCallComplete(complete) => Some(ChatEvent::ToolResult {
                 id: complete.tool_call_id.clone(),
@@ -170,7 +170,11 @@ fn tool_identity(
     )
 }
 
-fn tool_call_event(id: &str, state: &ToolCallState) -> ChatEvent {
+/// `None` for a state this client version cannot name (a newer protocol's
+/// `Unknown` payload): a nameless advance is worse than no advance — it
+/// garbles whatever row its id lands on, while the row keeps its own face
+/// until a known shape (the completion) settles it.
+fn tool_call_event(id: &str, state: &ToolCallState) -> Option<ChatEvent> {
     // Every state names its tool: an event must never reach the transcript
     // nameless — a nameless `ToolCall` garbles whatever row its id lands
     // on, up to wiping an open interaction card's identity (and with it
@@ -189,9 +193,9 @@ fn tool_call_event(id: &str, state: &ToolCallState) -> ChatEvent {
         }
         ToolCallState::Completed(s) => tool_identity(&s.tool_name, &s.intention, &s.display_name),
         ToolCallState::Cancelled(s) => tool_identity(&s.tool_name, &s.intention, &s.display_name),
-        ToolCallState::Unknown(_) => (String::new(), String::new()),
+        ToolCallState::Unknown(_) => return None,
     };
-    match state {
+    Some(match state {
         ToolCallState::Completed(c) => ChatEvent::ToolResult {
             id: id.to_string(),
             output: tool_result_text(c.content.as_deref()),
@@ -227,7 +231,7 @@ fn tool_call_event(id: &str, state: &ToolCallState) -> ChatEvent {
             status: ToolCallStatus::Running,
             input: None,
         },
-    }
+    })
 }
 
 /// The call id, uniform across every lifecycle state.
@@ -827,12 +831,12 @@ mod tests {
         }))
         .expect("streaming state parses");
         match tool_call_event("call_1", &streaming) {
-            ChatEvent::ToolCall {
+            Some(ChatEvent::ToolCall {
                 name,
                 title,
                 status,
                 ..
-            } => {
+            }) => {
                 assert_eq!(name, "AskUserQuestion");
                 assert_eq!(title, "Clarify the target file");
                 assert_eq!(status, ToolCallStatus::Running);
@@ -850,13 +854,26 @@ mod tests {
         }))
         .expect("running state parses");
         match tool_call_event("call_2", &running) {
-            ChatEvent::ToolCall { name, title, .. } => {
+            Some(ChatEvent::ToolCall { name, title, .. }) => {
                 assert_eq!(name, "Read");
                 // No intention: the display name is the title fallback.
                 assert_eq!(title, "read");
             }
             other => panic!("running derives a tool-call advance, got {other:?}"),
         }
+
+        // A state this client cannot name derives nothing at all: an
+        // unnamed advance is worse than none (the row keeps its own face
+        // until a known shape settles it).
+        let unknown: ToolCallState = serde_json::from_value(serde_json::json!({
+            "status": "teleporting",
+            "toolCallId": "call_9",
+        }))
+        .expect("unknown state parses");
+        assert!(
+            tool_call_event("call_9", &unknown).is_none(),
+            "an unnameable state derives no event"
+        );
 
         let completed: ToolCallState = serde_json::from_value(serde_json::json!({
             "status": "completed",
@@ -871,7 +888,7 @@ mod tests {
         }))
         .expect("completed state parses");
         match tool_call_event("call_3", &completed) {
-            ChatEvent::ToolResult { is_error, .. } => assert!(!is_error),
+            Some(ChatEvent::ToolResult { is_error, .. }) => assert!(!is_error),
             other => panic!("completed derives the settle face, got {other:?}"),
         }
     }
