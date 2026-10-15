@@ -64,6 +64,7 @@ use chat_column::ChatColumn;
 use steer_agent_chat_ui::ask_card::AskCardSnapshot;
 mod chips;
 mod composer_render;
+mod exit;
 mod render;
 
 /// One label/value row of the goal status popover.
@@ -687,6 +688,12 @@ impl Workspace {
             // GW5: the landing session is the focused one from tick one —
             // its row suppresses unread rises while attached.
             m.set_focused(Some(&session_id), cx);
+            // The catalogue channels (commands/skills for the composer's
+            // completion popover + the registry-turn hit check, workspaces for
+            // the project chip) ride the same pending-write replay as the
+            // session subscribes — without this baseline pull the popover's
+            // source is permanently empty and every `/skill` submit misses.
+            m.fetch_catalogues(cx);
         });
         let store = multiplexer.read(cx).store();
         let thread =
@@ -2934,12 +2941,17 @@ impl Workspace {
 /// their own `SlashCommand::execute`, and the registry adapters skip
 /// builtin-named keys at init).
 fn wire_commands_has(commands: &serde_json::Value, name: &str, kind: &str) -> bool {
-    commands.as_array().is_some_and(|entries| {
-        entries.iter().any(|e| {
-            e.get("name").and_then(|v| v.as_str()) == Some(name)
-                && e.get("kind").and_then(|v| v.as_str()) == Some(kind)
+    // The catalogue channel's baseline is the object `{"commands": [...]}`
+    // (see `slash_source`); a bare array was the retired `ListCommands` shape.
+    commands
+        .get("commands")
+        .and_then(|v| v.as_array())
+        .is_some_and(|entries| {
+            entries.iter().any(|e| {
+                e.get("name").and_then(|v| v.as_str()) == Some(name)
+                    && e.get("kind").and_then(|v| v.as_str()) == Some(kind)
+            })
         })
-    })
 }
 
 /// Read the sidebar decoration columns the wire `ThreadListItem` does not

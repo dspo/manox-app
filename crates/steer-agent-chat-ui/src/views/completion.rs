@@ -101,7 +101,9 @@ pub fn detect(value: &str, cursor: usize) -> Option<Detection> {
 /// is never resolved through the local bundles. Execution still dispatches
 /// through the desktop-local registry (`slash_command::parse`/`dispatch`).
 pub fn slash_source(query: &str, commands: &serde_json::Value) -> Vec<CompletionItem> {
-    let Some(entries) = commands.as_array() else {
+    // The catalogue channel's baseline is the object `{"commands": [...]}`,
+    // not a bare array (the pre-AHP `ListCommands` shape this used to unwrap).
+    let Some(entries) = commands.get("commands").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
     let items: Vec<CompletionItem> = entries
@@ -360,6 +362,28 @@ pub fn render_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slash_source_reads_the_catalogue_object_shape() {
+        // The `x-manox-commands://` baseline wraps the entries in an object;
+        // the retired bare-array shape must register nothing.
+        let catalogue = serde_json::json!({
+            "commands": [
+                { "name": "compact", "description": "Compact", "kind": "command" },
+                { "name": "gitwork:deliver", "description": "Deliver", "kind": "command" },
+                { "name": "myskill", "description": "A skill", "kind": "skill" },
+            ]
+        });
+        let items = slash_source("", &catalogue);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[2].kind, CompletionKind::Skill);
+        let items = slash_source("git", &catalogue);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "gitwork:deliver");
+        let bare = serde_json::json!([{ "name": "compact", "kind": "command" }]);
+        assert!(slash_source("", &bare).is_empty());
+        assert!(slash_source("", &serde_json::json!(null)).is_empty());
+    }
 
     #[test]
     fn detect_slash_at_start() {

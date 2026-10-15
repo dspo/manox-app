@@ -172,6 +172,32 @@ pub fn message_document(state: &Entity<TextViewState>, theme: &Theme, body: Pixe
         .text_size(body)
 }
 
+/// The reasoning tier — one step under the body (the dsh rule "think text
+/// reads the secondary tier"): muted foreground, a size under the message
+/// body's, the same machinery otherwise.
+pub fn reasoning_document(state: &Entity<TextViewState>, theme: &Theme) -> TextView {
+    const REASONING_SIZE: Pixels = px(12.);
+    TextView::new(state)
+        .style(
+            base_style(theme, move |level| {
+                let mut r = StyleRefinement::default();
+                r.text.font_size = Some(
+                    (if level == 1 {
+                        REASONING_SIZE + px(2.)
+                    } else {
+                        REASONING_SIZE
+                    })
+                    .into(),
+                );
+                r.text.font_weight = Some(FontWeight::BOLD);
+                r
+            })
+            .with_foreground(theme.muted_foreground),
+        )
+        .code_block_highlighter(steer_code_highlighter(theme))
+        .text_size(REASONING_SIZE)
+}
+
 /// A per-frame static markdown document. Upstream keys the state off `id`, so
 /// selection persists across frames without the caller owning an entity.
 pub fn static_document(
@@ -535,6 +561,17 @@ thread_local! {
 
 const CODE_HL_CACHE_MAX: usize = 1024;
 const CODE_HL_CACHE_MAX_BYTES: usize = 64 * 1024;
+
+/// Tree-sitter highlight runs for a bare code fragment (no fence) — the
+/// terminal panel's file-shaped bodies share the markdown stack's dispatch
+/// and thread-local cache.
+pub(crate) fn code_runs(
+    value: &str,
+    lang: &str,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    tree_sitter_runs(value, lang, &theme.highlight_theme)
+}
 
 fn tree_sitter_runs(
     value: &str,

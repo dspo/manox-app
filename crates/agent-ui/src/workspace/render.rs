@@ -343,6 +343,10 @@ impl Workspace {
                     .py_2()
                     .gap_2()
                     .child(centered(gpui::div().w_full().h(px(1.)).bg(theme.border)))
+                    .when_some(
+                        self.render_captain_strip(running, &theme, cx),
+                        |this, strip| this.child(centered(strip)),
+                    )
                     .children(self.render_attachments(&theme, cx))
                     .child(centered(self.render_composer(running, window, &theme, cx)))
             });
@@ -401,6 +405,12 @@ impl Workspace {
                         let conversation = self.chat.read(cx).conversation.clone();
                         let diag_enabled = crate::overlap_diag::enabled();
                         let processor = move |ix: usize, _window: &mut Window, cx: &mut App| {
+                            // A folded whole-turn process head hides the
+                            // turn's segments (the reply is exempt) — the
+                            // row renders empty instead.
+                            if conversation.read(cx).hidden_by_turn_process(ix, cx) {
+                                return v_flex().w_full().min_w_0().into_any_element();
+                            }
                             let item = conversation.read(cx).items().get(ix).cloned();
                             match item {
                                 Some(item) => {
@@ -410,10 +420,18 @@ impl Workspace {
                                             item.read(cx).diagnostic_id(),
                                         );
                                     }
+                                    // A reply immediately followed by an
+                                    // activity segment tightens its bottom
+                                    // gap: the segment's own header padding
+                                    // breathes, so the generic 16px reads as
+                                    // a hole (the reverse direction keeps it
+                                    // — a reply needs its air).
+                                    let tight_gap = conversation.read(cx).tight_gap_after(ix, cx);
                                     v_flex()
                                         .w_full()
                                         .pt_1()
-                                        .pb_4()
+                                        .when(tight_gap, |this| this.pb_1())
+                                        .when(!tight_gap, |this| this.pb_4())
                                         .flex_shrink_0()
                                         .min_w_0()
                                         .debug_selector(move || {
@@ -513,6 +531,85 @@ impl Workspace {
             });
         self.apply_chat_actions(root, window, cx)
     }
+
+    /// The one-line Captain strip above the composer while a turn runs:
+    /// `Captain is steering {provider}/{model} · {activity}` — a PixelSpinner
+    /// leading flush at the left edge (healthy running), the model in the
+    /// app's wire-color convention (the registration's `-wire` suffix never
+    /// shows as text), and the turn's current activity as a one-line summary.
+    /// The strip retires the instant the turn ends — the message column
+    /// carries no per-entry status glyphs, this is the one live surface.
+    fn render_captain_strip(
+        &self,
+        running: bool,
+        theme: &Theme,
+        cx: &App,
+    ) -> Option<gpui::AnyElement> {
+        use ai_elements::{PixelSpinner, PixelSpinnerVariant};
+        use steer_agent_chat_ui::conversation::LiveActivity;
+        use steer_agent_chat_ui::model_tag::ModelTag;
+
+        if !running {
+            return None;
+        }
+        let tag = ModelTag::resolve(&self.model_label(cx));
+        if tag.is_empty() {
+            return None;
+        }
+        let (activity, elapsed) = {
+            let conversation = self.chat.read(cx).conversation.read(cx);
+            (conversation.live_activity(cx), conversation.running_secs())
+        };
+
+        let muted = theme.muted_foreground;
+        let mut row = gpui::div()
+            .id("captain-strip")
+            .debug_selector(|| "workspace-captain-strip".into())
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .text_sm()
+            .text_color(muted)
+            .child(
+                PixelSpinner::new()
+                    .variant(PixelSpinnerVariant::Grid)
+                    .color(muted)
+                    .into_any_element(),
+            )
+            .child(gpui::div().child(crate::i18n::t("captain-steering-prefix")))
+            .children(tag.spans(theme).into_iter().map(|(text, color)| {
+                gpui::div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(color)
+                    .child(text)
+            }));
+        if elapsed > 0 {
+            row = row.child(gpui::div().child("·")).child(
+                gpui::div().child(crate::i18n::t_count("thinking-duration", elapsed as i64)),
+            );
+        }
+        if let Some(activity) = activity {
+            let summary = match &activity {
+                LiveActivity::Thinking => {
+                    gpui::div().child(crate::i18n::t("captain-activity-thinking"))
+                }
+                LiveActivity::Replying => {
+                    gpui::div().child(crate::i18n::t("captain-activity-replying"))
+                }
+                LiveActivity::Tool(title) => gpui::div()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(theme.mono_font_family.clone())
+                    .child(title.clone()),
+            };
+            row = row.child(gpui::div().child("·")).child(summary);
+        }
+        Some(row.into_any_element())
+    }
+
     /// §二.3 stop notice — the dismissible BROADCAST arm. Shown above the
     /// message area while the foreground leaf's reopen budget is exhausted
     /// AND not dismissed. It names what stopped (the reason copy is keyed

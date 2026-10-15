@@ -169,6 +169,13 @@ status-cancelled = Cancelled
 
 context-agents-captain = Captain
 
+### agent-ui workspace — Captain status strip (above the composer)
+
+captain-steering-prefix = Captain is steering
+turn-process-completed = Completed in 
+captain-activity-thinking = Thinking
+captain-activity-replying = Replying
+
 ### views/subagent_panel.rs
 
 subagent-panel-waiting = Waiting for sub-agent activity…
@@ -545,6 +552,32 @@ turn-navigator-copied = Message copied to clipboard.
 
 slash-mode-unknown = Unknown permission mode "{ $mode }" — expected read-only, workspace-write, or danger-full-access
 
+### /exit teardown sequence (workspace/exit.rs)
+
+exit-untitled-thread = this thread
+
+exit-stopping-subagents = Stopping subagents...
+
+exit-subagent-stopped = Subagent "{ $name }" is stopped.
+
+exit-stopping-agent = Stopping { $name }...
+
+exit-agent-stopped = { $name } is stopped.
+
+exit-killing-terminal = Killing subprocesses in the terminal...
+
+exit-terminal-killed = All subprocesses in the terminal are killed.
+
+exit-closing-browser = Closing the browser...
+
+exit-browser-closed = The browser is closed.
+
+exit-archiving = Archiving { $name }...
+
+exit-archived = The thread is archived.
+
+exit-bye = ByeBye!
+
 menu-settings = Settings…
 
 menu-quit = Quit
@@ -843,6 +876,8 @@ chrome-sidebar-grouping = Toggle grouping
 chrome-sidebar-search = Search sessions
 chrome-sidebar-search-placeholder = Search sessions
 chrome-sidebar-no-match = No matching sessions
+chrome-sidebar-show-more = Show more ({$count})
+chrome-sidebar-show-less = Show less
 chrome-unimplemented = Not implemented yet
 chrome-group-today = Today
 chrome-group-yesterday = Yesterday

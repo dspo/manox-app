@@ -139,7 +139,7 @@ fn header_right_click_opens_the_group_menu(cx: &mut TestAppContext) {
     );
 
     let header = visual
-        .debug_bounds("chrome-group-header-steer")
+        .debug_bounds("chrome-group-header-/home/u/projs/steer")
         .expect("the group header paints");
     assert!(
         visual.debug_bounds("chrome-group-menu").is_none(),
@@ -158,7 +158,10 @@ fn header_right_click_opens_the_group_menu(cx: &mut TestAppContext) {
         .expect("the menu paints");
     assert_eq!(
         log.borrow().as_slice(),
-        [("steer".to_string(), Some("/home/u/projs/steer".to_string()))],
+        [(
+            "/home/u/projs/steer".to_string(),
+            Some("/home/u/projs/steer".to_string())
+        )],
         "the host receives the key and the project path"
     );
 }
@@ -173,7 +176,7 @@ fn ellipsis_button_opens_without_toggling_collapse(cx: &mut TestAppContext) {
     );
 
     let button = visual
-        .debug_bounds("chrome-group-menu-btn-steer")
+        .debug_bounds("chrome-group-menu-btn-/home/u/projs/steer")
         .expect("the ellipsis button paints");
     visual.simulate_click(button.center(), Modifiers::default());
     visual.run_until_parked();
@@ -184,7 +187,10 @@ fn ellipsis_button_opens_without_toggling_collapse(cx: &mut TestAppContext) {
     );
     assert_eq!(
         log.borrow().as_slice(),
-        [("steer".to_string(), Some("/home/u/projs/steer".to_string()))],
+        [(
+            "/home/u/projs/steer".to_string(),
+            Some("/home/u/projs/steer".to_string())
+        )],
     );
     // The rows still paint: the click never reached the header's collapse
     // toggle.

@@ -73,6 +73,10 @@ pub struct TerminalPanel {
     streaming: bool,
     /// Pagination cursor: how many body lines a finalized panel renders.
     visible: usize,
+    /// The body's language for syntax highlighting (file-shaped kinds only —
+    /// `Numbered`/`File` render their content through tree-sitter when this
+    /// is set; `Plain`/`Diff` carry their own coloring and ignore it).
+    lang: Option<String>,
     theme: Theme,
 }
 
@@ -94,8 +98,16 @@ impl TerminalPanel {
             git: None,
             streaming: false,
             visible: PAGE_SIZE,
+            lang: None,
             theme: theme.clone(),
         }
+    }
+
+    /// Set the body's language (file-shaped panels highlight their content;
+    /// a `None` or unknown language degrades to the plain body).
+    pub fn set_lang(&mut self, lang: Option<String>, cx: &mut gpui::Context<Self>) {
+        self.lang = lang;
+        cx.notify();
     }
 
     pub fn set_kind(&mut self, kind: PanelKind, cx: &mut gpui::Context<Self>) {
@@ -245,16 +257,23 @@ impl TerminalPanel {
                 let muted = style_color(self.theme.muted_foreground);
                 let mut s = String::new();
                 let mut runs = Vec::new();
+                // Content starts, one per visible line — the highlight pass
+                // maps its runs onto the gutter-prefixed body through them.
+                let mut content_starts = Vec::with_capacity(v);
                 for (i, line) in parts.iter().take(v).enumerate() {
                     let line_start = s.len();
                     let gutter = format!("{:>width$}  ", i + 1);
                     let g_len = gutter.len();
                     s.push_str(&gutter);
                     runs.push((line_start..line_start + g_len, muted));
+                    content_starts.push(s.len());
                     s.push_str(line);
                     s.push('\n');
                 }
                 trim_trailing_newline(&mut s);
+                if let Some(lang) = self.lang.as_deref() {
+                    highlight_content(&mut runs, &parts[..v], &content_starts, lang, &self.theme);
+                }
                 (s, runs, total, v)
             }
             PanelKind::Numbered => {
@@ -275,6 +294,10 @@ impl TerminalPanel {
                 let muted = style_color(self.theme.muted_foreground);
                 let mut s = String::new();
                 let mut runs = Vec::new();
+                // Per visible line: where its content starts in `s` and what
+                // that content is; `None` marks a gap marker, which both
+                // carries no number and breaks the highlight segment.
+                let mut content_lines: Vec<Option<(usize, &str)>> = Vec::with_capacity(v);
                 for line in lines.iter().take(v) {
                     let line_start = s.len();
                     match line {
@@ -283,18 +306,26 @@ impl TerminalPanel {
                             let g_len = gutter.len();
                             s.push_str(&gutter);
                             runs.push((line_start..line_start + g_len, muted));
+                            content_lines.push(Some((s.len(), content)));
                             s.push_str(content);
                         }
                         // A gap marker is not a file line: it carries no number.
                         HashlineLine::Gap => {
                             s.push_str(GAP_MARKER);
                             runs.push((line_start..s.len(), muted));
+                            content_lines.push(None);
                         }
-                        HashlineLine::Plain(content) => s.push_str(content),
+                        HashlineLine::Plain(content) => {
+                            content_lines.push(Some((s.len(), content)));
+                            s.push_str(content);
+                        }
                     }
                     s.push('\n');
                 }
                 trim_trailing_newline(&mut s);
+                if let Some(lang) = self.lang.as_deref() {
+                    highlight_marked(&mut runs, &content_lines, lang, &self.theme);
+                }
                 (s, runs, total, v)
             }
             PanelKind::Diff => {
@@ -455,6 +486,80 @@ fn styled(color: Hsla, italic: bool) -> HighlightStyle {
         }),
         ..Default::default()
     }
+}
+
+/// Highlight the visible file content through tree-sitter and append the
+/// (translated) runs: `starts[i]` is where `lines[i]`'s content begins in
+/// the composed body, after its gutter. Invariant: `starts.len() ==
+/// lines.len()` (one content start per line, both built by the same loop).
+fn highlight_content(
+    runs: &mut Vec<(Range<usize>, HighlightStyle)>,
+    lines: &[&str],
+    starts: &[usize],
+    lang: &str,
+    theme: &Theme,
+) {
+    debug_assert_eq!(lines.len(), starts.len());
+    if lines.is_empty() {
+        return;
+    }
+    // Prefix sums of the plain (gutter-less) join: plain_offs[i] is where
+    // line i starts inside it, computed once — the per-run walk below reads
+    // it instead of re-summing.
+    let mut plain_offs = Vec::with_capacity(lines.len() + 1);
+    plain_offs.push(0usize);
+    for line in lines {
+        plain_offs.push(plain_offs.last().expect("seeded") + line.len() + 1);
+    }
+    let plain = lines.join("\n");
+    for (r, hl) in crate::markdown::text_view::code_runs(&plain, lang, theme) {
+        // Translate the run's byte span onto the gutter-prefixed body by
+        // walking line starts (a run may span lines; each line's interior
+        // shifts by that line's gutter width, which differs per line).
+        for (i, line) in lines.iter().enumerate() {
+            let line_off = starts[i];
+            let line_end = line_off + line.len();
+            if r.start >= plain_offs[i + 1] - 1 || r.end <= plain_offs[i] {
+                continue;
+            }
+            let shift = line_off as i64 - plain_offs[i] as i64;
+            let start = ((r.start as i64) + shift).max(line_off as i64) as usize;
+            let end = ((r.end as i64) + shift).min(line_end as i64) as usize;
+            if end > start {
+                runs.push((start..end, hl));
+            }
+        }
+    }
+}
+
+/// The `Numbered` variant of [`highlight_content`]: `lines[i]` is
+/// `Some((start, content))` or a gap marker's `None` — a `None` both carries
+/// no content and splits the highlight into independent segments (a window
+/// gap is not source the parser should carry across).
+fn highlight_marked(
+    runs: &mut Vec<(Range<usize>, HighlightStyle)>,
+    lines: &[Option<(usize, &str)>],
+    lang: &str,
+    theme: &Theme,
+) {
+    let mut segment: Vec<(usize, &str)> = Vec::new();
+    let flush = |segment: &mut Vec<(usize, &str)>,
+                 runs: &mut Vec<(Range<usize>, HighlightStyle)>| {
+        if segment.is_empty() {
+            return;
+        }
+        let starts: Vec<usize> = segment.iter().map(|(s, _)| *s).collect();
+        let texts: Vec<&str> = segment.iter().map(|(_, t)| *t).collect();
+        highlight_content(runs, &texts, &starts, lang, theme);
+        segment.clear();
+    };
+    for line in lines {
+        match line {
+            Some(mark) => segment.push(*mark),
+            None => flush(&mut segment, runs),
+        }
+    }
+    flush(&mut segment, runs);
 }
 
 /// Split `s` into body lines, dropping one trailing newline so a final `\n`
@@ -917,6 +1022,37 @@ mod tests {
         assert_eq!(digits(10), 2);
         assert_eq!(digits(99), 2);
         assert_eq!(digits(100), 3);
+    }
+
+    /// A file-shaped panel with a language highlights its content through
+    /// tree-sitter: the composed body carries highlight runs BEYOND the
+    /// gutter's (a bare gutter paints exactly one muted run per line), and
+    /// the runs stay inside the content span (gutter text is never
+    /// re-colored). Without a language the runs remain gutter-only.
+    #[test]
+    fn file_panels_highlight_content_through_tree_sitter() {
+        let theme = test_theme();
+        let source = "fn main() {\n    let x = 1;\n}\n";
+
+        let mut p = TerminalPanel::new(PanelKind::File, None, None, &theme);
+        p.lang = Some("rust".into());
+        p.output = source.to_string();
+        let (text, runs, _total, _v) = p.body();
+        let gutter_runs = text.lines().filter(|l| !l.is_empty()).count();
+        assert!(
+            runs.len() > gutter_runs,
+            "content highlighting adds runs beyond the {gutter_runs} gutter runs"
+        );
+
+        // No language: gutter runs only.
+        let mut plain = TerminalPanel::new(PanelKind::File, None, None, &theme);
+        plain.output = source.to_string();
+        let (_t, plain_runs, _total, _v) = plain.body();
+        assert_eq!(
+            plain_runs.len(),
+            gutter_runs,
+            "without a language the panel paints gutter runs only"
+        );
     }
 
     #[test]

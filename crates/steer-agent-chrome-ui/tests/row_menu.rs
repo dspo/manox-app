@@ -528,6 +528,8 @@ fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
         key: "Chats".into(),
         collapsed: false,
         project: None,
+        hidden: 0,
+        expanded: false,
         rows: vec![
             row_data("leader-1", 300, 300, true),
             // Post-projection shape: the member carries its leader's stamp
@@ -606,6 +608,8 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
         key: "Chats".into(),
         collapsed: false,
         project: None,
+        hidden: 0,
+        expanded: false,
         rows: vec![
             // Team sharing the leader's stamp; the member is NEWER on its
             // own clock (the classic "member just finished, leader idle")
@@ -665,8 +669,8 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
     // (trivially true — time_groups never reads group_order), the RECORDING
     // must come out untouched — a dropped edge (the mode early-return) must
     // not leak the pseudo name into the persisted drag order.
-    shell.update(cx, |s, _cx| {
-        s.move_group("chrome-group-earlier", "chrome-group-today", true);
+    shell.update(cx, |s, cx| {
+        s.move_group("chrome-group-earlier", "chrome-group-today", true, cx);
         assert!(
             s.group_order().is_empty(),
             "a time-mode drag must not record any order"
@@ -705,6 +709,8 @@ fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
         key: "proj".into(),
         collapsed: false,
         project: None,
+        hidden: 0,
+        expanded: false,
         rows: vec![
             titled("hit", "alpha design", stamp_days_ago(0)),
             titled("miss", "unrelated", stamp_days_ago(1)),

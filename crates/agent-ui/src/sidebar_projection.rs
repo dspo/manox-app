@@ -204,6 +204,8 @@ pub fn project_groups(rows: &[ThreadRow], removed: &HashSet<String>) -> Vec<Sess
             project: bucket_project.get(&name).cloned().flatten(),
             name,
             collapsed: false,
+            hidden: 0,
+            expanded: false,
         })
         .collect()
 }

@@ -103,13 +103,12 @@ impl Workspace {
         // or declines (NoOp → fall through to the normal path). Slash parsing
         // only applies to text-only input; attachments force the normal path.
         // While idle every recognized command dispatches; while a turn runs,
-        // only `/mode` dispatches immediately — mode switches are hot (the
-        // gate governs the very next tool call) and the prompt half of
-        // `/mode <name> <prompt>` parks as a follow-up like any message.
-        // Everything else typed mid-turn stays in the follow-up queue as raw
-        // text rather than interrupting the run (e.g. `/clear` mid-turn would
-        // race the streaming conversation); the queued text flushes at turn
-        // end.
+        // only the hot ones dispatch immediately: `/mode` (the gate governs
+        // the very next tool call) and `/exit`/`/quit` (whose whole point is
+        // to force-stop a running thread). Everything else typed mid-turn
+        // stays in the follow-up queue as raw text rather than interrupting
+        // the run (e.g. `/clear` mid-turn would race the streaming
+        // conversation); the queued text flushes at turn end.
         let running = self
             .chat
             .read(cx)
@@ -125,7 +124,7 @@ impl Workspace {
             });
         if attachments.is_empty()
             && let Some(parsed) = crate::slash_command::parse(&text)
-            && (!running || parsed.name == "mode")
+            && (!running || matches!(parsed.name.as_str(), "mode" | "exit" | "quit"))
         {
             let result = crate::slash_command::dispatch(&parsed, self, window, cx);
             match result {

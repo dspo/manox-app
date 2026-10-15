@@ -458,4 +458,30 @@ mod nav_history {
             "← lands on the SUCCESSOR id, never the retired predecessor"
         );
     }
+
+    #[test]
+    fn wire_commands_has_reads_the_catalogue_object_shape() {
+        use crate::workspace::wire_commands_has;
+        // The `x-manox-commands://` baseline wraps the entries in an object
+        // (the retired `ListCommands` shape was a bare array — unwrapping it
+        // starved the registry-turn hit check into every-miss).
+        let catalogue = serde_json::json!({
+            "commands": [
+                { "name": "gitwork:deliver", "kind": "command", "description": "d" },
+                { "name": "myskill", "kind": "skill", "description": "d" },
+            ]
+        });
+        assert!(wire_commands_has(&catalogue, "gitwork:deliver", "command"));
+        assert!(wire_commands_has(&catalogue, "myskill", "skill"));
+        assert!(
+            !wire_commands_has(&catalogue, "myskill", "command"),
+            "kind must match"
+        );
+        assert!(!wire_commands_has(&catalogue, "absent", "skill"));
+        let bare = serde_json::json!([{ "name": "myskill", "kind": "skill" }]);
+        assert!(
+            !wire_commands_has(&bare, "myskill", "skill"),
+            "a bare array is the retired shape and registers nothing"
+        );
+    }
 }

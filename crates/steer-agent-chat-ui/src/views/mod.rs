@@ -1,5 +1,6 @@
 //! View-layer helpers and the conversation column's view modules.
 
+pub mod activity_chain;
 pub mod completion;
 pub mod context_rail;
 pub mod message;

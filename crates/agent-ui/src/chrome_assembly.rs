@@ -91,6 +91,68 @@ pub fn close_tool_tabs_of_kind(kind: &str, cx: &mut App) -> bool {
         .is_ok()
 }
 
+/// Take the live dock's panel view and drop it — dropping the terminal view
+/// tears its PTY down (process-tree SIGTERM → SIGKILL), which is how `/exit`
+/// stops the dock's subprocesses. `false` when no shell/window is live or the
+/// dock holds no live content (a collapsed dock has none — collapse already
+/// dropped the view).
+pub fn stop_dock_terminal(cx: &mut App) -> bool {
+    let Some(shell) = shell_handle() else {
+        return false;
+    };
+    let Some(handle) = crate::dispatch::window_global() else {
+        return false;
+    };
+    let mut taken = None;
+    let _ = handle.update(cx, |_, _, cx| {
+        shell.update(cx, |shell, cx| taken = shell.take_panel_view(cx));
+    });
+    let had = taken.is_some();
+    drop(taken);
+    had
+}
+
+/// The distinct tool-tab kinds open in the live pane — `/exit`'s read-only
+/// probe of what owns live processes. Empty when no shell is live.
+pub fn pane_open_kinds(cx: &App) -> Vec<String> {
+    let Some(shell) = shell_handle() else {
+        return Vec::new();
+    };
+    shell
+        .read(cx)
+        .right
+        .read(cx)
+        .open_kinds()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether the bottom dock holds a live view (the `/exit` teardown's probe).
+pub fn dock_terminal_live(cx: &App) -> bool {
+    shell_handle().is_some_and(|shell| shell.read(cx).panel_live())
+}
+
+/// The archive gesture's shell-side reconciliation: drop the row from the
+/// sidebar now (the same optimistic drop the row menu's archive performs),
+/// instead of waiting for the protocol echo + the next list snapshot. The
+/// workspace-side archive paths (`/exit`, `cmd-;`) have no menu handler to
+/// do this half for them. `false` when no shell is live.
+pub fn drop_sidebar_row(id: &str, cx: &mut App) -> bool {
+    let Some(shell) = shell_handle() else {
+        return false;
+    };
+    let Some(handle) = crate::dispatch::window_global() else {
+        return false;
+    };
+    let id = id.to_string();
+    handle
+        .update(cx, |_, _, cx| {
+            shell.update(cx, |shell, cx| shell.set_archived(&id, true, cx));
+        })
+        .is_ok()
+}
+
 /// The open observation panel for a sub-agent address, when one is mounted in
 /// the live pane — how the workspace streams a child event into a panel the
 /// shell owns.
@@ -214,9 +276,27 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         // into the snapshot as sidebar rows; the shell regroups them under
         // their project's header.
         sessions.extend(ws.read(cx).external_session_rows());
+        // The registry stamps first-seen projects (the default order's
+        // newest-added-first clock) and resolves the display order: the
+        // manual drag order, with unrecorded projects newest-first on top.
+        let keys: Vec<String> = {
+            let mut seen: Vec<String> = Vec::new();
+            let mut all: Vec<String> = Vec::new();
+            for s in &sessions {
+                let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
+                if s.project.is_some() && !seen.contains(&s.project.clone().unwrap()) {
+                    seen.push(s.project.clone().unwrap());
+                }
+                if !all.contains(&key) {
+                    all.push(key);
+                }
+            }
+            crate::project_registry::note_seen_projects(&seen);
+            crate::project_registry::order_groups(&all)
+        };
         // The sidebar highlight follows the FOREGROUND thread, not the last
         // click: new-thread landings, /exit replacements and successor
-        // hand-offs all switch without a sidebar click, and a stale
+        // hand-offs all switch without a sidebar click; a stale
         // highlight would advertise the wrong session as active. An external
         // session's highlight is not stolen — it is no thread, so the
         // foreground rule has no opinion on it while it holds the highlight.
@@ -237,6 +317,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .map(|id| ws.read(cx).is_external_session(id))
             .unwrap_or(false);
         shell.update(cx, |shell, cx| {
+            shell.set_group_order(keys);
             shell.set_sessions(sessions);
             if !active_is_external && shell.active != fg {
                 shell.active = fg;
@@ -549,6 +630,11 @@ fn shell_config(
                 move |_key, project, _anchor, window, cx| {
                     Some(crate::project_menu::group_menu(project, &ws, window, cx))
                 }
+            })),
+            // The drag-reorder write-back: the key list the shell recorded
+            // is the registry's manual order, verbatim.
+            on_group_order: Some(Box::new(|keys, _cx| {
+                crate::project_registry::set_manual_order(keys.to_vec());
             })),
             // The external row menu's 关闭会话: drop the session (its
             // terminal view dies with the record) and fall back to the
