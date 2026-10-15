@@ -1220,26 +1220,41 @@ impl AhpStore {
                         // its bubble optimistically, and a refusal IS the
                         // echo, so silence here would strand the bubble
                         // with no reply and no explanation.
-                        let session_id = id_of(&envelope.channel).to_string();
-                        match config_values_of(&envelope.action) {
-                            Some(config) => {
-                                self.rollback_refused_config(&session_id, config);
-                            }
-                            None => {
-                                if let Some(keys) = touched_config_keys(&envelope.action) {
-                                    self.rollback_latest(&session_id, &keys);
+                        // The refusal speaks on the SESSION's bucket, not the
+                        // channel's own id: a chat payload carries no URI of
+                        // its own, so an `ahp-chat:` channel resolves through
+                        // its owning session exactly as the derived display
+                        // events do — a notice bucketed under a chat id lands
+                        // in a bucket no consumer drains (the stranded
+                        // bubble this arm exists to explain).
+                        let session_id = if envelope.channel.starts_with("ahp-chat:/") {
+                            self.book
+                                .session_of_chat(id_of(&envelope.channel))
+                                .map(str::to_string)
+                        } else {
+                            Some(id_of(&envelope.channel).to_string())
+                        };
+                        if let Some(session_id) = session_id {
+                            match config_values_of(&envelope.action) {
+                                Some(config) => {
+                                    self.rollback_refused_config(&session_id, config);
+                                }
+                                None => {
+                                    if let Some(keys) = touched_config_keys(&envelope.action) {
+                                        self.rollback_latest(&session_id, &keys);
+                                    }
                                 }
                             }
+                            self.push_chat_event(
+                                session_id,
+                                crate::chat_fold::ChatEvent::Notice {
+                                    text: format!(
+                                        "{}: {reason}",
+                                        steer_i18n::t("workspace-change-rejected")
+                                    ),
+                                },
+                            );
                         }
-                        self.push_chat_event(
-                            session_id,
-                            crate::chat_fold::ChatEvent::Notice {
-                                text: format!(
-                                    "{}: {reason}",
-                                    steer_i18n::t("workspace-change-rejected")
-                                ),
-                            },
-                        );
                     }
                     cx.notify();
                     return;
@@ -1669,28 +1684,31 @@ impl AhpStore {
                 continue;
             };
             let (_, _, base, _) = self.optimistic_undo.remove(position);
-            let later = self
+            // EVERY write still in flight for this key was written above the
+            // refused value, so the refused entry's base is the rollback
+            // target for all of them — a later refusal of any one restores
+            // to the last confirmed value, never to a refused one. Rewriting
+            // only the newest leaves the ones in between pointing at the
+            // refused value.
+            let mut later = false;
+            for entry in self
                 .optimistic_undo
                 .iter_mut()
-                .rposition(|(sid, k, _, _)| sid == session_id && k == key);
-            match later {
-                // A later in-flight write still owns the fold; its base is
-                // now the refused write's base.
-                Some(later) => {
-                    self.optimistic_undo[later].2 = base;
-                }
-                None => {
-                    if let Some(state) = self.book.sessions.get_mut(session_id)
-                        && let Some(seat) = &mut state.config
-                    {
-                        match base {
-                            Some(v) => {
-                                seat.values.insert(key.clone(), v);
-                            }
-                            None => {
-                                seat.values.remove(key);
-                            }
-                        }
+                .filter(|(sid, k, _, _)| sid == session_id && k == key)
+            {
+                entry.2 = base.clone();
+                later = true;
+            }
+            if !later
+                && let Some(state) = self.book.sessions.get_mut(session_id)
+                && let Some(seat) = &mut state.config
+            {
+                match base {
+                    Some(v) => {
+                        seat.values.insert(key.clone(), v);
+                    }
+                    None => {
+                        seat.values.remove(key);
                     }
                 }
             }
