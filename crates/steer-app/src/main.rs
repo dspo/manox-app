@@ -115,12 +115,6 @@ fn main() {
         // runtime; hand it the handle before `manox_terminal::init` builds the store.
         manox_terminal::runtime::set_runtime(manox_agent::runtime::handle().clone());
         agent_ui::slash_command::init(cx);
-        // The app's own contribution to every session's tool set: the
-        // Preview tool (a user-facing presentation tool mounted through the
-        // engine's embedder seam). Process-global; the engine re-consults
-        // the provider before every prompt, so ordering here is not load-
-        // bearing.
-        agent_ui::preview_host::install();
         manox_terminal::init();
         terminal_ui::init(cx);
 

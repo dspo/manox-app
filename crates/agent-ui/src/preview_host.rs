@@ -140,21 +140,44 @@ impl AgentTool for PreviewTool {
     }
 }
 
-/// The process-wide embedder provider: one Preview tool for every session.
-struct PreviewToolProvider;
+/// The process-wide embedder provider: the Preview tool for every session,
+/// chained over whatever provider owned the slot when [`install`] ran.
+///
+/// Chaining is not optional politeness: the `AgentServer` constructor
+/// claims the slot itself (`agent_server::install_embedder_provider` —
+/// last-wins by design), so an install that merely overwrites would either
+/// be clobbered by the server's construction or, if it won the race,
+/// silently kill the `RegisterSessionTools` path the server's provider
+/// serves. The chain keeps both surfaces alive.
+struct ChainedPreviewProvider {
+    fallback: Option<Arc<dyn manox_agent::embedder_tools::EmbedderToolProvider>>,
+}
 
-impl manox_agent::embedder_tools::EmbedderToolProvider for PreviewToolProvider {
-    fn tools_for(&self, _session_id: &str) -> Vec<Arc<dyn AgentTool>> {
-        vec![Arc::new(PreviewTool::new())]
+impl manox_agent::embedder_tools::EmbedderToolProvider for ChainedPreviewProvider {
+    fn tools_for(&self, session_id: &str) -> Vec<Arc<dyn AgentTool>> {
+        let mut tools = vec![Arc::new(PreviewTool::new()) as Arc<dyn AgentTool>];
+        if let Some(fallback) = &self.fallback {
+            tools.extend(fallback.tools_for(session_id));
+        }
+        tools
     }
 }
 
-/// Register the Preview tool with the engine's embedder seam. Idempotent;
-/// call once at app wiring. The engine re-consults the provider before
-/// every prompt, so the registration may land before or after sessions
-/// exist.
+/// Register the Preview tool with the engine's embedder seam.
+///
+/// MUST run after `agent_server::global(...)` — the server's construction
+/// claims the process-wide slot last-wins, and an earlier install would be
+/// clobbered (or, once-guarded, would burn the guard against a provider-less
+/// world). `Workspace::new` calls this immediately after the server global;
+/// the `Once` keeps later windows from stacking duplicate chains. The engine
+/// re-consults the provider at session assembly and before every prompt, so
+/// the registration may land before or after individual sessions exist.
 pub fn install() {
-    manox_agent::embedder_tools::set_provider(Arc::new(PreviewToolProvider));
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let fallback = manox_agent::embedder_tools::provider();
+        manox_agent::embedder_tools::set_provider(Arc::new(ChainedPreviewProvider { fallback }));
+    });
 }
 
 #[cfg(test)]
@@ -223,11 +246,53 @@ mod tests {
     }
 
     #[test]
-    fn provider_mounts_exactly_one_preview_tool() {
-        let provider = PreviewToolProvider;
-        let tools = provider.tools_for("any-session");
-        assert_eq!(tools.len(), 1);
+    fn chained_provider_adds_preview_over_the_fallback() {
+        struct TwoStubTools;
+        impl manox_agent::embedder_tools::EmbedderToolProvider for TwoStubTools {
+            fn tools_for(&self, _session_id: &str) -> Vec<Arc<dyn AgentTool>> {
+                vec![
+                    Arc::new(PreviewTool::new()) as Arc<dyn AgentTool>,
+                    Arc::new(PreviewTool::new()) as Arc<dyn AgentTool>,
+                ]
+            }
+        }
+        // No fallback: exactly our tool.
+        let bare = ChainedPreviewProvider { fallback: None };
+        assert_eq!(bare.tools_for("s").len(), 1);
+        assert_eq!(bare.tools_for("s")[0].name(), preview::TOOL_NAME);
+        // With a fallback: ours first, then everything the fallback serves
+        // (the RegisterSessionTools surface keeps its tools).
+        let chained = ChainedPreviewProvider {
+            fallback: Some(Arc::new(TwoStubTools)),
+        };
+        let tools = chained.tools_for("s");
+        assert_eq!(tools.len(), 3);
         assert_eq!(tools[0].name(), preview::TOOL_NAME);
+    }
+
+    /// The install contract under the process-global slot: it chains
+    /// whatever provider is live (the AgentServer's, in production) and the
+    /// `Once` guard keeps a second install from stacking duplicates. Runs
+    /// both halves in ONE test — the slot is process-global, and the
+    /// absent/present halves must not race each other across parallel test
+    /// threads (the same shape as upstream's provider-gate test).
+    #[test]
+    fn install_chains_the_live_provider_and_fires_once() {
+        manox_agent::embedder_tools::drop_provider_for_test();
+
+        install();
+        let first = manox_agent::embedder_tools::provider().expect("install claims the slot");
+        let tools = first.tools_for("any-session");
+        assert_eq!(tools.len(), 1, "no prior provider → only the preview tool");
+        assert_eq!(tools[0].name(), preview::TOOL_NAME);
+
+        // A second install (a second window) is a no-op — the live provider
+        // keeps serving exactly one preview tool.
+        install();
+        let second = manox_agent::embedder_tools::provider().expect("the slot stays claimed");
+        assert_eq!(second.tools_for("any-session").len(), 1);
+
+        manox_agent::embedder_tools::drop_provider_for_test();
     }
 
     #[test]
