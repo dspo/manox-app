@@ -75,11 +75,14 @@ fn seed_session(
     });
 }
 
+/// The notices a consumer actually reads: the display buckets are keyed by
+/// the OWNING SESSION, so an `ahp-chat:` refusal must resolve through it
+/// rather than through the chat's own id. Draining the chat's bucket here as
+/// well would hide a notice posted where nothing reads it — exactly the
+/// stranded bubble these tests exist to catch.
 fn notice_texts(store: &gpui::Entity<AhpStore>, cx: &mut gpui::TestAppContext) -> Vec<String> {
     store.update(cx, |s, _| {
-        let mut events = s.drain_chat_events("s-1");
-        events.extend(s.drain_chat_events("c-1"));
-        events
+        s.drain_chat_events("s-1")
             .iter()
             .filter_map(|event| match event {
                 steer_agent_chat_ui::chat_fold::ChatEvent::Notice { text } => Some(text.clone()),
@@ -245,5 +248,54 @@ async fn an_own_refused_non_config_action_still_speaks(cx: &mut gpui::TestAppCon
             .iter()
             .any(|text| text.contains("not writable")),
         "an own refused action is never silent"
+    );
+}
+
+/// Three writes to one key in flight, refused in order: the fold must end at
+/// the base of the FIRST refusal. Rewriting only the newest later entry
+/// leaves the ones in between pointing at the refused value, so their own
+/// refusal restores a value the host rejected — the outcome the value-chain
+/// scheme exists to rule out.
+#[gpui::test]
+async fn a_refused_write_never_resurfaces_as_a_rollback_target(cx: &mut gpui::TestAppContext) {
+    init_harness(cx);
+    let store = cx.new(|_| AhpStore::detached());
+    seed_session(&store, "s-1", "c-1", cx);
+
+    store.update(cx, |s, _| {
+        for value in ["prov/a", "prov/b", "prov/c"] {
+            let mut pick = serde_json::Map::new();
+            pick.insert(
+                "model".to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+            s.optimistic_config("s-1", &pick);
+        }
+    });
+
+    store.update(cx, |s, cx| {
+        for (seq, value) in ["prov/a", "prov/b", "prov/c"].into_iter().enumerate() {
+            s.diagnostic_route_event(
+                envelope(
+                    &session_uri("s-1"),
+                    config_action(&[("model", value)]),
+                    Some(CLIENT_ID),
+                    Some("model cannot be served"),
+                    seq as u64 + 1,
+                ),
+                cx,
+            );
+        }
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        store.read_with(cx, |s, _| {
+            steer_agent_chat_ui::ahp_store::leaf(&s.book, "s-1")
+                .model_id()
+                .map(str::to_string)
+        }),
+        None,
+        "the last refusal restores the first refusal's base, never a refused value"
     );
 }
