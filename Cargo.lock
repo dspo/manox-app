@@ -208,9 +208,11 @@ dependencies = [
 name = "ai-elements"
 version = "0.1.0"
 dependencies = [
+ "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
+ "gpui-pre-macos",
  "gpui-pre-platform",
  "steer-components",
 ]

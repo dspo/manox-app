@@ -14,15 +14,25 @@
 
 mod animation;
 
+pub mod ask;
+pub mod code_view;
 pub mod meerkat;
 pub mod pixel_spinner;
 pub mod reasoning;
+pub mod shell;
 pub mod spinner;
+pub mod tool;
 
+pub use ask::{AskBlock, AskOption, AskState, AskSubmitted, AskUserQuestion};
+pub use code_view::{CodeLine, CodeLineKind, CodeView};
 pub use meerkat::{FRAME_NAMES, Meerkat, NATIVE_CELL};
 pub use pixel_spinner::{PixelSpinner, PixelSpinnerVariant};
 pub use reasoning::{
     AUTO_CLOSE_DELAY, Reasoning, ReasoningContent, ReasoningEvent, ReasoningState,
     ReasoningTrigger, ThinkingMessage, default_thinking_message,
 };
+pub use shell::{ShellLine, ShellSpanKind, ShellView};
 pub use spinner::BrailleSpinner;
+pub use tool::{
+    AUTO_FOLD_DELAY, Tool, ToolEvent, ToolHeader, ToolState, ToolStatus, format_tool_duration,
+};
