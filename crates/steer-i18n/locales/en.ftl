@@ -156,6 +156,7 @@ status-pending = Pending approval
 status-running = Running
 
 status-success = Done
+tool-output-truncated = Output truncated — copy `out` for the full text
 
 status-continued = Continued
 

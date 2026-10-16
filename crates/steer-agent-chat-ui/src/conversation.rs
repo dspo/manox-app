@@ -268,6 +268,13 @@ pub struct ToolCallItem {
     /// renders the per-frame fallback until the streaming/rebuild path mounts
     /// the persistent panel — mirroring the reasoning `markdown` field.
     pub panel: Option<Entity<steer_components::markdown::TerminalPanel>>,
+    /// The ai-elements tool card's mirrored state (status + fold), mounted by
+    /// `MessageItem::ensure_tool_card` for the card families. `None` for
+    /// tools that still render through the `TerminalPanel` path.
+    pub card: Option<Entity<ai_elements::ToolState>>,
+    /// The working directory snapshot the card's shell context renders —
+    /// captured at sync time, the same moment the panel path takes its own.
+    pub cwd: Option<SharedString>,
 }
 
 /// An entry within a `ThinkingContainer`'s activity segment. A segment mixes
@@ -1418,6 +1425,8 @@ impl ConversationState {
                                     collapsed: false,
                                     user_toggled: false,
                                     panel: None,
+                        card: None,
+                        cwd: None,
                                 }),
                                 role.to_string(),
                                 item_id,
@@ -1447,6 +1456,8 @@ impl ConversationState {
                                 collapsed: false,
                                 user_toggled: false,
                                 panel: None,
+                                card: None,
+                                cwd: None,
                             }),
                             role.to_string(),
                             item_id,
@@ -1582,6 +1593,8 @@ impl ConversationState {
                                         collapsed: true,
                                         user_toggled: false,
                                         panel: None,
+                                        card: None,
+                                        cwd: None,
                                     }));
                                 }
                                 t.recompute_streaming();
@@ -1713,6 +1726,8 @@ impl ConversationState {
                         collapsed: true,
                         user_toggled: false,
                         panel: None,
+                        card: None,
+                        cwd: None,
                     };
                     let mut container = ThinkingContainer::new();
                     container.accepting_entries = false;
@@ -3057,6 +3072,8 @@ mod tests {
             collapsed: false,
             user_toggled: false,
             panel: None,
+            card: None,
+            cwd: None,
         }));
         // All entries terminal, but segment is still accepting (turn in progress).
         t.recompute_streaming();
@@ -3119,6 +3136,8 @@ mod tests {
             collapsed: false,
             user_toggled: false,
             panel: None,
+            card: None,
+            cwd: None,
         }));
         t.recompute_streaming();
         assert!(t.accepting_entries);
@@ -3163,6 +3182,8 @@ mod tests {
             collapsed: false,
             user_toggled: false,
             panel: None,
+            card: None,
+            cwd: None,
         }));
         t.recompute_streaming();
         assert!(t.streaming, "segment live while reasoning streaming");
@@ -3236,6 +3257,8 @@ mod tests {
             collapsed: false,
             user_toggled: false,
             panel: None,
+            card: None,
+            cwd: None,
         }));
         // Still finds the streaming reasoning at index 1.
         assert_eq!(t.last_streaming_reasoning_index(), Some(1));
@@ -3265,6 +3288,8 @@ mod tests {
             collapsed: false,
             user_toggled: false,
             panel: None,
+            card: None,
+            cwd: None,
         }));
         assert!(t.get_tool_entry_mut("tu_1").is_some());
         assert!(t.get_tool_entry_mut("nonexistent").is_none());
@@ -3308,6 +3333,8 @@ mod tests {
             collapsed: false,
             user_toggled: false,
             panel: None,
+            card: None,
+            cwd: None,
         }));
         assert_eq!(t.find_entry_index(&minted), Some(0));
         assert_eq!(t.find_entry_index("reasoning-0"), Some(1));
@@ -3930,6 +3957,8 @@ mod tests {
                         collapsed: false,
                         user_toggled: false,
                         panel: None,
+                        card: None,
+                        cwd: None,
                     },
                     "model".into(),
                     host,

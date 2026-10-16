@@ -1501,6 +1501,8 @@ impl Workspace {
                     collapsed: false,
                     user_toggled: false,
                     panel: None,
+                    card: None,
+                    cwd: None,
                 },
                 role,
                 host,

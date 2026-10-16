@@ -324,6 +324,8 @@ impl Workspace {
                             collapsed: false,
                             user_toggled: false,
                             panel: None,
+                            card: None,
+                            cwd: None,
                         },
                         role,
                         host,
@@ -581,6 +583,8 @@ impl Workspace {
             collapsed: false,
             user_toggled: false,
             panel: None,
+            card: None,
+            cwd: None,
         };
         // The diagnostic mount shows the card's controls but nothing copies
         // from it, so the copy-feedback context is ownerless.
