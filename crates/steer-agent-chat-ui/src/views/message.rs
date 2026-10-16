@@ -65,7 +65,23 @@ use steer_components::turn_frame::TurnFrame;
 use crate::ask_card::{AskCardQuestion, AskCardSnapshot};
 use crate::column::ConfirmationSnapshot;
 use crate::host::ChatHostHandle;
+use crate::preview::PreviewKind;
 use crate::views::centered;
+
+/// The mounted body of a completed Preview call. Mounted once and latched
+/// by [`MessageItem::ensure_preview_body`]: markdown owns the persistent
+/// `ChatDocument`, an svg owns its color rasterization (gpui's `svg()`
+/// element paints alpha-mask silhouettes, so faithful color previews go
+/// through the svg renderer into a `RenderImage`), and raster images need
+/// no state — `img(ImageSource::from(path))` loads and caches on its own.
+/// `Failed` latches a read/parse/render failure so it is retried at most
+/// once per item, never once per frame.
+#[derive(Clone)]
+pub enum PreviewBody {
+    Markdown(ChatDocument),
+    Svg(Arc<gpui::RenderImage>),
+    Failed,
+}
 
 /// Render-time context for sub-agent task rows. `None` when the owning
 /// workspace has been dropped; the row remains visible but clicks become a
@@ -218,6 +234,10 @@ pub struct MessageItem {
     /// rows such as `AgentTask` to open their peer right-pane view.
     host: ChatHostHandle,
     markdown: Option<ChatDocument>,
+    /// Mounted body for a completed Preview call (`None` for every other
+    /// kind, and for image previews which keep no state). See
+    /// [`PreviewBody`] for the mounting contract.
+    preview: Option<PreviewBody>,
     /// Persistent `Entity<TerminalPanel>` for a `ConvItem::Notice` body: the
     /// same paginated surface as tool output (default `PAGE_SIZE` lines, `+N`
     /// to reveal more) so a long notice — e.g. an escalated approval reason —
@@ -254,6 +274,7 @@ impl MessageItem {
             id,
             host,
             markdown: None,
+            preview: None,
             notice_panel: None,
             ask_snapshot: None,
             confirmation: None,
@@ -328,6 +349,61 @@ impl MessageItem {
         self.notice_panel.clone()
     }
 
+    /// Mount (once) the preview body of a completed Preview call. The file
+    /// is read at most once per item — the mounted slot is the latch, and a
+    /// read/parse/render failure latches [`PreviewBody::Failed`] instead of
+    /// retrying every frame. Markdown is bounded by the tool's cap with a
+    /// lossy UTF-8 decode; an svg rasterizes through the svg renderer into
+    /// a bounded box (gpui's `svg()` element would flatten it to a tinted
+    /// silhouette — alpha masks only — so previews take the color path);
+    /// raster images mount nothing (`img` owns their loading). `None` for
+    /// everything that is not a completed markdown/svg preview.
+    fn ensure_preview_body(&mut self, cx: &mut gpui::Context<Self>) -> Option<PreviewBody> {
+        let ConvItem::ToolCall(t) = &self.kind else {
+            return None;
+        };
+        if t.name != crate::preview::TOOL_NAME || t.status != ToolCallStatus::Success {
+            return None;
+        }
+        let outcome = crate::preview::resolved_outcome(&t.output, &t.input)?;
+        if self.preview.is_some() {
+            return self.preview.clone();
+        }
+        let body = match outcome.kind {
+            PreviewKind::Image => return None,
+            PreviewKind::Markdown => std::fs::read(&outcome.path)
+                .ok()
+                .map(|bytes| {
+                    let capped = &bytes[..bytes.len().min(outcome.kind.byte_cap() as usize)];
+                    let mut doc = ChatDocument::default();
+                    doc.sync(&String::from_utf8_lossy(capped), cx);
+                    PreviewBody::Markdown(doc)
+                })
+                .unwrap_or(PreviewBody::Failed),
+            PreviewKind::Svg => std::fs::read(&outcome.path)
+                .ok()
+                .and_then(|bytes| cx.svg_renderer().parse_svg(&bytes).ok())
+                .and_then(|parsed| {
+                    // The raster box bounds decode memory for any input,
+                    // vector content included (an svg's own natural size
+                    // is untrusted); aspect is preserved by the renderer.
+                    cx.svg_renderer()
+                        .render_parsed(
+                            &parsed,
+                            gpui::SvgSize::Size(gpui::Size::new(
+                                gpui::DevicePixels(1400),
+                                gpui::DevicePixels(1400),
+                            )),
+                        )
+                        .ok()
+                })
+                .map(PreviewBody::Svg)
+                .unwrap_or(PreviewBody::Failed),
+        };
+        self.preview = Some(body.clone());
+        Some(body)
+    }
+
     /// Ensure the `eix`-th activity entry's persistent `ChatDocument` exists
     /// and feed it the entry's current text. Mirrors `update_text` for the
     /// activity-tree reasoning rounds: an appended delta rides upstream's
@@ -390,6 +466,9 @@ impl MessageItem {
 
     /// Top-level `ConvItem::ToolCall` variant of the panel sync, used by the
     /// `AskUserQuestion` answered-state card and the orphan `ToolResult` card.
+    /// Preview cards skip it entirely: their body is the rendered artifact,
+    /// not a terminal-styled output log, so a `TerminalPanel` would only
+    /// duplicate the metadata line nobody reads.
     pub fn sync_tool_call_panel(
         &mut self,
         cwd: Option<SharedString>,
@@ -398,6 +477,9 @@ impl MessageItem {
         let ConvItem::ToolCall(entry) = &mut self.kind else {
             return;
         };
+        if entry.name == crate::preview::TOOL_NAME {
+            return;
+        }
         Self::ensure_tool_panel(entry, cwd, cx);
     }
 
@@ -574,6 +656,10 @@ impl MessageItem {
                     )
                     && !t.user_toggled
                     && !t.collapsed
+                    // A preview card's body is the artifact the user was
+                    // shown; folding it away a second after it renders would
+                    // undo the call's whole purpose.
+                    && t.name != crate::preview::TOOL_NAME
                 {
                     schedule_auto_collapse(AutoCollapseTarget::Tool(t.id.clone()), cx);
                 }
@@ -715,6 +801,9 @@ impl Render for MessageItem {
         // The owned paginated `TerminalPanel` for a `Notice` body (`None` for
         // every other kind).
         let notice_panel = self.ensure_notice_panel(cx);
+        // The mounted preview body for a completed Preview call (`None` for
+        // every other kind; image previews keep no state).
+        let preview_body = self.ensure_preview_body(cx);
         let copy = CopyFeedback {
             registry: &self.copied,
             owner: Some(cx.entity().downgrade()),
@@ -729,6 +818,7 @@ impl Render for MessageItem {
             tool_ctx.as_ref(),
             body,
             notice_panel,
+            preview_body.as_ref(),
             Some(self.host.clone()),
             &copy,
             cx,
@@ -768,6 +858,7 @@ pub fn render_item(
     tool_ctx: Option<&ToolCallCtx>,
     body: Option<ChatDocument>,
     notice_panel: Option<Entity<TerminalPanel>>,
+    preview_body: Option<&PreviewBody>,
     host: Option<ChatHostHandle>,
     copy: &CopyFeedback,
     cx: &mut App,
@@ -822,6 +913,8 @@ pub fn render_item(
         ConvItem::ToolCall(t) => {
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
                 render_ask_user_card(t, ix, theme, tool_ctx, copy, cx)
+            } else if t.name == crate::preview::TOOL_NAME {
+                render_preview_card(t, ix, theme, tool_ctx, preview_body, copy)
             } else {
                 // Ordinary tool calls fold into `Thinking`; a top-level
                 // ToolCall here is the answered-state fallback for an
@@ -2939,6 +3032,201 @@ fn render_question_card(
         .into_any_element()
 }
 
+/// The Preview tool's top-level card — the rendered artifact the user was
+/// shown, the point of the whole call. The header identifies the file
+/// (path + status) and toggles the body; the body renders the previewed
+/// file: markdown through the mounted `ChatDocument`, an svg through its
+/// mounted color rasterization, a raster image through `img`'s own file
+/// loading. Non-success faces carry no body. Unlike ordinary tool cards
+/// there is no auto-collapse: the body IS the deliverable.
+pub fn render_preview_card(
+    item: &ToolCallItem,
+    ix: usize,
+    theme: &Theme,
+    tool_ctx: Option<&ToolCallCtx>,
+    preview_body: Option<&PreviewBody>,
+    copy: &CopyFeedback,
+) -> gpui::AnyElement {
+    use manox_agent::ToolCallStatus;
+    let (status_color, status_label): (gpui::Hsla, SharedString) = match item.status {
+        ToolCallStatus::PendingApproval => (theme.muted_foreground, i18n::t("status-pending")),
+        ToolCallStatus::Running => (theme.muted_foreground, i18n::t("status-running")),
+        ToolCallStatus::Success => (theme.success, i18n::t("status-success")),
+        ToolCallStatus::Continued => (theme.muted_foreground, i18n::t("status-continued")),
+        ToolCallStatus::Error => (theme.danger, i18n::t("status-error")),
+        ToolCallStatus::Denied => (theme.danger, i18n::t("status-denied")),
+        ToolCallStatus::Cancelled => (theme.muted_foreground, i18n::t("status-cancelled")),
+    };
+
+    // The file the card speaks for: the tool's resolved path when the
+    // outcome line is present, else the raw input (pending face) — display
+    // only, never a re-resolution.
+    let display_path = crate::preview::resolved_outcome(&item.output, &item.input)
+        .map(|outcome| outcome.path.display().to_string())
+        .or_else(|| crate::preview::parse_input(&item.input).map(|input| input.path))
+        .unwrap_or_else(|| item.name.clone());
+
+    let show_body = item.status == ToolCallStatus::Success && !item.collapsed;
+    let chevron = if item.collapsed {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronDown
+    };
+
+    let id_for_toggle = item.id.clone();
+    let host = tool_ctx.map(|c| c.host.clone());
+
+    let mut card = v_flex()
+        .group(format!("preview-{ix}"))
+        .w_full()
+        .min_w_0()
+        .border_1()
+        .border_color(theme.border)
+        .rounded(theme.radius)
+        .overflow_hidden()
+        .child(
+            h_flex()
+                .id(("preview-header", ix))
+                .w_full()
+                .min_w_0()
+                .px_2()
+                .py_1()
+                .gap_1p5()
+                .items_center()
+                .when(show_body, |h| h.border_b_1().border_color(theme.border))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.secondary.opacity(0.5)))
+                .on_click(move |_, _window, cx: &mut App| {
+                    let Some(host) = host.clone() else {
+                        return;
+                    };
+                    let Some(conv) = host.conversation(cx) else {
+                        return;
+                    };
+                    conv.update(cx, |c, cx| {
+                        let id = id_for_toggle.clone();
+                        if let Some(ix) = c.find_tool(&id, &*cx)
+                            && let Some(item) = c.items().get(ix)
+                        {
+                            item.update(cx, |item, cx| {
+                                if let ConvItem::ToolCall(t) = item.kind_mut() {
+                                    t.collapsed = !t.collapsed;
+                                    t.user_toggled = true;
+                                }
+                                cx.notify();
+                            });
+                        }
+                        cx.notify();
+                    });
+                })
+                .child(
+                    Icon::new(chevron)
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_x_hidden()
+                        .text_sm()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.muted_foreground)
+                        .child(truncate(&display_path, 80)),
+                )
+                .child(copy_button_hoverable(
+                    ix,
+                    "copy-preview-path",
+                    format!("preview-{ix}"),
+                    display_path.clone(),
+                    copy,
+                ))
+                .child(
+                    gpui::div()
+                        .text_sm()
+                        .text_color(status_color)
+                        .child(status_label),
+                ),
+        );
+
+    if show_body {
+        card = card.child(preview_body_element(item, preview_body, theme));
+    }
+
+    card.into_any_element()
+}
+
+/// The body of a successful Preview card, by kind. Content lives only
+/// here — nothing in this element feeds back into model-visible state.
+fn preview_body_element(
+    item: &ToolCallItem,
+    preview_body: Option<&PreviewBody>,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    use crate::preview::PreviewKind;
+    let Some(outcome) = crate::preview::resolved_outcome(&item.output, &item.input) else {
+        return preview_unavailable(theme);
+    };
+    match outcome.kind {
+        PreviewKind::Markdown => match preview_body {
+            Some(PreviewBody::Markdown(doc)) => match doc.state() {
+                Some(state) => v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .text_color(theme.foreground)
+                    .child(message_document(state, theme, MESSAGE_BODY_SIZE))
+                    .into_any_element(),
+                None => preview_unavailable(theme),
+            },
+            _ => preview_unavailable(theme),
+        },
+        PreviewKind::Svg => match preview_body {
+            Some(PreviewBody::Svg(raster)) => gpui::div()
+                .flex()
+                .w_full()
+                .min_w_0()
+                .p_2()
+                .child(
+                    gpui::img(gpui::ImageSource::Render(raster.clone()))
+                        .w_full()
+                        .max_h(px(512.))
+                        .object_fit(gpui::ObjectFit::ScaleDown)
+                        .rounded(theme.radius),
+                )
+                .into_any_element(),
+            _ => preview_unavailable(theme),
+        },
+        PreviewKind::Image => gpui::div()
+            .flex()
+            .w_full()
+            .min_w_0()
+            .p_2()
+            .child(
+                gpui::img(gpui::ImageSource::from(outcome.path.clone()))
+                    .w_full()
+                    .max_h(px(512.))
+                    .object_fit(gpui::ObjectFit::ScaleDown)
+                    .rounded(theme.radius),
+            )
+            .into_any_element(),
+    }
+}
+
+/// The single-line fallback for a body that failed to mount (file moved or
+/// deleted between the call and the render). Identifies nothing about the
+/// failure beyond the fact — the header still carries the path.
+fn preview_unavailable(theme: &Theme) -> gpui::AnyElement {
+    gpui::div()
+        .w_full()
+        .px_2()
+        .py_1p5()
+        .text_sm()
+        .text_color(theme.muted_foreground)
+        .child(i18n::t("preview-unavailable"))
+        .into_any_element()
+}
+
 /// Render a plain tool-call card: title + status icon + copy button + (collapsible)
 /// monospace output. Used only as the answered-state fallback for an
 /// `AskUserQuestion` whose interactive snapshot is gone (and the defensive
@@ -4174,6 +4462,31 @@ impl ItemBuilder {
                                         user_toggled: false,
                                         panel: None,
                                     }));
+                                } else if tu.name.as_ref() == crate::preview::TOOL_NAME {
+                                    // A Preview call: a user-facing artifact,
+                                    // so it stays a top-level ToolCall (never
+                                    // folded into a segment) and the paired
+                                    // ToolResult stamps the outcome metadata
+                                    // line into `output`.
+                                    close_segment(items, self.active_segment_ix);
+                                    self.active_segment_ix = None;
+                                    items.push(ConvItem::ToolCall(ToolCallItem {
+                                        id: tu.id.clone(),
+                                        name: tu.name.to_string(),
+                                        title: manox_agent::thread::tool_title(
+                                            tu.name.as_ref(),
+                                            &tu.input,
+                                            None,
+                                        ),
+                                        status: ToolCallStatus::Success,
+                                        output: String::new(),
+                                        is_error: false,
+                                        input: tu.input.clone(),
+                                        streaming: false,
+                                        collapsed: false,
+                                        user_toggled: false,
+                                        panel: None,
+                                    }));
                                 } else {
                                     // Ordinary tool call: fold into the active
                                     // activity segment. The segment is created at
@@ -4725,6 +5038,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                             &copy,
                             cx,
                         ))
@@ -4739,6 +5053,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                             &copy,
                             cx,
                         ))
@@ -4748,6 +5063,7 @@ mod tests {
                             &crate::model_tag::ModelTag::resolve("test-model"),
                             false,
                             &theme,
+                            None,
                             None,
                             None,
                             None,
@@ -5250,6 +5566,231 @@ mod tests {
         match &seg.entries[0] {
             ActivityEntry::Tool(t) => assert_eq!(t.id, "tu_1"),
             _ => panic!("expected tool entry"),
+        }
+    }
+
+    /// A Preview call rebuilds as a standalone top-level card (never folded
+    /// into an activity segment); the paired result's outcome metadata line
+    /// lands in `output` for the renderer.
+    #[test]
+    fn build_items_keeps_preview_standalone_with_outcome() {
+        let outcome = crate::preview::encode_outcome(&crate::preview::PreviewOutcome {
+            path: "/abs/pic.png".into(),
+            kind: crate::preview::PreviewKind::Image,
+            bytes: 99,
+        });
+        let messages = vec![
+            Message::user("show me".to_string()),
+            Message::assistant(vec![
+                tu("tu_1", "Read", serde_json::json!({"path": "a.rs"})),
+                tu(
+                    "tu_pv",
+                    crate::preview::TOOL_NAME,
+                    serde_json::json!({"path": "pic.png"}),
+                ),
+            ]),
+            Message::user_with_content(vec![
+                tr("tu_1", "Read", "a"),
+                tr("tu_pv", crate::preview::TOOL_NAME, &outcome),
+            ]),
+        ];
+        let items = build_items(&messages, &HashMap::new(), false, None);
+        let preview = items
+            .iter()
+            .find_map(|i| match i {
+                ConvItem::ToolCall(t) if t.name == crate::preview::TOOL_NAME => Some(t),
+                _ => None,
+            })
+            .expect("preview rebuilds as a top-level card");
+        assert_eq!(
+            preview.input,
+            serde_json::json!({"path": "pic.png"}),
+            "the rebuild keeps the tool input"
+        );
+        assert_eq!(preview.status, ToolCallStatus::Success);
+        let parsed = crate::preview::parse_outcome(&preview.output)
+            .expect("the outcome line stamps into output");
+        assert_eq!(parsed.path, std::path::Path::new("/abs/pic.png"));
+        assert_eq!(parsed.kind, crate::preview::PreviewKind::Image);
+        // The ordinary tool stays a segment entry — the preview never folds
+        // into it.
+        let seg = items
+            .iter()
+            .find_map(|i| match i {
+                ConvItem::Thinking(t) => Some(t),
+                _ => None,
+            })
+            .expect("ordinary tool folded into a segment");
+        assert_eq!(seg.entries.len(), 1);
+    }
+
+    /// The preview card renders every face through a real window frame:
+    /// pending, the markdown document body, the failed-mount fallback, the
+    /// svg raster body, the declarative image body, and the error face.
+    /// Building `AnyElement`s without a frame parks them in the element
+    /// arena until teardown, so the faces go through a probe `Render` and
+    /// an actual `window.draw` (the frame end resets the arena) instead of
+    /// bare construction.
+    struct PreviewCardProbe {
+        faces: Vec<(ConvItem, Option<PreviewBody>)>,
+    }
+
+    impl Render for PreviewCardProbe {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = cx.theme().clone();
+            let copy_registry = CopiedRegistry::default();
+            let copy = CopyFeedback::inert(&copy_registry);
+            let model = crate::model_tag::ModelTag::resolve("test-model");
+            v_flex()
+                .gap_2()
+                .children(self.faces.iter().enumerate().map(|(ix, (item, body))| {
+                    gpui::div()
+                        .debug_selector(move || format!("preview-face-{ix}"))
+                        .child(render_item(
+                            item,
+                            ix,
+                            &model,
+                            false,
+                            &theme,
+                            None,
+                            None,
+                            None,
+                            None,
+                            body.as_ref(),
+                            None,
+                            &copy,
+                            cx,
+                        ))
+                }))
+        }
+    }
+
+    #[gpui::test]
+    fn preview_card_renders_every_face(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let mk = |status: ToolCallStatus, output: String, input: serde_json::Value| {
+            ConvItem::ToolCall(ToolCallItem {
+                id: "pc".into(),
+                name: crate::preview::TOOL_NAME.to_string(),
+                title: String::new(),
+                status,
+                output,
+                is_error: status == ToolCallStatus::Error,
+                input,
+                streaming: false,
+                collapsed: false,
+                user_toggled: false,
+                panel: None,
+            })
+        };
+        let outcome = |path: &str, kind: crate::preview::PreviewKind, bytes: u64| {
+            crate::preview::encode_outcome(&crate::preview::PreviewOutcome {
+                path: path.into(),
+                kind,
+                bytes,
+            })
+        };
+        let (md_doc, svg_raster) = cx.update(|cx| {
+            let mut doc = ChatDocument::default();
+            doc.sync("# hi
+
+body", cx);
+            let svg_bytes = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>"#;
+            let parsed = cx
+                .svg_renderer()
+                .parse_svg(svg_bytes)
+                .expect("fixture svg parses");
+            let raster = cx
+                .svg_renderer()
+                .render_parsed(
+                    &parsed,
+                    gpui::SvgSize::Size(gpui::Size::new(
+                        gpui::DevicePixels(64),
+                        gpui::DevicePixels(64),
+                    )),
+                )
+                .expect("fixture svg rasterizes");
+            (doc, raster)
+        });
+        let faces = vec![
+            // Pending face: running, no body.
+            (
+                mk(
+                    ToolCallStatus::Running,
+                    String::new(),
+                    serde_json::json!({"path": "docs/a.md"}),
+                ),
+                None,
+            ),
+            // Markdown face with a mounted document, and its failed-mount
+            // fallback.
+            (
+                mk(
+                    ToolCallStatus::Success,
+                    outcome("/tmp/a.md", crate::preview::PreviewKind::Markdown, 9),
+                    serde_json::json!({"path": "/tmp/a.md"}),
+                ),
+                Some(PreviewBody::Markdown(md_doc)),
+            ),
+            (
+                mk(
+                    ToolCallStatus::Success,
+                    outcome("/tmp/gone.md", crate::preview::PreviewKind::Markdown, 9),
+                    serde_json::json!({"path": "/tmp/gone.md"}),
+                ),
+                Some(PreviewBody::Failed),
+            ),
+            // Svg face with a mounted raster.
+            (
+                mk(
+                    ToolCallStatus::Success,
+                    outcome("/tmp/diagram.svg", crate::preview::PreviewKind::Svg, 8),
+                    serde_json::json!({"path": "/tmp/diagram.svg"}),
+                ),
+                Some(PreviewBody::Svg(svg_raster)),
+            ),
+            // Image face: mounts nothing — the path itself drives `img`.
+            (
+                mk(
+                    ToolCallStatus::Success,
+                    outcome("/tmp/shot.png", crate::preview::PreviewKind::Image, 12),
+                    serde_json::json!({"path": "/tmp/shot.png"}),
+                ),
+                None,
+            ),
+            // Error face.
+            (
+                mk(
+                    ToolCallStatus::Error,
+                    "path not found: /tmp/x.md".into(),
+                    serde_json::json!({"path": "/tmp/x.md"}),
+                ),
+                None,
+            ),
+        ];
+        let window = cx.open_window(size(px(420.), px(800.)), move |_, _| PreviewCardProbe {
+            faces,
+        });
+        cx.run_until_parked();
+        let any: AnyWindowHandle = window.into();
+        let mut cx = VisualTestContext::from_window(any, cx);
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        for selector in [
+            "preview-face-0",
+            "preview-face-1",
+            "preview-face-2",
+            "preview-face-3",
+            "preview-face-4",
+            "preview-face-5",
+        ] {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing debug bounds for {selector}"));
         }
     }
 

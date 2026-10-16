@@ -111,7 +111,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### MessageItem 变体
 
-- [UserMessage](#usermessage) · [AssistantMessage](#assistantmessage) · [AssistantActions](#assistantactions) · [ReasoningBlock](#reasoningblock) · [ActivitySegment](#activitysegment) · [ModelTag](#modeltag) · [ToolCallCard](#toolcallcard) · [AgentTaskCard](#agenttaskcard) · [BackgroundTaskCard](#backgroundtaskcard) · [ErrorMessage](#errormessage) · [NoticeMessage](#noticemessage) · [RecapCard](#recapcard) · [CacheMissDivider](#cachemissdivider) · [RetryBadge](#retrybadge)
+- [UserMessage](#usermessage) · [AssistantMessage](#assistantmessage) · [AssistantActions](#assistantactions) · [ReasoningBlock](#reasoningblock) · [ActivitySegment](#activitysegment) · [ModelTag](#modeltag) · [ToolCallCard](#toolcallcard) · [PreviewCard](#previewcard) · [AgentTaskCard](#agenttaskcard) · [BackgroundTaskCard](#backgroundtaskcard) · [ErrorMessage](#errormessage) · [NoticeMessage](#noticemessage) · [RecapCard](#recapcard) · [CacheMissDivider](#cachemissdivider) · [RetryBadge](#retrybadge)
 
 ### Footer / Composer
 
@@ -375,6 +375,14 @@ A standalone tool-call card (`render_tool_call`) for the special-case tools that
 Statuses: `PendingApproval` | `Running` | `Success` | `Error` | `Denied` — see [ToolCallStatus](#tool-call-statuses).
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs`
+
+#### PreviewCard
+
+The app-provided `client_Preview` tool's top-level card (`render_preview_card`) — the user-facing artifact the model shows with the Preview tool. The tool is registered app-side through the engine's embedder seam (`manox_agent::embedder_tools`, `agent-ui::preview_host::install` from `main.rs`); it is read-only and approval-free, and its result is one fixed-size metadata line (resolved absolute path / kind / bytes) — file content never flows back to the model. The card never folds into an [ActivitySegment](#activitysegment) (mirrors the ask card's top-level mint on both the live and rebuild paths) and is exempt from the terminal auto-collapse: the rendered body is the deliverable.
+
+Faces: header (mono path + status + hover copy-path + chevron for manual collapse) over a body that mounts lazily on success — markdown renders through the persistent `ChatDocument` pipeline (read once, latched on `MessageItem::preview`; `PreviewBody::Failed` latches a one-line fallback), an svg rasterizes through the svg renderer's color path into a bounded `RenderImage` (gpui's `svg()` element would flatten it to a tinted alpha-mask silhouette), and raster images ride `img(ImageSource::from(path))` with `ScaleDown` (no mounted state). Unsupported/missing/oversize inputs land as tool-level error results the card shows in its error face.
+
+> Source: `crates/steer-agent-chat-ui/src/preview.rs` (shared vocabulary), `crates/steer-agent-chat-ui/src/views/message.rs` (card), `crates/agent-ui/src/preview_host.rs` (tool + registration)
 
 #### AgentTaskCard
 
