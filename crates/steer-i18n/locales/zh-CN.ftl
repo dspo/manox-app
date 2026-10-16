@@ -690,10 +690,6 @@ about-version = 版本
 
 # Background task status card
 
-background-task-kind-command = 监视器（命令）
-
-background-task-kind-websocket = 监视器（WebSocket）
-
 background-task-kind-bash = 后台 Bash
 
 background-task-kind-subagent = 子代理

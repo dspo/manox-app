@@ -710,10 +710,6 @@ about-version = Version
 
 # Background task status card
 
-background-task-kind-command = Monitor (command)
-
-background-task-kind-websocket = Monitor (WebSocket)
-
 background-task-kind-bash = Background Bash
 
 background-task-kind-subagent = Subagent
