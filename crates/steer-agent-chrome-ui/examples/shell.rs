@@ -896,6 +896,8 @@ impl ChatPreview {
                 collapsed: false,
                 user_toggled: true,
                 panel: None,
+                card: None,
+                cwd: None,
             }),
             "",
             cx,
