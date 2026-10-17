@@ -341,7 +341,7 @@ fn load_rows() -> Vec<SessionRow> {
         .read(|st| {
             st.summaries()
                 .iter()
-                .filter(|t| !t.archived && t.depth == 0 && t.superseded_by.is_none())
+                .filter(|t| !t.archived && t.depth == 0)
                 .map(|t| (t.clone(), st.is_running(&t.id)))
                 .collect::<Vec<_>>()
         })
