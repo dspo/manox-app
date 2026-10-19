@@ -631,6 +631,7 @@ impl Workspace {
                 host,
                 ask: Some(snapshot),
                 ask_state: Some(ask_state),
+                ask_settled: None,
                 confirmation: None,
             }),
             &crate::views::message::CopyFeedback::inert(&copy_registry),

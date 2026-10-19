@@ -453,6 +453,14 @@ workspace-ask-plan-review-label = Plan 评审
 
 workspace-ask-discuss = 继续讨论
 
+workspace-ask-question-label = 问{$n}：
+
+workspace-ask-answer-label = 答{$n}：
+
+workspace-ask-note-label = 补充：
+
+workspace-ask-skipped = 已跳过
+
 workspace-cancel = 取消
 
 workspace-mode-readonly-title = 只读

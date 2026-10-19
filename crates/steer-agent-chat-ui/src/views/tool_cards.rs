@@ -202,8 +202,8 @@ fn input_str(entry: &ToolCallItem, key: &str) -> Option<SharedString> {
 }
 
 /// The localized status chip — the same label set the step rows use, so the
-/// card and the strip speak one language.
-fn status_chip(entry: &ToolCallItem, theme: &Theme) -> AnyElement {
+/// card, the strip and the settled ask card speak one language.
+pub(crate) fn status_chip(entry: &ToolCallItem, theme: &Theme) -> AnyElement {
     use manox_agent::ToolCallStatus as S;
     let (color, label, glyph) = match entry.status {
         S::PendingApproval => (theme.muted_foreground, i18n::t("status-pending"), None),

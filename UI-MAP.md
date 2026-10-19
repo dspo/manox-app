@@ -694,9 +694,21 @@ Enter submits the same entity, so the answers have exactly one reader. The card
 submits through `ChatHost::submit_ask` → `Workspace::reply_ask`
 (`crates/agent-ui/src/workspace/chips.rs`), which folds the reported indices
 and notes into the canonical `AskAnswer` rows (selected labels; a bare note as
-free text; an untouched question as an explicit skip). The header's close
-control and Esc inside the card both take the dismissal leg
+explicit free text; an untouched question as an explicit skip). The header's
+close control and Esc inside the card both take the dismissal leg
 (`ChatHost::dismiss_ask`), which is a card close, never a rejection.
+
+Answered, the row keeps the SAME card in its settled phase: the header (call
+name + status chip) owns the fold, the body is the host's answer markdown —
+`ask_answer_markdown` folds the server's canonical result payload
+(`{"answers":[{"id","selected","custom"?}]}`) into one stacked block per
+question: `问{n}：`/`答{n}：` lines (a note with no selection IS the answer;
+an untouched question reads as skipped, `补充：` carries a supplement to a
+selection), the question text recovered from the call's own input by id. The
+row mounts that phase's `AskState` itself (`MessageItem::ensure_ask_settled`,
+the same lazily mounted body shape as `ensure_preview_body`). A result that
+does not fold into canonical JSON (a prose result, an error) keeps the
+ordinary tool card's raw output panel.
 
 The live edge (`sync_live_ask`) arms the card from the fold: an open
 elicitation (`chat/inputRequested`) seeds the pending ask AND synthesizes the
@@ -710,7 +722,7 @@ joining owner (manox §D.6). A card whose id leaves the fold's input-needed list
 after having been confirmed in it settled remotely and is reconciled away
 (`reconcile_pending_with_projections`).
 
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`) + `crates/agent-ui/src/workspace/chips.rs` (`ensure_ask_state`, `reply_ask`)
+> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`, `render_ask_settled_card`, `ask_answer_markdown`) + `crates/agent-ui/src/workspace/chips.rs` (`ensure_ask_state`, `reply_ask`)
 
 #### PlanReviewDecisionCard
 

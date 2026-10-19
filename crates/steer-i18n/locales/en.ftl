@@ -466,6 +466,14 @@ workspace-ask-plan-review-label = Plan review
 
 workspace-ask-discuss = Discuss
 
+workspace-ask-question-label = Q{$n}:
+
+workspace-ask-answer-label = A{$n}:
+
+workspace-ask-note-label = Supplement:
+
+workspace-ask-skipped = Skipped
+
 workspace-cancel = Cancel
 
 workspace-mode-readonly-title = Read Only

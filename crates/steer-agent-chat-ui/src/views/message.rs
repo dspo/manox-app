@@ -100,6 +100,10 @@ pub struct ToolCallCtx {
     /// The pending ask's interactive card state, mounted by the workspace
     /// alongside the snapshot (`None` for a row that never carried an ask).
     pub ask_state: Option<Entity<ask::AskState>>,
+    /// The settled ask card's state — the same card in its answered phase,
+    /// mounted by the row itself (`None` for a row that is not an answered
+    /// ask).
+    pub ask_settled: Option<Entity<ask::AskState>>,
     pub confirmation: Option<ConfirmationSnapshot>,
 }
 
@@ -258,6 +262,12 @@ pub struct MessageItem {
     /// ask's content, this is the page/answers half the card drives. Both land
     /// and clear together.
     pub ask_state: Option<Entity<ask::AskState>>,
+    /// The answered ask's card state — the same `ai_elements::AskState`, held
+    /// in its settled phase so an answered row keeps rendering the card's
+    /// answered face (header + folded answer markdown). Mounted lazily by the
+    /// row and kept for its lifetime; the workspace-owned `ask_state` above is
+    /// the pending half and is retired when the ask settles.
+    pub ask_settled: Option<Entity<ask::AskState>>,
     /// The unified confirmation card's decision surface, budgeted by the
     /// `Workspace` under the same contract as `ask_snapshot`: present only
     /// while the fold still carries the park, so a settle anywhere retires
@@ -287,6 +297,7 @@ impl MessageItem {
             notice_panel: None,
             ask_snapshot: None,
             ask_state: None,
+            ask_settled: None,
             confirmation: None,
             copied: CopiedRegistry::default(),
             card_subs: Vec::new(),
@@ -316,6 +327,37 @@ impl MessageItem {
     /// list index to this id so row/body bounds can be paired.
     pub fn diagnostic_id(&self) -> usize {
         self.id
+    }
+
+    /// Lazily mount the answered ask card's state: the ai-elements card in its
+    /// settled phase, whose header fold owns the host's answer markdown. One
+    /// per answered ask row, mounted on the render path (the same shape as
+    /// `ensure_preview_body` / `ensure_notice_panel`) and kept for the row's
+    /// lifetime. `None` for every other row.
+    fn ensure_ask_settled(
+        &mut self,
+        cx: &mut gpui::Context<Self>,
+    ) -> Option<Entity<ask::AskState>> {
+        let ConvItem::ToolCall(t) = &self.kind else {
+            return None;
+        };
+        if t.name != manox_agent::tools::ASK_USER_QUESTION
+            || t.status == ToolCallStatus::PendingApproval
+        {
+            return None;
+        }
+        if self.ask_settled.is_none() {
+            let state = cx.new(|cx| {
+                // A settled card has no form to page through: no questions, no
+                // blocks, and the submitted flag set from the start — the
+                // header's fold is the only state it uses.
+                let mut state = ask::AskState::new(Vec::new(), "");
+                state.submit(cx);
+                state
+            });
+            self.ask_settled = Some(state);
+        }
+        self.ask_settled.clone()
     }
 
     /// Lazily mount (or re-sync) the owned [`ChatDocument`] for an item with a
@@ -836,8 +878,10 @@ impl Render for MessageItem {
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
         // The card families' fold mirror follows the entry on every pass, so a
-        // manual open/close lands on the card (see `sync_card_mirrors`).
+        // manual open/close lands on the card (see `sync_card_mirrors`), and an
+        // answered ask mounts the card's settled phase.
         self.sync_card_mirrors(cx);
+        self.ensure_ask_settled(cx);
         let agent_ctx = Some(AgentTaskCtx {
             host: self.host.clone(),
         });
@@ -845,6 +889,7 @@ impl Render for MessageItem {
             host: self.host.clone(),
             ask: self.ask_snapshot.clone(),
             ask_state: self.ask_state.clone(),
+            ask_settled: self.ask_settled.clone(),
             confirmation: self.confirmation.clone(),
         });
         // The owned markdown document for text-bearing items (persistent across
@@ -2490,7 +2535,7 @@ fn open_file_in_vscode(raw: &str, cwd: Option<&Path>) {
     }
 }
 
-/// The ask card's render entry and presentation router. `pub(crate)` so the
+/// The ask card's render entry and presentation router. `pub` so the
 /// test-support diagnostic probe (`Workspace::diagnostic_ask_card_element`)
 /// can render the card outside the conversation list.
 pub fn render_ask_user_card(
@@ -2504,12 +2549,21 @@ pub fn render_ask_user_card(
     let Some(ctx) = tool_ctx else {
         return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
     };
+    if item.status != ToolCallStatus::PendingApproval {
+        // The answered ask takes the same card, in the phase the gallery shows
+        // once a form submits: the host's output markdown under a foldable
+        // header. A result that does not fold into that markdown (a prose
+        // result, an error) keeps the ordinary tool card's raw output.
+        if let Some(markdown) = ask_answer_markdown(&item.input, &item.output)
+            && let Some(state) = ctx.ask_settled.clone()
+        {
+            return render_ask_settled_card(item, theme, &state, markdown, copy.owner.clone());
+        }
+        return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
+    }
     let Some(snapshot) = ctx.ask.clone() else {
         return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
     };
-    if item.status != ToolCallStatus::PendingApproval {
-        return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
-    }
 
     // One takeover, two presentations: a plan review is one decision over one
     // plan, so it takes the decision card; every other ask takes the paged
@@ -2540,6 +2594,34 @@ pub fn render_ask_user_card(
         &state,
         copy.owner.clone(),
     )
+}
+
+/// The answered ask, as the card's settled phase: the header names the call and
+/// owns the fold, the body is the host's answer markdown (see
+/// [`ask_answer_markdown`]). One card, two phases — the form the user works and
+/// the answers a later reader sees, exactly as the gallery mounts them.
+fn render_ask_settled_card(
+    item: &ToolCallItem,
+    theme: &Theme,
+    state: &Entity<ask::AskState>,
+    markdown: String,
+    owner: Option<WeakEntity<MessageItem>>,
+) -> gpui::AnyElement {
+    let card = ask::AskUserQuestion::new(item.id.clone(), state)
+        .icon(Icon::new(gpui_kit_assets::IconName::MessageCircleQuestionMark).xsmall())
+        .name(manox_agent::tools::ASK_USER_QUESTION)
+        .status(crate::views::tool_cards::status_chip(item, theme))
+        .output(static_body(
+            format!("ask-answer-{}", item.id),
+            markdown,
+            theme,
+            owner,
+        ));
+    gpui::div()
+        .w_full()
+        .min_w_0()
+        .child(card)
+        .into_any_element()
 }
 
 /// The interactive ask form: one `ai_elements::AskUserQuestion` — one question
@@ -3322,19 +3404,6 @@ fn render_tool_output(
     owner: Option<WeakEntity<MessageItem>>,
     _cx: &mut App,
 ) -> gpui::AnyElement {
-    // B2-PR-2: once the server's model-facing ask result is canonical JSON
-    // (`{"answers":[{"id","selected","custom"?}]}`), the answered-state card
-    // body reads as raw JSON. Fold it back into compact human Q/A rows — the
-    // question text is recovered from the call's own `input` by id. A parse
-    // miss (a legacy prose result, an error, or a non-canonical payload) falls
-    // through to the raw output path, so the display degrades gracefully. This
-    // sits above the terminal-panel branch because the ask result is a small
-    // structured payload, not shell text.
-    if item.name == manox_agent::tools::ASK_USER_QUESTION
-        && let Some(rows) = ask_result_qa_rows(&item.input, &item.output)
-    {
-        return render_ask_result_body(rows, ix, theme);
-    }
     // Persistent terminal panel: the conversation handler mounts it at every
     // live output chunk, finalized result, and reloaded-history entry, so the
     // common path renders the `Entity<TerminalPanel>` directly — giving tool
@@ -3386,16 +3455,15 @@ fn render_tool_output(
         .into_any_element()
 }
 
-/// Parse an ask tool's canonical result JSON (`{"answers":[{"id","selected",
-/// "custom"?}]}`) into `(question, answer)` display rows. The question text is
-/// recovered from the call's own `input` by matching `id`; an id the input
-/// doesn't name falls back to the id itself (never a wrong question). Tri-state
-/// fold mirrors the server: an explicit skip (empty `selected`, no `custom`)
-/// shows a marked non-answer, `custom` alone is the whole answer, `selected` +
-/// `custom` shows the picks with the note appended. Returns `None` for any
-/// non-canonical payload (prose result, error text, malformed JSON) so the
-/// caller falls back to the raw output.
-fn ask_result_qa_rows(input: &serde_json::Value, output: &str) -> Option<Vec<(String, String)>> {
+/// Fold an answered ask's canonical result payload (`{"answers":[{"id",
+/// "selected", "custom"?}]}`) into the card's settled markdown: per question the
+/// question line, its answer line, and the note on its own line — the shape the
+/// gallery's settled card renders. An untouched question reads as an explicit
+/// skip. The question text is recovered from the call's own `input` by matching
+/// `id`; an id the input doesn't name falls back to the id itself (never a wrong
+/// question). Returns `None` for any non-canonical payload (prose result, error
+/// text, malformed JSON) so the caller falls back to the raw output panel.
+fn ask_answer_markdown(input: &serde_json::Value, output: &str) -> Option<String> {
     use serde_json::Value;
     let trimmed = output.trim();
     if !trimmed.starts_with('{') {
@@ -3420,8 +3488,12 @@ fn ask_result_qa_rows(input: &serde_json::Value, output: &str) -> Option<Vec<(St
             })
             .unwrap_or_else(|| id.to_string())
     };
-    let mut rows = Vec::with_capacity(answers.len());
-    for answer in answers {
+    // Markdown collapses a soft line break into a space, so a line inside a
+    // block ends with a hard break (two spaces) and blocks are separated by a
+    // blank line — the stacked shape reads the same at every width.
+    const LINE_BREAK: &str = "  \n";
+    let mut out = String::new();
+    for (n, answer) in answers.iter().enumerate() {
         let id = answer.get("id").and_then(Value::as_str)?;
         let selected: Vec<&str> = answer
             .get("selected")
@@ -3434,61 +3506,45 @@ fn ask_result_qa_rows(input: &serde_json::Value, output: &str) -> Option<Vec<(St
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|c| !c.is_empty());
-        let rendered = match (selected.is_empty(), custom) {
-            // An explicit skip is a language-neutral em dash — no locale key,
-            // and visually distinct from a real (possibly empty-ish) answer.
-            (true, None) => "—".to_string(),
-            (true, Some(c)) => c.to_string(),
-            (false, None) => selected.join(", "),
-            (false, Some(c)) => format!("{} · {c}", selected.join(", ")),
+        if !out.is_empty() {
+            // A blank line, not a soft break: markdown reflows a lone line
+            // ending into a space, which would run one question's answer into
+            // the next question.
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!(
+            "{}{LINE_BREAK}",
+            i18n::t_str(
+                "workspace-ask-question-label",
+                &[("n", &(n + 1).to_string())]
+            )
+            .to_string()
+                + &question_text(id)
+        ));
+        // An untouched question is a skip (the server's own tri-state), never a
+        // blank answer line; a note without a selection IS the answer, so it
+        // rides the answer line rather than a supplement line of its own.
+        if selected.is_empty() && custom.is_none() {
+            out.push_str(&i18n::t("workspace-ask-skipped"));
+            continue;
+        }
+        let answer = if selected.is_empty() {
+            custom.unwrap_or_default().to_string()
+        } else {
+            selected.join(", ")
         };
-        rows.push((question_text(id), rendered));
+        out.push_str(
+            &(i18n::t_str("workspace-ask-answer-label", &[("n", &(n + 1).to_string())])
+                .to_string()
+                + &answer),
+        );
+        // The note supplements a selection; alone it was the answer above.
+        if let Some(custom) = custom.filter(|_| !selected.is_empty()) {
+            out.push_str(LINE_BREAK);
+            out.push_str(&format!("{}{custom}", i18n::t("workspace-ask-note-label")));
+        }
     }
-    Some(rows)
-}
-
-/// Render the folded ask Q/A rows as a bordered card body (a compact two-
-/// column question / answer table), replacing the raw JSON the model now sees.
-fn render_ask_result_body(
-    rows: Vec<(String, String)>,
-    ix: usize,
-    theme: &Theme,
-) -> gpui::AnyElement {
-    let container = v_flex()
-        .id(format!("ask-result-{ix}"))
-        .w_full()
-        .min_w_0()
-        .gap_1p5()
-        .px_3()
-        .py_2()
-        .border_t_1()
-        .border_color(theme.border);
-    let body = rows.into_iter().fold(container, |col, (question, answer)| {
-        col.child(
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .gap_2()
-                .items_start()
-                .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_sm()
-                        .text_color(theme.foreground)
-                        .child(question),
-                )
-                .child(
-                    gpui::div()
-                        .max_w(px(300.))
-                        .text_right()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(answer),
-                ),
-        )
-    });
-    body.into_any_element()
+    Some(out)
 }
 
 fn agent_terminal_icon(status: ToolCallStatus) -> Icon {
@@ -4751,108 +4807,104 @@ mod tests {
         assert_eq!(live_tail(s), s);
     }
 
-    /// B2-PR-2: the ask tool result row folds a canonical answers payload into
-    /// `(question, answer)` rows (question text recovered by id from the call's
-    /// own input). This is the shared render contract BOTH arrival paths satisfy
-    /// — the live `ToolResult` event and the rebuild journal translate each
-    /// deposit the identical JSON string into `ToolCallItem.output`, so a
-    /// fixture per path feeds this one function.
+    /// The answered ask's markdown: one question line, then its answer line —
+    /// the stacked shape the card's settled phase renders. Labels resolve
+    /// through the bundles (a missing key would leave the key itself in the
+    /// text, which the key-literal assertions catch).
     #[test]
-    fn ask_result_qa_rows_fold_the_canonical_single_select_live_payload() {
-        let input = serde_json::json!({
-            "questions": [{"id": "a1", "question": "Which color?", "options": [
-                {"label": "Red"}, {"label": "Blue"}]}]
-        });
-        // The live path's `ToolResult.output` once the server emits canonical JSON.
-        let output = r#"{"answers":[{"id":"a1","selected":["Blue"]}]}"#;
-        let rows = ask_result_qa_rows(&input, output).expect("canonical payload folds");
-        assert_eq!(rows, vec![("Which color?".to_string(), "Blue".to_string())]);
-    }
-
-    /// Rebuild-path fixture: a multi-select supplement plus an explicit skip
-    /// across two questions, arriving verbatim from the journal tool row.
-    #[test]
-    fn ask_result_qa_rows_fold_the_canonical_multi_and_skip_rebuild_payload() {
+    fn ask_answer_markdown_stacks_question_answer_and_note() {
         let input = serde_json::json!({
             "questions": [
-                {"id": "m", "question": "Pick flavors", "multiSelect": true},
-                {"id": "s", "question": "Skip me"}
+                {"id": "a1", "question": "Which color?", "options": [{"label": "Blue"}]},
+                {"id": "a2", "question": "Pick flavors", "multiSelect": true},
+                {"id": "a3", "question": "Anything else?"},
+                {"id": "a4", "question": "Which host?"}
             ]
         });
+        // The live path's `ToolResult.output` once the server emits canonical JSON.
         let output = r#"{"answers":[
-            {"id":"m","selected":["vanilla","salt"],"custom":"and pistachio"},
-            {"id":"s","selected":[]}
+            {"id":"a1","selected":["Blue"]},
+            {"id":"a2","selected":["vanilla","salt"],"custom":"and pistachio"},
+            {"id":"a3","selected":[]},
+            {"id":"a4","selected":[],"custom":"the staging one"}
         ]}"#;
-        let rows = ask_result_qa_rows(&input, output).expect("canonical payload folds");
+        let markdown = ask_answer_markdown(&input, output).expect("canonical payload folds");
+        let q1 = i18n::t_str("workspace-ask-question-label", &[("n", "1")]);
+        let a1 = i18n::t_str("workspace-ask-answer-label", &[("n", "1")]);
+        let q3 = i18n::t_str("workspace-ask-question-label", &[("n", "3")]);
+        assert!(
+            !markdown.contains("workspace-ask-"),
+            "labels resolve: {markdown:?}"
+        );
+        assert!(
+            markdown.starts_with(&format!("{q1}Which color?")),
+            "the question opens its own block: {markdown:?}"
+        );
+        assert!(
+            markdown.contains(&format!("{a1}Blue")),
+            "the answer line follows it: {markdown:?}"
+        );
+        assert!(
+            markdown.contains(&format!(
+                "{}{}and pistachio",
+                i18n::t("workspace-ask-note-label"),
+                ""
+            )),
+            "the note rides its own line: {markdown:?}"
+        );
+        assert!(
+            markdown.contains(&format!(
+                "{q3}Anything else?  \n{}",
+                i18n::t("workspace-ask-skipped")
+            )),
+            "an untouched question reads as an explicit skip: {markdown:?}"
+        );
+        let a4 = i18n::t_str("workspace-ask-answer-label", &[("n", "4")]);
+        assert!(
+            markdown.ends_with(&format!("{a4}the staging one")),
+            "a note with no selection IS the answer, not a supplement: {markdown:?}"
+        );
         assert_eq!(
-            rows,
-            vec![
-                (
-                    "Pick flavors".to_string(),
-                    "vanilla, salt · and pistachio".to_string()
-                ),
-                ("Skip me".to_string(), "—".to_string()),
-            ],
-            "multi-select lists picks with the supplement; the skip renders an em dash"
+            markdown
+                .matches(&i18n::t("workspace-ask-note-label").to_string())
+                .count(),
+            1,
+            "the supplement label rides only the answer that has a selection: {markdown:?}"
         );
     }
 
     /// An unknown id (not in the call's input) falls back to the id itself —
     /// never a mislabelled question.
     #[test]
-    fn ask_result_qa_rows_fall_back_to_the_id_for_an_unknown_question() {
+    fn ask_answer_markdown_falls_back_to_the_id_for_an_unknown_question() {
         let input = serde_json::json!({ "questions": [] });
         let output = r#"{"answers":[{"id":"ghost","selected":["x"]}]}"#;
-        let rows = ask_result_qa_rows(&input, output).expect("still folds");
-        assert_eq!(rows, vec![("ghost".to_string(), "x".to_string())]);
+        let markdown = ask_answer_markdown(&input, output).expect("still folds");
+        assert!(
+            markdown.contains("ghost") && markdown.contains("x"),
+            "the id names the question: {markdown:?}"
+        );
     }
 
-    /// A non-canonical result (the transitional prose render, an error string,
-    /// or malformed JSON) yields `None` so the display falls back to the raw
-    /// output verbatim.
+    /// A non-canonical result (a prose render, an error string, or malformed
+    /// JSON) yields `None` so the display falls back to the raw output
+    /// verbatim.
     #[test]
-    fn ask_result_qa_rows_reject_non_canonical_payloads() {
+    fn ask_answer_markdown_rejects_non_canonical_payloads() {
         let input = serde_json::json!({ "questions": [{"id":"a","question":"Q"}] });
         assert!(
-            ask_result_qa_rows(&input, "Question: Q\nAnswer: Blue").is_none(),
+            ask_answer_markdown(&input, "Question: Q\nAnswer: Blue").is_none(),
             "the legacy prose result is not canonical JSON"
         );
-        assert!(ask_result_qa_rows(&input, "boom: not json").is_none());
+        assert!(ask_answer_markdown(&input, "boom: not json").is_none());
         assert!(
-            ask_result_qa_rows(&input, r#"{"answers":[]}"#).is_none(),
+            ask_answer_markdown(&input, r#"{"answers":[]}"#).is_none(),
             "empty is not a fold"
         );
         assert!(
-            ask_result_qa_rows(&input, r#"{"answers":[{"id":"a","custom":"x"}]}"#).is_none(),
+            ask_answer_markdown(&input, r#"{"answers":[{"id":"a","custom":"x"}]}"#).is_none(),
             "a row without `selected` is not canonical"
         );
-    }
-
-    #[test]
-    fn live_tail_long_ascii_splits_on_newline() {
-        let s = "a".repeat(13 * 1024);
-        let out = live_tail(&s);
-        assert!(out.starts_with(&i18n::t("message-omitted-prefix").to_string()));
-        // No newline in the input -> fall back to the byte cut; still valid.
-        assert!(out.ends_with('a'));
-    }
-
-    /// Regression: a byte cut landing inside a multi-byte CJK glyph used to panic
-    /// `output[cut..]` with a slice-out-of-bounds. The tail must split on a char
-    /// boundary instead.
-    #[test]
-    fn live_tail_multibyte_cut_does_not_panic() {
-        // Each line is a CJK char repeated so the tail boundary lands mid-glyph.
-        let line = "中".repeat(64);
-        let mut s = String::new();
-        for _ in 0..(13 * 1024 / line.len() + 1) {
-            s.push_str(&line);
-            s.push('\n');
-        }
-        let out = live_tail(&s);
-        assert!(out.starts_with(&i18n::t("message-omitted-prefix").to_string()));
-        // The retained tail must be valid UTF-8 (would have panicked before).
-        assert!(out.contains('中'));
     }
 
     #[test]

@@ -270,10 +270,13 @@ mod macos {
                 cx.new(|_| MessageItem::new(item, role.to_string(), 0, noop_host()))
             };
             // `CHROME_ASK=<page>` swaps the seeded transcript for a pending
-            // `AskUserQuestion` card on that page (0-based) — the live card the
-            // conversation mounts, over the workspace-owned `AskState`.
-            if let Ok(page) = std::env::var("CHROME_ASK").map(|p| p.parse::<usize>().unwrap_or(0)) {
-                return Self::ask_card(cx, page);
+            // `AskUserQuestion` card on that page (0-based), `CHROME_ASK=answered`
+            // for the same card in its answered phase.
+            if let Ok(mode) = std::env::var("CHROME_ASK") {
+                return match mode.as_str() {
+                    "answered" => Self::answered_ask_card(cx),
+                    page => Self::ask_card(cx, page.parse::<usize>().unwrap_or(0)),
+                };
             }
             let items = vec![
             mk(
@@ -416,6 +419,65 @@ mod macos {
                         },
                         String::new(),
                         0,
+                        noop_host(),
+                    )
+                }),
+                ask,
+            ];
+            Self { items }
+        }
+
+        /// The answered ask, as the transcript keeps it: the synthesized
+        /// `ToolCall` row carrying the call's own input and the server's
+        /// canonical answer payload — the row mounts the card's settled phase
+        /// itself (no `AskState` is seeded here; the row owns it).
+        fn answered_ask_card(cx: &mut gpui::Context<Self>) -> Self {
+            let input = serde_json::json!({
+                "questions": [
+                    { "id": "one", "question": "这个服务用哪个数据库？",
+                      "options": [{"label": "PostgreSQL"}, {"label": "MySQL"}] },
+                    { "id": "many", "question": "这一期先启用哪些能力？", "multiSelect": true,
+                      "options": [{"label": "查询缓存"}, {"label": "全文检索"}, {"label": "指标上报"}] },
+                    { "id": "free", "question": "还有什么需要我注意的吗？" }
+                ]
+            });
+            let output = r#"{"answers":[
+                {"id":"one","selected":["PostgreSQL"]},
+                {"id":"many","selected":["查询缓存","指标上报"],"custom":"全文检索先留接口"},
+                {"id":"free","selected":[]}
+            ]}"#;
+            let ask = cx.new(|_| {
+                MessageItem::new(
+                    ConvItem::ToolCall(ToolCallItem {
+                        id: "ask-seed".into(),
+                        name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
+                        title: "存储 · 功能 · 补充".into(),
+                        status: manox_agent::ToolCallStatus::Success,
+                        output: output.to_string(),
+                        is_error: false,
+                        input,
+                        streaming: false,
+                        collapsed: false,
+                        user_toggled: false,
+                        panel: None,
+                        card: None,
+                        cwd: None,
+                    }),
+                    "GLM-5.3".into(),
+                    0,
+                    noop_host(),
+                )
+            });
+            let items = vec![
+                cx.new(|_| {
+                    MessageItem::new(
+                        ConvItem::User {
+                            text: "帮我起一个帖子服务".into(),
+                            images: Vec::new(),
+                            meta: None,
+                        },
+                        String::new(),
+                        1,
                         noop_host(),
                     )
                 }),
