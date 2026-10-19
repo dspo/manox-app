@@ -3,7 +3,10 @@
 //! a bottom-left pager (`< 1/3 >`) whose next button becomes the submit check
 //! on the last page (`< 3/3 ✓`).
 //!
-//! The mutable state lives in [`AskState`], the entity the host drives —
+//! The mutable state lives in [`AskState`] (including the card's
+//! [`FocusHandle`](gpui::FocusHandle), which a host mounts with `track_focus`
+//! and may move focus into so its own pager/dismissal key bindings reach the
+//! card), the entity the host drives —
 //! the same arrangement `Reasoning` and `Tool` use. The card renders from it:
 //! options toggle, pages turn, notes type into real input fields, and
 //! `advance` past the last page submits, flipping the card to its settled
@@ -26,8 +29,8 @@ use std::rc::Rc;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, ElementId, Entity, EventEmitter,
-    FontWeight, IntoElement, RenderOnce, SharedString, Window, div, ease_in_out, prelude::*, px,
-    radians,
+    FocusHandle, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, ease_in_out,
+    prelude::*, px, radians,
 };
 use gpui_component::collapsible::Collapsible;
 use gpui_component::input::{Input, InputState};
@@ -139,11 +142,21 @@ pub struct AskState {
     output_open: bool,
     /// Bumped on every output toggle; the chevron's rotation keys on it.
     output_gen: u64,
+    /// The card's own focus target: the host mounts `track_focus` on the card
+    /// and may move focus here (an ask is a question addressed to the user),
+    /// which is what makes the host's key bindings — the card's own pager
+    /// keys, its dismissal — reach it at all: gpui dispatches actions along
+    /// the focus path.
+    focus_handle: FocusHandle,
 }
 
 impl AskState {
     /// `multi` carries one flag per question block, in order.
-    pub fn new(multi: Vec<bool>, note_placeholder: impl Into<SharedString>) -> Self {
+    pub fn new(
+        multi: Vec<bool>,
+        note_placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let blocks = multi.len();
         Self {
             page: 0,
@@ -154,6 +167,7 @@ impl AskState {
             note_placeholder: note_placeholder.into(),
             output_open: true,
             output_gen: 0,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -238,6 +252,12 @@ impl AskState {
 
     pub fn submitted(&self) -> bool {
         self.submitted
+    }
+
+    /// The card's focus target, for a host that mounts `track_focus` and moves
+    /// focus into the card.
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus_handle
     }
 
     /// Fold or unfold the settled card's output.

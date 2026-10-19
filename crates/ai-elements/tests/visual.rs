@@ -112,12 +112,12 @@ fn main() {
             // wizard on its first page — the form's own pixels.
             let (ask_settled, ask_fresh) = if kind == PageKind::Ask {
                 let settled = cx.new(|cx| {
-                    let mut state = AskState::new(vec![false, false], "补充说明…（可选）");
+                    let mut state = AskState::new(vec![false, false], "补充说明…（可选）", cx);
                     state.toggle_option(0, 0, cx);
                     state.submit(cx);
                     state
                 });
-                let fresh = cx.new(|_| AskState::new(vec![false, true], "补充说明…（可选）"));
+                let fresh = cx.new(|cx| AskState::new(vec![false, true], "补充说明…（可选）", cx));
                 fresh.update(cx, |state, cx| {
                     state.toggle_option(0, 0, cx);
                     // Park on the last page: the pager's forward edge is the

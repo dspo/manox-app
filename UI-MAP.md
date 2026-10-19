@@ -697,8 +697,21 @@ submits through `ChatHost::submit_ask` → `Workspace::reply_ask`
 (`crates/agent-ui/src/workspace/chips.rs`), which folds the reported indices
 and notes into the canonical `AskAnswer` rows (selected labels; a bare note as
 explicit free text; an untouched question as an explicit skip). The header's
-close control and Esc inside the card both take the dismissal leg
-(`ChatHost::dismiss_ask`), which is a card close, never a rejection.
+close control takes the dismissal leg (`ChatHost::dismiss_ask`) — a card close,
+never a rejection — and so does Esc, see the keyboard note below.
+
+**Keyboard.** The card takes focus the first time it mounts
+(`MessageItem::seed_ask_focus` → `Window::focus` on the state's own
+`FocusHandle`; the seed is window-scoped, so later frames never steal focus
+back), and the host mounts `track_focus` + `tab_index(0)` on the card root.
+That is what makes the `AskDrawer` bindings reachable at all — gpui dispatches
+actions along the focus path, and a card nothing can focus is a card whose keys
+never fire. With focus in the card: `←`/`→` are the pager's edges (`→` on the
+last page is the submit the check is) and `Esc` closes. Clicking the note field
+hands focus to that input, whose own bindings keep the arrows for the caret —
+the deeper context wins. Pinned by
+`the_ask_card_takes_focus_so_its_keys_fire`, which drives real
+`simulate_keystrokes`, not a direct action dispatch.
 
 Answered, the row keeps the SAME card in its settled phase: the header (call
 name + status chip) owns the fold, the body is the host's answer markdown —
@@ -1129,6 +1142,11 @@ The fake terminal for command-shaped bodies (`ai_elements::ShellView`): host-sup
 The ask card as a paged form (`ai_elements::AskUserQuestion` driven by `AskState`): one question per page, radio circles for single-select blocks, checkboxes for multi-select, a note input per question (lazily mounted — an input state needs a window), and a `< 1/3 >` pager whose three controls are identical plain glyphs (the submit check included — the last page's forward edge). `advance` past the last page settles the card (`AskSubmitted` event) and swaps the form for the host's markdown `.output(...)`, which the settled header folds (chevron + click). Strings are the host's (headers, badges, placeholder, footnote); a block's `detail` element is the host's too (the crate renders no markdown of its own); the card's page is clamped against the blocks it received. A host that owns the answer elsewhere overrides the pager's check with `.on_submit(...)` — the state stays a working form until that host drops it — and adds the header's dismissal control with `.on_close(...)`, rendered while the card is unsettled only (a settled card is a transcript row, not a surface to leave). Both hooks are driven by the live conversation card ([AskDrawer](#askdrawer)); the gallery exercises the default path.
 
 > Source: `crates/ai-elements/src/ask.rs`. Acceptance surface: `cargo run -p ai-elements --example gallery` → AskUserQuestion; the live face is [AskDrawer](#askdrawer).
+
+The state also owns the card's `FocusHandle`: a host mounts `track_focus` +
+`tab_index(0)` on the card and moves focus into it, which is the only way its
+own pager/dismissal bindings (the `AskDrawer` key context) can fire at all —
+gpui dispatches actions along the focus path.
 
 #### ScrollHandle / ScrollableElement
 

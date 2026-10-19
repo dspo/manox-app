@@ -350,13 +350,40 @@ impl MessageItem {
                 // A settled card has no form to page through: no questions, no
                 // blocks, and the submitted flag set from the start — the
                 // header's fold is the only state it uses.
-                let mut state = ask::AskState::new(Vec::new(), "");
+                let mut state = ask::AskState::new(Vec::new(), "", cx);
                 state.submit(cx);
                 state
             });
             self.ask_settled = Some(state);
         }
         self.ask_settled.clone()
+    }
+
+    /// Move focus into the pending ask card the first time this row renders it.
+    ///
+    /// The card's key bindings (←/→ paging — the forward one submits on the last
+    /// page — and Esc dismissing) are context-scoped, and gpui dispatches
+    /// actions along the focus path: a card nothing can focus is a card whose
+    /// keys never fire. An ask is a question addressed to the user, so the card
+    /// takes focus the first time it mounts; the seed lives in window-scoped
+    /// element state, so later frames (and a card that scrolls out and back)
+    /// never fight the user's own focus. Clicking the note field hands focus to
+    /// that input, whose deeper bindings keep the arrows for the caret.
+    fn seed_ask_focus(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let (Some(state), Some(snapshot)) = (self.ask_state.clone(), self.ask_snapshot.as_ref())
+        else {
+            return;
+        };
+        let handle = state.read(cx).focus_handle().clone();
+        struct FocusSeed {
+            seeded: bool,
+        }
+        let key = gpui::ElementId::Name(format!("ask-card-focus-{}", snapshot.id).into());
+        let seed = window.use_keyed_state(key, cx, |_, _| FocusSeed { seeded: false });
+        let first = seed.update(cx, |seed, _| std::mem::replace(&mut seed.seeded, true));
+        if first {
+            window.focus(&handle, cx);
+        }
     }
 
     /// Lazily mount (or re-sync) the owned [`ChatDocument`] for an item with a
@@ -872,10 +899,13 @@ pub fn schedule_auto_collapse(target: AutoCollapseTarget, cx: &mut gpui::Context
 impl Render for MessageItem {
     fn render(
         &mut self,
-        _window: &mut gpui::Window,
+        window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
+        // A freshly arrived ask takes focus once, so its pager keys and Esc can
+        // reach it (see `ask_focus_handle`).
+        self.seed_ask_focus(window, cx);
         // The card families' fold mirror follows the entry on every pass, so a
         // manual open/close lands on the card (see `sync_card_mirrors`), and an
         // answered ask mounts the card's settled phase.
@@ -2574,6 +2604,7 @@ pub fn render_ask_user_card(
         &snapshot,
         &state,
         copy.owner.clone(),
+        cx,
     )
 }
 
@@ -2616,6 +2647,7 @@ fn render_ask_form_card(
     snapshot: &AskCardSnapshot,
     state: &Entity<ask::AskState>,
     owner: Option<WeakEntity<MessageItem>>,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let blocks = snapshot
         .questions
@@ -2681,13 +2713,21 @@ fn render_ask_form_card(
         .on_close(move |_, cx| host_close.dismiss_ask(cx));
     // The pager's keys, within the card's own focus context: the arrow keys are
     // the same forward/back edge as the glyphs beside the `n/N` count — on the
-    // last page the forward key is the submit the check is.
+    // last page the forward key is the submit the check is. They only reach the
+    // card through the focus path (gpui dispatches actions along it), so the
+    // card tracks the state's focus handle, takes focus once when it mounts — an
+    // ask is a question addressed to the user — and stays a tab stop from then
+    // on. Clicking the note field hands focus to that input, whose own bindings
+    // keep the arrows for the caret (the deeper context wins):
     let host_next = host.clone();
     let state_for_keys = state.clone();
     let state_for_prev = state.clone();
+    let handle = state.read(cx).focus_handle().clone();
     gpui::div()
         .w_full()
         .min_w_0()
+        .track_focus(&handle)
+        .tab_index(0)
         .key_context("AskDrawer")
         // Esc inside the card closes it unanswered — a dismissal, never an
         // approval card's deny.
@@ -4494,6 +4534,182 @@ mod tests {
     fn live_tail_short_output_unchanged() {
         let s = "line\nline2\n";
         assert_eq!(live_tail(s), s);
+    }
+
+    /// A host that records what the ask card asked it to do.
+    #[derive(Default)]
+    struct RecordingHost {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingHost {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::host::ChatHost for RecordingHost {
+        fn conversation(
+            &self,
+            _cx: &App,
+        ) -> Option<Entity<crate::conversation::ConversationState>> {
+            None
+        }
+        fn dismiss_ask(&self, _cx: &mut App) {
+            self.calls.lock().unwrap().push("dismiss".into());
+        }
+        fn submit_ask(&self, replies: Vec<crate::ask_card::AskCardReply>, _cx: &mut App) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("submit:{}", replies.len()));
+        }
+        fn submit_input(&self, _window: &mut Window, _cx: &mut App) {}
+        fn resolve_tool_confirmation(
+            &self,
+            _auth_id: &str,
+            _option_id: &str,
+            _approved: bool,
+            _cx: &mut App,
+        ) {
+        }
+        fn fork_session_at(&self, _through_entry_id: &str, _cx: &mut App) {}
+        fn open_subagent_tab(
+            &self,
+            _id: &str,
+            _subagent_type: &str,
+            _topic: &str,
+            _status: ToolCallStatus,
+            _cx: &mut App,
+        ) {
+        }
+    }
+
+    /// The ask card's keys reach it through the FOCUS PATH — the card takes
+    /// focus when it mounts, so the `AskDrawer` bindings (←/→ paging, the
+    /// forward one the submit check on the last page, Esc the dismissal) fire.
+    /// A card nothing could focus would make every one of them dead code, which
+    /// is exactly what this guards.
+    #[gpui::test]
+    fn the_ask_card_takes_focus_so_its_keys_fire(cx: &mut TestAppContext) {
+        use gpui::KeyBinding;
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new("left", crate::AskPrev, Some("AskDrawer")),
+                KeyBinding::new("right", crate::AskNext, Some("AskDrawer")),
+                KeyBinding::new("escape", crate::AskCancel, Some("AskDrawer")),
+            ]);
+        });
+        let host = std::sync::Arc::new(RecordingHost::default());
+        let (item, state) = cx.update(|cx| {
+            let mut container = ThinkingContainer::new();
+            container.accepting_entries = false;
+            container.streaming = false;
+            let item = cx.new(|_| {
+                MessageItem::new(
+                    ConvItem::ToolCall(ToolCallItem {
+                        id: "ask-1".into(),
+                        name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
+                        title: "Which color?".into(),
+                        status: ToolCallStatus::PendingApproval,
+                        output: String::new(),
+                        is_error: false,
+                        input: serde_json::Value::Null,
+                        streaming: false,
+                        collapsed: false,
+                        user_toggled: false,
+                        panel: None,
+                        card: None,
+                        cwd: None,
+                    }),
+                    "model".into(),
+                    0,
+                    host.clone() as crate::host::ChatHostHandle,
+                )
+            });
+            let state = cx.new(|cx| {
+                ask::AskState::new(
+                    vec![false, false],
+                    i18n::t("workspace-ask-supplement-placeholder"),
+                    cx,
+                )
+            });
+            item.update(cx, |item, _| {
+                item.ask_snapshot = Some(crate::ask_card::AskCardSnapshot {
+                    id: "ask-1".into(),
+                    questions: vec![
+                        crate::ask_card::AskCardQuestion {
+                            question: "Which color?".into(),
+                            header: "Color".into(),
+                            detail: String::new(),
+                            multi_select: false,
+                            options: vec![
+                                crate::ask_card::AskCardOption {
+                                    label: "Red".into(),
+                                    description: String::new(),
+                                    recommended: false,
+                                },
+                                crate::ask_card::AskCardOption {
+                                    label: "Blue".into(),
+                                    description: String::new(),
+                                    recommended: false,
+                                },
+                            ],
+                        },
+                        crate::ask_card::AskCardQuestion {
+                            question: "Which host?".into(),
+                            header: "Host".into(),
+                            detail: String::new(),
+                            multi_select: false,
+                            options: vec![crate::ask_card::AskCardOption {
+                                label: "Staging".into(),
+                                description: String::new(),
+                                recommended: false,
+                            }],
+                        },
+                    ],
+                });
+                item.ask_state = Some(state.clone());
+            });
+            (item, state)
+        });
+        let window = cx.open_window(size(px(700.), px(700.)), {
+            let item = item.clone();
+            move |_, _| RowProbe { item }
+        });
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(AnyWindowHandle::from(window), cx);
+        let draw = |visual: &mut VisualTestContext| {
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+        };
+        draw(&mut visual);
+        let page = |visual: &mut VisualTestContext, state: &Entity<ask::AskState>| {
+            visual.cx.update(|cx| state.read(cx).page())
+        };
+        assert_eq!(page(&mut visual, &state), 0, "the card opens on page 1");
+        // → turns the page: the binding fires only through the focus path the
+        // card took on mount.
+        visual.simulate_keystrokes("right");
+        draw(&mut visual);
+        assert_eq!(page(&mut visual, &state), 1, "→ reached the card");
+        // On the last page the forward edge IS the submit.
+        visual.simulate_keystrokes("right");
+        assert_eq!(
+            host.calls(),
+            vec!["submit:2".to_string()],
+            "→ on the last page submits the card"
+        );
+        // Esc takes the dismissal leg.
+        visual.simulate_keystrokes("escape");
+        assert_eq!(
+            host.calls(),
+            vec!["submit:2".to_string(), "dismiss".to_string()],
+            "Esc dismisses"
+        );
     }
 
     /// The answered ask's markdown: one question line, then its answer line —

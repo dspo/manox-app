@@ -419,7 +419,7 @@ mod macos {
             snapshot: AskCardSnapshot,
         ) -> Self {
             let multi: Vec<bool> = snapshot.questions.iter().map(|q| q.multi_select).collect();
-            let state = cx.new(|_| ai_elements::AskState::new(multi, "添加可选补充说明"));
+            let state = cx.new(|cx| ai_elements::AskState::new(multi, "添加可选补充说明", cx));
             state.update(cx, |state, cx| {
                 state.toggle_option(0, 0, cx);
                 state.set_page(page, cx);

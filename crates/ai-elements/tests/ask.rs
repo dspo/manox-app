@@ -9,7 +9,7 @@ use gpui::{AppContext as _, Entity, TestAppContext};
 
 fn state(cx: &mut TestAppContext, questions: usize) -> Entity<AskState> {
     cx.update(gpui_component::init);
-    cx.update(|cx| cx.new(|_| AskState::new(vec![false; questions], "note")))
+    cx.update(|cx| cx.new(|cx| AskState::new(vec![false; questions], "note", cx)))
 }
 
 /// One question: its forward edge is already the submit.

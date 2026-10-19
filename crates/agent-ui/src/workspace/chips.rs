@@ -512,8 +512,8 @@ impl Workspace {
         {
             return;
         }
-        let state = cx.new(|_| {
-            ai_elements::AskState::new(multi, i18n::t("workspace-ask-supplement-placeholder"))
+        let state = cx.new(|cx| {
+            ai_elements::AskState::new(multi, i18n::t("workspace-ask-supplement-placeholder"), cx)
         });
         self.chat.update(cx, |chat, cx| {
             chat.ask_state = Some((id, state));
