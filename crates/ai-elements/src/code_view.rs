@@ -305,22 +305,45 @@ fn scan_quoted(rest: &str, quote: char) -> (String, &str) {
     (rest.to_string(), "")
 }
 
-/// The document style: a transparent code surface — the card frame provides
-/// the chrome, and the only tint the editor allows itself is the diff run
-/// background. Mono at preview density.
-fn code_style(theme: &Theme) -> TextViewStyle {
+/// The shared document skeleton for the in-band bodies: mono code blocks at
+/// preview density, a tight paragraph gap, the code surface and palette left
+/// to the caller. One home — [`crate::ShellView`](crate::shell) composes
+/// through it too.
+pub(crate) fn doc_style(
+    foreground: Hsla,
+    muted: Hsla,
+    code_background: Hsla,
+    border: Hsla,
+    selection: Hsla,
+    dark: bool,
+) -> TextViewStyle {
     TextViewStyle::default()
-        .with_foreground(theme.foreground)
-        .with_muted_foreground(theme.muted_foreground)
-        .with_code_background(gpui::transparent_black())
-        .with_border(theme.border)
+        .with_foreground(foreground)
+        .with_muted_foreground(muted)
+        .with_code_background(code_background)
+        .with_border(border)
+        .with_selection(selection)
         .with_paragraph_gap(rems(0.25))
-        .with_dark(theme.is_dark())
+        .with_dark(dark)
         .with_code_block({
             let mut r = StyleRefinement::default();
             r.text.font_size = Some(px(12.).into());
             r
         })
+}
+
+/// The editor's take on the skeleton: a transparent code surface — the card
+/// frame provides the chrome, and the only tint the editor allows itself is
+/// the diff run background.
+fn code_style(theme: &Theme) -> TextViewStyle {
+    doc_style(
+        theme.foreground,
+        theme.muted_foreground,
+        gpui::transparent_black(),
+        theme.border,
+        theme.selection,
+        theme.is_dark(),
+    )
 }
 
 /// A number right-aligned to `width` mono cells, or that many blanks.
@@ -514,8 +537,9 @@ impl RenderOnce for CodeView {
 
 /// Fence `text` as one `ansi` code block — the same shape the app's terminal
 /// panel composes. The fence is one longer than the longest backtick run
-/// inside so no content line can close it early.
-fn fenced(text: &str) -> String {
+/// inside so no content line can close it early. The one home for this shape
+/// in the crate: [`crate::ShellView`] composes through it too.
+pub(crate) fn fenced(text: &str) -> String {
     let mut longest = 0usize;
     let mut run = 0usize;
     for b in text.bytes() {

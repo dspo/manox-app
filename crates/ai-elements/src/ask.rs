@@ -372,6 +372,7 @@ impl RenderOnce for AskUserQuestion {
                 theme.border,
             )
         };
+        let block_count = self.blocks.len();
         let AskUserQuestion {
             id,
             state,
@@ -396,12 +397,19 @@ impl RenderOnce for AskUserQuestion {
             output: None,
         };
         let state_ref = state.read(cx);
-        let (page, pages, submitted, output_open, output_gen) = (
-            state_ref.page(),
+        // The state's page is clamped against the blocks this card received:
+        // a host can construct a state with more pages than it mounts blocks
+        // for, and a published component must not index on faith.
+        let page = state_ref.page().min(block_count.saturating_sub(1));
+        let (pages, submitted, output_open, output_gen) = (
             state_ref.pages(),
             state_ref.submitted(),
             state_ref.output_open(),
             state_ref.output_gen,
+        );
+        debug_assert!(
+            pages <= block_count,
+            "AskState has {pages} pages but the card mounts {block_count} blocks"
         );
         let settled = submitted && has_output;
 

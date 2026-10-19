@@ -30,13 +30,15 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    ElementId, HighlightStyle, Hsla, IntoElement, RenderOnce, Rgba, SharedString, StyleRefinement,
-    div, prelude::*, px, rems,
+    ElementId, HighlightStyle, Hsla, IntoElement, RenderOnce, Rgba, SharedString, div, prelude::*,
+    px,
 };
-use gpui_base::{TextView, TextViewStyle};
+use gpui_base::TextView;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
+use crate::code_view::{doc_style, fenced};
 use crate::spinner::BrailleSpinner;
+use crate::tool::format_tool_duration;
 
 /// `gpui::rgb` is not `const`, so the palette spells its literals out.
 const fn shell_rgb(r: u8, g: u8, b: u8) -> Rgba {
@@ -137,8 +139,13 @@ impl ShellLine {
     }
 
     /// [`ShellLine::location`] with every occurrence of `needle` inside
-    /// `rest` raised to [`ShellSpanKind::Hit`] — the grep view.
+    /// `rest` raised to [`ShellSpanKind::Hit`] — the grep view. An empty
+    /// needle matches everything, which would never advance the scan — it
+    /// degrades to the located line instead.
     pub fn hit(path: &str, line: u32, rest: &str, needle: &str) -> Self {
+        if needle.is_empty() {
+            return Self::location(path, line, rest);
+        }
         let mut spans = vec![
             (ShellSpanKind::Path, SharedString::from(path)),
             (ShellSpanKind::Dim, ":".into()),
@@ -289,17 +296,7 @@ impl RenderOnce for ShellView {
         let (doc, runs) = self.compose();
         let runs = Arc::new(runs);
 
-        let duration = self
-            .duration
-            .map(|d| {
-                let secs = d.as_secs_f32();
-                SharedString::from(if secs < 60. {
-                    format!("{secs:.1}s")
-                } else {
-                    format!("{}m{:02}s", d.as_secs() / 60, d.as_secs() % 60)
-                })
-            })
-            .unwrap_or_default();
+        let duration = self.duration.map(format_tool_duration).unwrap_or_default();
 
         let footer = if self.running {
             h_flex()
@@ -324,19 +321,17 @@ impl RenderOnce for ShellView {
                 })
         };
 
-        let style = TextViewStyle::default()
-            .with_foreground(Hsla::from(FG))
-            .with_muted_foreground(Hsla::from(DIM))
-            .with_selection(theme.selection)
-            .with_code_background(gpui::transparent_black())
-            .with_border(Hsla::from(BG))
-            .with_paragraph_gap(rems(0.25))
-            .with_dark(true)
-            .with_code_block({
-                let mut r = StyleRefinement::default();
-                r.text.font_size = Some(px(12.).into());
-                r
-            });
+        // The shell's take on the shared skeleton: the dark surface is the
+        // wrapper's paint, so the code background stays transparent and the
+        // border matches it (no hairline inside the terminal).
+        let style = doc_style(
+            Hsla::from(FG),
+            Hsla::from(DIM),
+            gpui::transparent_black(),
+            Hsla::from(BG),
+            theme.selection,
+            true,
+        );
 
         // The dark surface is the wrapper's paint; the document itself is
         // transparent so the wrapper's rounding carries through.
@@ -366,28 +361,23 @@ impl RenderOnce for ShellView {
     }
 }
 
-/// Fence `text` as one `ansi` code block — the same shape the app's terminal
-/// panel composes. The fence is one longer than the longest backtick run
-/// inside so no content line can close it early.
-fn fenced(text: &str) -> String {
-    let mut longest = 0usize;
-    let mut run = 0usize;
-    for b in text.bytes() {
-        if b == b'`' {
-            run += 1;
-            longest = longest.max(run);
-        } else {
-            run = 0;
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty needle must degrade, not loop: `find("")` is always
+    /// `Some(0)`, so the unguarded scan would neither advance nor exit.
+    #[test]
+    fn hit_with_empty_needle_degrades_to_location() {
+        let hit = ShellLine::hit("src/lib.rs", 7, "let x = 1;", "");
+        let located = ShellLine::location("src/lib.rs", 7, "let x = 1;");
+        assert_eq!(hit.spans, located.spans);
     }
-    let fence = "`".repeat((longest + 1).max(3));
-    let mut source = String::with_capacity(text.len() + fence.len() * 2 + 8);
-    source.push_str(&fence);
-    source.push_str("ansi\n");
-    source.push_str(text);
-    if !text.ends_with('\n') {
-        source.push('\n');
+
+    #[test]
+    fn hit_raises_every_occurrence() {
+        let line = ShellLine::hit("a.rs", 1, "ab ab", "ab");
+        // path + ':' + lineno + ':' then hit, gap, hit.
+        assert_eq!(line.spans.len(), 7);
     }
-    source.push_str(&fence);
-    source
 }

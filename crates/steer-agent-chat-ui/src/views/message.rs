@@ -446,14 +446,13 @@ impl MessageItem {
         }
     }
 
-    /// Ensure the `eix`-th activity entry's persistent `Entity<TerminalPanel>`
-    /// exists and feed it the entry's current display output. Mirrors
-    /// `sync_reasoning_entry` for tool calls: a streaming delta or a finalized
-    /// result drives the panel's `set_output` while document-level selection +
+    /// Ensure the `eix`-th activity entry's persistent body state exists and
+    /// feed it the entry's current display output. Card families mount their
+    /// mirrored `Entity<ToolState>` here (`ensure_tool_card`); every other
+    /// tool mounts the persistent `Entity<TerminalPanel>` — a streaming delta
+    /// or a finalized result drives the body while document-level selection +
     /// focus survive across frames (drag + Cmd/Ctrl+C), so tool output selects
-    /// and copies like the assistant body — and renders as a terminal-styled
-    /// shell (cwd / toolchain / `❯` command + ANSI-colored output) rather than
-    /// a fenced code block.
+    /// and copies like the assistant body.
     pub fn sync_tool_entry_panel(
         &mut self,
         eix: usize,
@@ -2274,7 +2273,6 @@ fn tool_step(
             e.cwd.clone(),
             theme,
             Some(Box::new(on_toggle)),
-            cx,
         );
         return ActivityStep::new(id).content(card);
     }

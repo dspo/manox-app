@@ -147,7 +147,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Shared Primitives
 
-- [Button](#shared-primitives) · [Input](#shared-primitives) · [PopupMenu](#shared-primitives) · [PopupMenuItem](#shared-primitives) · [TabBar](#shared-primitives) · [Tag](#shared-primitives) · [Markdown](#markdown) · [TerminalPanel](#terminalpanel) · [TurnFrame](#turnframe) · [Icon](#shared-primitives) · [BrailleSpinner](#braillespinner) · [PixelSpinner](#pixelspinner) · [Meerkat](#meerkat) · [ScrollHandle](#shared-primitives) · [TitleBar](#shared-primitives) · [ContextMenu](#shared-primitives) · [Tooltip](#shared-primitives)
+- [Button](#shared-primitives) · [Input](#shared-primitives) · [PopupMenu](#shared-primitives) · [PopupMenuItem](#shared-primitives) · [TabBar](#shared-primitives) · [Tag](#shared-primitives) · [Markdown](#markdown) · [TerminalPanel](#terminalpanel) · [TurnFrame](#turnframe) · [Icon](#shared-primitives) · [BrailleSpinner](#braillespinner) · [PixelSpinner](#pixelspinner) · [Meerkat](#meerkat) · [Tool](#tool) · [CodeView](#codeview) · [ShellView](#shellview) · [AskUserQuestion](#askuserquestion) · [ScrollHandle](#shared-primitives) · [TitleBar](#shared-primitives) · [ContextMenu](#shared-primitives) · [Tooltip](#shared-primitives)
 
 ### 状态
 
@@ -370,7 +370,7 @@ The resolved model identity every turn surface renders (`crates/steer-agent-chat
 
 #### ToolCallCard
 
-A standalone tool-call card (`render_tool_call`) for the special-case tools that don't fold into an [ActivitySegment](#activitysegment) batch — today `agent` sub-agent calls and `AskUserQuestion`. A model response's other tool calls batch into the `Thinking` container; their output renders via [TerminalPanel](#terminalpanel).
+A standalone tool-call card (`render_tool_call`) for the special-case tools that don't fold into an [ActivitySegment](#activitysegment) batch — today `agent` sub-agent calls and `AskUserQuestion`. A model response's other tool calls batch into the `Thinking` container; the seven card families render as [Tool](#tool) cards (see [ActivitySegment](#activitysegment)), every other tool's output renders via [TerminalPanel](#terminalpanel).
 
 Statuses: `PendingApproval` | `Running` | `Success` | `Error` | `Denied` — see [ToolCallStatus](#tool-call-statuses).
 
@@ -1116,6 +1116,30 @@ VS Code session-status 的像素 spinner，gpui 原语复刻（`ai_elements::Pix
 The conversation-loading sprite (`ai_elements::Meerkat`): a 12×14-cell pixel meerkat played as a 6-slot loop (idle → bob → blink → bob → idle → tail flick) at 3 slots/sec — the face the main column shows while a reopened thread's chat snapshot is in flight (see the history-loading page above). Sprite data is character-row grids parsed to one div per solid cell, all under one gpui `Animation` clock: cycle time picks the slot, the slot picks the frame, and only the active frame renders (the pre-component page stacked six full-frame layers and opacity-toggled between them). Knobs: `cell` ([`NATIVE_CELL`] = 10 px, the page's scale), `speed`, `freeze(frame)` for a static render. Consumed by `agent-ui/src/views/history_loading.rs`; acceptance surface is the gallery's History Loading page.
 
 > Source: `crates/ai-elements/src/meerkat.rs`
+
+#### Tool
+
+The tool-call card frame (`ai_elements::Tool` / `ToolHeader` / `ToolState`): icon + tool name + mono argument summary + status chip over a collapsible body, mirroring Vercel AI Elements' Tool triple. Lifecycle contract (the Reasoning arrangement on tool vocabulary): a `Running` edge opens the body, a settle folds it one second later (`AUTO_FOLD_DELAY`), a hand toggle pins it, `no_auto_fold` hands the clock to a host that owns the fold elsewhere — the conversation's arrangement (see [ActivitySegment](#activitysegment)). Always-visible copy chips at the body's top-right quote the raw call — `in` = input JSON, `out` = raw output, `diff` for the edit family — pressing, landing on the clipboard, and flashing a check for 1.2 s (state in `ToolState`, so a host must observe the entity for the flash to repaint). The header click can be rerouted with `on_toggle` (the conversation routes it back through its own fold). Selection copy is WYSIWYG: the body rides the rich-text core (see [CodeView](#codeview) / [ShellView](#shellview)).
+
+> Source: `crates/ai-elements/src/tool.rs`. Mount point: `crates/steer-agent-chat-ui/src/views/tool_cards.rs`.
+
+#### CodeView
+
+The editor mock for file-shaped bodies (`ai_elements::CodeView`): line-number gutter, diff markers, syntax palette, all rendered **in-band** through the rich-text core — gutter, markers, and code are one text document, so drag-select copies what the card shows. Shapes: a whole-file read numbers from 1 (`CodeView::source`); a ranged read keeps the file's own numbers with a `...` gap row; an edit hunk widens to the old/new gutter pair, diff rows carrying their added/removed color whole with a run-background tint (the one surface tint). Long lines soft-wrap at compose time (`DEFAULT_WRAP_COLUMNS`, overridable `wrap_at`) hanging continuations under the code column — the core has no nowrap and wraps at the block's left edge, under the gutter, which no editor does; the budget must stay under the block's real pixel width or a highlight run crosses the core's internal wrap point and panics. `compose` is a pure function pinned by invariant tests (runs disjoint/ascending/within lines; continuation prefix = the code column).
+
+> Source: `crates/ai-elements/src/code_view.rs` (fence composition shared with [ShellView](#shellview) via `fenced`).
+
+#### ShellView
+
+The fake terminal for command-shaped bodies (`ai_elements::ShellView`): host-supplied prompt context lines (zsh-style — path, git branch, toolchains; the component has no opinion about prompt formats), a `❯` command echo, span-tinted output (`ShellLine::hit` raises grep needles; an empty needle degrades to the located line — the unguarded scan would never advance), and an exit footer (success = exit 0; failures carry no invented code; a streaming call runs). In-band like [CodeView](#codeview), on a fixed dark palette — a terminal surface stays dark under either app theme. `Bash`, `BashOutput`, `Grep` and `Glob` speak it; Grep/Glob render in shell vocabulary (their command equivalent), never as shell tools.
+
+> Source: `crates/ai-elements/src/shell.rs`
+
+#### AskUserQuestion
+
+The ask takeover card as a paged form (`ai_elements::AskUserQuestion` driven by `AskState`): one question per page, radio circles for single-select blocks, checkboxes for multi-select, a note input per question (lazily mounted — an input state needs a window), and a `< 1/3 >` pager whose three controls are identical plain glyphs (the submit check included — the last page's forward edge). `advance` past the last page settles the card (`AskSubmitted` event) and swaps the form for the host's markdown `.output(...)`, which the settled header folds (chevron + click). Strings are the host's (headers, badges, placeholder, footnote); the card's page is clamped against the blocks it received. **Gallery-only today**: the live ask flow keeps its own card (see [ToolCallCard](#toolcallcard)).
+
+> Source: `crates/ai-elements/src/ask.rs`. Acceptance surface: `cargo run -p ai-elements --example gallery` → AskUserQuestion.
 
 #### ScrollHandle / ScrollableElement
 

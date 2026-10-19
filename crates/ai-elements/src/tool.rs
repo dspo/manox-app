@@ -486,7 +486,7 @@ impl RenderOnce for ToolHeader {
 /// whatever the host renders — the crate ships editor and shell surfaces as
 /// siblings of this frame.
 ///
-/// The body may carry copy controls (hover the body's top-right corner):
+/// The body may carry copy controls, always visible at its top-right corner:
 /// `in` copies the tool call's raw input structure, `out` its raw output —
 /// the machine shape, as opposed to selecting the rendered text, which copies
 /// what the card shows.
@@ -656,8 +656,6 @@ impl RenderOnce for Tool {
                         .top_1()
                         .right_1()
                         .gap_1()
-                        .opacity(0.55)
-                        .hover(|bar| bar.opacity(1.0))
                         .children(copy_input.map(|raw| {
                             copy_chip((id.clone(), "copy-in"), "in", CopySide::In, raw, &state, cx)
                         }))

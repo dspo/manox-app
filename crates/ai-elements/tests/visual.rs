@@ -117,9 +117,13 @@ fn main() {
                     state.submit(cx);
                     state
                 });
-                let fresh =
-                    cx.new(|_| AskState::new(vec![false, true, false], "补充说明…（可选）"));
-                fresh.update(cx, |state, cx| state.toggle_option(0, 0, cx));
+                let fresh = cx.new(|_| AskState::new(vec![false, true], "补充说明…（可选）"));
+                fresh.update(cx, |state, cx| {
+                    state.toggle_option(0, 0, cx);
+                    // Park on the last page: the pager's forward edge is the
+                    // submit check, and that is the pixel under test.
+                    state.set_page(1, cx);
+                });
                 (Some(settled), Some(fresh))
             } else {
                 (None, None)

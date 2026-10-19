@@ -85,8 +85,7 @@ pub fn ensure_tool_card(
     subs: &mut Vec<gpui::Subscription>,
     cx: &mut Context<crate::views::message::MessageItem>,
 ) -> Option<Entity<ToolState>> {
-    let family = card_family(&entry.name)?;
-    let _ = family;
+    card_family(&entry.name)?;
     if entry.card.is_none() {
         let state = cx.new(|cx| ToolState::new(cx).no_auto_fold());
         // The copy flash lives in the card's state; a flash must repaint the
@@ -114,7 +113,6 @@ pub fn build_tool_card(
     cwd: Option<SharedString>,
     theme: &Theme,
     on_toggle: Option<CardToggle>,
-    cx: &App,
 ) -> AnyElement {
     let family = card_family(&entry.name).expect("card family");
     let mut card = Tool::new(gpui::ElementId::Name(entry.id.clone().into()), state)
@@ -123,7 +121,7 @@ pub fn build_tool_card(
         .args(card_args(family, entry, theme))
         .status(status_chip(entry, theme))
         .copy_input(SharedString::from(entry.input.to_string()))
-        .content(card_body(family, entry, cwd, cx));
+        .content(card_body(family, entry, cwd));
     // The edit family's quotable shape is the diff itself; every other
     // family quotes the raw output.
     if family == CardFamily::Edit {
@@ -160,10 +158,7 @@ fn card_args(family: CardFamily, entry: &ToolCallItem, theme: &Theme) -> AnyElem
             input_str(entry, "path").unwrap_or_else(|| entry.title.clone().into())
         }
         CardFamily::Bash => input_str(entry, "command").unwrap_or_default(),
-        CardFamily::BashOutput => {
-            let shell = input_str(entry, "shell_id").unwrap_or_default();
-            SharedString::from(format!("{shell}"))
-        }
+        CardFamily::BashOutput => input_str(entry, "shell_id").unwrap_or_default(),
         CardFamily::Grep => {
             let pattern = input_str(entry, "pattern").unwrap_or_default();
             match input_str(entry, "path") {
@@ -235,12 +230,7 @@ fn status_chip(entry: &ToolCallItem, theme: &Theme) -> AnyElement {
 
 /// The card body per family. Streaming bodies read the live tail; settled
 /// bodies cap at [`LINE_CAP`] lines with a truncation note.
-fn card_body(
-    family: CardFamily,
-    entry: &ToolCallItem,
-    cwd: Option<SharedString>,
-    _cx: &App,
-) -> AnyElement {
+fn card_body(family: CardFamily, entry: &ToolCallItem, cwd: Option<SharedString>) -> AnyElement {
     let id: gpui::ElementId = gpui::ElementId::Name(format!("{}-body", entry.id).into());
     let output = if entry.streaming {
         crate::views::message::live_tail(&entry.output)
@@ -312,24 +302,18 @@ fn card_body(
             let path = input_str(entry, "path").unwrap_or_default().to_string();
             let mut shell = ShellView::new(id, format!("find {path} -name \"{pattern}\""))
                 .context(path_context(cwd));
-            let mut paths = output.lines().map(str::trim_end).filter(|l| !l.is_empty());
-            let (count, truncated) = {
-                let mut count = 0usize;
-                let mut truncated = false;
-                for line in paths.by_ref() {
-                    if count >= LINE_CAP {
-                        truncated = true;
-                        break;
-                    }
-                    shell = shell.line(ShellLine::spans(vec![(
-                        ShellSpanKind::Path,
-                        SharedString::from(line),
-                    )]));
-                    count += 1;
-                }
-                (count, truncated)
-            };
-            let _ = count;
+            let paths: Vec<&str> = output
+                .lines()
+                .map(str::trim_end)
+                .filter(|l| !l.is_empty())
+                .collect();
+            let truncated = paths.len() > LINE_CAP;
+            for line in paths.into_iter().take(LINE_CAP) {
+                shell = shell.line(ShellLine::spans(vec![(
+                    ShellSpanKind::Path,
+                    SharedString::from(line),
+                )]));
+            }
             if truncated {
                 shell = shell.line(ShellLine::dim(i18n::t("tool-output-truncated")));
             }
@@ -419,22 +403,33 @@ fn parse_read_output(output: &str) -> Vec<CodeLine> {
         }
         if line == "..." {
             lines.push(CodeLine::gap());
-        } else if let Some((n, text)) = line.split_once(": ") {
-            if let Ok(n) = n.trim().parse::<u32>() {
-                lines.push(CodeLine::plain(n, text));
-                continue;
-            }
-            lines.push(CodeLine::plain(0, line));
+            continue;
+        }
+        // The harness prefixes every row `N:TEXT` with no space after the
+        // colon (`manox-harness` hashline), so the split is on the first
+        // colon and the digits parse or the row is gutter-less — the
+        // runtime's bracketed notes (`[no snapshot: …]`) must never print a
+        // gutter number.
+        if let Some((n, text)) = line.split_once(':')
+            && let Ok(n) = n.parse::<u32>()
+        {
+            lines.push(CodeLine::plain(n, text));
         } else {
-            lines.push(CodeLine {
-                old: None,
-                new: None,
-                kind: CodeLineKind::Context,
-                text: SharedString::from(line),
-            });
+            lines.push(gutterless(line));
         }
     }
     lines
+}
+
+/// A row that carries no gutter number: runtime notes, foreign shapes, the
+/// truncated tail.
+fn gutterless(line: &str) -> CodeLine {
+    CodeLine {
+        old: None,
+        new: None,
+        kind: CodeLineKind::Context,
+        text: SharedString::from(line),
+    }
 }
 
 /// A unified diff into editor lines: `@@` hunks carry both counters, ` ` /
@@ -443,6 +438,9 @@ fn parse_diff(output: &str) -> Vec<CodeLine> {
     let mut lines = Vec::new();
     let (mut old, mut new) = (None, None);
     for line in output.lines() {
+        if lines.is_empty() && line.starts_with('[') && line.ends_with(']') {
+            continue;
+        }
         if line.starts_with("--- ") || line.starts_with("+++ ") {
             continue;
         }
@@ -538,5 +536,59 @@ pub fn entry_toggle(
             }
             cx.notify();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The harness's real read envelope (`manox-harness` hashline): a
+    /// `[path#TAG]` header, `N:TEXT` rows with NO space after the colon, and
+    /// bare `...` between disjoint windows. Column-0 rows (`use …`,
+    /// `fn main`), blank rows, and indented rows must all land their own
+    /// gutter number.
+    #[test]
+    fn read_envelope_restores_the_files_own_numbers() {
+        let out =
+            "[src/lib.rs#T4K2]\n1:use std::fmt;\n2:\n3:    let x: u32 = 1;\n...\n10:fn main() {}\n";
+        let lines = parse_read_output(out);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].new, Some(1));
+        assert_eq!(lines[0].text, "use std::fmt;");
+        assert_eq!(lines[1].new, Some(2));
+        assert_eq!(lines[1].text, "");
+        assert_eq!(lines[2].new, Some(3));
+        assert_eq!(lines[2].text, "    let x: u32 = 1;");
+        assert_eq!(lines[3].kind, CodeLineKind::Gap);
+        assert_eq!(lines[4].new, Some(10));
+        assert_eq!(lines[4].text, "fn main() {}");
+    }
+
+    /// The runtime's bracketed notes are not numbered rows: a gutter-less
+    /// context line, never a `0` in the gutter.
+    #[test]
+    fn read_runtime_notes_render_gutterless() {
+        let out = "[src/lib.rs#T4K2]\n1:a\n[no snapshot: file changed since read]\n[read: output truncated]\n";
+        let lines = parse_read_output(out);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1].new, None);
+        assert_eq!(lines[1].text, "[no snapshot: file changed since read]");
+        assert_eq!(lines[2].new, None);
+    }
+
+    /// The edit output rides behind the same `[path#TAG]` header; the diff
+    /// body walks both counters, context rows carrying both numbers.
+    #[test]
+    fn diff_envelope_strips_header_and_walks_counters() {
+        let out = "[src/lib.rs#T4K2]\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -3,2 +3,3 @@\n ctx\n-old\n+new\n+added\n";
+        let lines = parse_diff(out);
+        assert_eq!(lines.len(), 4);
+        assert_eq!((lines[0].old, lines[0].new), (Some(3), Some(3)));
+        assert_eq!(lines[1].kind, CodeLineKind::Removed);
+        assert_eq!(lines[1].old, Some(4));
+        assert_eq!(lines[2].kind, CodeLineKind::Added);
+        assert_eq!(lines[2].new, Some(4));
+        assert_eq!(lines[3].new, Some(5));
     }
 }
