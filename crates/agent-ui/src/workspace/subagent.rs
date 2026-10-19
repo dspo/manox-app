@@ -7,6 +7,13 @@
 use super::*;
 
 impl Workspace {
+    /// Sub-agent drill-down tabs are per-thread ephemeral state: close the
+    /// outgoing thread's panels before rebinding (the transcript itself is
+    /// the child session's own fold now — there is nothing local to clear).
+    pub(super) fn close_subagent_tabs(&mut self, cx: &mut Context<Self>) {
+        crate::chrome_assembly::close_tool_tabs_of_kind("subagent", cx);
+    }
+
     /// Open (or focus) a sub-agent drill-down in the right pane. The run id
     /// names the child session (the swarm invariant): the multiplexer
     /// attaches it and the panel observes the child's own chat fold — the
@@ -53,21 +60,6 @@ impl Workspace {
                 );
             }
         });
-    }
-
-    /// Drop the per-thread sub-agent observation state: the accumulated child
-    /// transcripts, and every observation panel mounted in the live pane.
-    ///
-    /// The panels must go with it. A panel renders the transcript accumulated
-    /// up to its open, and the shell's per-thread stash would carry it across
-    /// the switch — it would then show the thread's history only as of the
-    /// moment it was left, while the catch-up refills `subagent_transcripts`
-    /// behind it. Retiring them here keeps "a panel shows the transcript as of
-    /// its open" true for the reopened one (the rail row reopens from the
-    /// fresh transcript).
-    pub(super) fn clear_subagent_observation(&mut self, cx: &mut Context<Self>) {
-        self.subagent_transcripts.clear();
-        crate::chrome_assembly::close_tool_tabs_of_kind("subagent", cx);
     }
 
     /// Rebuild the per-thread sub-agent observation state (rail rows + panel

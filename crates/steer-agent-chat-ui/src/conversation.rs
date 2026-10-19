@@ -1630,10 +1630,6 @@ impl ConversationState {
                     ApplyOutcome::Unchanged
                 }
             }
-            // Child-session transcripts are owned by the workspace's
-            // sub-agent observation panel; the conversation keeps only the
-            // compact Agent task row.
-            ThreadEvent::SubagentChild { .. } => ApplyOutcome::Unchanged,
             ThreadEvent::ToolResult {
                 id,
                 output,
@@ -1920,43 +1916,6 @@ impl ConversationState {
                     )
                 }));
                 ApplyOutcome::Appended
-            }
-            ThreadEvent::SubagentProgress {
-                id,
-                status,
-                ..
-            } => {
-                if let Some(ix) = self.find_agent_task(id, cx) {
-                    self.items[ix].update(cx, |item, cx| {
-                        if let ConvItem::AgentTask(t) = item.kind_mut() {
-                            t.status = *status;
-                        }
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(ix)
-                } else {
-                    ApplyOutcome::Unchanged
-                }
-            }
-            ThreadEvent::SubagentStarted {
-                id,
-                subagent_type,
-                description,
-                ..
-            } => {
-                if let Some(ix) = self.find_agent_task(id, cx) {
-                    self.items[ix].update(cx, |item, cx| {
-                        if let ConvItem::AgentTask(t) = item.kind_mut() {
-                            t.subagent_type = subagent_type.clone();
-                            t.description = description.clone();
-                            t.status = ToolCallStatus::Running;
-                        }
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(ix)
-                } else {
-                    ApplyOutcome::Unchanged
-                }
             }
             ThreadEvent::BackgroundTaskUpdated { snapshot } => {
                 // Find an existing BackgroundTask card with this task_id and
