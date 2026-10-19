@@ -282,6 +282,10 @@ pub struct ContextRail {
     /// face — per-model usage, project, cwd and title all derive from the
     /// book's channel state). `None` only before the workspace connects.
     store: Option<(gpui::Entity<AhpStore>, String)>,
+    /// The chat host handle: the agents-section rows' drill-down entry
+    /// (`open_subagent_tab` — the row's id is the run id, the run id names
+    /// the child session). `None` only before the workspace connects.
+    pub host: Option<crate::host::ChatHostHandle>,
     /// Coarse run phase. Derived from `ThreadEvent`s routed here by
     /// `Workspace`; drives the Captain row's status indicator.
     pub cockpit_phase: CockpitPhase,
@@ -385,6 +389,7 @@ impl ContextRail {
     pub fn new(store: Option<(gpui::Entity<AhpStore>, String)>, cx: &mut App) -> Self {
         Self {
             store,
+            host: None,
             cockpit_phase: CockpitPhase::Idle,
             plan: None,
             agents: Vec::new(),
@@ -704,13 +709,32 @@ impl ContextRail {
             // `{type} · {topic}` with graceful one-sided fallbacks.
             let title = task_display_title(&info.subagent_type, &info.description)
                 .unwrap_or_else(|| info.id.clone());
+            // A row click drills into the child session's own transcript
+            // (#168's panel; the id is the run id, which names the child).
+            let host = self.host.clone();
+            let (subagent_type, topic, status) = (
+                info.subagent_type.clone(),
+                info.description.clone(),
+                info.status,
+            );
+            let run_id = info.id.clone();
             rows.push(
                 h_flex()
+                    .id(gpui::SharedString::from(format!("subagent-row-{run_id}")))
                     .w_full()
                     .min_w_0()
                     .py_0p5()
                     .gap_1p5()
                     .items_center()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.secondary.opacity(0.5)))
+                    .on_click(move |_, _, cx| {
+                        let Some(host) = &host else {
+                            return;
+                        };
+                        host.open_subagent_tab(&run_id, &subagent_type, &topic, status, cx);
+                    })
                     .child(status_indicator(info.status, theme))
                     .child(
                         gpui::div()
