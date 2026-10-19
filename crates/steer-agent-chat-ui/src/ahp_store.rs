@@ -58,6 +58,30 @@ pub struct SubagentWorkRow {
     pub activity: Option<String>,
 }
 
+/// How much of one chat's fold a page has already rendered.
+///
+/// Cheap to read and compare, and it moves on every way a transcript grows: a
+/// settled turn was appended, the in-flight turn gained content (an AHP turn's
+/// parts grow IN PLACE — the turn count alone never moves while a run streams,
+/// and `activeTurn` is a separate field from `turns`), or the fold's
+/// last-entry stamp advanced.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatFoldVersion {
+    turns: usize,
+    active: Option<ahp_types::state::ActiveTurn>,
+    modified_at: String,
+}
+
+/// Read one chat's current fold version. A chat the fold does not hold answers
+/// `None` — the caller treats that as "nothing to render yet".
+pub fn chat_fold_version(chat: &ChatState) -> ChatFoldVersion {
+    ChatFoldVersion {
+        turns: chat.turns.len(),
+        active: chat.active_turn.clone(),
+        modified_at: chat.modified_at.clone(),
+    }
+}
+
 /// How the client identifies itself to the host (echo correlation, active
 /// client claims).
 pub const CLIENT_ID: &str = "desktop";
@@ -1827,6 +1851,18 @@ impl AhpStore {
     /// Recent dispatch rejections, oldest first.
     pub fn rejections(&self) -> impl Iterator<Item = &str> {
         self.rejections.iter().map(String::as_str)
+    }
+
+    /// How many subscriptions this store has queued because it has no client
+    /// yet (a detached test store queues every write). The sub-agent page's
+    /// refresh poll is a re-subscribe loop, so counting queued subscribes is
+    /// how a test proves the poll fires (and stops). Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_queued_subscribes(&self) -> usize {
+        self.pending_writes
+            .iter()
+            .filter(|write| matches!(write, PendingWrite::Subscribe(_)))
+            .count()
     }
 
     /// Re-apply the folded chat state as its own subscribe snapshot — the

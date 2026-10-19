@@ -287,14 +287,16 @@ struct SubagentPrompt {
     dispatched_at: i64,
 }
 
-/// The open sub-agent stream page: the run it renders, the page entity, the
-/// parent-reported activity signature it was last refreshed for (a sub-agent
-/// chat is served as a snapshot, so the page re-subscribes when the parent's
-/// run reports new activity), and the page's back subscription.
+/// The open sub-agent stream page: the run it renders, the child chat's fold
+/// version it was last built from (a re-subscribe that carried nothing new
+/// must not churn the page), the page entity, the refresh poll (alive while
+/// the page is — dropping the page cancels it), and the page's back
+/// subscription.
 struct SubagentStreamPage {
     id: String,
-    signature: Option<String>,
+    version: Option<steer_agent_chat_ui::ahp_store::ChatFoldVersion>,
     view: Entity<crate::views::subagent_stream::SubagentStreamView>,
+    _poll: gpui::Task<()>,
     _sub: Subscription,
 }
 
@@ -2088,8 +2090,12 @@ impl Workspace {
         // Leaving the external session for Settings drops its ownership:
         // the invariant is `view_mode == ExternalSession` ⟺
         // `active_external` names a live session — a mode flip that keeps
-        // the id leaves the title face reading a session not on screen.
+        // the id leaves the title face reading a session not on screen. The
+        // sub-agent page obeys the same rule: a mode flip that kept it would
+        // leave a page nobody sees still polling its child chat.
         self.active_external = None;
+        // Dropping the page drops its refresh poll with it.
+        self.subagent_stream = None;
         self.view_mode = ViewMode::Settings;
         // Clear any pending exit animation: clicking Settings… while the
         // panel is still sliding out re-opens the overlay. Bumping the
@@ -2158,9 +2164,11 @@ impl Workspace {
     }
 
     /// Switch to the conversation pane. Drops external ownership with the
-    /// mode flip (same invariant as the Settings arm).
+    /// mode flip (same invariant as the Settings arm), and the sub-agent page
+    /// with it.
     pub fn focus_conversation(&mut self, cx: &mut Context<Self>) {
         self.active_external = None;
+        self.subagent_stream = None;
         self.view_mode = ViewMode::Workspace;
         cx.notify();
     }
@@ -2761,10 +2769,11 @@ impl Workspace {
 
     /// The canonical `{registration}/{model-id}` wire identity of a
     /// registered model — the form every display surface resolves through
-    /// [`steer_agent_chat_ui::model_tag::ModelTag`]. A display name is NOT
-    /// wire-shaped, so resolving one yields no provider segment and no wire
-    /// tint; the label only falls back to a display name when nothing is
-    /// registered at all.
+    /// [`steer_agent_chat_ui::model_tag::ModelTag`]; an unresolvable id has no
+    /// provider segment and no wire tint, so the label never hands it a
+    /// display name. `provider_glue::display_name` belongs to the surfaces
+    /// that RENDER a name (the model catalog, the context rail); the label's
+    /// own last resort is the localized "no model" string.
     fn model_wire_id(model: &manox_harness::types::Model) -> String {
         format!("{}/{}", model.provider, model.id)
     }

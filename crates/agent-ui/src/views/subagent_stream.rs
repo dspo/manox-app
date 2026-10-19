@@ -8,12 +8,13 @@
 //! child's text).
 //!
 //! The page is a read-only view of a child chat: it inherits the child's
-//! transcript from the CHAT FOLD when it opens, and the workspace re-subscribes
-//! the child's channel whenever the parent's run reports new activity — the host
-//! serves a child chat as a snapshot (its journal is bridged into the child's
-//! own channel, not streamed to the parent), so a re-subscribe is how a running
-//! child's transcript advances. No composer: a child run is driven by the
-//! parent's dispatch, not by the person watching it.
+//! transcript from the CHAT FOLD when it opens, and keeps re-inheriting it —
+//! the host serves a child chat SNAPSHOT-ONLY (the child's journal is folded
+//! into the child's own channel and is never bridged to the parent), so the
+//! workspace re-subscribes that channel on a bounded poll and rebuilds this
+//! page whenever the child's fold version moved (see
+//! `agent_ui::workspace::subagent_stream` for the polling half). No composer: a
+//! child run is driven by the parent's dispatch, not by the person watching it.
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
@@ -43,9 +44,6 @@ pub struct SubagentStreamView {
     /// The chat fold's client (the process-singleton AHP store).
     store: gpui::WeakEntity<AhpStore>,
     host: ChatHostHandle,
-    /// The turn count the page's transcript was built from — the rebuild
-    /// trigger a re-subscribe feeds.
-    built_turns: usize,
     conversation: Entity<ConversationState>,
     scroll_handle: gpui::ScrollHandle,
     stick_to_bottom: bool,
@@ -62,7 +60,6 @@ impl SubagentStreamView {
         cx: &mut gpui::App,
     ) -> Entity<Self> {
         let conversation = build_conversation(&store, &chat_id, &label, &role, &host, cx);
-        let built_turns = chat_turns(&store, &chat_id, cx);
         cx.new(|_| Self {
             chat_id,
             label,
@@ -70,7 +67,6 @@ impl SubagentStreamView {
             activity,
             store: store.downgrade(),
             host,
-            built_turns,
             conversation,
             scroll_handle: gpui::ScrollHandle::new(),
             stick_to_bottom: true,
@@ -92,34 +88,20 @@ impl SubagentStreamView {
             .collect()
     }
 
-    /// Rebuild the transcript from the child chat's fold. Called when a fresh
-    /// snapshot lands: an unchanged fold is a no-op repaint, so a tick that
-    /// carried nothing new neither rebuilds nor churns the scroll position.
+    /// Rebuild the transcript from the child chat's fold. The CALLER decides
+    /// freshness (the workspace holds the fold version it last built from), so
+    /// a rebuild here is unconditional. Tail-follow is the USER's state, not
+    /// the rebuild's: a fresh snapshot must not yank a reader who scrolled
+    /// back up to the bottom.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.store.upgrade() else {
             return;
         };
-        let turns = chat_turns(&store, &self.chat_id, cx);
-        if turns == self.built_turns {
-            return;
-        }
-        self.built_turns = turns;
         let role = self.role.clone();
         self.conversation =
             build_conversation(&store, &self.chat_id, &self.label, &role, &self.host, cx);
-        self.stick_to_bottom = true;
         cx.notify();
     }
-}
-
-fn chat_turns(store: &Entity<AhpStore>, chat_id: &str, cx: &gpui::App) -> usize {
-    store
-        .read(cx)
-        .book
-        .chats
-        .get(chat_id)
-        .map(|chat| chat.turns.len())
-        .unwrap_or_default()
 }
 
 fn build_conversation(
@@ -158,11 +140,13 @@ fn build_conversation(
 impl Render for SubagentStreamView {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme: Theme = cx.theme().clone();
-        let title = steer_agent_chat_ui::views::subagents::task_display_title(
-            &self.label,
-            self.activity.as_deref().unwrap_or_default(),
-        )
-        .unwrap_or_else(|| self.chat_id.clone());
+        use steer_agent_chat_ui::views::subagents::{one_line, task_display_title};
+        // One line, always: the run's label is runtime text and may carry
+        // newlines — the header must not grow a line per input line.
+        let title = one_line(
+            &task_display_title(&self.label, self.activity.as_deref().unwrap_or_default())
+                .unwrap_or_else(|| self.chat_id.clone()),
+        );
 
         let header = h_flex()
             .w_full()

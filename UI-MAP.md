@@ -219,8 +219,9 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 #### ViewMode::SubagentStream
 一个运行中子代理的自家 transcript 顶替会话列（[CaptainStatusStrip](#captainstatusstrip) 的子代理行点开；
-见 [SubagentStream](#subagentstream)）。子代理聊天由宿主以快照服务，页面在父会话上报新活动时重订阅；
-任何线程导航（点侧栏行 / 新建会话）都退出该页回会话列。
+见 [SubagentStream](#subagentstream)）。子代理 chat 由宿主以**快照**服务（无 live bridge，且父 chat 的
+background work 条目每 run 只写一次），所以页面靠自己的有界轮询重订阅取新快照、按子 chat 的 fold 版本重建；
+任何线程导航（点侧栏行 / 新建会话 / 进设置）都 drop 该页并停掉轮询。
 
 ---
 
@@ -454,8 +455,10 @@ the footer — cancel priority keeps the composer live underneath them.
 
 #### CaptainStatusStrip
 
-The live-status block above the composer, shown only while the foreground
-turn runs and retired the instant it ends — the message column
+The live-status block above the composer, shown while the foreground turn runs
+OR while any sub-agent run is still live (AHP: "an entry may have been started
+by an earlier turn", so a run can outlive the turn that spawned it), and retired
+once neither is — the message column
 carries no per-entry status glyphs anymore (the chain-of-thought markers are
 retired), so this is the single "what is it doing" surface. Its first row is the
 Captain's own: a [`PixelSpinner`](#meerkat) (grid variant, `ai_elements::PixelSpinner`)
@@ -483,12 +486,16 @@ the host opens a run's entry on its first running tick and removes it when the
 run settles, so the rows are exactly the live set. Each row is the same shape
 (`spinner` + `captain-steering-subagent`「{name} 正在驾驶」+ the model tag),
 where `{name}` is the run's agent type plus its task label
-(`task_display_title`: 「Explore · 修登录跳转」). The model segment names the
+(`task_display_title`: 「Explore · 修登录跳转」— flattened by `one_line` and
+bounded the same way the Captain's own row is: a run's task label is runtime
+text and may carry newlines, and the block must never grow a line per input
+line). The model segment names the
 SESSION's model: a sub-agent run on this harness inherits it unless its own
 definition pins one, and the run's own model has no seat on the parent's
 channel. A sub-agent row's click opens that child's transcript in the main
-column ([SubagentStream](#subagentstream)); the Captain's own row returns
-there.
+column ([SubagentStream](#subagentstream)). The Captain's own row carries NO
+click: the block is not on screen while the page owns the column, so the round
+trip back is the page's own back control (no dead affordance here).
 
 > Source: `crates/agent-ui/src/workspace/render.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`), `crates/agent-ui/src/workspace/subagent_stream.rs`
 
@@ -508,12 +515,17 @@ conversation) + `{type} · {topic}`.
 
 Refresh model: the host serves a child chat as a SNAPSHOT (the child's journal
 is folded into the child's own channel and is never bridged to the parent), so
-opening subscribes that channel and the workspace re-subscribes whenever the
-parent's run reports new activity (`refresh_subagent_stream`, called from the
-store observe's notify — the same notify that drives the conversation rebuild).
-The page rebuilds only when the fold actually grew, so its scroll/selection are
-not churned per tick; the run leaving the live set refreshes it once (its
-journal ends when the run ends) and then stops.
+the page FETCHES on a bounded poll — while it owns the main column and its run
+is still live, a 2s `background_executor().timer()` re-subscribes the child's
+chat; the run leaving the live set earns one last subscribe (its journal ends
+when the run ends, so that snapshot is final) and stops the poll. The REBUILD
+key is the child chat's own fold version
+(`ChatFoldVersion`: settled turns, the in-flight turn's content, the fold's
+last-entry stamp — an AHP turn's parts grow in place, so the turn count alone
+never moves while a run streams), compared on the store notify a landed
+snapshot produces; a snapshot that carried nothing new neither rebuilds nor
+churns the page, and tail-follow stays the user's state (a rebuild does not yank
+a reader who scrolled back up).
 
 ##### Composer
 
