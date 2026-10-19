@@ -666,7 +666,40 @@ impl ContextRail {
                 .into_any_element(),
         ];
 
-        let fold = subagent_display_order(&self.agents, self.bubble_expanded.subagents);
+        // The active swarm rides `background_work` on the chat state —
+        // the pointer list whose entries name the child chats (the model
+        // sees the same roster through ListAgents). Settled rows the fold
+        // still carries merge underneath by run id.
+        let live: Vec<SubagentInfo> = self
+            .store
+            .as_ref()
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                leaf_of(&view.book, sid)
+                    .chat
+                    .and_then(|chat| chat.background_work.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|work| match work {
+                        ahp_types::state::BackgroundWork::Subagent(sub) => Some(SubagentInfo {
+                            id: sub.id,
+                            subagent_type: sub.label.clone(),
+                            description: sub.label,
+                            status: manox_agent::ToolCallStatus::Running,
+                            health: None,
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut roster = self.agents.clone();
+        for info in live {
+            if !roster.iter().any(|row| row.id == info.id) {
+                roster.push(info);
+            }
+        }
+        let fold = subagent_display_order(&roster, self.bubble_expanded.subagents);
         for info in fold.rows {
             // `{type} · {topic}` with graceful one-sided fallbacks.
             let title = task_display_title(&info.subagent_type, &info.description)
