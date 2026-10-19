@@ -60,6 +60,11 @@ impl Render for Workspace {
         {
             return self.apply_chat_actions(card, window, cx);
         }
+        if matches!(self.view_mode, ViewMode::SubagentStream)
+            && let Some(card) = self.render_subagent_stream_card(cx)
+        {
+            return self.apply_chat_actions(card, window, cx);
+        }
         // A blocking overlay owns the page: the turn navigator cannot stay
         // mounted under it.
         if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {
@@ -242,6 +247,27 @@ impl Workspace {
                 .flex()
                 .p(px(4.))
                 .child(view),
+        )
+    }
+
+    /// The sub-agent stream page (one running child's own chat) as the main
+    /// column's card. The page owns its transcript and its refresh; the
+    /// workspace owns which run is on screen, and the page's back control
+    /// returns the column to the conversation.
+    fn render_subagent_stream_card(
+        &mut self,
+        _cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        use gpui::{ParentElement as _, Styled as _, div};
+        let page = self.subagent_stream.as_ref()?;
+        Some(
+            div()
+                .id("subagent-stream-main")
+                .debug_selector(|| "subagent-stream-main".into())
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .child(page.view.clone()),
         )
     }
 
@@ -532,22 +558,29 @@ impl Workspace {
         self.apply_chat_actions(root, window, cx)
     }
 
-    /// The one-line Captain strip above the composer while a turn runs:
-    /// `Captain is steering {provider}/{model} · {activity}` — a PixelSpinner
-    /// leading flush at the left edge (healthy running), the model in the
-    /// app's wire-color convention (the registration's `-wire` suffix never
-    /// shows as text), and the turn's current activity as a one-line summary.
-    /// The strip retires the instant the turn ends — the message column
-    /// carries no per-entry status glyphs, this is the one live surface.
+    /// The Captain status block above the composer while a turn runs: the
+    /// Captain's own line (`Captain is steering {provider}/{model} ·
+    /// {activity} · {elapsed}`) followed by one line per RUNNING sub-agent,
+    /// each led by a PixelSpinner flush at the left edge. The model segment
+    /// carries the app's wire-color convention (the registration's `-wire`
+    /// suffix never shows as text), and the block retires the instant the turn
+    /// ends — the message column carries no per-entry status glyphs, this is
+    /// the one live surface.
+    ///
+    /// The sub-agent lines are the parent chat's AHP background work (the host
+    /// opens a run's entry on its first running tick and removes it when the
+    /// run settles); each line's click opens that child's own transcript in
+    /// the main column, and the Captain's line returns there.
     fn render_captain_strip(
         &self,
         running: bool,
         theme: &Theme,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         use ai_elements::{PixelSpinner, PixelSpinnerVariant};
         use steer_agent_chat_ui::conversation::LiveActivity;
         use steer_agent_chat_ui::model_tag::ModelTag;
+        use steer_agent_chat_ui::views::subagents::task_display_title;
 
         if !running {
             return None;
@@ -562,6 +595,25 @@ impl Workspace {
         };
 
         let muted = theme.muted_foreground;
+        let spinner = || {
+            PixelSpinner::new()
+                .variant(PixelSpinnerVariant::Grid)
+                .color(muted)
+                .into_any_element()
+        };
+        let model_spans = |theme: &Theme| {
+            tag.spans(theme)
+                .into_iter()
+                .map(|(text, color)| {
+                    gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(color)
+                        .child(text)
+                })
+                .collect::<Vec<_>>()
+        };
+
         let mut row = gpui::div()
             .id("captain-strip")
             .debug_selector(|| "workspace-captain-strip".into())
@@ -572,20 +624,13 @@ impl Workspace {
             .min_w_0()
             .text_sm()
             .text_color(muted)
-            .child(
-                PixelSpinner::new()
-                    .variant(PixelSpinnerVariant::Grid)
-                    .color(muted)
-                    .into_any_element(),
-            )
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.secondary.opacity(0.4)))
+            .child(spinner())
             .child(gpui::div().child(crate::i18n::t("captain-steering-prefix")))
-            .children(tag.spans(theme).into_iter().map(|(text, color)| {
-                gpui::div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(color)
-                    .child(text)
-            }));
+            .children(model_spans(theme))
+            // The Captain's own line is the way back from a sub-agent page.
+            .on_click(cx.listener(|this, _, _, cx| this.leave_subagent_stream(cx)));
         if elapsed > 0 {
             row = row.child(gpui::div().child("·")).child(
                 gpui::div().child(crate::i18n::t_count("thinking-duration", elapsed as i64)),
@@ -602,12 +647,48 @@ impl Workspace {
                 LiveActivity::Tool(title) => gpui::div()
                     .min_w_0()
                     .truncate()
+                    .whitespace_nowrap()
                     .font_family(theme.mono_font_family.clone())
-                    .child(title.clone()),
+                    .child(one_line(title)),
             };
             row = row.child(gpui::div().child("·")).child(summary);
         }
-        Some(row.into_any_element())
+
+        let mut rows = v_flex().w_full().min_w_0().gap_1().child(row);
+        for (ix, work) in self.running_subagents(cx).into_iter().enumerate() {
+            // The child's own identity: its agent type plus the run's task
+            // label (`Explore · fix the login redirect`).
+            let title =
+                task_display_title(&work.label, work.activity.as_deref().unwrap_or_default())
+                    .unwrap_or_else(|| work.id.clone());
+            // The model segment names the session's model: a sub-agent run on
+            // this harness inherits the parent's model unless its own
+            // definition pins one, and the run's own model has no AHP seat on
+            // the parent's channel.
+            let row = gpui::div()
+                .id(("captain-subagent-row", ix))
+                .debug_selector(move || format!("workspace-subagent-strip-{ix}"))
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .text_sm()
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.secondary.opacity(0.4)))
+                .child(spinner())
+                .child(gpui::div().min_w_0().truncate().child(crate::i18n::t_str(
+                    "captain-steering-subagent",
+                    &[("name", title.as_str())],
+                )))
+                .children(model_spans(theme))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_subagent_stream(&work, cx);
+                }));
+            rows = rows.child(row);
+        }
+        Some(rows.into_any_element())
     }
 
     /// §二.3 stop notice — the dismissible BROADCAST arm. Shown above the
@@ -630,5 +711,33 @@ impl Workspace {
         // The retry notice retired with the v2 follow stream: a failed turn
         // surfaces as the chat's error part now.
         None
+    }
+}
+
+/// Collapse a tool title onto ONE display line: every whitespace run — the
+/// newlines of a multi-line `bash` body included — becomes a single space.
+/// The strip bounds the line with `.truncate()`/`whitespace_nowrap()`, but
+/// those only ellipsize text that is already one line; a raw multi-line
+/// title stretched the strip to as many rows as the command had.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod one_line_tests {
+    use super::one_line;
+
+    /// The Captain strip's activity summary is ONE line: a multi-line `bash`
+    /// body collapses to a single spaced line (the row's `.truncate()` then
+    /// ellipsizes it on width), so the strip can never grow a line per command
+    /// line.
+    #[test]
+    fn the_activity_summary_collapses_to_one_line() {
+        assert_eq!(one_line("cargo build"), "cargo build");
+        assert_eq!(
+            one_line("cat <<'EOF'\n  a\n  b\nEOF"),
+            "cat <<'EOF' a b EOF"
+        );
+        assert_eq!(one_line("  \n \t "), "");
     }
 }

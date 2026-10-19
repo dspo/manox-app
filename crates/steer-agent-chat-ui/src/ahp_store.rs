@@ -42,6 +42,22 @@ use manox_ahp_runtime::ahp::projection::config_keys;
 use serde::Serialize;
 use serde_json::Value;
 
+/// One running sub-agent, as the host projects it onto the parent chat's
+/// background work (AHP `chat/backgroundWorkSet` / `chat/backgroundWorkRemoved`).
+/// The host opens an entry on the run's first running tick and removes it when
+/// the run settles, so the set IS the live one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentWorkRow {
+    /// The run id — the child session id, and the id of the child's own chat
+    /// (`ahp-chat:/{id}`), which is where the child's transcript lives.
+    pub id: String,
+    /// The agent type the host labels the run with (`Explore`, `Sailor`, …).
+    pub label: String,
+    /// The run's task label (`_meta.latestActivity`), when the host carried
+    /// one.
+    pub activity: Option<String>,
+}
+
 /// How the client identifies itself to the host (echo correlation, active
 /// client claims).
 pub const CLIENT_ID: &str = "desktop";
@@ -2269,6 +2285,34 @@ impl<'a> LeafView<'a> {
         self.chat.is_some_and(|c| c.active_turn.is_some())
     }
 
+    /// The chat's running sub-agents, in host order — one row per
+    /// `backgroundWork` subagent entry. The host removes an entry when its run
+    /// settles, so this is exactly the live set (the Captain status block
+    /// lists them beside the Captain's own line).
+    pub fn running_subagents(&self) -> Vec<SubagentWorkRow> {
+        self.chat
+            .and_then(|c| c.background_work.as_ref())
+            .map(|work| {
+                work.iter()
+                    .filter_map(|entry| match entry {
+                        ahp_types::state::BackgroundWork::Subagent(sub) => Some(SubagentWorkRow {
+                            id: sub.id.clone(),
+                            label: sub.label.clone(),
+                            activity: sub
+                                .meta
+                                .as_ref()
+                                .and_then(|meta| meta.get("latestActivity"))
+                                .and_then(Value::as_str)
+                                .filter(|activity| !activity.is_empty())
+                                .map(str::to_string),
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The canonical `provider/model` selection string.
     pub fn model_id(&self) -> Option<&str> {
         self.session
@@ -2607,6 +2651,66 @@ fn config_values_of(
 mod tests {
     use super::*;
     use ahp_types::actions::{ChatDeltaAction, SessionTitleChangedAction};
+
+    /// The sub-agent block's read face: the host's background-work subagent
+    /// entries project into rows (id + agent type + the run's task label),
+    /// every other kind (a shell, a future kind) is skipped, and an entry
+    /// without the `_meta` activity still answers with its type.
+    #[test]
+    fn running_subagents_project_the_background_work_subagent_entries() {
+        let mut book = ChannelBook::default();
+        let chat: ChatState = serde_json::from_value(serde_json::json!({
+            "resource": chat_uri("s-1"),
+            "title": "parent",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [],
+            "backgroundWork": [
+                {
+                    "kind": "shell",
+                    "id": "sh-1",
+                    "label": "cargo build",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "command": "cargo build",
+                },
+                {
+                    "kind": "subagent",
+                    "id": "sub-ns-3",
+                    "label": "Explore",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "_meta": { "agentType": "Explore", "latestActivity": "fix the login redirect" },
+                    "chat": "ahp-chat:/sub-ns-3",
+                },
+                {
+                    "kind": "subagent",
+                    "id": "sub-ns-4",
+                    "label": "Sailor",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "chat": "ahp-chat:/sub-ns-4",
+                },
+                { "kind": "future-kind", "whatever": true },
+            ],
+        }))
+        .expect("a chat with background work parses");
+        book.chats.insert("s-1".to_string(), chat);
+
+        let rows = leaf(&book, "s-1").running_subagents();
+        assert_eq!(
+            rows,
+            vec![
+                SubagentWorkRow {
+                    id: "sub-ns-3".into(),
+                    label: "Explore".into(),
+                    activity: Some("fix the login redirect".into()),
+                },
+                SubagentWorkRow {
+                    id: "sub-ns-4".into(),
+                    label: "Sailor".into(),
+                    activity: None,
+                },
+            ]
+        );
+    }
 
     #[test]
     fn typed_session_actions_fold_into_the_session_state() {

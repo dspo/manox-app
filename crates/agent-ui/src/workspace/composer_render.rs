@@ -1405,7 +1405,12 @@ impl Workspace {
                             .map(|rows| {
                                 rows.iter()
                                     .filter_map(serde_json::Value::as_str)
-                                    .map(|p| (p.to_string(), String::new()))
+                                    // The row names the directory the way the
+                                    // sidebar groups name it; the full path
+                                    // stays on the row's tooltip.
+                                    .map(|p| {
+                                        (p.to_string(), crate::sidebar_projection::project_label(p))
+                                    })
                                     .collect()
                             })
                     })
@@ -1424,7 +1429,7 @@ impl Workspace {
 
                     let ws_recent = ws.clone();
                     let theme_recent = theme.clone();
-                    for (path_str, name) in &recent_projects {
+                    for (ix, (path_str, name)) in recent_projects.iter().enumerate() {
                         let name = name.clone();
                         let display_path = path_str.clone();
                         let click_path = path_str.clone();
@@ -1432,7 +1437,9 @@ impl Workspace {
                         let themed = theme_recent.clone();
                         menu = menu.item(
                             PopupMenuItem::element(move |_window, _cx| {
+                                let tooltip = display_path.clone();
                                 h_flex()
+                                    .id(("project-menu-row", ix))
                                     .items_center()
                                     .gap_2()
                                     .child(
@@ -1442,17 +1449,18 @@ impl Workspace {
                                     )
                                     .child(
                                         gpui::div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .whitespace_nowrap()
                                             .text_sm()
                                             .text_color(themed.foreground)
                                             .child(name.clone()),
                                     )
-                                    .child(
-                                        gpui::div()
-                                            .flex_1()
-                                            .text_xs()
-                                            .text_color(themed.muted_foreground)
-                                            .child(display_path.clone()),
-                                    )
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(tooltip.clone())
+                                            .build(window, cx)
+                                    })
                             })
                             .on_click(
                                 move |_, _, cx: &mut gpui::App| {
