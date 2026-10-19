@@ -709,19 +709,25 @@ impl Workspace {
         // rides the Projects mirror, the per-thread projects ride the rows).
         let _mux_lists = cx.observe(&multiplexer, |_, _, cx| cx.notify());
         let conversation = cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead));
-        let context_rail = {
-            let rail_store = (store.clone(), session_id.clone());
-            cx.new(|cx| crate::views::context_rail::ContextRail::new(Some(rail_store), cx))
-        };
+
+        let weak_ws = cx.weak_entity();
+        let chat_host: steer_agent_chat_ui::host::ChatHostHandle =
+            std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
         // The rail's background writers (git refresh, subagent progress,
         // plan snapshots) notify only the rail entity; without this
         // observer those notifies never schedule a frame — the changes
         // surface on the next unrelated repaint (silent, self-healing
-        // lag).
+        // lag). The rail's agents rows drill into the child sessions
+        // through the same host the conversation cards use.
+        let context_rail = {
+            let rail_store = (store.clone(), session_id.clone());
+            cx.new(|cx| {
+                let mut rail = crate::views::context_rail::ContextRail::new(Some(rail_store), cx);
+                rail.host = Some(chat_host.clone());
+                rail
+            })
+        };
         let rail_updates = cx.observe(&context_rail, |_, _, cx| cx.notify());
-        let weak_ws = cx.weak_entity();
-        let chat_host: steer_agent_chat_ui::host::ChatHostHandle =
-            std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
 
         let mut ws = Self {
             cwd: cwd.clone(),
