@@ -429,8 +429,6 @@ pub struct Workspace {
     _mux_lists: gpui::Subscription,
     _rail_updates: gpui::Subscription,
     /// Accumulated child-session events per Agent tool-call id, so a panel
-    /// opened mid-run backfills from the start.
-    subagent_transcripts: HashMap<String, Vec<manox_agent::SubagentChildEvent>>,
     /// Latest completion text per subagent address (from SubagentProgress
     /// status=Success/Error), used as the panel's final answer when the
     /// Agent tool-result is absent (new Steer bus has no ToolResult).
@@ -733,7 +731,6 @@ impl Workspace {
             background_threads: Vec::new(),
             _mux_lists,
             _rail_updates: rail_updates,
-            subagent_transcripts: HashMap::new(),
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
             externals: Vec::new(),
