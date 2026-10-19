@@ -144,6 +144,7 @@ status-pending = 待审批
 status-running = 运行中
 
 status-success = 完成
+tool-output-truncated = 输出已截断，拷贝 out 可得完整内容
 
 status-continued = 继续讨论
 

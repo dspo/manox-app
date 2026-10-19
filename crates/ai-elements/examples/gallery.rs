@@ -16,14 +16,19 @@
 use std::time::Duration;
 
 use ai_elements::{
-    FRAME_NAMES, Meerkat, PixelSpinner, PixelSpinnerVariant, Reasoning, ReasoningState,
+    AskBlock, AskOption, AskState, AskUserQuestion, CodeLine, CodeView, FRAME_NAMES, Meerkat,
+    PixelSpinner, PixelSpinnerVariant, Reasoning, ReasoningState, ShellLine, ShellSpanKind,
+    ShellView, Tool, ToolState, ToolStatus,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, Window, div, prelude::*, px, size,
 };
-use gpui_component::{Root, Sizable as _, Theme, button::Button, h_flex, v_flex};
-use steer_components::markdown::{TextViewState, message_document, stream_fade_motion};
+use gpui_component::{Icon, Root, Sizable as _, Theme, button::Button, h_flex, v_flex};
+use gpui_kit_assets::IconName;
+use steer_components::markdown::{
+    TextViewState, message_document, static_document, stream_fade_motion,
+};
 
 /// The scripted reasoning text. A scripted stream feeds it a few characters at a
 /// time — the cadence a provider actually delivers, and the thing that makes a
@@ -72,6 +77,9 @@ enum Component {
     Reasoning,
     PixelSpinner,
     HistoryLoading,
+    ToolText,
+    ToolShell,
+    AskQuestion,
 }
 
 impl Component {
@@ -79,6 +87,9 @@ impl Component {
         Component::Reasoning,
         Component::PixelSpinner,
         Component::HistoryLoading,
+        Component::ToolText,
+        Component::ToolShell,
+        Component::AskQuestion,
     ];
 
     fn name(self) -> &'static str {
@@ -86,6 +97,9 @@ impl Component {
             Self::Reasoning => "Reasoning",
             Self::PixelSpinner => "Pixel Spinner",
             Self::HistoryLoading => "History Loading",
+            Self::ToolText => "Tools — Text",
+            Self::ToolShell => "Tools — Shell",
+            Self::AskQuestion => "AskUserQuestion",
         }
     }
 
@@ -104,6 +118,28 @@ impl Component {
                 "The pixel meerkat the app plays while a reopened thread's chat snapshot is in \
                  flight — same one-clock approach as the pixel spinner: cycle time picks the \
                  slot, the slot picks the frame, only the active frame renders."
+            }
+            Self::ToolText => {
+                "The file tools (`Read` / `Write` / `Edit`) as tool cards: an icon-name-args \
+                 header over an in-band editor — gutter, diff markers, naive coloring, no \
+                 surface tint beyond the diff. Drag-select copies what you see; the hover \
+                 `in`/`out` chips quote the raw call. Settling folds the card a second \
+                 later; a hand toggle pins it."
+            }
+            Self::ToolShell => {
+                "The command family (`Bash`, `BashOutput` — and `Grep`, `Glob`, `Ls` rendered \
+                 in the same shell vocabulary, not as shell tools) as tool cards: the header \
+                 keeps the tool's real identity, the body is a fake terminal that opens with \
+                 the host's zsh prompt lines — path, git branch and dirt, toolchains — then \
+                 the ❯ command, colored output, and an exit footer. Selecting the body \
+                 copies the transcript you see."
+            }
+            Self::AskQuestion => {
+                "The AskUserQuestion takeover card as a paged form: radio circles and \
+                 checkboxes loud enough to read at a glance, a note field per question, the \
+                 `< 1/3 >` pager whose next button becomes the submit check on the last \
+                 page, and — once submitted — the host's markdown output standing in for \
+                 the form."
             }
         }
     }
@@ -132,9 +168,34 @@ impl Demo {
     }
 }
 
+/// The tool cards' states, one entity per card so header clicks and the
+/// settle-fold reach the screen. Static demos mount settled and open; the
+/// lifecycle demo mounts running and is driven by its buttons.
+struct ToolDemos {
+    read: Entity<ToolState>,
+    ranged: Entity<ToolState>,
+    edit: Entity<ToolState>,
+    write: Entity<ToolState>,
+    failed: Entity<ToolState>,
+    lifecycle: Entity<ToolState>,
+    bash_ok: Entity<ToolState>,
+    bash_fail: Entity<ToolState>,
+    bash_run: Entity<ToolState>,
+    bash_output: Entity<ToolState>,
+    grep: Entity<ToolState>,
+    glob: Entity<ToolState>,
+    ls: Entity<ToolState>,
+}
+
 struct Gallery {
     selected: Component,
     reasoning: Vec<Demo>,
+    tools: ToolDemos,
+    /// The interactive wizard's live state: page, selections, notes,
+    /// submitted.
+    ask: Entity<AskState>,
+    /// The pre-settled card's state — what a replayed transcript mounts.
+    ask_answered: Entity<AskState>,
     /// The scripted stream's delta sequence, cut once.
     deltas: Vec<&'static str>,
     /// Keeps every demo's state observed, so a fold the block performs on its
@@ -144,12 +205,96 @@ struct Gallery {
 
 impl Gallery {
     fn new(cx: &mut Context<Self>) -> Self {
-        let (reasoning, subscriptions) = Self::build_reasoning(cx);
+        let (reasoning, mut subscriptions) = Self::build_reasoning(cx);
+        let tools = Self::build_tools(cx, &mut subscriptions);
+        // The live wizard. Questions: single, multi, single — one flag per
+        // block, in order.
+        let ask = cx.new(|_| AskState::new(vec![false, true, false], "补充说明…（可选）"));
+        subscriptions.push(cx.observe(&ask, |_, _, cx| cx.notify()));
+        // The answered card: settled at mount with one choice on the first
+        // question and nothing on the second — the skipped-question shape the
+        // output markdown has to carry.
+        let ask_answered = cx.new(|cx| {
+            let mut state = AskState::new(vec![false], "补充说明…（可选）");
+            state.toggle_option(0, 0, cx);
+            state.submit(cx);
+            state
+        });
+        subscriptions.push(cx.observe(&ask_answered, |_, _, cx| cx.notify()));
         Self {
             selected: Component::Reasoning,
             reasoning,
+            tools,
+            ask,
+            ask_answered,
             deltas: scripted_deltas(),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// One settled-and-open card state: what a replayed transcript mounts.
+    fn settled_card(
+        cx: &mut Context<Self>,
+        status: ToolStatus,
+        duration: Option<Duration>,
+    ) -> Entity<ToolState> {
+        let state = cx.new(|cx| ToolState::new(cx).with_status(status, cx));
+        state.update(cx, |state, cx| {
+            state.set_duration(duration, cx);
+            state.set_open(true, cx);
+        });
+        state
+    }
+
+    fn build_tools(cx: &mut Context<Self>, subscriptions: &mut Vec<Subscription>) -> ToolDemos {
+        let read = Self::settled_card(cx, ToolStatus::Succeeded, Some(Duration::from_millis(120)));
+        let ranged = Self::settled_card(cx, ToolStatus::Succeeded, Some(Duration::from_millis(90)));
+        let edit = Self::settled_card(cx, ToolStatus::Succeeded, Some(Duration::from_millis(210)));
+        let write = Self::settled_card(cx, ToolStatus::Succeeded, Some(Duration::from_millis(340)));
+        let failed = Self::settled_card(cx, ToolStatus::Failed, Some(Duration::from_millis(420)));
+        // The lifecycle demo mounts mid-run, the way a live conversation
+        // first renders a tool it just dispatched.
+        let lifecycle = cx.new(|cx| ToolState::new(cx).with_status(ToolStatus::Running, cx));
+        let bash_ok =
+            Self::settled_card(cx, ToolStatus::Succeeded, Some(Duration::from_millis(4210)));
+        let bash_fail =
+            Self::settled_card(cx, ToolStatus::Failed, Some(Duration::from_millis(2870)));
+        let bash_run = cx.new(|cx| ToolState::new(cx).with_status(ToolStatus::Running, cx));
+        let bash_output = cx.new(|cx| ToolState::new(cx).with_status(ToolStatus::Running, cx));
+        let grep = Self::settled_card(cx, ToolStatus::Succeeded, Some(Duration::from_millis(120)));
+        let glob = Self::settled_card(cx, ToolStatus::Succeeded, Some(Duration::from_millis(60)));
+        let ls = Self::settled_card(cx, ToolStatus::Succeeded, Some(Duration::from_millis(40)));
+        for state in [
+            &read,
+            &ranged,
+            &edit,
+            &write,
+            &failed,
+            &lifecycle,
+            &bash_ok,
+            &bash_fail,
+            &bash_run,
+            &bash_output,
+            &grep,
+            &glob,
+            &ls,
+        ] {
+            subscriptions.push(cx.observe(state, |_, _, cx| cx.notify()));
+        }
+        ToolDemos {
+            read,
+            ranged,
+            edit,
+            write,
+            failed,
+            lifecycle,
+            bash_ok,
+            bash_fail,
+            bash_run,
+            bash_output,
+            grep,
+            glob,
+            ls,
         }
     }
 
@@ -553,6 +698,592 @@ impl Gallery {
         ]
     }
 
+    /// The text tools' demos: the three file shapes a `CodeView` renders
+    /// (`Read` window, `Read` range with a gap, `Edit` hunk with the old/new
+    /// gutter pair, `Write` whole file), a failed edit, and the interactive
+    /// lifecycle card. Bodies carry copy controls — `in`/`out` quote the
+    /// call's raw JSON and raw result; selecting the body copies the text
+    /// you see, gutter numbers included.
+    fn tool_text_rows(
+        &self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let tools = &self.tools;
+        vec![
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Read — a whole file",
+                "The header carries the invocation's identity: icon, tool name, the file in the \
+                 UI-weight mono, the path muted. The body is the mock editor — sequential line \
+                 numbers, naive token coloring, no surface tint. Click the header to fold; the \
+                 status chip keeps the outcome visible either way.",
+                Tool::new("demo-read", &tools.read)
+                    .icon(Icon::new(IconName::FileText).xsmall())
+                    .name("Read")
+                    .args(file_args(foreground, "reasoning.rs", "crates/ai-elements/src"))
+                    .copy_input(READ_RAW_INPUT)
+                    .copy_output(READ_RAW_OUTPUT)
+                    .content(CodeView::source("demo-read-code", READ_SAMPLE)),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Read — a range with a gap",
+                "A ranged read keeps the file's own line numbers (the window starts where the \
+                 file does) and marks the skipped span with a `...` row — the shape the model \
+                 actually sees, minus the `N:` prefixes.",
+                Tool::new("demo-ranged", &tools.ranged)
+                    .icon(Icon::new(IconName::FileText).xsmall())
+                    .name("Read")
+                    .args(file_args(foreground, "chat_fold.rs", "crates/steer-agent-chat-ui/src"))
+                    .copy_input(RANGED_RAW_INPUT)
+                    .content(CodeView::new(
+                        "demo-ranged-code",
+                        vec![
+                            CodeLine::plain(
+                                138,
+                                "fn find_tool_call<'a>(chat: &'a ChatState, id: &str) -> Option<&'a ToolCallState> {",
+                            ),
+                            CodeLine::plain(
+                                139,
+                                "    chat.turns.iter().find_map(|turn| find_in(&turn.parts, id))",
+                            ),
+                            CodeLine::plain(140, "}"),
+                            CodeLine::gap(),
+                            CodeLine::plain(
+                                168,
+                                "/// The live turn stays in `active_turn` until the engine settles the",
+                            ),
+                            CodeLine::plain(
+                                169,
+                                "/// round; the reducer folds finished turns into `chat.turns`.",
+                            ),
+                            CodeLine::plain(170, "fn tool_call_id_of(call: &ToolCallState) -> &str {"),
+                            CodeLine::plain(171, "    &call.id"),
+                            CodeLine::plain(172, "}"),
+                        ],
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Edit — a unified hunk",
+                "Any line carrying a pre-image number widens the gutter to the old/new pair. \
+                 Removed lines tint danger with the `-` marker, added lines success with `+` — \
+                 the diff tint is the one surface tint the editor keeps.",
+                Tool::new("demo-edit", &tools.edit)
+                    .icon(Icon::new(IconName::Pencil).xsmall())
+                    .name("Edit")
+                    .args(file_args(foreground, "reasoning.rs", "crates/ai-elements/src"))
+                    .copy_diff(EDIT_DIFF)
+                    .copy_output("The file crates/ai-elements/src/reasoning.rs has been edited. (2 lines changed)")
+                    .content(CodeView::new(
+                        "demo-edit-code",
+                        vec![
+                            CodeLine::context(
+                                132,
+                                "    pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {",
+                            ),
+                            CodeLine::removed(133, "        if self.is_streaming == streaming {"),
+                            CodeLine::removed(134, "            return;"),
+                            CodeLine::added(
+                                133,
+                                "        if self.is_streaming == streaming && !streaming {",
+                            ),
+                            CodeLine::added(
+                                134,
+                                "            // a no-op falling edge collapses early; the rising edge opens",
+                            ),
+                            CodeLine::context(135, "        }"),
+                            CodeLine::context(136, "        if streaming {"),
+                        ],
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Write — a new file",
+                "Same sequential gutter as a whole-file read: the content is new, but it numbers \
+                 from 1 because that is where the file will open. The card's identity — icon, \
+                 name, the created path — is all the header says.",
+                Tool::new("demo-write", &tools.write)
+                    .icon(Icon::new(IconName::FilePlus).xsmall())
+                    .name("Write")
+                    .args(file_args(foreground, "code_view.rs", "crates/ai-elements/src"))
+                    .copy_input(WRITE_RAW_INPUT)
+                    .content(CodeView::source(
+                        "demo-write-code",
+                        "//! A text-editor mock for file-shaped tool bodies.\n\nuse gpui::{Hsla, IntoElement, Render};\n\npub struct CodeView {\n    lines: Vec<CodeLine>,\n}\n\nimpl CodeView {\n    pub fn source(text: &str) -> Self {\n        Self { lines: split_and_number(text) }\n    }\n}\n",
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Edit — failed, then the lifecycle",
+                "The failed card shows the failure chip (cross, danger tint, duration). The \
+                 right card is the live contract: mounted mid-run, it opens itself; settling \
+                 it folds it a second later — unless you toggle it by hand first, which pins \
+                 it for good. Restart re-opens it.",
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Tool::new("demo-failed", &tools.failed)
+                                    .icon(Icon::new(IconName::Pencil).xsmall())
+                                    .name("Edit")
+                                    .args(file_args(
+                                        foreground,
+                                        "workspace.rs",
+                                        "crates/agent-ui/src",
+                                    ))
+                                    .content(CodeView::new(
+                                        "demo-failed-code",
+                                        vec![
+                                            CodeLine::removed(1804, "    let Some((store, _)) = live.take() else {"),
+                                            CodeLine::added(
+                                                1804,
+                                                "    let Some((store, session_id)) = live.take() else {",
+                                            ),
+                                        ],
+                                    )),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("lifecycle-restart")
+                                            .xsmall()
+                                            .outline()
+                                            .label("Restart")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.tools.lifecycle.update(cx, |state, cx| {
+                                                    state.set_status(ToolStatus::Running, cx)
+                                                })
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("lifecycle-succeed")
+                                            .xsmall()
+                                            .outline()
+                                            .label("Succeed")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.tools.lifecycle.update(cx, |state, cx| {
+                                                    state.set_status(ToolStatus::Succeeded, cx)
+                                                })
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("lifecycle-fail")
+                                            .xsmall()
+                                            .outline()
+                                            .label("Fail")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.tools.lifecycle.update(cx, |state, cx| {
+                                                    state.set_status(ToolStatus::Failed, cx)
+                                                })
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                Tool::new("demo-lifecycle", &tools.lifecycle)
+                                    .icon(Icon::new(IconName::FileText).xsmall())
+                                    .name("Read")
+                                    .args(file_args(
+                                        foreground,
+                                        "ahp_store.rs",
+                                        "crates/steer-agent-chat-ui/src",
+                                    ))
+                                    .content(CodeView::new(
+                                        "demo-lifecycle-code",
+                                        vec![
+                                            CodeLine::plain(1170, "let event = chat_events.pop_front();"),
+                                            CodeLine::plain(1171, "match event {"),
+                                            CodeLine::plain(1172, "    Some((sid, ev)) if sid == owner => apply(ev),"),
+                                            CodeLine::plain(1173, "    _ => {} // not ours: drop it"),
+                                            CodeLine::plain(1174, "}"),
+                                        ],
+                                    )),
+                            ),
+                    ),
+            )
+            .into_any_element(),
+        ]
+    }
+
+    /// The command family's demos: every body is the same fake terminal —
+    /// the host's zsh prompt lines, `❯` command, colored output, exit
+    /// footer — while the header keeps each tool's real identity. `Grep` /
+    /// `Glob` / `Ls` are rendered in shell vocabulary (their command
+    /// equivalent and file-shaped output), not claimed as shell tools.
+    fn tool_shell_rows(
+        &self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+    ) -> Vec<AnyElement> {
+        let tools = &self.tools;
+        // The prompt this machine prints: path + git branch + dirt, then the
+        // toolchain line. In the app the host derives these from the user's
+        // shell configuration; the gallery pins the dev box's.
+        let prompt = |shell: ShellView| {
+            shell
+                .context(ShellLine::spans(vec![
+                    (ShellSpanKind::Path, "~/projects/dspo/manox-app".into()),
+                    (ShellSpanKind::Plain, " ".into()),
+                    (ShellSpanKind::Git, "git:main".into()),
+                    (ShellSpanKind::Plain, " ".into()),
+                    (ShellSpanKind::Hit, "*2!4?11".into()),
+                ]))
+                .context(ShellLine::dim("node v26.0.0 rs v1.95.0"))
+        };
+        vec![
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Bash — passing",
+                "The settled shape: header chip with the duration, body with the exit footer. \\
+                 The prompt area renders the host's zsh configuration — path, `git:main` with \\
+                 its dirt markers, the toolchain line. Selecting the body copies the \\
+                 transcript you see; `in`/`out` quote the raw call.",
+                Tool::new("demo-bash-ok", &tools.bash_ok)
+                    .icon(Icon::new(IconName::SquareTerminal).xsmall())
+                    .name("Bash")
+                    .args(cmd_args(foreground, "cargo test -p ai-elements"))
+                    .copy_input(BASH_RAW_INPUT)
+                    .copy_output(BASH_RAW_OUTPUT)
+                    .content(prompt(
+                        ShellView::new("demo-bash-ok-shell", "cargo test -p ai-elements")
+                            .line(ShellLine::dim("   Compiling ai-elements v0.1.0"))
+                            .line(ShellLine::plain("running 40 tests"))
+                            .line(ShellLine::plain(
+                                "test views::trigger_label_follows_upstream ... ok",
+                            ))
+                            .line(ShellLine::plain("test views::reasoning_stream ... ok"))
+                            .line(ShellLine::plain(
+                                "test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured",
+                            ))
+                            .exit(0)
+                            .duration(Duration::from_millis(4210)),
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Bash — failing",
+                "Error lines render in the terminal's error red; the footer carries the real \\
+                 exit code and the failure tint. The header chip mirrors the outcome so a \\
+                 folded card still tells you it broke.",
+                Tool::new("demo-bash-fail", &tools.bash_fail)
+                    .icon(Icon::new(IconName::SquareTerminal).xsmall())
+                    .name("Bash")
+                    .args(cmd_args(foreground, "cargo build -p steer-app"))
+                    .copy_input(r#"{"command":"cargo build -p steer-app"}"#)
+                    .copy_output("error[E0432]: unresolved import `agent_ui::chrome`\nerror: could not compile `steer-app` (bin \"steer\") due to 1 previous error")
+                    .content(prompt(
+                        ShellView::new("demo-bash-fail-shell", "cargo build -p steer-app")
+                            .line(ShellLine::dim("   Compiling steer-app v0.1.0"))
+                            .line(ShellLine::error(
+                                "error[E0432]: unresolved import `agent_ui::chrome`",
+                            ))
+                            .line(ShellLine::dim(" --> crates/steer-app/src/main.rs:12:5"))
+                            .line(ShellLine::dim("   |"))
+                            .line(ShellLine::dim(
+                                "12 |     use agent_ui::chrome_assembly::ChromeShell;",
+                            ))
+                            .line(ShellLine::error(
+                                "error: could not compile `steer-app` (bin \"steer\") due to 1 previous error",
+                            ))
+                            .exit(101)
+                            .duration(Duration::from_millis(2870)),
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Bash — running, and BashOutput",
+                "An unsettled command: spinner in the footer, `running` instead of an exit \\
+                 line. `BashOutput` is the same surface reading a background shell — its \\
+                 command line is the read, its footer stays live because the stream is open.",
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Tool::new("demo-bash-run", &tools.bash_run)
+                                .icon(Icon::new(IconName::SquareTerminal).xsmall())
+                                .name("Bash")
+                                .args(cmd_args(foreground, "cargo test --workspace --all-targets"))
+                                .copy_input(r#"{"command":"cargo test --workspace --all-targets"}"#)
+                                .content(prompt(
+                                    ShellView::new(
+                                        "demo-bash-run-shell",
+                                        "cargo test --workspace --all-targets",
+                                    )
+                                    .line(ShellLine::plain("running 612 tests"))
+                                    .line(ShellLine::plain("test views::reasoning_stream ... ok"))
+                                    .line(ShellLine::plain("test views::ask_card_render ... "))
+                                    .line(ShellLine::plain("test views::turn_rail ... "))
+                                    .running(),
+                                )),
+                        ),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Tool::new("demo-bash-output", &tools.bash_output)
+                                .icon(Icon::new(IconName::Terminal).xsmall())
+                                .name("BashOutput")
+                                .args(cmd_args(foreground, "tail -n 3 /tmp/steer-shell-1.out"))
+                                .copy_input(r#"{"shell_id":"shell_1"}"#)
+                                .content(prompt(
+                                    ShellView::new(
+                                        "demo-bash-output-shell",
+                                        "tail -n 3 /tmp/steer-shell-1.out",
+                                    )
+                                    .line(ShellLine::dim(
+                                        "[10:02:11] watch: crates/ai-elements/src/** changed",
+                                    ))
+                                    .line(ShellLine::dim("[10:02:11] cargo check -p ai-elements"))
+                                    .line(ShellLine::plain(
+                                        "[10:02:12] Finished `dev` profile [unoptimized] in 0.61s",
+                                    ))
+                                    .running(),
+                                )),
+                        ),
+                    ),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Grep — hits, located and highlighted",
+                "The header keeps `Grep`'s identity; the body speaks shell. Hit lines are \\
+                 `path:line:content` with the path and line number tinted and the matched \\
+                 needle raised — the grep view a terminal actually gives you, plus a summary.",
+                Tool::new("demo-grep", &tools.grep)
+                    .icon(Icon::new(IconName::TextSearch).xsmall())
+                    .name("Grep")
+                    .args(cmd_args(
+                        foreground,
+                        "find_tool_call · crates/steer-agent-chat-ui/src",
+                    ))
+                    .copy_input(GREP_RAW_INPUT)
+                    .copy_output("crates/steer-agent-chat-ui/src/chat_fold.rs:138: fn find_tool_call<'a>(...)\ncrates/steer-agent-chat-ui/src/message.rs:2317: let Some(review) = ...\n\n3 matches\n")
+                    .content(prompt(
+                        ShellView::new(
+                            "demo-grep-shell",
+                            "grep -rn \"find_tool_call\" crates/steer-agent-chat-ui/src",
+                        )
+                        .line(ShellLine::hit(
+                            "crates/steer-agent-chat-ui/src/chat_fold.rs",
+                            138,
+                            "fn find_tool_call<'a>(chat: &'a ChatState, id: &str) -> Option<&'a ToolCallState> {",
+                            "find_tool_call",
+                        ))
+                        .line(ShellLine::hit(
+                            "crates/steer-agent-chat-ui/src/message.rs",
+                            2317,
+                            "    let Some(review) = fold_input_request(&turn, id) else {",
+                            "find_tool_call",
+                        ))
+                        .line(ShellLine::hit(
+                            "crates/steer-agent-chat-ui/src/chat_fold.rs",
+                            258,
+                            "fn tool_result_text(content: Option<&[ToolResultContent]>) -> String {",
+                            "find_tool_call",
+                        ))
+                        .line(ShellLine::blank())
+                        .line(ShellLine::dim("3 matches · 2 files"))
+                        .exit(0)
+                        .duration(Duration::from_millis(120)),
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Glob and Ls — file-shaped output",
+                "`Glob`'s body is its shell equivalent (`find -name`); `Ls` is the listing \\
+                 itself, directories tinted as paths, permissions dim. One visual series, \\
+                 honest tool identities.",
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Tool::new("demo-glob", &tools.glob)
+                                .icon(Icon::new(IconName::FileSearch).xsmall())
+                                .name("Glob")
+                                .args(cmd_args(foreground, "**/*.rs · crates/ai-elements/src"))
+                                .copy_input(GLOB_RAW_INPUT)
+                                .content(prompt(
+                                    ShellView::new(
+                                        "demo-glob-shell",
+                                        "find crates/ai-elements/src -name \"*.rs\"",
+                                    )
+                                    .line(path_line("crates/ai-elements/src/lib.rs"))
+                                    .line(path_line("crates/ai-elements/src/animation.rs"))
+                                    .line(path_line("crates/ai-elements/src/ask.rs"))
+                                    .line(path_line("crates/ai-elements/src/code_view.rs"))
+                                    .line(path_line("crates/ai-elements/src/reasoning.rs"))
+                                    .line(path_line("crates/ai-elements/src/shell.rs"))
+                                    .line(path_line("crates/ai-elements/src/tool.rs"))
+                                    .line(ShellLine::blank())
+                                    .line(ShellLine::dim("7 files"))
+                                    .exit(0)
+                                    .duration(Duration::from_millis(60)),
+                                )),
+                        ),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Tool::new("demo-ls", &tools.ls)
+                                .icon(Icon::new(IconName::FolderTree).xsmall())
+                                .name("Ls")
+                                .args(cmd_args(foreground, "crates/ai-elements"))
+                                .copy_input(LS_RAW_INPUT)
+                                .content(prompt(
+                                    ShellView::new("demo-ls-shell", "ls -la crates/ai-elements")
+                                        .line(ShellLine::dim("total 0"))
+                                        .line(ls_line(
+                                            "drwxr-xr-x   9 czr  staff   288 Oct 16 10:02 ",
+                                            ".",
+                                        ))
+                                        .line(ls_line(
+                                            "drwxr-xr-x@  4 czr  staff   128 Oct 15 18:44 ",
+                                            "..",
+                                        ))
+                                        .line(ls_line(
+                                            "drwxr-xr-x   5 czr  staff   160 Oct 15 18:44 ",
+                                            "examples",
+                                        ))
+                                        .line(ls_line(
+                                            "drwxr-xr-x   4 czr  staff   128 Oct 16 09:58 ",
+                                            "src",
+                                        ))
+                                        .line(ls_line(
+                                            "drwxr-xr-x   3 czr  staff    96 Oct 15 18:44 ",
+                                            "tests",
+                                        ))
+                                        .line(ls_line(
+                                            "-rw-r--r--   1 czr  staff   512 Oct 15 18:44 ",
+                                            "Cargo.toml",
+                                        ))
+                                        .exit(0)
+                                        .duration(Duration::from_millis(40)),
+                                )),
+                        ),
+                    ),
+            )
+            .into_any_element(),
+        ]
+    }
+
+    /// The ask card's demos: the live wizard (paged form, note field,
+    /// pager, submit) and the pre-settled card whose output markdown is what
+    /// a replayed transcript shows.
+    fn ask_rows(
+        &mut self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = Theme::global(cx);
+        let submitted = self.ask.read(cx).submitted();
+
+        // The wizard card. Submitted, it swaps the form for the output
+        // markdown composed from the live state — the host's summary step.
+        let mut wizard = AskUserQuestion::new("ask-live", &self.ask)
+            .icon(Icon::new(IconName::MessageCircleQuestionMark).xsmall())
+            .blocks(ask_blocks());
+        if submitted {
+            let markdown = ask_output_markdown(&self.ask, cx);
+            wizard = wizard
+                .status(ask_answered_chip())
+                .output(static_document("ask-live-output", markdown, theme))
+                .footnote("已提交 · 答案已回传工具");
+        } else {
+            wizard = wizard.status(ask_waiting_chip());
+        }
+
+        // The settled card: mounted answered, one choice made, the second
+        // question skipped — the output markdown has to carry both.
+        let answered_markdown = format!(
+            "### Question 1: {}\n\n{}\n\n### Question 2: {}\n\n*(skipped)*\n",
+            ASK_ANSWERED_Q1, ASK_ANSWERED_A1, ASK_ANSWERED_Q2,
+        );
+        let answered = AskUserQuestion::new("ask-answered", &self.ask_answered)
+            .icon(Icon::new(IconName::MessageCircleQuestionMark).xsmall())
+            .blocks(ask_answered_blocks())
+            .status(ask_answered_chip())
+            .output(static_document(
+                "ask-answered-output",
+                answered_markdown,
+                theme,
+            ))
+            .footnote("已提交 · gpui-base TextView · Question 2 skipped");
+
+        vec![
+            demo_card(
+                muted,
+                border,
+                foreground,
+                if submitted {
+                    "The wizard — submitted"
+                } else {
+                    "The wizard — one question per page"
+                },
+                "Radio circles for single-select blocks, checkboxes for multi-select, a note \\
+                 field per question, and the bottom-left pager: `< 1/3 >` turns pages; on \\
+                 the last page the next button becomes the accent check that submits. Work \\
+                 it — answers and notes land in the output markdown the moment it settles.",
+                wizard,
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Submitted — the output rendering",
+                "What a replayed transcript mounts: the form is gone, the host's markdown \\
+                 summary stands in its place — one heading per question, the chosen answers, \\
+                 and an explicit *(skipped)* for the ones left unanswered.",
+                answered,
+            )
+            .into_any_element(),
+        ]
+    }
+
     /// The left rail: one row per component, the selected one tinted.
     fn rail(
         &mut self,
@@ -621,6 +1352,9 @@ impl Render for Gallery {
                 .collect(),
             Component::PixelSpinner => self.pixel_spinner_rows(muted, border, foreground),
             Component::HistoryLoading => self.history_loading_rows(muted, border, foreground),
+            Component::ToolText => self.tool_text_rows(muted, border, foreground, cx),
+            Component::ToolShell => self.tool_shell_rows(muted, border, foreground),
+            Component::AskQuestion => self.ask_rows(muted, border, foreground, cx),
         };
 
         let pane = v_flex()
@@ -698,6 +1432,25 @@ fn footer_note(selected: Component) -> &'static str {
              and only the active frame's cells render — no stacked layers. Freeze pins a \
              frame; speed multiplies the same clock."
         }
+        Component::ToolText => {
+            "Tool cards: a Running edge opens the body, a settled edge folds it one second \
+             later (AUTO_FOLD_DELAY), and a hand toggle pins the card — the Reasoning \
+             contract on tool vocabulary. The editor renders in-band through the rich-text \
+             core, so selection copy is the window's own; the tokenizer is line-local by \
+             design, and anything it can't classify renders plain."
+        }
+        Component::ToolShell => {
+            "One fake terminal for the whole command family: the host's zsh prompt lines, ❯ \
+             command, span-tinted output, exit footer — one in-band document, so selection \
+             copies the transcript. The dark palette is the component's own; a terminal \
+             surface stays dark under either app theme."
+        }
+        Component::AskQuestion => {
+            "All form state lives in AskState — page, selections, notes, submitted — driven \
+             by clicks and typing, observed by the host. Submit emits AskSubmitted; the \
+             host then hands the composed markdown back through .output(), which is the \
+             shape a replayed transcript mounts."
+        }
         _ => {
             "Auto-open while streaming, auto-fold one second after the stream ends \
              (AUTO_CLOSE_DELAY). A hand toggle pins the block: nothing automatic moves \
@@ -706,8 +1459,226 @@ fn footer_note(selected: Component) -> &'static str {
     }
 }
 
+/// The whole-file `Read` sample — chosen to exercise the mock tokenizer:
+/// keywords, attributes, doc comments, and a type-ful enum.
+const READ_SAMPLE: &str = "use std::time::Duration;\n\n/// How long a block stays open after its stream ends before folding.\npub const AUTO_CLOSE_DELAY: Duration = Duration::from_millis(1000);\n\n#[derive(Clone, Debug, PartialEq)]\npub enum ThinkingLabel {\n    Shimmer,\n    Seconds(u64),\n}\n";
+
+/// The header's argument summary for file tools: the file name in the
+/// foreground, the path muted beside it.
+fn file_args(foreground: gpui::Hsla, file: &'static str, path: &'static str) -> impl IntoElement {
+    h_flex()
+        .gap_1p5()
+        .min_w_0()
+        .overflow_hidden()
+        .child(div().text_color(foreground).child(file))
+        .child(div().opacity(0.75).child(path))
+}
+
+/// The header's argument summary for command tools: the command itself.
+fn cmd_args(foreground: gpui::Hsla, cmd: &'static str) -> impl IntoElement {
+    div().text_color(foreground).child(cmd)
+}
+
+/// One tinted path line — the shape `Glob` output takes.
+fn path_line(path: &'static str) -> ShellLine {
+    ShellLine::spans(vec![(ShellSpanKind::Path, SharedString::from(path))])
+}
+
+/// One `ls -la` row: dim permissions/size/date prefix, the name tinted as a
+/// path when it is a directory.
+fn ls_line(prefix: &'static str, name: &'static str) -> ShellLine {
+    ShellLine::spans(vec![
+        (ShellSpanKind::Dim, SharedString::from(prefix)),
+        (
+            if name.ends_with(".toml") {
+                ShellSpanKind::Plain
+            } else {
+                ShellSpanKind::Path
+            },
+            SharedString::from(name),
+        ),
+    ])
+}
+
+/// Raw tool-call structures the copy controls quote — `in` copies the input
+/// JSON, `out` the raw result, exactly as the machine saw them.
+const READ_RAW_INPUT: &str = r#"{"file_path":{"relative_path":"crates/ai-elements/src/reasoning.rs"},"offset":1,"limit":60}"#;
+const READ_RAW_OUTPUT: &str = "[crates/ai-elements/src/reasoning.rs#T4K2]\n  1: use std::time::Duration;\n  2:\n  3: /// How long a block stays open after its stream ends before folding.\n …";
+/// The edit family's quotable shape: not the input JSON, the unified diff.
+const EDIT_DIFF: &str = "--- a/crates/ai-elements/src/reasoning.rs\n+++ b/crates/ai-elements/src/reasoning.rs\n@@ -132,6 +132,7 @@\n     pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {\n-        if self.is_streaming == streaming {\n-            return;\n+        if self.is_streaming == streaming && !streaming {\n+            // a no-op falling edge collapses early; the rising edge opens\n         }\n";
+const WRITE_RAW_INPUT: &str = r#"{"file_path":{"relative_path":"crates/ai-elements/src/code_view.rs"},"content":"//! A text-editor mock for file-shaped tool bodies.\n…"}"#;
+const BASH_RAW_INPUT: &str = r#"{"command":"cargo test -p ai-elements","timeout_ms":120000,"description":"Test the gallery's crate"}"#;
+const BASH_RAW_OUTPUT: &str = "   Compiling ai-elements v0.1.0\nrunning 40 tests\ntest result: ok. 40 passed; 0 failed; 0 ignored; 0 measured\n\nfinished in 4.21s";
+const GLOB_RAW_INPUT: &str = r#"{"pattern":"crates/ai-elements/src/**/*.rs"}"#;
+const LS_RAW_INPUT: &str = r#"{"path":{"relative_path":"crates/ai-elements"}}"#;
+const RANGED_RAW_INPUT: &str = r#"{"file_path":{"relative_path":"crates/steer-agent-chat-ui/src/chat_fold.rs"},"offset":138,"limit":40}"#;
+const GREP_RAW_INPUT: &str = r#"{"pattern":"find_tool_call","path":{"relative_path":"crates/steer-agent-chat-ui/src"},"output_mode":"content","head_limit":100}"#;
+
+/// The wizard's three questions as the card renders them.
+fn ask_blocks() -> Vec<AskBlock> {
+    vec![
+        AskBlock::new("Which rich-text core should the chat standardize on?")
+            .header("Libraries")
+            .option(
+                AskOption::new("gpui-base TextView")
+                    .badge("Recommended")
+                    .description(
+                        "The stack markdown already renders through — incremental push_str, \
+                         selection, highlight channels.",
+                    ),
+            )
+            .option(
+                AskOption::new("gpui-component Markdown").description(
+                    "Higher-level, but a full re-parse per update; no incremental path.",
+                ),
+            )
+            .option(
+                AskOption::new("hand-rolled markdown")
+                    .description("Retired in #145 — −4.4k lines say no."),
+            ),
+        AskBlock::new("Which surfaces get the tool cards first?")
+            .header("Scope")
+            .multi_select()
+            .option(AskOption::new("Conversation column"))
+            .option(AskOption::new("Right rail ToolTab"))
+            .option(AskOption::new("Exported transcripts")),
+        AskBlock::new("Should settled tool bodies fold by default?")
+            .header("Default state")
+            .option(AskOption::new("Fold after a second").badge("Recommended"))
+            .option(AskOption::new("Stay open until clicked")),
+    ]
+}
+
+/// The settled demo's questions — mirrored by [`ASK_ANSWERED_Q1`] and friends
+/// so the markdown and the state agree.
+fn ask_answered_blocks() -> Vec<AskBlock> {
+    vec![
+        AskBlock::new(ASK_ANSWERED_Q1)
+            .header("Libraries")
+            .option(
+                AskOption::new(ASK_ANSWERED_A1)
+                    .badge("Recommended")
+                    .description(
+                        "The stack markdown already renders through — incremental push_str, \
+                         selection, highlight channels.",
+                    ),
+            )
+            .option(
+                AskOption::new("gpui-component Markdown").description(
+                    "Higher-level, but a full re-parse per update; no incremental path.",
+                ),
+            ),
+        AskBlock::new(ASK_ANSWERED_Q2)
+            .header("Default state")
+            .option(AskOption::new("Fold after a second").badge("Recommended"))
+            .option(AskOption::new("Stay open until clicked")),
+    ]
+}
+
+const ASK_ANSWERED_Q1: &str = "Which rich-text core should the chat standardize on?";
+const ASK_ANSWERED_A1: &str = "gpui-base TextView";
+const ASK_ANSWERED_Q2: &str = "Should settled tool bodies fold by default?";
+
+/// Compose the submit output's markdown from the live state: one section per
+/// question, chosen labels joined, the note appended, *(skipped)* when a
+/// block carries no answer.
+fn ask_output_markdown(state: &Entity<AskState>, cx: &App) -> String {
+    let blocks = ask_blocks();
+    let mut out = String::new();
+    for (qix, block) in blocks.iter().enumerate() {
+        let _ = block;
+        let labels: Vec<SharedString> = {
+            let selections = state.read(cx).selection(qix).to_vec();
+            let opts = options_of(qix);
+            selections
+                .iter()
+                .filter_map(|oix| opts.get(*oix).cloned())
+                .collect()
+        };
+        out.push_str(&format!(
+            "### Question {}: {}\n\n",
+            qix + 1,
+            questions_of(qix)
+        ));
+        if labels.is_empty() {
+            out.push_str("*(skipped)*\n\n");
+        } else {
+            out.push_str(
+                &labels
+                    .iter()
+                    .map(|l| l.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            out.push('\n');
+            let note = state.read(cx).note(qix, cx);
+            if !note.is_empty() {
+                out.push_str(&format!("\n（补充：{note}）\n"));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The questions' plain text, indexed — the markdown composer's source of
+/// truth alongside [`ask_blocks`].
+fn questions_of(qix: usize) -> &'static str {
+    const QUESTIONS: &[&str] = &[
+        "Which rich-text core should the chat standardize on?",
+        "Which surfaces get the tool cards first?",
+        "Should settled tool bodies fold by default?",
+    ];
+    QUESTIONS[qix]
+}
+
+/// The questions' option labels, indexed.
+fn options_of(qix: usize) -> Vec<SharedString> {
+    const OPTIONS: &[&[&str]] = &[
+        &[
+            "gpui-base TextView",
+            "gpui-component Markdown",
+            "hand-rolled markdown",
+        ],
+        &[
+            "Conversation column",
+            "Right rail ToolTab",
+            "Exported transcripts",
+        ],
+        &["Fold after a second", "Stay open until clicked"],
+    ];
+    OPTIONS[qix]
+        .iter()
+        .map(|s| SharedString::from(*s))
+        .collect()
+}
+
+/// The ask header's waiting chip: the pending-auth blue dot the sidebar
+/// already uses, plus the label.
+fn ask_waiting_chip() -> AnyElement {
+    let blue: gpui::Hsla = gpui::rgb(0x3794ff).into();
+    h_flex()
+        .gap_1p5()
+        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(blue))
+        .child(div().text_xs().child("waiting for your answer"))
+        .into_any_element()
+}
+
+/// The ask header's settled chip.
+fn ask_answered_chip() -> AnyElement {
+    h_flex()
+        .gap_1p5()
+        .child(
+            gpui_component::Icon::new(gpui_component::IconName::CircleCheck)
+                .xsmall()
+                .into_any_element(),
+        )
+        .child(div().text_xs().child("answered"))
+        .into_any_element()
+}
+
 fn main() {
-    let app = gpui_platform::application().with_assets(gpui_kit_assets::Assets);
+    let app = gpui_platform::application().with_assets(gpui_kit_assets::AllAssets);
     app.run(|cx| {
         gpui_component::init(cx);
         let bounds = gpui::WindowBounds::centered(size(px(1040.), px(760.)), cx);

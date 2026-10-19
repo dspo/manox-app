@@ -233,6 +233,10 @@ pub struct MessageItem {
     /// Weak handle to the owning `Workspace`, used by interactive message
     /// rows such as `AgentTask` to open their peer right-pane view.
     host: ChatHostHandle,
+    /// Observers keeping the tool cards' mirrored states repaintable — the
+    /// copy flash lives in the card state, and a flash has to reach the
+    /// message. Held here because a `Subscription` dies with its holder.
+    card_subs: Vec<gpui::Subscription>,
     markdown: Option<ChatDocument>,
     /// Mounted body for a completed Preview call (`None` for every other
     /// kind, and for image previews which keep no state). See
@@ -279,6 +283,7 @@ impl MessageItem {
             ask_snapshot: None,
             confirmation: None,
             copied: CopiedRegistry::default(),
+            card_subs: Vec::new(),
         }
     }
 
@@ -441,26 +446,31 @@ impl MessageItem {
         }
     }
 
-    /// Ensure the `eix`-th activity entry's persistent `Entity<TerminalPanel>`
-    /// exists and feed it the entry's current display output. Mirrors
-    /// `sync_reasoning_entry` for tool calls: a streaming delta or a finalized
-    /// result drives the panel's `set_output` while document-level selection +
+    /// Ensure the `eix`-th activity entry's persistent body state exists and
+    /// feed it the entry's current display output. Card families mount their
+    /// mirrored `Entity<ToolState>` here (`ensure_tool_card`); every other
+    /// tool mounts the persistent `Entity<TerminalPanel>` — a streaming delta
+    /// or a finalized result drives the body while document-level selection +
     /// focus survive across frames (drag + Cmd/Ctrl+C), so tool output selects
-    /// and copies like the assistant body — and renders as a terminal-styled
-    /// shell (cwd / toolchain / `❯` command + ANSI-colored output) rather than
-    /// a fenced code block.
+    /// and copies like the assistant body.
     pub fn sync_tool_entry_panel(
         &mut self,
         eix: usize,
         cwd: Option<SharedString>,
         cx: &mut gpui::Context<Self>,
     ) {
-        let ConvItem::Thinking(t) = &mut self.kind else {
+        let (kind, card_subs) = (&mut self.kind, &mut self.card_subs);
+        let ConvItem::Thinking(t) = kind else {
             return;
         };
         let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(eix) else {
             return;
         };
+        if crate::views::tool_cards::card_family(&entry.name).is_some() {
+            entry.cwd = cwd;
+            crate::views::tool_cards::ensure_tool_card(entry, card_subs, cx);
+            return;
+        }
         Self::ensure_tool_panel(entry, cwd, cx);
     }
 
@@ -474,10 +484,16 @@ impl MessageItem {
         cwd: Option<SharedString>,
         cx: &mut gpui::Context<Self>,
     ) {
-        let ConvItem::ToolCall(entry) = &mut self.kind else {
+        let (kind, card_subs) = (&mut self.kind, &mut self.card_subs);
+        let ConvItem::ToolCall(entry) = kind else {
             return;
         };
         if entry.name == crate::preview::TOOL_NAME {
+            return;
+        }
+        if crate::views::tool_cards::card_family(&entry.name).is_some() {
+            entry.cwd = cwd;
+            crate::views::tool_cards::ensure_tool_card(entry, card_subs, cx);
             return;
         }
         Self::ensure_tool_panel(entry, cwd, cx);
@@ -2241,6 +2257,26 @@ fn tool_step(
     } else {
         None
     };
+    // The card families render as ai-elements cards: a headless step whose
+    // content is the card itself — the card's header is the fold, its state
+    // mirrored from this entry by `ensure_tool_card`. The state mounts on the
+    // sync path; until it exists (a first frame racing the sync), the step
+    // path below still renders, so nothing flashes unstyled.
+    if crate::views::tool_cards::card_family(&e.name).is_some()
+        && let Some(state) = e.card.clone()
+    {
+        let on_toggle =
+            crate::views::tool_cards::entry_toggle(tool_ctx.map(|c| c.host.clone()), e.id.clone());
+        let card = crate::views::tool_cards::build_tool_card(
+            e,
+            &state,
+            e.cwd.clone(),
+            theme,
+            Some(Box::new(on_toggle)),
+        );
+        return ActivityStep::new(id).content(card);
+    }
+
     // A headless step carries no fold affordance (there is no row to click),
     // so its body shows outright; otherwise the fold state decides — the next
     // entry's arrival, or the delayed auto-collapse after a terminal status.
@@ -4069,7 +4105,7 @@ fn detect_git(cwd: &Path) -> Option<GitSummary> {
 /// Trailing slice of live output: keep the last ~12 KiB so the most recent
 /// lines are in view as they stream in. Whole-buffer lines are preserved once
 /// the final result arrives.
-fn live_tail(output: &str) -> String {
+pub(crate) fn live_tail(output: &str) -> String {
     const TAIL_BYTES: usize = 12 * 1024;
     if output.len() <= TAIL_BYTES {
         return output.to_string();
@@ -4459,6 +4495,8 @@ impl ItemBuilder {
                                         collapsed: false,
                                         user_toggled: false,
                                         panel: None,
+                                        card: None,
+                                        cwd: None,
                                     }));
                                 } else if tu.name.as_ref() == crate::preview::TOOL_NAME {
                                     // A Preview call: a user-facing artifact,
@@ -4484,6 +4522,8 @@ impl ItemBuilder {
                                         collapsed: false,
                                         user_toggled: false,
                                         panel: None,
+                                        card: None,
+                                        cwd: None,
                                     }));
                                 } else {
                                     // Ordinary tool call: fold into the active
@@ -4508,6 +4548,8 @@ impl ItemBuilder {
                                         collapsed: true,
                                         user_toggled: false,
                                         panel: None,
+                                        card: None,
+                                        cwd: None,
                                     });
                                     match self.active_segment_ix {
                                         Some(ix) => {
@@ -4654,6 +4696,8 @@ fn pair_tool_result(items: &mut Vec<ConvItem>, tr: &LanguageModelToolResult) {
                 ),
                 user_toggled: false,
                 panel: None,
+                card: None,
+                cwd: None,
             })],
             accepting_entries: false,
             streaming: false,
@@ -4966,6 +5010,8 @@ mod tests {
                 collapsed: false,
                 user_toggled: true,
                 panel: None,
+                card: None,
+                cwd: None,
             }));
             thinking.entries.push(ActivityEntry::Tool(ToolCallItem {
                 id: "tool-long-streaming-output".into(),
@@ -4979,6 +5025,8 @@ mod tests {
                 collapsed: false,
                 user_toggled: true,
                 panel: None,
+                card: None,
+                cwd: None,
             }));
 
             let thinking_item = ConvItem::Thinking(thinking);
@@ -5683,6 +5731,8 @@ mod tests {
                 collapsed: false,
                 user_toggled: false,
                 panel: None,
+                card: None,
+                cwd: None,
             })
         };
         let outcome = |path: &str, kind: crate::preview::PreviewKind, bytes: u64| {
@@ -5809,6 +5859,8 @@ body", cx);
                 collapsed: false,
                 user_toggled: false,
                 panel: None,
+                card: None,
+                cwd: None,
             })
         };
         let mut t = ThinkingContainer::new();
@@ -5858,6 +5910,8 @@ body", cx);
                 collapsed: true,
                 user_toggled: false,
                 panel: None,
+                card: None,
+                cwd: None,
             })
         };
         let mut t = ThinkingContainer::new();

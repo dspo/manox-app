@@ -294,6 +294,8 @@ mod macos {
                     collapsed: false,
                     user_toggled: true,
                     panel: None,
+                    card: None,
+                    cwd: None,
                 }),
                 "",
             ),
