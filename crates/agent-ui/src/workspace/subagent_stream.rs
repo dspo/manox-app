@@ -63,11 +63,23 @@ impl Workspace {
         store.update(cx, |s, cx| {
             s.subscribe(crate::ahp_store::chat_uri(&row.id), cx)
         });
-        if let Some(page) = self.subagent_stream.as_mut()
-            && page.id == row.id
+        if self
+            .subagent_stream
+            .as_ref()
+            .is_some_and(|page| page.id == row.id)
         {
-            // Already on this run: the re-subscribe above is the refresh.
-            page.view.update(cx, |view, cx| view.refresh(cx));
+            // Already on this run: the re-subscribe above is the refresh. The
+            // version is synced to what the rebuild renders, and the poll is
+            // re-armed (assigning drops the old task, which cancels it) —
+            // defence in depth: the "page exists ⟺ its mode owns the column"
+            // invariant already routes a re-open through the create arm.
+            let poll = Self::spawn_subagent_stream_poll(cx, row.id.clone());
+            let version = child_fold_version(&store, &row.id, cx);
+            if let Some(page) = self.subagent_stream.as_mut() {
+                page.version = version;
+                page._poll = poll;
+                page.view.update(cx, |view, cx| view.refresh(cx));
+            }
             self.view_mode = ViewMode::SubagentStream;
             cx.notify();
             return;

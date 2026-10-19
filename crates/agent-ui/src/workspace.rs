@@ -983,6 +983,13 @@ impl Workspace {
         self.model_label(cx)
     }
 
+    /// The live external sessions' row ids — the sidebar's routing keys (and
+    /// what `open_external_session` resolves). Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_external_session_ids(&self) -> Vec<String> {
+        self.externals.iter().map(|s| s.id.clone()).collect()
+    }
+
     /// The foreground chat's running sub-agents (the Captain block's sub-agent
     /// lines). Diagnostic-only read face.
     #[cfg(feature = "test-support")]

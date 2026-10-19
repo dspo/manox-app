@@ -60,24 +60,36 @@ pub struct SubagentWorkRow {
 
 /// How much of one chat's fold a page has already rendered.
 ///
-/// Cheap to read and compare, and it moves on every way a transcript grows: a
-/// settled turn was appended, the in-flight turn gained content (an AHP turn's
-/// parts grow IN PLACE — the turn count alone never moves while a run streams,
-/// and `activeTurn` is a separate field from `turns`), or the fold's
-/// last-entry stamp advanced.
-#[derive(Clone, Debug, PartialEq)]
+/// Cheap to read and compare — an id, two counts and the fold's last-entry
+/// stamp, never a copy of the content. It moves on every way a transcript
+/// grows: a settled turn was appended or the in-flight turn settled, the
+/// in-flight turn gained a part or a new id, or the fold's stamp advanced.
+///
+/// The stamp carries the fine-grained half BY DESIGN: the projection stamps
+/// `modifiedAt` with the journal's last entry, so a change that appends no new
+/// part (text streaming inside one part, a tool call's state inside an existing
+/// part) still moves it. This is a VERSION, not a content hash — a producer
+/// that rewrote a settled turn while leaving `modifiedAt` behind would be
+/// invisible here, and that is the contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatFoldVersion {
+    /// Settled turns.
     turns: usize,
-    active: Option<ahp_types::state::ActiveTurn>,
+    /// The in-flight turn: `(id, part count)`. An AHP turn's parts grow IN
+    /// PLACE, so the turn count alone never moves while a run streams.
+    active: Option<(String, usize)>,
+    /// The fold's last-entry stamp.
     modified_at: String,
 }
 
-/// Read one chat's current fold version. A chat the fold does not hold answers
-/// `None` — the caller treats that as "nothing to render yet".
+/// Read one chat's current fold version.
 pub fn chat_fold_version(chat: &ChatState) -> ChatFoldVersion {
     ChatFoldVersion {
         turns: chat.turns.len(),
-        active: chat.active_turn.clone(),
+        active: chat
+            .active_turn
+            .as_ref()
+            .map(|turn| (turn.id.clone(), turn.response_parts.len())),
         modified_at: chat.modified_at.clone(),
     }
 }
@@ -2745,6 +2757,79 @@ mod tests {
                     activity: None,
                 },
             ]
+        );
+    }
+
+    /// The fold version's contract: counts and the last-entry stamp are what
+    /// move it (never the content), so a settled turn rewritten UNDER THE SAME
+    /// STAMP is invisible — a version, not a content hash. Production stamps
+    /// every changed fold (`modifiedAt` = the journal's last entry), which is
+    /// what makes that safe, and the page only needs to know "did anything
+    /// land since the build?".
+    #[test]
+    fn the_fold_version_moves_on_counts_and_the_stamp_only() {
+        fn chat(stamp: &str, settled: usize, settled_text: &str, active_parts: usize) -> ChatState {
+            let turns: Vec<serde_json::Value> = (0..settled)
+                .map(|ix| {
+                    serde_json::json!({
+                        "id": format!("t{ix}"),
+                        "message": { "text": "q", "origin": { "kind": "user" } },
+                        "responseParts": [{ "kind": "markdown", "id": format!("t{ix}-p0"), "content": settled_text }],
+                        "state": "complete",
+                    })
+                })
+                .collect();
+            let mut value = serde_json::json!({
+                "resource": chat_uri("s-1"),
+                "title": "fold version probe",
+                "status": 0,
+                "modifiedAt": stamp,
+                "turns": turns,
+            });
+            if active_parts > 0 {
+                let parts: Vec<serde_json::Value> = (0..active_parts)
+                    .map(|ix| {
+                        serde_json::json!({ "kind": "markdown", "id": format!("a{ix}"), "content": "streaming" })
+                    })
+                    .collect();
+                value.as_object_mut().expect("object").insert(
+                    "activeTurn".into(),
+                    serde_json::json!({
+                        "id": "active",
+                        "startedAt": stamp,
+                        "message": { "text": "q", "origin": { "kind": "user" } },
+                        "responseParts": parts,
+                    }),
+                );
+            }
+            serde_json::from_value(value).expect("the version probe chat parses")
+        }
+
+        let base = chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 1));
+        assert_eq!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 1)),
+            "an unchanged fold is the same version"
+        );
+        assert_ne!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:00Z", 2, "a", 1)),
+            "a settled turn was appended"
+        );
+        assert_ne!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 2)),
+            "the in-flight turn gained a part (in place)"
+        );
+        assert_ne!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:01Z", 1, "a", 1)),
+            "the fold's stamp advanced"
+        );
+        assert_eq!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "rewritten", 1)),
+            "a settled turn rewritten under the SAME stamp is invisible — a version, not a hash"
         );
     }
 
