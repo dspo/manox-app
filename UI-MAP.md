@@ -70,8 +70,8 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
-| Sub-agent 观察 | ✅ 部分 | rail 观察行（生命周期/活动）+ Agent 工具卡片实时流式子转录（text/thinking delta、工具 ▸/✓/✗ 行）；独立钻取面板随 manox 移除，卡片体即钻取面 |
-| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 就是单个 [AskDrawer](#askdrawer)（分页表单那张卡）：`detail`=plan 正文、选项为三裁决 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端），选项 + 对钩提交，没有第二套裁决卡；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
+| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读） |
+| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewDecisionCard](#planreviewdecisioncard)（底部一键裁决卡），三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
 分层纪律：crates/manox-harness/src/core 只做 TS Pi 对齐与扩展点；harness 能力扩展一律走
@@ -862,18 +862,18 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 
 #### SubagentPanel
 
-单个子代理运行的只读观察页签（装配层宿主页签，`ToolTab` kind `subagent`）。页签标签是子代理
-**地址**（`SubagentProgress.id`，如 `Sailor_0`）；面板二级头显示 **topic** —— 状态指示 + mono
-topic 文本（共享 `subagent_topic` / 派发提示首行推导，空则回退地址）。正文是一段微型会话，走与
-主会话**同一套 `ConversationState` + 消息管线**：以 Captain 的派发提示作为首条用户气泡
-（来自 Steer 工具调用，存入 `Workspace::subagent_prompts`，带发送时间），头部读作
-`Captain > {recipient}·{model}·{time}`（`recipient` 为子代理类型，`model` 为子会话派发时上报的
-模型），随后是 bridged 子事件翻译成共享 `ThreadEvent` 契约后的助手气泡、推理折叠、工具卡片。
-实时累积在 `Workspace::subagent_transcripts`，整个会话期保留（终态也不再裁剪），所以事后打开仍
-重放全过程；重载后打开则回退到 `subagent_final_text` + `subagent-panel-final-note` 提示。
-由会话里的子代理卡片点击打开（原 rail agents 段的点击入口随只读气泡退役）
-（`ChatHost::open_subagent_tab` → 装配层 `chrome_assembly::open_tool_tab`）；页签随线程走壳的
-per-thread stash，切线程时只清该线程的转写数据（`clear_subagent_observation`）。
+单个子代理运行的只读钻取页签（装配层宿主页签，`ToolTab` kind `subagent`）。页签标签是任务的
+**topic**（不再是裸 run id）；面板头部是状态指示 + mono topic 文本——状态在运行期实时派生自
+`background_work`（run 在列即 Running），终态沿用打开时的快照。正文是与主列**同一套会话管线**
+渲染的微型会话：子会话（run id 即子会话 id，swarm 不变量）在打开时经 multiplexer attach，
+面板持有自己的 `ConversationState`，观察 `AhpStore` 并排水**该子会话自己的事件桶**
+（`ChatEvent` → `to_thread_event` → `apply`，与主列 live 腿同一词汇与同一 apply 语义）——
+journal 重放与实时 delta 都经此泵进入，运行中钻取是 live 的。相位三态：`subagent-panel-settling`
+（订阅快照未回）→ 活动（有行）/`subagent-panel-empty`（快照已回、无内容），永不渲染无依据的
+假占位。底部是 `subagent-panel-readonly` 只读说明条（宿主侧 #910 已把子会话标记为
+`ChatInteractivity::ReadOnly`）。入口：会话内子代理卡片点击——卡片的 `AgentTaskItem.run_id`
+来自派发信封（前台结果 / promotion 回执 / 后台启动回执都携带 `run_id`）；
+rail agents 段（#165 起直读 `background_work`）展示运行中花名册。
 
 > Source: `crates/agent-ui/src/views/subagent_panel.rs`, `crates/agent-ui/src/workspace/subagent.rs`
 

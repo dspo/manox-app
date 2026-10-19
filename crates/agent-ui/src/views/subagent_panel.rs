@@ -1,208 +1,124 @@
-//! Read-only observation panel for a single pi sub-agent run.
-//!
-//! The panel renders through the same [`ConversationState`] + message
-//! pipeline as the main conversation: bridged child events are translated
-//! into the shared [`ThreadEvent`] contract (`AgentText` / `AgentThinking` /
-//! `ToolCall` / `ToolResult`), so a sub-agent run reads exactly like a
-//! miniature conversation (assistant bubbles, reasoning folds, tool cards).
-//!
-//! The workspace accumulates the child session's bridged events
-//! ([`manox_agent::SubagentChildEvent`]) per Agent tool-call id; opening mid-run
-//! backfills from that accumulation by replaying the translated events.
-//! Pi sub-agent sessions are ephemeral (no persisted child transcript), so a
-//! panel opened after a reload falls back to the Agent tool result's final
-//! text plus a note.
+//! The sub-agent drill-down: one child session's transcript, rendered live
+//! from its own AHP chat fold. The panel owns a conversation pipeline
+//! instance fed by the same fold vocabulary the main column applies
+//! (`ChatEvent` → `to_thread_event` → `apply`); the child session is
+//! attached on open, so its journal replays through the bucket and the
+//! panel fills from empty — settling until the snapshot lands, active once
+//! rows exist, empty when a landed fold carries no rows. A worker chat is
+//! read-only (the host stamps the interactivity; the footer states it).
 
 use std::collections::HashMap;
 
-use crate::i18n;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Pixels, Render, ScrollHandle, Window, px};
+use gpui::{AnyElement, App, Context, Entity, ScrollHandle, Subscription, Window, px};
 use gpui_component::{ActiveTheme as _, ElementExt as _, h_flex, v_flex};
-use manox_agent::Message;
 use manox_agent::ToolCallStatus;
-use manox_agent::language_model::{MessageContent, TokenUsage};
-use manox_agent::thread::{SubagentChildEvent, ThreadEvent};
+use steer_agent_chat_ui::ahp_store::AhpStore;
+use steer_agent_chat_ui::chat_fold;
 
 use crate::conversation::{ApplyCtx, ConversationState};
+use crate::i18n;
 use crate::views::subagents::status_indicator;
 
-/// Translate one bridged child event into the shared [`ThreadEvent`]
-/// contract. Tool titles go through the same `tool_title` derivation as the
-/// main conversation, and the child call id pairs start/end under parallel
-/// child tool execution. A message stop carries the child message's token
-/// usage, consumed by the `Stop` arm to label the just-finished reply.
-/// `None` marks an observation the transcript never renders — the child's
-/// resolved model — which the panel consumes as turn-header metadata.
-fn thread_event_of(child: &SubagentChildEvent) -> Option<(ThreadEvent, Option<TokenUsage>)> {
-    match child {
-        SubagentChildEvent::Text(text) => Some((ThreadEvent::AgentText(text.clone()), None)),
-        SubagentChildEvent::Thinking(text) => {
-            Some((ThreadEvent::AgentThinking(text.clone()), None))
-        }
-        SubagentChildEvent::ToolStart { id, name, hint } => {
-            let input = hint
-                .as_ref()
-                .map(|(key, value)| serde_json::json!({ key: value }));
-            let title_value = input.clone().unwrap_or_default();
-            Some((
-                ThreadEvent::ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    title: manox_agent::thread::tool_title(name, &title_value, None),
-                    status: ToolCallStatus::Running,
-                    input,
-                },
-                None,
-            ))
-        }
-        SubagentChildEvent::ToolEnd {
-            id,
-            is_error,
-            output,
-            ..
-        } => Some((
-            ThreadEvent::ToolResult {
-                id: id.clone(),
-                output: output.clone(),
-                is_error: *is_error,
-            },
-            None,
-        )),
-        SubagentChildEvent::Stop { reason, usage } => Some((ThreadEvent::Stop(*reason), *usage)),
-        SubagentChildEvent::Error(text) => {
-            Some((ThreadEvent::Error(anyhow::anyhow!("{text}")), None))
-        }
-        SubagentChildEvent::Model(_) => None,
-    }
-}
-
 pub struct SubagentPanel {
-    /// The sub-agent's task topic — the panel's second-level banner. The
-    /// right-pane tab label shows the subagent's address instead.
+    /// The task topic — the panel banner and the tab label.
     topic: String,
-    status: ToolCallStatus,
+    /// The status the opener knew; the live read below overrides it while
+    /// the run is listed as background work.
+    opened_status: ToolCallStatus,
     /// The child run rendered as a miniature conversation through the shared
     /// message pipeline.
     conversation: Entity<ConversationState>,
-    /// Rendered above the transcript when the panel fell back to the final
-    /// answer (no live transcript survives a reload).
-    final_note: bool,
-    /// The model the child runs: every turn header's `{model}` segment and the
-    /// activity rows' model name. The recipient (the sub-agent definition)
-    /// lives with the conversation, which owns the turn headers. Carried for
-    /// the panel's future per-row attribution (the tree itself is a known
-    /// downgrade — AGENTS.md), so the field survives the switch unused.
-    #[allow(dead_code)]
+    /// The model label the child's turn headers carry (the parent's stand-in
+    /// until the child reports its own).
     role: String,
-    /// The chat host handle the panel's future interaction rows will need
-    /// (notice pushes, answer routing); unused while the panel is read-only.
-    #[allow(dead_code)]
     host: steer_agent_chat_ui::host::ChatHostHandle,
+    /// The child session this panel renders: the store plus the run id (the
+    /// run id names the child session — the swarm invariant). `None` when
+    /// no store is bound; the panel then stays in its settling phase.
+    source: Option<(Entity<AhpStore>, String)>,
+    _subscription: Option<Subscription>,
     scroll_handle: ScrollHandle,
     stick_to_bottom: bool,
 }
 
 impl SubagentPanel {
-    #[allow(clippy::too_many_arguments)] // constructor inputs are distinct presentation values, not a bundleable config
     pub(crate) fn new(
         topic: String,
         role: String,
-        recipient: String,
         status: ToolCallStatus,
-        backfill: &[SubagentChildEvent],
-        prompt: Option<(String, i64)>,
-        final_text: Option<String>,
         host: steer_agent_chat_ui::host::ChatHostHandle,
+        source: Option<(Entity<AhpStore>, String)>,
         cx: &mut App,
     ) -> Entity<Self> {
         let ctx = ApplyCtx {
             host: host.clone(),
             cwd: None,
-            // The panel's rows are a child session's display, and its answer
-            // backfill is locally minted — no row here is a forkable anchor.
+            // The panel's rows are a child session's display — no row here
+            // is a forkable anchor.
             fork_source: None,
         };
-        let final_note = backfill.is_empty() && final_text.is_some();
         let role_for_conv = role.clone();
-        // Seed the Captain's dispatch prompt as the opening turn, stamped with
-        // its author and its send time, so the header reads
-        // `Captain > {recipient}·{model}·{time}`. The final-answer fallback
-        // (when nothing was bridged) and the bridged child events follow
-        // through the same display/apply pipeline as the main thread.
-        let mut display = Vec::new();
-        if let Some((prompt, dispatched_at)) = prompt {
-            let mut message = Message::user(prompt);
-            message.timestamp = dispatched_at;
-            message.ui = Some(manox_agent::MessageUiMetadata {
-                author: Some(manox_agent::MessageAuthor::Lead),
-                ..Default::default()
-            });
-            display.push(manox_agent::db::HistoryEntry::Message(message));
-        }
-        if backfill.is_empty()
-            && let Some(final_text) = final_text
-        {
-            display.push(manox_agent::db::HistoryEntry::Message(Message::assistant(
-                vec![MessageContent::Text(final_text)],
-            )));
-        }
-        let empty_usage: HashMap<String, TokenUsage> = HashMap::new();
-        let recipient_author = manox_agent::MessageAuthor::Agent(recipient.clone());
+        let empty_usage: HashMap<String, manox_agent::language_model::TokenUsage> = HashMap::new();
         let conversation = cx.new(|cx| {
-            let mut conversation = ConversationState::rebuild_from_display(
-                &display,
+            ConversationState::rebuild_from_display(
+                &[],
                 &empty_usage,
                 &role_for_conv,
-                recipient_author,
+                manox_agent::MessageAuthor::Agent(String::new()),
                 false,
                 ctx.clone(),
                 cx,
-            );
-            for child in backfill {
-                if let Some((event, usage)) = thread_event_of(child) {
-                    conversation.apply(&event, &role_for_conv, usage, ctx.clone(), cx);
-                }
-            }
-            conversation
+            )
         });
-        cx.new(|_| Self {
-            topic,
-            status,
-            conversation,
-            final_note,
-            role,
-            host,
-            scroll_handle: ScrollHandle::new(),
-            stick_to_bottom: true,
+        cx.new(|cx| {
+            // The pump: every store notification drains the child session's
+            // own event bucket through the shared fold vocabulary into this
+            // panel's conversation. The main column's live leg drains only
+            // the foreground session's bucket — the child bucket is this
+            // panel's alone.
+            let subscription = source.as_ref().map(|(store, sid)| {
+                let sid = sid.clone();
+                cx.observe(store, move |this: &mut Self, store, cx| {
+                    this.pump(&sid, &store, cx)
+                })
+            });
+            Self {
+                topic,
+                opened_status: status,
+                conversation,
+                role,
+                host,
+                source,
+                _subscription: subscription,
+                scroll_handle: ScrollHandle::new(),
+                stick_to_bottom: true,
+            }
         })
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn push(&mut self, child: &SubagentChildEvent, cx: &mut Context<Self>) {
-        if let SubagentChildEvent::Model(model) = child {
-            // The child's resolved model arrives once, at dispatch: later turn
-            // headers name the model that actually runs the work.
-            self.role = model.clone();
-            cx.notify();
+    /// Drain the child session's event bucket into the panel's conversation.
+    fn pump(&mut self, sid: &str, store: &Entity<AhpStore>, cx: &mut Context<Self>) {
+        let events = store.update(cx, |s, _| s.drain_chat_events(sid));
+        if events.is_empty() {
             return;
         }
-        let Some((event, usage)) = thread_event_of(child) else {
-            return;
-        };
         let role = self.role.clone();
         let ctx = ApplyCtx {
             host: self.host.clone(),
             cwd: None,
-            // The panel's rows are a child session's display, and its answer
-            // backfill is locally minted — no row here is a forkable anchor.
             fork_source: None,
         };
-        self.conversation
-            .update(cx, |c, cx| c.apply(&event, &role, usage, ctx, cx));
+        for event in events {
+            let Some(thread_event) = chat_fold::to_thread_event(event) else {
+                continue;
+            };
+            self.conversation.update(cx, |c, cx| {
+                c.apply(&thread_event, &role, None, ctx.clone(), cx);
+            });
+        }
         // Re-arm tail-follow only while the viewport is still near the
-        // bottom; a user who scrolled up to read history must not be yanked
-        // back by the next delta.
+        // bottom; a reader scrolled into history must not be yanked back.
         let off = self.scroll_handle.offset().y;
         let max = self.scroll_handle.max_offset().y;
         if (max + off).abs() < px(20.) {
@@ -211,16 +127,54 @@ impl SubagentPanel {
         cx.notify();
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn set_status(&mut self, status: ToolCallStatus, cx: &mut Context<Self>) {
-        self.status = status;
-        cx.notify();
+    /// The live phase: the snapshot has not landed yet (settling), the fold
+    /// carries rows (active), or a landed fold carries none (empty).
+    fn phase(&self, cx: &App) -> Phase {
+        let Some((store, sid)) = &self.source else {
+            return Phase::Settling;
+        };
+        let view = store.read(cx);
+        if !view.book.chat_snapshot_landed(sid) {
+            return Phase::Settling;
+        }
+        if self.conversation.read(cx).items().is_empty() {
+            Phase::Empty
+        } else {
+            Phase::Active
+        }
     }
+
+    /// The run is listed as background work while it lives.
+    fn running(&self, cx: &App) -> bool {
+        let Some((store, sid)) = &self.source else {
+            return false;
+        };
+        let view = store.read(cx);
+        crate::ahp_store::leaf(&view.book, sid)
+            .chat
+            .and_then(|chat| chat.background_work.clone())
+            .is_some_and(|work| {
+                work.iter().any(
+                    |w| matches!(w, ahp_types::state::BackgroundWork::Subagent(s) if s.id == *sid),
+                )
+            })
+    }
+}
+
+enum Phase {
+    Settling,
+    Active,
+    Empty,
 }
 
 impl Render for SubagentPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let status = if self.running(cx) {
+            ToolCallStatus::Running
+        } else {
+            self.opened_status
+        };
 
         let header = h_flex()
             .w_full()
@@ -231,7 +185,7 @@ impl Render for SubagentPanel {
             .py_2()
             .border_b_1()
             .border_color(theme.border)
-            .child(status_indicator(self.status, theme))
+            .child(status_indicator(status, theme))
             .child(
                 gpui::div()
                     .flex_1()
@@ -274,164 +228,50 @@ impl Render for SubagentPanel {
             .track_scroll(&scroll)
             .px_3()
             .py_2();
-
-        if self.final_note {
-            body = body.child(
-                gpui::div()
-                    .pb_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(i18n::t("subagent-panel-final-note")),
-            );
-        }
-        if items.is_empty() && !self.final_note {
+        // The phases are distinct states, never one placeholder: settling is
+        // "the answer is in flight"; empty is "landed, nothing there yet".
+        if items.is_empty() {
+            let line = match self.phase(cx) {
+                Phase::Settling => i18n::t("subagent-panel-settling"),
+                Phase::Empty | Phase::Active => i18n::t("subagent-panel-empty"),
+            };
             body = body.child(
                 gpui::div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(i18n::t("subagent-panel-waiting")),
+                    .child(line),
             );
         }
         body = body.children(items);
 
-        let body = body
-            .on_prepaint(move |_bounds, _window, cx| {
-                let Some(this) = weak.upgrade() else {
-                    return;
-                };
-                if !this.read(cx).stick_to_bottom {
-                    return;
+        let body = body.on_prepaint(move |_bounds, _window, cx| {
+            let Some(this) = weak.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, _| {
+                if this.stick_to_bottom {
+                    this.scroll_handle.scroll_to_bottom();
                 }
-                let off = scroll.offset().y;
-                let max = scroll.max_offset().y;
-                if (max + off).abs() < px(1.) {
-                    return;
-                }
-                scroll.scroll_to_bottom();
-            })
-            .on_scroll_wheel(
-                cx.listener(|this, ev: &gpui::ScrollWheelEvent, window, cx| {
-                    // An upward wheel breaks tail-follow so the user can
-                    // scroll back through history; the next push re-arms it
-                    // once the viewport is back near the bottom.
-                    let dy = ev.delta.pixel_delta(window.line_height()).y;
-                    if dy > Pixels::ZERO {
-                        this.stick_to_bottom = false;
-                        cx.notify();
-                    }
-                }),
-            );
+            });
+        });
 
         v_flex()
-            .h_full()
             .w_full()
-            .bg(theme.background)
-            .text_color(theme.foreground)
+            .h_full()
+            .min_h_0()
             .child(header)
             .child(body)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Test view of the transcript mapping: every event probed here renders a
-    /// row, so the header-only observations never come through.
-    fn translated(child: &SubagentChildEvent) -> (ThreadEvent, Option<TokenUsage>) {
-        thread_event_of(child).expect("event maps onto a transcript event")
-    }
-
-    #[test]
-    fn child_events_translate_to_shared_thread_events() {
-        let (event, usage) = translated(&SubagentChildEvent::ToolStart {
-            id: "c1".into(),
-            name: "Read".into(),
-            hint: Some(("path".into(), "src/x.rs".into())),
-        });
-        assert!(usage.is_none());
-        match event {
-            ThreadEvent::ToolCall {
-                id,
-                name,
-                title,
-                status,
-                input,
-            } => {
-                assert_eq!(id, "c1");
-                assert_eq!(name, "Read");
-                assert_eq!(status, ToolCallStatus::Running);
-                assert!(title.contains("src/x.rs"), "{title}");
-                assert_eq!(input.unwrap()["path"], "src/x.rs");
-            }
-            other => panic!("expected ToolCall, got {other:?}"),
-        }
-
-        let (event, usage) = translated(&SubagentChildEvent::ToolEnd {
-            id: "c1".into(),
-            name: "Read".into(),
-            is_error: true,
-            output: "ok".into(),
-        });
-        assert!(usage.is_none());
-        match event {
-            ThreadEvent::ToolResult {
-                id,
-                is_error,
-                output,
-                ..
-            } => {
-                assert_eq!(id, "c1");
-                assert!(is_error);
-                assert_eq!(output, "ok");
-            }
-            other => panic!("expected ToolResult, got {other:?}"),
-        }
-
-        assert!(matches!(
-            translated(&SubagentChildEvent::Text("hi".into())),
-            (ThreadEvent::AgentText(t), None) if t == "hi"
-        ));
-        assert!(matches!(
-            translated(&SubagentChildEvent::Thinking("hmm".into())),
-            (ThreadEvent::AgentThinking(t), None) if t == "hmm"
-        ));
-        assert!(
-            thread_event_of(&SubagentChildEvent::Model("glm-5.2".into())).is_none(),
-            "the child's resolved model is header metadata, never a transcript row"
-        );
-    }
-
-    /// A message stop maps onto the shared `Stop` boundary with the child
-    /// message's usage; a terminal provider error maps onto `Error`.
-    #[test]
-    fn stop_and_error_events_translate_to_thread_boundaries() {
-        let (event, usage) = translated(&SubagentChildEvent::Stop {
-            reason: manox_agent::language_model::StopReason::ToolUse,
-            usage: Some(TokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                ..Default::default()
-            }),
-        });
-        assert!(matches!(
-            event,
-            ThreadEvent::Stop(manox_agent::language_model::StopReason::ToolUse)
-        ));
-        assert_eq!(usage.unwrap().input_tokens, 10);
-
-        let (event, usage) = translated(&SubagentChildEvent::Stop {
-            reason: manox_agent::language_model::StopReason::EndTurn,
-            usage: None,
-        });
-        assert!(matches!(
-            event,
-            ThreadEvent::Stop(manox_agent::language_model::StopReason::EndTurn)
-        ));
-        assert!(usage.is_none());
-
-        let (event, usage) = translated(&SubagentChildEvent::Error("boom".into()));
-        assert!(usage.is_none());
-        assert!(matches!(event, ThreadEvent::Error(e) if e.to_string() == "boom"));
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1p5()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(i18n::t("subagent-panel-readonly")),
+            )
     }
 }

@@ -541,6 +541,10 @@ impl Default for ThinkingContainer {
 #[derive(Debug, Clone)]
 pub struct AgentTaskItem {
     pub id: String,
+    /// The run id a delegation envelope names — the child session the card
+    /// drills into (foreground results, promotion receipts, and background
+    /// start receipts all carry `run_id`).
+    pub run_id: Option<String>,
     pub subagent_type: String,
     pub description: String,
     pub status: ToolCallStatus,
@@ -551,6 +555,14 @@ pub struct AgentTaskItem {
 /// flattened and capped at 60 chars with an ellipsis. Local presentation
 /// rule (the runtime helper of the same shape was removed with the retired
 /// harness).
+/// The run id a delegation envelope names (`run_id` in the foreground
+/// result, the promotion receipt, and the background start receipt).
+pub fn envelope_run_id(output: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|v| v.get("run_id").and_then(|r| r.as_str()).map(str::to_string))
+}
+
 pub fn subagent_topic(prompt: &str) -> String {
     let flat: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = flat.chars();
@@ -1367,6 +1379,7 @@ impl ConversationState {
                             MessageItem::new(
                                 ConvItem::AgentTask(AgentTaskItem {
                                     id: id.clone(),
+                                    run_id: None,
                                     subagent_type,
                                     description,
                                     status: *status,
@@ -1668,6 +1681,7 @@ impl ConversationState {
                             };
                             t.is_error = *is_error;
                             t.status = next_status;
+                            t.run_id = envelope_run_id(output).or(t.run_id.clone());
                         }
                         cx.notify();
                     });

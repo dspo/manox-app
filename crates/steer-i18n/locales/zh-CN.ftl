@@ -176,7 +176,9 @@ subagent-stream-empty = 暂无活动 — 该子代理还没有产出第一轮内
 
 ### views/subagent_panel.rs
 
-subagent-panel-waiting = 等待子代理活动…
+subagent-panel-settling = 正在接入子会话…
+subagent-panel-empty = 子会话已接入，暂无内容。
+subagent-panel-readonly = 子代理工作会话 · 只读
 
 subagent-panel-final-note = 实时转录不跨重载保留；以下为子代理的最终回答。
 
