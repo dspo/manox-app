@@ -3729,7 +3729,7 @@ pub fn render_agent_task(
     let open_target = agent_ctx.map(|ctx| {
         (
             ctx.host.clone(),
-            item.id.clone(),
+            item.run_id.clone(),
             item.subagent_type.clone(),
             item.description.clone(),
             item.status,
@@ -3749,10 +3749,12 @@ pub fn render_agent_task(
         .hover(|s| s.bg(theme.secondary.opacity(0.5)))
         .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
         .on_click(move |_, _window, cx| {
-            let Some((host, id, subagent_type, topic, status)) = &open_target else {
+            // The run id names the child session; before any envelope named
+            // it (a foreground run mid-wait) there is nothing to drill into.
+            let Some((host, Some(run_id), subagent_type, topic, status)) = &open_target else {
                 return;
             };
-            host.open_subagent_tab(id, subagent_type, topic, *status, cx);
+            host.open_subagent_tab(run_id, subagent_type, topic, *status, cx);
         });
 
     row.child(icon_el)
@@ -4429,6 +4431,7 @@ impl ItemBuilder {
                                         );
                                     items.push(ConvItem::AgentTask(AgentTaskItem {
                                         id: tu.id.clone(),
+                                        run_id: None,
                                         subagent_type,
                                         description,
                                         status: ToolCallStatus::Success,
@@ -4668,6 +4671,7 @@ fn pair_tool_result(items: &mut Vec<ConvItem>, tr: &LanguageModelToolResult) {
         ConvItem::AgentTask(t) => {
             t.is_error = tr.is_error;
             t.status = status;
+            t.run_id = crate::conversation::envelope_run_id(&tr.content).or(t.run_id.clone());
         }
         ConvItem::ToolCall(t) => {
             t.output = tr.content.clone();
@@ -4984,6 +4988,7 @@ mod tests {
             let thinking_item = ConvItem::Thinking(thinking);
             let agent_item = ConvItem::AgentTask(AgentTaskItem {
                 id: "agent-long-title".into(),
+                run_id: Some("sub-1".into()),
                 subagent_type: "Explore".into(),
                 description: "检查一段非常长的中英文混合标题 and verify that it remains a single truncated line without rendering metrics or child output".into(),
                 status: ToolCallStatus::Success,

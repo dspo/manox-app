@@ -277,15 +277,6 @@ fn composer_key_context(completion_open: bool) -> &'static str {
     }
 }
 
-/// The Captain's dispatch prompt for one sub-agent address, with the Unix
-/// second it was sent: a sub-agent panel's opening bubble shows the send time,
-/// never the time its tab was opened.
-#[derive(Debug, Clone)]
-struct SubagentPrompt {
-    text: String,
-    dispatched_at: i64,
-}
-
 /// A thread parked in the background while still running a turn. U6b⑤: the
 /// park holds NO kernel entity — just the id, the leaf (the wire-state home
 /// whose mirrors the server's §D.5 deltas keep fed while the session stays
@@ -443,12 +434,10 @@ pub struct Workspace {
     /// Latest completion text per subagent address (from SubagentProgress
     /// status=Success/Error), used as the panel's final answer when the
     /// Agent tool-result is absent (new Steer bus has no ToolResult).
-    subagent_final_text: HashMap<String, String>,
     /// The Captain's dispatch prompt per subagent address with its send time,
     /// captured from the Steer tool call so a panel always shows the opening
     /// user message — correctly attributed and timed — even before the child
     /// streams anything.
-    subagent_prompts: HashMap<String, SubagentPrompt>,
     /// Lazily-built browser tab entities, keyed by `BrowserTabId`. A browser
     /// tab keeps its `BrowserView` (and the underlying native webview) across
     /// tab switches; dropped when the tab closes, which detaches the native
@@ -745,8 +734,6 @@ impl Workspace {
             _mux_lists,
             _rail_updates: rail_updates,
             subagent_transcripts: HashMap::new(),
-            subagent_final_text: HashMap::new(),
-            subagent_prompts: HashMap::new(),
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
             externals: Vec::new(),
