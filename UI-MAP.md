@@ -221,7 +221,9 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 一个运行中子代理的自家 transcript 顶替会话列（[CaptainStatusStrip](#captainstatusstrip) 的子代理行点开；
 见 [SubagentStream](#subagentstream)）。子代理 chat 由宿主以**快照**服务（无 live bridge，且父 chat 的
 background work 条目每 run 只写一次），所以页面靠自己的有界轮询重订阅取新快照、按子 chat 的 fold 版本重建；
-任何线程导航（点侧栏行 / 新建会话 / 进设置）都 drop 该页并停掉轮询。
+任何离开它的 mode 翻转（点侧栏行 / 新建会话 / 进设置 / **外部会话抢走主列**——项目菜单拉起或侧栏 external 行点击）
+都 drop 该页并停掉轮询；不变量是「页面存在 ⟺ `view_mode == SubagentStream`」（与 `active_external` 同一条规矩），
+闸门与 drop 双保险——漏一个翻转点最多是多一次重建，不会出现看不见的页面在后台轮询。
 
 ---
 
