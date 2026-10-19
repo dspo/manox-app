@@ -80,6 +80,11 @@ fn card_status(status: ToolCallStatus) -> ToolStatus {
 /// entry: status first, then the fold — the conversation is the authority, so
 /// its mirror lands last. The card's own auto-fold is off; the conversation's
 /// delayed collapse drives the fold through this same mirror.
+///
+/// A write happens only when the mirror actually disagrees with the entry: the
+/// caller runs this on every render pass, and an unconditional `set_status` /
+/// `set_open` would notify the card (and through its observer the message) on
+/// every frame — a repaint loop with no state change behind it.
 pub fn ensure_tool_card(
     entry: &mut ToolCallItem,
     subs: &mut Vec<gpui::Subscription>,
@@ -99,8 +104,12 @@ pub fn ensure_tool_card(
         entry.streaming || !entry.collapsed,
     );
     state.update(cx, |state, cx| {
-        state.set_status(status, cx);
-        state.set_open(open, cx);
+        if state.status() != &status {
+            state.set_status(status, cx);
+        }
+        if state.is_open() != open {
+            state.set_open(open, cx);
+        }
     });
     Some(state)
 }

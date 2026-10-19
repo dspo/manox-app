@@ -113,11 +113,9 @@ impl Workspace {
                 } else if self.chat.read(cx).ask_projection_confirmed {
                     self.chat.update(cx, |chat, cx| {
                         chat.pending_ask = None;
-                        chat.ask_step = 0;
-                        chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
                         cx.notify();
                     });
-                    self.reset_ask_custom(cx);
+                    self.reset_ask_state(cx);
                     cx.notify();
                 }
             }
@@ -477,48 +475,79 @@ impl Workspace {
         self.chat.read(cx).ask_card_snapshot(id)
     }
 
-    pub(super) fn pending_ask_has_selection(&self, cx: &App) -> bool {
-        self.chat.read(cx).pending_ask_has_selection()
-    }
-
-    pub(crate) fn first_incomplete_ask_question(&self, cx: &App) -> Option<usize> {
-        self.chat.read(cx).first_incomplete_ask_question()
-    }
-
-    pub(crate) fn toggle_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            chat.toggle_ask_option(qi, oi);
-            cc.notify();
+    /// Mount the pending ask's interactive card state — the page, the
+    /// selections and the per-question note fields the form drives — replacing
+    /// it whenever the ask changes. It lives on the column rather than on the
+    /// card's row because the composer's Enter submits the same card, so the
+    /// answers have exactly one reader. Runs on the render path, before the
+    /// list measures (the state's note inputs need no window of their own
+    /// until the card renders them).
+    pub(super) fn ensure_ask_state(&mut self, cx: &mut App) {
+        let pending = self.chat.read(cx).pending_ask.as_ref().map(|ask| {
+            (
+                ask.id.clone(),
+                ask.questions
+                    .iter()
+                    .map(|q| q.multi_select)
+                    .collect::<Vec<_>>(),
+                ask.questions.len(),
+            )
+        });
+        let Some((id, multi, count)) = pending else {
+            // No ask: retire the state so a re-seed of the same request (the
+            // dismiss/restore race) starts from a blank form.
+            if self.chat.read(cx).ask_state.is_some() {
+                self.chat.update(cx, |chat, cx| {
+                    chat.reset_ask_state();
+                    cx.notify();
+                });
+            }
+            return;
+        };
+        if self
+            .chat
+            .read(cx)
+            .ask_state
+            .as_ref()
+            .is_some_and(|(state_id, _)| state_id == &id)
+        {
+            return;
+        }
+        let state = cx.new(|_| {
+            ai_elements::AskState::new(multi, i18n::t("workspace-ask-supplement-placeholder"))
+        });
+        self.chat.update(cx, |chat, cx| {
+            if chat.ask_body_scroll.len() != count {
+                chat.ask_body_scroll = (0..count).map(|_| ScrollHandle::new()).collect();
+            }
+            chat.ask_state = Some((id, state));
+            cx.notify();
         });
     }
 
-    pub(crate) fn decide_ask_option(&mut self, qi: usize, oi: usize, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            chat.decide_ask_option(qi, oi);
-            cc.notify();
-        });
-        self.resolve_ask(cx);
-    }
-
-    pub(crate) fn ask_prev(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            chat.ask_prev();
-            cc.notify();
+    /// Drop the ask's interactive state (the settle, dismissal and retirement
+    /// paths all take it with them).
+    pub(super) fn reset_ask_state(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| {
+            chat.reset_ask_state();
+            cx.notify();
         });
     }
 
-    pub(crate) fn ask_next(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            chat.ask_next();
-            cc.notify();
-        });
-    }
-
-    pub(super) fn reset_ask_custom(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            chat.reset_ask_custom();
-            cc.notify();
-        });
+    /// Settle the pending ask from the card's own state — the composer's Enter
+    /// leg, which holds no element of its own to read the form back from.
+    pub(super) fn submit_pending_ask(&mut self, cx: &mut Context<Self>) {
+        let state = self
+            .chat
+            .read(cx)
+            .ask_state
+            .as_ref()
+            .map(|(_, s)| s.clone());
+        let Some(state) = state else {
+            return;
+        };
+        let replies = steer_agent_chat_ui::ask_card::replies_of(&state, cx);
+        self.reply_ask(replies, cx);
     }
 
     pub(crate) fn dismiss_ask(&mut self, cx: &mut Context<Self>) {
@@ -537,7 +566,7 @@ impl Workspace {
             Some(a) => a,
             None => return,
         };
-        self.reset_ask_custom(cx);
+        self.reset_ask_state(cx);
         if let Some((store, sid)) = self.chat.read(cx).store.clone() {
             let view = store.read(cx);
             if let Some((chat_id, _request)) =
@@ -564,13 +593,18 @@ impl Workspace {
     /// render-level probe tests pull the card out and mount it directly.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_ask_card_element(
-        &self,
+        &mut self,
         host: steer_agent_chat_ui::host::ChatHostHandle,
         ix: usize,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        // The card renders from the workspace-owned interactive state, so the
+        // probe mounts it first — exactly what the workspace's own render path
+        // does before the list measures.
+        self.ensure_ask_state(cx);
         let id = self.chat.read(cx).pending_ask.as_ref()?.id.clone();
         let snapshot = self.ask_card_snapshot(&id, cx)?;
+        let ask_state = self.chat.read(cx).ask_state.as_ref()?.1.clone();
         let item = crate::conversation::ToolCallItem {
             id,
             name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
@@ -596,6 +630,7 @@ impl Workspace {
             Some(&crate::views::message::ToolCallCtx {
                 host,
                 ask: Some(snapshot),
+                ask_state: Some(ask_state),
                 confirmation: None,
             }),
             &crate::views::message::CopyFeedback::inert(&copy_registry),
@@ -604,15 +639,20 @@ impl Workspace {
     }
 
     /// Synchronize Workspace-derived ask state before the native list starts
-    /// measuring. Updating a `MessageItem` from the row callback dirties the
-    /// same entity tree whose height GPUI is currently caching, which can make
-    /// the cached row and the painted subtree describe different layouts.
+    /// measuring: the pending ask's interactive state (mounting it on this
+    /// path, since it is the ask's own render input) and the snapshot onto the
+    /// ToolCall row the card renders on. Updating a `MessageItem` from the row
+    /// callback dirties the same entity tree whose height GPUI is currently
+    /// caching, which can make the cached row and the painted subtree describe
+    /// different layouts.
     pub(super) fn sync_ask_card_snapshots(&mut self, cx: &mut App) {
+        self.ensure_ask_state(cx);
         let next = self.chat.read(cx).pending_ask.as_ref().and_then(|ask| {
             let snapshot = self.ask_card_snapshot(&ask.id, cx)?;
+            let state = self.chat.read(cx).ask_state.as_ref()?.1.clone();
             let ix = self.chat_conversation(cx).read(cx).find_tool(&ask.id, cx)?;
             let item = self.chat_conversation(cx).read(cx).items().get(ix)?.clone();
-            Some((item, snapshot))
+            Some((item, snapshot, state))
         });
 
         if let Some(previous) = self.chat.update(cx, |chat, cc| {
@@ -621,19 +661,23 @@ impl Workspace {
             v
         }) && next
             .as_ref()
-            .is_none_or(|(current, _)| current != &previous)
+            .is_none_or(|(current, _, _)| current != &previous)
             && previous.read(cx).ask_snapshot.is_some()
         {
             previous.update(cx, |item, cx| {
                 item.ask_snapshot = None;
+                item.ask_state = None;
                 cx.notify();
             });
         }
 
-        if let Some((item, snapshot)) = next {
-            if item.read(cx).ask_snapshot.as_ref() != Some(&snapshot) {
+        if let Some((item, snapshot, state)) = next {
+            if item.read(cx).ask_snapshot.as_ref() != Some(&snapshot)
+                || item.read(cx).ask_state.as_ref() != Some(&state)
+            {
                 item.update(cx, |item, cx| {
                     item.ask_snapshot = Some(snapshot);
+                    item.ask_state = Some(state);
                     cx.notify();
                 });
             }
@@ -653,92 +697,43 @@ impl Workspace {
         }
         let input_empty = self.chat_input(cx).read(cx).value().trim().is_empty();
         if self.chat.read(cx).pending_ask.is_some() {
-            !input_empty || self.pending_ask_has_selection(cx)
+            // The card is answerable without typing anything: its pager's
+            // check settles whatever is selected, and an untouched question
+            // settles as an explicit skip.
+            true
         } else {
             !input_empty || !self.chat.read(cx).pending_attachments.is_empty()
         }
     }
 
-    /// Submit the ask drawer: fold each question's tri-state (its selected
-    /// labels plus its own free-text `custom`) into canonical `AskAnswer` rows.
-    /// A blank custom is `None`; a question with nothing selected and no custom
-    /// settles as an explicit skip (`selected: []`, no `custom`) — the same
-    /// tri-state the server's `fold_ask_answers` reads. There is no card-level
-    /// free-text override: a card close is `dismiss_ask`, and per-question free
-    /// text rides the answer's `custom`.
-    pub(crate) fn resolve_ask(&mut self, cx: &mut Context<Self>) {
-        let (ask, custom_texts) = match self.chat.update(cx, |chat, cc| {
+    /// Settle the pending ask: fold each question's answer (its selected
+    /// option labels plus its own note) into canonical `AskAnswer` rows. A
+    /// question with nothing selected and no note settles as an explicit skip
+    /// (`selected: []`, no `custom`) — the same tri-state the server's
+    /// `fold_ask_answers` reads. There is no card-level free-text override: a
+    /// card close is `dismiss_ask`, and per-question free text rides the
+    /// answer's `custom`.
+    pub(crate) fn reply_ask(
+        &mut self,
+        replies: Vec<steer_agent_chat_ui::ask_card::AskCardReply>,
+        cx: &mut Context<Self>,
+    ) {
+        let ask = match self.chat.update(cx, |chat, cc| {
             let ask = chat.take_pending_ask();
-            let texts = chat.ask_custom_text.clone();
             cc.notify();
-            (ask, texts)
+            ask
         }) {
-            (Some(a), t) => (a, t),
-            (None, _) => return,
+            Some(a) => a,
+            None => return,
         };
-        // The wire answer per question: the selected option(s) (a select
-        // question), the free-form text (a text question or a select's
-        // freeform input). A question with neither carries no answer.
-        let mut answers: std::collections::HashMap<String, ahp_types::state::ChatInputAnswer> =
-            std::collections::HashMap::new();
-        for (i, q) in ask.questions.iter().enumerate() {
-            let sel = ask.selections.get(i).map(|s| s.as_slice()).unwrap_or(&[]);
-            let selected: Vec<String> = q
-                .options
-                .iter()
-                .zip(sel.iter())
-                .filter_map(|(o, &s)| s.then_some(o.label.clone()))
-                .collect();
-            let custom = custom_texts
-                .get(i)
-                .filter(|s| !s.trim().is_empty())
-                .cloned();
-            let value = if q.multi_select {
-                ahp_types::state::ChatInputAnswerValue::SelectedMany(
-                    ahp_types::state::ChatInputSelectedManyAnswerValue {
-                        value: selected,
-                        freeform_values: custom.map(|c| vec![c]),
-                    },
-                )
-            } else if let Some(first) = selected.first() {
-                ahp_types::state::ChatInputAnswerValue::Selected(
-                    ahp_types::state::ChatInputSelectedAnswerValue {
-                        value: first.clone(),
-                        freeform_values: custom.map(|c| vec![c]),
-                    },
-                )
-            } else if let Some(text) = custom {
-                ahp_types::state::ChatInputAnswerValue::Text(
-                    ahp_types::state::ChatInputTextAnswerValue { value: text },
-                )
-            } else {
-                // An untouched question is a SKIPPED answer, not a missing
-                // key: the host distinguishes "the user skipped this" from
-                // "the client never sent it", and the model must see the
-                // skip. Record it and move on without a Submitted row.
-                answers.insert(
-                    q.id.clone(),
-                    ahp_types::state::ChatInputAnswer::Skipped(
-                        ahp_types::state::ChatInputSkipped {
-                            freeform_values: None,
-                        },
-                    ),
-                );
-                continue;
-            };
-            answers.insert(
-                q.id.clone(),
-                ahp_types::state::ChatInputAnswer::Submitted(ahp_types::state::ChatInputAnswered {
-                    value,
-                }),
-            );
-        }
+        let answers = ask_answers(&ask, &replies);
         let id = ask.id.clone();
+        // `take_pending_ask` retired the card's interactive state with the ask;
+        // the plan body's scroll slots go with it.
         self.chat.update(cx, |chat, cx| {
-            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
+            chat.ask_body_scroll.clear();
             cx.notify();
         });
-        self.reset_ask_custom(cx);
         if let Some((store, sid)) = self.chat.read(cx).store.clone() {
             let view = store.read(cx);
             if let Some((chat_id, request)) =
@@ -769,77 +764,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Align the per-question custom-answer scratch with the current ask:
-    /// reset lengths to `questions.len()` (on re-seed / count change) and
-    /// create each `custom` `InputState` lazily — allocation needs a `Window`,
-    /// which the park event handler lacks, so this runs on the render path.
-    /// Each input's `Change` repaints the card (driving the skip affordance and
-    /// the submit gate) and mirrors its live text into `ask_custom_text`.
-    pub(crate) fn ensure_ask_custom_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let count = self
-            .chat
-            .read(cx)
-            .pending_ask
-            .as_ref()
-            .map_or(0, |ask| ask.questions.len());
-        if self.chat.read(cx).pending_ask.is_none() {
-            if !self.chat.read(cx).ask_custom_inputs.is_empty() {
-                self.reset_ask_custom(cx);
-            }
-            return;
-        }
-        if self.chat.read(cx).ask_custom_text.len() != count
-            || self.chat.read(cx).ask_custom_inputs.len() != count
-            || self.chat.read(cx).ask_skipped.len() != count
-            || self.chat.read(cx).ask_body_scroll.len() != count
-        {
-            self.reset_ask_custom(cx);
-            self.chat.update(cx, |chat, cc| {
-                chat.ask_custom_text = vec![String::new(); count];
-                chat.ask_skipped = vec![false; count];
-                chat.ask_custom_inputs = vec![None; count];
-                chat.ask_body_scroll = (0..count).map(|_| ScrollHandle::new()).collect();
-                cc.notify();
-            });
-        }
-        for qi in 0..count {
-            if self.chat.read(cx).ask_custom_inputs[qi].is_none() {
-                let initial = self
-                    .chat
-                    .read(cx)
-                    .ask_custom_text
-                    .get(qi)
-                    .cloned()
-                    .filter(|s| !s.is_empty());
-                let state: Entity<InputState> = cx.new(|cx| {
-                    let mut st = InputState::new(window, cx)
-                        .placeholder(i18n::t("workspace-ask-supplement-placeholder"));
-                    if let Some(initial) = initial {
-                        st.set_value(initial, window, cx);
-                    }
-                    st
-                });
-                let sub = cx.subscribe(&state, move |this, state, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        let val = state.read(cx).value().to_string();
-                        this.chat.update(cx, |chat, cc| {
-                            if let Some(slot) = chat.ask_custom_text.get_mut(qi) {
-                                *slot = val;
-                            }
-                            cc.notify();
-                        });
-                        cx.notify();
-                    }
-                });
-                self.chat.update(cx, |chat, cc| {
-                    chat.ask_custom_inputs[qi] = Some(state);
-                    chat.ask_custom_subs.push(sub);
-                    cc.notify();
-                });
-            }
-        }
-    }
-
     /// The ask card body's tracked scroll handle for question `qi`. `None`
     /// before the ask scratch is allocated (the render path allocates it); the
     /// card then keeps gpui's untracked element-state scroll and takes no wheel
@@ -848,47 +772,6 @@ impl Workspace {
     /// (`contain_body_scroll`).
     pub(crate) fn ask_body_scroll(&self, cx: &App, qi: usize) -> Option<ScrollHandle> {
         self.chat.read(cx).ask_body_scroll.get(qi).cloned()
-    }
-
-    /// Skip question `qi` (deepseek `QuestionFlow.skipQuestion` semantics):
-    /// clear its selection and its `custom` text and mark it EXPLICITLY
-    /// skipped — the settled answer is the canonical explicit skip
-    /// (`selected: []`, no `custom`), never a card dismissal — then either
-    /// advance the walk or, on the last question, settle the whole card. The
-    /// settle runs the same completeness gate as the submit: questions that
-    /// were never touched jump the walk back instead of silently folding to
-    /// skips. A skip can never strand the user: the walk always moves.
-    pub(crate) fn skip_ask_question(
-        &mut self,
-        qi: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let walk = self.chat.update(cx, |chat, cc| {
-            let v = chat.skip_ask_question_state(qi);
-            cc.notify();
-            v
-        });
-        if let Some(state) = self
-            .chat
-            .read(cx)
-            .ask_custom_inputs
-            .get(qi)
-            .and_then(|slot| slot.clone())
-        {
-            state.update(cx, |st, cx| st.set_value("", window, cx));
-        }
-        // `walk` is Some(target) to advance to, None to settle the card.
-        match walk {
-            Some(target) => {
-                self.chat.update(cx, |chat, cc| {
-                    chat.ask_step = target;
-                    cc.notify();
-                });
-                cx.notify();
-            }
-            None => self.resolve_ask(cx),
-        }
     }
 
     /// Wire api string → text color for the pi composer model label and the
@@ -1779,6 +1662,71 @@ impl Workspace {
                 .into_any_element(),
         )
     }
+}
+
+/// Fold a card's answers into the canonical `AskAnswer` rows. Per question:
+/// the selected option LABELS (a select question), the free-form note (a text
+/// question, or a select's supplemental freeform), or an explicit skip when
+/// the user touched neither — the same tri-state the server's
+/// `fold_ask_answers` reads. A reply index with no option, or an option index
+/// the question does not have, contributes nothing rather than a phantom
+/// label.
+pub(super) fn ask_answers(
+    ask: &PendingAsk,
+    replies: &[steer_agent_chat_ui::ask_card::AskCardReply],
+) -> std::collections::HashMap<String, ahp_types::state::ChatInputAnswer> {
+    let mut answers = std::collections::HashMap::new();
+    for (i, q) in ask.questions.iter().enumerate() {
+        let reply = replies.get(i);
+        let selected: Vec<String> = reply
+            .map(|r| {
+                r.selected
+                    .iter()
+                    .filter_map(|&oi| q.options.get(oi).map(|o| o.label.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let custom = reply
+            .map(|r| r.note.clone())
+            .filter(|note| !note.trim().is_empty());
+        let value = if q.multi_select {
+            ahp_types::state::ChatInputAnswerValue::SelectedMany(
+                ahp_types::state::ChatInputSelectedManyAnswerValue {
+                    value: selected,
+                    freeform_values: custom.map(|c| vec![c]),
+                },
+            )
+        } else if let Some(first) = selected.first() {
+            ahp_types::state::ChatInputAnswerValue::Selected(
+                ahp_types::state::ChatInputSelectedAnswerValue {
+                    value: first.clone(),
+                    freeform_values: custom.map(|c| vec![c]),
+                },
+            )
+        } else if let Some(text) = custom {
+            ahp_types::state::ChatInputAnswerValue::Text(
+                ahp_types::state::ChatInputTextAnswerValue { value: text },
+            )
+        } else {
+            // An untouched question is a SKIPPED answer, not a missing key:
+            // the host distinguishes "the user skipped this" from "the
+            // client never sent it", and the model must see the skip.
+            answers.insert(
+                q.id.clone(),
+                ahp_types::state::ChatInputAnswer::Skipped(ahp_types::state::ChatInputSkipped {
+                    freeform_values: None,
+                }),
+            );
+            continue;
+        };
+        answers.insert(
+            q.id.clone(),
+            ahp_types::state::ChatInputAnswer::Submitted(ahp_types::state::ChatInputAnswered {
+                value,
+            }),
+        );
+    }
+    answers
 }
 
 /// A file URI lowered to its display path: strips the `file://` scheme and

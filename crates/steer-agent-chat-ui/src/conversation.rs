@@ -1576,6 +1576,19 @@ impl ConversationState {
                                     // The newest entry owns the stage: fold
                                     // the ones before it (user pins win).
                                     t.fold_preceding();
+                                    // A tool call interrupts the reasoning
+                                    // round in flight — the model moved on to
+                                    // act, so the next `AgentThinking` opens a
+                                    // fresh round instead of appending to this
+                                    // one (the rule `ActivityEntry::Reasoning`
+                                    // documents). AHP has no mid-turn
+                                    // `Stop(ToolUse)` to say so: in the live
+                                    // stream the tool call IS that boundary,
+                                    // and without it every round of a turn's
+                                    // tool loop appends to the first, leaving
+                                    // one merged thinking block above every
+                                    // tool call of the turn.
+                                    t.finalize_reasoning_rounds();
                                     t.entries.push(ActivityEntry::Tool(ToolCallItem {
                                         id,
                                         name,
@@ -5485,6 +5498,62 @@ mod tests {
                 let entry = tool_entry(c, cx);
                 assert_eq!(entry.title, "Read src/lib.rs");
                 assert_eq!(entry.input, serde_json::json!({"path": "src/lib.rs"}));
+            });
+        });
+    }
+
+    /// A tool call interrupts the reasoning round in flight: the live AHP
+    /// stream carries no mid-turn `Stop(ToolUse)`, so the tool call itself is
+    /// the boundary. Without that split every round of a turn's tool loop
+    /// appends to the first one — one merged thinking block above every tool
+    /// call of the turn, in arrival order the tools read as "always last".
+    #[gpui::test]
+    fn live_tool_call_splits_the_reasoning_round_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                let tool = |id: &str, name: &str| ThreadEvent::ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    title: name.into(),
+                    status: ToolCallStatus::Running,
+                    input: None,
+                };
+                for event in [
+                    ThreadEvent::AgentThinking("r1".into()),
+                    tool("t1", "Bash"),
+                    ThreadEvent::AgentThinking("r2".into()),
+                    tool("t2", "Grep"),
+                ] {
+                    let _ = c.apply(&event, "model", None, ctx.clone(), cx);
+                }
+            });
+        });
+        cx.update(|cx| {
+            conversation.read_with(cx, |c, cx| {
+                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
+                    panic!("expected one activity segment");
+                };
+                let shape: Vec<String> = t
+                    .entries
+                    .iter()
+                    .map(|e| match e {
+                        ActivityEntry::Reasoning { text, .. } => format!("reasoning:{text}"),
+                        ActivityEntry::Tool(tool) => format!("tool:{}", tool.name),
+                    })
+                    .collect();
+                assert_eq!(
+                    shape,
+                    ["reasoning:r1", "tool:Bash", "reasoning:r2", "tool:Grep"],
+                    "rounds and tools interleave in arrival order"
+                );
             });
         });
     }

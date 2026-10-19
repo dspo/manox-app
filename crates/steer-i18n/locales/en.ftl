@@ -446,7 +446,6 @@ workspace-composer-placeholder = Write markdown… (Cmd-Enter to send)
 workspace-unknown-command = Unknown command: /{$name} (open the `/` menu to see installed commands)
 
 workspace-unknown-skill = Unknown skill: /{$name} (open the `/` menu to see installed skills)
-workspace-clarify-title = Clarifying question
 workspace-rename-confirm = Rename
 
 workspace-no-model = No model configured
@@ -466,12 +465,6 @@ workspace-ask-recommended = Recommended
 workspace-ask-plan-review-label = Plan review
 
 workspace-ask-discuss = Discuss
-
-workspace-ask-next = Next
-
-workspace-ask-submit = Submit
-
-workspace-ask-skip = Skip
 
 workspace-cancel = Cancel
 

@@ -34,6 +34,7 @@ chrono.workspace = true
 # leak into the library's dependency surface — the lib stays data-free.
 manox-agent.workspace = true
 steer-agent-chat-ui.workspace = true
+ai-elements.workspace = true
 manox-terminal.workspace = true
 terminal-ui.workspace = true
 steer-webview.workspace = true

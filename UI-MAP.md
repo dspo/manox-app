@@ -119,7 +119,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### AskDrawer
 
-- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerCustomInput](#askdrawercustominput) · [AskDrawerFooter](#askdrawerfooter) · [AskDrawerSkipButton](#askdrawerskipbutton) · [AskDrawerNav](#askdrawernav) · [PlanReviewDecisionCard](#planreviewdecisioncard) · [ConfirmationCard](#confirmationcard)
+- [AskDrawer](#askdrawer) · [PlanReviewDecisionCard](#planreviewdecisioncard) · [ConfirmationCard](#confirmationcard)
 
 ### Popups & Dropdowns
 
@@ -655,19 +655,6 @@ list never spends its width on the path.
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
-##### AskDrawer
-
-Inline transcript card, not a footer swap. The live edge (`sync_live_ask`,
-`crates/agent-ui/src/workspace/chips.rs`) arms the card from the fold: an open
-elicitation (`chat/inputRequested`) seeds the pending ask AND synthesizes the
-matching `ToolCall` row (same-frame guarantee). A parked thread's subscription
-drops that event by design, so the card re-surfaces on switch-back by an
-explicit re-own: the reclaim sends `OpenSession` (same leaf and follow stream
-— the parked session never detached) and the gateway replays the unsettled
-adjudications to the joining owner (manox §D.6). A card whose id leaves the
-fold's input-needed list after having been confirmed in it settled remotely
-and is reconciled away (`reconcile_pending_with_projections`).
-
 ##### ConfirmationCard
 
 The tool confirmation's unified surface: the parked call's OWN conversation
@@ -687,100 +674,43 @@ retired full-column `render_pending_auth_overlay` modal is gone.
 
 #### AskDrawer
 
-Multi-step question navigator rendered inside the conversation. The card
-carries two presentations routed at the one render entry
-(`render_ask_user_card`, `crates/steer-agent-chat-ui/src/views/message.rs`): a
-single-question ask with a `plan-review` intent whose `approve` label matches
-one of its own options renders the [PlanReviewDecisionCard](#planreviewdecisioncard);
-every other ask renders the generic stepper flow (`render_question_card`).
-Decision actions live in a fixed footer BELOW the content (pager + skip +
-next/submit), never above it; the body caps at 520px and scrolls internally so
-the footer stays reachable on a long plan. The ask state
-(`Workspace::pending_ask` + snapshot sync) lives in `chips.rs`.
+The pending `AskUserQuestion`, rendered inside the conversation as the
+ai-elements paged form ([AskUserQuestion](#askuserquestion)) — the card the
+gallery shows is the card the app shows; there is no second, app-local
+presentation. `render_ask_user_card`
+(`crates/steer-agent-chat-ui/src/views/message.rs`) routes one-question
+plan-review asks to [PlanReviewDecisionCard](#planreviewdecisioncard) and
+mounts `render_ask_form_card` for every other ask: the ask's questions become
+`AskBlock`s (header, question, `detail` as host-rendered markdown, options with
+the 「推荐」 badge, multi-select flags), the note placeholder and the
+「推荐」 badge label are localized here, and a block's detail element rides its
+own page.
 
-> Source: `crates/agent-ui/src/workspace/chips.rs`
+The interactive half (page, selections, per-question notes) lives in the
+`ai_elements::AskState` entity, whose only owner is the workspace
+(`ChatColumn::ask_state`, mounted by `Workspace::ensure_ask_state` on the
+render path) — the card's row holds a clone for rendering, and the composer's
+Enter submits the same entity, so the answers have exactly one reader. The card
+submits through `ChatHost::submit_ask` → `Workspace::reply_ask`
+(`crates/agent-ui/src/workspace/chips.rs`), which folds the reported indices
+and notes into the canonical `AskAnswer` rows (selected labels; a bare note as
+free text; an untouched question as an explicit skip). The header's close
+control and Esc inside the card both take the dismissal leg
+(`ChatHost::dismiss_ask`), which is a card close, never a rejection.
 
-#### AskDrawerHeader
+The live edge (`sync_live_ask`) arms the card from the fold: an open
+elicitation (`chat/inputRequested`) seeds the pending ask AND synthesizes the
+matching `ToolCall` row (same-frame guarantee), then
+`sync_ask_card_snapshots` budgets the snapshot and the card state onto that row
+before the list measures. A parked thread's subscription drops that event by
+design, so the card re-surfaces on switch-back by an explicit re-own: the
+reclaim sends `OpenSession` (same leaf and follow stream — the parked session
+never detached) and the gateway replays the unsettled adjudications to the
+joining owner (manox §D.6). A card whose id leaves the fold's input-needed list
+after having been confirmed in it settled remotely and is reconciled away
+(`reconcile_pending_with_projections`).
 
-Title + close (X, the dismissal leg). The stepper moved to
-[AskDrawerFooter](#askdrawerfooter).
-
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`)
-
-#### AskDrawerQuestion
-
-Header tag + question text, then an optional `detail` block — markdown support
-text rendered through `steer_components::markdown::static_document` beneath the
-question. On the generic card the plan-review body rides here when the intent
-fallback fires (see [PlanReviewDecisionCard](#planreviewdecisioncard)).
-
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`)
-
-#### AskDrawerOptions
-
-Checkbox/radio list with labels + descriptions. Single-select resets siblings on
-toggle; multi-select toggles in place. Options are optional and unbounded — a
-detail/intent-only question is legal (B2-PR-1 lifted the 1..=3 / 2..=3 caps).
-
-> Source: `crates/agent-ui/src/workspace/chips.rs` (`toggle_ask_option`)
-
-#### AskDrawerCustomInput
-
-Per-question free-text `custom` input, rendered under the options with an
-`Input` bound to a lazily-allocated `Entity<InputState>`
-(`Workspace::ensure_ask_custom_inputs`, run on the render path because an
-`InputState` needs a `Window`). Its live text mirrors into
-`Workspace::ask_custom_text[qi]`. At the settle fold a `custom` REPLACES a
-single-select's selection and SUPPLEMENTS a multi-select's — free text can only
-ever attach to its own question (the removed card-level "response" override is
-gone). The skip affordance that used to sit beside it moved to
-[AskDrawerFooter](#askdrawerfooter).
-
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs`
-
-#### AskDrawerFooter
-
-Fixed decision row BELOW the scrollable body (which caps at 520px): left the
-pager — Prev / "N of M" / Next ghost steppers; right the Skip outline button
-and the primary action — 「下一步」 until the last question, then 「提交」
-(last step submits via the composer's `submit_input` gate) — DISABLED until
-the CURRENT question is answered (a pick or typed custom; dsh
-`disabled={!answered}` parity), so the composer's silent submit gate can never
-be reached as a no-op that reads as a broken button. Decision actions sit
-where the reading finishes, never pinned above the content they settle.
-
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`)
-
-#### AskDrawerSkipButton
-
-Explicit per-question skip (footer outline button): clears that question's
-selection and custom, MARKS it explicitly skipped (`Workspace.ask_skipped`,
-dsh `QuestionDraftAnswer.skipped` parity), and moves the walk — a mid-card
-skip advances to the next question; the last question's skip settles the card
-through the same completeness gate as the submit. The settled canonical row is
-`{id, selected: []}` with no `custom` (the server's `AskAnswer::is_skip`). A
-skip is distinct from closing the whole card (that is `dismiss_ask`, the
-header X; the AskDrawer Esc binding only lands while focus sits INSIDE the
-card — reachable on the generic card after clicking the custom input, never
-on the decision card, which takes no focus).
-
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
-
-#### AskDrawerNav
-
-Footer Prev / Next steppers plus the primary 下一步/提交 action (the last step
-submits); the header keeps only the Cancel leg (close ⇒ `{"dismissed": true}`).
-Submitting is completeness-gated (dsh `submitDrafts`'s `findIndex(!completed)`
-parity): a question that was never touched blocks the settle and the walk
-jumps back to the first incomplete question — the blank card IS the feedback;
-only answered or EXPLICITLY skipped questions settle. The reply frame gathers
-every question's tri-state (`selected` + `custom`, skipped ones carry
-`selected: []`) into the canonical `{"answers":[{"id","selected","custom"?}]}`
-— the legacy positional `[[question, answer]]` pair and the card-level
-`response` are removed. Dismiss keeps `{"dismissed": true}`; the generic
-approval card's allow/deny leg (`resolve_auth`, `{"allow": …}`) is unchanged.
-
-> Source: `crates/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`, `first_incomplete_ask_question`) + `crates/agent-ui/src/workspace/composer.rs` (`submit_input` gate)
+> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`) + `crates/agent-ui/src/workspace/chips.rs` (`ensure_ask_state`, `reply_ask`)
 
 #### PlanReviewDecisionCard
 
@@ -798,8 +728,9 @@ the deepseek-harness `PlanReviewPanel` shape: a warning-tinted strip (dot +
 BOTTOM decision row — the approve option as the primary button, the remaining
 options as outline buttons (description in the tooltip), and a quiet
 「继续讨论」 ghost action carrying the dismissal leg (`dismiss_ask`). A click
-IS the verdict (`decide_ask_option` folds the clicked option in and settles in
-the same activation — no selection-then-confirm two-step). 「继续讨论」 is the
+IS the verdict: the button submits the one-question ask with that option
+selected (`ChatHost::submit_ask` with a single reply — no selection-then-confirm
+two-step). 「继续讨论」 is the
 decision card's only keyboard-free exit: the AskDrawer Esc binding is
 context-scoped and lands only while focus sits INSIDE the card, and this card
 takes no focus (buttons avoid focus on mouse-down) — a deliberate button-only
@@ -808,13 +739,12 @@ surface, same as dsh's `PlanReviewPanel`.
 The user's answer rides the normal canonical reply; the SERVER owns the verdict
 mapping (Approve → keep, Approve & compact → compact, anything else — Request
 changes / custom / skip → refine, and a card close → stop and stay in plan mode
-awaiting a message). The client sends no verdict enum. A free-form message while
-the card is up submits the card (per [AskDrawerNav](#askdrawernav)), not a
+awaiting a message). The client sends no verdict enum. Enter in the composer
+while the card is up submits the card (per [AskDrawer](#askdrawer)), not a
 separate dismissal. A plan-review ask that fails the routing (extra questions,
-a multi-select question, unmatched `approve`) renders the generic stepper flow
-instead.
+a multi-select question, unmatched `approve`) renders the paged form instead.
 
-> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/steer-agent-chat-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`decide_ask_option`)
+> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/steer-agent-chat-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`reply_ask`)
 
 #### 3.2.4 Popups & Dropdowns
 
@@ -1201,9 +1131,9 @@ The fake terminal for command-shaped bodies (`ai_elements::ShellView`): host-sup
 
 #### AskUserQuestion
 
-The ask takeover card as a paged form (`ai_elements::AskUserQuestion` driven by `AskState`): one question per page, radio circles for single-select blocks, checkboxes for multi-select, a note input per question (lazily mounted — an input state needs a window), and a `< 1/3 >` pager whose three controls are identical plain glyphs (the submit check included — the last page's forward edge). `advance` past the last page settles the card (`AskSubmitted` event) and swaps the form for the host's markdown `.output(...)`, which the settled header folds (chevron + click). Strings are the host's (headers, badges, placeholder, footnote); the card's page is clamped against the blocks it received. **Gallery-only today**: the live ask flow keeps its own card (see [ToolCallCard](#toolcallcard)).
+The ask card as a paged form (`ai_elements::AskUserQuestion` driven by `AskState`): one question per page, radio circles for single-select blocks, checkboxes for multi-select, a note input per question (lazily mounted — an input state needs a window), and a `< 1/3 >` pager whose three controls are identical plain glyphs (the submit check included — the last page's forward edge). `advance` past the last page settles the card (`AskSubmitted` event) and swaps the form for the host's markdown `.output(...)`, which the settled header folds (chevron + click). Strings are the host's (headers, badges, placeholder, footnote); a block's `detail` element is the host's too (the crate renders no markdown of its own); the card's page is clamped against the blocks it received. A host that owns the answer elsewhere overrides the pager's check with `.on_submit(...)` — the state stays a working form until that host drops it — and adds the header's dismissal control with `.on_close(...)`, rendered while the card is unsettled only (a settled card is a transcript row, not a surface to leave). Both hooks are driven by the live conversation card ([AskDrawer](#askdrawer)); the gallery exercises the default path.
 
-> Source: `crates/ai-elements/src/ask.rs`. Acceptance surface: `cargo run -p ai-elements --example gallery` → AskUserQuestion.
+> Source: `crates/ai-elements/src/ask.rs`. Acceptance surface: `cargo run -p ai-elements --example gallery` → AskUserQuestion; the live face is [AskDrawer](#askdrawer).
 
 #### ScrollHandle / ScrollableElement
 
@@ -1246,7 +1176,7 @@ States of a [ToolCallCard](#toolcallcard).
 
 #### PendingApproval
 
-Waiting for user, surfaces as the [AskDrawer](#askdrawer) question card.
+Waiting for user, surfaces as the [AskDrawer](#askdrawer) form card.
 
 #### Running
 

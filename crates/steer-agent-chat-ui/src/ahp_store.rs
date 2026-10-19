@@ -2573,7 +2573,6 @@ pub fn pending_ask_from_ahp(
         return None;
     }
     let mut parsed = Vec::with_capacity(questions.len());
-    let mut selections = Vec::with_capacity(questions.len());
     for q in questions {
         let (id, question, header, multi, options) = match q {
             Q::SingleSelect(s) => (
@@ -2634,7 +2633,6 @@ pub fn pending_ask_from_ahp(
             ),
             Q::Unknown(_) => continue,
         };
-        selections.push(vec![false; options.len()]);
         // A plan-review elicitation (request id `plan-review:<entry>`) renders
         // the verdict card: the affirmative option is highlighted by label
         // (the render matches `intent.approve` against the option labels).
@@ -2660,7 +2658,6 @@ pub fn pending_ask_from_ahp(
     Some(crate::column::PendingAsk {
         id,
         questions: parsed,
-        selections,
     })
 }
 

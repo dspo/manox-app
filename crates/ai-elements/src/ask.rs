@@ -8,7 +8,11 @@
 //! options toggle, pages turn, notes type into real input fields, and
 //! `advance` past the last page submits, flipping the card to its settled
 //! rendering where the host's output element replaces the form — the
-//! transcript a later reader sees.
+//! transcript a later reader sees. A host that owns the answer elsewhere (a
+//! conversation writing the ask's answer onto the wire, say) can reroute the
+//! submit instead: [`AskUserQuestion::on_submit`] replaces what the pager's
+//! check does and keeps the card a working form until that host drops it, and
+//! [`AskUserQuestion::on_close`] adds the header's dismissal control.
 //!
 //! The strings are the host's. Headers, badges ("Recommended"), the note
 //! placeholder, the footnote, and the output's markdown all arrive localized;
@@ -17,6 +21,8 @@
 //! Indicators are deliberately loud — 18px cells, solid borders in the muted
 //! foreground, filled selected states — because a form the user cannot read
 //! at a glance is a form they answer wrongly.
+
+use std::rc::Rc;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, ElementId, Entity, EventEmitter,
@@ -69,6 +75,10 @@ impl AskOption {
 pub struct AskBlock {
     header: Option<SharedString>,
     question: SharedString,
+    /// Host-rendered support text under the question — a plan body, a file
+    /// excerpt, whatever the ask hangs off the question. The crate renders no
+    /// markdown of its own, so the host hands over the element.
+    detail: Option<AnyElement>,
     multi_select: bool,
     options: Vec<AskOption>,
 }
@@ -78,6 +88,7 @@ impl AskBlock {
         Self {
             header: None,
             question: question.into(),
+            detail: None,
             multi_select: false,
             options: Vec::new(),
         }
@@ -85,6 +96,12 @@ impl AskBlock {
 
     pub fn header(mut self, header: impl Into<SharedString>) -> Self {
         self.header = Some(header.into());
+        self
+    }
+
+    /// Support text beneath the question (the host's element).
+    pub fn detail(mut self, detail: impl IntoElement) -> Self {
+        self.detail = Some(detail.into_any_element());
         self
     }
 
@@ -169,12 +186,22 @@ impl AskState {
         }
     }
 
-    /// The pager's forward edge: the next page, or — on the last page —
-    /// the submit.
-    pub fn advance(&mut self, cx: &mut Context<Self>) {
+    /// The pager's forward edge: turns the page, or reports `true` when this
+    /// WAS the last page — the caller then settles the card however it owns the
+    /// submit. The click and a host's own keyboard binding share this one rule;
+    /// [`AskState::advance`] is this plus the card's own settle.
+    pub fn forward(&mut self, cx: &mut Context<Self>) -> bool {
         if self.page + 1 < self.multi.len() {
             self.set_page(self.page + 1, cx);
+            false
         } else {
+            true
+        }
+    }
+
+    /// The pager's forward edge, settling the card itself on the last page.
+    pub fn advance(&mut self, cx: &mut Context<Self>) {
+        if self.forward(cx) {
             self.submit(cx);
         }
     }
@@ -232,6 +259,16 @@ impl AskState {
             .unwrap_or_default()
     }
 
+    /// The whole form as the host reads it back at submit time: one
+    /// `(selected option indices, note text)` per question, in question order.
+    /// A question the user never touched reports an empty pair — the host
+    /// settles that as an explicit skip.
+    pub fn answers(&self, cx: &App) -> Vec<(Vec<usize>, String)> {
+        (0..self.multi.len())
+            .map(|qix| (self.selections[qix].clone(), self.note(qix, cx).to_string()))
+            .collect()
+    }
+
     /// The question's note editor, mounted on first use. Input state needs a
     /// window, so the card materializes editors during its render — this
     /// method is the crate's internal seam for that, not a host API.
@@ -253,6 +290,9 @@ impl AskState {
 
 impl EventEmitter<AskSubmitted> for AskState {}
 
+/// A click that settles the ask card, as the component takes it.
+pub type AskAction = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// The ask card: header row, the current question's form (or the submitted
 /// output), and the pager bar.
 #[derive(IntoElement)]
@@ -265,6 +305,8 @@ pub struct AskUserQuestion {
     blocks: Vec<AskBlock>,
     footnote: Option<SharedString>,
     output: Option<AnyElement>,
+    on_submit: Option<AskAction>,
+    on_close: Option<AskAction>,
 }
 
 impl AskUserQuestion {
@@ -278,6 +320,8 @@ impl AskUserQuestion {
             blocks: Vec::new(),
             footnote: None,
             output: None,
+            on_submit: None,
+            on_close: None,
         }
     }
 
@@ -322,6 +366,24 @@ impl AskUserQuestion {
     /// a markdown element), shown in place of the form once submitted.
     pub fn output(mut self, output: impl IntoElement) -> Self {
         self.output = Some(output.into_any_element());
+        self
+    }
+
+    /// Replaces what the pager's last-page check does. The default settles the
+    /// card's own [`AskState`] (`advance` → `submit`); a host that owns the
+    /// answer elsewhere routes the click to itself and settles the card by
+    /// dropping it — the state stays a working form until then.
+    pub fn on_submit(mut self, on_submit: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_submit = Some(Rc::new(on_submit));
+        self
+    }
+
+    /// The header's dismissal control — rendered while the card is
+    /// unsettled, because a settled card is a transcript row rather than a
+    /// surface the user can leave. No default: a host that never lets the ask
+    /// go simply omits it.
+    pub fn on_close(mut self, on_close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_close = Some(Rc::new(on_close));
         self
     }
 
@@ -382,11 +444,14 @@ impl RenderOnce for AskUserQuestion {
             blocks,
             footnote,
             output,
+            on_submit,
+            on_close,
         } = self;
         // `AnyElement` is not `Clone`, so the output moves into the settled
-        // branch and the form never sees it.
+        // branch and the form never sees it; a block's detail element is
+        // likewise consumed by whichever body renders it.
         let has_output = output.is_some();
-        let ask = AskUserQuestion {
+        let mut ask = AskUserQuestion {
             id: id.clone(),
             state: state.clone(),
             icon: None,
@@ -395,6 +460,8 @@ impl RenderOnce for AskUserQuestion {
             blocks,
             footnote: footnote.clone(),
             output: None,
+            on_submit: None,
+            on_close: None,
         };
         let state_ref = state.read(cx);
         // The state's page is clamped against the blocks this card received:
@@ -427,6 +494,18 @@ impl RenderOnce for AskUserQuestion {
             )
             .child(div().flex_1())
             .children(status);
+        // The dismissal control rides the header's trailing edge, level with
+        // the status chip it sits beside.
+        let close: Option<AnyElement> = on_close.map(|on_close| {
+            pager_button(
+                (ElementId::Name(id.clone()), "close"),
+                Icon::new(IconName::Close).xsmall().into_any_element(),
+                muted,
+                true,
+                move |_, window, cx| on_close(window, cx),
+            )
+            .into_any_element()
+        });
         // The settled header owns the output's fold: clicking it (or working
         // it on the keyboard) toggles, and the trailing chevron says so.
         let header: AnyElement = if settled {
@@ -451,7 +530,9 @@ impl RenderOnce for AskUserQuestion {
                 .child(chevron)
                 .into_any_element()
         } else {
-            base_header.into_any_element()
+            // A settled card is a transcript row, so the dismissal control
+            // belongs to the form alone (see `on_close`).
+            base_header.children(close).into_any_element()
         };
 
         let body: AnyElement = if submitted {
@@ -459,23 +540,23 @@ impl RenderOnce for AskUserQuestion {
             // without an output slot keeps the last page's form, frozen.
             match output {
                 Some(output) => output,
-                None => frozen_form(&ask, page, cx),
+                None => frozen_form(&mut ask, page, cx),
             }
         } else {
-            form_page(&ask, page, window, cx)
+            form_page(&mut ask, page, window, cx)
         };
 
         // The pager: prev, `n/N`, then next — the submit check on the last
-        // page, solid accent with a light glyph so it reads as the primary
-        // action. Not shown on the settled card; the output is not a form.
-        // The pager: prev, `n/N`, then next — the submit check on the last
         // page, the same plain glyph control as the turn chevrons. Not shown
-        // on the settled card; the output is not a form.
+        // on the settled card; the output is not a form. The check settles
+        // through `on_submit` when the host owns the answer, and through the
+        // card's own state otherwise.
         let pager = (!submitted && pages > 0).then(|| {
             let state_for_prev = state.clone();
             let submit = page + 1 == pages;
             let next = {
                 let state_for_next = state.clone();
+                let on_submit = on_submit.clone();
                 let glyph = if submit {
                     Icon::new(IconName::Check).xsmall().into_any_element()
                 } else {
@@ -488,7 +569,13 @@ impl RenderOnce for AskUserQuestion {
                     glyph,
                     muted,
                     true,
-                    move |_, _window, cx| state_for_next.update(cx, |state, cx| state.advance(cx)),
+                    move |_, window, cx| {
+                        if submit && let Some(on_submit) = on_submit.as_ref() {
+                            on_submit(window, cx);
+                            return;
+                        }
+                        state_for_next.update(cx, |state, cx| state.advance(cx));
+                    },
                 )
             };
             h_flex()
@@ -609,7 +696,12 @@ fn pager_button(
 }
 
 /// The current page's form: the question, its options, and the note field.
-fn form_page(ask: &AskUserQuestion, page: usize, window: &mut Window, cx: &mut App) -> AnyElement {
+fn form_page(
+    ask: &mut AskUserQuestion,
+    page: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     if ask.blocks.is_empty() {
         return v_flex().w_full().min_w_0().into_any_element();
     }
@@ -620,7 +712,7 @@ fn form_page(ask: &AskUserQuestion, page: usize, window: &mut Window, cx: &mut A
         theme.secondary,
         theme.accent,
     );
-    let block = &ask.blocks[page];
+    let block = &mut ask.blocks[page];
     let multi = block.multi();
 
     let note = ask
@@ -703,6 +795,7 @@ fn form_page(ask: &AskUserQuestion, page: usize, window: &mut Window, cx: &mut A
                 .text_color(foreground)
                 .child(block.question.clone()),
         )
+        .children(block.detail.take())
         .children(options)
         .child(
             v_flex()
@@ -716,14 +809,14 @@ fn form_page(ask: &AskUserQuestion, page: usize, window: &mut Window, cx: &mut A
 
 /// The frozen last page — the fallback for a submitted card whose host gave
 /// no output element.
-fn frozen_form(ask: &AskUserQuestion, page: usize, cx: &App) -> AnyElement {
+fn frozen_form(ask: &mut AskUserQuestion, page: usize, cx: &App) -> AnyElement {
     if ask.blocks.is_empty() {
         return v_flex().w_full().min_w_0().into_any_element();
     }
     let theme = cx.theme();
     let (muted, foreground, accent) = (theme.muted_foreground, theme.foreground, theme.accent);
-    let block = &ask.blocks[page];
     let state = ask.state.read(cx);
+    let block = &mut ask.blocks[page];
     v_flex()
         .w_full()
         .min_w_0()
@@ -741,6 +834,7 @@ fn frozen_form(ask: &AskUserQuestion, page: usize, cx: &App) -> AnyElement {
                 .text_color(foreground)
                 .child(block.question.clone()),
         )
+        .children(block.detail.take())
         .children(block.options.iter().enumerate().map(|(oix, option)| {
             let selected = state.is_selected(page, oix);
             h_flex()

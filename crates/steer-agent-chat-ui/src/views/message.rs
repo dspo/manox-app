@@ -26,23 +26,20 @@ use crate::conversation::{
 };
 use crate::i18n;
 use crate::views::activity_chain::{ActivityChain, ActivityChainHeader, ActivityStep};
-use ai_elements::BrailleSpinner;
+use ai_elements::ask;
+use ai_elements::{AskBlock, AskOption, BrailleSpinner};
 use base64::Engine as _;
 use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui::prelude::*;
-use gpui::{Animation, AnimationExt as _, CursorStyle, ease_out_quint};
+use gpui::{Animation, AnimationExt as _, ease_out_quint};
 use gpui::{App, ClipboardItem, Entity, Render, ScrollHandle, SharedString, WeakEntity, px};
+use gpui_component::Disableable as _;
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState},
     tooltip::Tooltip,
     v_flex,
-};
-use gpui_component::{
-    Disableable as _,
-    tag::{Tag, TagVariant},
 };
 use manox_agent::language_model::{LanguageModelToolResult, MessageContent, Role};
 use manox_agent::thread::PermissionMode;
@@ -100,6 +97,9 @@ pub struct AgentTaskCtx {
 pub struct ToolCallCtx {
     pub host: ChatHostHandle,
     pub ask: Option<AskCardSnapshot>,
+    /// The pending ask's interactive card state, mounted by the workspace
+    /// alongside the snapshot (`None` for a row that never carried an ask).
+    pub ask_state: Option<Entity<ask::AskState>>,
     pub confirmation: Option<ConfirmationSnapshot>,
 }
 
@@ -253,6 +253,11 @@ pub struct MessageItem {
     /// measuring rows, so `render` never reads the owning `Workspace` and the
     /// list callback remains read-only.
     pub ask_snapshot: Option<AskCardSnapshot>,
+    /// The pending ask's interactive card state (`ai_elements::AskState`),
+    /// budgeted by the `Workspace` beside `ask_snapshot` — the snapshot is the
+    /// ask's content, this is the page/answers half the card drives. Both land
+    /// and clear together.
+    pub ask_state: Option<Entity<ask::AskState>>,
     /// The unified confirmation card's decision surface, budgeted by the
     /// `Workspace` under the same contract as `ask_snapshot`: present only
     /// while the fold still carries the park, so a settle anywhere retires
@@ -281,6 +286,7 @@ impl MessageItem {
             preview: None,
             notice_panel: None,
             ask_snapshot: None,
+            ask_state: None,
             confirmation: None,
             copied: CopiedRegistry::default(),
             card_subs: Vec::new(),
@@ -565,6 +571,35 @@ impl MessageItem {
         }
     }
 
+    /// Re-sync every card-family tool entry's mirrored `ToolState` from the
+    /// entry, on every render pass.
+    ///
+    /// The fold lives on the conversation entry (`collapsed` /
+    /// `user_toggled`); the ai-elements card only mirrors it. Every fold change
+    /// writes the entry — the user's header click, the next entry's arrival
+    /// folding its predecessor, the delayed auto-collapse — so the mirror has
+    /// to follow the entry's *current* value rather than only the event that
+    /// produced it: re-syncing on the tool's own output events alone left a
+    /// manually opened card shut forever (an auto-collapsed card could not be
+    /// reopened), and a folded predecessor still painting open. The sync is a
+    /// no-op when the two already agree (see `ensure_tool_card`).
+    fn sync_card_mirrors(&mut self, cx: &mut gpui::Context<Self>) {
+        let (kind, card_subs) = (&mut self.kind, &mut self.card_subs);
+        match kind {
+            ConvItem::Thinking(t) => {
+                for entry in t.entries.iter_mut() {
+                    if let ActivityEntry::Tool(tool) = entry {
+                        let _ = crate::views::tool_cards::ensure_tool_card(tool, card_subs, cx);
+                    }
+                }
+            }
+            ConvItem::ToolCall(tool) => {
+                let _ = crate::views::tool_cards::ensure_tool_card(tool, card_subs, cx);
+            }
+            _ => {}
+        }
+    }
+
     /// On history reload, mount + refresh the persistent panel for every tool
     /// entry across all activity segments (and each top-level `ToolCall`),
     /// so selection works on reloaded history and finalized output renders as a
@@ -800,12 +835,16 @@ impl Render for MessageItem {
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
+        // The card families' fold mirror follows the entry on every pass, so a
+        // manual open/close lands on the card (see `sync_card_mirrors`).
+        self.sync_card_mirrors(cx);
         let agent_ctx = Some(AgentTaskCtx {
             host: self.host.clone(),
         });
         let tool_ctx = Some(ToolCallCtx {
             host: self.host.clone(),
             ask: self.ask_snapshot.clone(),
+            ask_state: self.ask_state.clone(),
             confirmation: self.confirmation.clone(),
         });
         // The owned markdown document for text-bearing items (persistent across
@@ -2473,11 +2512,11 @@ pub fn render_ask_user_card(
     }
 
     // One takeover, two presentations: a plan review is one decision over one
-    // plan, so it takes the decision card; every other ask takes the generic
-    // stepper flow. The routing lives at the one entry that renders the card,
+    // plan, so it takes the decision card; every other ask takes the paged
+    // form card. The routing lives at the one entry that renders the card,
     // so neither presentation can claim an ask the other is already showing.
-    if snapshot.total == 1
-        && let Some(approve_ix) = plan_review_approve_index(&snapshot.question)
+    if snapshot.questions.len() == 1
+        && let Some(approve_ix) = plan_review_approve_index(&snapshot.questions[0])
     {
         return render_plan_review_card(
             ix,
@@ -2489,14 +2528,109 @@ pub fn render_ask_user_card(
             cx,
         );
     }
-    render_question_card(
-        ix,
+    let Some(state) = ctx.ask_state.clone() else {
+        // The card's interactive state mounts on the workspace's render path;
+        // before that first pass there is nothing to page through yet.
+        return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
+    };
+    render_ask_form_card(
         theme,
         ctx.host.clone(),
-        snapshot,
+        &snapshot,
+        &state,
         copy.owner.clone(),
-        cx,
     )
+}
+
+/// The interactive ask form: one `ai_elements::AskUserQuestion` — one question
+/// per page, radio/checkbox options, a per-question note field, and the pager
+/// whose last-page control is the submit check. The page and the answers live
+/// in the card's own `AskState` (owned by the workspace); the card reports the
+/// answer back through the host, which folds the indices onto the wire.
+fn render_ask_form_card(
+    theme: &Theme,
+    host: ChatHostHandle,
+    snapshot: &AskCardSnapshot,
+    state: &Entity<ask::AskState>,
+    owner: Option<WeakEntity<MessageItem>>,
+) -> gpui::AnyElement {
+    let blocks = snapshot
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(qix, q)| {
+            let mut block = AskBlock::new(q.question.clone());
+            if !q.header.trim().is_empty() {
+                block = block.header(q.header.clone());
+            }
+            if q.multi_select {
+                block = block.multi_select();
+            }
+            if !q.detail.trim().is_empty() {
+                block = block.detail(static_body(
+                    format!("ask-card-detail-{}-{qix}", snapshot.id),
+                    q.detail.clone(),
+                    theme,
+                    owner.clone(),
+                ));
+            }
+            for opt in &q.options {
+                let mut option = AskOption::new(opt.label.clone());
+                if opt.recommended {
+                    option = option.badge(i18n::t("workspace-ask-recommended"));
+                }
+                if !opt.description.trim().is_empty() {
+                    option = option.description(opt.description.clone());
+                }
+                block = block.option(option);
+            }
+            block
+        })
+        .collect::<Vec<_>>();
+
+    let host_submit = host.clone();
+    let host_close = host.clone();
+    let host_esc = host.clone();
+    let state_for_submit = state.clone();
+    let card = ask::AskUserQuestion::new(snapshot.id.clone(), state)
+        .icon(Icon::new(gpui_kit_assets::IconName::MessageCircleQuestionMark).xsmall())
+        // The card's identity is the tool that raised it — the same voice the
+        // other tool cards use. The question's own header rides the form.
+        .name(manox_agent::tools::ASK_USER_QUESTION)
+        .blocks(blocks)
+        // The pager's check submits the form: the card reports what it holds
+        // (an untouched question settles as an explicit skip) and the host
+        // folds it onto the wire.
+        .on_submit(move |_, cx| {
+            let replies = crate::ask_card::replies_of(&state_for_submit, cx);
+            host_submit.submit_ask(replies, cx);
+        })
+        .on_close(move |_, cx| host_close.dismiss_ask(cx));
+    // The pager's keys, within the card's own focus context: the arrow keys are
+    // the same forward/back edge as the glyphs beside the `n/N` count — on the
+    // last page the forward key is the submit the check is.
+    let host_next = host.clone();
+    let state_for_keys = state.clone();
+    let state_for_prev = state.clone();
+    gpui::div()
+        .w_full()
+        .min_w_0()
+        .key_context("AskDrawer")
+        // Esc inside the card closes it unanswered — a dismissal, never an
+        // approval card's deny.
+        .on_action(move |_: &crate::AskCancel, _window, cx| host_esc.dismiss_ask(cx))
+        .on_action(move |_: &crate::AskPrev, _window, cx| {
+            state_for_prev.update(cx, |state, cx| state.go_back(cx));
+        })
+        .on_action(move |_: &crate::AskNext, _window, cx| {
+            let last = state_for_keys.update(cx, |state, cx| state.forward(cx));
+            if last {
+                let replies = crate::ask_card::replies_of(&state_for_keys, cx);
+                host_next.submit_ask(replies, cx);
+            }
+        })
+        .child(card)
+        .into_any_element()
 }
 
 /// The plan-review decision presentation's approve option: the ask must carry
@@ -2562,8 +2696,9 @@ fn contain_body_scroll(
 /// owns the scroll (so the strip and the decision row stay reachable on a
 /// long plan), and a fixed decision row at the BOTTOM — the approve option as
 /// the primary button, the remaining options as outline buttons, and a quiet
-/// discuss action carrying the dismissal leg. A click IS the verdict
-/// (`decide_ask_option`): no selection-then-confirm two-step.
+/// discuss action carrying the dismissal leg. A click IS the verdict: the
+/// button submits the one-question ask with that option selected, so there is
+/// no selection-then-confirm two-step.
 fn render_plan_review_card(
     ix: usize,
     theme: &Theme,
@@ -2575,6 +2710,9 @@ fn render_plan_review_card(
 ) -> gpui::AnyElement {
     let host_esc = host.clone();
     let host_discuss = host.clone();
+    // The single question the decision settles (the routing only sends
+    // one-question asks here).
+    let question = &snapshot.questions[0];
 
     let strip = h_flex()
         .w_full()
@@ -2598,11 +2736,11 @@ fn render_plan_review_card(
         .min_w_0()
         .text_base()
         .text_color(theme.foreground)
-        .child(snapshot.question.question.clone());
-    let plan_body = (!snapshot.question.detail.trim().is_empty()).then(|| {
+        .child(question.question.clone());
+    let plan_body = (!question.detail.trim().is_empty()).then(|| {
         static_body(
             format!("plan-review-detail-{ix}"),
-            snapshot.question.detail.clone(),
+            question.detail.clone(),
             theme,
             owner.clone(),
         )
@@ -2619,12 +2757,9 @@ fn render_plan_review_card(
         .pb_1()
         .child(lead)
         .children(plan_body);
-    // The plan body owns the wheel while it has room: without the guard a
-    // single event scrolls the plan AND the column, so the plan's tail never
-    // reaches the top of the card.
     // The plan body owns the wheel while it has room (see
     // `contain_body_scroll`).
-    let body = match host.ask_body_scroll(snapshot.step, cx) {
+    let body = match host.ask_body_scroll(0, cx) {
         Some(scroll) => contain_body_scroll(body, &scroll),
         None => body,
     };
@@ -2650,7 +2785,7 @@ fn render_plan_review_card(
                     host_discuss.dismiss_ask(cx);
                 }),
         );
-    for (oi, opt) in snapshot.question.options.iter().enumerate() {
+    for (oi, opt) in question.options.iter().enumerate() {
         if oi == approve_ix {
             continue;
         }
@@ -2660,7 +2795,7 @@ fn render_plan_review_card(
             .small()
             .label(opt.label.clone())
             .on_click(move |_, _, cx: &mut App| {
-                host_decide.decide_ask_option(0, oi, cx);
+                host_decide.submit_ask(vec![verdict(oi)], cx);
             });
         if !opt.description.trim().is_empty() {
             button = button.tooltip(opt.description.clone());
@@ -2668,13 +2803,13 @@ fn render_plan_review_card(
         footer = footer.child(button);
     }
     let host_approve = host.clone();
-    let approve = &snapshot.question.options[approve_ix];
+    let approve = &question.options[approve_ix];
     let mut approve_button = Button::new(format!("plan-review-approve-{ix}"))
         .primary()
         .small()
         .label(approve.label.clone())
         .on_click(move |_, _, cx: &mut App| {
-            host_approve.decide_ask_option(0, approve_ix, cx);
+            host_approve.submit_ask(vec![verdict(approve_ix)], cx);
         });
     if !approve.description.trim().is_empty() {
         approve_button = approve_button.tooltip(approve.description.clone());
@@ -2682,10 +2817,7 @@ fn render_plan_review_card(
     footer = footer.child(approve_button);
 
     v_flex()
-        .id(format!(
-            "plan-review-card-{}-{}",
-            snapshot.id, snapshot.transition_gen
-        ))
+        .id(format!("plan-review-card-{}", snapshot.id))
         .key_context("AskDrawer")
         // The discuss action is the decision card's only exit. The AskDrawer
         // Esc binding is context-scoped and only lands while focus sits
@@ -2704,368 +2836,27 @@ fn render_plan_review_card(
         .bg(theme.background)
         .shadow_lg()
         // The extra bottom padding plus negative margin lets the composer
-        // cover the card tail, the same contract as the generic ask card.
+        // cover the card tail, the same contract as the form card.
         .pb_5()
         .mb(px(-10.))
         .child(strip)
         .child(body)
         .child(footer)
         .with_animation(
-            format!("plan-review-slide-{}", snapshot.transition_gen),
+            format!("plan-review-slide-{}", snapshot.id),
             Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
             |el, delta| el.mt(px(8. * (1. - delta))).opacity(delta),
         )
         .into_any_element()
 }
 
-/// The generic multi-step question card: title + close in the header; the
-/// question, its detail, the options and the custom supplement in a capped
-/// scrollable body; and a fixed footer with the pager on the left and the
-/// skip + next/submit actions on the right — the decision actions sit where
-/// the reading finishes, never pinned above the content they settle.
-fn render_question_card(
-    ix: usize,
-    theme: &Theme,
-    host: ChatHostHandle,
-    snapshot: AskCardSnapshot,
-    owner: Option<WeakEntity<MessageItem>>,
-    cx: &mut App,
-) -> gpui::AnyElement {
-    let host_close = host.clone();
-    let host_esc = host.clone();
-    let step = snapshot.step;
-    let total = snapshot.total;
-    let can_prev = step > 0;
-    let can_next = step + 1 < total;
-    // dsh parity: the primary is gated on the CURRENT question being answered
-    // (a pick or typed custom). Without the gate, "submit an unanswered card"
-    // hits the composer's silent submit gate and dies as a no-op the user
-    // reads as a broken button; the footer Skip is the always-available way
-    // through (it advances, or settles on the last question).
-    let answered_current =
-        snapshot.selections.iter().any(|s| *s) || !snapshot.custom.trim().is_empty();
-
-    let title = question_card_title(&snapshot.question.header);
-
-    let header = h_flex()
-        .w_full()
-        .min_w_0()
-        .items_center()
-        .justify_between()
-        .child(
-            gpui::div()
-                .flex_1()
-                .min_w_0()
-                .overflow_x_hidden()
-                .text_base()
-                .text_color(theme.foreground)
-                .child(title),
-        )
-        .child(
-            Button::new(("ask-card-cancel", ix))
-                .ghost()
-                .xsmall()
-                .icon(IconName::Close)
-                .on_click(move |_, _, cx: &mut App| {
-                    // Close (not deny): the dismissal marker, never
-                    // the allow/deny exit the approval card owns.
-                    host_close.dismiss_ask(cx);
-                }),
-        );
-
-    let question_row = gpui::div()
-        .w_full()
-        .min_w_0()
-        .text_base()
-        .text_color(theme.foreground)
-        .child(snapshot.question.question.clone());
-
-    // B2-PR-1 L1: `detail` is optional markdown support text beneath the
-    // question (the plan-review body rides here). Static, so a per-frame
-    // document mount is fine.
-    let detail_block = (!snapshot.question.detail.trim().is_empty()).then(|| {
-        static_body(
-            format!("ask-card-detail-{ix}-{step}"),
-            snapshot.question.detail.clone(),
-            theme,
-            owner,
-        )
-    });
-
-    let mut options_block = v_flex().w_full().min_w_0().gap_1p5();
-    for (oi, opt) in snapshot.question.options.iter().enumerate() {
-        let selected = snapshot.selections.get(oi).copied().unwrap_or(false);
-        let indicator_size = px(15.);
-        let indicator = if snapshot.question.multi_select {
-            if selected {
-                h_flex()
-                    .size(indicator_size)
-                    .rounded(px(3.))
-                    .border_1()
-                    .border_color(theme.primary)
-                    .bg(theme.primary.opacity(0.08))
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Icon::new(IconName::Check)
-                            .xsmall()
-                            .text_color(theme.primary),
-                    )
-            } else {
-                h_flex()
-                    .size(indicator_size)
-                    .rounded(px(3.))
-                    .border_1()
-                    .border_color(theme.border)
-            }
-        } else if selected {
-            h_flex()
-                .size(indicator_size)
-                .rounded_full()
-                .border_1()
-                .border_color(theme.primary)
-                .items_center()
-                .justify_center()
-                .child(gpui::div().size(px(8.)).rounded_full().bg(theme.primary))
-        } else {
-            h_flex()
-                .size(indicator_size)
-                .rounded_full()
-                .border_1()
-                .border_color(theme.border)
-        };
-        let host_for_option = host.clone();
-        // B2-PR-5: a plan-review ask (single question, `intent.kind ==
-        // "plan-review"`) highlights the affirmative option (`intent.approve`,
-        // "Approve") so the verdict card reads at a glance. `intent.approve`
-        // always names one of this question's own option labels (server
-        // validated), so the match is exact.
-        let is_approve_option = snapshot.question.intent.as_ref().is_some_and(|i| {
-            i.kind == "plan-review" && !i.approve.is_empty() && i.approve == opt.label
-        });
-        let option_row = h_flex()
-            .w_full()
-            .min_w_0()
-            .gap_2p5()
-            .items_start()
-            .px_2()
-            .py_1p5()
-            .rounded(px(10.))
-            .when(selected, |row| row.bg(theme.accent.opacity(0.08)))
-            .when(is_approve_option && !selected, |row| {
-                row.bg(theme.primary.opacity(0.08))
-                    .border_1()
-                    .border_color(theme.primary.opacity(0.45))
-            })
-            .hover(|row| row.bg(theme.accent.opacity(0.06)))
-            .id(gpui::SharedString::from(format!(
-                "ask-card-opt-{ix}-{step}-{oi}"
-            )))
-            .cursor(CursorStyle::PointingHand)
-            .on_click(move |_, _, cx: &mut App| {
-                host_for_option.toggle_ask_option(step, oi, cx);
-            })
-            .child(indicator)
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_x_hidden()
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .items_center()
-                            .gap_1p5()
-                            .child(
-                                gpui::div()
-                                    .flex_shrink_0()
-                                    .text_base()
-                                    .text_color(theme.foreground)
-                                    .child(format!("{}.", oi + 1)),
-                            )
-                            .child(
-                                gpui::div()
-                                    .min_w_0()
-                                    .overflow_x_hidden()
-                                    .text_base()
-                                    .text_color(theme.foreground)
-                                    .child(opt.label.clone()),
-                            )
-                            .when(opt.recommended, |row| {
-                                row.child(
-                                    Tag::new()
-                                        .with_variant(TagVariant::Secondary)
-                                        .small()
-                                        .child(i18n::t("workspace-ask-recommended")),
-                                )
-                            }),
-                    )
-                    .when(!opt.description.trim().is_empty(), |col| {
-                        col.child(
-                            gpui::div()
-                                .mt_0p5()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(opt.description.clone()),
-                        )
-                    }),
-            );
-        options_block = options_block.child(option_row);
+/// The plan-review verdict as the card reports it: the clicked option, and an
+/// empty note.
+fn verdict(option_ix: usize) -> crate::ask_card::AskCardReply {
+    crate::ask_card::AskCardReply {
+        selected: vec![option_ix],
+        note: String::new(),
     }
-
-    // B2-PR-1 L1 tri-state: a per-question free-text `custom` input (single
-    // select — it overrides the selection at the settle fold; multi select —
-    // it supplements it) plus an explicit per-question skip button (clears the
-    // selection and the custom, settling `{selected: [], no custom}` — a skip,
-    // distinct from closing the whole card). The `custom` entity is allocated on
-    // the render path (see `ensure_ask_custom_inputs`) because an `InputState`
-    // needs a `Window`; if it isn't present yet the row simply carries the skip.
-    let custom_state: Option<Entity<InputState>> = host.ask_custom_state(step, cx);
-    let custom_row = custom_state.map(|state| {
-        h_flex().w_full().min_w_0().mt_0p5().child(
-            Input::new(&state).appearance(false).prefix(
-                gpui::div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(i18n::t("workspace-ask-supplement-label")),
-            ),
-        )
-    });
-
-    // The body is the card's scrollport: a long detail (a plan body rides a
-    // generic ask when the intent fallback fires) caps here instead of
-    // pushing the footer's decision actions out of reach.
-    let body = gpui::div()
-        .id(format!("ask-card-body-{ix}-{step}"))
-        .debug_selector(move || format!("ask-card-body-{ix}-{step}"))
-        .w_full()
-        .min_w_0()
-        .max_h(px(520.))
-        .overflow_y_scroll()
-        .child(question_row)
-        .children(detail_block)
-        .child(options_block)
-        .children(custom_row);
-    // The body owns the wheel while it has room — the same contract as the
-    // plan-review card's body (see `contain_body_scroll`).
-    let body = match host.ask_body_scroll(step, cx) {
-        Some(scroll) => contain_body_scroll(body, &scroll),
-        None => body,
-    };
-
-    let host_prev = host.clone();
-    let host_next = host.clone();
-    let host_advance = host.clone();
-    let host_submit = host.clone();
-    let host_skip = host.clone();
-    let pager = h_flex()
-        .items_center()
-        .gap_1()
-        .child(
-            Button::new(("ask-card-prev", ix))
-                .ghost()
-                .xsmall()
-                .icon(IconName::ChevronLeft)
-                .disabled(!can_prev)
-                .on_click(move |_, _, cx: &mut App| {
-                    host_prev.ask_prev(cx);
-                }),
-        )
-        .child(
-            gpui::div()
-                .min_w(px(44.))
-                .text_center()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(format!("{} of {total}", step + 1)),
-        )
-        .child(
-            Button::new(("ask-card-next", ix))
-                .ghost()
-                .xsmall()
-                .icon(IconName::ChevronRight)
-                .disabled(!can_next)
-                .on_click(move |_, _, cx: &mut App| {
-                    host_advance.ask_next(cx);
-                }),
-        );
-    let primary_action = if can_next {
-        Button::new(format!("ask-card-advance-{ix}-{step}"))
-            .primary()
-            .small()
-            .disabled(!answered_current)
-            .label(i18n::t("workspace-ask-next"))
-            .on_click(move |_, _, cx: &mut App| {
-                host_next.ask_next(cx);
-            })
-    } else {
-        Button::new(format!("ask-card-submit-{ix}-{step}"))
-            .primary()
-            .small()
-            .disabled(!answered_current)
-            .label(i18n::t("workspace-ask-submit"))
-            .on_click(move |_, window, cx: &mut App| {
-                host_submit.submit_input(window, cx);
-            })
-    };
-    let footer = h_flex()
-        .debug_selector(move || format!("ask-card-footer-{ix}-{step}"))
-        .w_full()
-        .min_w_0()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(pager)
-        .child(
-            h_flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    Button::new(format!("ask-card-skip-{ix}-{step}"))
-                        .outline()
-                        .small()
-                        .label(i18n::t("workspace-ask-skip"))
-                        .on_click(move |_, window, cx: &mut App| {
-                            host_skip.skip_ask_question(step, window, cx);
-                        }),
-                )
-                .child(primary_action),
-        );
-
-    v_flex()
-        .id(format!(
-            "ask-card-{}-{}",
-            snapshot.id, snapshot.transition_gen
-        ))
-        .key_context("AskDrawer")
-        // Esc inside the drawer closes it unanswered — the same dismissal
-        // leg as the X button, never the approval card's deny.
-        .on_action(move |_: &crate::AskCancel, _window, cx: &mut App| {
-            host_esc.dismiss_ask(cx);
-        })
-        .w_full()
-        .min_w_0()
-        .gap_2p5()
-        .px_3()
-        .pt_3()
-        // The extra bottom padding plus negative margin lets the composer cover
-        // the drawer tail, so the card reads as emerging from beneath it.
-        .pb_5()
-        .mb(px(-10.))
-        .rounded(px(18.))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.background)
-        .shadow_lg()
-        .child(header)
-        .child(body)
-        .child(footer)
-        .with_animation(
-            format!("ask-card-slide-{}", snapshot.transition_gen),
-            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-            |el, delta| el.mt(px(8. * (1. - delta))).opacity(delta),
-        )
-        .into_any_element()
 }
 
 /// The Preview tool's top-level card — the rendered artifact the user was
@@ -4740,45 +4531,12 @@ fn pair_tool_result(items: &mut Vec<ConvItem>, tr: &LanguageModelToolResult) {
     }
 }
 
-/// Title for a `AskUserQuestion` card.
-///
-/// A header comes from the model/runtime and is shown as-is. The runtime does
-/// not require it (`parse_pending_ask` tolerates a missing field), so an empty
-/// header falls back to this app's own chrome label rather than rendering a
-/// blank card.
-fn question_card_title(header: &str) -> SharedString {
-    if header.trim().is_empty() {
-        i18n::t("workspace-clarify-title")
-    } else {
-        header.into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
-    /// An empty question header is reachable (the runtime's validation does not
-    /// require the field), so the card must fall back to app chrome rather
-    /// than render a blank title. A present header is shown verbatim.
-    #[test]
-    fn question_card_title_falls_back_for_an_empty_header() {
-        let fallback = i18n::t("workspace-clarify-title");
-        assert_ne!(
-            fallback.as_ref(),
-            "workspace-clarify-title",
-            "the fallback key is missing from the bundles"
-        );
-        for empty in ["", "   ", "\n"] {
-            assert_eq!(question_card_title(empty), fallback, "header: {empty:?}");
-        }
-        assert_eq!(question_card_title("Pick a database"), "Pick a database");
-        // Runtime-supplied text is never re-localized, even when it is Chinese.
-        assert_eq!(question_card_title("选一个数据库"), "选一个数据库");
-    }
-
     /// The plan-review routing is exact: the intent must name `plan-review`
     /// AND its `approve` label must match one of the question's own option
-    /// labels; anything else renders the generic question card.
+    /// labels; anything else renders the paged form card.
     #[test]
     fn plan_review_approve_index_requires_a_matching_option() {
         use crate::ask_card::{AskCardIntent, AskCardOption, AskCardQuestion};
@@ -4857,6 +4615,135 @@ mod tests {
         AnyWindowHandle, Bounds, Pixels, Render, TestAppContext, VisualTestContext, Window, size,
     };
     use manox_agent::language_model::{LanguageModelToolResult, LanguageModelToolUse};
+
+    /// The card families' fold lives on the conversation entry, and the
+    /// ai-elements card only mirrors it — so a manual fold must reach the card
+    /// on the next render even though the click writes only the entry.
+    /// Regression: the mirror was re-synced by the tool's own output events
+    /// alone, so the ordinary shape (open while running, folded when the
+    /// result lands) could never be opened again by hand.
+    #[gpui::test]
+    fn a_card_family_tool_follows_the_entrys_fold_on_every_render(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let item = cx.update(|cx| {
+            let mut container = ThinkingContainer::new();
+            container.accepting_entries = false;
+            container.streaming = false;
+            container.entries.push(ActivityEntry::Tool(ToolCallItem {
+                id: "tu_1".into(),
+                name: manox_agent::tools::BASH.to_string(),
+                title: "ls".into(),
+                status: ToolCallStatus::Success,
+                output: "a\n".into(),
+                is_error: false,
+                input: serde_json::json!({"command": "ls"}),
+                streaming: false,
+                // The state a settled card lands in: folded, not user-toggled.
+                collapsed: true,
+                user_toggled: false,
+                panel: None,
+                card: None,
+                cwd: None,
+            }));
+            cx.new(|_| {
+                MessageItem::new(
+                    ConvItem::Thinking(container),
+                    "model".into(),
+                    0,
+                    crate::host::noop_host(),
+                )
+            })
+        });
+        let window = cx.open_window(size(px(600.), px(800.)), {
+            let item = item.clone();
+            move |_, _| RowProbe { item }
+        });
+        // Mount the mirror the way the live path does when the tool settles
+        // (`sync_tool_entry_panel`) — the entry's fold is what render has to
+        // follow, not whether a card exists at all. The live host is gone
+        // here, so the mount runs directly.
+        cx.update(|cx| {
+            item.update(cx, |item, cx| item.sync_tool_entry_panel(0, None, cx));
+        });
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(AnyWindowHandle::from(window), cx);
+        let draw = |visual: &mut VisualTestContext| {
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+        };
+        // The card's mounted mirror, once the render path has mounted it.
+        let card_open = |visual: &VisualTestContext| -> Option<bool> {
+            visual.cx.update(|cx| {
+                let ConvItem::Thinking(t) = item.read(cx).kind() else {
+                    return None;
+                };
+                let ActivityEntry::Tool(tool) = &t.entries[0] else {
+                    return None;
+                };
+                tool.card.as_ref().map(|card| card.read(cx).is_open())
+            })
+        };
+        draw(&mut visual);
+        assert_eq!(
+            card_open(&visual),
+            Some(false),
+            "a folded entry renders shut"
+        );
+
+        // What the header click writes: the entry, and nothing else.
+        cx.update(|cx| {
+            item.update(cx, |item, cx| {
+                if let ConvItem::Thinking(t) = item.kind_mut()
+                    && let Some(ActivityEntry::Tool(tool)) = t.entries.first_mut()
+                {
+                    tool.collapsed = false;
+                    tool.user_toggled = true;
+                }
+                cx.notify();
+            });
+        });
+        draw(&mut visual);
+        assert_eq!(
+            card_open(&visual),
+            Some(true),
+            "the manual open reaches the card on the next render"
+        );
+
+        // And back: the fold is symmetric — nothing pins it one way.
+        cx.update(|cx| {
+            item.update(cx, |item, cx| {
+                if let ConvItem::Thinking(t) = item.kind_mut()
+                    && let Some(ActivityEntry::Tool(tool)) = t.entries.first_mut()
+                {
+                    tool.collapsed = true;
+                }
+                cx.notify();
+            });
+        });
+        draw(&mut visual);
+        assert_eq!(
+            card_open(&visual),
+            Some(false),
+            "the manual close lands too"
+        );
+    }
+
+    /// A one-row probe: paints the item under test in its own window.
+    struct RowProbe {
+        item: Entity<MessageItem>,
+    }
+
+    impl Render for RowProbe {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            self.item.clone()
+        }
+    }
 
     #[test]
     fn live_tail_short_output_unchanged() {

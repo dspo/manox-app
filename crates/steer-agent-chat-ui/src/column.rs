@@ -10,6 +10,8 @@ use gpui::{Entity, FocusHandle, ListState, Subscription};
 use gpui_component::input::{InputState, TextareaState};
 use gpui_component::menu::PopupMenu;
 
+use ai_elements::AskState;
+
 use crate::ahp_store::AhpStore;
 use crate::conversation::{ConversationState, UserImage, UserTurnMeta};
 use crate::host::ChatHostHandle;
@@ -17,10 +19,11 @@ use crate::views::completion::CompletionState;
 use crate::views::message::MessageItem;
 use crate::views::turn_navigator::TurnNavigator;
 
-/// Parse an `AskUserQuestion` tool input into a `PendingAsk`. The per-question
-/// `InputState` entities are allocated lazily on first render (they need a
-/// `Window`, which the event handler lacks). Returns `None` when the input is
-/// malformed (the generic question overlay then takes over as a fallback).
+/// Parse an `AskUserQuestion` tool input into a `PendingAsk`. The interactive
+/// state (page, selections, notes) belongs to the card's own
+/// `ai_elements::AskState`, owned by the workspace beside this pending ask.
+/// Returns `None` when the input is malformed (the generic question overlay
+/// then takes over as a fallback).
 pub fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<PendingAsk> {
     let questions = input.get("questions")?.as_array()?;
     // B2-PR-1 removed the 1..=3 question cap (and the 2..=3 option cap) from
@@ -30,7 +33,6 @@ pub fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<Pending
         return None;
     }
     let mut parsed: Vec<AskQuestion> = Vec::with_capacity(questions.len());
-    let mut selections: Vec<Vec<bool>> = Vec::with_capacity(questions.len());
     for (i, q) in questions.iter().enumerate() {
         let question = q.get("question")?.as_str()?.to_string();
         // The server mints a stable id onto each parked question; answers are
@@ -107,7 +109,6 @@ pub fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<Pending
         // B2-PR-1: options are optional and unbounded (a detail/intent-only
         // question is legal) — the old 2..=3 cap is gone server-side, so the
         // card must not degrade on counts it now receives.
-        selections.push(vec![false; opts.len()]);
         parsed.push(AskQuestion {
             id,
             question,
@@ -121,7 +122,6 @@ pub fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<Pending
     Some(PendingAsk {
         id,
         questions: parsed,
-        selections,
     })
 }
 
@@ -196,12 +196,10 @@ pub struct ConfirmationEdit {
     pub deletion: bool,
 }
 
-/// A parsed `AskUserQuestion` prompt awaiting the user's selections.
+/// A parsed `AskUserQuestion` prompt awaiting the user's answers.
 pub struct PendingAsk {
     pub id: String,
     pub questions: Vec<AskQuestion>,
-    /// Per-question toggled option flags, aligned with `questions[i].options`.
-    pub selections: Vec<Vec<bool>>,
 }
 
 pub struct AskQuestion {
@@ -405,41 +403,21 @@ pub struct ChatColumn {
     /// the row was minted by the sync — a park's retirement removes the
     /// promoted row, while a row that already existed stays.
     pub confirmation_row_synthesized: Option<String>,
-    /// Current question index in the ask drawer (0-based).
-    pub ask_step: usize,
-    /// Animation generation counter for the ask drawer slide, bumped on every
-    /// open/close so a fresh tween fires rather than replaying a cached delta.
-    pub ask_transition_gen: u64,
-    /// Per-question free-text `custom` inputs for the pending ask card, one
-    /// slot per question (index-aligned with `pending_ask.questions`). Created
-    /// lazily at render time because an `InputState` needs a `Window`, which
-    /// the park event handler lacks; reset whenever the ask is (re)seeded or
-    /// retired. A tri-state answer is `{selected, custom}` — `custom` overrides
-    /// a single-select and supplements a multi-select at the settle fold, and
-    /// an empty selection with no `custom` is an explicit skip.
-    pub ask_custom_inputs: Vec<Option<Entity<InputState>>>,
-    /// Subscriptions keeping the card repainted as the custom inputs change.
-    pub ask_custom_subs: Vec<Subscription>,
-    /// Authoritative per-question custom text (index-aligned with
-    /// `pending_ask.questions`), the value `resolve_ask` folds
-    /// into each canonical `AskAnswer`. The `InputState` entities above mirror
-    /// this for live editing; tests drive this directly. Reset with the ask.
-    pub ask_custom_text: Vec<String>,
-    /// Per-question explicit-skip markers (index-aligned with
-    /// `pending_ask.questions`): set by the footer Skip, cleared with the ask.
-    /// The submit completeness gate reads them — an untouched question is
-    /// never silently folded to a skip, but an explicitly skipped one counts
-    /// as completed (dsh `QuestionDraftAnswer.skipped` parity).
-    pub ask_skipped: Vec<bool>,
-    /// Scroll handles for the ask card's body scrollport — the plan-review
-    /// card's plan body and the generic card's capped body — one slot per
-    /// question (index-aligned with `pending_ask.questions`). The body is a
-    /// scrollport nested inside the message list, so its wheel handler needs
-    /// the live offset to tell whether the gesture is consumed there or
+    /// The ask card's body scrollport — the plan-review card's plan body — one
+    /// slot per question (index-aligned with `pending_ask.questions`). The body
+    /// is a scrollport nested inside the message list, so its wheel handler
+    /// needs the live offset to tell whether the gesture is consumed there or
     /// chained to the enclosing list (`contain_body_scroll` in the message
     /// views), and `track_scroll` stores the offset in the handle, so it must
-    /// outlive a frame. Rebuilt with the ask scratch, reset with it.
+    /// outlive a frame. Rebuilt with the ask, reset with it.
     pub ask_body_scroll: Vec<gpui::ScrollHandle>,
+    /// The pending ask's interactive card state — page, per-question
+    /// selections and notes — as `ai_elements::AskUserQuestion` drives it. The
+    /// tuple is `(ask id, state)`: the id retires the state with the ask it
+    /// describes. Owned here rather than on the card's row because the
+    /// composer submits the same card on Enter, so the answers have exactly
+    /// one reader. Mounted by the render path (`ensure_ask_state`).
+    pub ask_state: Option<(String, Entity<AskState>)>,
     pub model_open: bool,
     /// PopupMenu entity for the open model selector; created on open, destroyed on close.
     pub model_menu: Option<Entity<PopupMenu>>,
@@ -650,167 +628,48 @@ impl ChatColumn {
         self.turn_rail_followed = None;
     }
 
-    /// The snapshot for the pending ask card at its current step.
+    /// The snapshot for the pending ask card: every question, in page order.
+    /// The page and the answers live in the card's own [`AskState`].
     pub fn ask_card_snapshot(&self, id: &str) -> Option<crate::ask_card::AskCardSnapshot> {
         let ask = self.pending_ask.as_ref()?;
         if ask.id != id || ask.questions.is_empty() {
             return None;
         }
-        let step = self.ask_step.min(ask.questions.len() - 1);
-        let q = ask.questions.get(step)?;
-        let custom = self.ask_custom_text.get(step).cloned().unwrap_or_default();
         Some(crate::ask_card::AskCardSnapshot {
             id: ask.id.clone(),
-            step,
-            total: ask.questions.len(),
-            transition_gen: self.ask_transition_gen,
-            question: crate::ask_card::AskCardQuestion {
-                question: q.question.clone(),
-                header: q.header.clone(),
-                detail: q.detail.clone(),
-                intent: q.intent.as_ref().map(|i| crate::ask_card::AskCardIntent {
-                    kind: i.kind.clone(),
-                    approve: i.approve.clone(),
-                }),
-                multi_select: q.multi_select,
-                options: q
-                    .options
-                    .iter()
-                    .map(|o| crate::ask_card::AskCardOption {
-                        label: o.label.clone(),
-                        description: o.description.clone(),
-                        recommended: o.recommended,
-                    })
-                    .collect(),
-            },
-            selections: ask.selections.get(step).cloned().unwrap_or_default(),
-            custom,
-        })
-    }
-
-    /// Whether the pending card carries any user intent (a toggled option or
-    /// non-blank custom text) — the submit gate.
-    pub fn pending_ask_has_selection(&self) -> bool {
-        self.pending_ask.as_ref().is_some_and(|ask| {
-            ask.selections.iter().flatten().any(|s| *s)
-                || self.ask_custom_text.iter().any(|c| !c.trim().is_empty())
-        })
-    }
-
-    /// The first question that is neither answered nor explicitly skipped —
-    /// the completeness gate's jump target. An untouched question must never
-    /// silently fold to a skip at the settle boundary.
-    pub fn first_incomplete_ask_question(&self) -> Option<usize> {
-        let ask = self.pending_ask.as_ref()?;
-        (0..ask.questions.len()).find(|&qi| {
-            let answered = ask
-                .selections
-                .get(qi)
-                .is_some_and(|sel| sel.iter().any(|s| *s))
-                || self
-                    .ask_custom_text
-                    .get(qi)
-                    .is_some_and(|c| !c.trim().is_empty());
-            let skipped = self.ask_skipped.get(qi).copied().unwrap_or(false);
-            !answered && !skipped
-        })
-    }
-
-    /// Toggle an option in the pending card. Single-select questions reset
-    /// siblings; multi-select toggles in place.
-    pub fn toggle_ask_option(&mut self, qi: usize, oi: usize) {
-        if let Some(ask) = self.pending_ask.as_mut()
-            && let Some(sel) = ask.selections.get_mut(qi)
-        {
-            let multi = ask
+            questions: ask
                 .questions
-                .get(qi)
-                .map(|q| q.multi_select)
-                .unwrap_or(false);
-            let prev = sel.get(oi).copied().unwrap_or(false);
-            if multi {
-                if let Some(slot) = sel.get_mut(oi) {
-                    *slot = !*slot;
-                }
-            } else {
-                for s in sel.iter_mut() {
-                    *s = false;
-                }
-                if let Some(slot) = sel.get_mut(oi) {
-                    *slot = !prev;
-                }
-            }
-        }
+                .iter()
+                .map(|q| crate::ask_card::AskCardQuestion {
+                    question: q.question.clone(),
+                    header: q.header.clone(),
+                    detail: q.detail.clone(),
+                    intent: q.intent.as_ref().map(|i| crate::ask_card::AskCardIntent {
+                        kind: i.kind.clone(),
+                        approve: i.approve.clone(),
+                    }),
+                    multi_select: q.multi_select,
+                    options: q
+                        .options
+                        .iter()
+                        .map(|o| crate::ask_card::AskCardOption {
+                            label: o.label.clone(),
+                            description: o.description.clone(),
+                            recommended: o.recommended,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
     }
 
-    /// One-click verdict: fold option `oi` of question `qi` in as that
-    /// question's single selection (plan-review cards are single-select by
-    /// construction). The caller settles the card afterwards.
-    pub fn decide_ask_option(&mut self, qi: usize, oi: usize) {
-        if let Some(ask) = self.pending_ask.as_mut()
-            && let Some(sel) = ask.selections.get_mut(qi)
-        {
-            for s in sel.iter_mut() {
-                *s = false;
-            }
-            if let Some(slot) = sel.get_mut(oi) {
-                *slot = true;
-            }
-        }
-    }
-
-    pub fn ask_prev(&mut self) {
-        if self.ask_step > 0 {
-            self.ask_step -= 1;
-        }
-    }
-
-    pub fn ask_next(&mut self) {
-        if let Some(ask) = self.pending_ask.as_ref()
-            && self.ask_step < ask.questions.len() - 1
-        {
-            self.ask_step += 1;
-        }
-    }
-
-    /// Drop the custom-answer state — call whenever the pending ask is
-    /// seeded, resolved, dismissed, or reconciled away so a stale custom
-    /// never leaks into the next card. The explicit-skip markers ride the
-    /// same lifecycle.
-    pub fn reset_ask_custom(&mut self) {
-        self.ask_custom_inputs.clear();
-        self.ask_custom_subs.clear();
-        self.ask_custom_text.clear();
-        self.ask_skipped.clear();
+    /// Drop the ask's interactive state — call whenever the pending ask is
+    /// seeded, resolved, dismissed, or reconciled away so a stale page or a
+    /// stale selection never leaks into the next card. The body scroll slots
+    /// ride the same lifecycle.
+    pub fn reset_ask_state(&mut self) {
+        self.ask_state = None;
         self.ask_body_scroll.clear();
-    }
-
-    /// Skip question `qi` (clear its selection + custom, mark it explicitly
-    /// skipped) and report the walk target: `Some(step)` to advance to,
-    /// `None` when the card should settle now.
-    pub fn skip_ask_question_state(&mut self, qi: usize) -> Option<usize> {
-        if let Some(ask) = self.pending_ask.as_mut()
-            && let Some(sel) = ask.selections.get_mut(qi)
-        {
-            for s in sel.iter_mut() {
-                *s = false;
-            }
-        }
-        if let Some(slot) = self.ask_custom_text.get_mut(qi) {
-            slot.clear();
-        }
-        if let Some(slot) = self.ask_skipped.get_mut(qi) {
-            *slot = true;
-        }
-        let has_next = self
-            .pending_ask
-            .as_ref()
-            .is_some_and(|ask| qi + 1 < ask.questions.len());
-        if has_next {
-            Some(qi + 1)
-        } else {
-            self.first_incomplete_ask_question()
-        }
     }
 
     /// Land one recall step's state (the walk index and the displaced
@@ -826,12 +685,11 @@ impl ChatColumn {
         self.recall_draft = None;
     }
 
-    /// Take the pending ask (the settle path) and reset the walk counters in
-    /// the same move.
+    /// Take the pending ask (the settle path) and retire its card state in the
+    /// same move.
     pub fn take_pending_ask(&mut self) -> Option<PendingAsk> {
         let v = self.pending_ask.take();
-        self.ask_step = 0;
-        self.ask_transition_gen = self.ask_transition_gen.wrapping_add(1);
+        self.reset_ask_state();
         v
     }
 }

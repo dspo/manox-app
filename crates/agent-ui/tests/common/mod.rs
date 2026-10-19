@@ -194,16 +194,13 @@ pub fn tall_history(turns: usize) -> Vec<HistoryEntry> {
         .collect()
 }
 
-/// The probe window's height, the viewport bound the ask-card geometry
-/// assertions check the footer against.
+/// The probe window's height, the viewport bound the plan-review card's
+/// geometry assertions check its decision row against.
 pub const PROBE_WINDOW_HEIGHT: Pixels = px(780.);
 
-/// Re-pulls the diagnostic ask-card element from the workspace state on EVERY
-/// frame — an `AnyElement` is consumed by its first paint, so a stored one
-/// would leave later frames empty. The weak handle is deliberately invalid:
-/// the build runs while the workspace entity is `update`-held, and the card's
-/// render path upgrades the weak to read the custom-input state, which would
-/// double-borrow. A geometry probe needs no live custom row.
+/// Re-pulls the diagnostic pending-ask card element from the workspace state
+/// on EVERY frame — an `AnyElement` is consumed by its first paint, so a
+/// stored one would leave later frames empty.
 pub struct AskCardProbe {
     pub ws: Entity<Workspace>,
 }
