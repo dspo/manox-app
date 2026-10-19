@@ -249,6 +249,7 @@ impl SessionMultiplexer {
     /// `session/isArchivedChanged` echo drops it from the sidebar the moment
     /// it lands, ahead of any list refresh.
     pub fn thread_list(&self, cx: &App) -> Vec<ThreadRow> {
+        let focused_sid = self.focused.clone();
         let view = self.store.read(cx);
         let book = &view.book;
         let mut rows: Vec<ThreadRow> = book
@@ -260,6 +261,19 @@ impl SessionMultiplexer {
                 // (see `effective_archived` for the read and the doc on this
                 // method for why the filter lives here).
                 if effective_archived(book, sid, summary) {
+                    return None;
+                }
+                // A blank row stays out of the list: an attached session
+                // whose landed fold carries no turns has never been used.
+                // The focused row always shows (a landing thread the user
+                // is typing into must be reachable), and a fold that has
+                // not landed yet is never judged.
+                if focused_sid.as_deref() != Some(sid)
+                    && book.chat_snapshot_landed(sid)
+                    && crate::ahp_store::leaf(book, sid)
+                        .chat
+                        .is_some_and(|c| c.turns.is_empty() && c.active_turn.is_none())
+                {
                     return None;
                 }
                 // The row pin read: see `ext_and_meta_pinned`.
