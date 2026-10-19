@@ -3941,8 +3941,8 @@ mod tests {
     /// B2-PR-2 live-path fixture: an `AskUserQuestion` top-level card whose
     /// `ToolResult` event carries the canonical answers JSON deposits that
     /// string into `ToolCallItem.output` verbatim — the same payload the
-    /// answered-state card body folds through `ask_result_qa_rows` (mirror of
-    /// the rebuild path's journal-translate fixture).
+    /// answered card folds through `ask_answer_markdown` (mirror of the
+    /// rebuild path's journal-translate fixture).
     #[gpui::test]
     fn ask_tool_result_output_is_deposited_verbatim(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);

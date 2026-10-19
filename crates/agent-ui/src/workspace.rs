@@ -1440,7 +1440,7 @@ impl Workspace {
                 // A live-seeded card retires outright — its source of truth
                 // left the fold. Any other card retires when the fold
                 // demonstrably lacks its request id: the fold is the only
-                // route an answer can ride (`resolve_ask` looks it up there),
+                // route an answer can ride (`reply_ask` looks it up there),
                 // so a card the fold cannot route is dead weight that parks
                 // the composer in ask-supplement mode — the composer half of
                 // the #88 dead-lock. The live edge re-seeds from the fold on
