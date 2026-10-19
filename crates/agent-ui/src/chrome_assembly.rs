@@ -733,11 +733,11 @@ pub fn foreground_project() -> Option<std::path::PathBuf> {
         .clone()
 }
 
-/// The threads database behind the store global — the pane snapshot's
-/// upsert/load face (one acquisition site shared by both directions).
-fn pane_db() -> std::sync::Arc<manox_agent::db::ThreadsDatabase> {
-    manox_agent::thread_store_global().read(|s| s.db().clone())
-}
+/// The right-pane registry: client-owned presentation state (the plan's
+/// home for pane snapshots after the db retired). Session-lifetime — the
+/// pane layout a process remembers is the pane layout it opened with.
+static PANE_REGISTRY: std::sync::Mutex<Option<HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
 
 /// Upsert the current foreground thread's right-pane snapshot into
 /// `threads.db` (the pane's own kind/spec encoding, one row per thread).
@@ -754,14 +754,21 @@ fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
             .map(|(kind, spec)| serde_json::json!({ "kind": kind, "spec": spec }))
             .collect::<Vec<_>>(),
     });
-    if let Err(e) = pane_db().upsert_right_pane(&thread_id, &payload.to_string()) {
-        tracing::warn!(error = %e, thread_id = %thread_id, "persist chrome right pane failed");
-    }
+    PANE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(thread_id, payload.to_string());
 }
 
 /// Load a thread's persisted right-pane snapshot (the chrome encoding).
 fn load_right_pane(thread_id: &str) -> Option<String> {
-    pane_db().load_right_pane(thread_id).ok().flatten()
+    PANE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .and_then(|map| map.get(thread_id))
+        .cloned()
 }
 
 fn refresh_foreground_cwd(
