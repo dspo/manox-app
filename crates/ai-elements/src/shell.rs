@@ -15,9 +15,10 @@
 //! are chrome, not transcript.
 //!
 //! `Bash`, `BashOutput`, and — as a deliberate rendering choice, not a claim
-//! about what those tools are — `Grep`, `Glob`, `Ls` all speak this surface:
-//! the card header keeps the tool's true identity, the body shows the shell
-//! equivalent of what it did.
+//! about what those tools are — `Grep` and `Glob` speak this surface: the
+//! card header keeps the tool's true identity, the body shows the shell
+//! equivalent of what it did. (The gallery demos an `Ls` card; the runtime
+//! ships no such tool.)
 //!
 //! The palette is the component's own and stays dark regardless of the app
 //! theme: a terminal surface is read as a terminal by being dark. Colors are

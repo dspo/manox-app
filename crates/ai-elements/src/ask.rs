@@ -610,6 +610,9 @@ fn pager_button(
 
 /// The current page's form: the question, its options, and the note field.
 fn form_page(ask: &AskUserQuestion, page: usize, window: &mut Window, cx: &mut App) -> AnyElement {
+    if ask.blocks.is_empty() {
+        return v_flex().w_full().min_w_0().into_any_element();
+    }
     let theme = cx.theme();
     let (muted, foreground, secondary, accent) = (
         theme.muted_foreground,
@@ -714,6 +717,9 @@ fn form_page(ask: &AskUserQuestion, page: usize, window: &mut Window, cx: &mut A
 /// The frozen last page — the fallback for a submitted card whose host gave
 /// no output element.
 fn frozen_form(ask: &AskUserQuestion, page: usize, cx: &App) -> AnyElement {
+    if ask.blocks.is_empty() {
+        return v_flex().w_full().min_w_0().into_any_element();
+    }
     let theme = cx.theme();
     let (muted, foreground, accent) = (theme.muted_foreground, theme.foreground, theme.accent);
     let block = &ask.blocks[page];
