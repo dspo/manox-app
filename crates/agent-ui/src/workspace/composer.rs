@@ -44,32 +44,16 @@ impl Workspace {
                 chat.pending_attachments = attachments;
                 cx.notify();
             });
-            // A send/Enter while an ask card is up submits the card, not a
-            // message: the tri-state answers are collected from the card's own
-            // per-question selections + custom inputs (there is no card-level
-            // composer override any more — B2-PR-1 retired the whole-card
-            // `response` free text). The composer text is a supplement the user
-            // may type but it no longer rides the answer.
-            if !text.trim().is_empty() || self.pending_ask_has_selection(cx) {
-                // Completeness gate (dsh `submitDrafts` parity): a question
-                // that was never touched must not silently fold to a skip.
-                // The walk jumps to the first incomplete question — the blank
-                // card IS the feedback — and the composer text survives.
-                if let Some(missing) = self.first_incomplete_ask_question(cx) {
-                    self.chat.update(cx, |chat, cx| {
-                        chat.ask_step = missing;
-                        cx.notify();
-                    });
-                    cx.notify();
-                    return;
-                }
-                self.chat_input(cx)
-                    .update(cx, |state, cx| state.set_value("", window, cx));
-                // Submitting ends the walk: nothing is left to return to.
-                self.end_recall_walk(cx);
-                self.close_completion(cx);
-                self.resolve_ask(cx);
-            }
+            // A send/Enter while an ask card is up submits that card, not a
+            // message: the card is the ask's only answer surface, and its
+            // pager's check is the same submit. An untouched question settles
+            // as an explicit skip — the card asks for no completeness gate,
+            // and neither does this shortcut. The composer text stays put (it
+            // is not part of the answer): whatever the user typed is still
+            // theirs to send once the ask settles.
+            self.end_recall_walk(cx);
+            self.close_completion(cx);
+            self.submit_pending_ask(cx);
             return;
         }
         // Block submit on empty input or while the project picker is open.

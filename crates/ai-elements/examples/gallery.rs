@@ -209,13 +209,13 @@ impl Gallery {
         let tools = Self::build_tools(cx, &mut subscriptions);
         // The live wizard. Questions: single, multi, single — one flag per
         // block, in order.
-        let ask = cx.new(|_| AskState::new(vec![false, true, false], "补充说明…（可选）"));
+        let ask = cx.new(|cx| AskState::new(vec![false, true, false], "补充说明…（可选）", cx));
         subscriptions.push(cx.observe(&ask, |_, _, cx| cx.notify()));
         // The answered card: settled at mount with one choice on the first
         // question and nothing on the second — the skipped-question shape the
         // output markdown has to carry.
         let ask_answered = cx.new(|cx| {
-            let mut state = AskState::new(vec![false], "补充说明…（可选）");
+            let mut state = AskState::new(vec![false], "补充说明…（可选）", cx);
             state.toggle_option(0, 0, cx);
             state.submit(cx);
             state

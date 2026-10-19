@@ -70,13 +70,12 @@ impl Render for Workspace {
         if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {
             self.close_turn_navigator(window, cx);
         }
-        // Per-frame conversation maintenance, all of it needing `&mut Window`
-        // (the ask card's per-question inputs): reconcile the local cards
-        // against the server projections, allocate the missing ask inputs,
-        // and sync the workspace-derived snapshots onto the owning tool rows
-        // (the ask card and the unified confirmation card).
+        // Per-frame conversation maintenance: reconcile the local cards
+        // against the server projections and sync the workspace-derived
+        // snapshots onto the owning tool rows (the ask card — including
+        // mounting its interactive state — and the unified confirmation
+        // card).
         self.reconcile_pending_with_projections(cx);
-        self.ensure_ask_custom_inputs(window, cx);
         self.sync_ask_card_snapshots(cx);
         self.sync_confirmation_snapshot(cx);
         self.render_column(window, cx)

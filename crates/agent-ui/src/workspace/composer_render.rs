@@ -121,9 +121,7 @@ impl Workspace {
         let followup_mode = running
             && self.chat.read(cx).pending_ask.is_none()
             && self.chat.read(cx).pending_confirmation.is_none();
-        let placeholder_mode = if self.chat.read(cx).pending_ask.is_some() {
-            ComposerPlaceholderMode::Ask
-        } else if followup_mode {
+        let placeholder_mode = if followup_mode {
             ComposerPlaceholderMode::FollowUp
         } else {
             ComposerPlaceholderMode::Normal
@@ -136,7 +134,6 @@ impl Workspace {
             let key = match placeholder_mode {
                 ComposerPlaceholderMode::Normal => "workspace-input-placeholder",
                 ComposerPlaceholderMode::FollowUp => "composer-placeholder-followup",
-                ComposerPlaceholderMode::Ask => "workspace-ask-supplement-placeholder",
             };
             self.chat_input(cx).update(cx, |state, cx| {
                 state.set_placeholder(i18n::t(key), window, cx);
@@ -154,8 +151,8 @@ impl Workspace {
         // running edge alone — a pending ask/approve/plan card never swaps
         // the control into a send glyph the user cannot fire (the deadlock
         // class: stop became an empty-input-disabled send exactly when
-        // the user most needed to interrupt). Ask supplement input keeps
-        // its own path: Enter.
+        // the user most needed to interrupt). Enter still answers a pending
+        // ask card, whose own controls are the only answer surface.
         let send = self.render_send_button(running, cx);
         // Context-occupancy pill (ring + percent) sits between the model and
         // the action it quantifies: session-state cluster, then the send
@@ -202,14 +199,6 @@ impl Workspace {
                     }
                 }
             }))
-            .when(self.chat.read(cx).pending_ask.is_some(), |this| {
-                this.child(
-                    gpui::div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(i18n::t("workspace-ask-supplement-label")),
-                )
-            })
             .when_some(
                 self.chat
                     .read(cx)

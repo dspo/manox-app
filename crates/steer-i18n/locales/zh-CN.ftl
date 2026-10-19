@@ -433,7 +433,6 @@ workspace-composer-placeholder = 编写 markdown…（Cmd-Enter 发送）
 workspace-unknown-command = 未知命令：/{$name}（用 `/` 菜单查看已安装命令）
 
 workspace-unknown-skill = 未知技能：/{$name}（用 `/` 菜单查看已安装技能）
-workspace-clarify-title = 澄清问题
 workspace-rename-confirm = 重命名
 
 workspace-no-model = 未配置模型
@@ -444,21 +443,19 @@ workspace-reasoning-high = 高
 
 workspace-reasoning-max = 最高
 
-workspace-ask-supplement-label = 补充说明
-
 workspace-ask-supplement-placeholder = 添加可选补充说明
 
 workspace-ask-recommended = 推荐
 
-workspace-ask-plan-review-label = Plan 评审
+workspace-ask-waiting = 等待回答
 
-workspace-ask-discuss = 继续讨论
+workspace-ask-question-label = 问{$n}：
 
-workspace-ask-next = 下一步
+workspace-ask-answer-label = 答{$n}：
 
-workspace-ask-submit = 提交
+workspace-ask-note-label = 补充：
 
-workspace-ask-skip = 跳过
+workspace-ask-skipped = 已跳过
 
 workspace-cancel = 取消
 

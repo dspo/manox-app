@@ -17,8 +17,8 @@ use gpui::ClickEvent;
 use gpui::DismissEvent;
 use gpui::{
     AnyElement, App, Context, Entity, FollowMode, ListAlignment, ListOffset, ListState,
-    MouseButton, Pixels, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
-    anchored, deferred, prelude::*, px,
+    MouseButton, Pixels, Render, SharedString, Subscription, WeakEntity, Window, anchored,
+    deferred, prelude::*, px,
 };
 /// Shared across both harnesses: workspace struct fields hold
 /// `Option<Entity<PopupMenu>>` regardless of feature.
@@ -331,8 +331,8 @@ enum RegistryTurnKind {
 // module (Phase 2 tail); these re-exports keep every bare/`super::` name in
 // the workspace family resolving unchanged.
 pub use steer_agent_chat_ui::column::{
-    AskIntent, AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState,
-    PendingAsk, PendingConfirmation, QueuedFollowUp, parse_pending_ask,
+    AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState, PendingAsk,
+    PendingConfirmation, QueuedFollowUp, parse_pending_ask,
 };
 
 /// The visited-thread history behind the titlebar ←/→ moves. Invariants
@@ -800,13 +800,7 @@ impl Workspace {
                 ask_snapshot_item: None,
                 confirmation_row_synthesized: None,
                 confirmation_snapshot_item: None,
-                ask_step: 0,
-                ask_transition_gen: 0,
-                ask_custom_inputs: Vec::new(),
-                ask_custom_subs: Vec::new(),
-                ask_custom_text: Vec::new(),
-                ask_skipped: Vec::new(),
-                ask_body_scroll: Vec::new(),
+                ask_state: None,
                 model_open: false,
                 model_menu: None,
                 model_menu_sub: None,
@@ -1205,36 +1199,10 @@ impl Workspace {
     ) {
         self.chat.update(cx, |chat, cc| {
             chat.pending_ask = parse_pending_ask(id.to_string(), input);
-            chat.ask_step = 0;
-            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
             cc.notify();
         });
-        self.reset_ask_custom(cx);
+        self.reset_ask_state(cx);
         cx.notify();
-    }
-
-    /// Seed a per-question free-text `custom` answer on the pending ask
-    /// without a `Window` (the render path mirrors the `InputState` entities
-    /// onto this, but the tri-state fold reads `ask_custom_text` directly).
-    /// Diagnostic-only: drives the answer-leg wire tests.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_set_ask_custom(&mut self, qi: usize, text: &str, cx: &mut App) {
-        self.chat.update(cx, |chat, cc| {
-            if qi >= chat.ask_custom_text.len() {
-                chat.ask_custom_text.resize(qi + 1, String::new());
-            }
-            if let Some(slot) = chat.ask_custom_text.get_mut(qi) {
-                *slot = text.to_string();
-            }
-            cc.notify();
-        });
-    }
-
-    /// The pending ask's per-question `custom` texts (diagnostic-only; used to
-    /// confirm a skip/re-seed cleared the scratch).
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_ask_custom_texts(&self, cx: &App) -> Vec<String> {
-        self.chat.read(cx).ask_custom_text.clone()
     }
 
     /// Seed a tool confirmation as the pending state, WITHOUT the row: the
@@ -1255,10 +1223,9 @@ impl Workspace {
                 tool_call_id: tool_call_id.to_string(),
             });
             chat.pending_confirmation_live = false;
-            chat.ask_step = 0;
             cc.notify();
         });
-        self.reset_ask_custom(cx);
+        self.reset_ask_state(cx);
         cx.notify();
     }
 
@@ -1459,12 +1426,10 @@ impl Workspace {
                         self.chat.update(cx, |chat, cx| {
                             chat.pending_ask = Some(ask);
                             chat.pending_ask_live = true;
-                            chat.ask_step = 0;
-                            chat.ask_transition_gen = chat.ask_transition_gen.wrapping_add(1);
                             chat.last_declined_ask = None;
                             cx.notify();
                         });
-                        self.reset_ask_custom(cx);
+                        self.reset_ask_state(cx);
                         self.ensure_ask_tool_item(&request_id, &summary, input, cx);
                     }
                 }
@@ -1475,7 +1440,7 @@ impl Workspace {
                 // A live-seeded card retires outright — its source of truth
                 // left the fold. Any other card retires when the fold
                 // demonstrably lacks its request id: the fold is the only
-                // route an answer can ride (`resolve_ask` looks it up there),
+                // route an answer can ride (`reply_ask` looks it up there),
                 // so a card the fold cannot route is dead weight that parks
                 // the composer in ask-supplement mode — the composer half of
                 // the #88 dead-lock. The live edge re-seeds from the fold on
@@ -1504,10 +1469,9 @@ impl Workspace {
                     self.chat.update(cx, |chat, cx| {
                         chat.pending_ask = None;
                         chat.pending_ask_live = false;
-                        chat.ask_step = 0;
                         cx.notify();
                     });
-                    self.reset_ask_custom(cx);
+                    self.reset_ask_state(cx);
                 }
             }
         }
@@ -1646,16 +1610,15 @@ impl Workspace {
     }
 
     /// Whether the pending ask's card would render interactively: a matching
-    /// top-level `ToolCall` item carrying the Workspace-derived snapshot.
+    /// top-level `ToolCall` item carrying the Workspace-derived snapshot and
+    /// the card's interactive state.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_ask_card_interactive(&self, id: &str, cx: &App) -> bool {
         let Some(ix) = self.chat_conversation(cx).read(cx).find_tool(id, cx) else {
             return false;
         };
-        self.chat_conversation(cx).read(cx).items()[ix]
-            .read(cx)
-            .ask_snapshot
-            .is_some()
+        let item = self.chat_conversation(cx).read(cx).items()[ix].read(cx);
+        item.ask_snapshot.is_some() && item.ask_state.is_some()
     }
 
     /// Count of top-level `ToolCall` items with the given id. Diagnostic-only.
@@ -1746,12 +1709,15 @@ impl Workspace {
         Some(self.render_delivery_error_strip(&failure, cx))
     }
 
-    /// The ask walk's churn counter. Diagnostic-only: a re-delivery of the
-    /// same pending id must not advance it — the walk state belongs to the
-    /// user, not to the wire.
+    /// The pending ask's interactive card state (diagnostic-only): the page
+    /// and the answers the card is showing.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_ask_transition_gen(&self, cx: &App) -> u64 {
-        self.chat.read(cx).ask_transition_gen
+    pub fn diagnostic_ask_state(&self, cx: &App) -> Option<gpui::Entity<ai_elements::AskState>> {
+        self.chat
+            .read(cx)
+            .ask_state
+            .as_ref()
+            .map(|(_, s)| s.clone())
     }
 
     /// Run the render-time projection reconcile. Diagnostic-only wrapper
