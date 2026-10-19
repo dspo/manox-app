@@ -57,8 +57,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> String {
         // New-session intent returns the main column to the conversation
-        // (an on-screen external session parks, still running).
+        // (an on-screen external session parks, still running; the sub-agent
+        // stream page is a view of a run the parent still owns).
         self.leave_external_session();
+        self.leave_subagent_stream(cx);
         // The park/draft bookkeeping is identical to `attach_thread`'s switch
         // arm, but there is no outgoing-thread double-bind to preserve: the
         // outgoing thread is detached on the park, the incoming id is unknown
@@ -122,6 +124,8 @@ impl Workspace {
         // An empty vector leaves the session directory-less ("choose
         // project" on a thread the user launched FROM a project).
         let cwds = vec![format!("file://{cwd}")];
+        let config_for_channel = config.clone();
+        let cwd_for_channel = cwd.clone();
         let reply = self.with_foreground_store(cx, |store, _| {
             store.create_session(&sid, cwds, Some(config))
         });
@@ -148,6 +152,22 @@ impl Workspace {
                     tracing::warn!(session_id = %sid2, error = %err, "new-thread attach FAILED")
                 }
             }
+            // The create intent boots the runtime on the directory and the
+            // inherited config, but the session CHANNEL carries neither until
+            // a write lands one — and every composer surface (project chip,
+            // model chip, Captain strip) reads the channel. Land both through
+            // the same writers the composer's own pickers use, so the thread
+            // the user just created shows where it runs and on which model
+            // instead of asking for the folder a second time.
+            let _ = ws.update(cx, |this, cx| {
+                this.with_foreground_store(cx, |store, sid| {
+                    store.set_cwd(&sid, &cwd_for_channel);
+                    if !config_for_channel.is_empty() {
+                        store.optimistic_config(&sid, &config_for_channel);
+                        store.set_config(&sid, config_for_channel);
+                    }
+                });
+            });
         })
         .detach();
         let _ = window;
@@ -685,7 +705,10 @@ impl Workspace {
         // may have re-entered an external session (or anything else) while
         // this async attach was landing — the synchronous leave in
         // open_thread already handled the normal transition.
-        if !matches!(self.view_mode, ViewMode::ExternalSession) {
+        if !matches!(
+            self.view_mode,
+            ViewMode::ExternalSession | ViewMode::SubagentStream
+        ) {
             self.active_external = None;
             self.view_mode = ViewMode::Workspace;
         }
@@ -886,8 +909,10 @@ impl Workspace {
 
     pub fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         // Opening a thread is an implicit park for the external session on
-        // screen (its terminal keeps running) — the conversation returns.
+        // screen (its terminal keeps running) — the conversation returns, and
+        // so does a sub-agent stream page (the run keeps running).
         self.leave_external_session();
+        self.leave_subagent_stream(cx);
         self.open_thread_inner(id, true, window, cx);
     }
 

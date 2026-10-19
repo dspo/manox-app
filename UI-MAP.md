@@ -87,7 +87,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### 顶层
 
-- [Window](#window) · [NativeMenuBar](#nativemenubar) · [AboutWindow](#aboutwindow) · [Workspace](#workspace) · [ViewMode](#viewmode) · [ViewMode::Workspace](#viewmodeworkspace) · [ViewMode::Settings](#viewmodesettings)
+- [Window](#window) · [NativeMenuBar](#nativemenubar) · [AboutWindow](#aboutwindow) · [Workspace](#workspace) · [ViewMode](#viewmode) · [ViewMode::Workspace](#viewmodeworkspace) · [ViewMode::Settings](#viewmodesettings) · [ViewMode::ExternalSession](#viewmodeexternalsession) · [ViewMode::SubagentStream](#viewmodesubagentstream)
 
 ### MainView
 
@@ -131,7 +131,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### 右栏页签内容
 
-- [SubagentPanel](#subagentpanel) · [BrowserView](#browserview)
+- [SubagentPanel](#subagentpanel) · [SubagentStream](#subagentstream) · [BrowserView](#browserview)
 
 ### ManagementShell
 
@@ -206,13 +206,24 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 ### 2.1 ViewMode
 
-`Workspace` 只有两个模式：
+`Workspace` has four modes:
 
 #### ViewMode::Workspace
 默认 —— 会话列（hero 或消息列表 + composer）。
 
 #### ViewMode::Settings
 主区卡内的设置页（nav｜panel 两栏，替换会话列，直到 back 控件退出），带 200ms 退出延迟。
+
+#### ViewMode::ExternalSession
+项目菜单拉起的 CLI agent TUI / 普通终端顶替会话列占主列（PTY 属于 Workspace，切走只停靠、保活）。
+
+#### ViewMode::SubagentStream
+一个运行中子代理的自家 transcript 顶替会话列（[CaptainStatusStrip](#captainstatusstrip) 的子代理行点开；
+见 [SubagentStream](#subagentstream)）。子代理 chat 由宿主以**快照**服务（无 live bridge，且父 chat 的
+background work 条目每 run 只写一次），所以页面靠自己的有界轮询重订阅取新快照、按子 chat 的 fold 版本重建；
+任何离开它的 mode 翻转（点侧栏行 / 新建会话 / 进设置 / **外部会话抢走主列**——项目菜单拉起或侧栏 external 行点击）
+都 drop 该页并停掉轮询；不变量是「页面存在 ⟺ `view_mode == SubagentStream`」（与 `active_external` 同一条规矩），
+闸门与 drop 双保险——漏一个翻转点最多是多一次重建，不会出现看不见的页面在后台轮询。
 
 ---
 
@@ -448,18 +459,22 @@ the footer — cancel priority keeps the composer live underneath them.
 
 #### CaptainStatusStrip
 
-The one-line live-status strip above the composer, shown only while the
-foreground turn runs and retired the instant it ends — the message column
+The live-status block above the composer, shown while the foreground turn runs
+OR while any sub-agent run is still live (AHP: "an entry may have been started
+by an earlier turn", so a run can outlive the turn that spawned it), and retired
+once neither is — the message column
 carries no per-entry status glyphs anymore (the chain-of-thought markers are
-retired), so this is the single "what is it doing" surface. Layout: a
-[`PixelSpinner`](#meerkat) (grid variant, `ai_elements::PixelSpinner`) flush
-at the left = healthy running, then the localized prefix (`captain-steering-prefix`,
+retired), so this is the single "what is it doing" surface. Its first row is the
+Captain's own: a [`PixelSpinner`](#meerkat) (grid variant, `ai_elements::PixelSpinner`)
+flush at the left = healthy running, then the localized prefix (`captain-steering-prefix`,
 「船长正在驾驶 Captain is steering」), the model via
 [`ModelTag`](#modeltag) (`{provider}/` muted, model tinted by wire api), `·`,
 and the activity — 思考中/Thinking while a reasoning round streams,
 正在回复/Replying while the assistant body streams, or the running tool's
-one-line summary verbatim (monospace, runtime-provided). The running clock (dsh's「深度探索中
-N 秒」suffix shape) rides the same line from
+one-line summary (monospace, runtime-provided; newline runs collapse to single
+spaces so a multi-line `bash` body cannot stretch the block — the row's
+`.truncate()` then ellipsizes it on width). The running clock (dsh's「深度探索中
+N 秒」suffix shape) rides the same row from
 `ConversationState::running_secs`. The activity comes
 from `ConversationState::live_activity` (`LiveActivity`), a read-only
 projection over the trailing item: a streaming assistant body names Replying,
@@ -468,9 +483,53 @@ in-flight tool, and a streaming segment with no live entry (the gap between a
 tool settling and the next round) reads as Thinking. No activity yet (turn
 started, nothing arrived) renders the prefix + model alone.
 
-> Source: `crates/agent-ui/src/workspace/render.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`)
+The rows BELOW it are the running sub-agents: one row per entry the host
+projects as the parent chat's AHP background work
+(`leaf.running_subagents()`, `crates/steer-agent-chat-ui/src/ahp_store.rs`) —
+the host opens a run's entry on its first running tick and removes it when the
+run settles, so the rows are exactly the live set. Each row is the same shape
+(`spinner` + `captain-steering-subagent`「{name} 正在驾驶」+ the model tag),
+where `{name}` is the run's agent type plus its task label
+(`task_display_title`: 「Explore · 修登录跳转」— flattened by `one_line` and
+bounded the same way the Captain's own row is: a run's task label is runtime
+text and may carry newlines, and the block must never grow a line per input
+line). The model segment names the
+SESSION's model: a sub-agent run on this harness inherits it unless its own
+definition pins one, and the run's own model has no seat on the parent's
+channel. A sub-agent row's click opens that child's transcript in the main
+column ([SubagentStream](#subagentstream)). The Captain's own row carries NO
+click: the block is not on screen while the page owns the column, so the round
+trip back is the page's own back control (no dead affordance here).
+
+> Source: `crates/agent-ui/src/workspace/render.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`), `crates/agent-ui/src/workspace/subagent_stream.rs`
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
+
+##### SubagentStream
+
+The main-column page behind a sub-agent row's click
+(`crates/agent-ui/src/views/subagent_stream.rs`, `ViewMode::SubagentStream`):
+the child's own chat (`ahp-chat:/{run-id}`) rendered through the shared message
+pipeline — the same `synth_display` →
+`ConversationState::rebuild_from_display` fold the conversation column uses, so
+the rows ARE the child's messages (never a second transcript expression). It is
+read-only by design: a child run is driven by the parent's dispatch, not by the
+watcher (no composer, no chips). Header = back control (「船长」→ the
+conversation) + `{type} · {topic}`.
+
+Refresh model: the host serves a child chat as a SNAPSHOT (the child's journal
+is folded into the child's own channel and is never bridged to the parent), so
+the page FETCHES on a bounded poll — while it owns the main column and its run
+is still live, a 2s `background_executor().timer()` re-subscribes the child's
+chat; the run leaving the live set earns one last subscribe (its journal ends
+when the run ends, so that snapshot is final) and stops the poll. The REBUILD
+key is the child chat's own fold version
+(`ChatFoldVersion`: settled turns, the in-flight turn's content, the fold's
+last-entry stamp — an AHP turn's parts grow in place, so the turn count alone
+never moves while a run streams), compared on the store notify a landed
+snapshot produces; a snapshot that carried nothing new neither rebuilds nor
+churns the page, and tail-follow stays the user's state (a rebuild does not yank
+a reader who scrolled back up).
 
 ##### Composer
 
@@ -589,7 +648,10 @@ Dropdown chip showing [PermissionMode](#permission-modes) → [AccessMenu](#acce
 Dropdown chip showing current project → [ProjectMenu](#projectmenu) popup. The
 label is the workspace row accounting the foreground session (host registry
 order), falling back to the session's project mirror for sessions no row
-accounts; the menu's recency list is the same registry.
+accounts; the menu's recency list is the same registry, and each row names the
+directory by its LAST SEGMENT (`sidebar_projection::project_label`, the same
+label the sidebar groups use) with the full path on the row's tooltip — the
+list never spends its width on the path.
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
 

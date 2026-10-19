@@ -249,6 +249,7 @@ mod external;
 pub mod external_sessions;
 mod plan_review;
 mod subagent;
+mod subagent_stream;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerPlacement {
@@ -284,6 +285,19 @@ fn composer_key_context(completion_open: bool) -> &'static str {
 struct SubagentPrompt {
     text: String,
     dispatched_at: i64,
+}
+
+/// The open sub-agent stream page: the run it renders, the child chat's fold
+/// version it was last built from (a re-subscribe that carried nothing new
+/// must not churn the page), the page entity, the refresh poll (alive while
+/// the page is — dropping the page cancels it), and the page's back
+/// subscription.
+struct SubagentStreamPage {
+    id: String,
+    version: Option<steer_agent_chat_ui::ahp_store::ChatFoldVersion>,
+    view: Entity<crate::views::subagent_stream::SubagentStreamView>,
+    _poll: gpui::Task<()>,
+    _sub: Subscription,
 }
 
 /// A thread parked in the background while still running a turn. U6b⑤: the
@@ -468,6 +482,11 @@ pub struct Workspace {
     /// Keeps `view_mode == Settings` mounted so the exit animation can play
     /// before the unmount; cleared when the slide-out completes.
     exiting_settings: bool,
+    /// The open sub-agent stream page (the Captain status block's sub-agent
+    /// line opens it; `view_mode == SubagentStream` while it owns the main
+    /// column). One page at a time — the block lists the live runs, and the
+    /// page renders the one that was clicked.
+    subagent_stream: Option<SubagentStreamPage>,
     /// Bumped on every transition into or out of Settings. Embedded in the
     /// slide animation's element id so a fresh tween fires on each direction
     /// change (an old id would replay from the cached delta and visibly
@@ -480,10 +499,12 @@ pub struct Workspace {
     settings_sub: Option<Subscription>,
 }
 
-/// Top-level rendering mode of the app page. `Settings` is a main-column swap
-/// off the conversation; every other surface (terminal, browser, external
-/// session, sub-agent panel) is a shell surface — a right-pane tab or the
-/// bottom dock — and never a view mode.
+/// Top-level rendering mode of the app page. `Settings` and the two
+/// conversation-replacing pages are main-column swaps: `ExternalSession`
+/// (a launched TUI / plain terminal) and `SubagentStream` (one running
+/// sub-agent's own transcript). Every other surface (browser, sub-agent
+/// panel, dock) is a shell surface — a right-pane tab or the bottom dock —
+/// and never a view mode.
 #[derive(Default)]
 enum ViewMode {
     #[default]
@@ -494,6 +515,11 @@ enum ViewMode {
     /// full-pane external-session mode. Switching away parks the session
     /// (its terminal keeps running); closing kills it.
     ExternalSession,
+    /// One running sub-agent's own transcript renders in place of the
+    /// conversation column (the Captain status block's sub-agent line opens
+    /// it). Switching away drops the page: it is a live view of a child
+    /// chat, and reopening re-subscribes that chat's channel.
+    SubagentStream,
 }
 
 /// The main card's `border_1` on both edges; width budgets that measure
@@ -752,6 +778,7 @@ impl Workspace {
             externals: Vec::new(),
             active_external: None,
             exiting_settings: false,
+            subagent_stream: None,
             settings_transition_gen: 0,
             settings_view: None,
             settings_sub: None,
@@ -924,6 +951,91 @@ impl Workspace {
             .store
             .as_ref()
             .map(|(_, sid)| sid.clone())
+    }
+
+    /// The foreground leaf's effective working directory — the composer
+    /// project chip's read face, and the new-thread inheritance assertion.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_foreground_cwd(&self, cx: &App) -> Option<String> {
+        self.chat
+            .read(cx)
+            .store
+            .as_ref()
+            .and_then(|(store, sid)| crate::ahp_store::leaf(&store.read(cx).book, sid).cwd())
+    }
+
+    /// The foreground leaf's canonical model selection (`{provider}/{model}`)
+    /// — the Captain strip's model identity source.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_foreground_model(&self, cx: &App) -> Option<String> {
+        self.chat.read(cx).store.as_ref().and_then(|(store, sid)| {
+            crate::ahp_store::leaf(&store.read(cx).book, sid)
+                .model_id()
+                .map(str::to_string)
+        })
+    }
+
+    /// The label the Captain strip resolves its model identity from
+    /// (`Workspace::model_label`): canonical `{provider}/{model}` when the
+    /// session channel carries a model, the registry default otherwise.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_model_label(&self, cx: &App) -> String {
+        self.model_label(cx)
+    }
+
+    /// The live external sessions' row ids — the sidebar's routing keys (and
+    /// what `open_external_session` resolves). Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_external_session_ids(&self) -> Vec<String> {
+        self.externals.iter().map(|s| s.id.clone()).collect()
+    }
+
+    /// The foreground chat's running sub-agents (the Captain block's sub-agent
+    /// lines). Diagnostic-only read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_running_subagents(
+        &self,
+        cx: &App,
+    ) -> Vec<steer_agent_chat_ui::ahp_store::SubagentWorkRow> {
+        self.running_subagents(cx)
+    }
+
+    /// Open one run's sub-agent page by id — the line click's own path.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_open_subagent_stream(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(row) = self
+            .running_subagents(cx)
+            .into_iter()
+            .find(|row| row.id == id)
+        {
+            self.open_subagent_stream(&row, cx);
+        }
+    }
+
+    /// The run id whose page owns the main column, if any.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_subagent_stream(&self, _cx: &App) -> Option<String> {
+        self.subagent_stream.as_ref().map(|page| page.id.clone())
+    }
+
+    /// The open page's transcript texts — the CHILD chat's fold, never the
+    /// foreground conversation's.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_subagent_stream_texts(&self, cx: &App) -> Vec<String> {
+        self.subagent_stream
+            .as_ref()
+            .map(|page| page.view.read(cx).transcript_texts(cx))
+            .unwrap_or_default()
+    }
+
+    /// Fire the page's back control (its real event path).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_subagent_stream_back(&self, cx: &mut Context<Self>) {
+        if let Some(page) = self.subagent_stream.as_ref() {
+            page.view.update(cx, |_, cx| {
+                cx.emit(crate::views::subagent_stream::BackToConversation)
+            });
+        }
     }
 
     /// Whether the AHP client leg finished its handshake — the gate the
@@ -1830,6 +1942,11 @@ impl Workspace {
             // still empty, rebuild from the snapshot. The drained deltas are
             // already inside it, so the drain skips one round.
             let (rebuilt, chat_landed) = this.sync_rebuild_from_book(cx);
+            // The sub-agent page rides the same notify: the parent's
+            // background-work ticks are what say a child run advanced, and a
+            // child chat is served snapshot-only — the re-subscribe this
+            // triggers is the only way its page can follow the run.
+            this.refresh_subagent_stream(cx);
             if !rebuilt && chat_landed && this.chat.read(cx).awaiting_history.is_some() {
                 // The chat snapshot landed but holds no displayable turn: the
                 // reopened session is genuinely empty. Drop the loading gate so
@@ -1982,8 +2099,12 @@ impl Workspace {
         // Leaving the external session for Settings drops its ownership:
         // the invariant is `view_mode == ExternalSession` ⟺
         // `active_external` names a live session — a mode flip that keeps
-        // the id leaves the title face reading a session not on screen.
+        // the id leaves the title face reading a session not on screen. The
+        // sub-agent page obeys the same rule: a mode flip that kept it would
+        // leave a page nobody sees still polling its child chat.
         self.active_external = None;
+        // Dropping the page drops its refresh poll with it.
+        self.subagent_stream = None;
         self.view_mode = ViewMode::Settings;
         // Clear any pending exit animation: clicking Settings… while the
         // panel is still sliding out re-opens the overlay. Bumping the
@@ -2052,9 +2173,11 @@ impl Workspace {
     }
 
     /// Switch to the conversation pane. Drops external ownership with the
-    /// mode flip (same invariant as the Settings arm).
+    /// mode flip (same invariant as the Settings arm), and the sub-agent page
+    /// with it.
     pub fn focus_conversation(&mut self, cx: &mut Context<Self>) {
         self.active_external = None;
+        self.subagent_stream = None;
         self.view_mode = ViewMode::Workspace;
         cx.notify();
     }
@@ -2639,18 +2762,29 @@ impl Workspace {
                         .read(cx)
                         .thread
                         .read(|t| t.model().cloned())
-                        .map(|model| manox_agent::provider_glue::display_name(&model))
+                        .map(|model| Self::model_wire_id(&model))
                         // Same rule as the chip's identity read: a fresh
                         // session's engine already runs the registry default,
                         // so show it — "no model" only when nothing is
                         // registered at all.
                         .or_else(|| {
                             manox_agent::provider_glue::default_model()
-                                .map(|m| manox_agent::provider_glue::display_name(&m))
+                                .map(|m| Self::model_wire_id(&m))
                         })
                         .unwrap_or_else(|| i18n::t("workspace-no-model").to_string())
                 })
         }
+    }
+
+    /// The canonical `{registration}/{model-id}` wire identity of a
+    /// registered model — the form every display surface resolves through
+    /// [`steer_agent_chat_ui::model_tag::ModelTag`]; an unresolvable id has no
+    /// provider segment and no wire tint, so the label never hands it a
+    /// display name. `provider_glue::display_name` belongs to the surfaces
+    /// that RENDER a name (the model catalog, the context rail); the label's
+    /// own last resort is the localized "no model" string.
+    fn model_wire_id(model: &manox_harness::types::Model) -> String {
+        format!("{}/{}", model.provider, model.id)
     }
 
     /// Report a system outcome into the conversation (no thread message, no

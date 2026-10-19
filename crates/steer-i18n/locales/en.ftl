@@ -173,9 +173,18 @@ context-agents-captain = Captain
 ### agent-ui workspace — Captain status strip (above the composer)
 
 captain-steering-prefix = Captain is steering
+# The sub-agent lines under the Captain's own: `{ $name }` is the run's agent
+# type plus its task label (e.g. "Explore · fix the login redirect").
+captain-steering-subagent = { $name } is steering
 turn-process-completed = Completed in 
 captain-activity-thinking = Thinking
 captain-activity-replying = Replying
+
+### views/subagent_stream.rs (the sub-agent page in the main column)
+
+subagent-stream-back = Captain
+
+subagent-stream-empty = No activity yet — the sub-agent has not written its first turn.
 
 ### views/subagent_panel.rs
 
