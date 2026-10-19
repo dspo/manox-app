@@ -12,9 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_ui::Workspace;
-use gpui::{
-    AppContext as _, Context, Entity, IntoElement, Pixels, Render, TestAppContext, Window, px, size,
-};
+use gpui::{AppContext as _, Entity, TestAppContext, px, size};
 use gpui_component::Theme;
 use manox_agent::db::{HistoryEntry, ThreadSummary};
 use manox_agent::language_model::{LanguageModelToolUse, MessageContent, Role, TokenUsage};
@@ -192,28 +190,6 @@ pub fn tall_history(turns: usize) -> Vec<HistoryEntry> {
             ]
         })
         .collect()
-}
-
-/// The probe window's height, the viewport bound the plan-review card's
-/// geometry assertions check its decision row against.
-pub const PROBE_WINDOW_HEIGHT: Pixels = px(780.);
-
-/// Re-pulls the diagnostic pending-ask card element from the workspace state
-/// on EVERY frame — an `AnyElement` is consumed by its first paint, so a
-/// stored one would leave later frames empty.
-pub struct AskCardProbe {
-    pub ws: Entity<Workspace>,
-}
-
-impl Render for AskCardProbe {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A geometry probe needs no live host: the noop host mirrors the
-        // old invalid-weak trick (no custom row, controls render inert).
-        let card = self.ws.update(cx, |ws, cx| {
-            ws.diagnostic_ask_card_element(steer_agent_chat_ui::host::noop_host(), 0, cx)
-        });
-        card.unwrap_or_else(|| gpui::div().into_any_element())
-    }
 }
 
 /// A real plan file on disk, as `ProposePlan` leaves one.

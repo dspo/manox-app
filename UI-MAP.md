@@ -71,7 +71,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
 | Sub-agent 观察 | ✅ 部分 | rail 观察行（生命周期/活动）+ Agent 工具卡片实时流式子转录（text/thinking delta、工具 ▸/✓/✗ 行）；独立钻取面板随 manox 移除，卡片体即钻取面 |
-| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewDecisionCard](#planreviewdecisioncard)（底部一键裁决卡），三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
+| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 就是单个 [AskDrawer](#askdrawer)（分页表单那张卡）：`detail`=plan 正文、选项为三裁决 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端），选项 + 对钩提交，没有第二套裁决卡；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
 分层纪律：crates/manox-harness/src/core 只做 TS Pi 对齐与扩展点；harness 能力扩展一律走
@@ -119,7 +119,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### AskDrawer
 
-- [AskDrawer](#askdrawer) · [PlanReviewDecisionCard](#planreviewdecisioncard) · [ConfirmationCard](#confirmationcard)
+- [AskDrawer](#askdrawer) · [ConfirmationCard](#confirmationcard)
 
 ### Popups & Dropdowns
 
@@ -676,15 +676,17 @@ retired full-column `render_pending_auth_overlay` modal is gone.
 
 The pending `AskUserQuestion`, rendered inside the conversation as the
 ai-elements paged form ([AskUserQuestion](#askuserquestion)) — the card the
-gallery shows is the card the app shows; there is no second, app-local
-presentation. `render_ask_user_card`
-(`crates/steer-agent-chat-ui/src/views/message.rs`) routes one-question
-plan-review asks to [PlanReviewDecisionCard](#planreviewdecisioncard) and
-mounts `render_ask_form_card` for every other ask: the ask's questions become
-`AskBlock`s (header, question, `detail` as host-rendered markdown, options with
-the 「推荐」 badge, multi-select flags), the note placeholder and the
-「推荐」 badge label are localized here, and a block's detail element rides its
-own page.
+gallery shows is the card the app shows, in BOTH phases. There is no second,
+app-local ask presentation: `render_ask_user_card`
+(`crates/steer-agent-chat-ui/src/views/message.rs`) mounts `render_ask_form_card`
+while the ask is pending and `render_ask_settled_card` once it is answered, and
+nothing routes on the question's shape. The ask's questions become `AskBlock`s
+(header, question, `detail` as host-rendered markdown, options with the 「推荐」
+badge, multi-select flags); the note placeholder and the 「推荐」 badge label are
+localized here, and a block's detail element rides its own page. A plan review is
+an ordinary one-question ask whose `detail` carries the plan body — the card's
+pending chip (`等待回答`, the sidebar's parked-turn blue dot) and close control are
+its only chrome.
 
 The interactive half (page, selections, per-question notes) lives in the
 `ai_elements::AskState` entity, whose only owner is the workspace
@@ -724,39 +726,20 @@ after having been confirmed in it settled remotely and is reconciled away
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`, `render_ask_settled_card`, `ask_answer_markdown`) + `crates/agent-ui/src/workspace/chips.rs` (`ensure_ask_state`, `reply_ask`)
 
-#### PlanReviewDecisionCard
+**Plan review** rides that one card: a proposed plan arrives as a single-question
+ask whose `detail` is the plan body (the live edge pulls it off the plan channel
+into the question's support text) and whose options are the three verdicts —
+**Approve**, **Approve & compact**, **Request changes** — so the user picks one
+and the pager's check submits it. The SERVER owns the verdict mapping (Approve →
+keep, Approve & compact → compact, anything else — Request changes / custom /
+skip → refine, and a card close → stop and stay in plan mode awaiting a message);
+the client sends no verdict enum. B2-PR-5's dedicated four-choice verdict drawer,
+its `PendingPlanReview` state/stash/overlay and the `ExecuteFresh`
+create-and-reseed path stay retired, and the app-local decision card that
+replaced them (a warning strip over a scrolled plan with a bottom button row) is
+gone with the rest: one ask design, the gallery's.
 
-B2-PR-5: a proposed plan is no longer a dedicated `PlanVerdict` drawer with a
-four-choice verdict (that surface, its `PendingPlanReview` state / stash /
-overlay, and the `ExecuteFresh` create-and-reseed path are deleted). It reaches
-the client as a single-question [AskDrawer](#askdrawer) whose `input` carries
-`detail` = the plan body (markdown) and `intent = {kind: "plan-review",
-approve: "Approve"}` over three options — **Approve**, **Approve & compact**,
-**Request changes**. When the routing (`plan_review_approve_index`: single
-question, single-select, `intent.kind == "plan-review"`, `approve` matching
-one of the question's own labels) fires, the ask renders as a decision card in
-the deepseek-harness `PlanReviewPanel` shape: a warning-tinted strip (dot +
-「Plan 评审」), the plan as the body that owns the internal scroll, and a fixed
-BOTTOM decision row — the approve option as the primary button, the remaining
-options as outline buttons (description in the tooltip), and a quiet
-「继续讨论」 ghost action carrying the dismissal leg (`dismiss_ask`). A click
-IS the verdict: the button submits the one-question ask with that option
-selected (`ChatHost::submit_ask` with a single reply — no selection-then-confirm
-two-step). 「继续讨论」 is the
-decision card's only keyboard-free exit: the AskDrawer Esc binding is
-context-scoped and lands only while focus sits INSIDE the card, and this card
-takes no focus (buttons avoid focus on mouse-down) — a deliberate button-only
-surface, same as dsh's `PlanReviewPanel`.
-
-The user's answer rides the normal canonical reply; the SERVER owns the verdict
-mapping (Approve → keep, Approve & compact → compact, anything else — Request
-changes / custom / skip → refine, and a card close → stop and stay in plan mode
-awaiting a message). The client sends no verdict enum. Enter in the composer
-while the card is up submits the card (per [AskDrawer](#askdrawer)), not a
-separate dismissal. A plan-review ask that fails the routing (extra questions,
-a multi-select question, unmatched `approve`) renders the paged form instead.
-
-> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/steer-agent-chat-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`reply_ask`)
+> Source: `crates/agent-ui/src/workspace/chips.rs` (`sync_live_ask` pulls the plan body) + `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`)
 
 #### 3.2.4 Popups & Dropdowns
 

@@ -48,11 +48,6 @@ pub trait ChatHost: Send + Sync + 'static {
         approved: bool,
         cx: &mut App,
     );
-    /// The ask card body's tracked scroll handle for step `qi` — `None`
-    /// before the ask scratch is allocated (the render path allocates it), in
-    /// which case the card keeps gpui's untracked element-state scroll and
-    /// takes no wheel guard.
-    fn ask_body_scroll(&self, qi: usize, cx: &App) -> Option<gpui::ScrollHandle>;
     /// Fork the session at `through_entry_id`.
     fn fork_session_at(&self, through_entry_id: &str, cx: &mut App);
     /// Open the right-pane observation tab for a sub-agent (the rail's row
@@ -73,9 +68,6 @@ pub struct NoopHost;
 
 impl ChatHost for NoopHost {
     fn conversation(&self, _cx: &App) -> Option<Entity<ConversationState>> {
-        None
-    }
-    fn ask_body_scroll(&self, _qi: usize, _cx: &App) -> Option<gpui::ScrollHandle> {
         None
     }
     fn dismiss_ask(&self, _cx: &mut App) {}

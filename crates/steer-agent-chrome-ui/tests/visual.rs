@@ -28,6 +28,7 @@ mod macos {
         size,
     };
     use gpui_component::Root;
+    use steer_agent_chat_ui::ask_card::{AskCardOption, AskCardQuestion, AskCardSnapshot};
     use steer_agent_chat_ui::conversation::{ConvItem, ToolCallItem};
     use steer_agent_chat_ui::host::noop_host;
     use steer_agent_chat_ui::views::message::MessageItem;
@@ -258,6 +259,85 @@ mod macos {
 
     // ── main-surface seat ─────────────────────────────────────────────────────
 
+    /// The demo ask: three questions covering single-select, multi-select and
+    /// a free-text note.
+    fn seed_snapshot() -> AskCardSnapshot {
+        let question = |header: &str,
+                        question: &str,
+                        multi_select: bool,
+                        options: Vec<(&str, &str, bool)>| AskCardQuestion {
+            question: question.to_string(),
+            header: header.to_string(),
+            detail: String::new(),
+            multi_select,
+            options: options
+                .into_iter()
+                .map(|(label, description, recommended)| AskCardOption {
+                    label: label.to_string(),
+                    description: description.to_string(),
+                    recommended,
+                })
+                .collect(),
+        };
+        AskCardSnapshot {
+            id: "ask-seed".into(),
+            questions: vec![
+                question(
+                    "存储",
+                    "这个服务用哪个数据库？",
+                    false,
+                    vec![
+                        ("PostgreSQL", "事务 + JSONB，跟现有部署一致", true),
+                        ("MySQL", "团队更熟悉，但需要补迁移脚本", false),
+                    ],
+                ),
+                question(
+                    "功能",
+                    "这一期先启用哪些能力？",
+                    true,
+                    vec![
+                        ("查询缓存", "命中率可观测", false),
+                        ("全文检索", "先把接口留好", false),
+                        ("指标上报", "", false),
+                    ],
+                ),
+                question("补充", "还有什么需要我注意的吗？", false, Vec::new()),
+            ],
+        }
+    }
+
+    /// A plan review, as the runtime raises one: a single question whose
+    /// `detail` carries the plan body and whose options are the three verdicts.
+    /// One card face — no separate decision surface.
+    fn plan_review_snapshot() -> AskCardSnapshot {
+        AskCardSnapshot {
+            id: "plan-review-seed".into(),
+            questions: vec![AskCardQuestion {
+                question: "批准这个计划吗？".into(),
+                header: "Plan 评审".into(),
+                detail: "## 帖子服务拆分\n\n1. 建 `posts` 表与迁移脚本\n2. 查询缓存接一层\n3. 全文检索先留接口\n\n> 预计两轮迭代".into(),
+                multi_select: false,
+                options: vec![
+                    AskCardOption {
+                        label: "Approve".into(),
+                        description: "开始执行".into(),
+                        recommended: true,
+                    },
+                    AskCardOption {
+                        label: "Approve & compact".into(),
+                        description: "先压缩上下文再执行".into(),
+                        recommended: false,
+                    },
+                    AskCardOption {
+                        label: "Request changes".into(),
+                        description: "继续讨论".into(),
+                        recommended: false,
+                    },
+                ],
+            }],
+        }
+    }
+
     /// A minimal seeded message list (the chat pipeline's real `MessageItem`s),
     /// so the acceptance capture shows chat content inside the shell.
     struct ChatPreviewStub {
@@ -275,6 +355,7 @@ mod macos {
             if let Ok(mode) = std::env::var("CHROME_ASK") {
                 return match mode.as_str() {
                     "answered" => Self::answered_ask_card(cx),
+                    "plan" => Self::ask_card_with(cx, 0, plan_review_snapshot()),
                     page => Self::ask_card(cx, page.parse::<usize>().unwrap_or(0)),
                 };
             }
@@ -328,59 +409,19 @@ mod macos {
         /// state is seeded by hand here (the workspace's `ensure_ask_state`
         /// does it live), including the answers a reader would see mid-form.
         fn ask_card(cx: &mut gpui::Context<Self>, page: usize) -> Self {
-            use ai_elements::AskState;
-            use steer_agent_chat_ui::ask_card::{AskCardOption, AskCardQuestion, AskCardSnapshot};
+            Self::ask_card_with(cx, page, seed_snapshot())
+        }
 
-            let question =
-                |header: &str,
-                 question: &str,
-                 multi_select: bool,
-                 options: Vec<(&str, &str, bool)>| AskCardQuestion {
-                    question: question.to_string(),
-                    header: header.to_string(),
-                    detail: String::new(),
-                    intent: None,
-                    multi_select,
-                    options: options
-                        .into_iter()
-                        .map(|(label, description, recommended)| AskCardOption {
-                            label: label.to_string(),
-                            description: description.to_string(),
-                            recommended,
-                        })
-                        .collect(),
-                };
-            let snapshot = AskCardSnapshot {
-                id: "ask-seed".into(),
-                questions: vec![
-                    question(
-                        "存储",
-                        "这个服务用哪个数据库？",
-                        false,
-                        vec![
-                            ("PostgreSQL", "事务 + JSONB，跟现有部署一致", true),
-                            ("MySQL", "团队更熟悉，但需要补迁移脚本", false),
-                        ],
-                    ),
-                    question(
-                        "功能",
-                        "这一期先启用哪些能力？",
-                        true,
-                        vec![
-                            ("查询缓存", "命中率可观测", false),
-                            ("全文检索", "先把接口留好", false),
-                            ("指标上报", "", false),
-                        ],
-                    ),
-                    question("补充", "还有什么需要我注意的吗？", false, Vec::new()),
-                ],
-            };
+        /// The same card over any snapshot — the plan-review mode reuses it.
+        fn ask_card_with(
+            cx: &mut gpui::Context<Self>,
+            page: usize,
+            snapshot: AskCardSnapshot,
+        ) -> Self {
             let multi: Vec<bool> = snapshot.questions.iter().map(|q| q.multi_select).collect();
-            let state = cx.new(|_| AskState::new(multi, "添加可选补充说明"));
+            let state = cx.new(|_| ai_elements::AskState::new(multi, "添加可选补充说明"));
             state.update(cx, |state, cx| {
                 state.toggle_option(0, 0, cx);
-                state.toggle_option(1, 0, cx);
-                state.toggle_option(1, 2, cx);
                 state.set_page(page, cx);
             });
             let ask = cx.new(|_| {

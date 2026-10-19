@@ -17,8 +17,8 @@ use gpui::ClickEvent;
 use gpui::DismissEvent;
 use gpui::{
     AnyElement, App, Context, Entity, FollowMode, ListAlignment, ListOffset, ListState,
-    MouseButton, Pixels, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
-    anchored, deferred, prelude::*, px,
+    MouseButton, Pixels, Render, SharedString, Subscription, WeakEntity, Window, anchored,
+    deferred, prelude::*, px,
 };
 /// Shared across both harnesses: workspace struct fields hold
 /// `Option<Entity<PopupMenu>>` regardless of feature.
@@ -331,8 +331,8 @@ enum RegistryTurnKind {
 // module (Phase 2 tail); these re-exports keep every bare/`super::` name in
 // the workspace family resolving unchanged.
 pub use steer_agent_chat_ui::column::{
-    AskIntent, AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState,
-    PendingAsk, PendingConfirmation, QueuedFollowUp, parse_pending_ask,
+    AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState, PendingAsk,
+    PendingConfirmation, QueuedFollowUp, parse_pending_ask,
 };
 
 /// The visited-thread history behind the titlebar ←/→ moves. Invariants
@@ -801,7 +801,6 @@ impl Workspace {
                 confirmation_row_synthesized: None,
                 confirmation_snapshot_item: None,
                 ask_state: None,
-                ask_body_scroll: Vec::new(),
                 model_open: false,
                 model_menu: None,
                 model_menu_sub: None,

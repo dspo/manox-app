@@ -456,15 +456,11 @@ workspace-reasoning-high = High
 
 workspace-reasoning-max = Max
 
-workspace-ask-supplement-label = Supplemental note
-
 workspace-ask-supplement-placeholder = Add optional context
 
 workspace-ask-recommended = Recommended
 
-workspace-ask-plan-review-label = Plan review
-
-workspace-ask-discuss = Discuss
+workspace-ask-waiting = Waiting for your answer
 
 workspace-ask-question-label = Q{$n}:
 

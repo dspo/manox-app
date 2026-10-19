@@ -2633,21 +2633,11 @@ pub fn pending_ask_from_ahp(
             ),
             Q::Unknown(_) => continue,
         };
-        // A plan-review elicitation (request id `plan-review:<entry>`) renders
-        // the verdict card: the affirmative option is highlighted by label
-        // (the render matches `intent.approve` against the option labels).
-        let intent = id
-            .starts_with("plan-review:")
-            .then(|| crate::column::AskIntent {
-                kind: "plan-review".to_string(),
-                approve: "Approve".to_string(),
-            });
         parsed.push(crate::column::AskQuestion {
             id,
             question,
             header,
             detail: String::new(),
-            intent,
             multi_select: multi,
             options,
         });

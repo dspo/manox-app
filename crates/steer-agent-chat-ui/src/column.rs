@@ -51,27 +51,14 @@ pub fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<Pending
             None => format!("q{i}"),
         };
         // B2-PR-1 L1 vocabulary: `detail` is optional markdown support text
-        // rendered beneath the question; `intent` names a specialised surface
-        // (`kind`, e.g. "plan-review") with the option label that carries the
-        // affirmative verdict (`approve`). Both ride the snapshot so the card
-        // renders them; later PRs branch on `intent`.
+        // rendered beneath the question. A specialised ask (a plan review) is
+        // just a question whose detail carries the plan body — one card face,
+        // no routing.
         let detail = q
             .get("detail")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let intent = q.get("intent").and_then(|v| v.as_object()).map(|obj| {
-            let read = |k: &str| {
-                obj.get(k)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
-            };
-            AskIntent {
-                kind: read("kind"),
-                approve: read("approve"),
-            }
-        });
         let header = q
             .get("header")
             .and_then(|v| v.as_str())
@@ -114,7 +101,6 @@ pub fn parse_pending_ask(id: String, input: serde_json::Value) -> Option<Pending
             question,
             header,
             detail,
-            intent,
             multi_select,
             options: opts,
         });
@@ -209,16 +195,8 @@ pub struct AskQuestion {
     pub question: String,
     pub header: String,
     pub detail: String,
-    pub intent: Option<AskIntent>,
     pub multi_select: bool,
     pub options: Vec<AskOption>,
-}
-
-/// Parsed form of a question's `intent` object: the specialised-surface kind
-/// (e.g. "plan-review") and the option label carrying the affirmative verdict.
-pub struct AskIntent {
-    pub kind: String,
-    pub approve: String,
 }
 
 pub struct AskOption {
@@ -231,7 +209,6 @@ pub struct AskOption {
 pub enum ComposerPlaceholderMode {
     Normal,
     FollowUp,
-    Ask,
 }
 
 pub struct DeferredUserTurn {
@@ -403,14 +380,6 @@ pub struct ChatColumn {
     /// the row was minted by the sync — a park's retirement removes the
     /// promoted row, while a row that already existed stays.
     pub confirmation_row_synthesized: Option<String>,
-    /// The ask card's body scrollport — the plan-review card's plan body — one
-    /// slot per question (index-aligned with `pending_ask.questions`). The body
-    /// is a scrollport nested inside the message list, so its wheel handler
-    /// needs the live offset to tell whether the gesture is consumed there or
-    /// chained to the enclosing list (`contain_body_scroll` in the message
-    /// views), and `track_scroll` stores the offset in the handle, so it must
-    /// outlive a frame. Rebuilt with the ask, reset with it.
-    pub ask_body_scroll: Vec<gpui::ScrollHandle>,
     /// The pending ask's interactive card state — page, per-question
     /// selections and notes — as `ai_elements::AskUserQuestion` drives it. The
     /// tuple is `(ask id, state)`: the id retires the state with the ask it
@@ -644,10 +613,6 @@ impl ChatColumn {
                     question: q.question.clone(),
                     header: q.header.clone(),
                     detail: q.detail.clone(),
-                    intent: q.intent.as_ref().map(|i| crate::ask_card::AskCardIntent {
-                        kind: i.kind.clone(),
-                        approve: i.approve.clone(),
-                    }),
                     multi_select: q.multi_select,
                     options: q
                         .options
@@ -669,7 +634,6 @@ impl ChatColumn {
     /// ride the same lifecycle.
     pub fn reset_ask_state(&mut self) {
         self.ask_state = None;
-        self.ask_body_scroll.clear();
     }
 
     /// Land one recall step's state (the walk index and the displaced

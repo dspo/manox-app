@@ -32,17 +32,8 @@ pub struct AskCardQuestion {
     pub header: String,
     /// Optional markdown support text beneath the question.
     pub detail: String,
-    /// Optional specialised-surface intent (`kind` + the `approve` option
-    /// label). Empty `kind` means a plain ask.
-    pub intent: Option<AskCardIntent>,
     pub multi_select: bool,
     pub options: Vec<AskCardOption>,
-}
-
-#[derive(Clone, PartialEq)]
-pub struct AskCardIntent {
-    pub kind: String,
-    pub approve: String,
 }
 
 #[derive(Clone, PartialEq)]

@@ -4,9 +4,9 @@
 //! handlers) and its `tests` child keep calling them.
 //!
 //! B2-PR-5: the plan-review VERDICT surface is gone. A proposed plan now
-//! reaches the user as a single-question `AskUserQuestion` whose `intent.kind`
-//! is `plan-review` (see the ask card + `chips.rs`), so the four-choice verdict
-//! drawer, the `PlanVerdict` reply/cancel legs, and the `ExecuteFresh`
+//! reaches the user as a single-question `AskUserQuestion` whose `detail`
+//! carries the plan body (see the ask card + `chips.rs`), so the four-choice
+//! verdict drawer, the `PlanVerdict` reply/cancel legs, and the `ExecuteFresh`
 //! create-and-reseed path were retired with the server's `PlanVerdict` call.
 
 use super::*;

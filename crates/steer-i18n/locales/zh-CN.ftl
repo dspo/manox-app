@@ -443,15 +443,11 @@ workspace-reasoning-high = 高
 
 workspace-reasoning-max = 最高
 
-workspace-ask-supplement-label = 补充说明
-
 workspace-ask-supplement-placeholder = 添加可选补充说明
 
 workspace-ask-recommended = 推荐
 
-workspace-ask-plan-review-label = Plan 评审
-
-workspace-ask-discuss = 继续讨论
+workspace-ask-waiting = 等待回答
 
 workspace-ask-question-label = 问{$n}：
 

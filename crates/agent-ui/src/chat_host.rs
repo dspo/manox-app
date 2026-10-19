@@ -68,12 +68,6 @@ impl ChatHost for WorkspaceChatHost {
         }
     }
 
-    fn ask_body_scroll(&self, qi: usize, cx: &App) -> Option<gpui::ScrollHandle> {
-        // Read through the workspace's own accessor (it holds the chat guard
-        // internally).
-        self.0.upgrade()?.read(cx).ask_body_scroll(cx, qi)
-    }
-
     fn fork_session_at(&self, through_entry_id: &str, cx: &mut App) {
         if let Some(ws) = up(self, cx) {
             ws.update(cx, |w, cx| w.fork_session_at(through_entry_id, cx));

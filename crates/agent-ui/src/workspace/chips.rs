@@ -490,10 +490,9 @@ impl Workspace {
                     .iter()
                     .map(|q| q.multi_select)
                     .collect::<Vec<_>>(),
-                ask.questions.len(),
             )
         });
-        let Some((id, multi, count)) = pending else {
+        let Some((id, multi)) = pending else {
             // No ask: retire the state so a re-seed of the same request (the
             // dismiss/restore race) starts from a blank form.
             if self.chat.read(cx).ask_state.is_some() {
@@ -517,9 +516,6 @@ impl Workspace {
             ai_elements::AskState::new(multi, i18n::t("workspace-ask-supplement-placeholder"))
         });
         self.chat.update(cx, |chat, cx| {
-            if chat.ask_body_scroll.len() != count {
-                chat.ask_body_scroll = (0..count).map(|_| ScrollHandle::new()).collect();
-            }
             chat.ask_state = Some((id, state));
             cx.notify();
         });
@@ -585,58 +581,6 @@ impl Workspace {
             }
         }
         cx.notify();
-    }
-
-    /// Diagnostic-only: the interactive ask card element for the CURRENT
-    /// pending-ask snapshot, as the conversation list would render it. The
-    /// workspace's message list only paints through the live event path, so
-    /// render-level probe tests pull the card out and mount it directly.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_ask_card_element(
-        &mut self,
-        host: steer_agent_chat_ui::host::ChatHostHandle,
-        ix: usize,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        // The card renders from the workspace-owned interactive state, so the
-        // probe mounts it first — exactly what the workspace's own render path
-        // does before the list measures.
-        self.ensure_ask_state(cx);
-        let id = self.chat.read(cx).pending_ask.as_ref()?.id.clone();
-        let snapshot = self.ask_card_snapshot(&id, cx)?;
-        let ask_state = self.chat.read(cx).ask_state.as_ref()?.1.clone();
-        let item = crate::conversation::ToolCallItem {
-            id,
-            name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
-            title: String::new(),
-            status: manox_agent::ToolCallStatus::PendingApproval,
-            output: String::new(),
-            is_error: false,
-            input: serde_json::Value::Null,
-            streaming: false,
-            collapsed: false,
-            user_toggled: false,
-            panel: None,
-            card: None,
-            cwd: None,
-        };
-        // The diagnostic mount shows the card's controls but nothing copies
-        // from it, so the copy-feedback context is ownerless.
-        let copy_registry = steer_components::copy_feedback::CopiedRegistry::default();
-        Some(crate::views::message::render_ask_user_card(
-            &item,
-            ix,
-            &cx.theme().clone(),
-            Some(&crate::views::message::ToolCallCtx {
-                host,
-                ask: Some(snapshot),
-                ask_state: Some(ask_state),
-                ask_settled: None,
-                confirmation: None,
-            }),
-            &crate::views::message::CopyFeedback::inert(&copy_registry),
-            cx,
-        ))
     }
 
     /// Synchronize Workspace-derived ask state before the native list starts
@@ -729,12 +673,6 @@ impl Workspace {
         };
         let answers = ask_answers(&ask, &replies);
         let id = ask.id.clone();
-        // `take_pending_ask` retired the card's interactive state with the ask;
-        // the plan body's scroll slots go with it.
-        self.chat.update(cx, |chat, cx| {
-            chat.ask_body_scroll.clear();
-            cx.notify();
-        });
         if let Some((store, sid)) = self.chat.read(cx).store.clone() {
             let view = store.read(cx);
             if let Some((chat_id, request)) =
@@ -763,16 +701,6 @@ impl Workspace {
             "ask card retired without an answer; composer back to plain submit"
         );
         cx.notify();
-    }
-
-    /// The ask card body's tracked scroll handle for question `qi`. `None`
-    /// before the ask scratch is allocated (the render path allocates it); the
-    /// card then keeps gpui's untracked element-state scroll and takes no wheel
-    /// guard — the pre-fix behaviour, never a broken body. The chat crate's
-    /// message views read this through the `ChatHost` port
-    /// (`contain_body_scroll`).
-    pub(crate) fn ask_body_scroll(&self, cx: &App, qi: usize) -> Option<ScrollHandle> {
-        self.chat.read(cx).ask_body_scroll.get(qi).cloned()
     }
 
     /// Wire api string → text color for the pi composer model label and the

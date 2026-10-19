@@ -361,23 +361,6 @@ mod suite {
         );
     }
 
-    #[test]
-    fn a_plain_ask_carries_no_intent() {
-        let payload = serde_json::json!({
-            "questions": [{"question": "Which color?", "options": [{"label": "Red"}]}]
-        });
-        let ask =
-            crate::workspace::parse_pending_ask("ask1".into(), payload).expect("plain ask parses");
-        assert!(
-            ask.questions[0].intent.is_none(),
-            "no intent → generic ask card"
-        );
-        assert!(
-            ask.questions[0].detail.is_empty(),
-            "no detail → no markdown block"
-        );
-    }
-
     /// The card reports option INDICES and note text; the wire fold is the one
     /// place those become labels and `/ panic` — the tri-state the server
     /// reads: selected (single / many), a bare note as free text, and an

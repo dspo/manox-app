@@ -31,8 +31,7 @@ use ai_elements::{AskBlock, AskOption, BrailleSpinner};
 use base64::Engine as _;
 use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui::prelude::*;
-use gpui::{Animation, AnimationExt as _, ease_out_quint};
-use gpui::{App, ClipboardItem, Entity, Render, ScrollHandle, SharedString, WeakEntity, px};
+use gpui::{App, ClipboardItem, Entity, Render, SharedString, WeakEntity, px};
 use gpui_component::Disableable as _;
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
@@ -59,7 +58,7 @@ pub const MESSAGE_BODY_SIZE: gpui::Pixels = gpui::px(13.);
 use std::path::{Path, PathBuf};
 use steer_components::turn_frame::TurnFrame;
 
-use crate::ask_card::{AskCardQuestion, AskCardSnapshot};
+use crate::ask_card::AskCardSnapshot;
 use crate::column::ConfirmationSnapshot;
 use crate::host::ChatHostHandle;
 use crate::preview::PreviewKind;
@@ -1017,9 +1016,8 @@ pub fn render_item(
                 render_preview_card(t, ix, theme, tool_ctx, preview_body, copy)
             } else {
                 // Ordinary tool calls fold into `Thinking`; a top-level
-                // ToolCall here is the answered-state fallback for an
-                // `AskUserQuestion` whose interactive snapshot is gone, or a
-                // defensive orphan — render it as a plain card.
+                // `ToolCall` here is a defensive orphan — render it as a plain
+                // card.
                 render_tool_call(t, ix, theme, tool_ctx, copy, cx)
             }
         }
@@ -2565,23 +2563,6 @@ pub fn render_ask_user_card(
         return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
     };
 
-    // One takeover, two presentations: a plan review is one decision over one
-    // plan, so it takes the decision card; every other ask takes the paged
-    // form card. The routing lives at the one entry that renders the card,
-    // so neither presentation can claim an ask the other is already showing.
-    if snapshot.questions.len() == 1
-        && let Some(approve_ix) = plan_review_approve_index(&snapshot.questions[0])
-    {
-        return render_plan_review_card(
-            ix,
-            theme,
-            ctx.host.clone(),
-            &snapshot,
-            approve_ix,
-            copy.owner.clone(),
-            cx,
-        );
-    }
     let Some(state) = ctx.ask_state.clone() else {
         // The card's interactive state mounts on the workspace's render path;
         // before that first pass there is nothing to page through yet.
@@ -2679,6 +2660,16 @@ fn render_ask_form_card(
         // The card's identity is the tool that raised it — the same voice the
         // other tool cards use. The question's own header rides the form.
         .name(manox_agent::tools::ASK_USER_QUESTION)
+        // The parked turn's own signal, the gallery's pending chip: the dot the
+        // sidebar uses for a turn waiting on a human, plus the label.
+        .status(
+            h_flex()
+                .gap_1p5()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(gpui::div().size(px(6.)).rounded_full().bg(theme.blue))
+                .child(i18n::t("workspace-ask-waiting")),
+        )
         .blocks(blocks)
         // The pager's check submits the form: the card reports what it holds
         // (an untouched question settles as an explicit skip) and the host
@@ -2713,232 +2704,6 @@ fn render_ask_form_card(
         })
         .child(card)
         .into_any_element()
-}
-
-/// The plan-review decision presentation's approve option: the ask must carry
-/// a `plan-review` intent whose `approve` label names one of the question's
-/// own options, and the question must be single-select — `decide_ask_option`
-/// clears siblings, which would destroy answers on a multi-select. `None`
-/// renders the generic question card. The label match runs against the
-/// DISPLAY label — the server's `(Recommended)` suffix was already stripped
-/// at parse — while the server validated the raw label, so a model-minted
-/// intent can miss and degrade to the generic card. That asymmetry is the
-/// intended safe fallback, not a bug to align away. (dsh's `planReviewOf`
-/// also caps options at two, shaping its two-button panel; our footer is N
-/// buttons over the gateway's three minted options, so that guard MUST NOT
-/// be copied.)
-fn plan_review_approve_index(question: &AskCardQuestion) -> Option<usize> {
-    let intent = question.intent.as_ref()?;
-    if intent.kind != "plan-review" || intent.approve.is_empty() || question.multi_select {
-        return None;
-    }
-    question
-        .options
-        .iter()
-        .position(|opt| opt.label == intent.approve)
-}
-
-/// Give an ask card body its wheel contract. The body is a scrollport nested
-/// inside the message list, and gpui dispatches one wheel event to EVERY
-/// scroll container whose hitbox contains the cursor, so without this guard a
-/// wheel over the card scrolls the body and the column together and the
-/// body's tail is never reachable. The body's own (gpui built-in) listener has
-/// already applied the delta when this handler runs — custom listeners
-/// register ahead of it in paint and the bubble phase runs in reverse
-/// registration order — so the room test reads the post-delta offset: while the
-/// body still has room in the gesture's direction the event stops here, and at
-/// either end it continues to the enclosing list (scroll chaining), so a body
-/// that fits its cap never traps the column.
-fn contain_body_scroll(
-    body: gpui::Stateful<gpui::Div>,
-    scroll: &ScrollHandle,
-) -> gpui::Stateful<gpui::Div> {
-    let scroll = scroll.clone();
-    body.track_scroll(&scroll).on_scroll_wheel(
-        move |ev: &gpui::ScrollWheelEvent, window: &mut gpui::Window, cx: &mut App| {
-            let dy = ev.delta.pixel_delta(window.line_height()).y;
-            // Offsets run 0 (top) → -max (bottom): a negative dy scrolls
-            // toward the bottom, a positive one toward the top.
-            let offset = scroll.offset().y;
-            let room = if dy < px(0.) {
-                offset + scroll.max_offset().y > px(0.5)
-            } else if dy > px(0.) {
-                offset < px(-0.5)
-            } else {
-                false
-            };
-            if room {
-                cx.stop_propagation();
-            }
-        },
-    )
-}
-
-/// The plan-review decision card: a tinted strip, the plan as the body that
-/// owns the scroll (so the strip and the decision row stay reachable on a
-/// long plan), and a fixed decision row at the BOTTOM — the approve option as
-/// the primary button, the remaining options as outline buttons, and a quiet
-/// discuss action carrying the dismissal leg. A click IS the verdict: the
-/// button submits the one-question ask with that option selected, so there is
-/// no selection-then-confirm two-step.
-fn render_plan_review_card(
-    ix: usize,
-    theme: &Theme,
-    host: ChatHostHandle,
-    snapshot: &AskCardSnapshot,
-    approve_ix: usize,
-    owner: Option<WeakEntity<MessageItem>>,
-    cx: &mut App,
-) -> gpui::AnyElement {
-    let host_esc = host.clone();
-    let host_discuss = host.clone();
-    // The single question the decision settles (the routing only sends
-    // one-question asks here).
-    let question = &snapshot.questions[0];
-
-    let strip = h_flex()
-        .w_full()
-        .min_w_0()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .bg(theme.warning.opacity(0.12))
-        .child(gpui::div().size(px(8.)).rounded_full().bg(theme.warning))
-        .child(
-            gpui::div()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_sm()
-                .text_color(theme.warning)
-                .child(i18n::t("workspace-ask-plan-review-label")),
-        );
-
-    let lead = gpui::div()
-        .w_full()
-        .min_w_0()
-        .text_base()
-        .text_color(theme.foreground)
-        .child(question.question.clone());
-    let plan_body = (!question.detail.trim().is_empty()).then(|| {
-        static_body(
-            format!("plan-review-detail-{ix}"),
-            question.detail.clone(),
-            theme,
-            owner.clone(),
-        )
-    });
-    let body = gpui::div()
-        .id(format!("plan-review-body-{ix}"))
-        .debug_selector(move || format!("plan-review-body-{ix}"))
-        .w_full()
-        .min_w_0()
-        .max_h(px(520.))
-        .overflow_y_scroll()
-        .px_3()
-        .pt_2p5()
-        .pb_1()
-        .child(lead)
-        .children(plan_body);
-    // The plan body owns the wheel while it has room (see
-    // `contain_body_scroll`).
-    let body = match host.ask_body_scroll(0, cx) {
-        Some(scroll) => contain_body_scroll(body, &scroll),
-        None => body,
-    };
-
-    let mut footer = h_flex()
-        .debug_selector(move || format!("plan-review-footer-{ix}"))
-        .w_full()
-        .min_w_0()
-        .items_center()
-        .justify_end()
-        .flex_wrap()
-        .gap_2()
-        .px_3()
-        .pt_1p5()
-        .pb_1()
-        .child(
-            Button::new(format!("plan-review-discuss-{ix}"))
-                .ghost()
-                .small()
-                .icon(gpui_kit_assets::IconName::PenLine)
-                .label(i18n::t("workspace-ask-discuss"))
-                .on_click(move |_, _, cx: &mut App| {
-                    host_discuss.dismiss_ask(cx);
-                }),
-        );
-    for (oi, opt) in question.options.iter().enumerate() {
-        if oi == approve_ix {
-            continue;
-        }
-        let host_decide = host.clone();
-        let mut button = Button::new(format!("plan-review-decide-{ix}-{oi}"))
-            .outline()
-            .small()
-            .label(opt.label.clone())
-            .on_click(move |_, _, cx: &mut App| {
-                host_decide.submit_ask(vec![verdict(oi)], cx);
-            });
-        if !opt.description.trim().is_empty() {
-            button = button.tooltip(opt.description.clone());
-        }
-        footer = footer.child(button);
-    }
-    let host_approve = host.clone();
-    let approve = &question.options[approve_ix];
-    let mut approve_button = Button::new(format!("plan-review-approve-{ix}"))
-        .primary()
-        .small()
-        .label(approve.label.clone())
-        .on_click(move |_, _, cx: &mut App| {
-            host_approve.submit_ask(vec![verdict(approve_ix)], cx);
-        });
-    if !approve.description.trim().is_empty() {
-        approve_button = approve_button.tooltip(approve.description.clone());
-    }
-    footer = footer.child(approve_button);
-
-    v_flex()
-        .id(format!("plan-review-card-{}", snapshot.id))
-        .key_context("AskDrawer")
-        // The discuss action is the decision card's only exit. The AskDrawer
-        // Esc binding is context-scoped and only lands while focus sits
-        // INSIDE the card, and nothing on this card takes focus (gpui
-        // buttons avoid focus on mouse-down) — a deliberate button-only
-        // surface, same as dsh's PlanReviewPanel.
-        .on_action(move |_: &crate::AskCancel, _window, cx: &mut App| {
-            host_esc.dismiss_ask(cx);
-        })
-        .w_full()
-        .min_w_0()
-        .overflow_hidden()
-        .rounded(px(18.))
-        .border_1()
-        .border_color(theme.warning.opacity(0.45))
-        .bg(theme.background)
-        .shadow_lg()
-        // The extra bottom padding plus negative margin lets the composer
-        // cover the card tail, the same contract as the form card.
-        .pb_5()
-        .mb(px(-10.))
-        .child(strip)
-        .child(body)
-        .child(footer)
-        .with_animation(
-            format!("plan-review-slide-{}", snapshot.id),
-            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-            |el, delta| el.mt(px(8. * (1. - delta))).opacity(delta),
-        )
-        .into_any_element()
-}
-
-/// The plan-review verdict as the card reports it: the clicked option, and an
-/// empty note.
-fn verdict(option_ix: usize) -> crate::ask_card::AskCardReply {
-    crate::ask_card::AskCardReply {
-        selected: vec![option_ix],
-        note: String::new(),
-    }
 }
 
 /// The Preview tool's top-level card — the rendered artifact the user was
@@ -4590,82 +4355,6 @@ fn pair_tool_result(items: &mut Vec<ConvItem>, tr: &LanguageModelToolResult) {
 #[cfg(test)]
 mod tests {
 
-    /// The plan-review routing is exact: the intent must name `plan-review`
-    /// AND its `approve` label must match one of the question's own option
-    /// labels; anything else renders the paged form card.
-    #[test]
-    fn plan_review_approve_index_requires_a_matching_option() {
-        use crate::ask_card::{AskCardIntent, AskCardOption, AskCardQuestion};
-
-        let question = |intent: Option<AskCardIntent>, multi_select: bool| AskCardQuestion {
-            question: String::new(),
-            header: String::new(),
-            detail: String::new(),
-            intent,
-            multi_select,
-            options: vec![
-                AskCardOption {
-                    label: "Approve".into(),
-                    description: String::new(),
-                    recommended: false,
-                },
-                AskCardOption {
-                    label: "Request changes".into(),
-                    description: String::new(),
-                    recommended: false,
-                },
-            ],
-        };
-        let plan_review = Some(AskCardIntent {
-            kind: "plan-review".into(),
-            approve: "Approve".into(),
-        });
-        assert_eq!(
-            plan_review_approve_index(&question(plan_review.clone(), false)),
-            Some(0),
-            "the approve label resolves to its option's index"
-        );
-        for (case, (intent, multi_select)) in [
-            ("no intent", (None, false)),
-            (
-                "empty approve label",
-                (
-                    Some(AskCardIntent {
-                        kind: "plan-review".into(),
-                        approve: String::new(),
-                    }),
-                    false,
-                ),
-            ),
-            (
-                "approve label matches no option",
-                (
-                    Some(AskCardIntent {
-                        kind: "plan-review".into(),
-                        approve: "Nope".into(),
-                    }),
-                    false,
-                ),
-            ),
-            (
-                "foreign intent kind",
-                (
-                    Some(AskCardIntent {
-                        kind: "clarify".into(),
-                        approve: "Approve".into(),
-                    }),
-                    false,
-                ),
-            ),
-            ("multi-select question", (plan_review, true)),
-        ] {
-            assert_eq!(
-                plan_review_approve_index(&question(intent, multi_select)),
-                None,
-                "case: {case}"
-            );
-        }
-    }
     use super::*;
     use gpui::{
         AnyWindowHandle, Bounds, Pixels, Render, TestAppContext, VisualTestContext, Window, size,
