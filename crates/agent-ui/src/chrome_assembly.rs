@@ -471,7 +471,7 @@ fn shell_config(
                 move |id, _w, cx| {
                     let store = mux.read(cx).store();
                     let channel = crate::ahp_store::thread_uri(id);
-                    store.update(cx, |store, _| {
+                    store.update(cx, |store, cx| {
                         // The flip reads through the ONE pin read face (fold
                         // first, list `_meta` baseline second) — flipping
                         // against the fold alone would no-op a row whose
@@ -481,6 +481,14 @@ fn shell_config(
                             store.book.summaries.get(id),
                             &channel,
                         );
+                        // An un-opened row's thread channel is not subscribed
+                        // (the boot path stopped mass-subscribing — one
+                        // baseline fold per row froze the FIFO connection for
+                        // minutes on a large migrated history). Subscribe
+                        // first: the connection's ordering lands it before the
+                        // dispatch, so the router's subscribed-gate passes and
+                        // the pin echo folds back.
+                        store.subscribe(channel.clone(), cx);
                         store.dispatch(
                             channel,
                             ahp_types::actions::StateAction::Unknown(serde_json::json!({
