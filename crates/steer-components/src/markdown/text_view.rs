@@ -270,7 +270,9 @@ pub fn panel_document(
     TextView::markdown(id, source)
         .style(panel_style(theme))
         .motion(motion)
-        .code_block_highlighter(move |_| layer_runs(styled.clone()))
+        .code_block_highlighter(move |block: &CodeBlock| {
+            clamp_runs(layer_runs(styled.clone()), &block.code())
+        })
 }
 
 /// The streaming fade policy measured upstream from claude.ai (~6-word chunks,
@@ -410,25 +412,51 @@ pub fn steer_code_highlighter(
         let code = block.code();
         let lang_holder = block.lang();
         let lang = lang_holder.as_deref().unwrap_or("text");
-        if lang.eq_ignore_ascii_case("ansi") {
-            return ansi_runs(&code);
-        }
-        if is_conflict(&code) {
-            return conflict_runs(&code, foreground, muted, secondary, add_fg, del_fg);
-        }
-        if lang.eq_ignore_ascii_case("diff") {
-            return diff_runs(&code, foreground, muted, secondary, add_fg, del_fg);
-        }
-        // An svg fence is markup, and markup is what the registry carries for
-        // it: `svg` itself is unregistered, which would color nothing and warn
-        // on every distinct fence.
-        let lang = if lang.eq_ignore_ascii_case("svg") {
-            "html"
+        let runs = if lang.eq_ignore_ascii_case("ansi") {
+            ansi_runs(&code)
+        } else if is_conflict(&code) {
+            conflict_runs(&code, foreground, muted, secondary, add_fg, del_fg)
+        } else if lang.eq_ignore_ascii_case("diff") {
+            diff_runs(&code, foreground, muted, secondary, add_fg, del_fg)
         } else {
-            lang
+            // An svg fence is markup, and markup is what the registry carries
+            // for it: `svg` itself is unregistered, which would color nothing
+            // and warn on every distinct fence.
+            let lang = if lang.eq_ignore_ascii_case("svg") {
+                "html"
+            } else {
+                lang
+            };
+            tree_sitter_runs(&code, lang, &highlight_theme)
         };
-        tree_sitter_runs(&code, lang, &highlight_theme)
+        clamp_runs(runs, &code)
     }
+}
+
+/// Snap every highlight range onto the block's char boundaries, inside its
+/// bounds. The run builder (`StyledText::with_runs`) aborts the process on a
+/// range that ends mid-character — a real-device class of crash under
+/// streaming CJK tool output — so the highlighter layer owns the invariant
+/// the same way the runtime already drops out-of-bounds ranges: a boundary
+/// that slipped snaps inward, and what collapses to empty leaves.
+pub(crate) fn clamp_runs(
+    runs: Vec<(Range<usize>, HighlightStyle)>,
+    text: &str,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let len = text.len();
+    runs.into_iter()
+        .filter_map(|(mut range, style)| {
+            range.start = range.start.min(len);
+            range.end = range.end.min(len);
+            while !text.is_char_boundary(range.start) {
+                range.start += 1;
+            }
+            while range.end < len && !text.is_char_boundary(range.end) {
+                range.end += 1;
+            }
+            (range.start < range.end).then_some((range, style))
+        })
+        .collect()
 }
 
 /// Per-line runs for a unified-diff fence: added/removed lines carry the
@@ -597,15 +625,7 @@ const CODE_HL_CACHE_MAX_BYTES: usize = 64 * 1024;
 /// Tree-sitter highlight runs for a bare code fragment (no fence) — the
 /// terminal panel's file-shaped bodies share the markdown stack's dispatch
 /// and thread-local cache.
-pub(crate) fn code_runs(
-    value: &str,
-    lang: &str,
-    theme: &Theme,
-) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
-    tree_sitter_runs(value, lang, &theme.highlight_theme)
-}
-
-fn tree_sitter_runs(
+pub(crate) fn tree_sitter_runs(
     value: &str,
     lang: &str,
     theme: &Arc<HighlightTheme>,
@@ -643,6 +663,184 @@ mod tests {
         assert_eq!(fence_len("plain"), 3);
         assert_eq!(fence_len("has ``` inside"), 4);
         assert_eq!(fence_len("````\n"), 5);
+    }
+
+    /// TEMP probe: the panel's ranges are byte offsets into the text it
+    /// fenced; the highlighter receives the mdast-parsed block value. Any
+    /// byte divergence between the two shifts every range — and once CJK
+    /// follows, a boundary lands mid-character and `with_runs` aborts the
+    /// app (real-device panic: glab output, 2-space indents, "invalid text
+    /// run" with a run ending 2 bytes into 「显」).
+    #[test]
+    fn panel_ranges_match_the_parsed_code_block_byte_for_byte() {
+        let text = concat!(
+            "== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior\n",
+            "  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值\n",
+            "  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config\n",
+        );
+        // The exact `panel_document` source construction.
+        let fence = "`".repeat(fence_len(text));
+        let mut source = String::new();
+        source.push_str(&fence);
+        source.push_str("ansi\n");
+        source.push_str(text);
+        if !text.ends_with('\n') {
+            source.push('\n');
+        }
+        source.push_str(&fence);
+
+        let options = markdown::ParseOptions::default();
+        let root = markdown::to_mdast(&source, &options).expect("parses");
+        let code = collect_first_code(&root).expect("a fenced code block");
+        // The parser contract the panel's ranges ride on: the block value is
+        // the fenced body minus exactly one trailing newline. Any further
+        // divergence shifts every range — and once CJK follows, a boundary
+        // lands mid-character and aborts the app.
+        let expected = text.strip_suffix('\n').unwrap_or(text);
+        assert_eq!(code.value, expected);
+    }
+
+    fn collect_first_code(node: &markdown::mdast::Node) -> Option<&markdown::mdast::Code> {
+        use markdown::mdast::Node;
+        match node {
+            Node::Code(code) => Some(code),
+            _ => node
+                .children()
+                .and_then(|children| children.iter().find_map(collect_first_code)),
+        }
+    }
+
+    /// TEMP probe round 3 — the end-to-end pure pipeline over the REAL raw
+    /// tool output of the crashing call: highlight remap (File kind) →
+    /// `panel_document` fence → mdast block value → `layer_runs` → the same
+    /// invariant `text_runs`+`with_runs` enforce: every range boundary must
+    /// be a char boundary inside the block. A failure here reproduces the
+    /// real-device abort without a window.
+    #[test]
+    fn the_real_crashing_output_produces_char_safe_panel_ranges() {
+        let raw = include_str!("../../tests/fixtures/raw-tool-output.txt");
+        let parts: Vec<&str> = raw.strip_suffix('\n').unwrap_or(raw).split('\n').collect();
+        // The settled panel's default visible window.
+        let v = parts.len().min(400);
+
+        // File kind: gutter + tree-sitter highlight remap — the layer with
+        // the only non-trivial offset math in the pipeline.
+        let mut s = String::new();
+        let mut runs: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+        let width = parts.len().to_string().len();
+        let mut content_starts = Vec::with_capacity(v);
+        for (i, line) in parts.iter().take(v).enumerate() {
+            let line_start = s.len();
+            let gutter = format!("{:>width$}  ", i + 1);
+            let g_len = gutter.len();
+            s.push_str(&gutter);
+            runs.push((
+                line_start..line_start + g_len,
+                HighlightStyle {
+                    color: Some(gpui::Hsla::default()),
+                    ..Default::default()
+                },
+            ));
+            content_starts.push(s.len());
+            s.push_str(line);
+            s.push('\n');
+        }
+        crate::markdown::terminal_panel::highlight_content(
+            &mut runs,
+            &parts[..v],
+            &content_starts,
+            "bash",
+            &gpui_component::highlighter::HighlightTheme::default_light(),
+        );
+
+        // The panel_document fence over the composed text.
+        let fence = "`".repeat(fence_len(&s));
+        let mut source = String::new();
+        source.push_str(&fence);
+        source.push_str("ansi\n");
+        source.push_str(&s);
+        if !s.ends_with('\n') {
+            source.push('\n');
+        }
+        source.push_str(&fence);
+        let options = markdown::ParseOptions::default();
+        let root = markdown::to_mdast(&source, &options).expect("parses");
+        let code = collect_first_code(&root).expect("a fenced code block");
+        let block = &code.value;
+
+        let layered = layer_runs(runs);
+        let mut bad = 0;
+        for (range, _) in &layered {
+            for (label, edge) in [("start", range.start), ("end", range.end)] {
+                if edge > block.len() || !block.is_char_boundary(edge) {
+                    if bad == 0 {
+                        eprintln!(
+                            "first bad range {range:?} ({label} at {edge}, block {} bytes)",
+                            block.len()
+                        );
+                    }
+                    bad += 1;
+                }
+            }
+        }
+        assert_eq!(
+            bad, 0,
+            "{bad} range edges are not char boundaries of the block"
+        );
+    }
+
+    /// TEMP probe round 2: the EXACT text from the real-device panic (the
+    /// tail `with_runs` held when it died), fenced exactly like
+    /// `panel_document` does. This is the real block; whatever byte
+    /// transformation mdast applies to it shows up as a divergence here.
+    #[test]
+    fn the_real_panic_block_survives_the_fence_verbatim() {
+        let text = include_str!("../../tests/fixtures/panic-block-text.txt");
+        let fence = "`".repeat(fence_len(text));
+        let mut source = String::new();
+        source.push_str(&fence);
+        source.push_str("ansi\n");
+        source.push_str(text);
+        if !text.ends_with('\n') {
+            source.push('\n');
+        }
+        source.push_str(&fence);
+        let options = markdown::ParseOptions::default();
+        let root = markdown::to_mdast(&source, &options).expect("parses");
+        let code = collect_first_code(&root).expect("a fenced code block");
+        let expected = text.strip_suffix('\n').unwrap_or(text).to_string();
+        if code.value != expected {
+            let a = expected.as_bytes();
+            let b = code.value.as_bytes();
+            let diverge = a
+                .iter()
+                .zip(b.iter())
+                .position(|(x, y)| x != y)
+                .unwrap_or(a.len().min(b.len()));
+            fn floor_boundary(s: &str, mut i: usize) -> usize {
+                while i > 0 && !s.is_char_boundary(i) {
+                    i -= 1;
+                }
+                i
+            }
+            fn ceil_boundary(s: &str, mut i: usize) -> usize {
+                while i < s.len() && !s.is_char_boundary(i) {
+                    i += 1;
+                }
+                i
+            }
+            let lo = floor_boundary(expected.as_str(), diverge.saturating_sub(24));
+            let hi_a = ceil_boundary(expected.as_str(), (diverge + 24).min(expected.len()));
+            let hi_b = ceil_boundary(&code.value, (diverge + 24).min(code.value.len()));
+            panic!(
+                "mdast transformed the block: {} vs {} bytes, first divergence at {}:\n  expected: {:?}\n  parsed:   {:?}",
+                a.len(),
+                b.len(),
+                diverge,
+                &expected[lo..hi_a],
+                &code.value[lo..hi_b],
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,138 @@
+64 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/hua5-terms
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/hua5-terms
+  MR!479 [merged] ->main 2026-10-13 docs(hua5): 统一识花链路术语（hua5 商品库 / 花集通花材表 / 映射表）
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/hua5-terms
+  MR!479 [merged] ->main 2026-10-13 docs(hua5): 统一识花链路术语（hua5 商品库 / 花集通花材表 / 映射表）
+== huayi/saas/huaji-skm :: ci/remove-verify-image
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/hua5-terms
+  MR!479 [merged] ->main 2026-10-13 docs(hua5): 统一识花链路术语（hua5 商品库 / 花集通花材表 / 映射表）
+== huayi/saas/huaji-skm :: ci/remove-verify-image
+  MR!443 [merged] ->main 2026-09-21 ci: 移除 MR 流水线中的 verify-image
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/hua5-terms
+  MR!479 [merged] ->main 2026-10-13 docs(hua5): 统一识花链路术语（hua5 商品库 / 花集通花材表 / 映射表）
+== huayi/saas/huaji-skm :: ci/remove-verify-image
+  MR!443 [merged] ->main 2026-09-21 ci: 移除 MR 流水线中的 verify-image
+== huayi/saas/huaji-skm :: docs/hua5-prepaid-billing
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/hua5-terms
+  MR!479 [merged] ->main 2026-10-13 docs(hua5): 统一识花链路术语（hua5 商品库 / 花集通花材表 / 映射表）
+== huayi/saas/huaji-skm :: ci/remove-verify-image
+  MR!443 [merged] ->main 2026-09-21 ci: 移除 MR 流水线中的 verify-image
+== huayi/saas/huaji-skm :: docs/hua5-prepaid-billing
+  MR!442 [merged] ->main 2026-09-21 docs(hua5): 同步 AI 识花契约 2026-09-21 导出件（套餐计费口径）
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/hua5-terms
+  MR!479 [merged] ->main 2026-10-13 docs(hua5): 统一识花链路术语（hua5 商品库 / 花集通花材表 / 映射表）
+== huayi/saas/huaji-skm :: ci/remove-verify-image
+  MR!443 [merged] ->main 2026-09-21 ci: 移除 MR 流水线中的 verify-image
+== huayi/saas/huaji-skm :: docs/hua5-prepaid-billing
+  MR!442 [merged] ->main 2026-09-21 docs(hua5): 同步 AI 识花契约 2026-09-21 导出件（套餐计费口径）
+== huayi/saas/huaji-skm :: docs/hua5-quota-live-contract
+== huayi/saas/huaji-skm :: docs/kubeconfig-path
+  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config
+== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior
+  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值
+== huayi/saas/huaji-skm :: feat/hua5-detail-enrich
+  MR!476 [closed] ->main 2026-10-12 feat(sdk): hua5 单条详情接口 GetHua（GET /v1/open/huas/{id}）
+  MR!475 [merged] ->main 2026-10-12 feat(hua5): 详情接口补全未见过商品（pending_enrich → active）
+== huayi/saas/huaji-skm :: feat/hua5-readpath-db
+  MR!478 [merged] ->main 2026-10-12 feat(hua5): 读路径切库（按图批量点查）
+== huayi/saas/huaji-skm :: docs/hua5-terms
+  MR!479 [merged] ->main 2026-10-13 docs(hua5): 统一识花链路术语（hua5 商品库 / 花集通花材表 / 映射表）
+== huayi/saas/huaji-skm :: ci/remove-verify-image
+  MR!443 [merged] ->main 2026-09-21 ci: 移除 MR 流水线中的 verify-image
+== huayi/saas/huaji-skm :: docs/hua5-prepaid-billing
+  MR!442 [merged] ->main 2026-09-21 docs(hua5): 同步 AI 识花契约 2026-09-21 导出件（套餐计费口径）
+== huayi/saas/huaji-skm :: docs/hua5-quota-live-contract
+  MR!470 [merged] ->main 2026-10-09 docs(hua5): 额度接口按线上实测修订（路径 / 可用性 / 字段族三处不实）
