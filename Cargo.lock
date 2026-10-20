@@ -208,9 +208,11 @@ dependencies = [
 name = "ai-elements"
 version = "1.0.0"
 dependencies = [
+ "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
+ "gpui-pre-macos",
  "gpui-pre-platform",
  "steer-components",
 ]
@@ -9611,6 +9613,7 @@ dependencies = [
 name = "steer-agent-chrome-ui"
 version = "1.0.0"
 dependencies = [
+ "ai-elements",
  "anyhow",
  "chrono",
  "gpui-component",

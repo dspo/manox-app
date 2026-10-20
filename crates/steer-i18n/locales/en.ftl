@@ -156,6 +156,7 @@ status-pending = Pending approval
 status-running = Running
 
 status-success = Done
+tool-output-truncated = Output truncated — copy `out` for the full text
 
 status-continued = Continued
 
@@ -172,9 +173,18 @@ context-agents-captain = Captain
 ### agent-ui workspace — Captain status strip (above the composer)
 
 captain-steering-prefix = Captain is steering
+# The sub-agent lines under the Captain's own: `{ $name }` is the run's agent
+# type plus its task label (e.g. "Explore · fix the login redirect").
+captain-steering-subagent = { $name } is steering
 turn-process-completed = Completed in 
 captain-activity-thinking = Thinking
 captain-activity-replying = Replying
+
+### views/subagent_stream.rs (the sub-agent page in the main column)
+
+subagent-stream-back = Captain
+
+subagent-stream-empty = No activity yet — the sub-agent has not written its first turn.
 
 ### views/subagent_panel.rs
 
@@ -438,7 +448,6 @@ workspace-composer-placeholder = Write markdown… (Cmd-Enter to send)
 workspace-unknown-command = Unknown command: /{$name} (open the `/` menu to see installed commands)
 
 workspace-unknown-skill = Unknown skill: /{$name} (open the `/` menu to see installed skills)
-workspace-clarify-title = Clarifying question
 workspace-rename-confirm = Rename
 
 workspace-no-model = No model configured
@@ -449,21 +458,19 @@ workspace-reasoning-high = High
 
 workspace-reasoning-max = Max
 
-workspace-ask-supplement-label = Supplemental note
-
 workspace-ask-supplement-placeholder = Add optional context
 
 workspace-ask-recommended = Recommended
 
-workspace-ask-plan-review-label = Plan review
+workspace-ask-waiting = Waiting for your answer
 
-workspace-ask-discuss = Discuss
+workspace-ask-question-label = Q{$n}:
 
-workspace-ask-next = Next
+workspace-ask-answer-label = A{$n}:
 
-workspace-ask-submit = Submit
+workspace-ask-note-label = Supplement:
 
-workspace-ask-skip = Skip
+workspace-ask-skipped = Skipped
 
 workspace-cancel = Cancel
 

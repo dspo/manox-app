@@ -60,18 +60,22 @@ impl Render for Workspace {
         {
             return self.apply_chat_actions(card, window, cx);
         }
+        if matches!(self.view_mode, ViewMode::SubagentStream)
+            && let Some(card) = self.render_subagent_stream_card(cx)
+        {
+            return self.apply_chat_actions(card, window, cx);
+        }
         // A blocking overlay owns the page: the turn navigator cannot stay
         // mounted under it.
         if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {
             self.close_turn_navigator(window, cx);
         }
-        // Per-frame conversation maintenance, all of it needing `&mut Window`
-        // (the ask card's per-question inputs): reconcile the local cards
-        // against the server projections, allocate the missing ask inputs,
-        // and sync the workspace-derived snapshots onto the owning tool rows
-        // (the ask card and the unified confirmation card).
+        // Per-frame conversation maintenance: reconcile the local cards
+        // against the server projections and sync the workspace-derived
+        // snapshots onto the owning tool rows (the ask card — including
+        // mounting its interactive state — and the unified confirmation
+        // card).
         self.reconcile_pending_with_projections(cx);
-        self.ensure_ask_custom_inputs(window, cx);
         self.sync_ask_card_snapshots(cx);
         self.sync_confirmation_snapshot(cx);
         self.render_column(window, cx)
@@ -242,6 +246,27 @@ impl Workspace {
                 .flex()
                 .p(px(4.))
                 .child(view),
+        )
+    }
+
+    /// The sub-agent stream page (one running child's own chat) as the main
+    /// column's card. The page owns its transcript and its refresh; the
+    /// workspace owns which run is on screen, and the page's back control
+    /// returns the column to the conversation.
+    fn render_subagent_stream_card(
+        &mut self,
+        _cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        use gpui::{ParentElement as _, Styled as _, div};
+        let page = self.subagent_stream.as_ref()?;
+        Some(
+            div()
+                .id("subagent-stream-main")
+                .debug_selector(|| "subagent-stream-main".into())
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .child(page.view.clone()),
         )
     }
 
@@ -532,82 +557,140 @@ impl Workspace {
         self.apply_chat_actions(root, window, cx)
     }
 
-    /// The one-line Captain strip above the composer while a turn runs:
-    /// `Captain is steering {provider}/{model} · {activity}` — a PixelSpinner
-    /// leading flush at the left edge (healthy running), the model in the
+    /// The Captain status block above the composer — the Captain's own row
+    /// (`Captain is steering {provider}/{model} · {activity} · {elapsed}`)
+    /// while a turn runs, followed by one row per RUNNING sub-agent, each led
+    /// by a PixelSpinner flush at the left edge. The model segment carries the
     /// app's wire-color convention (the registration's `-wire` suffix never
-    /// shows as text), and the turn's current activity as a one-line summary.
-    /// The strip retires the instant the turn ends — the message column
-    /// carries no per-entry status glyphs, this is the one live surface.
+    /// shows as text), and the block retires once neither a turn nor a run is
+    /// live — the message column carries no per-entry status glyphs, this is
+    /// the one live surface.
+    ///
+    /// The sub-agent rows are the parent chat's AHP background work (the host
+    /// opens a run's entry on its first running tick and removes it when the
+    /// run settles), so they stay listed while their run does — including a
+    /// run that outlived the turn that spawned it (AHP: "an entry may have been
+    /// started by an earlier turn"). A row's click opens that child's own
+    /// transcript in the main column; the round trip back is the page's own
+    /// back control (the block is not on screen while the page owns the
+    /// column, so it carries no click of its own).
     fn render_captain_strip(
         &self,
         running: bool,
         theme: &Theme,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         use ai_elements::{PixelSpinner, PixelSpinnerVariant};
         use steer_agent_chat_ui::conversation::LiveActivity;
         use steer_agent_chat_ui::model_tag::ModelTag;
+        use steer_agent_chat_ui::views::subagents::{one_line, task_display_title};
 
-        if !running {
+        let subagents = self.running_subagents(cx);
+        if !running && subagents.is_empty() {
             return None;
         }
         let tag = ModelTag::resolve(&self.model_label(cx));
-        if tag.is_empty() {
-            return None;
-        }
-        let (activity, elapsed) = {
-            let conversation = self.chat.read(cx).conversation.read(cx);
-            (conversation.live_activity(cx), conversation.running_secs())
-        };
 
         let muted = theme.muted_foreground;
-        let mut row = gpui::div()
-            .id("captain-strip")
-            .debug_selector(|| "workspace-captain-strip".into())
-            .flex()
-            .items_center()
-            .gap_2()
-            .w_full()
-            .min_w_0()
-            .text_sm()
-            .text_color(muted)
-            .child(
-                PixelSpinner::new()
-                    .variant(PixelSpinnerVariant::Grid)
-                    .color(muted)
-                    .into_any_element(),
-            )
-            .child(gpui::div().child(crate::i18n::t("captain-steering-prefix")))
-            .children(tag.spans(theme).into_iter().map(|(text, color)| {
-                gpui::div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(color)
-                    .child(text)
-            }));
-        if elapsed > 0 {
-            row = row.child(gpui::div().child("·")).child(
-                gpui::div().child(crate::i18n::t_count("thinking-duration", elapsed as i64)),
-            );
-        }
-        if let Some(activity) = activity {
-            let summary = match &activity {
-                LiveActivity::Thinking => {
-                    gpui::div().child(crate::i18n::t("captain-activity-thinking"))
-                }
-                LiveActivity::Replying => {
-                    gpui::div().child(crate::i18n::t("captain-activity-replying"))
-                }
-                LiveActivity::Tool(title) => gpui::div()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(theme.mono_font_family.clone())
-                    .child(title.clone()),
+        let spinner = || {
+            PixelSpinner::new()
+                .variant(PixelSpinnerVariant::Grid)
+                .color(muted)
+                .into_any_element()
+        };
+        let model_spans = |theme: &Theme| {
+            tag.spans(theme)
+                .into_iter()
+                .map(|(text, color)| {
+                    gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(color)
+                        .child(text)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut rows = v_flex().w_full().min_w_0().gap_1();
+        // The Captain's own row names a model; a session with none registered
+        // still lists its sub-agent rows rather than dropping the block.
+        if running && !tag.is_empty() {
+            let (activity, elapsed) = {
+                let conversation = self.chat.read(cx).conversation.read(cx);
+                (conversation.live_activity(cx), conversation.running_secs())
             };
-            row = row.child(gpui::div().child("·")).child(summary);
+            let mut row = gpui::div()
+                .id("captain-strip")
+                .debug_selector(|| "workspace-captain-strip".into())
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .text_sm()
+                .text_color(muted)
+                .child(spinner())
+                .child(gpui::div().child(crate::i18n::t("captain-steering-prefix")))
+                .children(model_spans(theme));
+            if elapsed > 0 {
+                row = row.child(gpui::div().child("·")).child(
+                    gpui::div().child(crate::i18n::t_count("thinking-duration", elapsed as i64)),
+                );
+            }
+            if let Some(activity) = activity {
+                let summary = match &activity {
+                    LiveActivity::Thinking => {
+                        gpui::div().child(crate::i18n::t("captain-activity-thinking"))
+                    }
+                    LiveActivity::Replying => {
+                        gpui::div().child(crate::i18n::t("captain-activity-replying"))
+                    }
+                    LiveActivity::Tool(title) => gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .whitespace_nowrap()
+                        .font_family(theme.mono_font_family.clone())
+                        .child(one_line(title)),
+                };
+                row = row.child(gpui::div().child("·")).child(summary);
+            }
+            rows = rows.child(row);
         }
-        Some(row.into_any_element())
+
+        for (ix, work) in subagents.into_iter().enumerate() {
+            // The child's own identity: its agent type plus the run's task
+            // label (`Explore · fix the login redirect`).
+            let title = one_line(
+                &task_display_title(&work.label, work.activity.as_deref().unwrap_or_default())
+                    .unwrap_or_else(|| work.id.clone()),
+            );
+            // The model segment names the session's model: a sub-agent run on
+            // this harness inherits the parent's model unless its own
+            // definition pins one, and the run's own model has no AHP seat on
+            // the parent's channel.
+            let row = gpui::div()
+                .id(("captain-subagent-row", ix))
+                .debug_selector(move || format!("workspace-subagent-strip-{ix}"))
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .text_sm()
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.secondary.opacity(0.4)))
+                .child(spinner())
+                .child(gpui::div().min_w_0().truncate().whitespace_nowrap().child(
+                    crate::i18n::t_str("captain-steering-subagent", &[("name", title.as_str())]),
+                ))
+                .children(model_spans(theme))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_subagent_stream(&work, cx);
+                }));
+            rows = rows.child(row);
+        }
+        Some(rows.into_any_element())
     }
 
     /// §二.3 stop notice — the dismissible BROADCAST arm. Shown above the

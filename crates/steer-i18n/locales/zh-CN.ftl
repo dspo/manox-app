@@ -144,6 +144,7 @@ status-pending = 待审批
 status-running = 运行中
 
 status-success = 完成
+tool-output-truncated = 输出已截断，拷贝 out 可得完整内容
 
 status-continued = 继续讨论
 
@@ -160,9 +161,18 @@ context-agents-captain = 船长
 ### agent-ui workspace — Captain 状态行（composer 上方）
 
 captain-steering-prefix = 船长正在驾驶
+# 船长行下方的子代理行：`{ $name }` 是该 run 的 agent 类型 + 任务标签
+# （例如「Explore · 修复登录跳转」）。
+captain-steering-subagent = { $name } 正在驾驶
 turn-process-completed = 已完成，用时 
 captain-activity-thinking = 思考中
 captain-activity-replying = 正在回复
+
+### views/subagent_stream.rs（主列中的子代理页）
+
+subagent-stream-back = 船长
+
+subagent-stream-empty = 暂无活动 — 该子代理还没有产出第一轮内容。
 
 ### views/subagent_panel.rs
 
@@ -425,7 +435,6 @@ workspace-composer-placeholder = 编写 markdown…（Cmd-Enter 发送）
 workspace-unknown-command = 未知命令：/{$name}（用 `/` 菜单查看已安装命令）
 
 workspace-unknown-skill = 未知技能：/{$name}（用 `/` 菜单查看已安装技能）
-workspace-clarify-title = 澄清问题
 workspace-rename-confirm = 重命名
 
 workspace-no-model = 未配置模型
@@ -436,21 +445,19 @@ workspace-reasoning-high = 高
 
 workspace-reasoning-max = 最高
 
-workspace-ask-supplement-label = 补充说明
-
 workspace-ask-supplement-placeholder = 添加可选补充说明
 
 workspace-ask-recommended = 推荐
 
-workspace-ask-plan-review-label = Plan 评审
+workspace-ask-waiting = 等待回答
 
-workspace-ask-discuss = 继续讨论
+workspace-ask-question-label = 问{$n}：
 
-workspace-ask-next = 下一步
+workspace-ask-answer-label = 答{$n}：
 
-workspace-ask-submit = 提交
+workspace-ask-note-label = 补充：
 
-workspace-ask-skip = 跳过
+workspace-ask-skipped = 已跳过
 
 workspace-cancel = 取消
 

@@ -70,8 +70,8 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
-| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读） |
-| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewDecisionCard](#planreviewdecisioncard)（底部一键裁决卡），三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
+| Sub-agent 观察 | ✅ | 运行中花名册两处同源（`background_work`）：rail agents 段（行点击开右栏 SubagentPanel）与 Captain 状态行（#159，行点击开主列流页）；Agent 工具卡片携带 run_id 可点击、卡片体流式子转录（#157/#170）；钻取双面并存——右栏 SubagentPanel（v1.0.0 重写：observe 泵排子会话自己的 chat 桶、live、相位三态、只读）与主列 SubagentStream 页（#159：快照 + 重订阅轮询），统一为后续项 |
+| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewDecisionCard](#planreviewdecisioncard)（底部一键裁决卡），三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端，显式提交）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
 分层纪律：crates/manox-harness/src/core 只做 TS Pi 对齐与扩展点；harness 能力扩展一律走
@@ -87,7 +87,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### 顶层
 
-- [Window](#window) · [NativeMenuBar](#nativemenubar) · [AboutWindow](#aboutwindow) · [Workspace](#workspace) · [ViewMode](#viewmode) · [ViewMode::Workspace](#viewmodeworkspace) · [ViewMode::Settings](#viewmodesettings)
+- [Window](#window) · [NativeMenuBar](#nativemenubar) · [AboutWindow](#aboutwindow) · [Workspace](#workspace) · [ViewMode](#viewmode) · [ViewMode::Workspace](#viewmodeworkspace) · [ViewMode::Settings](#viewmodesettings) · [ViewMode::ExternalSession](#viewmodeexternalsession) · [ViewMode::SubagentStream](#viewmodesubagentstream)
 
 ### MainView
 
@@ -119,7 +119,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### AskDrawer
 
-- [AskDrawer](#askdrawer) · [AskDrawerHeader](#askdrawerheader) · [AskDrawerQuestion](#askdrawerquestion) · [AskDrawerOptions](#askdraweroptions) · [AskDrawerCustomInput](#askdrawercustominput) · [AskDrawerFooter](#askdrawerfooter) · [AskDrawerSkipButton](#askdrawerskipbutton) · [AskDrawerNav](#askdrawernav) · [PlanReviewDecisionCard](#planreviewdecisioncard) · [ConfirmationCard](#confirmationcard)
+- [AskDrawer](#askdrawer) · [ConfirmationCard](#confirmationcard)
 
 ### Popups & Dropdowns
 
@@ -131,7 +131,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### 右栏页签内容
 
-- [SubagentPanel](#subagentpanel) · [BrowserView](#browserview)
+- [SubagentPanel](#subagentpanel) · [SubagentStream](#subagentstream) · [BrowserView](#browserview)
 
 ### ManagementShell
 
@@ -147,7 +147,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Shared Primitives
 
-- [Button](#shared-primitives) · [Input](#shared-primitives) · [PopupMenu](#shared-primitives) · [PopupMenuItem](#shared-primitives) · [TabBar](#shared-primitives) · [Tag](#shared-primitives) · [Markdown](#markdown) · [TerminalPanel](#terminalpanel) · [TurnFrame](#turnframe) · [Icon](#shared-primitives) · [BrailleSpinner](#braillespinner) · [PixelSpinner](#pixelspinner) · [Meerkat](#meerkat) · [ScrollHandle](#shared-primitives) · [TitleBar](#shared-primitives) · [ContextMenu](#shared-primitives) · [Tooltip](#shared-primitives)
+- [Button](#shared-primitives) · [Input](#shared-primitives) · [PopupMenu](#shared-primitives) · [PopupMenuItem](#shared-primitives) · [TabBar](#shared-primitives) · [Tag](#shared-primitives) · [Markdown](#markdown) · [TerminalPanel](#terminalpanel) · [TurnFrame](#turnframe) · [Icon](#shared-primitives) · [BrailleSpinner](#braillespinner) · [PixelSpinner](#pixelspinner) · [Meerkat](#meerkat) · [Tool](#tool) · [CodeView](#codeview) · [ShellView](#shellview) · [AskUserQuestion](#askuserquestion) · [ScrollHandle](#shared-primitives) · [TitleBar](#shared-primitives) · [ContextMenu](#shared-primitives) · [Tooltip](#shared-primitives)
 
 ### 状态
 
@@ -206,13 +206,24 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 ### 2.1 ViewMode
 
-`Workspace` 只有两个模式：
+`Workspace` has four modes:
 
 #### ViewMode::Workspace
 默认 —— 会话列（hero 或消息列表 + composer）。
 
 #### ViewMode::Settings
 主区卡内的设置页（nav｜panel 两栏，替换会话列，直到 back 控件退出），带 200ms 退出延迟。
+
+#### ViewMode::ExternalSession
+项目菜单拉起的 CLI agent TUI / 普通终端顶替会话列占主列（PTY 属于 Workspace，切走只停靠、保活）。
+
+#### ViewMode::SubagentStream
+一个运行中子代理的自家 transcript 顶替会话列（[CaptainStatusStrip](#captainstatusstrip) 的子代理行点开；
+见 [SubagentStream](#subagentstream)）。子代理 chat 由宿主以**快照**服务（无 live bridge，且父 chat 的
+background work 条目每 run 只写一次），所以页面靠自己的有界轮询重订阅取新快照、按子 chat 的 fold 版本重建；
+任何离开它的 mode 翻转（点侧栏行 / 新建会话 / 进设置 / **外部会话抢走主列**——项目菜单拉起或侧栏 external 行点击）
+都 drop 该页并停掉轮询；不变量是「页面存在 ⟺ `view_mode == SubagentStream`」（与 `active_external` 同一条规矩），
+闸门与 drop 双保险——漏一个翻转点最多是多一次重建，不会出现看不见的页面在后台轮询。
 
 ---
 
@@ -354,11 +365,13 @@ One contiguous thinking + tool-call segment within a user turn, rendered as an *
 
 **Fold discipline (live)**: a reasoning round plays OPEN on arrival and the moment the next entry arrives (`fold_preceding`: a new reasoning round or a new tool) every preceding round the user has not pinned open folds; a manual expansion is sticky (`user_toggled`) and never fought. A TOOL entry folds by default — its title row already names the call — and only a manual expansion opens it (sticky; neither the result landing nor the next node re-folds a pinned entry). A terminal stop keeps the ~1s delayed collapse for the turn's tail. History/replay defaults every entry to folded.
 
-**Per-entry faces (dsh-aligned)**: a reasoning round is a disclosure row — a brain glyph + the localized「思考」title carrying the round's own first line as the folded summary (separator dot, clipped, right-edge fade); expanded, the body renders through the reasoning tier (`reasoning_document`: muted foreground, one size under the message body). Every foldable row carries a disclosure chevron (▸ folded / ▾ open) and a KEYBOARD-ONLY focus affordance (`focus_visible` border — a mouse click leaves no ring parked on the row, segment header included). The steps region plays at NATURAL height — keep it that way: an `overflow_y_scroll` height cap never established its scroll frame inside the toggle animation wrapper, so it only clipped entries past the limit (the tools after a long reasoning vanished with no way to scroll). A tool entry's head is the call's own one-line identity (`Read path`, `$ cmd` via the runtime's `tool_title`) — never a generic "tool result" label; an orphan result with neither title nor name renders its body with no head row. A tool's EXPANDED body shows the call's own input first — one muted mono `key value` row per top-level argument field (`tool_input_rows`, values single-lined and clipped) above the output panel — then the output per its shape: `Read`/`Write` panels highlight their content through tree-sitter (the language from the input path's extension; the model-facing hashline envelope still strips into the file's own line-number gutter), `Edit` keeps its diff coloring, `Bash` and command-style tools keep the terminal shell — every kind rides the same persistent `TerminalPanel` with document-level selection.
+**Per-entry faces (dsh-aligned)**: a reasoning round is a disclosure row — a brain glyph + the localized「思考」title carrying the round's own first line as the folded summary (separator dot, clipped, right-edge fade); expanded, the body renders through the reasoning tier (`reasoning_document`: muted foreground, one size under the message body). Every foldable row carries a disclosure chevron (▸ folded / ▾ open) and a KEYBOARD-ONLY focus affordance (`focus_visible` border — a mouse click leaves no ring parked on the row, segment header included). The steps region plays at NATURAL height — keep it that way: an `overflow_y_scroll` height cap never established its scroll frame inside the toggle animation wrapper, so it only clipped entries past the limit (the tools after a long reasoning vanished with no way to scroll). A tool entry's head is the call's own one-line identity (`Read path`, `$ cmd` via the runtime's `tool_title`) — never a generic "tool result" label; an orphan result with neither title nor name renders its body with no head row. A tool's EXPANDED body splits by family: the seven card families render [`Tool`](#tool) cards (below); every other tool keeps the step's input rows (one muted mono `key value` row per top-level argument field, `tool_input_rows`, values single-lined and clipped) above a persistent `TerminalPanel` with document-level selection.
 
 **Blank text parts are not boundaries**: providers on interleaved-thinking wire often emit an empty text block between reasoning rounds — both the rebuild path (`ItemBuilder`) and the live path (a blank `AgentText` delta) skip them, so the run stays one segment instead of splitting into two headers with nothing visible between them.
 
-The component holds no policy: `open` is `layout.expanded` (which folds in the approval force-open), clicks write the caller's state, and the reveal is layout-neutral (the collapse height never animates — the list caches row heights). Segments with fewer than two entries render flat under a model-only header with no cover to click. An approval-pending entry force-opens the segment so the interactive row is never hidden. The assistant reply that follows a segment renders no model row of its own — the header is the single place the model shows. The elapsed counter ticks every second via a gpui background timer spawned on `TurnStarted` and self-terminating on terminal `Stop`/`Error`; `frozen_secs` pins the final value. Ordinary tool calls fold here instead of producing standalone cards; a tool's body keeps its own terminal-styled framed panel, a reasoning round's body is its persistent `Entity<TextViewState>` markdown (selection survives across frames). Attaching a thread replays the leaf window's live-only tail (`workspace/catch_up.rs`), so an in-flight tool's streamed output survives a switch away and back.
+**Tool cards (the ai-elements families)**: `Read` / `Write` / `Edit` / `Bash` / `BashOutput` / `Grep` / `Glob` render as [`Tool`](#tool) cards — a headless `ActivityStep` carries the card, whose own header (icon + name + mono args + localized status chip) is the fold. The card's `Entity<ToolState>` (`ToolCallItem.card`, mounted by `ensure_tool_card` on the sync paths, `no_auto_fold`) is a pure mirror: the conversation's `collapsed`/`user_toggled` stays the fold authority, the header click routes back through `entry_toggle`, and the only state the card owns is the copy flash (observers held on `MessageItem.card_subs`). Bodies are [`CodeView`](#codeview) / [`ShellView`](#shellview) with the family's parsers (read envelope, unified diff, grep hits); 400-line cap with the `tool-output-truncated` note; streaming bodies read the live tail.
+
+The component holds no policy: `open` is `layout.expanded` (which folds in the approval force-open), clicks write the caller's state, and the reveal is layout-neutral (the collapse height never animates — the list caches row heights). Segments with fewer than two entries render flat under a model-only header with no cover to click. An approval-pending entry force-opens the segment so the interactive row is never hidden. The assistant reply that follows a segment renders no model row of its own — the header is the single place the model shows. The elapsed counter ticks every second via a gpui background timer spawned on `TurnStarted` and self-terminating on terminal `Stop`/`Error`; `frozen_secs` pins the final value. Ordinary tool calls fold here instead of producing standalone cards; a reasoning round's body is its persistent `Entity<TextViewState>` markdown (selection survives across frames). Attaching a thread replays the leaf window's live-only tail (`workspace/catch_up.rs`), so an in-flight tool's streamed output survives a switch away and back.
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs` — `render_thinking`, `render_activity_entry`, `reasoning_step`, `tool_step`, `segment_layout`, `segment_stats`. Component: `crates/steer-agent-chat-ui/src/views/activity_chain.rs` (`ActivityChain`/`ActivityChainHeader`/`ActivityStep`, local to the chat crate — `ai-elements` no longer ships it). Container state: `ConversationState` (`ConvItem::Thinking` / `ThinkingContainer`, `fold_preceding`).
 
@@ -370,7 +383,7 @@ The resolved model identity every turn surface renders (`crates/steer-agent-chat
 
 #### ToolCallCard
 
-A standalone tool-call card (`render_tool_call`) for the special-case tools that don't fold into an [ActivitySegment](#activitysegment) batch — today `agent` sub-agent calls and `AskUserQuestion`. A model response's other tool calls batch into the `Thinking` container; their output renders via [TerminalPanel](#terminalpanel).
+A standalone tool-call card (`render_tool_call`) for the special-case tools that don't fold into an [ActivitySegment](#activitysegment) batch — today `agent` sub-agent calls and `AskUserQuestion`. A model response's other tool calls batch into the `Thinking` container; the seven card families render as [Tool](#tool) cards (see [ActivitySegment](#activitysegment)), every other tool's output renders via [TerminalPanel](#terminalpanel).
 
 Statuses: `PendingApproval` | `Running` | `Success` | `Error` | `Denied` — see [ToolCallStatus](#tool-call-statuses).
 
@@ -446,18 +459,22 @@ the footer — cancel priority keeps the composer live underneath them.
 
 #### CaptainStatusStrip
 
-The one-line live-status strip above the composer, shown only while the
-foreground turn runs and retired the instant it ends — the message column
+The live-status block above the composer, shown while the foreground turn runs
+OR while any sub-agent run is still live (AHP: "an entry may have been started
+by an earlier turn", so a run can outlive the turn that spawned it), and retired
+once neither is — the message column
 carries no per-entry status glyphs anymore (the chain-of-thought markers are
-retired), so this is the single "what is it doing" surface. Layout: a
-[`PixelSpinner`](#meerkat) (grid variant, `ai_elements::PixelSpinner`) flush
-at the left = healthy running, then the localized prefix (`captain-steering-prefix`,
+retired), so this is the single "what is it doing" surface. Its first row is the
+Captain's own: a [`PixelSpinner`](#meerkat) (grid variant, `ai_elements::PixelSpinner`)
+flush at the left = healthy running, then the localized prefix (`captain-steering-prefix`,
 「船长正在驾驶 Captain is steering」), the model via
 [`ModelTag`](#modeltag) (`{provider}/` muted, model tinted by wire api), `·`,
 and the activity — 思考中/Thinking while a reasoning round streams,
 正在回复/Replying while the assistant body streams, or the running tool's
-one-line summary verbatim (monospace, runtime-provided). The running clock (dsh's「深度探索中
-N 秒」suffix shape) rides the same line from
+one-line summary (monospace, runtime-provided; newline runs collapse to single
+spaces so a multi-line `bash` body cannot stretch the block — the row's
+`.truncate()` then ellipsizes it on width). The running clock (dsh's「深度探索中
+N 秒」suffix shape) rides the same row from
 `ConversationState::running_secs`. The activity comes
 from `ConversationState::live_activity` (`LiveActivity`), a read-only
 projection over the trailing item: a streaming assistant body names Replying,
@@ -466,9 +483,53 @@ in-flight tool, and a streaming segment with no live entry (the gap between a
 tool settling and the next round) reads as Thinking. No activity yet (turn
 started, nothing arrived) renders the prefix + model alone.
 
-> Source: `crates/agent-ui/src/workspace/render.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`)
+The rows BELOW it are the running sub-agents: one row per entry the host
+projects as the parent chat's AHP background work
+(`leaf.running_subagents()`, `crates/steer-agent-chat-ui/src/ahp_store.rs`) —
+the host opens a run's entry on its first running tick and removes it when the
+run settles, so the rows are exactly the live set. Each row is the same shape
+(`spinner` + `captain-steering-subagent`「{name} 正在驾驶」+ the model tag),
+where `{name}` is the run's agent type plus its task label
+(`task_display_title`: 「Explore · 修登录跳转」— flattened by `one_line` and
+bounded the same way the Captain's own row is: a run's task label is runtime
+text and may carry newlines, and the block must never grow a line per input
+line). The model segment names the
+SESSION's model: a sub-agent run on this harness inherits it unless its own
+definition pins one, and the run's own model has no seat on the parent's
+channel. A sub-agent row's click opens that child's transcript in the main
+column ([SubagentStream](#subagentstream)). The Captain's own row carries NO
+click: the block is not on screen while the page owns the column, so the round
+trip back is the page's own back control (no dead affordance here).
+
+> Source: `crates/agent-ui/src/workspace/render.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`), `crates/agent-ui/src/workspace/subagent_stream.rs`
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
+
+##### SubagentStream
+
+The main-column page behind a sub-agent row's click
+(`crates/agent-ui/src/views/subagent_stream.rs`, `ViewMode::SubagentStream`):
+the child's own chat (`ahp-chat:/{run-id}`) rendered through the shared message
+pipeline — the same `synth_display` →
+`ConversationState::rebuild_from_display` fold the conversation column uses, so
+the rows ARE the child's messages (never a second transcript expression). It is
+read-only by design: a child run is driven by the parent's dispatch, not by the
+watcher (no composer, no chips). Header = back control (「船长」→ the
+conversation) + `{type} · {topic}`.
+
+Refresh model: the host serves a child chat as a SNAPSHOT (the child's journal
+is folded into the child's own channel and is never bridged to the parent), so
+the page FETCHES on a bounded poll — while it owns the main column and its run
+is still live, a 2s `background_executor().timer()` re-subscribes the child's
+chat; the run leaving the live set earns one last subscribe (its journal ends
+when the run ends, so that snapshot is final) and stops the poll. The REBUILD
+key is the child chat's own fold version
+(`ChatFoldVersion`: settled turns, the in-flight turn's content, the fold's
+last-entry stamp — an AHP turn's parts grow in place, so the turn count alone
+never moves while a run streams), compared on the store notify a landed
+snapshot produces; a snapshot that carried nothing new neither rebuilds nor
+churns the page, and tail-follow stays the user's state (a rebuild does not yank
+a reader who scrolled back up).
 
 ##### Composer
 
@@ -587,22 +648,12 @@ Dropdown chip showing [PermissionMode](#permission-modes) → [AccessMenu](#acce
 Dropdown chip showing current project → [ProjectMenu](#projectmenu) popup. The
 label is the workspace row accounting the foreground session (host registry
 order), falling back to the session's project mirror for sessions no row
-accounts; the menu's recency list is the same registry.
+accounts; the menu's recency list is the same registry, and each row names the
+directory by its LAST SEGMENT (`sidebar_projection::project_label`, the same
+label the sidebar groups use) with the full path on the row's tooltip — the
+list never spends its width on the path.
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
-
-##### AskDrawer
-
-Inline transcript card, not a footer swap. The live edge (`sync_live_ask`,
-`crates/agent-ui/src/workspace/chips.rs`) arms the card from the fold: an open
-elicitation (`chat/inputRequested`) seeds the pending ask AND synthesizes the
-matching `ToolCall` row (same-frame guarantee). A parked thread's subscription
-drops that event by design, so the card re-surfaces on switch-back by an
-explicit re-own: the reclaim sends `OpenSession` (same leaf and follow stream
-— the parked session never detached) and the gateway replays the unsettled
-adjudications to the joining owner (manox §D.6). A card whose id leaves the
-fold's input-needed list after having been confirmed in it settled remotely
-and is reconciled away (`reconcile_pending_with_projections`).
 
 ##### ConfirmationCard
 
@@ -623,134 +674,85 @@ retired full-column `render_pending_auth_overlay` modal is gone.
 
 #### AskDrawer
 
-Multi-step question navigator rendered inside the conversation. The card
-carries two presentations routed at the one render entry
-(`render_ask_user_card`, `crates/steer-agent-chat-ui/src/views/message.rs`): a
-single-question ask with a `plan-review` intent whose `approve` label matches
-one of its own options renders the [PlanReviewDecisionCard](#planreviewdecisioncard);
-every other ask renders the generic stepper flow (`render_question_card`).
-Decision actions live in a fixed footer BELOW the content (pager + skip +
-next/submit), never above it; the body caps at 520px and scrolls internally so
-the footer stays reachable on a long plan. The ask state
-(`Workspace::pending_ask` + snapshot sync) lives in `chips.rs`.
+The pending `AskUserQuestion`, rendered inside the conversation as the
+ai-elements paged form ([AskUserQuestion](#askuserquestion)) — the card the
+gallery shows is the card the app shows, in BOTH phases. There is no second,
+app-local ask presentation: `render_ask_user_card`
+(`crates/steer-agent-chat-ui/src/views/message.rs`) mounts `render_ask_form_card`
+while the ask is pending and `render_ask_settled_card` once it is answered, and
+nothing routes on the question's shape. The ask's questions become `AskBlock`s
+(header, question, `detail` as host-rendered markdown, options with the 「推荐」
+badge, multi-select flags); the note placeholder and the 「推荐」 badge label are
+localized here, and a block's detail element rides its own page. A plan review is
+an ordinary one-question ask whose `detail` carries the plan body — the card's
+pending chip (`等待回答`, the sidebar's parked-turn blue dot) and close control are
+its only chrome.
 
-> Source: `crates/agent-ui/src/workspace/chips.rs`
+The interactive half (page, selections, per-question notes) lives in the
+`ai_elements::AskState` entity, whose only owner is the workspace
+(`ChatColumn::ask_state`, mounted by `Workspace::ensure_ask_state` on the
+render path) — the card's row holds a clone for rendering, and the composer's
+Enter submits the same entity, so the answers have exactly one reader. The card
+submits through `ChatHost::submit_ask` → `Workspace::reply_ask`
+(`crates/agent-ui/src/workspace/chips.rs`), which folds the reported indices
+and notes into the canonical `AskAnswer` rows (selected labels; a bare note as
+explicit free text; an untouched question as an explicit skip). The header's
+close control takes the dismissal leg (`ChatHost::dismiss_ask`) — a card close,
+never a rejection — and so does Esc, see the keyboard note below.
 
-#### AskDrawerHeader
+**Keyboard.** The card takes focus the first time it mounts
+(`MessageItem::seed_ask_focus` → `Window::focus` on the state's own
+`FocusHandle`; the seed is window-scoped, so later frames never steal focus
+back), and the host mounts `track_focus` + `tab_index(0)` on the card root.
+That is what makes the `AskDrawer` bindings reachable at all — gpui dispatches
+actions along the focus path, and a card nothing can focus is a card whose keys
+never fire. With focus in the card: `←`/`→` are the pager's edges (`→` on the
+last page is the submit the check is) and `Esc` closes. Clicking the note field
+hands focus to that input, whose own bindings keep the arrows for the caret —
+the deeper context wins. Pinned by
+`the_ask_card_takes_focus_so_its_keys_fire`, which drives real
+`simulate_keystrokes`, not a direct action dispatch.
 
-Title + close (X, the dismissal leg). The stepper moved to
-[AskDrawerFooter](#askdrawerfooter).
+Answered, the row keeps the SAME card in its settled phase: the header (call
+name + status chip) owns the fold, the body is the host's answer markdown —
+`ask_answer_markdown` folds the server's canonical result payload
+(`{"answers":[{"id","selected","custom"?}]}`) into one stacked block per
+question: `问{n}：`/`答{n}：` lines (a note with no selection IS the answer;
+an untouched question reads as skipped, `补充：` carries a supplement to a
+selection), the question text recovered from the call's own input by id. The
+row mounts that phase's `AskState` itself (`MessageItem::ensure_ask_settled`,
+the same lazily mounted body shape as `ensure_preview_body`). A result that
+does not fold into canonical JSON (a prose result, an error) keeps the
+ordinary tool card's raw output panel.
 
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`)
+The live edge (`sync_live_ask`) arms the card from the fold: an open
+elicitation (`chat/inputRequested`) seeds the pending ask AND synthesizes the
+matching `ToolCall` row (same-frame guarantee), then
+`sync_ask_card_snapshots` budgets the snapshot and the card state onto that row
+before the list measures. A parked thread's subscription drops that event by
+design, so the card re-surfaces on switch-back by an explicit re-own: the
+reclaim sends `OpenSession` (same leaf and follow stream — the parked session
+never detached) and the gateway replays the unsettled adjudications to the
+joining owner (manox §D.6). A card whose id leaves the fold's input-needed list
+after having been confirmed in it settled remotely and is reconciled away
+(`reconcile_pending_with_projections`).
 
-#### AskDrawerQuestion
+> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`, `render_ask_settled_card`, `ask_answer_markdown`) + `crates/agent-ui/src/workspace/chips.rs` (`ensure_ask_state`, `reply_ask`)
 
-Header tag + question text, then an optional `detail` block — markdown support
-text rendered through `steer_components::markdown::static_document` beneath the
-question. On the generic card the plan-review body rides here when the intent
-fallback fires (see [PlanReviewDecisionCard](#planreviewdecisioncard)).
+**Plan review** rides that one card: a proposed plan arrives as a single-question
+ask whose `detail` is the plan body (the live edge pulls it off the plan channel
+into the question's support text) and whose options are the three verdicts —
+**Approve**, **Approve & compact**, **Request changes** — so the user picks one
+and the pager's check submits it. The SERVER owns the verdict mapping (Approve →
+keep, Approve & compact → compact, anything else — Request changes / custom /
+skip → refine, and a card close → stop and stay in plan mode awaiting a message);
+the client sends no verdict enum. B2-PR-5's dedicated four-choice verdict drawer,
+its `PendingPlanReview` state/stash/overlay and the `ExecuteFresh`
+create-and-reseed path stay retired, and the app-local decision card that
+replaced them (a warning strip over a scrolled plan with a bottom button row) is
+gone with the rest: one ask design, the gallery's.
 
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`)
-
-#### AskDrawerOptions
-
-Checkbox/radio list with labels + descriptions. Single-select resets siblings on
-toggle; multi-select toggles in place. Options are optional and unbounded — a
-detail/intent-only question is legal (B2-PR-1 lifted the 1..=3 / 2..=3 caps).
-
-> Source: `crates/agent-ui/src/workspace/chips.rs` (`toggle_ask_option`)
-
-#### AskDrawerCustomInput
-
-Per-question free-text `custom` input, rendered under the options with an
-`Input` bound to a lazily-allocated `Entity<InputState>`
-(`Workspace::ensure_ask_custom_inputs`, run on the render path because an
-`InputState` needs a `Window`). Its live text mirrors into
-`Workspace::ask_custom_text[qi]`. At the settle fold a `custom` REPLACES a
-single-select's selection and SUPPLEMENTS a multi-select's — free text can only
-ever attach to its own question (the removed card-level "response" override is
-gone). The skip affordance that used to sit beside it moved to
-[AskDrawerFooter](#askdrawerfooter).
-
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs`
-
-#### AskDrawerFooter
-
-Fixed decision row BELOW the scrollable body (which caps at 520px): left the
-pager — Prev / "N of M" / Next ghost steppers; right the Skip outline button
-and the primary action — 「下一步」 until the last question, then 「提交」
-(last step submits via the composer's `submit_input` gate) — DISABLED until
-the CURRENT question is answered (a pick or typed custom; dsh
-`disabled={!answered}` parity), so the composer's silent submit gate can never
-be reached as a no-op that reads as a broken button. Decision actions sit
-where the reading finishes, never pinned above the content they settle.
-
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`)
-
-#### AskDrawerSkipButton
-
-Explicit per-question skip (footer outline button): clears that question's
-selection and custom, MARKS it explicitly skipped (`Workspace.ask_skipped`,
-dsh `QuestionDraftAnswer.skipped` parity), and moves the walk — a mid-card
-skip advances to the next question; the last question's skip settles the card
-through the same completeness gate as the submit. The settled canonical row is
-`{id, selected: []}` with no `custom` (the server's `AskAnswer::is_skip`). A
-skip is distinct from closing the whole card (that is `dismiss_ask`, the
-header X; the AskDrawer Esc binding only lands while focus sits INSIDE the
-card — reachable on the generic card after clicking the custom input, never
-on the decision card, which takes no focus).
-
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_question_card`) + `crates/agent-ui/src/workspace/chips.rs` (`skip_ask_question`)
-
-#### AskDrawerNav
-
-Footer Prev / Next steppers plus the primary 下一步/提交 action (the last step
-submits); the header keeps only the Cancel leg (close ⇒ `{"dismissed": true}`).
-Submitting is completeness-gated (dsh `submitDrafts`'s `findIndex(!completed)`
-parity): a question that was never touched blocks the settle and the walk
-jumps back to the first incomplete question — the blank card IS the feedback;
-only answered or EXPLICITLY skipped questions settle. The reply frame gathers
-every question's tri-state (`selected` + `custom`, skipped ones carry
-`selected: []`) into the canonical `{"answers":[{"id","selected","custom"?}]}`
-— the legacy positional `[[question, answer]]` pair and the card-level
-`response` are removed. Dismiss keeps `{"dismissed": true}`; the generic
-approval card's allow/deny leg (`resolve_auth`, `{"allow": …}`) is unchanged.
-
-> Source: `crates/agent-ui/src/workspace/chips.rs` (`resolve_ask`, `dismiss_ask`, `first_incomplete_ask_question`) + `crates/agent-ui/src/workspace/composer.rs` (`submit_input` gate)
-
-#### PlanReviewDecisionCard
-
-B2-PR-5: a proposed plan is no longer a dedicated `PlanVerdict` drawer with a
-four-choice verdict (that surface, its `PendingPlanReview` state / stash /
-overlay, and the `ExecuteFresh` create-and-reseed path are deleted). It reaches
-the client as a single-question [AskDrawer](#askdrawer) whose `input` carries
-`detail` = the plan body (markdown) and `intent = {kind: "plan-review",
-approve: "Approve"}` over three options — **Approve**, **Approve & compact**,
-**Request changes**. When the routing (`plan_review_approve_index`: single
-question, single-select, `intent.kind == "plan-review"`, `approve` matching
-one of the question's own labels) fires, the ask renders as a decision card in
-the deepseek-harness `PlanReviewPanel` shape: a warning-tinted strip (dot +
-「Plan 评审」), the plan as the body that owns the internal scroll, and a fixed
-BOTTOM decision row — the approve option as the primary button, the remaining
-options as outline buttons (description in the tooltip), and a quiet
-「继续讨论」 ghost action carrying the dismissal leg (`dismiss_ask`). A click
-IS the verdict (`decide_ask_option` folds the clicked option in and settles in
-the same activation — no selection-then-confirm two-step). 「继续讨论」 is the
-decision card's only keyboard-free exit: the AskDrawer Esc binding is
-context-scoped and lands only while focus sits INSIDE the card, and this card
-takes no focus (buttons avoid focus on mouse-down) — a deliberate button-only
-surface, same as dsh's `PlanReviewPanel`.
-
-The user's answer rides the normal canonical reply; the SERVER owns the verdict
-mapping (Approve → keep, Approve & compact → compact, anything else — Request
-changes / custom / skip → refine, and a card close → stop and stay in plan mode
-awaiting a message). The client sends no verdict enum. A free-form message while
-the card is up submits the card (per [AskDrawerNav](#askdrawernav)), not a
-separate dismissal. A plan-review ask that fails the routing (extra questions,
-a multi-select question, unmatched `approve`) renders the generic stepper flow
-instead.
-
-> Source: `crates/agent-ui/src/workspace.rs` (`parse_pending_ask` intent) + `crates/steer-agent-chat-ui/src/views/message.rs` (`plan_review_approve_index`, `render_plan_review_card`) + `crates/agent-ui/src/workspace/chips.rs` (`decide_ask_option`)
+> Source: `crates/agent-ui/src/workspace/chips.rs` (`sync_live_ask` pulls the plan body) + `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`)
 
 #### 3.2.4 Popups & Dropdowns
 
@@ -1117,6 +1119,35 @@ The conversation-loading sprite (`ai_elements::Meerkat`): a 12×14-cell pixel me
 
 > Source: `crates/ai-elements/src/meerkat.rs`
 
+#### Tool
+
+The tool-call card frame (`ai_elements::Tool` / `ToolHeader` / `ToolState`): icon + tool name + mono argument summary + status chip over a collapsible body, mirroring Vercel AI Elements' Tool triple. Lifecycle contract (the Reasoning arrangement on tool vocabulary): a `Running` edge opens the body, a settle folds it one second later (`AUTO_FOLD_DELAY`), a hand toggle pins it, `no_auto_fold` hands the clock to a host that owns the fold elsewhere — the conversation's arrangement (see [ActivitySegment](#activitysegment)). Always-visible copy chips at the body's top-right quote the raw call — `in` = input JSON, `out` = raw output, `diff` for the edit family — pressing, landing on the clipboard, and flashing a check for 1.2 s (state in `ToolState`, so a host must observe the entity for the flash to repaint). The header click can be rerouted with `on_toggle` (the conversation routes it back through its own fold). Selection copy is WYSIWYG: the body rides the rich-text core (see [CodeView](#codeview) / [ShellView](#shellview)).
+
+> Source: `crates/ai-elements/src/tool.rs`. Mount point: `crates/steer-agent-chat-ui/src/views/tool_cards.rs`.
+
+#### CodeView
+
+The editor mock for file-shaped bodies (`ai_elements::CodeView`): line-number gutter, diff markers, syntax palette, all rendered **in-band** through the rich-text core — gutter, markers, and code are one text document, so drag-select copies what the card shows. Shapes: a whole-file read numbers from 1 (`CodeView::source`); a ranged read keeps the file's own numbers with a `...` gap row; an edit hunk widens to the old/new gutter pair, diff rows carrying their added/removed color whole with a run-background tint (the one surface tint). Long lines soft-wrap at compose time (`DEFAULT_WRAP_COLUMNS`, overridable `wrap_at`) hanging continuations under the code column — the core has no nowrap and wraps at the block's left edge, under the gutter, which no editor does; the budget must stay under the block's real pixel width or a highlight run crosses the core's internal wrap point and panics. `compose` is a pure function pinned by invariant tests (runs disjoint/ascending/within lines; continuation prefix = the code column).
+
+> Source: `crates/ai-elements/src/code_view.rs` (fence composition shared with [ShellView](#shellview) via `fenced`).
+
+#### ShellView
+
+The fake terminal for command-shaped bodies (`ai_elements::ShellView`): host-supplied prompt context lines (zsh-style — path, git branch, toolchains; the component has no opinion about prompt formats), a `❯` command echo, span-tinted output (`ShellLine::hit` raises grep needles; an empty needle degrades to the located line — the unguarded scan would never advance), and an exit footer (success = exit 0; failures carry no invented code; a streaming call runs). In-band like [CodeView](#codeview), on a fixed dark palette — a terminal surface stays dark under either app theme. `Bash`, `BashOutput`, `Grep` and `Glob` speak it; Grep/Glob render in shell vocabulary (their command equivalent), never as shell tools.
+
+> Source: `crates/ai-elements/src/shell.rs`
+
+#### AskUserQuestion
+
+The ask card as a paged form (`ai_elements::AskUserQuestion` driven by `AskState`): one question per page, radio circles for single-select blocks, checkboxes for multi-select, a note input per question (lazily mounted — an input state needs a window), and a `< 1/3 >` pager whose three controls are identical plain glyphs (the submit check included — the last page's forward edge). `advance` past the last page settles the card (`AskSubmitted` event) and swaps the form for the host's markdown `.output(...)`, which the settled header folds (chevron + click). Strings are the host's (headers, badges, placeholder, footnote); a block's `detail` element is the host's too (the crate renders no markdown of its own); the card's page is clamped against the blocks it received. A host that owns the answer elsewhere overrides the pager's check with `.on_submit(...)` — the state stays a working form until that host drops it — and adds the header's dismissal control with `.on_close(...)`, rendered while the card is unsettled only (a settled card is a transcript row, not a surface to leave). Both hooks are driven by the live conversation card ([AskDrawer](#askdrawer)); the gallery exercises the default path.
+
+> Source: `crates/ai-elements/src/ask.rs`. Acceptance surface: `cargo run -p ai-elements --example gallery` → AskUserQuestion; the live face is [AskDrawer](#askdrawer).
+
+The state also owns the card's `FocusHandle`: a host mounts `track_focus` +
+`tab_index(0)` on the card and moves focus into it, which is the only way its
+own pager/dismissal bindings (the `AskDrawer` key context) can fire at all —
+gpui dispatches actions along the focus path.
+
 #### ScrollHandle / ScrollableElement
 
 Scroll container with custom scrollbar.
@@ -1158,7 +1189,7 @@ States of a [ToolCallCard](#toolcallcard).
 
 #### PendingApproval
 
-Waiting for user, surfaces as the [AskDrawer](#askdrawer) question card.
+Waiting for user, surfaces as the [AskDrawer](#askdrawer) form card.
 
 #### Running
 

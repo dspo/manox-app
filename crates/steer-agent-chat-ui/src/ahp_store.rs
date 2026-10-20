@@ -42,6 +42,58 @@ use manox_ahp_runtime::ahp::projection::config_keys;
 use serde::Serialize;
 use serde_json::Value;
 
+/// One running sub-agent, as the host projects it onto the parent chat's
+/// background work (AHP `chat/backgroundWorkSet` / `chat/backgroundWorkRemoved`).
+/// The host opens an entry on the run's first running tick and removes it when
+/// the run settles, so the set IS the live one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentWorkRow {
+    /// The run id — the child session id, and the id of the child's own chat
+    /// (`ahp-chat:/{id}`), which is where the child's transcript lives.
+    pub id: String,
+    /// The agent type the host labels the run with (`Explore`, `Sailor`, …).
+    pub label: String,
+    /// The run's task label (`_meta.latestActivity`), when the host carried
+    /// one.
+    pub activity: Option<String>,
+}
+
+/// How much of one chat's fold a page has already rendered.
+///
+/// Cheap to read and compare — an id, two counts and the fold's last-entry
+/// stamp, never a copy of the content. It moves on every way a transcript
+/// grows: a settled turn was appended or the in-flight turn settled, the
+/// in-flight turn gained a part or a new id, or the fold's stamp advanced.
+///
+/// The stamp carries the fine-grained half BY DESIGN: the projection stamps
+/// `modifiedAt` with the journal's last entry, so a change that appends no new
+/// part (text streaming inside one part, a tool call's state inside an existing
+/// part) still moves it. This is a VERSION, not a content hash — a producer
+/// that rewrote a settled turn while leaving `modifiedAt` behind would be
+/// invisible here, and that is the contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatFoldVersion {
+    /// Settled turns.
+    turns: usize,
+    /// The in-flight turn: `(id, part count)`. An AHP turn's parts grow IN
+    /// PLACE, so the turn count alone never moves while a run streams.
+    active: Option<(String, usize)>,
+    /// The fold's last-entry stamp.
+    modified_at: String,
+}
+
+/// Read one chat's current fold version.
+pub fn chat_fold_version(chat: &ChatState) -> ChatFoldVersion {
+    ChatFoldVersion {
+        turns: chat.turns.len(),
+        active: chat
+            .active_turn
+            .as_ref()
+            .map(|turn| (turn.id.clone(), turn.response_parts.len())),
+        modified_at: chat.modified_at.clone(),
+    }
+}
+
 /// How the client identifies itself to the host (echo correlation, active
 /// client claims).
 pub const CLIENT_ID: &str = "desktop";
@@ -1813,6 +1865,18 @@ impl AhpStore {
         self.rejections.iter().map(String::as_str)
     }
 
+    /// How many subscriptions this store has queued because it has no client
+    /// yet (a detached test store queues every write). The sub-agent page's
+    /// refresh poll is a re-subscribe loop, so counting queued subscribes is
+    /// how a test proves the poll fires (and stops). Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_queued_subscribes(&self) -> usize {
+        self.pending_writes
+            .iter()
+            .filter(|write| matches!(write, PendingWrite::Subscribe(_)))
+            .count()
+    }
+
     /// Re-apply the folded chat state as its own subscribe snapshot — the
     /// host's snapshot ≈ the replayed journal — marking the snapshot landed
     /// for the rebuild-heal watermark. Test-support diagnostic.
@@ -2269,6 +2333,34 @@ impl<'a> LeafView<'a> {
         self.chat.is_some_and(|c| c.active_turn.is_some())
     }
 
+    /// The chat's running sub-agents, in host order — one row per
+    /// `backgroundWork` subagent entry. The host removes an entry when its run
+    /// settles, so this is exactly the live set (the Captain status block
+    /// lists them beside the Captain's own line).
+    pub fn running_subagents(&self) -> Vec<SubagentWorkRow> {
+        self.chat
+            .and_then(|c| c.background_work.as_ref())
+            .map(|work| {
+                work.iter()
+                    .filter_map(|entry| match entry {
+                        ahp_types::state::BackgroundWork::Subagent(sub) => Some(SubagentWorkRow {
+                            id: sub.id.clone(),
+                            label: sub.label.clone(),
+                            activity: sub
+                                .meta
+                                .as_ref()
+                                .and_then(|meta| meta.get("latestActivity"))
+                                .and_then(Value::as_str)
+                                .filter(|activity| !activity.is_empty())
+                                .map(str::to_string),
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The canonical `provider/model` selection string.
     pub fn model_id(&self) -> Option<&str> {
         self.session
@@ -2481,7 +2573,6 @@ pub fn pending_ask_from_ahp(
         return None;
     }
     let mut parsed = Vec::with_capacity(questions.len());
-    let mut selections = Vec::with_capacity(questions.len());
     for q in questions {
         let (id, question, header, multi, options) = match q {
             Q::SingleSelect(s) => (
@@ -2542,22 +2633,11 @@ pub fn pending_ask_from_ahp(
             ),
             Q::Unknown(_) => continue,
         };
-        selections.push(vec![false; options.len()]);
-        // A plan-review elicitation (request id `plan-review:<entry>`) renders
-        // the verdict card: the affirmative option is highlighted by label
-        // (the render matches `intent.approve` against the option labels).
-        let intent = id
-            .starts_with("plan-review:")
-            .then(|| crate::column::AskIntent {
-                kind: "plan-review".to_string(),
-                approve: "Approve".to_string(),
-            });
         parsed.push(crate::column::AskQuestion {
             id,
             question,
             header,
             detail: String::new(),
-            intent,
             multi_select: multi,
             options,
         });
@@ -2568,7 +2648,6 @@ pub fn pending_ask_from_ahp(
     Some(crate::column::PendingAsk {
         id,
         questions: parsed,
-        selections,
     })
 }
 
@@ -2607,6 +2686,139 @@ fn config_values_of(
 mod tests {
     use super::*;
     use ahp_types::actions::{ChatDeltaAction, SessionTitleChangedAction};
+
+    /// The sub-agent block's read face: the host's background-work subagent
+    /// entries project into rows (id + agent type + the run's task label),
+    /// every other kind (a shell, a future kind) is skipped, and an entry
+    /// without the `_meta` activity still answers with its type.
+    #[test]
+    fn running_subagents_project_the_background_work_subagent_entries() {
+        let mut book = ChannelBook::default();
+        let chat: ChatState = serde_json::from_value(serde_json::json!({
+            "resource": chat_uri("s-1"),
+            "title": "parent",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [],
+            "backgroundWork": [
+                {
+                    "kind": "shell",
+                    "id": "sh-1",
+                    "label": "cargo build",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "command": "cargo build",
+                },
+                {
+                    "kind": "subagent",
+                    "id": "sub-ns-3",
+                    "label": "Explore",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "_meta": { "agentType": "Explore", "latestActivity": "fix the login redirect" },
+                    "chat": "ahp-chat:/sub-ns-3",
+                },
+                {
+                    "kind": "subagent",
+                    "id": "sub-ns-4",
+                    "label": "Sailor",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "chat": "ahp-chat:/sub-ns-4",
+                },
+                { "kind": "future-kind", "whatever": true },
+            ],
+        }))
+        .expect("a chat with background work parses");
+        book.chats.insert("s-1".to_string(), chat);
+
+        let rows = leaf(&book, "s-1").running_subagents();
+        assert_eq!(
+            rows,
+            vec![
+                SubagentWorkRow {
+                    id: "sub-ns-3".into(),
+                    label: "Explore".into(),
+                    activity: Some("fix the login redirect".into()),
+                },
+                SubagentWorkRow {
+                    id: "sub-ns-4".into(),
+                    label: "Sailor".into(),
+                    activity: None,
+                },
+            ]
+        );
+    }
+
+    /// The fold version's contract: counts and the last-entry stamp are what
+    /// move it (never the content), so a settled turn rewritten UNDER THE SAME
+    /// STAMP is invisible — a version, not a content hash. Production stamps
+    /// every changed fold (`modifiedAt` = the journal's last entry), which is
+    /// what makes that safe, and the page only needs to know "did anything
+    /// land since the build?".
+    #[test]
+    fn the_fold_version_moves_on_counts_and_the_stamp_only() {
+        fn chat(stamp: &str, settled: usize, settled_text: &str, active_parts: usize) -> ChatState {
+            let turns: Vec<serde_json::Value> = (0..settled)
+                .map(|ix| {
+                    serde_json::json!({
+                        "id": format!("t{ix}"),
+                        "message": { "text": "q", "origin": { "kind": "user" } },
+                        "responseParts": [{ "kind": "markdown", "id": format!("t{ix}-p0"), "content": settled_text }],
+                        "state": "complete",
+                    })
+                })
+                .collect();
+            let mut value = serde_json::json!({
+                "resource": chat_uri("s-1"),
+                "title": "fold version probe",
+                "status": 0,
+                "modifiedAt": stamp,
+                "turns": turns,
+            });
+            if active_parts > 0 {
+                let parts: Vec<serde_json::Value> = (0..active_parts)
+                    .map(|ix| {
+                        serde_json::json!({ "kind": "markdown", "id": format!("a{ix}"), "content": "streaming" })
+                    })
+                    .collect();
+                value.as_object_mut().expect("object").insert(
+                    "activeTurn".into(),
+                    serde_json::json!({
+                        "id": "active",
+                        "startedAt": stamp,
+                        "message": { "text": "q", "origin": { "kind": "user" } },
+                        "responseParts": parts,
+                    }),
+                );
+            }
+            serde_json::from_value(value).expect("the version probe chat parses")
+        }
+
+        let base = chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 1));
+        assert_eq!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 1)),
+            "an unchanged fold is the same version"
+        );
+        assert_ne!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:00Z", 2, "a", 1)),
+            "a settled turn was appended"
+        );
+        assert_ne!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 2)),
+            "the in-flight turn gained a part (in place)"
+        );
+        assert_ne!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:01Z", 1, "a", 1)),
+            "the fold's stamp advanced"
+        );
+        assert_eq!(
+            base,
+            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "rewritten", 1)),
+            "a settled turn rewritten under the SAME stamp is invisible — a version, not a hash"
+        );
+    }
 
     #[test]
     fn typed_session_actions_fold_into_the_session_state() {

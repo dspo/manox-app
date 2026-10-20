@@ -1,7 +1,7 @@
 //! Regression (manox-app#88, composer half): the live-ask edge must retire a
 //! card whose request the fold can no longer route. A card the fold lost
 //! parks the composer in ask-supplement mode against a request
-//! `resolve_ask` cannot answer — submit becomes a silent no-op until the
+//! `reply_ask` cannot answer — submit becomes a silent no-op until the
 //! card is gone. The fold is the only answer route, so a fold without the
 //! id retires; a later fold that regains the request re-seeds (self-healing).
 #![cfg(feature = "test-support")]

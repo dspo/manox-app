@@ -34,33 +34,9 @@ impl ChatHost for WorkspaceChatHost {
         }
     }
 
-    fn decide_ask_option(&self, qi: usize, oi: usize, cx: &mut App) {
+    fn submit_ask(&self, replies: Vec<steer_agent_chat_ui::ask_card::AskCardReply>, cx: &mut App) {
         if let Some(ws) = up(self, cx) {
-            ws.update(cx, |w, cx| w.decide_ask_option(qi, oi, cx));
-        }
-    }
-
-    fn toggle_ask_option(&self, step: usize, oi: usize, cx: &mut App) {
-        if let Some(ws) = up(self, cx) {
-            ws.update(cx, |w, cx| w.toggle_ask_option(step, oi, cx));
-        }
-    }
-
-    fn ask_prev(&self, cx: &mut App) {
-        if let Some(ws) = up(self, cx) {
-            ws.update(cx, |w, cx| w.ask_prev(cx));
-        }
-    }
-
-    fn ask_next(&self, cx: &mut App) {
-        if let Some(ws) = up(self, cx) {
-            ws.update(cx, |w, cx| w.ask_next(cx));
-        }
-    }
-
-    fn skip_ask_question(&self, qi: usize, window: &mut Window, cx: &mut App) {
-        if let Some(ws) = up(self, cx) {
-            ws.update(cx, |w, cx| w.skip_ask_question(qi, window, cx));
+            ws.update(cx, |w, cx| w.reply_ask(replies, cx));
         }
     }
 
@@ -90,27 +66,6 @@ impl ChatHost for WorkspaceChatHost {
                 w.resolve_auth(auth_id, Some(option_id.to_string()), decision, cx);
             });
         }
-    }
-
-    fn ask_body_scroll(&self, qi: usize, cx: &App) -> Option<gpui::ScrollHandle> {
-        // Read through the workspace's own accessor (it holds the chat guard
-        // internally).
-        self.0.upgrade()?.read(cx).ask_body_scroll(cx, qi)
-    }
-
-    fn ask_custom_state(
-        &self,
-        qi: usize,
-        cx: &App,
-    ) -> Option<Entity<gpui_component::input::InputState>> {
-        self.0.upgrade().and_then(|ws| {
-            let ws = ws.read(cx);
-            ws.chat
-                .read(cx)
-                .ask_custom_inputs
-                .get(qi)
-                .and_then(|slot| slot.clone())
-        })
     }
 
     fn fork_session_at(&self, through_entry_id: &str, cx: &mut App) {

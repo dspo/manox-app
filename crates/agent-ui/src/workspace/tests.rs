@@ -107,6 +107,8 @@ mod suite {
         assert_eq!(out.2, None);
     }
 
+    /// The Captain strip's activity summary is ONE line — pinned beside the
+    /// helper in `steer_agent_chat_ui::views::subagents` (`one_line`).
     #[test]
     fn an_edited_recalled_turn_becomes_the_working_line() {
         let turns = ["newest", "middle"];
@@ -359,20 +361,86 @@ mod suite {
         );
     }
 
+    /// The card reports option INDICES and note text; the wire fold is the one
+    /// place those become labels and `/ panic` — the tri-state the server
+    /// reads: selected (single / many), a bare note as free text, and an
+    /// untouched question as an explicit skip.
     #[test]
-    fn a_plain_ask_carries_no_intent() {
-        let payload = serde_json::json!({
-            "questions": [{"question": "Which color?", "options": [{"label": "Red"}]}]
-        });
-        let ask =
-            crate::workspace::parse_pending_ask("ask1".into(), payload).expect("plain ask parses");
+    fn ask_replies_fold_onto_the_wire_tri_state() {
+        use steer_agent_chat_ui::ask_card::AskCardReply as Reply;
+
+        let ask = crate::workspace::parse_pending_ask(
+            "ask1".into(),
+            serde_json::json!({
+                "questions": [
+                    { "id": "one", "question": "Which color?", "options": [
+                        {"label": "Red"}, {"label": "Blue"}] },
+                    { "id": "many", "question": "Which flavors?", "multiSelect": true, "options": [
+                        {"label": "vanilla"}, {"label": "salt"}] },
+                    { "id": "note", "question": "Anything else?" },
+                    { "id": "untouched", "question": "Skipped?", "options": [{"label": "x"}] }
+                ]
+            }),
+        )
+        .expect("ask parses");
+        let replies = vec![
+            // A single-select pick with a supplement rides the freeform half.
+            Reply {
+                selected: vec![1],
+                note: "and teal".into(),
+            },
+            // Multi-select keeps every pick, in card order; a blank note is
+            // no supplement at all.
+            Reply {
+                selected: vec![1, 0],
+                note: "   ".into(),
+            },
+            // Nothing picked, a note typed: a text answer.
+            Reply {
+                selected: Vec::new(),
+                note: "no preference".into(),
+            },
+            // Never touched: an explicit skip, never a missing key.
+            Reply::default(),
+        ];
+        let answers = super::super::chips::ask_answers(&ask, &replies);
+        assert_eq!(answers.len(), 4, "every question carries an answer row");
+        use ahp_types::state::ChatInputAnswer as A;
+        match &answers["one"] {
+            A::Submitted(a) => match &a.value {
+                ahp_types::state::ChatInputAnswerValue::Selected(s) => {
+                    assert_eq!(s.value, "Blue");
+                    assert_eq!(
+                        s.freeform_values.as_deref(),
+                        Some(["and teal".to_string()].as_slice())
+                    );
+                }
+                other => panic!("single-select folds to Selected, got {other:?}"),
+            },
+            other => panic!("picked question is Submitted, got {other:?}"),
+        }
+        match &answers["many"] {
+            A::Submitted(a) => match &a.value {
+                ahp_types::state::ChatInputAnswerValue::SelectedMany(s) => {
+                    assert_eq!(s.value, vec!["salt".to_string(), "vanilla".to_string()]);
+                    assert!(s.freeform_values.is_none(), "a blank note is no supplement");
+                }
+                other => panic!("multi-select folds to SelectedMany, got {other:?}"),
+            },
+            other => panic!("multi-select question is Submitted, got {other:?}"),
+        }
+        match &answers["note"] {
+            A::Submitted(a) => match &a.value {
+                ahp_types::state::ChatInputAnswerValue::Text(t) => {
+                    assert_eq!(t.value, "no preference")
+                }
+                other => panic!("a bare note folds to Text, got {other:?}"),
+            },
+            other => panic!("note-only question is Submitted, got {other:?}"),
+        }
         assert!(
-            ask.questions[0].intent.is_none(),
-            "no intent → generic ask card"
-        );
-        assert!(
-            ask.questions[0].detail.is_empty(),
-            "no detail → no markdown block"
+            matches!(&answers["untouched"], A::Skipped(s) if s.freeform_values.is_none()),
+            "an untouched question settles as an explicit skip"
         );
     }
 }

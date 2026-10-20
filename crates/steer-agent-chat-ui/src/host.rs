@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use gpui::{App, Entity, Window};
 
+use crate::ask_card::AskCardReply;
 use crate::conversation::ConversationState;
 
 pub type ChatHostHandle = Arc<dyn ChatHost>;
@@ -26,19 +27,12 @@ pub trait ChatHost: Send + Sync + 'static {
     /// shell is gone — callers treat it as a no-op, matching the old
     /// weak-upgrade failure path).
     fn conversation(&self, cx: &App) -> Option<Entity<ConversationState>>;
-    /// Dismiss the pending ask card (its × affordance).
+    /// Dismiss the pending ask card (its header's close control).
     fn dismiss_ask(&self, cx: &mut App);
-    /// Toggle option `oi` of question `qi` on the pending ask card.
-    fn decide_ask_option(&self, qi: usize, oi: usize, cx: &mut App);
-    /// Toggle option `oi` of the ask card's step `step` (the option row's
-    /// click).
-    fn toggle_ask_option(&self, step: usize, oi: usize, cx: &mut App);
-    /// Step to the previous ask question.
-    fn ask_prev(&self, cx: &mut App);
-    /// Step to the next ask question.
-    fn ask_next(&self, cx: &mut App);
-    /// Mark question `qi` explicitly skipped.
-    fn skip_ask_question(&self, qi: usize, window: &mut Window, cx: &mut App);
+    /// Settle the pending ask with the card's answers, in question order. The
+    /// host folds them onto the wire (option labels, untouched questions as
+    /// explicit skips) — the card reports indices and note text only.
+    fn submit_ask(&self, replies: Vec<AskCardReply>, cx: &mut App);
     /// Submit the composer's current input.
     fn submit_input(&self, window: &mut Window, cx: &mut App);
     /// Settle the tool confirmation parked under `auth_id` — the unified
@@ -54,18 +48,6 @@ pub trait ChatHost: Send + Sync + 'static {
         approved: bool,
         cx: &mut App,
     );
-    /// The ask card body's tracked scroll handle for step `qi` — `None`
-    /// before the ask scratch is allocated (the render path allocates it), in
-    /// which case the card keeps gpui's untracked element-state scroll and
-    /// takes no wheel guard.
-    fn ask_body_scroll(&self, qi: usize, cx: &App) -> Option<gpui::ScrollHandle>;
-    /// The step-`qi` custom-answer input entity of the pending ask card
-    /// (allocated on the render path by the shell).
-    fn ask_custom_state(
-        &self,
-        qi: usize,
-        cx: &App,
-    ) -> Option<Entity<gpui_component::input::InputState>>;
     /// Fork the session at `through_entry_id`.
     fn fork_session_at(&self, through_entry_id: &str, cx: &mut App);
     /// Open the right-pane observation tab for a sub-agent (the rail's row
@@ -88,15 +70,8 @@ impl ChatHost for NoopHost {
     fn conversation(&self, _cx: &App) -> Option<Entity<ConversationState>> {
         None
     }
-    fn ask_body_scroll(&self, _qi: usize, _cx: &App) -> Option<gpui::ScrollHandle> {
-        None
-    }
     fn dismiss_ask(&self, _cx: &mut App) {}
-    fn decide_ask_option(&self, _qi: usize, _oi: usize, _cx: &mut App) {}
-    fn toggle_ask_option(&self, _step: usize, _oi: usize, _cx: &mut App) {}
-    fn ask_prev(&self, _cx: &mut App) {}
-    fn ask_next(&self, _cx: &mut App) {}
-    fn skip_ask_question(&self, _qi: usize, _window: &mut Window, _cx: &mut App) {}
+    fn submit_ask(&self, _replies: Vec<AskCardReply>, _cx: &mut App) {}
     fn submit_input(&self, _window: &mut Window, _cx: &mut App) {}
     fn resolve_tool_confirmation(
         &self,
@@ -105,13 +80,6 @@ impl ChatHost for NoopHost {
         _approved: bool,
         _cx: &mut App,
     ) {
-    }
-    fn ask_custom_state(
-        &self,
-        _qi: usize,
-        _cx: &App,
-    ) -> Option<Entity<gpui_component::input::InputState>> {
-        None
     }
     fn fork_session_at(&self, _through_entry_id: &str, _cx: &mut App) {}
     fn open_subagent_tab(

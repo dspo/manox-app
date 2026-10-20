@@ -121,9 +121,7 @@ impl Workspace {
         let followup_mode = running
             && self.chat.read(cx).pending_ask.is_none()
             && self.chat.read(cx).pending_confirmation.is_none();
-        let placeholder_mode = if self.chat.read(cx).pending_ask.is_some() {
-            ComposerPlaceholderMode::Ask
-        } else if followup_mode {
+        let placeholder_mode = if followup_mode {
             ComposerPlaceholderMode::FollowUp
         } else {
             ComposerPlaceholderMode::Normal
@@ -136,7 +134,6 @@ impl Workspace {
             let key = match placeholder_mode {
                 ComposerPlaceholderMode::Normal => "workspace-input-placeholder",
                 ComposerPlaceholderMode::FollowUp => "composer-placeholder-followup",
-                ComposerPlaceholderMode::Ask => "workspace-ask-supplement-placeholder",
             };
             self.chat_input(cx).update(cx, |state, cx| {
                 state.set_placeholder(i18n::t(key), window, cx);
@@ -154,8 +151,8 @@ impl Workspace {
         // running edge alone — a pending ask/approve/plan card never swaps
         // the control into a send glyph the user cannot fire (the deadlock
         // class: stop became an empty-input-disabled send exactly when
-        // the user most needed to interrupt). Ask supplement input keeps
-        // its own path: Enter.
+        // the user most needed to interrupt). Enter still answers a pending
+        // ask card, whose own controls are the only answer surface.
         let send = self.render_send_button(running, cx);
         // Context-occupancy pill (ring + percent) sits between the model and
         // the action it quantifies: session-state cluster, then the send
@@ -202,14 +199,6 @@ impl Workspace {
                     }
                 }
             }))
-            .when(self.chat.read(cx).pending_ask.is_some(), |this| {
-                this.child(
-                    gpui::div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(i18n::t("workspace-ask-supplement-label")),
-                )
-            })
             .when_some(
                 self.chat
                     .read(cx)
@@ -1405,7 +1394,12 @@ impl Workspace {
                             .map(|rows| {
                                 rows.iter()
                                     .filter_map(serde_json::Value::as_str)
-                                    .map(|p| (p.to_string(), String::new()))
+                                    // The row names the directory the way the
+                                    // sidebar groups name it; the full path
+                                    // stays on the row's tooltip.
+                                    .map(|p| {
+                                        (p.to_string(), crate::sidebar_projection::project_label(p))
+                                    })
                                     .collect()
                             })
                     })
@@ -1424,7 +1418,7 @@ impl Workspace {
 
                     let ws_recent = ws.clone();
                     let theme_recent = theme.clone();
-                    for (path_str, name) in &recent_projects {
+                    for (ix, (path_str, name)) in recent_projects.iter().enumerate() {
                         let name = name.clone();
                         let display_path = path_str.clone();
                         let click_path = path_str.clone();
@@ -1432,7 +1426,9 @@ impl Workspace {
                         let themed = theme_recent.clone();
                         menu = menu.item(
                             PopupMenuItem::element(move |_window, _cx| {
+                                let tooltip = display_path.clone();
                                 h_flex()
+                                    .id(("project-menu-row", ix))
                                     .items_center()
                                     .gap_2()
                                     .child(
@@ -1442,17 +1438,18 @@ impl Workspace {
                                     )
                                     .child(
                                         gpui::div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .whitespace_nowrap()
                                             .text_sm()
                                             .text_color(themed.foreground)
                                             .child(name.clone()),
                                     )
-                                    .child(
-                                        gpui::div()
-                                            .flex_1()
-                                            .text_xs()
-                                            .text_color(themed.muted_foreground)
-                                            .child(display_path.clone()),
-                                    )
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(tooltip.clone())
+                                            .build(window, cx)
+                                    })
                             })
                             .on_click(
                                 move |_, _, cx: &mut gpui::App| {

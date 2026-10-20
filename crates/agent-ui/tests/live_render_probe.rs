@@ -124,13 +124,15 @@ async fn live_tool_rows_paint_and_survive_a_long_reasoning_round(cx: &mut TestAp
     };
     paint(&mut visual);
 
-    // The tool entry renders — its head row is a visible line, not nothing.
-    let tool_head = visual
-        .debug_bounds("message-overflow-activity-entry-0-1-head")
-        .expect("the tool head row paints");
+    // The tool entry renders — a visible row, not nothing. Card-family
+    // tools render the ai-elements card (its own header is the fold), so the
+    // step's row selector is the stable paint witness either way.
+    let tool_row = visual
+        .debug_bounds("message-overflow-activity-entry-0-1")
+        .expect("the tool entry row paints");
     assert!(
-        tool_head.size.height > px(8.),
-        "the tool head has real height: {tool_head:?}"
+        tool_row.size.height > px(8.),
+        "the tool row has real height: {tool_row:?}"
     );
 
     // Open the (auto-folded) reasoning round over a body far taller than any
@@ -155,12 +157,12 @@ async fn live_tool_rows_paint_and_survive_a_long_reasoning_round(cx: &mut TestAp
         });
     });
     paint(&mut visual);
-    let tool_head = visual
-        .debug_bounds("message-overflow-activity-entry-0-1-head")
+    let tool_row = visual
+        .debug_bounds("message-overflow-activity-entry-0-1")
         .expect("the tool survives a long reasoning round");
     assert!(
-        tool_head.size.height > px(8.),
-        "the tool head still has height under a long round: {tool_head:?}"
+        tool_row.size.height > px(8.),
+        "the tool row still has height under a long round: {tool_row:?}"
     );
 
     // An open round keeps its head row and body on separate lines.

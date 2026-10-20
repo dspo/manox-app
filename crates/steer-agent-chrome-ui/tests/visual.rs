@@ -28,6 +28,7 @@ mod macos {
         size,
     };
     use gpui_component::Root;
+    use steer_agent_chat_ui::ask_card::{AskCardOption, AskCardQuestion, AskCardSnapshot};
     use steer_agent_chat_ui::conversation::{ConvItem, ToolCallItem};
     use steer_agent_chat_ui::host::noop_host;
     use steer_agent_chat_ui::views::message::MessageItem;
@@ -258,11 +259,89 @@ mod macos {
 
     // ── main-surface seat ─────────────────────────────────────────────────────
 
+    /// The demo ask: three questions covering single-select, multi-select and
+    /// a free-text note.
+    fn seed_snapshot() -> AskCardSnapshot {
+        let question = |header: &str,
+                        question: &str,
+                        multi_select: bool,
+                        options: Vec<(&str, &str, bool)>| AskCardQuestion {
+            question: question.to_string(),
+            header: header.to_string(),
+            detail: String::new(),
+            multi_select,
+            options: options
+                .into_iter()
+                .map(|(label, description, recommended)| AskCardOption {
+                    label: label.to_string(),
+                    description: description.to_string(),
+                    recommended,
+                })
+                .collect(),
+        };
+        AskCardSnapshot {
+            id: "ask-seed".into(),
+            questions: vec![
+                question(
+                    "存储",
+                    "这个服务用哪个数据库？",
+                    false,
+                    vec![
+                        ("PostgreSQL", "事务 + JSONB，跟现有部署一致", true),
+                        ("MySQL", "团队更熟悉，但需要补迁移脚本", false),
+                    ],
+                ),
+                question(
+                    "功能",
+                    "这一期先启用哪些能力？",
+                    true,
+                    vec![
+                        ("查询缓存", "命中率可观测", false),
+                        ("全文检索", "先把接口留好", false),
+                        ("指标上报", "", false),
+                    ],
+                ),
+                question("补充", "还有什么需要我注意的吗？", false, Vec::new()),
+            ],
+        }
+    }
+
+    /// A plan review, as the runtime raises one: a single question whose
+    /// `detail` carries the plan body and whose options are the three verdicts.
+    /// One card face — no separate decision surface.
+    fn plan_review_snapshot() -> AskCardSnapshot {
+        AskCardSnapshot {
+            id: "plan-review-seed".into(),
+            questions: vec![AskCardQuestion {
+                question: "批准这个计划吗？".into(),
+                header: "Plan 评审".into(),
+                detail: "## 帖子服务拆分\n\n1. 建 `posts` 表与迁移脚本\n2. 查询缓存接一层\n3. 全文检索先留接口\n\n> 预计两轮迭代".into(),
+                multi_select: false,
+                options: vec![
+                    AskCardOption {
+                        label: "Approve".into(),
+                        description: "开始执行".into(),
+                        recommended: true,
+                    },
+                    AskCardOption {
+                        label: "Approve & compact".into(),
+                        description: "先压缩上下文再执行".into(),
+                        recommended: false,
+                    },
+                    AskCardOption {
+                        label: "Request changes".into(),
+                        description: "继续讨论".into(),
+                        recommended: false,
+                    },
+                ],
+            }],
+        }
+    }
+
     /// A minimal seeded message list (the chat pipeline's real `MessageItem`s),
     /// so the acceptance capture shows chat content inside the shell.
     struct ChatPreviewStub {
         items: Vec<gpui::Entity<MessageItem>>,
-        list_state: gpui::ListState,
     }
 
     impl ChatPreviewStub {
@@ -270,6 +349,16 @@ mod macos {
             let mk = |cx: &mut gpui::Context<Self>, item: ConvItem, role: &str| {
                 cx.new(|_| MessageItem::new(item, role.to_string(), 0, noop_host()))
             };
+            // `CHROME_ASK=<page>` swaps the seeded transcript for a pending
+            // `AskUserQuestion` card on that page (0-based), `CHROME_ASK=answered`
+            // for the same card in its answered phase.
+            if let Ok(mode) = std::env::var("CHROME_ASK") {
+                return match mode.as_str() {
+                    "answered" => Self::answered_ask_card(cx),
+                    "plan" => Self::ask_card_with(cx, 0, plan_review_snapshot()),
+                    page => Self::ask_card(cx, page.parse::<usize>().unwrap_or(0)),
+                };
+            }
             let items = vec![
             mk(
                 cx,
@@ -294,6 +383,8 @@ mod macos {
                     collapsed: false,
                     user_toggled: true,
                     panel: None,
+                    card: None,
+                    cwd: None,
                 }),
                 "",
             ),
@@ -310,33 +401,163 @@ mod macos {
                 "GLM-5.3",
             ),
         ];
-            let list_state =
-                gpui::ListState::new(items.len(), gpui::ListAlignment::Bottom, px(400.));
-            Self { items, list_state }
+            Self { items }
+        }
+
+        /// The pending ask, as the conversation mounts it: the synthesized
+        /// `ToolCall` row carrying the snapshot and the card's own state. The
+        /// state is seeded by hand here (the workspace's `ensure_ask_state`
+        /// does it live), including the answers a reader would see mid-form.
+        fn ask_card(cx: &mut gpui::Context<Self>, page: usize) -> Self {
+            Self::ask_card_with(cx, page, seed_snapshot())
+        }
+
+        /// The same card over any snapshot — the plan-review mode reuses it.
+        fn ask_card_with(
+            cx: &mut gpui::Context<Self>,
+            page: usize,
+            snapshot: AskCardSnapshot,
+        ) -> Self {
+            let multi: Vec<bool> = snapshot.questions.iter().map(|q| q.multi_select).collect();
+            let state = cx.new(|cx| ai_elements::AskState::new(multi, "添加可选补充说明", cx));
+            state.update(cx, |state, cx| {
+                state.toggle_option(0, 0, cx);
+                state.set_page(page, cx);
+            });
+            let ask = cx.new(|_| {
+                MessageItem::new(
+                    ConvItem::ToolCall(ToolCallItem {
+                        id: "ask-seed".into(),
+                        name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
+                        title: "存储 · 功能 · 补充".into(),
+                        status: manox_agent::ToolCallStatus::PendingApproval,
+                        output: String::new(),
+                        is_error: false,
+                        input: serde_json::Value::Null,
+                        streaming: false,
+                        collapsed: false,
+                        user_toggled: false,
+                        panel: None,
+                        card: None,
+                        cwd: None,
+                    }),
+                    "GLM-5.3".into(),
+                    0,
+                    noop_host(),
+                )
+            });
+            ask.update(cx, |item, _| {
+                item.ask_snapshot = Some(snapshot);
+                item.ask_state = Some(state);
+            });
+            let items = vec![
+                cx.new(|_| {
+                    MessageItem::new(
+                        ConvItem::User {
+                            text: "帮我起一个帖子服务".into(),
+                            images: Vec::new(),
+                            meta: None,
+                        },
+                        String::new(),
+                        0,
+                        noop_host(),
+                    )
+                }),
+                ask,
+            ];
+            Self { items }
+        }
+
+        /// The answered ask, as the transcript keeps it: the synthesized
+        /// `ToolCall` row carrying the call's own input and the server's
+        /// canonical answer payload — the row mounts the card's settled phase
+        /// itself (no `AskState` is seeded here; the row owns it).
+        fn answered_ask_card(cx: &mut gpui::Context<Self>) -> Self {
+            let input = serde_json::json!({
+                "questions": [
+                    { "id": "one", "question": "这个服务用哪个数据库？",
+                      "options": [{"label": "PostgreSQL"}, {"label": "MySQL"}] },
+                    { "id": "many", "question": "这一期先启用哪些能力？", "multiSelect": true,
+                      "options": [{"label": "查询缓存"}, {"label": "全文检索"}, {"label": "指标上报"}] },
+                    { "id": "free", "question": "还有什么需要我注意的吗？" }
+                ]
+            });
+            let output = r#"{"answers":[
+                {"id":"one","selected":["PostgreSQL"]},
+                {"id":"many","selected":["查询缓存","指标上报"],"custom":"全文检索先留接口"},
+                {"id":"free","selected":[]}
+            ]}"#;
+            let ask = cx.new(|_| {
+                MessageItem::new(
+                    ConvItem::ToolCall(ToolCallItem {
+                        id: "ask-seed".into(),
+                        name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
+                        title: "存储 · 功能 · 补充".into(),
+                        status: manox_agent::ToolCallStatus::Success,
+                        output: output.to_string(),
+                        is_error: false,
+                        input,
+                        streaming: false,
+                        collapsed: false,
+                        user_toggled: false,
+                        panel: None,
+                        card: None,
+                        cwd: None,
+                    }),
+                    "GLM-5.3".into(),
+                    0,
+                    noop_host(),
+                )
+            });
+            let items = vec![
+                cx.new(|_| {
+                    MessageItem::new(
+                        ConvItem::User {
+                            text: "帮我起一个帖子服务".into(),
+                            images: Vec::new(),
+                            meta: None,
+                        },
+                        String::new(),
+                        1,
+                        noop_host(),
+                    )
+                }),
+                ask,
+            ];
+            Self { items }
         }
     }
 
     impl gpui::Render for ChatPreviewStub {
+        // A plain column, NOT `gpui::list`: the virtualized list never
+        // resolves its rows' heights under the offscreen harness, so the
+        // acceptance capture came out with an empty main column. The rows here
+        // are the same real `MessageItem`s — the list is what the live shell
+        // adds on top, not what the shot is about.
         fn render(
             &mut self,
             _window: &mut gpui::Window,
             _cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             let items = self.items.clone();
-            let processor = move |ix: usize, _w: &mut gpui::Window, _cx: &mut gpui::App| match items
-                .get(ix)
-                .cloned()
-            {
-                Some(item) => gpui::div()
-                    .w_full()
-                    .pt_1()
-                    .pb_4()
-                    .flex_shrink_0()
-                    .min_w_0()
-                    .child(item)
-                    .into_any_element(),
-                None => gpui::div().into_any_element(),
-            };
+            let rows: Vec<gpui::AnyElement> = (0..items.len())
+                .map(|ix| {
+                    items
+                        .get(ix)
+                        .cloned()
+                        .map(|item| {
+                            gpui::div()
+                                .w_full()
+                                .pt_1()
+                                .pb_4()
+                                .flex_shrink_0()
+                                .min_w_0()
+                                .child(item)
+                                .into_any_element()
+                        })
+                        .unwrap_or_else(|| gpui::div().into_any_element())
+                })
+                .collect();
             gpui::div()
                 .size_full()
                 .flex()
@@ -348,7 +569,8 @@ mod macos {
                         .w_full()
                         .flex_1()
                         .min_h_0()
-                        .child(gpui::list(self.list_state.clone(), processor)),
+                        .children(rows)
+                        .into_any_element(),
                 )
         }
     }

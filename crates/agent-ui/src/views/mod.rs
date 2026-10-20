@@ -12,6 +12,7 @@ pub mod model_cascade;
 pub mod plugin_manager;
 pub mod settings;
 pub mod subagent_panel;
+pub mod subagent_stream;
 
 pub use steer_agent_chat_ui::views::{
     CardWidth, MessageListWidthInvalidator, centered, completion, context_rail, message,

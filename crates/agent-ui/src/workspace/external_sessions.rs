@@ -127,6 +127,11 @@ impl Workspace {
             agent = launch.agent_id,
             "external session registered"
         );
+        // The main column changes hands. The sub-agent page obeys the same
+        // invariant its own fields do — it exists only while its mode owns the
+        // column — so the hand-off drops it (and its refresh poll with it);
+        // `open_subagent_stream` is the only way back.
+        self.subagent_stream = None;
         self.active_external = Some(id);
         self.view_mode = super::ViewMode::ExternalSession;
         focus_terminal(&view, window, cx);
@@ -146,6 +151,9 @@ impl Workspace {
             return;
         };
         let view = record.view.clone();
+        // Same hand-off as the spawn path: the sub-agent page never outlives
+        // the mode that owns the column.
+        self.subagent_stream = None;
         self.active_external = Some(id.to_string());
         self.view_mode = super::ViewMode::ExternalSession;
         focus_terminal(&view, window, cx);
