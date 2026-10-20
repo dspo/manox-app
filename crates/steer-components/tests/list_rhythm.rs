@@ -77,19 +77,9 @@ impl Element for Measure {
     }
 }
 
-/// Which document constructor a measurement mounts. Both tiers render a source
-/// through the same machinery, so equal footprints at one body size is the
-/// invariant: a tier may not carry a size (or a heading ladder) of its own.
-#[derive(Clone, Copy)]
-enum Tier {
-    Message,
-    Reasoning,
-}
-
 struct Host {
-    state: Entity<TextViewState>,
+    source: String,
     body: Option<Pixels>,
-    tier: Tier,
     out: Rc<Cell<Pixels>>,
 }
 
@@ -97,10 +87,9 @@ impl Render for Host {
     fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let theme = Theme::default();
         let text_size = self.body.unwrap_or(px(13.));
-        let view = match self.tier {
-            Tier::Message => message_document(&self.state, &theme, text_size),
-            Tier::Reasoning => reasoning_document(&self.state, &theme, text_size),
-        };
+        let view = TextView::markdown("m", self.source.clone())
+            .style(message_style(&theme, text_size))
+            .text_size(text_size);
         div().w(px(600.)).child(Measure {
             child: view.into_any_element(),
             out: self.out.clone(),
@@ -108,35 +97,62 @@ impl Render for Host {
     }
 }
 
-fn measure_raw(
-    cx: &mut gpui::TestAppContext,
-    source: &str,
-    body: Option<Pixels>,
-    tier: Tier,
-) -> f32 {
+fn measure_raw(cx: &mut gpui::TestAppContext, source: &str, body: Option<Pixels>) -> f32 {
     cx.update(gpui_base::init);
     let out = Rc::new(Cell::new(px(0.)));
     let src = source.to_string();
     let o2 = out.clone();
-    let (_view, cx) = cx.add_window_view(move |_window, cx| {
-        let state = cx.new(|cx| TextViewState::markdown(&src, cx));
-        Host {
-            state,
-            body,
-            tier,
-            out: o2,
-        }
+    let (_view, cx) = cx.add_window_view(move |_window, _cx| Host {
+        source: src,
+        body,
+        out: o2,
     });
     cx.run_until_parked();
     f32::from(out.get())
 }
 
 fn measure(cx: &mut gpui::TestAppContext, source: &str) -> f32 {
-    measure_raw(cx, source, Some(px(13.)), Tier::Message)
+    measure_raw(cx, source, Some(px(13.)))
 }
 
-fn measure_reasoning(cx: &mut gpui::TestAppContext, source: &str) -> f32 {
-    measure_raw(cx, source, Some(px(13.)), Tier::Reasoning)
+/// A document constructor over a persistent [`TextViewState`] — the mount every
+/// conversation tier renders through, so the comparison below is
+/// constructor-for-constructor and nothing else.
+type TierDocument = fn(&Entity<TextViewState>, &Theme, Pixels) -> TextView;
+
+struct TierHost {
+    state: Entity<TextViewState>,
+    document: TierDocument,
+    body: Pixels,
+    out: Rc<Cell<Pixels>>,
+}
+
+impl Render for TierHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let view = (self.document)(&self.state, &Theme::default(), self.body);
+        div().w(px(600.)).child(Measure {
+            child: view.into_any_element(),
+            out: self.out.clone(),
+        })
+    }
+}
+
+fn measure_tier(cx: &mut gpui::TestAppContext, source: &str, document: TierDocument) -> f32 {
+    cx.update(gpui_base::init);
+    let out = Rc::new(Cell::new(px(0.)));
+    let src = source.to_string();
+    let o2 = out.clone();
+    let (_view, cx) = cx.add_window_view(move |_window, cx| {
+        let state = cx.new(|cx| TextViewState::markdown(&src, cx));
+        TierHost {
+            state,
+            document,
+            body: px(13.),
+            out: o2,
+        }
+    });
+    cx.run_until_parked();
+    f32::from(out.get())
 }
 
 #[gpui::test]
@@ -232,8 +248,8 @@ fn heading_ladder_stays_at_body_size_with_one_h1_step(cx: &mut gpui::TestAppCont
 #[gpui::test]
 fn reasoning_tier_matches_the_message_body_footprint(cx: &mut gpui::TestAppContext) {
     let source = "alpha bravo charlie\n\n# delta echo foxtrot\n\n## golf hotel india\n\njuliet **kilo** lima `mike` november\n\n- oscar\n- papa\n- quebec";
-    let message = measure(cx, source);
-    let reasoning = measure_reasoning(cx, source);
+    let message = measure_tier(cx, source, message_document);
+    let reasoning = measure_tier(cx, source, reasoning_document);
     assert!(
         (message - reasoning).abs() <= 0.5,
         "the reasoning tier must measure like the message body at one size: \
