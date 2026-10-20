@@ -3,18 +3,22 @@
 //! upstream renderer spaces list items tighter than paragraph gaps; the guard
 //! pins that density). The heading ladder must hold its configured sizes under
 //! the message-density style: H2–H6 at body size (plus the renderer's constant
-//! heading pad), H1 one step up.
+//! heading pad), H1 one step up. The document tiers are density-equal: the
+//! reasoning tier differs from the message body by color alone, so at one body
+//! size the two must measure the same.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Element, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, ParentElement, Pixels, Render, Style, Styled, Window, div, px,
+    AnyElement, App, AppContext, Bounds, Element, Entity, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, ParentElement, Pixels, Render, Style, Styled, Window, div, px,
 };
 use gpui_base::TextView;
 use gpui_component::{Root, Theme};
-use steer_components::markdown::{TextViewState, message_style};
+use steer_components::markdown::{
+    TextViewState, message_document, message_style, reasoning_document,
+};
 
 struct Measure {
     child: AnyElement,
@@ -73,9 +77,19 @@ impl Element for Measure {
     }
 }
 
+/// Which document constructor a measurement mounts. Both tiers render a source
+/// through the same machinery, so equal footprints at one body size is the
+/// invariant: a tier may not carry a size (or a heading ladder) of its own.
+#[derive(Clone, Copy)]
+enum Tier {
+    Message,
+    Reasoning,
+}
+
 struct Host {
-    source: String,
+    state: Entity<TextViewState>,
     body: Option<Pixels>,
+    tier: Tier,
     out: Rc<Cell<Pixels>>,
 }
 
@@ -83,9 +97,10 @@ impl Render for Host {
     fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let theme = Theme::default();
         let text_size = self.body.unwrap_or(px(13.));
-        let view = TextView::markdown("m", self.source.clone())
-            .style(message_style(&theme, text_size))
-            .text_size(text_size);
+        let view = match self.tier {
+            Tier::Message => message_document(&self.state, &theme, text_size),
+            Tier::Reasoning => reasoning_document(&self.state, &theme, text_size),
+        };
         div().w(px(600.)).child(Measure {
             child: view.into_any_element(),
             out: self.out.clone(),
@@ -93,22 +108,35 @@ impl Render for Host {
     }
 }
 
-fn measure_raw(cx: &mut gpui::TestAppContext, source: &str, body: Option<Pixels>) -> f32 {
+fn measure_raw(
+    cx: &mut gpui::TestAppContext,
+    source: &str,
+    body: Option<Pixels>,
+    tier: Tier,
+) -> f32 {
     cx.update(gpui_base::init);
     let out = Rc::new(Cell::new(px(0.)));
     let src = source.to_string();
     let o2 = out.clone();
-    let (_view, cx) = cx.add_window_view(move |_window, _cx| Host {
-        source: src,
-        body,
-        out: o2,
+    let (_view, cx) = cx.add_window_view(move |_window, cx| {
+        let state = cx.new(|cx| TextViewState::markdown(&src, cx));
+        Host {
+            state,
+            body,
+            tier,
+            out: o2,
+        }
     });
     cx.run_until_parked();
     f32::from(out.get())
 }
 
 fn measure(cx: &mut gpui::TestAppContext, source: &str) -> f32 {
-    measure_raw(cx, source, Some(px(13.)))
+    measure_raw(cx, source, Some(px(13.)), Tier::Message)
+}
+
+fn measure_reasoning(cx: &mut gpui::TestAppContext, source: &str) -> f32 {
+    measure_raw(cx, source, Some(px(13.)), Tier::Reasoning)
 }
 
 #[gpui::test]
@@ -194,6 +222,22 @@ fn heading_ladder_stays_at_body_size_with_one_h1_step(cx: &mut gpui::TestAppCont
     assert!(
         h1_f > h2_f && h1_f - h2_f <= 10.0,
         "H1 must sit one visible step above H2, got {h1} vs {h2}"
+    );
+}
+
+/// The reasoning tier has no size of its own: the muted foreground is the whole
+/// difference from a message body, so at one body size the same source must
+/// measure identically — heading ladder included. A reasoning size step, or a
+/// second ladder, fails here.
+#[gpui::test]
+fn reasoning_tier_matches_the_message_body_footprint(cx: &mut gpui::TestAppContext) {
+    let source = "alpha bravo charlie\n\n# delta echo foxtrot\n\n## golf hotel india\n\njuliet **kilo** lima `mike` november\n\n- oscar\n- papa\n- quebec";
+    let message = measure(cx, source);
+    let reasoning = measure_reasoning(cx, source);
+    assert!(
+        (message - reasoning).abs() <= 0.5,
+        "the reasoning tier must measure like the message body at one size: \
+         reasoning {reasoning}px vs message {message}px"
     );
 }
 

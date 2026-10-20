@@ -172,30 +172,14 @@ pub fn message_document(state: &Entity<TextViewState>, theme: &Theme, body: Pixe
         .text_size(body)
 }
 
-/// The reasoning tier — one step under the body (the dsh rule "think text
-/// reads the secondary tier"): muted foreground, a size under the message
-/// body's, the same machinery otherwise.
-pub fn reasoning_document(state: &Entity<TextViewState>, theme: &Theme) -> TextView {
-    const REASONING_SIZE: Pixels = px(12.);
+/// The reasoning tier — the message document in the muted foreground. A round
+/// is secondary by color, not by a size of its own: the transcript carries one
+/// body size, so a round's body matches the message body it belongs to.
+pub fn reasoning_document(state: &Entity<TextViewState>, theme: &Theme, body: Pixels) -> TextView {
     TextView::new(state)
-        .style(
-            base_style(theme, move |level| {
-                let mut r = StyleRefinement::default();
-                r.text.font_size = Some(
-                    (if level == 1 {
-                        REASONING_SIZE + px(2.)
-                    } else {
-                        REASONING_SIZE
-                    })
-                    .into(),
-                );
-                r.text.font_weight = Some(FontWeight::BOLD);
-                r
-            })
-            .with_foreground(theme.muted_foreground),
-        )
+        .style(message_style(theme, body).with_foreground(theme.muted_foreground))
         .code_block_highlighter(steer_code_highlighter(theme))
-        .text_size(REASONING_SIZE)
+        .text_size(body)
 }
 
 /// A per-frame static markdown document. Upstream keys the state off `id`, so

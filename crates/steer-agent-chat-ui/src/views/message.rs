@@ -53,7 +53,9 @@ use steer_components::markdown::{
 
 /// Message body type size: one step below the chrome `text_base` (14px) so
 /// dense conversation text reads lighter. Composer + Editor tab pin the same
-/// value so input text stays interchangeable with message content.
+/// value so input text stays interchangeable with message content, and the
+/// reasoning tier renders through it too — the transcript carries one text
+/// size.
 pub const MESSAGE_BODY_SIZE: gpui::Pixels = gpui::px(13.);
 use std::path::{Path, PathBuf};
 use steer_components::turn_frame::TurnFrame;
@@ -2278,8 +2280,8 @@ fn reasoning_round_toggle(
 /// A reasoning round's step — the dsh disclosure shape: a thinking icon and
 /// the localized「思考」title row carrying the round's own first line as the
 /// folded summary (with a right-edge fade); the expanded body is the
-/// reasoning-tier document (muted, one size under the message body) kept in
-/// sync by the streaming path.
+/// reasoning-tier document (muted, message body size) kept in sync by the
+/// streaming path.
 // One arg per slot the step is assembled from (selector identity, fold data,
 // body document, render positions for the debug selectors, host context);
 // a config struct would only rename the same values.
@@ -2326,7 +2328,11 @@ fn reasoning_step(
             .as_ref()
             .and_then(ChatDocument::state)
             .map(|state| {
-                decorate_document(reasoning_document(state, theme), streaming, owner.clone())
+                decorate_document(
+                    reasoning_document(state, theme, MESSAGE_BODY_SIZE),
+                    streaming,
+                    owner.clone(),
+                )
             })
             .unwrap_or_else(|| static_body(("reasoning-entry-body", eix), text, theme, owner));
         step = step.content(
