@@ -674,12 +674,17 @@ impl Workspace {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The launch directory is the conversation's anchor: a terminal
+        // launch from a project dir (e.g. `cargo run` inside the repo)
+        // starts a conversation that belongs to that project — the claim's
+        // working directory decides the core bucket the sidebar groups by.
+        // `/` is the GUI-launch signature on macOS: an unbound conversation
+        // must not anchor there, so home is the neutral default; binding a
+        // project via the chip / project "+" overrides it later.
         let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        // An unbound conversation must not inherit the launch terminal's
-        // cwd as its working directory — that is an arbitrary project dir
-        // (or `/` under a GUI launch). Home is the neutral default; binding
-        // a project via the chip / project "+" overrides it later.
-        if let Some(home) = manox_agent::paths::home_dir() {
+        if (!cwd.is_absolute() || cwd.as_path() == "/")
+            && let Some(home) = manox_agent::paths::home_dir()
+        {
             cwd = home;
         }
         // L11: the process-global server — every window and the embedded
