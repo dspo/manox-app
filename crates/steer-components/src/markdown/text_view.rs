@@ -3,8 +3,9 @@
 //! Every markdown surface in the app — message bodies, reasoning rounds,
 //! static chrome, terminal panels — renders through the helpers here, so the
 //! theme bridge, the heading ladders, the code-highlight dispatch (`ansi` /
-//! `diff` / conflict markers / tree-sitter), and the copy controls stay
-//! consistent by construction instead of by per-call-site discipline.
+//! `diff` / conflict markers / tree-sitter), the inline ```svg block, and the
+//! copy controls stay consistent by construction instead of by per-call-site
+//! discipline.
 //!
 //! This drives the `gpui-base` `TextView` directly (same crates.io train as
 //! `gpui-component`, exact-pinned): the component wrapper folds onto the theme
@@ -30,6 +31,7 @@ use ropey::Rope;
 
 use crate::copy_feedback::{CopyFeedbackHost, copy_button};
 use crate::markdown::linkify::linkify_markdown;
+use crate::markdown::svg_block;
 
 // --- theme bridge ------------------------------------------------------------
 
@@ -165,21 +167,51 @@ impl ChatDocument {
 /// focus. Chain [`TextView::on_link_click`], [`TextView::code_block_actions`]
 /// and [`TextView::table_actions`] at the call site where the copy-feedback
 /// host is known.
-pub fn message_document(state: &Entity<TextViewState>, theme: &Theme, body: Pixels) -> TextView {
-    TextView::new(state)
-        .style(message_style(theme, body))
-        .code_block_highlighter(steer_code_highlighter(theme))
-        .text_size(body)
+///
+/// `cx` is the app because an ```svg fence is rasterized at parse time (see
+/// [`svg_block`]); the renderer is read here, at the assembly point, and
+/// carried by the document.
+pub fn message_document(
+    state: &Entity<TextViewState>,
+    theme: &Theme,
+    body: Pixels,
+    cx: &App,
+) -> TextView {
+    let style = message_style(theme, body);
+    svg_block::with_svg_blocks(
+        TextView::new(state)
+            .style(style.clone())
+            .code_block_highlighter(steer_code_highlighter(theme))
+            .text_size(body),
+        svg_block::FaceStyle {
+            style,
+            size: Some(body),
+        },
+        cx,
+    )
 }
 
 /// The reasoning tier — the message document in the muted foreground. A round
 /// is secondary by color, not by a size of its own: the transcript carries one
 /// body size, so a round's body matches the message body it belongs to.
-pub fn reasoning_document(state: &Entity<TextViewState>, theme: &Theme, body: Pixels) -> TextView {
-    TextView::new(state)
-        .style(message_style(theme, body).with_foreground(theme.muted_foreground))
-        .code_block_highlighter(steer_code_highlighter(theme))
-        .text_size(body)
+pub fn reasoning_document(
+    state: &Entity<TextViewState>,
+    theme: &Theme,
+    body: Pixels,
+    cx: &App,
+) -> TextView {
+    let style = message_style(theme, body).with_foreground(theme.muted_foreground);
+    svg_block::with_svg_blocks(
+        TextView::new(state)
+            .style(style.clone())
+            .code_block_highlighter(steer_code_highlighter(theme))
+            .text_size(body),
+        svg_block::FaceStyle {
+            style,
+            size: Some(body),
+        },
+        cx,
+    )
 }
 
 /// A per-frame static markdown document. Upstream keys the state off `id`, so
@@ -188,10 +220,18 @@ pub fn static_document(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
     theme: &Theme,
+    cx: &App,
 ) -> TextView {
-    TextView::markdown(id, linkify_markdown(text.into().as_ref()))
-        .style(chrome_style(theme))
-        .code_block_highlighter(steer_code_highlighter(theme))
+    svg_block::with_svg_blocks(
+        TextView::markdown(id, linkify_markdown(text.into().as_ref()))
+            .style(chrome_style(theme))
+            .code_block_highlighter(steer_code_highlighter(theme)),
+        svg_block::FaceStyle {
+            style: chrome_style(theme),
+            size: None,
+        },
+        cx,
+    )
 }
 
 /// A per-frame document rendering raw text verbatim inside one `ansi` fence —
@@ -379,6 +419,14 @@ pub fn steer_code_highlighter(
         if lang.eq_ignore_ascii_case("diff") {
             return diff_runs(&code, foreground, muted, secondary, add_fg, del_fg);
         }
+        // An svg fence is markup, and markup is what the registry carries for
+        // it: `svg` itself is unregistered, which would color nothing and warn
+        // on every distinct fence.
+        let lang = if lang.eq_ignore_ascii_case("svg") {
+            "html"
+        } else {
+            lang
+        };
         tree_sitter_runs(&code, lang, &highlight_theme)
     }
 }
@@ -671,6 +719,22 @@ mod tests {
             "earlier field survives where the later layer sets nothing"
         );
         assert_eq!(layered[2].0, 4..6);
+    }
+
+    #[gpui::test]
+    fn an_svg_fence_highlights_as_markup(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let runs = cx.update(|cx| {
+            let highlight = steer_code_highlighter(gpui_component::Theme::global(cx));
+            highlight(&CodeBlock::from_code(
+                "<svg><circle cx=\"4\" cy=\"4\" r=\"3\"/></svg>",
+                Some("svg"),
+            ))
+        });
+        assert!(
+            !runs.is_empty(),
+            "an svg fence takes the markup grammar instead of falling through unhighlighted"
+        );
     }
 
     /// The rendered plain text of a synced [`ChatDocument`].

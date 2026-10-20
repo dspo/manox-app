@@ -118,7 +118,7 @@ fn measure(cx: &mut gpui::TestAppContext, source: &str) -> f32 {
 /// A document constructor over a persistent [`TextViewState`] — the mount every
 /// conversation tier renders through, so the comparison below is
 /// constructor-for-constructor and nothing else.
-type TierDocument = fn(&Entity<TextViewState>, &Theme, Pixels) -> TextView;
+type TierDocument = fn(&Entity<TextViewState>, &Theme, Pixels, &App) -> TextView;
 
 struct TierHost {
     state: Entity<TextViewState>,
@@ -128,8 +128,8 @@ struct TierHost {
 }
 
 impl Render for TierHost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let view = (self.document)(&self.state, &Theme::default(), self.body);
+    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let view = (self.document)(&self.state, &Theme::default(), self.body, cx);
         div().w(px(600.)).child(Measure {
             child: view.into_any_element(),
             out: self.out.clone(),

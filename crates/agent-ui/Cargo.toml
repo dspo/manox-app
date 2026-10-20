@@ -14,6 +14,12 @@ path = "src/lib.rs"
 name = "visual_bubble"
 harness = false
 
+# Visual acceptance for an ```svg fence rendering as its diagram in the
+# transcript (same offscreen-render constraints as visual_bubble).
+[[test]]
+name = "visual_inline_svg"
+harness = false
+
 [features]
 default = []
 # Exposes the `Workspace::diagnostic_*` hooks and the full-workspace overlap

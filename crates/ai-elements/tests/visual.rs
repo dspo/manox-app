@@ -318,7 +318,7 @@ fn main() {
                                 .option(AskOption::new("Fold after a second"))
                                 .option(AskOption::new("Stay open until clicked")),
                         ])
-                        .output(static_document("ask-output", markdown, theme))
+                        .output(static_document("ask-output", markdown, theme, cx))
                         .into_any_element(),
                     AskUserQuestion::new("ask-fresh", fresh)
                         .icon(

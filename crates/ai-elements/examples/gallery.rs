@@ -460,7 +460,7 @@ impl Gallery {
     fn demo_block(&self, ix: usize, cx: &App) -> impl IntoElement {
         let demo = &self.reasoning[ix];
         let mut block = Reasoning::new(("reasoning", ix), &demo.state).content(
-            message_document(&demo.markdown, Theme::global(cx), px(13.))
+            message_document(&demo.markdown, Theme::global(cx), px(13.), cx)
                 .motion(stream_fade_motion())
                 .into_any_element(),
         );
@@ -1230,7 +1230,7 @@ impl Gallery {
             let markdown = ask_output_markdown(&self.ask, cx);
             wizard = wizard
                 .status(ask_answered_chip())
-                .output(static_document("ask-live-output", markdown, theme))
+                .output(static_document("ask-live-output", markdown, theme, cx))
                 .footnote("已提交 · 答案已回传工具");
         } else {
             wizard = wizard.status(ask_waiting_chip());
@@ -1250,6 +1250,7 @@ impl Gallery {
                 "ask-answered-output",
                 answered_markdown,
                 theme,
+                cx,
             ))
             .footnote("已提交 · gpui-base TextView · Question 2 skipped");
 
