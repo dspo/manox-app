@@ -622,7 +622,6 @@ pub struct AhpStore {
     /// sidebar subscribes one channel per catalogue row (the pin badge and
     /// the pin dispatch both read `x-manox-thread` state), re-issued only
     /// for rows that appear after their subscription.
-    thread_subs: std::collections::HashSet<String>,
     /// Sessions with an unread-rise write in flight (issued, the host echo
     /// not folded yet): the rise fires at most once per read→unread
     /// transition instead of once per background action while a turn
@@ -672,7 +671,6 @@ impl AhpStore {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
-            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
@@ -786,7 +784,6 @@ impl AhpStore {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
-            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
@@ -1409,7 +1406,6 @@ impl AhpStore {
             }
             ahp::SubscriptionEvent::SessionAdded(params) => {
                 let changed = self.book.seed_summaries(vec![params.summary]);
-                self.subscribe_thread_channels_for_summaries(cx);
                 if changed {
                     cx.notify();
                 }
@@ -1582,31 +1578,10 @@ impl AhpStore {
                     if store.book.seed_summaries(result.items) {
                         cx.notify();
                     }
-                    store.subscribe_thread_channels_for_summaries(cx);
                 });
             }
         })
         .detach();
-    }
-
-    /// Subscribe the thread channel of every catalogue row. The sidebar's
-    /// pin badge reads `x-manox-thread` state (the thread-scoped baseline
-    /// rides the subscription), and the pin dispatch targets the same
-    /// channel — both only work for rows whose channel is subscribed, so a
-    /// catalogue seed subscribes one channel per row, deduplicated per run.
-    pub fn subscribe_thread_channels_for_summaries(&mut self, cx: &mut gpui::Context<Self>) {
-        let ids: Vec<String> = self.book.summaries.keys().cloned().collect();
-        for sid in ids {
-            if self.thread_sub_due(&sid) {
-                self.subscribe(thread_uri(&sid), cx);
-            }
-        }
-    }
-
-    /// Whether this row's thread subscription is still due (first sight this
-    /// run); marks it issued. Split out for the cx-free test face.
-    fn thread_sub_due(&mut self, session_id: &str) -> bool {
-        self.thread_subs.insert(session_id.to_string())
     }
 
     /// Create a session over a client-minted id (the idempotency key).
@@ -3277,7 +3252,6 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
-            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
@@ -3356,46 +3330,6 @@ mod tests {
     }
 
     #[test]
-    fn thread_subscriptions_are_due_once_per_row_per_run() {
-        let mut store = AhpStore {
-            book: ChannelBook::default(),
-            client: None,
-            replay_pending: false,
-            chat_events: HashMap::new(),
-            focused_session: None,
-            optimistic_undo: Vec::new(),
-            pending_writes: Vec::new(),
-            request_hook: None,
-            rejections: std::collections::VecDeque::new(),
-            thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
-            delivery_failure: None,
-            queue_head_at: None,
-            handshake_params: None,
-            handshaking: false,
-            delivery_signal_tx: None,
-            _tasks: Vec::new(),
-        };
-        store.book.seed_summaries(vec![
-            serde_json::from_value(serde_json::json!({
-                "resource": session_uri("s-1"),
-                "provider": "test",
-                "title": "row",
-                "status": 0,
-                "createdAt": "2026-01-01T00:00:00Z",
-                "modifiedAt": "2026-01-01T00:00:00Z",
-            }))
-            .expect("summary parses"),
-        ]);
-        // First sight is due; the second sight of the same row is not — the
-        // catalogue refetches on every summary change and must not re-issue
-        // the subscription (nor, with one, duplicate it server-side).
-        assert!(store.thread_sub_due("s-1"));
-        assert!(!store.thread_sub_due("s-1"));
-        assert!(store.thread_sub_due("s-2"), "an unseen row is still due");
-    }
-
-    #[test]
     fn a_rejected_echo_is_surfaced_not_folded() {
         let mut book = ChannelBook::default();
         let effect = book.apply(
@@ -3442,7 +3376,6 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
-            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
@@ -3711,7 +3644,6 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
-            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
