@@ -22,7 +22,9 @@ pub const TOOL_NAME: &str = "client_Preview";
 /// UI is willing to read and rasterize in one preview; they have nothing to
 /// do with context size (no content ever reaches the model).
 pub const MAX_MARKDOWN_BYTES: u64 = 2 * 1024 * 1024;
-pub const MAX_SVG_BYTES: u64 = 4 * 1024 * 1024;
+/// The rasterizer's own source budget, shared with the inline ```svg block —
+/// the file this card previews and a fence in a message feed the same renderer.
+pub const MAX_SVG_BYTES: u64 = steer_components::markdown::svg_block::MAX_SOURCE_BYTES as u64;
 pub const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// What the renderer does with a previewed file. The set matches what the

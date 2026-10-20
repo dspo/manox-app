@@ -120,8 +120,9 @@ fn static_body(
     text: impl Into<gpui::SharedString>,
     theme: &Theme,
     owner: Option<WeakEntity<MessageItem>>,
+    cx: &App,
 ) -> gpui::AnyElement {
-    let view = static_document(id, text, theme);
+    let view = static_document(id, text, theme, cx);
     match owner {
         Some(owner) => view
             .code_block_actions(code_copy_actions(owner.clone()))
@@ -174,14 +175,15 @@ fn body_or_static(
     theme: &Theme,
     streaming: bool,
     owner: Option<WeakEntity<MessageItem>>,
+    cx: &App,
 ) -> gpui::AnyElement {
     match body.as_ref().and_then(ChatDocument::state) {
         Some(state) => decorate_document(
-            message_document(state, theme, MESSAGE_BODY_SIZE),
+            message_document(state, theme, MESSAGE_BODY_SIZE, cx),
             streaming,
             owner,
         ),
-        None => static_body(id, text, theme, owner),
+        None => static_body(id, text, theme, owner, cx),
     }
 }
 
@@ -463,20 +465,11 @@ impl MessageItem {
                 .unwrap_or(PreviewBody::Failed),
             PreviewKind::Svg => std::fs::read(&outcome.path)
                 .ok()
-                .and_then(|bytes| cx.svg_renderer().parse_svg(&bytes).ok())
-                .and_then(|parsed| {
+                .and_then(|bytes| {
                     // The raster box bounds decode memory for any input,
                     // vector content included (an svg's own natural size
                     // is untrusted); aspect is preserved by the renderer.
-                    cx.svg_renderer()
-                        .render_parsed(
-                            &parsed,
-                            gpui::SvgSize::Size(gpui::Size::new(
-                                gpui::DevicePixels(1400),
-                                gpui::DevicePixels(1400),
-                            )),
-                        )
-                        .ok()
+                    steer_components::markdown::svg_block::rasterize(&cx.svg_renderer(), &bytes)
                 })
                 .map(PreviewBody::Svg)
                 .unwrap_or(PreviewBody::Failed),
@@ -1045,7 +1038,7 @@ pub fn render_item(
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
                 render_ask_user_card(t, ix, theme, tool_ctx, copy, cx)
             } else if t.name == crate::preview::TOOL_NAME {
-                render_preview_card(t, ix, theme, tool_ctx, preview_body, copy)
+                render_preview_card(t, ix, theme, tool_ctx, preview_body, copy, cx)
             } else {
                 // Ordinary tool calls fold into `Thinking`; a top-level
                 // `ToolCall` here is a defensive orphan — render it as a plain
@@ -1194,7 +1187,7 @@ fn render_user(
     theme: &Theme,
     body: Option<ChatDocument>,
     copy: &CopyFeedback,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let UserRenderContent { text, images, meta } = content;
     // The item's tag already carries this turn's model (the live push stamps
@@ -1248,6 +1241,7 @@ fn render_user(
         theme,
         false,
         copy.owner.clone(),
+        cx,
     );
     let mut header_el = h_flex()
         .items_center()
@@ -1381,7 +1375,7 @@ pub fn render_assistant(
     body: Option<ChatDocument>,
     actions: AssistantActions,
     copy: &CopyFeedback,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let AssistantRenderContent {
         text,
@@ -1398,6 +1392,7 @@ pub fn render_assistant(
         theme,
         streaming,
         copy.owner.clone(),
+        cx,
     );
     let group = format!("assistant-{ix}");
     let mut col = v_flex().group(group.clone()).w_full().min_w_0().gap_1();
@@ -1596,7 +1591,7 @@ pub fn render_error(
     theme: &Theme,
     body: Option<ChatDocument>,
     copy: &CopyFeedback,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     render_banner(
         theme.danger,
@@ -1613,6 +1608,7 @@ pub fn render_error(
             theme,
             false,
             copy.owner.clone(),
+            cx,
         ),
         theme,
         None,
@@ -1667,7 +1663,7 @@ pub fn render_recap(
     tool_ctx: Option<&ToolCallCtx>,
     body: Option<ChatDocument>,
     copy: &CopyFeedback,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let host = tool_ctx.map(|c| c.host.clone());
     let on_click = Box::new(move |_cx: &mut App| {
@@ -1711,6 +1707,7 @@ pub fn render_recap(
             theme,
             false,
             copy.owner.clone(),
+            cx,
         ),
         theme,
         Some(CollapsibleBanner {
@@ -1742,7 +1739,7 @@ pub fn render_retry(
     tool_ctx: Option<&ToolCallCtx>,
     body: Option<ChatDocument>,
     copy: &CopyFeedback,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let badge: SharedString = i18n::t_str(
         "retry-badge",
@@ -1789,6 +1786,7 @@ pub fn render_retry(
                 theme,
                 false,
                 copy.owner.clone(),
+                cx,
             )
         })
         .unwrap_or_else(|| gpui::div().into_any_element());
@@ -2298,7 +2296,7 @@ fn reasoning_step(
     cix: usize,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> ActivityStep {
     let host = tool_ctx.map(|c| c.host.clone());
     let toggle = reasoning_round_toggle(host, entry_id);
@@ -2329,12 +2327,12 @@ fn reasoning_step(
             .and_then(ChatDocument::state)
             .map(|state| {
                 decorate_document(
-                    reasoning_document(state, theme, MESSAGE_BODY_SIZE),
+                    reasoning_document(state, theme, MESSAGE_BODY_SIZE, cx),
                     streaming,
                     owner.clone(),
                 )
             })
-            .unwrap_or_else(|| static_body(("reasoning-entry-body", eix), text, theme, owner));
+            .unwrap_or_else(|| static_body(("reasoning-entry-body", eix), text, theme, owner, cx));
         step = step.content(
             gpui::div()
                 .id(("reasoning-body", eix))
@@ -2591,7 +2589,7 @@ pub fn render_ask_user_card(
         if let Some(markdown) = ask_answer_markdown(&item.input, &item.output)
             && let Some(state) = ctx.ask_settled.clone()
         {
-            return render_ask_settled_card(item, theme, &state, markdown, copy.owner.clone());
+            return render_ask_settled_card(item, theme, &state, markdown, copy.owner.clone(), cx);
         }
         return render_tool_call(item, ix, theme, tool_ctx, copy, cx);
     }
@@ -2624,6 +2622,7 @@ fn render_ask_settled_card(
     state: &Entity<ask::AskState>,
     markdown: String,
     owner: Option<WeakEntity<MessageItem>>,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let card = ask::AskUserQuestion::new(item.id.clone(), state)
         .icon(Icon::new(gpui_kit_assets::IconName::MessageCircleQuestionMark).xsmall())
@@ -2634,6 +2633,7 @@ fn render_ask_settled_card(
             markdown,
             theme,
             owner,
+            cx,
         ));
     gpui::div()
         .w_full()
@@ -2673,6 +2673,7 @@ fn render_ask_form_card(
                     q.detail.clone(),
                     theme,
                     owner.clone(),
+                    cx,
                 ));
             }
             for opt in &q.options {
@@ -2766,6 +2767,7 @@ pub fn render_preview_card(
     tool_ctx: Option<&ToolCallCtx>,
     preview_body: Option<&PreviewBody>,
     copy: &CopyFeedback,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     use manox_agent::ToolCallStatus;
     let (status_color, status_label): (gpui::Hsla, SharedString) = match item.status {
@@ -2870,7 +2872,7 @@ pub fn render_preview_card(
         );
 
     if show_body {
-        card = card.child(preview_body_element(item, preview_body, theme));
+        card = card.child(preview_body_element(item, preview_body, theme, cx));
     }
 
     card.into_any_element()
@@ -2882,6 +2884,7 @@ fn preview_body_element(
     item: &ToolCallItem,
     preview_body: Option<&PreviewBody>,
     theme: &Theme,
+    cx: &App,
 ) -> gpui::AnyElement {
     use crate::preview::PreviewKind;
     let Some(outcome) = crate::preview::resolved_outcome(&item.output, &item.input) else {
@@ -2895,7 +2898,7 @@ fn preview_body_element(
                     .min_w_0()
                     .p_2()
                     .text_color(theme.foreground)
-                    .child(message_document(state, theme, MESSAGE_BODY_SIZE))
+                    .child(message_document(state, theme, MESSAGE_BODY_SIZE, cx))
                     .into_any_element(),
                 None => preview_unavailable(theme),
             },
@@ -2910,7 +2913,7 @@ fn preview_body_element(
                 .child(
                     gpui::img(gpui::ImageSource::Render(raster.clone()))
                         .w_full()
-                        .max_h(px(512.))
+                        .max_h(steer_components::markdown::svg_block::MAX_DISPLAY_HEIGHT)
                         .object_fit(gpui::ObjectFit::ScaleDown)
                         .rounded(theme.radius),
                 )
@@ -3213,7 +3216,7 @@ fn render_tool_output(
     ix: usize,
     theme: &Theme,
     owner: Option<WeakEntity<MessageItem>>,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     // Persistent terminal panel: the conversation handler mounts it at every
     // live output chunk, finalized result, and reloaded-history entry, so the
@@ -3262,7 +3265,13 @@ fn render_tool_output(
         .border_t_1()
         .border_color(theme.border)
         .text_color(theme.muted_foreground)
-        .child(static_body(("tool-output-text", ix), code, theme, owner))
+        .child(static_body(
+            ("tool-output-text", ix),
+            code,
+            theme,
+            owner,
+            cx,
+        ))
         .into_any_element()
 }
 

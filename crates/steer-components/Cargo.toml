@@ -11,6 +11,9 @@ gpui.workspace = true
 # the per-instance code-block highlighter nor heading weights.
 gpui-base.workspace = true
 gpui-component = { workspace = true, features = ["tree-sitter-languages"] }
+# The full Lucide catalog the toggle's face icons come from — the component's
+# own `IconName` is a subset without `Code`/`Image`.
+gpui-kit-assets.workspace = true
 log.workspace = true
 # ropey::Rope is what SyntaxHighlighter::update consumes for syntax highlighting.
 ropey.workspace = true

@@ -194,6 +194,7 @@ impl Render for PersistentMarkdownRow {
                 &self.markdown,
                 &cx.theme().clone(),
                 agent_ui::views::message::MESSAGE_BODY_SIZE,
+                cx,
             )
             .into_any_element(),
         )

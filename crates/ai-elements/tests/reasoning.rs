@@ -429,9 +429,9 @@ struct MarkdownHarness {
 impl Render for MarkdownHarness {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         Reasoning::new(("reasoning", 0usize), &self.state).content(
-            div()
-                .debug_selector(|| "body-probe".into())
-                .child(message_document(&self.body, Theme::global(cx), px(13.)).into_any_element()),
+            div().debug_selector(|| "body-probe".into()).child(
+                message_document(&self.body, Theme::global(cx), px(13.), cx).into_any_element(),
+            ),
         )
     }
 }
