@@ -301,19 +301,18 @@ impl SessionMultiplexer {
                 Some(row)
             })
             .collect();
-        rows.sort_by(|a, b| {
-            let ta = book
-                .summaries
-                .get(&a.id)
-                .map(|s| s.modified_at.as_str())
-                .unwrap_or("");
-            let tb = book
-                .summaries
-                .get(&b.id)
-                .map(|s| s.modified_at.as_str())
-                .unwrap_or("");
-            tb.cmp(ta)
-        });
+        // The HOST's catalogue order is the sidebar's order (the store's
+        // persisted account: folder sequence → pinned band → rank). A local
+        // `modified_at` sort reshuffled the list on every journal append —
+        // clicking a row marked it read, bumped its mtime, and the row
+        // jumped to the top with everything under the cursor shifting.
+        let rank: std::collections::HashMap<&str, usize> = book
+            .summary_order
+            .iter()
+            .enumerate()
+            .map(|(ix, id)| (id.as_str(), ix))
+            .collect();
+        rows.sort_by_key(|row| rank.get(row.id.as_str()).copied().unwrap_or(usize::MAX));
         rows
     }
 

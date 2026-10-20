@@ -109,6 +109,12 @@ pub struct ChannelBook {
     pub root: RootState,
     /// Session id → summary (the sidebar catalogue, one row per thread).
     pub summaries: BTreeMap<String, SessionSummary>,
+    /// First-seen arrival order of the catalogue rows — the HOST's page
+    /// order (the store's persisted sidebar account), preserved across
+    /// upserts. The sidebar renders in this order; re-sorting by
+    /// `modified_at` locally made every journal append (a read marker, a
+    /// title echo) reshuffle the list under a stationary mouse.
+    pub summary_order: Vec<String>,
     pub sessions: HashMap<String, SessionState>,
     pub chats: HashMap<String, ChatState>,
     /// Extension channel URI → folded state (a baseline replaces, deltas fold).
@@ -149,6 +155,7 @@ impl Default for ChannelBook {
         Self {
             root: empty_root(),
             summaries: BTreeMap::new(),
+            summary_order: Vec::new(),
             sessions: HashMap::new(),
             chats: HashMap::new(),
             ext: HashMap::new(),
@@ -330,17 +337,36 @@ impl ChannelBook {
         let mut changed = false;
         for summary in items {
             let id = id_of(&summary.resource).to_string();
+            let first_sight = !self.summaries.contains_key(&id);
             changed |= self
                 .summaries
                 .insert(id.clone(), summary.clone())
                 .is_none_or(|old| old.modified_at != summary.modified_at);
+            if first_sight {
+                self.summary_order.push(id);
+            }
+        }
+        changed
+    }
+
+    /// Seed a LIVE-arrived row (a just-created session) at the front of
+    /// the order: the host's next page walk would rank it first (newest),
+    /// and the first-seen append alone would pin it to the bottom.
+    pub fn seed_summary_at_front(&mut self, summary: SessionSummary) -> bool {
+        let id = id_of(&summary.resource).to_string();
+        let changed = self.seed_summaries(vec![summary]);
+        if let Some(ix) = self.summary_order.iter().position(|seen| seen == &id) {
+            let id = self.summary_order.remove(ix);
+            self.summary_order.insert(0, id);
         }
         changed
     }
 
     /// Drop a catalogue row (the session was disposed).
     pub fn remove_summary(&mut self, session_uri: &str) -> bool {
-        self.summaries.remove(id_of(session_uri)).is_some()
+        let id = id_of(session_uri).to_string();
+        self.summary_order.retain(|seen| seen != &id);
+        self.summaries.remove(&id).is_some()
     }
 
     /// The default chat URI of a session, from its folded state.
@@ -931,7 +957,7 @@ impl AhpStore {
 
     pub fn seed_local_summary(&mut self, session_id: &str, title: &str) -> bool {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.book.seed_summaries(vec![SessionSummary {
+        self.book.seed_summary_at_front(SessionSummary {
             provider: String::new(),
             title: title.to_string(),
             // The host's own rows always carry Idle|IsRead; a zeroed status
@@ -950,7 +976,7 @@ impl AhpStore {
             meta: None,
             chats: None,
             default_chat: None,
-        }])
+        })
     }
 
     /// Pop the next queued write, if any and if the replay may proceed.
@@ -1433,7 +1459,7 @@ impl AhpStore {
                 }
             }
             ahp::SubscriptionEvent::SessionAdded(params) => {
-                let changed = self.book.seed_summaries(vec![params.summary]);
+                let changed = self.book.seed_summary_at_front(params.summary);
                 if changed {
                     cx.notify();
                 }
@@ -3444,6 +3470,52 @@ mod tests {
                 "row {id} from a later page never seeded"
             );
         }
+    }
+
+    /// The catalogue order is the HOST's page order, and it survives
+    /// re-seeds: upserting a row with a bumped `modifiedAt` (a read marker
+    /// echoed back, a title change) must not move anything — the historical
+    /// local `modified_at` sort made every click reshuffle the sidebar.
+    #[test]
+    fn catalogue_order_is_the_host_page_order_and_survives_upserts() {
+        let row = |id: &str, modified: &str| -> SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri(id),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": modified,
+            }))
+            .expect("a summary parses")
+        };
+        let mut book = ChannelBook::default();
+        book.seed_summaries(vec![
+            row("s-a", "2026-01-01T00:00:00Z"),
+            row("s-b", "2026-01-02T00:00:00Z"),
+        ]);
+        assert_eq!(book.summary_order, vec!["s-a", "s-b"]);
+
+        // A later page appends its rows after the earlier page's.
+        book.seed_summaries(vec![row("s-c", "2026-01-03T00:00:00Z")]);
+        assert_eq!(book.summary_order, vec!["s-a", "s-b", "s-c"]);
+
+        // An upsert with a NEWER modifiedAt keeps the row where it was.
+        book.seed_summaries(vec![row("s-a", "2026-10-20T00:00:00Z")]);
+        assert_eq!(
+            book.summary_order,
+            vec!["s-a", "s-b", "s-c"],
+            "a read-marker echo must not re-rank the row"
+        );
+
+        // A live-arrived session fronts the order; a removal drops out of it.
+        book.seed_summary_at_front(row("s-live", "2026-10-20T00:00:01Z"));
+        assert_eq!(
+            book.summary_order.first().map(String::as_str),
+            Some("s-live")
+        );
+        book.remove_summary(&session_uri("s-b"));
+        assert_eq!(book.summary_order, vec!["s-live", "s-a", "s-c"]);
     }
 
     #[test]
