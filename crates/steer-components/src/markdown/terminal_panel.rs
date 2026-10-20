@@ -272,7 +272,13 @@ impl TerminalPanel {
                 }
                 trim_trailing_newline(&mut s);
                 if let Some(lang) = self.lang.as_deref() {
-                    highlight_content(&mut runs, &parts[..v], &content_starts, lang, &self.theme);
+                    highlight_content(
+                        &mut runs,
+                        &parts[..v],
+                        &content_starts,
+                        lang,
+                        &self.theme.highlight_theme,
+                    );
                 }
                 (s, runs, total, v)
             }
@@ -324,7 +330,7 @@ impl TerminalPanel {
                 }
                 trim_trailing_newline(&mut s);
                 if let Some(lang) = self.lang.as_deref() {
-                    highlight_marked(&mut runs, &content_lines, lang, &self.theme);
+                    highlight_marked(&mut runs, &content_lines, lang, &self.theme.highlight_theme);
                 }
                 (s, runs, total, v)
             }
@@ -492,12 +498,12 @@ fn styled(color: Hsla, italic: bool) -> HighlightStyle {
 /// (translated) runs: `starts[i]` is where `lines[i]`'s content begins in
 /// the composed body, after its gutter. Invariant: `starts.len() ==
 /// lines.len()` (one content start per line, both built by the same loop).
-fn highlight_content(
+pub(crate) fn highlight_content(
     runs: &mut Vec<(Range<usize>, HighlightStyle)>,
     lines: &[&str],
     starts: &[usize],
     lang: &str,
-    theme: &Theme,
+    highlight_theme: &std::sync::Arc<gpui_component::highlighter::HighlightTheme>,
 ) {
     debug_assert_eq!(lines.len(), starts.len());
     if lines.is_empty() {
@@ -512,7 +518,7 @@ fn highlight_content(
         plain_offs.push(plain_offs.last().expect("seeded") + line.len() + 1);
     }
     let plain = lines.join("\n");
-    for (r, hl) in crate::markdown::text_view::code_runs(&plain, lang, theme) {
+    for (r, hl) in crate::markdown::text_view::tree_sitter_runs(&plain, lang, highlight_theme) {
         // Translate the run's byte span onto the gutter-prefixed body by
         // walking line starts (a run may span lines; each line's interior
         // shifts by that line's gutter width, which differs per line).
@@ -540,7 +546,7 @@ fn highlight_marked(
     runs: &mut Vec<(Range<usize>, HighlightStyle)>,
     lines: &[Option<(usize, &str)>],
     lang: &str,
-    theme: &Theme,
+    highlight_theme: &std::sync::Arc<gpui_component::highlighter::HighlightTheme>,
 ) {
     let mut segment: Vec<(usize, &str)> = Vec::new();
     let flush = |segment: &mut Vec<(usize, &str)>,
@@ -550,7 +556,7 @@ fn highlight_marked(
         }
         let starts: Vec<usize> = segment.iter().map(|(s, _)| *s).collect();
         let texts: Vec<&str> = segment.iter().map(|(_, t)| *t).collect();
-        highlight_content(runs, &texts, &starts, lang, theme);
+        highlight_content(runs, &texts, &starts, lang, highlight_theme);
         segment.clear();
     };
     for line in lines {

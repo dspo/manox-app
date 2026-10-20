@@ -20,3 +20,7 @@ hyperlinks.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+
+# The same mdast parser gpui-base drives, so tests can pin the fenced-block
+# extraction contract (the panel's byte ranges ride on it) without a window.
+markdown = "1.0.0"
