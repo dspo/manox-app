@@ -9669,6 +9669,7 @@ dependencies = [
  "gpui-pre",
  "hyperlinks",
  "log",
+ "markdown",
  "ropey",
  "vte",
 ]
