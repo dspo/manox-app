@@ -485,6 +485,28 @@ pub fn id_of(uri: &str) -> &str {
     uri.split_once(":/").map(|(_, id)| id).unwrap_or(uri)
 }
 
+/// The hard ceiling on one refresh's `listSessions` page walk — a guard
+/// against a pathological cursor loop, not a real page count.
+const LIST_SESSIONS_PAGE_CAP: usize = 20;
+
+/// One `listSessions` request: the max page the host serves, from wherever
+/// the previous page left the cursor.
+fn list_sessions_params(cursor: Option<&str>) -> ListSessionsParams {
+    ListSessionsParams {
+        channel: ROOT_RESOURCE_URI.to_string(),
+        meta: None,
+        cursor: cursor.map(str::to_string),
+        limit: Some(500),
+    }
+}
+
+/// Fold one `listSessions` page into the catalogue; returns the cursor the
+/// next page must carry (`None` = the list is exhausted on this page).
+fn fold_session_page(book: &mut ChannelBook, result: &ListSessionsResult) -> Option<String> {
+    book.seed_summaries(result.items.clone());
+    result.next_cursor.clone()
+}
+
 /// Build a session channel URI for a client-minted id.
 pub fn session_uri(id: &str) -> String {
     format!("ahp-session:/{id}")
@@ -645,6 +667,10 @@ pub struct AhpStore {
     /// A handshake (initial or retried) is currently dialing: `retry` must
     /// not stack a second dial on top of a slow one.
     handshaking: bool,
+    /// A `listSessions` cursor walk is in flight: later refresh requests
+    /// fold into the running walk instead of stacking a second one (the
+    /// walk seeds fresher rows than a queued duplicate would).
+    session_list_in_flight: bool,
     /// Dispatch outcomes ride this to the store's own pump — the dispatch
     /// spawn runs on the manox runtime with no gpui handle, and the face
     /// needs the entity.
@@ -676,6 +702,7 @@ impl AhpStore {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: Some(fail_tx),
             _tasks: Vec::new(),
         };
@@ -789,6 +816,7 @@ impl AhpStore {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
@@ -1559,27 +1587,56 @@ impl AhpStore {
     }
 
     /// Seed/refresh the sidebar catalogue from `listSessions`.
+    ///
+    /// The host pages the answer (a bounded page size with a `nextCursor`);
+    /// the sidebar only ever saw the FIRST page until every conversation
+    /// older than the newest handful vanished from the list. The refresh
+    /// now walks the cursor chain to exhaustion — one round trip covers
+    /// the host's maximum page, the chain covers everything past it — and
+    /// a refresh already in flight absorbs later requests (the running
+    /// walk seeds fresher rows than a second one queued behind it).
     pub fn refresh_sessions(&mut self, cx: &mut gpui::Context<Self>) {
-        let reply = self.call(
-            "listSessions",
-            ListSessionsParams {
-                channel: ROOT_RESOURCE_URI.to_string(),
-                meta: None,
-                cursor: None,
-                limit: None,
-            },
-        );
+        if self.session_list_in_flight {
+            return;
+        }
+        self.session_list_in_flight = true;
+        let reply = self.call("listSessions", list_sessions_params(None));
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            if let Ok(Ok(value)) = reply.recv().await {
-                let Ok(result) = serde_json::from_value::<ListSessionsResult>(value) else {
-                    return;
+            let mut pages = 0usize;
+            let mut reply = reply;
+            loop {
+                let value = match reply.recv().await {
+                    Ok(Ok(value)) => value,
+                    _ => break,
                 };
-                let _ = this.update(cx, |store, cx| {
-                    if store.book.seed_summaries(result.items) {
-                        cx.notify();
-                    }
+                let Ok(result) = serde_json::from_value::<ListSessionsResult>(value) else {
+                    break;
+                };
+                pages += 1;
+                let next = this.update(cx, |store, cx| {
+                    let next = fold_session_page(&mut store.book, &result);
+                    cx.notify();
+                    next
                 });
+                let Ok(Some(cursor)) = next else { break };
+                if pages >= LIST_SESSIONS_PAGE_CAP {
+                    tracing::warn!(
+                        pages,
+                        "listSessions pagination stopped at the page cap; the sidebar shows a prefix"
+                    );
+                    break;
+                }
+                let Ok(next_reply) =
+                    this.update(cx, |store, _| store.call("listSessions", list_sessions_params(Some(&cursor))))
+                else {
+                    break;
+                };
+                reply = next_reply;
             }
+            // Every exit path releases the guard — a reply dropped mid-walk
+            // (the connection died between pages) must not pin the flag and
+            // starve every later refresh.
+            let _ = this.update(cx, |store, _| store.session_list_in_flight = false);
         })
         .detach();
     }
@@ -3257,6 +3314,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         };
@@ -3344,6 +3402,50 @@ mod tests {
         assert!(!book.sessions.contains_key("s-1"));
     }
 
+    /// The wire names the cursor `nextCursor` (camelCase): a page parsed
+    /// off raw JSON must surface it, and an exhausted page must not — the
+    /// walk's termination reads exactly this distinction.
+    #[test]
+    fn a_page_fold_surfaces_the_next_cursor_until_exhaustion() {
+        let page = |ids: &[&str], cursor: Option<&str>| -> ListSessionsResult {
+            serde_json::from_value(serde_json::json!({
+                "items": ids
+                    .iter()
+                    .map(|id| serde_json::json!({
+                        "resource": session_uri(id),
+                        "provider": "test",
+                        "title": format!("row {id}"),
+                        "status": 0,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "modifiedAt": "2026-01-01T00:00:00Z",
+                    }))
+                    .collect::<Vec<_>>(),
+                "nextCursor": cursor,
+            }))
+            .expect("a page parses")
+        };
+
+        let mut book = ChannelBook::default();
+        // Two pages plus an exhausted tail: every row must land in the
+        // catalogue — the sidebar's historic truncation was exactly the
+        // rows past the first page.
+        assert_eq!(
+            fold_session_page(&mut book, &page(&["s-1", "s-2"], Some("2"))),
+            Some("2".into())
+        );
+        assert_eq!(
+            fold_session_page(&mut book, &page(&["s-3"], Some("3"))),
+            Some("3".into())
+        );
+        assert_eq!(fold_session_page(&mut book, &page(&["s-4"], None)), None);
+        for id in ["s-1", "s-2", "s-3", "s-4"] {
+            assert!(
+                book.summaries.contains_key(id),
+                "row {id} from a later page never seeded"
+            );
+        }
+    }
+
     #[test]
     fn catalogue_seeding_is_keyed_by_bare_session_id() {
         let mut book = ChannelBook::default();
@@ -3381,6 +3483,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
@@ -3649,6 +3752,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
