@@ -266,9 +266,10 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .detach();
         }
         let rows = mux.read(cx).thread_list(cx);
+        let folders = mux.read(cx).project_folders(cx);
         let removed = crate::project_registry::removed_projects();
         let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
-            crate::sidebar_projection::project_groups(&rows, &removed)
+            crate::sidebar_projection::project_groups(&rows, &folders, &removed)
                 .into_iter()
                 .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
@@ -279,9 +280,26 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         // The registry stamps first-seen projects (the default order's
         // newest-added-first clock) and resolves the display order: the
         // manual drag order, with unrecorded projects newest-first on top.
+        let heads: Vec<(String, String)> = folders
+            .iter()
+            .filter(|(path, _)| !removed.contains(path))
+            .map(|(path, alias)| {
+                let label = alias
+                    .clone()
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or_else(|| crate::sidebar_projection::project_label(path));
+                (path.clone(), label)
+            })
+            .collect();
         let keys: Vec<String> = {
             let mut seen: Vec<String> = Vec::new();
             let mut all: Vec<String> = Vec::new();
+            for path in heads.iter().map(|(path, _)| path) {
+                if !all.contains(path) {
+                    all.push(path.clone());
+                }
+                seen.push(path.clone());
+            }
             for s in &sessions {
                 let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
                 if s.project.is_some() && !seen.contains(&s.project.clone().unwrap()) {
@@ -317,6 +335,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .map(|id| ws.read(cx).is_external_session(id))
             .unwrap_or(false);
         shell.update(cx, |shell, cx| {
+            shell.set_folder_heads(heads);
             shell.set_group_order(keys);
             shell.set_sessions(sessions);
             if !active_is_external && shell.active != fg {

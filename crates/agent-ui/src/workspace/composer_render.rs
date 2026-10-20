@@ -1393,12 +1393,19 @@ impl Workspace {
                             .and_then(serde_json::Value::as_array)
                             .map(|rows| {
                                 rows.iter()
-                                    .filter_map(serde_json::Value::as_str)
-                                    // The row names the directory the way the
-                                    // sidebar groups name it; the full path
-                                    // stays on the row's tooltip.
-                                    .map(|p| {
-                                        (p.to_string(), crate::sidebar_projection::project_label(p))
+                                    .filter_map(|row| {
+                                        let p = row.get("path")?.as_str()?;
+                                        // The alias is the project's own
+                                        // display name; the directory segment
+                                        // is the fallback.
+                                        let label = row
+                                            .get("alias")
+                                            .and_then(serde_json::Value::as_str)
+                                            .map(str::to_string)
+                                            .unwrap_or_else(|| {
+                                                crate::sidebar_projection::project_label(p)
+                                            });
+                                        Some((p.to_string(), label))
                                     })
                                     .collect()
                             })

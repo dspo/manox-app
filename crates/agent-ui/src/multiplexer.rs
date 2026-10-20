@@ -313,7 +313,39 @@ impl SessionMultiplexer {
             .map(|(ix, id)| (id.as_str(), ix))
             .collect();
         rows.sort_by_key(|row| rank.get(row.id.as_str()).copied().unwrap_or(usize::MAX));
+        for (ix, row) in rows.iter_mut().enumerate() {
+            // The chrome re-sorts rows by `(pinned, sort_stamp)` locally;
+            // carrying the rank lets the projection encode it so that sort
+            // reproduces exactly this order.
+            row.rank = ix as i64;
+        }
         rows
+    }
+
+    /// The durable project objects (path + user alias), in the host's
+    /// committed folder order — the skeleton the sidebar renders folders
+    /// from, including projects whose every conversation is archived.
+    pub fn project_folders(&self, cx: &App) -> Vec<(String, Option<String>)> {
+        self.store
+            .read(cx)
+            .book
+            .catalogues
+            .get(manox_ahp::ext::channels::WORKSPACES)
+            .and_then(|state| state.get("workspaces"))
+            .and_then(serde_json::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let path = row.get("path")?.as_str()?.to_string();
+                        let alias = row
+                            .get("alias")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string);
+                        Some((path, alias))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The root agents catalogue: one row per provider with its models.

@@ -249,6 +249,10 @@ pub struct Shell {
     /// Group (project) display order: the persisted result of drag
     /// reordering; unlisted groups trail in default order.
     group_order: Vec<String>,
+    /// Durable folder heads (project key + display name) the host
+    /// committed. A folder renders even when it holds no rows — archiving
+    /// every conversation never dissolves the project.
+    folder_heads: Vec<(String, String)>,
     /// Live group-drag drop marker (dragged, target, before-edge?); drives
     /// the insertion line, cleared when the drag ends.
     group_drag_marker: Option<(String, String, bool)>,
@@ -330,6 +334,7 @@ impl Shell {
             expanded_groups: RefCell::new(Vec::new()),
             revealed_for: RefCell::new(HashMap::new()),
             group_order: Vec::new(),
+            folder_heads: Vec::new(),
             group_drag_marker: None,
             hovered_row: None,
             row_focus: HashMap::new(),
@@ -525,6 +530,12 @@ impl Shell {
     /// the host re-seeds the same list on the next snapshot.
     pub fn set_group_order(&mut self, keys: Vec<String>) {
         self.group_order = keys;
+    }
+
+    /// Host-seeded folder skeleton: ordered (project key, display name)
+    /// pairs, one per durable project object — empty included.
+    pub fn set_folder_heads(&mut self, heads: Vec<(String, String)>) {
+        self.folder_heads = heads;
     }
 
     /// Group reorder: insert `dragged` before/after `target`'s edge
@@ -1165,7 +1176,21 @@ impl Shell {
     /// still stamped and ordered by the host registry; it just never
     /// surfaces as its own group here.
     fn workspace_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
-        let mut groups: Vec<SessionGroup> = Vec::new();
+        // The durable skeleton first: every committed folder renders, empty
+        // or not; row groups of the same display name merge into them.
+        let mut groups: Vec<SessionGroup> = self
+            .folder_heads
+            .iter()
+            .map(|(key, name)| SessionGroup {
+                name: name.clone(),
+                key: key.clone(),
+                collapsed: self.collapsed.iter().any(|k| k == key),
+                project: Some(key.clone()),
+                rows: Vec::new(),
+                hidden: 0,
+                expanded: false,
+            })
+            .collect();
         for s in sessions {
             let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
             let collapsed = self.collapsed.iter().any(|k| k == &key);
