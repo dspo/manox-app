@@ -770,10 +770,15 @@ impl ContextRail {
     /// one pair per checkout (the thread's single cwd today). Same data
     /// sources the old card's branch block read; the change ±counts and the
     /// click-to-copy affordances retired with the card.
-    fn render_branch_pair_section(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
-        let cwd_path = self.store.as_ref().and_then(|(store, sid)| {
-            let view = store.read(cx);
-            leaf_of(&view.book, sid).cwd().map(PathBuf::from)
+    fn render_branch_pair_section(&self, theme: &Theme, _cx: &App) -> Option<AnyElement> {
+        // The project's directory, from the conversation's belonging rather
+        // than its working directory: a project-less conversation runs in a
+        // temporary workspace of its own, which is not a checkout to name a
+        // branch for.
+        let cwd_path = self.store.as_ref().and_then(|(_, sid)| {
+            manox_agent::object_store::ObjectStore::try_global()
+                .and_then(|objects| objects.project_of(sid))
+                .map(PathBuf::from)
         });
         let basename = cwd_path
             .as_ref()
