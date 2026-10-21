@@ -61,6 +61,10 @@ steer-agent-chat-ui = { path = "crates/steer-agent-chat-ui" }
 steer-agent-chrome-ui = { path = "crates/steer-agent-chrome-ui" }
 
 anyhow = "1"
+# The pure-Rust LaTeX math typesetter behind `$$…$$` blocks: a formula becomes
+# a standalone SVG (STIX Two Math glyph outlines, MATH-table layout) at
+# markdown-parse time and rides the svg fence's raster path.
+mathra = "=1.1.1"
 async-channel = "2"
 async-trait = "0.1"
 futures = "0.3"

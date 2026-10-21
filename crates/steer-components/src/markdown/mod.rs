@@ -18,6 +18,7 @@
 //! one path for the entity they own.
 
 pub mod linkify;
+pub mod math_block;
 pub mod svg_block;
 pub mod terminal_panel;
 pub mod text_view;
