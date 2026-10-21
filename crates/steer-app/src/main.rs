@@ -5,7 +5,7 @@
 //! `agent` crate; UI lives in the `agent-ui` crate.
 
 use gpui::{App, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
-use gpui::{WindowBounds, WindowOptions};
+use gpui::{WindowBounds, WindowDecorations, WindowOptions};
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use std::borrow::Cow;
 
@@ -459,6 +459,13 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
     let reused = agent_ui::dispatch::workspace_global().is_some();
     let window_options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
+        // macOS parity on Linux: no system titlebar — the chrome toolbar is
+        // the titlebar (its right end carries our own window controls, as the
+        // traffic lights float over content on macOS). Where client-side
+        // decorations are unsupported gpui falls back to server-side and the
+        // toolbar's controls hide themselves (no double chrome).
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        window_decorations: Some(WindowDecorations::Client),
         window_bounds: Some(WindowBounds::centered(size(px(1100.), px(760.)), cx)),
         // Floor below which the window can no longer shrink. Shared with
         // Settings so both views respect one minimum width.
