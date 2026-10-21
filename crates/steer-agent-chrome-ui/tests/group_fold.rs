@@ -35,9 +35,9 @@ impl MainSurface for StubMain {
     }
 }
 
-/// One project-bound thread row; stamps are handed out increasing so the
-/// sort surfaces them NEWEST first (n is the wire push index, not the
-/// display position).
+/// One project-bound thread row; stamps are handed out increasing and the
+/// host ranks newer rows better, so the sort surfaces them NEWEST first
+/// (n is the wire push index, not the display position).
 fn row(id: &str, stamp: i64) -> SessionRow {
     SessionRow {
         id: id.into(),
@@ -49,6 +49,7 @@ fn row(id: &str, stamp: i64) -> SessionRow {
         kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
         updated_at: stamp,
         sort_stamp: stamp,
+        rank: i64::MAX - stamp,
         pinned: false,
         archived: false,
         tag: None,

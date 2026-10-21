@@ -111,10 +111,17 @@ pub struct ChannelBook {
     pub summaries: BTreeMap<String, SessionSummary>,
     /// First-seen arrival order of the catalogue rows — the HOST's page
     /// order (the store's persisted sidebar account), preserved across
-    /// upserts. The sidebar renders in this order; re-sorting by
-    /// `modified_at` locally made every journal append (a read marker, a
-    /// title echo) reshuffle the list under a stationary mouse.
+    /// upserts. A finished `listSessions` walk REPLACES it (see
+    /// [`Self::commit_summary_walk`]): the host reranks by interaction, so
+    /// first-seen append alone would pin rows at their first-seen slot
+    /// until restart. (Re-sorting by `modified_at` locally made every
+    /// journal append — a read marker, a title echo — reshuffle the list
+    /// under a stationary mouse; the walk order carries neither fault.)
     pub summary_order: Vec<String>,
+    /// The running `listSessions` walk's arrival order, one page appended
+    /// at a time — the material [`Self::commit_summary_walk`] rebuilds
+    /// `summary_order` from when the walk ends.
+    walk_order: Vec<String>,
     pub sessions: HashMap<String, SessionState>,
     pub chats: HashMap<String, ChatState>,
     /// Extension channel URI → folded state (a baseline replaces, deltas fold).
@@ -156,6 +163,7 @@ impl Default for ChannelBook {
             root: empty_root(),
             summaries: BTreeMap::new(),
             summary_order: Vec::new(),
+            walk_order: Vec::new(),
             sessions: HashMap::new(),
             chats: HashMap::new(),
             ext: HashMap::new(),
@@ -369,6 +377,25 @@ impl ChannelBook {
         self.summaries.remove(&id).is_some()
     }
 
+    /// Fold a finished `listSessions` walk's arrival order into
+    /// `summary_order`: ids the walk returned take the host's committed
+    /// order (it reranks by interaction; the walk is the only face that
+    /// order surfaces through); ids it did not reach — a truncated walk at
+    /// the page cap, a row added between pages — keep their previous
+    /// relative order behind the walked prefix. First-seen append alone
+    /// would leave the sidebar pinned at the boot-time order until restart.
+    pub fn commit_summary_walk(&mut self) {
+        let mut walked = std::mem::take(&mut self.walk_order);
+        let mut seen = HashSet::new();
+        walked.retain(|id| seen.insert(id.clone()));
+        for id in &self.summary_order {
+            if seen.insert(id.clone()) {
+                walked.push(id.clone());
+            }
+        }
+        self.summary_order = walked;
+    }
+
     /// The default chat URI of a session, from its folded state.
     pub fn default_chat(&self, session_id: &str) -> Option<String> {
         self.sessions
@@ -527,9 +554,12 @@ fn list_sessions_params(cursor: Option<&str>) -> ListSessionsParams {
 }
 
 /// Fold one `listSessions` page into the catalogue; returns the cursor the
-/// next page must carry (`None` = the list is exhausted on this page).
+/// next page must carry (`None` = the list is exhausted on this page). The
+/// page's ids join the running walk's arrival order.
 fn fold_session_page(book: &mut ChannelBook, result: &ListSessionsResult) -> Option<String> {
     book.seed_summaries(result.items.clone());
+    book.walk_order
+        .extend(result.items.iter().map(|s| id_of(&s.resource).to_string()));
     result.next_cursor.clone()
 }
 
@@ -666,10 +696,12 @@ pub struct AhpStore {
     request_hook: Option<RequestHook>,
     /// Recent dispatch rejections (bounded ring) for UI surfacing.
     rejections: std::collections::VecDeque<String>,
-    /// Session ids whose thread channel this store already subscribed — the
-    /// sidebar subscribes one channel per catalogue row (the pin badge and
-    /// the pin dispatch both read `x-manox-thread` state), re-issued only
-    /// for rows that appear after their subscription.
+    /// Session ids whose thread channel this store already subscribed —
+    /// the pin path's guard (the pin badge and the pin dispatch both read
+    /// `x-manox-thread` state): every pin click on an un-attached row
+    /// would otherwise re-issue the subscribe and pile host-side
+    /// subscriptions. The store never unsubscribes, so the set only grows.
+    thread_subs: std::collections::HashSet<String>,
     /// Sessions with an unread-rise write in flight (issued, the host echo
     /// not folded yet): the rise fires at most once per read→unread
     /// transition instead of once per background action while a turn
@@ -723,6 +755,7 @@ impl AhpStore {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
@@ -837,6 +870,7 @@ impl AhpStore {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
@@ -1490,6 +1524,16 @@ impl AhpStore {
         }
     }
 
+    /// Subscribe a session's thread channel once per store lifetime (the
+    /// pin path's entry): a re-click on an already-subscribed row issues
+    /// no second subscribe round trip. The store never unsubscribes, so
+    /// the dedup set only grows.
+    pub fn subscribe_thread_once(&mut self, session_id: &str, cx: &mut gpui::Context<Self>) {
+        if self.thread_subs.insert(session_id.to_string()) {
+            self.subscribe(thread_uri(session_id), cx);
+        }
+    }
+
     /// Subscribe one channel. The snapshot (state-bearing channels) folds
     /// into the book when the host answers.
     pub fn subscribe(&mut self, uri: impl Into<String>, cx: &mut gpui::Context<Self>) {
@@ -1626,6 +1670,7 @@ impl AhpStore {
             return;
         }
         self.session_list_in_flight = true;
+        self.book.walk_order.clear();
         let reply = self.call("listSessions", list_sessions_params(None));
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             let mut pages = 0usize;
@@ -1661,8 +1706,14 @@ impl AhpStore {
             }
             // Every exit path releases the guard — a reply dropped mid-walk
             // (the connection died between pages) must not pin the flag and
-            // starve every later refresh.
-            let _ = this.update(cx, |store, _| store.session_list_in_flight = false);
+            // starve every later refresh. The walk's arrival order folds
+            // into the sidebar order on every exit path (a truncated walk
+            // still carries the host's freshest prefix).
+            let _ = this.update(cx, |store, cx| {
+                store.book.commit_summary_walk();
+                store.session_list_in_flight = false;
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -3378,6 +3429,7 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
@@ -3561,6 +3613,60 @@ mod tests {
         assert_eq!(book.summary_order, vec!["s-live", "s-a", "s-c"]);
     }
 
+    /// A finished `listSessions` walk rebuilds the order from the walk's
+    /// arrival: the host reranks by interaction, so rows it moved (a click
+    /// bumped one to the top) take the new slots instead of staying pinned
+    /// at their boot-time positions until restart. Rows the walk did not
+    /// reach (a page-cap truncation) keep their relative order behind the
+    /// walked prefix.
+    #[test]
+    fn a_finished_walk_rebuilds_the_host_order() {
+        let page = |ids: &[&str]| -> ListSessionsResult {
+            serde_json::from_value(serde_json::json!({
+                "items": ids
+                    .iter()
+                    .map(|id| serde_json::json!({
+                        "resource": session_uri(id),
+                        "provider": "test",
+                        "title": format!("row {id}"),
+                        "status": 0,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "modifiedAt": "2026-01-01T00:00:00Z",
+                    }))
+                    .collect::<Vec<_>>(),
+                "nextCursor": None::<String>,
+            }))
+            .expect("a page parses")
+        };
+        let mut book = ChannelBook::default();
+        fold_session_page(&mut book, &page(&["s-a", "s-b", "s-c"]));
+        book.commit_summary_walk();
+        assert_eq!(book.summary_order, vec!["s-a", "s-b", "s-c"]);
+
+        // The host reranked: s-c now leads. A fresh walk (it starts clean,
+        // as `refresh_sessions` starts one) lands that order.
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-c", "s-a"]));
+        fold_session_page(&mut book, &page(&["s-b"]));
+        book.commit_summary_walk();
+        assert_eq!(
+            book.summary_order,
+            vec!["s-c", "s-a", "s-b"],
+            "the walk's arrival order is the host's committed order"
+        );
+
+        // A truncated walk (page cap): walked rows take the host order,
+        // unwalked ones trail in their previous relative order.
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-b"]));
+        book.commit_summary_walk();
+        assert_eq!(
+            book.summary_order,
+            vec!["s-b", "s-c", "s-a"],
+            "the unwalked tail keeps its relative order behind the prefix"
+        );
+    }
+
     #[test]
     fn catalogue_seeding_is_keyed_by_bare_session_id() {
         let mut book = ChannelBook::default();
@@ -3593,6 +3699,7 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
@@ -3862,6 +3969,7 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            thread_subs: std::collections::HashSet::new(),
             pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,

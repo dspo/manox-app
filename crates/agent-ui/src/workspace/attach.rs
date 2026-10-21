@@ -155,6 +155,17 @@ impl Workspace {
         // same project (or project-less) is that project's unfinished
         // draft — return to it instead of minting a sibling. Its row
         // already carries the model/permission picks the user left there.
+        // The FOREGROUND session and archived rows are excluded: the
+        // landing conversation (created project-less at boot, never
+        // spoken) is itself the latest project-less draft, and a just
+        // archived draft would be resurrected — refilling either would
+        // make "new session" a no-op on the very session it should leave.
+        let foreground = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone());
         let objects = manox_agent::object_store::ObjectStore::try_global();
         let refill = objects.as_ref().and_then(|store| {
             store.latest_draft(
@@ -164,6 +175,8 @@ impl Workspace {
                     .as_deref(),
             )
         });
+        let refill =
+            refill.filter(|row| !row.archived && foreground.as_deref() != Some(row.id.as_str()));
         // v3: the id is client-minted; the create carries the inherited
         // config, and the attach lands once the host answered.
         let sid = refill

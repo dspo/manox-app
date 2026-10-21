@@ -1747,7 +1747,7 @@ impl Workspace {
                     if let Some(sid) = sid
                         && let Some(objects) = manox_agent::object_store::ObjectStore::try_global()
                     {
-                        objects.attach(&sid, path.to_str().unwrap_or_default());
+                        objects.attach(&sid, &path.to_string_lossy());
                     }
                 }
                 cx.notify();

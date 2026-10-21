@@ -1,9 +1,9 @@
-//! Session-list ordering: a freshly created session (the newest sort stamp)
+//! Session-list ordering: a freshly created session (the best host rank)
 //! must lead its group, pinned rows above it — in BOTH grouping modes. The
 //! regression class: `set_sessions` used to keep the push order verbatim, so
 //! the assembly's external rows (appended at the snapshot's tail — a just
 //! launched Claude Code session) rendered at the group's bottom while the
-//! time buckets already sorted by stamp.
+//! local re-sort already ordered by rank.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -38,7 +38,7 @@ impl MainSurface for StubMain {
     }
 }
 
-fn row(id: &str, stamp: i64, pinned: bool, project: Option<&str>) -> SessionRow {
+fn row(id: &str, stamp: i64, rank: i64, pinned: bool, project: Option<&str>) -> SessionRow {
     let workspace = project
         .map(|p| {
             std::path::Path::new(p)
@@ -59,6 +59,7 @@ fn row(id: &str, stamp: i64, pinned: bool, project: Option<&str>) -> SessionRow 
         },
         updated_at: stamp,
         sort_stamp: stamp,
+        rank,
         pinned,
         archived: false,
         tag: None,
@@ -97,9 +98,9 @@ fn newest_session_leads_its_group_in_the_workspace_grouping(cx: &mut TestAppCont
             // The stale thread leads the push; the pinned relic is older
             // still; the just-created external session trails the snapshot.
             s.set_sessions(vec![
-                row("stale", 100, false, Some("/p/proj")),
-                row("relic", 10, true, Some("/p/proj")),
-                row("fresh", 500, false, Some("/p/proj")),
+                row("stale", 100, 2, false, Some("/p/proj")),
+                row("relic", 10, 0, true, Some("/p/proj")),
+                row("fresh", 500, 1, false, Some("/p/proj")),
             ])
         });
         *slot_for_build.borrow_mut() = Some(shell.clone());
@@ -117,7 +118,7 @@ fn newest_session_leads_its_group_in_the_workspace_grouping(cx: &mut TestAppCont
     assert_eq!(
         ids,
         vec!["relic", "fresh", "stale"],
-        "pinned first, then the newest stamp — the push order does not survive"
+        "pinned first, then the host rank — the push order does not survive"
     );
 
     // The time grouping keeps the same discipline per bucket.
@@ -130,7 +131,7 @@ fn newest_session_leads_its_group_in_the_workspace_grouping(cx: &mut TestAppCont
     assert_eq!(
         ids,
         vec!["relic", "fresh", "stale"],
-        "the time buckets order pinned-first then newest-first"
+        "the time buckets order pinned-first then best-rank-first"
     );
 }
 
@@ -171,9 +172,9 @@ fn group_order_seeds_keys_and_drag_mirrors_to_the_host(cx: &mut TestAppContext) 
         });
         shell.update(cx, |s, _| {
             s.set_sessions(vec![
-                row("a", 100, false, Some("/p/one")),
-                row("b", 200, false, Some("/p/two")),
-                row("c", 300, false, None),
+                row("a", 100, 1, false, Some("/p/one")),
+                row("b", 200, 0, false, Some("/p/two")),
+                row("c", 300, 2, false, None),
             ]);
             // The host seeds the persisted order: two on top, then one;
             // the loose bucket trails unlisted.

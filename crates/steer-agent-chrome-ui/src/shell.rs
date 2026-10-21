@@ -51,13 +51,11 @@ pub struct SessionRow {
     pub kind: SessionRowKind,
     /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
-    /// The re-sort stamp: the row's own `updated_at`, except team members
-    /// arrive with their leader's (the projection owns the team structure),
-    /// so a team sorts as one unit and stays contiguous through the
-    /// pinned-first re-order. Note the store pins per thread: pinning a
-    /// member floats that member alone — unit-wide pinning is the store's
-    /// concern when teams land.
+    /// The time-grouping stamp (see [`SessionRowData::sort_stamp`]).
     pub sort_stamp: i64,
+    /// The host-order rank (see [`SessionRowData::rank`]) — the local
+    /// re-sort's order key.
+    pub rank: i64,
     pub pinned: bool,
     /// See [`SessionRowData::archived`] — the protocol's IsArchived bit.
     pub archived: bool,
@@ -86,6 +84,7 @@ impl SessionRow {
                 kind: r.kind,
                 updated_at: r.updated_at,
                 sort_stamp: r.sort_stamp,
+                rank: r.rank,
                 pinned: r.pinned,
                 archived: r.archived,
                 tag: r.tag,
@@ -101,6 +100,7 @@ impl SessionRow {
             title: self.title.clone(),
             updated_at: self.updated_at,
             sort_stamp: self.sort_stamp,
+            rank: self.rank,
             status: self.status,
             kind: self.kind,
             pinned: self.pinned,
@@ -1077,14 +1077,12 @@ impl Shell {
         &self.group_order
     }
 
-    /// Pinned first, then by the team-unit sort stamp descending (see
-    /// `SessionRow::sort_stamp`).
+    /// Pinned first, then by the host-order rank ascending (see
+    /// `SessionRow::rank`) — a team's members carry their leader's rank, so
+    /// the unit sorts as one block under its chevron.
     fn sort_sessions(&mut self) {
-        self.sessions.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
-                .then(b.sort_stamp.cmp(&a.sort_stamp))
-        });
+        self.sessions
+            .sort_by(|a, b| b.pinned.cmp(&a.pinned).then(a.rank.cmp(&b.rank)));
     }
 
     /// Sidebar props (fixed rows + groups + Customizations). Groups follow
@@ -1170,14 +1168,13 @@ impl Shell {
     /// recorded drag order, unrecorded groups trailing. The group's project
     /// path rides the rows (the host stamps every row of a group with it).
     ///
-    /// Known wart, accepted: groups MERGE by display name while keys and
-    /// persistence ride the path — two different paths sharing a basename
-    /// render as one header keyed by the first row's path. The other path is
-    /// still stamped and ordered by the host registry; it just never
-    /// surfaces as its own group here.
+    /// Rows merge into heads by KEY, never by display name: an aliased
+    /// folder absorbs its rows by path (a name match would leave an empty
+    /// alias head beside a basename-headed row bucket), and two paths that
+    /// share a basename stay two groups.
     fn workspace_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
         // The durable skeleton first: every committed folder renders, empty
-        // or not; row groups of the same display name merge into them.
+        // or not; rows of the same project path merge into them.
         let mut groups: Vec<SessionGroup> = self
             .folder_heads
             .iter()
@@ -1194,7 +1191,7 @@ impl Shell {
         for s in sessions {
             let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
             let collapsed = self.collapsed.iter().any(|k| k == &key);
-            if let Some(g) = groups.iter_mut().find(|g| g.name == s.workspace) {
+            if let Some(g) = groups.iter_mut().find(|g| g.key == key) {
                 g.rows.push(s.row_data());
                 g.collapsed = collapsed;
             } else {
@@ -1231,13 +1228,12 @@ impl Shell {
     }
 
     /// Time grouping: four recency buckets by local natural day (today /
-    /// yesterday / last 7 days / earlier). Rows bucket AND order by their
-    /// `sort_stamp` — the projection stamps team members with their leader's
-    /// stamp, so a team lands in ONE bucket and the bucket sort keeps it
-    /// contiguous (per-row keys would split it / reorder it under the
-    /// chevron; a member pinned individually can still float up — pin is
-    /// per-row, pre-existing). Unknown stamps (0) fall into "earlier".
-    /// Empty buckets are not rendered.
+    /// yesterday / last 7 days / earlier). Rows bucket by their `sort_stamp`
+    /// — the projection stamps team members with their leader's stamp, so a
+    /// team lands in ONE bucket — and order by the host rank (a member
+    /// pinned individually can still float up — pin is per-row,
+    /// pre-existing). Unknown stamps (0) fall into "earlier". Empty buckets
+    /// are not rendered.
     fn time_groups(&self, sessions: &[&SessionRow], today: chrono::NaiveDate) -> Vec<SessionGroup> {
         const BUCKETS: [TimeBucket; 4] = [
             TimeBucket::Today,
@@ -1265,14 +1261,12 @@ impl Shell {
             groups[bucket as usize].rows.push(s.row_data());
         }
         for g in &mut groups {
-            // sort_stamp is the ONLY time key: team members share their
-            // leader's, so equal stamps keep the wire order (stable sort)
-            // and the team stays contiguous under its chevron.
-            g.rows.sort_by(|a, b| {
-                b.pinned
-                    .cmp(&a.pinned)
-                    .then(b.sort_stamp.cmp(&a.sort_stamp))
-            });
+            // Within a bucket the host-order rank is the order key: team
+            // members share their leader's, so equal ranks keep the wire
+            // order (stable sort) and the team stays contiguous under its
+            // chevron.
+            g.rows
+                .sort_by(|a, b| b.pinned.cmp(&a.pinned).then(a.rank.cmp(&b.rank)));
         }
         groups.retain(|g| !g.rows.is_empty());
         groups

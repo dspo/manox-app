@@ -688,7 +688,13 @@ impl ContextRail {
                     .filter_map(|work| match work {
                         ahp_types::state::BackgroundWork::Subagent(sub) => Some(SubagentInfo {
                             id: sub.id,
-                            subagent_type: sub.label.clone(),
+                            // The wire's label NAMES the run (its topic), it
+                            // is not the agent type — carrying it in both
+                            // slots renders "Explore · Explore". The type
+                            // fills in from the settled rows once the run's
+                            // own progress events land (the merge below is
+                            // by id).
+                            subagent_type: String::new(),
                             description: sub.label,
                             status: manox_agent::ToolCallStatus::Running,
                             health: None,

@@ -48,10 +48,9 @@ pub struct ThreadRow {
     /// chrome menu's archive toggle dispatches it back.
     pub archived: bool,
     /// The row's position in the HOST's sidebar order (0 = top). The
-    /// chrome re-sorts rows by `(pinned, sort_stamp)` locally, so the
-    /// projection encodes the rank as a descending stamp — the chrome's
-    /// own sort then reproduces the host order exactly, and no local
-    /// timestamp can reshuffle it.
+    /// chrome re-sorts rows by `(pinned, rank)` locally, so carrying the
+    /// rank lets that sort reproduce the host order exactly — no local
+    /// timestamp can reshuffle it. `i64::MAX` (unranked) sorts last.
     pub rank: i64,
 }
 
@@ -101,19 +100,18 @@ impl ThreadRow {
 }
 
 /// Project one wire row: the row's own wire flag is the single unread
-/// source (the official IsRead bit folded from the protocol). The sort
-/// stamp defaults to the row's own last-active time; a team's members are
-/// re-stamped to their leader's by [`project_forest`].
+/// source (the official IsRead bit folded from the protocol). The time
+/// stamp and the host rank ride separately — the stamp is a real unix
+/// time the chrome's recency buckets decode, the rank its order key; a
+/// team's members are re-stamped to their leader's by [`project_forest`].
 pub fn project_row(item: &ThreadRow) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),
         short_id: item.id.chars().take(8).collect(),
         title: item.title.clone(),
         updated_at: item.updated_at,
-        // The descending-encoded host rank: the chrome's local
-        // `(pinned, sort_stamp desc)` sort reproduces the host's
-        // interaction-ranked order instead of a reshuffling timestamp.
-        sort_stamp: i64::MAX - item.rank,
+        sort_stamp: item.updated_at,
+        rank: item.rank,
         status: five_state(item),
         kind: SessionRowKind::Thread,
         pinned: item.pinned,
@@ -145,7 +143,7 @@ pub fn five_state(item: &ThreadRow) -> SessionStatus {
 /// rows (the wire's team nesting is never deeper — pi sub-agents — so no
 /// recursion is needed). Members no longer indent — the leader's chevron is
 /// the only nesting marker, and the projection re-stamps each member's
-/// `sort_stamp` to its leader's `updated_at` so the team sorts (and survives
+/// `sort_stamp` and `rank` to its leader's so the team sorts (and survives
 /// a pin re-order) as one unit. Orphans (a parent that is missing,
 /// archived, or outside the partition) flatten to top-level rather than
 /// vanishing, keeping their own stamp.
@@ -161,10 +159,12 @@ pub fn project_forest(rows: &[ThreadRow]) -> Vec<SessionRowData> {
                 .collect();
             leader.team_leader = !members.is_empty();
             let unit_stamp = leader.sort_stamp;
+            let unit_rank = leader.rank;
             out.push(leader);
             for m in members {
                 let mut member = project_row(m);
                 member.sort_stamp = unit_stamp;
+                member.rank = unit_rank;
                 out.push(member);
             }
         } else {
@@ -206,14 +206,27 @@ pub fn project_groups(
     // The durable project skeleton first: a folder renders even with zero
     // rows — archiving every conversation never dissolves the project. The
     // alias is the folder's own name; the directory segment is the fallback.
-    for (path, alias) in folders {
+    // The path→name map is also the row-filing index: a row joins its
+    // project's folder by PATH, so a non-empty alias cannot split the
+    // project into an empty alias head plus a basename-headed row bucket.
+    let folder_name: HashMap<&str, String> = folders
+        .iter()
+        .filter(|(path, _)| !removed.contains(path))
+        .map(|(path, alias)| {
+            (
+                path.as_str(),
+                alias
+                    .clone()
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or_else(|| project_label(path)),
+            )
+        })
+        .collect();
+    for (path, _) in folders {
         if removed.contains(path) {
             continue;
         }
-        let name = alias
-            .clone()
-            .filter(|a| !a.trim().is_empty())
-            .unwrap_or_else(|| project_label(path));
+        let name = folder_name[path.as_str()].clone();
         if !buckets.contains_key(&name) {
             order.push(name.clone());
             bucket_project.insert(name.clone(), Some(path.clone()));
@@ -222,7 +235,10 @@ pub fn project_groups(
     }
     for row in rows {
         let project = effective(row);
-        let key = project_label(project.as_deref().unwrap_or(""));
+        let key = project
+            .as_ref()
+            .and_then(|p| folder_name.get(p.as_str()).cloned())
+            .unwrap_or_else(|| project_label(project.as_deref().unwrap_or("")));
         if !buckets.contains_key(&key) {
             order.push(key.clone());
             bucket_project.insert(key.clone(), project);
@@ -331,12 +347,15 @@ mod tests {
         assert_eq!(out[1].updated_at, 150);
         assert!(out[2].archived);
         assert!(!out[0].archived);
-        // The team shares one sort stamp (the leader's rank-encoded one);
-        // a flattened orphan and an unrelated top row keep their own ranks.
-        assert_eq!(out[0].sort_stamp, i64::MAX);
+        // The team shares one sort stamp AND one host rank (the leader's);
+        // a flattened orphan and an unrelated top row keep their own.
+        assert_eq!(out[0].sort_stamp, 300);
+        assert_eq!(out[0].rank, 0);
         assert_eq!(out[1].sort_stamp, out[0].sort_stamp);
-        assert_eq!(out[2].sort_stamp, i64::MAX - 2);
-        assert_eq!(out[3].sort_stamp, i64::MAX - 9);
+        assert_eq!(out[1].rank, out[0].rank);
+        assert_eq!(out[2].sort_stamp, 0);
+        assert_eq!(out[2].rank, 2);
+        assert_eq!(out[3].rank, 9);
     }
 
     #[test]
@@ -374,6 +393,22 @@ mod tests {
         assert_eq!(groups[1].rows.len(), 1);
     }
 
+    /// A non-empty alias names the folder but never re-keys it: the
+    /// project's rows file under the alias head by PATH, not under a second
+    /// basename-headed bucket beside an empty alias head.
+    #[test]
+    fn an_aliased_folder_absorbs_its_rows_by_path() {
+        let mut rows = vec![row("a", 0, None), row("b", 0, None)];
+        rows[0].project = Some("/p/live".into());
+        rows[1].project = Some("/p/live".into());
+        let folders = vec![("/p/live".to_string(), Some("别名".to_string()))];
+        let groups = project_groups(&rows, &folders, &HashSet::new());
+        assert_eq!(groups.len(), 1, "one head, no basename twin");
+        assert_eq!(groups[0].name, "别名");
+        assert_eq!(groups[0].project.as_deref(), Some("/p/live"));
+        assert_eq!(groups[0].rows.len(), 2);
+    }
+
     /// A skeleton folder whose project was client-removed dissolves; its
     /// rows (if any) re-bucket loose.
     #[test]
@@ -387,21 +422,26 @@ mod tests {
         assert_eq!(groups[0].name, "Chats");
     }
 
-    /// The chrome re-sorts by `(pinned, sort_stamp)` locally; the projection
-    /// encodes the HOST rank as a descending stamp so that sort reproduces
-    /// the host order — no local timestamp can reshuffle it.
+    /// The chrome re-sorts by `(pinned, rank)` locally; the projection
+    /// carries the HOST rank verbatim so that sort reproduces the host
+    /// order — no local timestamp reshuffles it. The sort stamp stays a
+    /// real unix time (the recency buckets decode it), never a rank.
     #[test]
-    fn the_sort_stamp_encodes_the_host_rank() {
+    fn the_rank_carries_the_host_order_and_the_stamp_stays_a_time() {
         let mut rows = [row("a", 0, None), row("b", 0, None)];
         rows[0].rank = 0;
+        rows[0].updated_at = 1_700_000_000;
         rows[1].rank = 1;
+        rows[1].updated_at = 1_700_000_500;
         let projected: Vec<_> = rows.iter().map(project_row).collect();
-        assert!(projected[0].sort_stamp > projected[1].sort_stamp);
-        // A local sort of the projected rows reproduces the host order.
+        // Order key: the rank ascending reproduces the host order.
         let mut sorted = projected.clone();
-        sorted.sort_by_key(|r| std::cmp::Reverse(r.sort_stamp));
+        sorted.sort_by_key(|r| r.rank);
         assert_eq!(sorted[0].id, "a");
         assert_eq!(sorted[1].id, "b");
+        // The stamp is the row's own last-active time, bucket-decodable.
+        assert_eq!(projected[0].sort_stamp, 1_700_000_000);
+        assert_eq!(projected[1].sort_stamp, 1_700_000_500);
     }
 
     /// Removed project paths re-bucket their rows loose (the v2

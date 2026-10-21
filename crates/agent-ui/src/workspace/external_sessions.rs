@@ -272,6 +272,7 @@ impl Workspace {
                     },
                     updated_at: s.created_at,
                     sort_stamp: s.created_at,
+                    rank: i64::MAX,
                     pinned: false,
                     archived: false,
                     tag: None,

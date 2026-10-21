@@ -364,6 +364,7 @@ fn load_rows() -> Vec<SessionRow> {
             // Team rows are filtered out above, so every row is its own
             // sort unit (production stamping lives in project_forest).
             sort_stamp: t.updated_at,
+            rank: 0,
             pinned: t.pinned,
             archived: t.archived,
         })

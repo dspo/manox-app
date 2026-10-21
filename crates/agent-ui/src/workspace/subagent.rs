@@ -48,9 +48,11 @@ impl Workspace {
             source,
             cx,
         );
-        // The tab label is the task topic, not the bare run id — a row of
-        // hex tails cannot be told apart.
-        let tab = crate::tool_tabs::subagent_tab(&banner, panel);
+        // The tab's identity is the run id (one panel per run — open_tab
+        // dedups by id, so topic-colliding runs must not share a tab);
+        // the label is the task topic, not the bare run id — a row of hex
+        // tails cannot be told apart.
+        let tab = crate::tool_tabs::subagent_tab(id, &banner, panel);
         let address = id.to_string();
         cx.defer(move |cx| {
             if !crate::chrome_assembly::open_tool_tab(tab, cx) {

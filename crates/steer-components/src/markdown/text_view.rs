@@ -665,18 +665,18 @@ mod tests {
         assert_eq!(fence_len("````\n"), 5);
     }
 
-    /// TEMP probe: the panel's ranges are byte offsets into the text it
-    /// fenced; the highlighter receives the mdast-parsed block value. Any
-    /// byte divergence between the two shifts every range — and once CJK
+    /// The panel's ranges are byte offsets into the text it fenced; the
+    /// highlighter receives the mdast-parsed block value. Any byte
+    /// divergence between the two shifts every range — and once CJK
     /// follows, a boundary lands mid-character and `with_runs` aborts the
-    /// app (real-device panic: glab output, 2-space indents, "invalid text
-    /// run" with a run ending 2 bytes into 「显」).
+    /// app. The text carries the hazard shape: 2-space indents, ASCII
+    /// columns, CJK mid-line.
     #[test]
     fn panel_ranges_match_the_parsed_code_block_byte_for_byte() {
         let text = concat!(
-            "== huayi/saas/huaji-skm :: fix/hpa-scale-down-behavior\n",
-            "  MR!464 [merged] ->main 2026-10-08 fix(helm): HPA 显式声明 behavior，缩容语义不再依赖控制面默认值\n",
-            "  MR!463 [merged] ->main 2026-10-08 docs: correct KUBECONFIG path to ~/.kube/config\n",
+            "== synth/project-alpha :: fix/resize-behavior\n",
+            "  PR!101 [merged] ->main 2026-01-02 fix(ui): 窗口缩放行为显式声明，缩放语义不再依赖默认值\n",
+            "  PR!102 [merged] ->main 2026-01-03 docs: correct the config path to ~/.config/synth\n",
         );
         // The exact `panel_document` source construction.
         let fence = "`".repeat(fence_len(text));
@@ -710,15 +710,14 @@ mod tests {
         }
     }
 
-    /// TEMP probe round 3 — the end-to-end pure pipeline over the REAL raw
-    /// tool output of the crashing call: highlight remap (File kind) →
+    /// The end-to-end pure pipeline over a raw tool listing (a columned
+    /// table with CJK cells): highlight remap (File kind) →
     /// `panel_document` fence → mdast block value → `layer_runs` → the same
     /// invariant `text_runs`+`with_runs` enforce: every range boundary must
-    /// be a char boundary inside the block. A failure here reproduces the
-    /// real-device abort without a window.
+    /// be a char boundary inside the block.
     #[test]
-    fn the_real_crashing_output_produces_char_safe_panel_ranges() {
-        let raw = include_str!("../../tests/fixtures/raw-tool-output.txt");
+    fn a_tool_listing_produces_char_safe_panel_ranges() {
+        let raw = include_str!("../../tests/fixtures/tool-table-output.txt");
         let parts: Vec<&str> = raw.strip_suffix('\n').unwrap_or(raw).split('\n').collect();
         // The settled panel's default visible window.
         let v = parts.len().min(400);
@@ -789,13 +788,13 @@ mod tests {
         );
     }
 
-    /// TEMP probe round 2: the EXACT text from the real-device panic (the
-    /// tail `with_runs` held when it died), fenced exactly like
-    /// `panel_document` does. This is the real block; whatever byte
-    /// transformation mdast applies to it shows up as a divergence here.
+    /// A CJK-heavy listing fenced exactly like `panel_document` does must
+    /// come back from mdast verbatim: whatever byte transformation the
+    /// parser applied to the block shows up as a divergence here, with the
+    /// first differing window printed on char boundaries.
     #[test]
-    fn the_real_panic_block_survives_the_fence_verbatim() {
-        let text = include_str!("../../tests/fixtures/panic-block-text.txt");
+    fn a_fenced_cjk_listing_survives_the_fence_verbatim() {
+        let text = include_str!("../../tests/fixtures/fenced-cjk-listing.txt");
         let fence = "`".repeat(fence_len(text));
         let mut source = String::new();
         source.push_str(&fence);

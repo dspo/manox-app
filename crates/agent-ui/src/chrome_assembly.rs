@@ -489,7 +489,6 @@ fn shell_config(
                 let mux = mux.clone();
                 move |id, _w, cx| {
                     let store = mux.read(cx).store();
-                    let channel = crate::ahp_store::thread_uri(id);
                     store.update(cx, |store, cx| {
                         // The flip reads through the ONE pin read face (fold
                         // first, list `_meta` baseline second) — flipping
@@ -498,18 +497,20 @@ fn shell_config(
                         let pinned = crate::multiplexer::ext_and_meta_pinned(
                             &store.book,
                             store.book.summaries.get(id),
-                            &channel,
+                            &crate::ahp_store::thread_uri(id),
                         );
                         // An un-opened row's thread channel is not subscribed
                         // (the boot path stopped mass-subscribing — one
                         // baseline fold per row froze the FIFO connection for
                         // minutes on a large migrated history). Subscribe
-                        // first: the connection's ordering lands it before the
-                        // dispatch, so the router's subscribed-gate passes and
-                        // the pin echo folds back.
-                        store.subscribe(channel.clone(), cx);
+                        // first — ONCE per row (every pin click re-issuing
+                        // the subscribe would pile host-side subscriptions):
+                        // the connection's ordering lands it before the
+                        // dispatch, so the router's subscribed-gate passes
+                        // and the pin echo folds back.
+                        store.subscribe_thread_once(id, cx);
                         store.dispatch(
-                            channel,
+                            crate::ahp_store::thread_uri(id),
                             ahp_types::actions::StateAction::Unknown(serde_json::json!({
                                 "type": manox_ahp::ext::actions::PINNED_CHANGED,
                                 "pinned": !pinned,

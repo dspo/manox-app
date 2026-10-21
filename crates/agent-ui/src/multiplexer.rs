@@ -314,9 +314,9 @@ impl SessionMultiplexer {
             .collect();
         rows.sort_by_key(|row| rank.get(row.id.as_str()).copied().unwrap_or(usize::MAX));
         for (ix, row) in rows.iter_mut().enumerate() {
-            // The chrome re-sorts rows by `(pinned, sort_stamp)` locally;
-            // carrying the rank lets the projection encode it so that sort
-            // reproduces exactly this order.
+            // The chrome re-sorts rows by `(pinned, rank)` locally;
+            // carrying the rank lets that sort reproduce exactly this
+            // order.
             row.rank = ix as i64;
         }
         rows
