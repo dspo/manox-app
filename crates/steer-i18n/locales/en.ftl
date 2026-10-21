@@ -188,7 +188,9 @@ subagent-stream-empty = No activity yet — the sub-agent has not written its fi
 
 ### views/subagent_panel.rs
 
-subagent-panel-waiting = Waiting for sub-agent activity…
+subagent-panel-settling = Connecting to the child session…
+subagent-panel-empty = Child session connected; nothing in it yet.
+subagent-panel-readonly = Subagent worker chat · read-only
 
 subagent-panel-final-note = Live transcript is not retained across reloads; showing the sub-agent's final answer.
 
@@ -495,6 +497,7 @@ workspace-project-choose = Choose project
 workspace-project-new = New project
 
 workspace-project-blank = Create blank project
+workspace-project-unfiled = Conversations
 
 workspace-project-select-folder = Select folder
 

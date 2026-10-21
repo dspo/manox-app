@@ -109,6 +109,19 @@ pub struct ChannelBook {
     pub root: RootState,
     /// Session id → summary (the sidebar catalogue, one row per thread).
     pub summaries: BTreeMap<String, SessionSummary>,
+    /// First-seen arrival order of the catalogue rows — the HOST's page
+    /// order (the store's persisted sidebar account), preserved across
+    /// upserts. A finished `listSessions` walk REPLACES it (see
+    /// [`Self::commit_summary_walk`]): the host reranks by interaction, so
+    /// first-seen append alone would pin rows at their first-seen slot
+    /// until restart. (Re-sorting by `modified_at` locally made every
+    /// journal append — a read marker, a title echo — reshuffle the list
+    /// under a stationary mouse; the walk order carries neither fault.)
+    pub summary_order: Vec<String>,
+    /// The running `listSessions` walk's arrival order, one page appended
+    /// at a time — the material [`Self::commit_summary_walk`] rebuilds
+    /// `summary_order` from when the walk ends.
+    walk_order: Vec<String>,
     pub sessions: HashMap<String, SessionState>,
     pub chats: HashMap<String, ChatState>,
     /// Extension channel URI → folded state (a baseline replaces, deltas fold).
@@ -149,6 +162,8 @@ impl Default for ChannelBook {
         Self {
             root: empty_root(),
             summaries: BTreeMap::new(),
+            summary_order: Vec::new(),
+            walk_order: Vec::new(),
             sessions: HashMap::new(),
             chats: HashMap::new(),
             ext: HashMap::new(),
@@ -330,17 +345,55 @@ impl ChannelBook {
         let mut changed = false;
         for summary in items {
             let id = id_of(&summary.resource).to_string();
+            let first_sight = !self.summaries.contains_key(&id);
             changed |= self
                 .summaries
                 .insert(id.clone(), summary.clone())
                 .is_none_or(|old| old.modified_at != summary.modified_at);
+            if first_sight {
+                self.summary_order.push(id);
+            }
+        }
+        changed
+    }
+
+    /// Seed a LIVE-arrived row (a just-created session) at the front of
+    /// the order: the host's next page walk would rank it first (newest),
+    /// and the first-seen append alone would pin it to the bottom.
+    pub fn seed_summary_at_front(&mut self, summary: SessionSummary) -> bool {
+        let id = id_of(&summary.resource).to_string();
+        let changed = self.seed_summaries(vec![summary]);
+        if let Some(ix) = self.summary_order.iter().position(|seen| seen == &id) {
+            let id = self.summary_order.remove(ix);
+            self.summary_order.insert(0, id);
         }
         changed
     }
 
     /// Drop a catalogue row (the session was disposed).
     pub fn remove_summary(&mut self, session_uri: &str) -> bool {
-        self.summaries.remove(id_of(session_uri)).is_some()
+        let id = id_of(session_uri).to_string();
+        self.summary_order.retain(|seen| seen != &id);
+        self.summaries.remove(&id).is_some()
+    }
+
+    /// Fold a finished `listSessions` walk's arrival order into
+    /// `summary_order`: ids the walk returned take the host's committed
+    /// order (it reranks by interaction; the walk is the only face that
+    /// order surfaces through); ids it did not reach — a truncated walk at
+    /// the page cap, a row added between pages — keep their previous
+    /// relative order behind the walked prefix. First-seen append alone
+    /// would leave the sidebar pinned at the boot-time order until restart.
+    pub fn commit_summary_walk(&mut self) {
+        let mut walked = std::mem::take(&mut self.walk_order);
+        let mut seen = HashSet::new();
+        walked.retain(|id| seen.insert(id.clone()));
+        for id in &self.summary_order {
+            if seen.insert(id.clone()) {
+                walked.push(id.clone());
+            }
+        }
+        self.summary_order = walked;
     }
 
     /// The default chat URI of a session, from its folded state.
@@ -485,6 +538,31 @@ pub fn id_of(uri: &str) -> &str {
     uri.split_once(":/").map(|(_, id)| id).unwrap_or(uri)
 }
 
+/// The hard ceiling on one refresh's `listSessions` page walk — a guard
+/// against a pathological cursor loop, not a real page count.
+const LIST_SESSIONS_PAGE_CAP: usize = 20;
+
+/// One `listSessions` request: the max page the host serves, from wherever
+/// the previous page left the cursor.
+fn list_sessions_params(cursor: Option<&str>) -> ListSessionsParams {
+    ListSessionsParams {
+        channel: ROOT_RESOURCE_URI.to_string(),
+        meta: None,
+        cursor: cursor.map(str::to_string),
+        limit: Some(500),
+    }
+}
+
+/// Fold one `listSessions` page into the catalogue; returns the cursor the
+/// next page must carry (`None` = the list is exhausted on this page). The
+/// page's ids join the running walk's arrival order.
+fn fold_session_page(book: &mut ChannelBook, result: &ListSessionsResult) -> Option<String> {
+    book.seed_summaries(result.items.clone());
+    book.walk_order
+        .extend(result.items.iter().map(|s| id_of(&s.resource).to_string()));
+    result.next_cursor.clone()
+}
+
 /// Build a session channel URI for a client-minted id.
 pub fn session_uri(id: &str) -> String {
     format!("ahp-session:/{id}")
@@ -618,10 +696,11 @@ pub struct AhpStore {
     request_hook: Option<RequestHook>,
     /// Recent dispatch rejections (bounded ring) for UI surfacing.
     rejections: std::collections::VecDeque<String>,
-    /// Session ids whose thread channel this store already subscribed — the
-    /// sidebar subscribes one channel per catalogue row (the pin badge and
-    /// the pin dispatch both read `x-manox-thread` state), re-issued only
-    /// for rows that appear after their subscription.
+    /// Session ids whose thread channel this store already subscribed —
+    /// the pin path's guard (the pin badge and the pin dispatch both read
+    /// `x-manox-thread` state): every pin click on an un-attached row
+    /// would otherwise re-issue the subscribe and pile host-side
+    /// subscriptions. The store never unsubscribes, so the set only grows.
     thread_subs: std::collections::HashSet<String>,
     /// Sessions with an unread-rise write in flight (issued, the host echo
     /// not folded yet): the rise fires at most once per read→unread
@@ -646,6 +725,10 @@ pub struct AhpStore {
     /// A handshake (initial or retried) is currently dialing: `retry` must
     /// not stack a second dial on top of a slow one.
     handshaking: bool,
+    /// A `listSessions` cursor walk is in flight: later refresh requests
+    /// fold into the running walk instead of stacking a second one (the
+    /// walk seeds fresher rows than a queued duplicate would).
+    session_list_in_flight: bool,
     /// Dispatch outcomes ride this to the store's own pump — the dispatch
     /// spawn runs on the manox runtime with no gpui handle, and the face
     /// needs the entity.
@@ -678,6 +761,7 @@ impl AhpStore {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: Some(fail_tx),
             _tasks: Vec::new(),
         };
@@ -792,6 +876,7 @@ impl AhpStore {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
@@ -906,7 +991,7 @@ impl AhpStore {
 
     pub fn seed_local_summary(&mut self, session_id: &str, title: &str) -> bool {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.book.seed_summaries(vec![SessionSummary {
+        self.book.seed_summary_at_front(SessionSummary {
             provider: String::new(),
             title: title.to_string(),
             // The host's own rows always carry Idle|IsRead; a zeroed status
@@ -925,7 +1010,7 @@ impl AhpStore {
             meta: None,
             chats: None,
             default_chat: None,
-        }])
+        })
     }
 
     /// Pop the next queued write, if any and if the replay may proceed.
@@ -1408,8 +1493,7 @@ impl AhpStore {
                 }
             }
             ahp::SubscriptionEvent::SessionAdded(params) => {
-                let changed = self.book.seed_summaries(vec![params.summary]);
-                self.subscribe_thread_channels_for_summaries(cx);
+                let changed = self.book.seed_summary_at_front(params.summary);
                 if changed {
                     cx.notify();
                 }
@@ -1437,6 +1521,16 @@ impl AhpStore {
                 // auth nudge) all reach this store through the global fan-in
                 // stream as well; anything unmodelled is tolerated.
             }
+        }
+    }
+
+    /// Subscribe a session's thread channel once per store lifetime (the
+    /// pin path's entry): a re-click on an already-subscribed row issues
+    /// no second subscribe round trip. The store never unsubscribes, so
+    /// the dedup set only grows.
+    pub fn subscribe_thread_once(&mut self, session_id: &str, cx: &mut gpui::Context<Self>) {
+        if self.thread_subs.insert(session_id.to_string()) {
+            self.subscribe(thread_uri(session_id), cx);
         }
     }
 
@@ -1563,50 +1657,65 @@ impl AhpStore {
     }
 
     /// Seed/refresh the sidebar catalogue from `listSessions`.
+    ///
+    /// The host pages the answer (a bounded page size with a `nextCursor`);
+    /// the sidebar only ever saw the FIRST page until every conversation
+    /// older than the newest handful vanished from the list. The refresh
+    /// now walks the cursor chain to exhaustion — one round trip covers
+    /// the host's maximum page, the chain covers everything past it — and
+    /// a refresh already in flight absorbs later requests (the running
+    /// walk seeds fresher rows than a second one queued behind it).
     pub fn refresh_sessions(&mut self, cx: &mut gpui::Context<Self>) {
-        let reply = self.call(
-            "listSessions",
-            ListSessionsParams {
-                channel: ROOT_RESOURCE_URI.to_string(),
-                meta: None,
-                cursor: None,
-                limit: None,
-            },
-        );
+        if self.session_list_in_flight {
+            return;
+        }
+        self.session_list_in_flight = true;
+        self.book.walk_order.clear();
+        let reply = self.call("listSessions", list_sessions_params(None));
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            if let Ok(Ok(value)) = reply.recv().await {
-                let Ok(result) = serde_json::from_value::<ListSessionsResult>(value) else {
-                    return;
+            let mut pages = 0usize;
+            let mut reply = reply;
+            loop {
+                let value = match reply.recv().await {
+                    Ok(Ok(value)) => value,
+                    _ => break,
                 };
-                let _ = this.update(cx, |store, cx| {
-                    if store.book.seed_summaries(result.items) {
-                        cx.notify();
-                    }
-                    store.subscribe_thread_channels_for_summaries(cx);
+                let Ok(result) = serde_json::from_value::<ListSessionsResult>(value) else {
+                    break;
+                };
+                pages += 1;
+                let next = this.update(cx, |store, cx| {
+                    let next = fold_session_page(&mut store.book, &result);
+                    cx.notify();
+                    next
                 });
+                let Ok(Some(cursor)) = next else { break };
+                if pages >= LIST_SESSIONS_PAGE_CAP {
+                    tracing::warn!(
+                        pages,
+                        "listSessions pagination stopped at the page cap; the sidebar shows a prefix"
+                    );
+                    break;
+                }
+                let Ok(next_reply) =
+                    this.update(cx, |store, _| store.call("listSessions", list_sessions_params(Some(&cursor))))
+                else {
+                    break;
+                };
+                reply = next_reply;
             }
+            // Every exit path releases the guard — a reply dropped mid-walk
+            // (the connection died between pages) must not pin the flag and
+            // starve every later refresh. The walk's arrival order folds
+            // into the sidebar order on every exit path (a truncated walk
+            // still carries the host's freshest prefix).
+            let _ = this.update(cx, |store, cx| {
+                store.book.commit_summary_walk();
+                store.session_list_in_flight = false;
+                cx.notify();
+            });
         })
         .detach();
-    }
-
-    /// Subscribe the thread channel of every catalogue row. The sidebar's
-    /// pin badge reads `x-manox-thread` state (the thread-scoped baseline
-    /// rides the subscription), and the pin dispatch targets the same
-    /// channel — both only work for rows whose channel is subscribed, so a
-    /// catalogue seed subscribes one channel per row, deduplicated per run.
-    pub fn subscribe_thread_channels_for_summaries(&mut self, cx: &mut gpui::Context<Self>) {
-        let ids: Vec<String> = self.book.summaries.keys().cloned().collect();
-        for sid in ids {
-            if self.thread_sub_due(&sid) {
-                self.subscribe(thread_uri(&sid), cx);
-            }
-        }
-    }
-
-    /// Whether this row's thread subscription is still due (first sight this
-    /// run); marks it issued. Split out for the cx-free test face.
-    fn thread_sub_due(&mut self, session_id: &str) -> bool {
-        self.thread_subs.insert(session_id.to_string())
     }
 
     /// Create a session over a client-minted id (the idempotency key).
@@ -2900,6 +3009,49 @@ mod tests {
     /// lowering (`synth_display` -> `build_items`) must fold them into the
     /// activity segment as tool entries. This is the pinning test for
     /// "工具调用看不到".
+    /// The self-describing guarantee: a tool-call Start whose reducer gate
+    /// declined (no active turn — a turn-id the fold never saw) still
+    /// derives its event from the action's own identity. Dropping it would
+    /// drop the reasoning-round boundary and merge every later round into
+    /// the first ("thinking keeps appending above a stack of tools").
+    #[test]
+    fn a_state_missed_tool_start_still_derives_its_event() {
+        use ahp_types::actions::{ChatToolCallStartAction, StateAction};
+
+        let mut book = ChannelBook::default();
+        let uri = chat_uri("c-1");
+        // A turn id the fold never activated: the reducer NoOps, so no
+        // tool-call part ever enters the state.
+        let start = StateAction::ChatToolCallStart(ChatToolCallStartAction {
+            turn_id: "t-ghost".into(),
+            tool_call_id: "tc-1".into(),
+            meta: None,
+            tool_name: "Read".into(),
+            display_name: "Read".into(),
+            intention: Some("Read AGENTS.md".into()),
+            contributor: None,
+        });
+        book.apply(&uri, &start);
+        let chat = book.chats.get("c-1").expect("the fold holds the chat");
+        let event = crate::chat_fold::ChatEvent::from_action(&start, Some(chat))
+            .expect("the action's own identity derives the event");
+        match event {
+            crate::chat_fold::ChatEvent::ToolCall {
+                id,
+                name,
+                title,
+                status,
+                ..
+            } => {
+                assert_eq!(id, "tc-1");
+                assert_eq!(name, "Read");
+                assert_eq!(title, "Read AGENTS.md");
+                assert_eq!(status, manox_agent::thread::ToolCallStatus::Running);
+            }
+            other => panic!("expected a tool-call event, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_tool_loop_surfaces_tools_on_both_paths() {
         use ahp_types::actions::{
@@ -3283,6 +3435,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         };
@@ -3356,46 +3509,6 @@ mod tests {
     }
 
     #[test]
-    fn thread_subscriptions_are_due_once_per_row_per_run() {
-        let mut store = AhpStore {
-            book: ChannelBook::default(),
-            client: None,
-            replay_pending: false,
-            chat_events: HashMap::new(),
-            focused_session: None,
-            optimistic_undo: Vec::new(),
-            pending_writes: Vec::new(),
-            request_hook: None,
-            rejections: std::collections::VecDeque::new(),
-            thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
-            delivery_failure: None,
-            queue_head_at: None,
-            handshake_params: None,
-            handshaking: false,
-            delivery_signal_tx: None,
-            _tasks: Vec::new(),
-        };
-        store.book.seed_summaries(vec![
-            serde_json::from_value(serde_json::json!({
-                "resource": session_uri("s-1"),
-                "provider": "test",
-                "title": "row",
-                "status": 0,
-                "createdAt": "2026-01-01T00:00:00Z",
-                "modifiedAt": "2026-01-01T00:00:00Z",
-            }))
-            .expect("summary parses"),
-        ]);
-        // First sight is due; the second sight of the same row is not — the
-        // catalogue refetches on every summary change and must not re-issue
-        // the subscription (nor, with one, duplicate it server-side).
-        assert!(store.thread_sub_due("s-1"));
-        assert!(!store.thread_sub_due("s-1"));
-        assert!(store.thread_sub_due("s-2"), "an unseen row is still due");
-    }
-
-    #[test]
     fn a_rejected_echo_is_surfaced_not_folded() {
         let mut book = ChannelBook::default();
         let effect = book.apply(
@@ -3408,6 +3521,150 @@ mod tests {
         );
         assert_eq!(effect, FoldEffect::Rejected("blank title".into()));
         assert!(!book.sessions.contains_key("s-1"));
+    }
+
+    /// The wire names the cursor `nextCursor` (camelCase): a page parsed
+    /// off raw JSON must surface it, and an exhausted page must not — the
+    /// walk's termination reads exactly this distinction.
+    #[test]
+    fn a_page_fold_surfaces_the_next_cursor_until_exhaustion() {
+        let page = |ids: &[&str], cursor: Option<&str>| -> ListSessionsResult {
+            serde_json::from_value(serde_json::json!({
+                "items": ids
+                    .iter()
+                    .map(|id| serde_json::json!({
+                        "resource": session_uri(id),
+                        "provider": "test",
+                        "title": format!("row {id}"),
+                        "status": 0,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "modifiedAt": "2026-01-01T00:00:00Z",
+                    }))
+                    .collect::<Vec<_>>(),
+                "nextCursor": cursor,
+            }))
+            .expect("a page parses")
+        };
+
+        let mut book = ChannelBook::default();
+        // Two pages plus an exhausted tail: every row must land in the
+        // catalogue — the sidebar's historic truncation was exactly the
+        // rows past the first page.
+        assert_eq!(
+            fold_session_page(&mut book, &page(&["s-1", "s-2"], Some("2"))),
+            Some("2".into())
+        );
+        assert_eq!(
+            fold_session_page(&mut book, &page(&["s-3"], Some("3"))),
+            Some("3".into())
+        );
+        assert_eq!(fold_session_page(&mut book, &page(&["s-4"], None)), None);
+        for id in ["s-1", "s-2", "s-3", "s-4"] {
+            assert!(
+                book.summaries.contains_key(id),
+                "row {id} from a later page never seeded"
+            );
+        }
+    }
+
+    /// The catalogue order is the HOST's page order, and it survives
+    /// re-seeds: upserting a row with a bumped `modifiedAt` (a read marker
+    /// echoed back, a title change) must not move anything — the historical
+    /// local `modified_at` sort made every click reshuffle the sidebar.
+    #[test]
+    fn catalogue_order_is_the_host_page_order_and_survives_upserts() {
+        let row = |id: &str, modified: &str| -> SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri(id),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": modified,
+            }))
+            .expect("a summary parses")
+        };
+        let mut book = ChannelBook::default();
+        book.seed_summaries(vec![
+            row("s-a", "2026-01-01T00:00:00Z"),
+            row("s-b", "2026-01-02T00:00:00Z"),
+        ]);
+        assert_eq!(book.summary_order, vec!["s-a", "s-b"]);
+
+        // A later page appends its rows after the earlier page's.
+        book.seed_summaries(vec![row("s-c", "2026-01-03T00:00:00Z")]);
+        assert_eq!(book.summary_order, vec!["s-a", "s-b", "s-c"]);
+
+        // An upsert with a NEWER modifiedAt keeps the row where it was.
+        book.seed_summaries(vec![row("s-a", "2026-10-20T00:00:00Z")]);
+        assert_eq!(
+            book.summary_order,
+            vec!["s-a", "s-b", "s-c"],
+            "a read-marker echo must not re-rank the row"
+        );
+
+        // A live-arrived session fronts the order; a removal drops out of it.
+        book.seed_summary_at_front(row("s-live", "2026-10-20T00:00:01Z"));
+        assert_eq!(
+            book.summary_order.first().map(String::as_str),
+            Some("s-live")
+        );
+        book.remove_summary(&session_uri("s-b"));
+        assert_eq!(book.summary_order, vec!["s-live", "s-a", "s-c"]);
+    }
+
+    /// A finished `listSessions` walk rebuilds the order from the walk's
+    /// arrival: the host reranks by interaction, so rows it moved (a click
+    /// bumped one to the top) take the new slots instead of staying pinned
+    /// at their boot-time positions until restart. Rows the walk did not
+    /// reach (a page-cap truncation) keep their relative order behind the
+    /// walked prefix.
+    #[test]
+    fn a_finished_walk_rebuilds_the_host_order() {
+        let page = |ids: &[&str]| -> ListSessionsResult {
+            serde_json::from_value(serde_json::json!({
+                "items": ids
+                    .iter()
+                    .map(|id| serde_json::json!({
+                        "resource": session_uri(id),
+                        "provider": "test",
+                        "title": format!("row {id}"),
+                        "status": 0,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "modifiedAt": "2026-01-01T00:00:00Z",
+                    }))
+                    .collect::<Vec<_>>(),
+                "nextCursor": None::<String>,
+            }))
+            .expect("a page parses")
+        };
+        let mut book = ChannelBook::default();
+        fold_session_page(&mut book, &page(&["s-a", "s-b", "s-c"]));
+        book.commit_summary_walk();
+        assert_eq!(book.summary_order, vec!["s-a", "s-b", "s-c"]);
+
+        // The host reranked: s-c now leads. A fresh walk (it starts clean,
+        // as `refresh_sessions` starts one) lands that order.
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-c", "s-a"]));
+        fold_session_page(&mut book, &page(&["s-b"]));
+        book.commit_summary_walk();
+        assert_eq!(
+            book.summary_order,
+            vec!["s-c", "s-a", "s-b"],
+            "the walk's arrival order is the host's committed order"
+        );
+
+        // A truncated walk (page cap): walked rows take the host order,
+        // unwalked ones trail in their previous relative order.
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-b"]));
+        book.commit_summary_walk();
+        assert_eq!(
+            book.summary_order,
+            vec!["s-b", "s-c", "s-a"],
+            "the unwalked tail keeps its relative order behind the prefix"
+        );
     }
 
     #[test]
@@ -3448,6 +3705,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
@@ -3717,6 +3975,7 @@ mod tests {
             queue_head_at: None,
             handshake_params: None,
             handshaking: false,
+            session_list_in_flight: false,
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }

@@ -70,8 +70,8 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
-| Sub-agent 观察 | ✅ 部分 | rail 观察行（生命周期/活动）+ Agent 工具卡片实时流式子转录（text/thinking delta、工具 ▸/✓/✗ 行）；独立钻取面板随 manox 移除，卡片体即钻取面 |
-| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 就是单个 [AskDrawer](#askdrawer)（分页表单那张卡）：`detail`=plan 正文、选项为三裁决 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端），选项 + 对钩提交，没有第二套裁决卡；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
+| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读） |
+| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewDecisionCard](#planreviewdecisioncard)（底部一键裁决卡），三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
 分层纪律：crates/manox-harness/src/core 只做 TS Pi 对齐与扩展点；harness 能力扩展一律走
@@ -862,18 +862,21 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 
 #### SubagentPanel
 
-单个子代理运行的只读观察页签（装配层宿主页签，`ToolTab` kind `subagent`）。页签标签是子代理
-**地址**（`SubagentProgress.id`，如 `Sailor_0`）；面板二级头显示 **topic** —— 状态指示 + mono
-topic 文本（共享 `subagent_topic` / 派发提示首行推导，空则回退地址）。正文是一段微型会话，走与
-主会话**同一套 `ConversationState` + 消息管线**：以 Captain 的派发提示作为首条用户气泡
-（来自 Steer 工具调用，存入 `Workspace::subagent_prompts`，带发送时间），头部读作
-`Captain > {recipient}·{model}·{time}`（`recipient` 为子代理类型，`model` 为子会话派发时上报的
-模型），随后是 bridged 子事件翻译成共享 `ThreadEvent` 契约后的助手气泡、推理折叠、工具卡片。
-实时累积在 `Workspace::subagent_transcripts`，整个会话期保留（终态也不再裁剪），所以事后打开仍
-重放全过程；重载后打开则回退到 `subagent_final_text` + `subagent-panel-final-note` 提示。
-由会话里的子代理卡片点击打开（原 rail agents 段的点击入口随只读气泡退役）
-（`ChatHost::open_subagent_tab` → 装配层 `chrome_assembly::open_tool_tab`）；页签随线程走壳的
-per-thread stash，切线程时只清该线程的转写数据（`clear_subagent_observation`）。
+单个子代理运行的只读钻取页签（装配层宿主页签，`ToolTab` kind `subagent`）。页签**身份**是 run id
+（`subagent:{run_id}`——`open_tab` 按 id 去重，topic 撞车的两个 run 各得各的转录；身份拿 topic 当，
+第二次打开只会聚焦第一个 run 的旧面板）；页签标签是任务的 **topic**（不再是裸 run id）；面板头部是状态指示 + mono topic 文本——状态在运行期实时派生自
+`background_work`（run 在列即 Running），终态沿用打开时的快照。正文是与主列**同一套会话管线**
+渲染的微型会话：子会话（run id 即子会话 id，swarm 不变量）在打开时经 multiplexer attach，
+面板持有自己的 `ConversationState`，观察 `AhpStore` 并排水**该子会话自己的事件桶**
+（`ChatEvent` → `to_thread_event` → `apply`，与主列 live 腿同一词汇与同一 apply 语义）——
+journal 重放与实时 delta 都经此泵进入，运行中钻取是 live 的。相位三态：`subagent-panel-settling`
+（订阅快照未回）→ 活动（有行）/`subagent-panel-empty`（快照已回、无内容），永不渲染无依据的
+假占位。底部是 `subagent-panel-readonly` 只读说明条（宿主侧 #910 已把子会话标记为
+`ChatInteractivity::ReadOnly`）。入口：会话内子代理卡片点击——卡片的 `AgentTaskItem.run_id`
+来自派发信封（前台结果 / promotion 回执 / 后台启动回执都携带 `run_id`）；
+rail agents 段（#165 起直读 `background_work`）展示运行中花名册。live 行的 wire `label` 只作
+话题（`description`）不作类型——两处同填会把行标题渲染成「Explore · Explore」；类型由
+settled 行的进度事件按 run id 合并补齐。
 
 > Source: `crates/agent-ui/src/views/subagent_panel.rs`, `crates/agent-ui/src/workspace/subagent.rs`
 
@@ -987,7 +990,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 侧栏会话树（props 驱动，`crates/steer-agent-chrome-ui/src/session_list.rs`）：**三行 66px 行卡（2026-09-29 thread-item 设计稿）**——标题行（16px 状态槽 + 6px 间距 + 标题）、tag 行（短 id chip 恒首位 + 用户 tag chip）、info 行（仅最后活跃时间：72h 内相对、之外本地 `MM-DD HH:MM`），三行共用一条左基线、无任何右对齐内容、**不随项目层级缩进**（层级只由分组头与 leader chevron 表达）。行面上**零控件**：pin/archive/标签/复制 ID 全部收进右键菜单（`Shell::open_row_menu` 五项：置顶 toggle／归档 toggle／添加·重命名标签／移除标签／复制 ID；tag 内联编辑挂在 tag 行，Escape 取消、Enter/blur 提交、空值丢弃、10 字上限；双击用户 tag 芯片 = 老壳同款进入重命名编辑，短 id 芯片单击复制完整 id）。五态字形（`Errored` 红三角／`PendingAuth`·`PendingPlan` 实心 8px 蓝点／`Running` 像素积木 2×3 点阵 1820ms 阶梯循环（VS Code pixelSpinner grid 变体移植）／`Unread` 空心 6.5px 蓝点／`Idle` 空槽）。四态表面：未选中无背景、悬浮 `LIST_HOVER` + 标题转 500 字重 + **截断标题跑马灯**（双份标题 + 24px 间隔的无缝循环轨道：24px/s、每循环停 600ms、回绕点像素级相同无闪跳；仅 `is_hovered && title_truncated` 启动，移开复位；截断判定 = 与渲染器省略号同一套 `shape_text` 实测宽 vs `on_prepaint` 逐帧记录的剪裁盒宽）、选中白卡 + 15% 描边、键盘焦点 = `track_focus` + `focus_visible` 1.5px accent 环（↑/↓ 在可见行间移动焦点，行高四态一致不 reflow）；分组头可折叠（折叠态按**稳定 state key** 存取——`SessionGroup.key`，时间分组用 i18n 键字符串、workspace 分组用项目路径（无项目桶退回其显示名 "Chats"，该显示名同时是它的拖拽与持久化身份），显示名随语言切换不落状态）并作为拖拽源/放置目标（2px accent 插入线；**仅 workspace 模式**——时间模式的分组头不是拖拽源、容器不是放置目标，渲染期直接不挂拖拽机械）；workspace 模式下分组头同时是**项目菜单**面（见 [ProjectGroupMenu](#projectgroupmenu)：头右端常驻 `MORE` 省略号钮（FG_FAINT，hover 转 FG）+ 头右键，二者都 `stop_propagation` 不触发折叠）。**5 行折叠**（`GROUP_ROW_LIMIT`，两种分组模式同律）：超出上限的组只渲染前 5 行 + 组底 footer 行——「显示更多（N 条）」↔「收起」（`Shell::toggle_show_more`）；折叠分组（chevron）即重置折叠，重新展开回到 5 行，重启不持久化；藏区含**前台活跃行**时该组自动展开（一次性：按活跃行 id 记录 `revealed_for`，手动「收起」后不再弹回，直到前台会话再次变化——自动展开与手动展开同落 `expanded_groups`，footer 的「收起」才能一次生效）。
 
-头部右侧控件（2026-09-30 起为真控件）：**sort**（workspace ↔ 时间分组切换，时间模式下点亮；时间分组 = 本地自然日四桶「今天/昨天/最近 7 天/更早」，分桶与桶内排序同源 `sort_stamp`（member 沿用 leader 的戳，team 不拆桶不散序；成员单独置顶仍可上浮——pin 逐行的既有语义），空桶不渲染）与 **search**（展开 header 下过滤行：InputState 过滤输入 + × 清空；title/project/tag 不区分大小写包含，无匹配组隐藏、过滤中强制展开，全滤空时显示「无匹配会话」提示；纯壳内显示态，不持久化）。
+头部右侧控件（2026-09-30 起为真控件）：**sort**（workspace ↔ 时间分组切换，时间模式下点亮；时间分组 = 本地自然日四桶「今天/昨天/最近 7 天/更早」，分桶键 `sort_stamp`（真实时间戳——member 沿用 leader 的戳，team 不拆桶；编码 rank 进时间戳会让 chrono 解码全部越界落「更早」），桶内排序键 host `rank` 升序（member 沿用 leader 的 rank，team 不散序；成员单独置顶仍可上浮——pin 逐行的既有语义），空桶不渲染）与 **search**（展开 header 下过滤行：InputState 过滤输入 + × 清空；title/project/tag 不区分大小写包含，无匹配组隐藏、过滤中强制展开，全滤空时显示「无匹配会话」提示；纯壳内显示态，不持久化）。
 
 > Source: `crates/steer-agent-chrome-ui/src/session_list.rs`, `crates/steer-agent-chrome-ui/src/shell.rs`
 
@@ -997,7 +1000,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 **持久化**（AHP 世界无项目注册表可反注册，分组读会话自身 project 绑定）：`agent_ui::project_registry` 在共享 `~/.manox/settings.toml` 的 app 自有**三键**上做 parse-edit-serialize（与 `ui_language` 同款只碰己键纪律）+ 进程级缓存（投影每次 multiplexer notify 都要查，不逐帧读文件）——`removed_projects`（移除路径集；`project_groups(rows, removed)` 把命中行**改投 Chats 桶而非隐藏**）、`project_added`（路径 → 首次出现在侧栏的时间戳，`note_seen_projects` 首见打戳；默认序 = 最新添加在最上，功能上线前的存量项目视为同时添加、以既有最近活动序为初始序）、`project_order`（手动拖拽序，决定它所列键的最终顺序；未列键按默认序浮在其上，「Chats」无戳垫底）。重新绑定即重新注册：`register_project` 清移除条目 + 撤销手动序条目——组浮回手动序区块之上（若已有更新的未记录项目，仍排在其下）；首次出现的时间戳不动（它记录的是目录何时首次出现，不是何时回归；`Workspace::register_project_in_store` 仍是全部绑定路径的汇聚点）。装配层快照时解析显示序注入壳（`order_groups` → `Shell::set_group_order`）；壳内拖拽经 `HostHooks::on_group_order` 回写全量键序 → `set_manual_order` 持久化。
 
-**外部会话 = 主列会话**（`agent_ui::workspace::external_sessions`，旧壳 external-session 家族的 chrome 回归）：AHP 无外部会话通道，注册表是客户端状态、挂在 Workspace 实体上（`externals: Vec<ExternalSessionRecord>` + `active_external`，各记录持 live `TerminalView` 实体与它的 `Title` 事件订阅）——项目菜单拉起 agent/终端即注册并**顶替会话列占主列且自动聚焦**（`ViewMode::ExternalSession`，与 Settings 同一条主列换页轨道；壳子套主列，终端/TUI 就放主列，不放右栏）。**身份模型（legacy 同款）**：行 id = `external:{agent}:{uuid}`（命名空间隔离 manox thread UUID），记录另持**真实外部会话 id**（`cx_session_id`，从 cx session socket 的 `<id>.sock` 文件名导出；spawn 时 tracing 记录两者关联）；路由按 `ws.is_external_session(id)` 记录查找（非前缀协议）。切走即停靠（点 thread 行/新建会话隐式 `leave_external_session`，终端保活）；侧栏行走 `on_select` 的 `ext-` 前缀分叉 → `open_external_session` 切回主列（同步 ws 更新，无 window handle 往返，无 dispatch 时序坑）；行菜单「关闭会话」→ `close_external_session`（drop 记录 = 拆进程树，正在前台则回落会话列）。行投影 `external_session_rows` 并入装配层快照、壳按显示名归入项目组（快照进壳即统一排序：pinned 置顶、`sort_stamp` 降序——`set_sessions` 内 `sort_sessions`，新拉起的会话行置组首，`session_order` 回归钉死）；高亮不被前台线程规则抢走（`active_is_external` 不回写）。主列标题（`PendingMain::title`）在外部会话前台时显示会话名。**进程级寿命**：PTY 属于 Workspace（进程单例），窗口重开仍在（比右栏 stash 的窗口级寿命更强，与 legacy 一致）。行级抽象同款 `SessionRowKind::{Thread, External{icon}}`——品牌位 + 行菜单（关闭会话／**重命名**／复制 ID）；时序律仍有效：open/close_tool_tab（右栏页签通用路径）在 click dispatch 内会被拒（探针测试钉死），外部会话已改为纯 ws 更新不受其辖；**Steer 平行行同律**——click 闭包自带 `&mut Window` 直通 `ws.update`（`project_menu_new_thread` 回归钉死），绝不走 `window_global().update`：click dispatch 已租住窗口，重入 update 一律 `Err(window not found)`，被 `let _ =` 吞掉即「点了没反应」（本菜单 Steer 行的旧形态正是此坑）。**标题双写面**（sidebar 行与主列标题共用 `record.label` 一个字段）：① **TUI 自报**——终端的 OSC 0/2 标题流经 manox-terminal 解析成 `TerminalEvent::Title`，spawn 时 `spawn_external_session` 订阅 **proxy 实体**（gpui 事件面；**绝不订 handle 的 broadcast**——proxy 泵依赖它是 handle 的唯一订阅者，`Arc::try_unwrap` 在多订阅者下丢全部事件）→ `apply_terminal_title` 写记录并去重（TUI 高频重发、逐条 notify 会刷侧栏；`Title(None)` 重置回 `default_label` 启动名），80 字符截断与重命名编辑器同预算；② **用户重命名**——行菜单「重命名」在**标题行**原位挂内联输入框（`title_edit`，与 tag 编辑器同生命周期：Escape 取消、Enter/blur 提交、空值丢弃、80 字上限），提交走 `on_set_external_title` 宿主钩子写同一字段。两面 last-writer-wins：重命名后 TUI 下一次自报仍会夺回标题（TUI 拥有标题所有权）。
+**外部会话 = 主列会话**（`agent_ui::workspace::external_sessions`，旧壳 external-session 家族的 chrome 回归）：AHP 无外部会话通道，注册表是客户端状态、挂在 Workspace 实体上（`externals: Vec<ExternalSessionRecord>` + `active_external`，各记录持 live `TerminalView` 实体与它的 `Title` 事件订阅）——项目菜单拉起 agent/终端即注册并**顶替会话列占主列且自动聚焦**（`ViewMode::ExternalSession`，与 Settings 同一条主列换页轨道；壳子套主列，终端/TUI 就放主列，不放右栏）。**身份模型（legacy 同款）**：行 id = `external:{agent}:{uuid}`（命名空间隔离 manox thread UUID），记录另持**真实外部会话 id**（`cx_session_id`，从 cx session socket 的 `<id>.sock` 文件名导出；spawn 时 tracing 记录两者关联）；路由按 `ws.is_external_session(id)` 记录查找（非前缀协议）。切走即停靠（点 thread 行/新建会话隐式 `leave_external_session`，终端保活）；侧栏行走 `on_select` 的 `ext-` 前缀分叉 → `open_external_session` 切回主列（同步 ws 更新，无 window handle 往返，无 dispatch 时序坑）；行菜单「关闭会话」→ `close_external_session`（drop 记录 = 拆进程树，正在前台则回落会话列）。行投影 `external_session_rows` 并入装配层快照（`rank = i64::MAX` 恒排已排线程之后）、壳按项目 path key 归入项目组（显示名——尤其 alias——从不当组身份；快照进壳即统一排序：pinned 置顶、host `rank` 升序——`set_sessions` 内 `sort_sessions`，新拉起的会话行置组首，`session_order` 回归钉死）；高亮不被前台线程规则抢走（`active_is_external` 不回写）。主列标题（`PendingMain::title`）在外部会话前台时显示会话名。**进程级寿命**：PTY 属于 Workspace（进程单例），窗口重开仍在（比右栏 stash 的窗口级寿命更强，与 legacy 一致）。行级抽象同款 `SessionRowKind::{Thread, External{icon}}`——品牌位 + 行菜单（关闭会话／**重命名**／复制 ID）；时序律仍有效：open/close_tool_tab（右栏页签通用路径）在 click dispatch 内会被拒（探针测试钉死），外部会话已改为纯 ws 更新不受其辖；**Steer 平行行同律**——click 闭包自带 `&mut Window` 直通 `ws.update`（`project_menu_new_thread` 回归钉死），绝不走 `window_global().update`：click dispatch 已租住窗口，重入 update 一律 `Err(window not found)`，被 `let _ =` 吞掉即「点了没反应」（本菜单 Steer 行的旧形态正是此坑）。**标题双写面**（sidebar 行与主列标题共用 `record.label` 一个字段）：① **TUI 自报**——终端的 OSC 0/2 标题流经 manox-terminal 解析成 `TerminalEvent::Title`，spawn 时 `spawn_external_session` 订阅 **proxy 实体**（gpui 事件面；**绝不订 handle 的 broadcast**——proxy 泵依赖它是 handle 的唯一订阅者，`Arc::try_unwrap` 在多订阅者下丢全部事件）→ `apply_terminal_title` 写记录并去重（TUI 高频重发、逐条 notify 会刷侧栏；`Title(None)` 重置回 `default_label` 启动名），80 字符截断与重命名编辑器同预算；② **用户重命名**——行菜单「重命名」在**标题行**原位挂内联输入框（`title_edit`，与 tag 编辑器同生命周期：Escape 取消、Enter/blur 提交、空值丢弃、80 字上限），提交走 `on_set_external_title` 宿主钩子写同一字段。两面 last-writer-wins：重命名后 TUI 下一次自报仍会夺回标题（TUI 拥有标题所有权）。
 
 > Source: `crates/agent-ui/src/project_menu.rs`, `crates/agent-ui/src/project_registry.rs`, `crates/agent-ui/src/workspace/external_sessions.rs`, `crates/agent-ui/src/chrome_assembly.rs`, `crates/steer-agent-chrome-ui/src/shell.rs`
 

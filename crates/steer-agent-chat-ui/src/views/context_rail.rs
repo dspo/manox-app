@@ -282,6 +282,10 @@ pub struct ContextRail {
     /// face — per-model usage, project, cwd and title all derive from the
     /// book's channel state). `None` only before the workspace connects.
     store: Option<(gpui::Entity<AhpStore>, String)>,
+    /// The chat host handle: the agents-section rows' drill-down entry
+    /// (`open_subagent_tab` — the row's id is the run id, the run id names
+    /// the child session). `None` only before the workspace connects.
+    pub host: Option<crate::host::ChatHostHandle>,
     /// Coarse run phase. Derived from `ThreadEvent`s routed here by
     /// `Workspace`; drives the Captain row's status indicator.
     pub cockpit_phase: CockpitPhase,
@@ -385,6 +389,7 @@ impl ContextRail {
     pub fn new(store: Option<(gpui::Entity<AhpStore>, String)>, cx: &mut App) -> Self {
         Self {
             store,
+            host: None,
             cockpit_phase: CockpitPhase::Idle,
             plan: None,
             agents: Vec::new(),
@@ -666,18 +671,76 @@ impl ContextRail {
                 .into_any_element(),
         ];
 
-        let fold = subagent_display_order(&self.agents, self.bubble_expanded.subagents);
+        // The active swarm rides `background_work` on the chat state —
+        // the pointer list whose entries name the child chats (the model
+        // sees the same roster through ListAgents). Settled rows the fold
+        // still carries merge underneath by run id.
+        let live: Vec<SubagentInfo> = self
+            .store
+            .as_ref()
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                leaf_of(&view.book, sid)
+                    .chat
+                    .and_then(|chat| chat.background_work.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|work| match work {
+                        ahp_types::state::BackgroundWork::Subagent(sub) => Some(SubagentInfo {
+                            id: sub.id,
+                            // The wire's label NAMES the run (its topic), it
+                            // is not the agent type — carrying it in both
+                            // slots renders "Explore · Explore". The type
+                            // fills in from the settled rows once the run's
+                            // own progress events land (the merge below is
+                            // by id).
+                            subagent_type: String::new(),
+                            description: sub.label,
+                            status: manox_agent::ToolCallStatus::Running,
+                            health: None,
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut roster = self.agents.clone();
+        for info in live {
+            if !roster.iter().any(|row| row.id == info.id) {
+                roster.push(info);
+            }
+        }
+        let fold = subagent_display_order(&roster, self.bubble_expanded.subagents);
         for info in fold.rows {
             // `{type} · {topic}` with graceful one-sided fallbacks.
             let title = task_display_title(&info.subagent_type, &info.description)
                 .unwrap_or_else(|| info.id.clone());
+            // A row click drills into the child session's own transcript
+            // (#168's panel; the id is the run id, which names the child).
+            let host = self.host.clone();
+            let (subagent_type, topic, status) = (
+                info.subagent_type.clone(),
+                info.description.clone(),
+                info.status,
+            );
+            let run_id = info.id.clone();
             rows.push(
                 h_flex()
+                    .id(gpui::SharedString::from(format!("subagent-row-{run_id}")))
                     .w_full()
                     .min_w_0()
                     .py_0p5()
                     .gap_1p5()
                     .items_center()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.secondary.opacity(0.5)))
+                    .on_click(move |_, _, cx| {
+                        let Some(host) = &host else {
+                            return;
+                        };
+                        host.open_subagent_tab(&run_id, &subagent_type, &topic, status, cx);
+                    })
                     .child(status_indicator(info.status, theme))
                     .child(
                         gpui::div()
@@ -713,10 +776,15 @@ impl ContextRail {
     /// one pair per checkout (the thread's single cwd today). Same data
     /// sources the old card's branch block read; the change ±counts and the
     /// click-to-copy affordances retired with the card.
-    fn render_branch_pair_section(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
-        let cwd_path = self.store.as_ref().and_then(|(store, sid)| {
-            let view = store.read(cx);
-            leaf_of(&view.book, sid).cwd().map(PathBuf::from)
+    fn render_branch_pair_section(&self, theme: &Theme, _cx: &App) -> Option<AnyElement> {
+        // The project's directory, from the conversation's belonging rather
+        // than its working directory: a project-less conversation runs in a
+        // temporary workspace of its own, which is not a checkout to name a
+        // branch for.
+        let cwd_path = self.store.as_ref().and_then(|(_, sid)| {
+            manox_agent::object_store::ObjectStore::try_global()
+                .and_then(|objects| objects.project_of(sid))
+                .map(PathBuf::from)
         });
         let basename = cwd_path
             .as_ref()

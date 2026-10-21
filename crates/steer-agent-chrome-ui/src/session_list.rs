@@ -83,10 +83,16 @@ pub struct SessionRowData {
     pub title: String,
     /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
-    /// The re-sort stamp: the row's own `updated_at`, except team members,
-    /// which the projection stamps with their leader's — a team sorts (and
-    /// survives a pin re-order) as one unit, contiguous under its chevron.
+    /// The time-grouping stamp (unix seconds): the row's own `updated_at`,
+    /// except team members, which the projection stamps with their leader's
+    /// — a team lands in ONE recency bucket, contiguous under its chevron.
     pub sort_stamp: i64,
+    /// The row's position in the HOST's sidebar order (0 = top). The
+    /// chrome's local `(pinned, rank)` sort reproduces the host's
+    /// interaction-ranked order — no local timestamp reshuffles it. Team
+    /// members carry their leader's rank; rows the host never ranked (live
+    /// external sessions) carry `i64::MAX` and sort last.
+    pub rank: i64,
     pub status: SessionStatus,
     /// What the row IS — the leading slot's glyph and the row menu's
     /// semantics ride this (the legacy sidebar's RowIcon/RowKind pair,

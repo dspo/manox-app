@@ -266,9 +266,10 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .detach();
         }
         let rows = mux.read(cx).thread_list(cx);
+        let folders = mux.read(cx).project_folders(cx);
         let removed = crate::project_registry::removed_projects();
         let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
-            crate::sidebar_projection::project_groups(&rows, &removed)
+            crate::sidebar_projection::project_groups(&rows, &folders, &removed)
                 .into_iter()
                 .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
                 .collect();
@@ -279,9 +280,26 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         // The registry stamps first-seen projects (the default order's
         // newest-added-first clock) and resolves the display order: the
         // manual drag order, with unrecorded projects newest-first on top.
+        let heads: Vec<(String, String)> = folders
+            .iter()
+            .filter(|(path, _)| !removed.contains(path))
+            .map(|(path, alias)| {
+                let label = alias
+                    .clone()
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or_else(|| crate::sidebar_projection::project_label(path));
+                (path.clone(), label)
+            })
+            .collect();
         let keys: Vec<String> = {
             let mut seen: Vec<String> = Vec::new();
             let mut all: Vec<String> = Vec::new();
+            for path in heads.iter().map(|(path, _)| path) {
+                if !all.contains(path) {
+                    all.push(path.clone());
+                }
+                seen.push(path.clone());
+            }
             for s in &sessions {
                 let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
                 if s.project.is_some() && !seen.contains(&s.project.clone().unwrap()) {
@@ -317,6 +335,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .map(|id| ws.read(cx).is_external_session(id))
             .unwrap_or(false);
         shell.update(cx, |shell, cx| {
+            shell.set_folder_heads(heads);
             shell.set_group_order(keys);
             shell.set_sessions(sessions);
             if !active_is_external && shell.active != fg {
@@ -470,8 +489,7 @@ fn shell_config(
                 let mux = mux.clone();
                 move |id, _w, cx| {
                     let store = mux.read(cx).store();
-                    let channel = crate::ahp_store::thread_uri(id);
-                    store.update(cx, |store, _| {
+                    store.update(cx, |store, cx| {
                         // The flip reads through the ONE pin read face (fold
                         // first, list `_meta` baseline second) — flipping
                         // against the fold alone would no-op a row whose
@@ -479,10 +497,20 @@ fn shell_config(
                         let pinned = crate::multiplexer::ext_and_meta_pinned(
                             &store.book,
                             store.book.summaries.get(id),
-                            &channel,
+                            &crate::ahp_store::thread_uri(id),
                         );
+                        // An un-opened row's thread channel is not subscribed
+                        // (the boot path stopped mass-subscribing — one
+                        // baseline fold per row froze the FIFO connection for
+                        // minutes on a large migrated history). Subscribe
+                        // first — ONCE per row (every pin click re-issuing
+                        // the subscribe would pile host-side subscriptions):
+                        // the connection's ordering lands it before the
+                        // dispatch, so the router's subscribed-gate passes
+                        // and the pin echo folds back.
+                        store.subscribe_thread_once(id, cx);
                         store.dispatch(
-                            channel,
+                            crate::ahp_store::thread_uri(id),
                             ahp_types::actions::StateAction::Unknown(serde_json::json!({
                                 "type": manox_ahp::ext::actions::PINNED_CHANGED,
                                 "pinned": !pinned,
@@ -733,11 +761,11 @@ pub fn foreground_project() -> Option<std::path::PathBuf> {
         .clone()
 }
 
-/// The threads database behind the store global — the pane snapshot's
-/// upsert/load face (one acquisition site shared by both directions).
-fn pane_db() -> std::sync::Arc<manox_agent::db::ThreadsDatabase> {
-    manox_agent::thread_store_global().read(|s| s.db().clone())
-}
+/// The right-pane registry: client-owned presentation state (the plan's
+/// home for pane snapshots after the db retired). Session-lifetime — the
+/// pane layout a process remembers is the pane layout it opened with.
+static PANE_REGISTRY: std::sync::Mutex<Option<HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
 
 /// Upsert the current foreground thread's right-pane snapshot into
 /// `threads.db` (the pane's own kind/spec encoding, one row per thread).
@@ -754,14 +782,21 @@ fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
             .map(|(kind, spec)| serde_json::json!({ "kind": kind, "spec": spec }))
             .collect::<Vec<_>>(),
     });
-    if let Err(e) = pane_db().upsert_right_pane(&thread_id, &payload.to_string()) {
-        tracing::warn!(error = %e, thread_id = %thread_id, "persist chrome right pane failed");
-    }
+    PANE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(thread_id, payload.to_string());
 }
 
 /// Load a thread's persisted right-pane snapshot (the chrome encoding).
 fn load_right_pane(thread_id: &str) -> Option<String> {
-    pane_db().load_right_pane(thread_id).ok().flatten()
+    PANE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .and_then(|map| map.get(thread_id))
+        .cloned()
 }
 
 fn refresh_foreground_cwd(

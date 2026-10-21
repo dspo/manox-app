@@ -541,6 +541,10 @@ impl Default for ThinkingContainer {
 #[derive(Debug, Clone)]
 pub struct AgentTaskItem {
     pub id: String,
+    /// The run id a delegation envelope names — the child session the card
+    /// drills into (foreground results, promotion receipts, and background
+    /// start receipts all carry `run_id`).
+    pub run_id: Option<String>,
     pub subagent_type: String,
     pub description: String,
     pub status: ToolCallStatus,
@@ -551,6 +555,14 @@ pub struct AgentTaskItem {
 /// flattened and capped at 60 chars with an ellipsis. Local presentation
 /// rule (the runtime helper of the same shape was removed with the retired
 /// harness).
+/// The run id a delegation envelope names (`run_id` in the foreground
+/// result, the promotion receipt, and the background start receipt).
+pub fn envelope_run_id(output: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|v| v.get("run_id").and_then(|r| r.as_str()).map(str::to_string))
+}
+
 pub fn subagent_topic(prompt: &str) -> String {
     let flat: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = flat.chars();
@@ -1367,6 +1379,7 @@ impl ConversationState {
                             MessageItem::new(
                                 ConvItem::AgentTask(AgentTaskItem {
                                     id: id.clone(),
+                                    run_id: None,
                                     subagent_type,
                                     description,
                                     status: *status,
@@ -1643,10 +1656,6 @@ impl ConversationState {
                     ApplyOutcome::Unchanged
                 }
             }
-            // Child-session transcripts are owned by the workspace's
-            // sub-agent observation panel; the conversation keeps only the
-            // compact Agent task row.
-            ThreadEvent::SubagentChild { .. } => ApplyOutcome::Unchanged,
             ThreadEvent::ToolResult {
                 id,
                 output,
@@ -1668,6 +1677,7 @@ impl ConversationState {
                             };
                             t.is_error = *is_error;
                             t.status = next_status;
+                            t.run_id = envelope_run_id(output).or(t.run_id.clone());
                         }
                         cx.notify();
                     });
@@ -1934,43 +1944,6 @@ impl ConversationState {
                     )
                 }));
                 ApplyOutcome::Appended
-            }
-            ThreadEvent::SubagentProgress {
-                id,
-                status,
-                ..
-            } => {
-                if let Some(ix) = self.find_agent_task(id, cx) {
-                    self.items[ix].update(cx, |item, cx| {
-                        if let ConvItem::AgentTask(t) = item.kind_mut() {
-                            t.status = *status;
-                        }
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(ix)
-                } else {
-                    ApplyOutcome::Unchanged
-                }
-            }
-            ThreadEvent::SubagentStarted {
-                id,
-                subagent_type,
-                description,
-                ..
-            } => {
-                if let Some(ix) = self.find_agent_task(id, cx) {
-                    self.items[ix].update(cx, |item, cx| {
-                        if let ConvItem::AgentTask(t) = item.kind_mut() {
-                            t.subagent_type = subagent_type.clone();
-                            t.description = description.clone();
-                            t.status = ToolCallStatus::Running;
-                        }
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(ix)
-                } else {
-                    ApplyOutcome::Unchanged
-                }
             }
             ThreadEvent::BackgroundTaskUpdated { snapshot } => {
                 // Find an existing BackgroundTask card with this task_id and
@@ -5507,6 +5480,207 @@ mod tests {
     /// the boundary. Without that split every round of a turn's tool loop
     /// appends to the first one — one merged thinking block above every tool
     /// call of the turn, in arrival order the tools read as "always last".
+    /// The composite live path, end to end: real AHP actions (two reasoning
+    /// rounds with a tool call between them), folded through the book in
+    /// the pump's exact order (fold first, then derive from the updated
+    /// state), lowered to ThreadEvents and applied — the transcript must
+    /// hold ONE activity segment whose entries strictly interleave
+    /// [reasoning, tool, reasoning, tool], the second round opening fresh
+    /// instead of appending to the first. This pins the whole chain the
+    /// "thinking keeps appending above a stack of tools" report walked.
+    #[gpui::test]
+    fn live_two_round_tool_turn_composes_in_arrival_order(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        use ahp_types::actions::{
+            ChatDeltaAction, ChatReasoningAction, ChatResponsePartAction,
+            ChatToolCallCompleteAction, ChatToolCallReadyAction, ChatToolCallStartAction,
+            ChatTurnCompleteAction, ChatTurnStartedAction, StateAction,
+        };
+        use ahp_types::state::{
+            MarkdownResponsePart, Message, MessageKind, MessageOrigin, ResponsePart,
+            ToolCallResult, ToolInput, ToolResultContent, ToolResultTextContent,
+        };
+
+        let uri = crate::ahp_store::chat_uri("c-1");
+        let turn = "t-1".to_string();
+        let user = Message {
+            text: "two rounds".into(),
+            origin: MessageOrigin {
+                kind: MessageKind::User,
+            },
+            attachments: None,
+            model: None,
+            agent: None,
+            meta: None,
+        };
+        let tool_round = |tool_call_id: &str, intention: &str| {
+            vec![
+                StateAction::ChatToolCallStart(ChatToolCallStartAction {
+                    turn_id: turn.clone(),
+                    tool_call_id: tool_call_id.into(),
+                    meta: None,
+                    tool_name: "Read".into(),
+                    display_name: "Read".into(),
+                    intention: Some(intention.into()),
+                    contributor: None,
+                }),
+                StateAction::ChatToolCallReady(ChatToolCallReadyAction {
+                    turn_id: turn.clone(),
+                    tool_call_id: tool_call_id.into(),
+                    meta: None,
+                    contributor: None,
+                    intention: Some(intention.into()),
+                    invocation_message: ahp_types::StringOrMarkdown::Plain(intention.into()),
+                    tool_input: Some(ToolInput::Inline(r#"{"path":"AGENTS.md"}"#.into())),
+                    confirmation_title: None,
+                    risk_assessment: None,
+                    edits: None,
+                    editable: None,
+                    confirmed: None,
+                    options: None,
+                }),
+            ]
+        };
+        let complete = |tool_call_id: &str| {
+            StateAction::ChatToolCallComplete(ChatToolCallCompleteAction {
+                turn_id: turn.clone(),
+                tool_call_id: tool_call_id.into(),
+                meta: None,
+                result: ToolCallResult {
+                    success: true,
+                    past_tense_message: ahp_types::StringOrMarkdown::Plain("read".into()),
+                    content: Some(vec![ToolResultContent::Text(ToolResultTextContent {
+                        text: "body".into(),
+                    })]),
+                    structured_content: None,
+                    error: None,
+                },
+                requires_result_confirmation: None,
+            })
+        };
+        let actions = vec![
+            StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: turn.clone(),
+                started_at: "2026-10-21T00:00:00.000Z".into(),
+                message: user,
+                queued_message_id: None,
+                meta: None,
+            }),
+            StateAction::ChatReasoning(ChatReasoningAction {
+                turn_id: turn.clone(),
+                part_id: "p-r1".into(),
+                content: "round one thinking".into(),
+                meta: None,
+            }),
+        ];
+        let mut actions = actions;
+        actions.extend(tool_round("tc-1", "Read first"));
+        actions.push(complete("tc-1"));
+        actions.push(StateAction::ChatReasoning(ChatReasoningAction {
+            turn_id: turn.clone(),
+            part_id: "p-r2".into(),
+            content: "round two thinking".into(),
+            meta: None,
+        }));
+        actions.extend(tool_round("tc-2", "Read second"));
+        actions.push(complete("tc-2"));
+        actions.push(StateAction::ChatResponsePart(ChatResponsePartAction {
+            turn_id: turn.clone(),
+            part: ResponsePart::Markdown(MarkdownResponsePart {
+                id: "p-m1".into(),
+                content: String::new(),
+            }),
+            meta: None,
+        }));
+        actions.push(StateAction::ChatDelta(ChatDeltaAction {
+            turn_id: turn.clone(),
+            part_id: "p-m1".into(),
+            content: "done".into(),
+            meta: None,
+        }));
+        actions.push(StateAction::ChatTurnComplete(ChatTurnCompleteAction {
+            turn_id: turn.clone(),
+            duration: 1_000,
+            meta: None,
+        }));
+
+        let mut book = crate::ahp_store::ChannelBook::default();
+        let conversation =
+            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
+        let ctx = ApplyCtx {
+            host: crate::host::noop_host(),
+            cwd: None,
+            fork_source: None,
+        };
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                for action in &actions {
+                    // The pump's exact order: fold first, then derive from
+                    // the updated state, then lower and apply.
+                    book.apply(&uri, action);
+                    let Some(chat) = book.chats.get("c-1") else {
+                        continue;
+                    };
+                    let Some(display) =
+                        crate::chat_fold::ChatEvent::from_action(action, Some(chat))
+                    else {
+                        continue;
+                    };
+                    let Some(event) = crate::chat_fold::to_thread_event(display) else {
+                        continue;
+                    };
+                    let _ = c.apply(&event, "model", None, ctx.clone(), cx);
+                }
+            });
+        });
+
+        cx.update(|cx| {
+            conversation.read_with(cx, |c, cx| {
+                let segments: Vec<usize> = c
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| matches!(item.read(cx).kind(), ConvItem::Thinking(_)))
+                    .map(|(ix, _)| ix)
+                    .collect();
+                assert_eq!(
+                    segments.len(),
+                    1,
+                    "one activity segment carries the whole tool loop"
+                );
+                let ConvItem::Thinking(t) = c.items[segments[0]].read(cx).kind() else {
+                    unreachable!()
+                };
+                let shape: Vec<&str> = t
+                    .entries
+                    .iter()
+                    .map(|e| match e {
+                        ActivityEntry::Reasoning { .. } => "R",
+                        ActivityEntry::Tool(_) => "T",
+                    })
+                    .collect();
+                assert_eq!(
+                    shape,
+                    ["R", "T", "R", "T"],
+                    "rounds and tools strictly interleave in arrival order"
+                );
+                let texts: Vec<&str> = t
+                    .entries
+                    .iter()
+                    .filter_map(|e| match e {
+                        ActivityEntry::Reasoning { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    texts,
+                    ["round one thinking", "round two thinking"],
+                    "the second round opened fresh, not appended to the first"
+                );
+            });
+        });
+    }
+
     #[gpui::test]
     fn live_tool_call_splits_the_reasoning_round_in_flight(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);

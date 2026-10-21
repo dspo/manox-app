@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use ahp_types::state::{
     ChatState, InputRequestResponsePart, Message as AhpMessage, MessageKind, ResponsePart,
-    ToolCallState, ToolResultContent, ToolResultTextContent, Turn, UsageInfo,
+    ToolCallState, ToolInput, ToolResultContent, ToolResultTextContent, Turn, UsageInfo,
 };
 use manox_agent::Message;
 use manox_agent::TokenUsage;
@@ -82,14 +82,45 @@ impl ChatEvent {
             A::ChatReasoning(reasoning) => {
                 Some(ChatEvent::AgentThinking(reasoning.content.clone()))
             }
-            A::ChatToolCallStart(start) => {
-                let state = find_tool_call(chat, &start.tool_call_id)?;
-                tool_call_event(&start.tool_call_id, state)
-            }
-            A::ChatToolCallReady(ready) => {
-                let state = find_tool_call(chat, &ready.tool_call_id)?;
-                tool_call_event(&ready.tool_call_id, state)
-            }
+            // The three lifecycle starts are SELF-DESCRIBING: the action
+            // carries the tool's id, name and intention, so a state miss can
+            // only mean the reducer's gate (no active turn, or a turn-id
+            // mismatch) declined to materialize the part — dropping the
+            // event here would drop the round boundary with it, and every
+            // later reasoning delta would append to the round before the
+            // tool (the "thinking keeps appending above a stack of tools"
+            // shape, with the orphaned results rendering as separate
+            // bottom segments). The state lookup enriches; it never gates.
+            A::ChatToolCallStart(start) => match find_tool_call(chat, &start.tool_call_id) {
+                Some(state) => tool_call_event(&start.tool_call_id, state),
+                None => Some(ChatEvent::ToolCall {
+                    id: start.tool_call_id.clone(),
+                    title: tool_identity(&start.tool_name, &start.intention, &start.display_name).1,
+                    name: start.tool_name.clone(),
+                    status: ToolCallStatus::Running,
+                    input: None,
+                }),
+            },
+            A::ChatToolCallReady(ready) => match find_tool_call(chat, &ready.tool_call_id) {
+                Some(state) => tool_call_event(&ready.tool_call_id, state),
+                None => Some(ChatEvent::ToolCall {
+                    id: ready.tool_call_id.clone(),
+                    name: String::new(),
+                    title: ready.intention.clone().unwrap_or_default(),
+                    status: ToolCallStatus::Running,
+                    input: ready.tool_input.as_ref().and_then(|input| match input {
+                        ToolInput::Inline(json) => serde_json::from_str(json).ok(),
+                        // A content-ref input has no inline JSON to
+                        // parse; the row renders input-less until a
+                        // state-bearing event enriches it.
+                        ToolInput::ContentRef(_) => None,
+                    }),
+                }),
+            },
+            // Confirmed carries approval state but no tool identity; with
+            // no state part to name it there is nothing safe to say (a
+            // nameless advance garbles the row it lands on), and the round
+            // boundary already rode the Start event.
             A::ChatToolCallConfirmed(confirmed) => {
                 let state = find_tool_call(chat, &confirmed.tool_call_id)?;
                 tool_call_event(&confirmed.tool_call_id, state)

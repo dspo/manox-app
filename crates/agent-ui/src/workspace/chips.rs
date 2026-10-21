@@ -1025,6 +1025,12 @@ impl Workspace {
                         );
                         store.optimistic_config(&sid, &config);
                         store.set_config(&sid, config);
+                        // The durable pick lands in the object row at once —
+                        // the engine's next-request handshake reads it there.
+                        if let Some(objects) = manox_agent::object_store::ObjectStore::try_global()
+                        {
+                            objects.set_model(&sid, Some(&row.provider), Some(&row.id));
+                        }
                     });
                 });
             },
@@ -1075,6 +1081,11 @@ impl Workspace {
                             let mut config = serde_json::Map::new();
                             config.insert("reasoningEffort".into(), serde_json::json!(effort_str));
                             store.set_config(&sid, config);
+                            if let Some(objects) =
+                                manox_agent::object_store::ObjectStore::try_global()
+                            {
+                                objects.set_reasoning_effort(&sid, Some(effort_str));
+                            }
                         });
                     });
                 }),

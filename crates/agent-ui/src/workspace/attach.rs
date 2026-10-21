@@ -7,6 +7,46 @@
 
 use super::*;
 
+/// Land the object row for a conversation the app has just minted: its
+/// belonging plus the picks it carries. The row is the conversation's
+/// birth — no journal and no session directory exist until the user speaks
+/// — and it is where every surface reads the config back from, so each
+/// create path must land one. A create path that skips this leaves a
+/// conversation with no object behind it, and the pickers then address an
+/// id the store has never seen.
+fn land_conversation_row(
+    sid: &str,
+    project: Option<&std::path::Path>,
+    provider: Option<&str>,
+    model_id: Option<&str>,
+    approval: Option<&str>,
+    effort: Option<&str>,
+) {
+    let Some(objects) = manox_agent::object_store::ObjectStore::try_global() else {
+        return;
+    };
+    objects.create_conversation(sid, project.map(|p| p.to_string_lossy()).as_deref());
+    if provider.is_some() || model_id.is_some() {
+        objects.set_model(sid, provider, model_id);
+    }
+    if let Some(approval) = approval {
+        objects.set_permission_mode(sid, Some(approval));
+    }
+    if let Some(effort) = effort {
+        objects.set_reasoning_effort(sid, Some(effort));
+    }
+}
+
+/// Split the session config's `model` value into the two halves the row
+/// keeps apart. The app writes the wire form (`provider/id`); a value that
+/// carries no provider keeps its id whole.
+fn split_wire_model(model: Option<&str>) -> (Option<&str>, Option<&str>) {
+    match model.and_then(|m| m.split_once('/')) {
+        Some((provider, id)) => (Some(provider), Some(id)),
+        None => (None, model),
+    }
+}
+
 impl Workspace {
     /// Minimal subscription for a thread parked in `background_threads`. Unlike
     /// `subscribe_thread`, this only coordinates running state and the parked
@@ -71,6 +111,12 @@ impl Workspace {
         // `project` the bound folder. The legacy thread mirror is only a
         // pre-snapshot fallback (the #765 round-2 repro: reading the mirror
         // alone lost model AND project on every new thread).
+        //
+        // The inherited *project* is the conversation's belonging, read from
+        // its object row — not its working directory. A project-less
+        // conversation runs in a temporary workspace of its own, and
+        // inheriting that path would file the new thread under a directory
+        // the user never chose.
         let inherited = self.chat.read(cx).store.clone().map(|(store, sid)| {
             let view = store.read(cx);
             let leaf = crate::ahp_store::leaf(&view.book, &sid);
@@ -81,7 +127,8 @@ impl Workspace {
             // inheritance and display cannot diverge unless the host
             // default itself changes between them.
             (
-                leaf.cwd().filter(|p| !p.is_empty()),
+                manox_agent::object_store::ObjectStore::try_global()
+                    .and_then(|objects| objects.project_of(&sid)),
                 leaf.model_id().map(str::to_string),
                 leaf.approval_mode().map(str::to_string),
                 leaf.reasoning_effort().map(str::to_string),
@@ -104,9 +151,38 @@ impl Workspace {
             .to_string();
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
+        // The draft refill: a never-materialized conversation under the
+        // same project (or project-less) is that project's unfinished
+        // draft — return to it instead of minting a sibling. Its row
+        // already carries the model/permission picks the user left there.
+        // The FOREGROUND session and archived rows are excluded: the
+        // landing conversation (created project-less at boot, never
+        // spoken) is itself the latest project-less draft, and a just
+        // archived draft would be resurrected — refilling either would
+        // make "new session" a no-op on the very session it should leave.
+        let foreground = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone());
+        let objects = manox_agent::object_store::ObjectStore::try_global();
+        let refill = objects.as_ref().and_then(|store| {
+            store.latest_draft(
+                project
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .as_deref(),
+            )
+        });
+        let refill =
+            refill.filter(|row| !row.archived && foreground.as_deref() != Some(row.id.as_str()));
         // v3: the id is client-minted; the create carries the inherited
         // config, and the attach lands once the host answered.
-        let sid = uuid::Uuid::new_v4().to_string();
+        let sid = refill
+            .as_ref()
+            .map(|row| row.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let mut config = serde_json::Map::new();
         if let Some(model) = &model {
             config.insert("model".into(), serde_json::json!(model));
@@ -124,6 +200,35 @@ impl Workspace {
         // An empty vector leaves the session directory-less ("choose
         // project" on a thread the user launched FROM a project).
         let cwds = vec![format!("file://{cwd}")];
+        // The object row: created at once, carrying the conversation's
+        // belonging and picks. A refilled draft reuses its row (the picks
+        // it holds win over inheritance); a fresh conversation starts a
+        // new row.
+        let (provider, model_id, approval, effort) = match &refill {
+            Some(row) => (
+                row.model_provider.as_deref(),
+                row.model_id.as_deref(),
+                row.permission_mode.as_deref(),
+                row.reasoning_effort.as_deref(),
+            ),
+            None => {
+                let (provider, model_id) = split_wire_model(model.as_deref());
+                (
+                    provider,
+                    model_id,
+                    approval.as_deref(),
+                    effort_str.as_deref(),
+                )
+            }
+        };
+        land_conversation_row(
+            &sid,
+            project.as_deref(),
+            provider,
+            model_id,
+            approval,
+            effort,
+        );
         let config_for_channel = config.clone();
         let cwd_for_channel = cwd.clone();
         let reply = self.with_foreground_store(cx, |store, _| {
@@ -232,12 +337,11 @@ impl Workspace {
         let old_id = old_thread.read(|t| t.id.0.clone());
         let new_id = new_thread.read(|t| t.id.0.clone());
 
-        // Sub-agent observation is per-thread ephemeral state; drop the
-        // outgoing thread's transcripts AND its live panels before rebinding
-        // (the shell has not stashed the outgoing pane yet — that happens in
-        // the assembly's observer, after this attach — so the panels closed
-        // here are exactly the outgoing thread's).
-        self.clear_subagent_observation(cx);
+        // Sub-agent drill-down tabs are per-thread: close the outgoing
+        // thread's panels before rebinding (the shell has not stashed the
+        // outgoing pane yet — the panels closed here are exactly the
+        // outgoing thread's).
+        self.close_subagent_tabs(cx);
 
         // Save the outgoing thread's unsent composer text before switching, so
         // a draft survives a round-trip through another thread (Bug 1). A
@@ -249,6 +353,14 @@ impl Workspace {
             Some(draft) if self.chat.read(cx).recall_index >= 0 => draft.to_string(),
             _ => self.chat_input(cx).read(cx).value().to_string(),
         };
+        // The durable twin: the object row carries the draft across
+        // restarts (the in-memory stash dies with the process), making the
+        // never-materialized conversation refillable the next time the
+        // user creates under the same project.
+        if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+            let text = outgoing.clone();
+            objects.set_draft(&old_id, (!text.is_empty()).then_some(text.as_str()));
+        }
         self.chat.update(cx, |chat, cx| {
             chat.drafts.insert(old_id.clone(), outgoing);
             cx.notify();
@@ -558,11 +670,17 @@ impl Workspace {
         // has none — without this the previous thread's text would bleed into
         // the new one (Bug 1). `set_value` is silent (no Change event), so
         // re-sync the slash menu by hand in case the draft begins with `/`.
-        let saved = self.chat.update(cx, |chat, cc| {
+        let mut saved = self.chat.update(cx, |chat, cc| {
             let v = chat.drafts.remove(&new_id).unwrap_or_default();
             cc.notify();
             v
         });
+        if saved.is_empty()
+            && let Some(objects) = manox_agent::object_store::ObjectStore::try_global()
+            && let Some(draft) = objects.conversation(&new_id).and_then(|row| row.draft)
+        {
+            saved = draft;
+        }
         self.chat_input(cx)
             .update(cx, |s, cx| s.set_value(saved, window, cx));
         self.sync_completion(window, cx);
@@ -834,10 +952,20 @@ impl Workspace {
         // receipt's minted id attaches through the standard
         // created-session path.
         let cwd_str = cwd.to_string_lossy().to_string();
-        let model_str = model.map(|m| format!("{}/{}", m.provider, m.id));
+        let model_str = model.as_ref().map(|m| format!("{}/{}", m.provider, m.id));
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
         let sid = uuid::Uuid::new_v4().to_string();
+        // The object row, exactly as `start_new_thread` lands it: this
+        // conversation is minted here and never passes through that path.
+        land_conversation_row(
+            &sid,
+            project.as_deref(),
+            model.as_ref().map(|m| m.provider.as_str()),
+            model.as_ref().map(|m| m.id.as_str()),
+            approval.as_deref(),
+            effort_str.as_deref(),
+        );
         let mut config = serde_json::Map::new();
         if let Some(model) = &model_str {
             config.insert("model".into(), serde_json::json!(model));

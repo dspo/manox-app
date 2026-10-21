@@ -388,30 +388,32 @@ pub fn adopt_browser_tab(
 
 // ── sub-agent observation ─────────────────────────────────────────────────
 
-/// The tab id one sub-agent address's panel rides on (the address is the
-/// tab's identity — one panel per subagent).
+/// The tab id one sub-agent run's panel rides on (the run id is the tab's
+/// identity — one panel per run; two runs may share a topic, never an id).
 pub fn subagent_tab_id(address: &str) -> String {
     format!("subagent:{address}")
 }
 
-/// Wrap a built observation panel as a right-pane tab. The panel entity is
-/// built by the workspace (it owns the child transcript the panel renders);
-/// the shell owns placement and teardown.
+/// Wrap a built observation panel as a right-pane tab. The tab's IDENTITY
+/// is the run id (`address`) — `open_tab` dedups by id, so a second run
+/// with the same topic must not collide with the first one's panel — while
+/// the LABEL is the human-facing task topic.
 pub fn subagent_tab(
     address: &str,
+    label: &str,
     panel: Entity<crate::views::subagent_panel::SubagentPanel>,
 ) -> Arc<dyn ToolTab> {
     Arc::new(SubagentTab {
         id: subagent_tab_id(address),
-        label: address.to_string(),
+        label: label.to_string(),
         panel,
     })
 }
 
 struct SubagentTab {
     id: String,
-    /// The subagent's address — the tab label (the panel's own banner shows
-    /// the task topic).
+    /// The tab label — the run's task topic (the panel's own banner shows
+    /// it too).
     label: String,
     /// The observation panel this tab renders; its entity is the tab's
     /// content, so teardown is a store reset.

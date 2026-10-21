@@ -213,12 +213,13 @@ mod macos {
             .read(|st| {
                 st.summaries()
                     .iter()
-                    .filter(|t| !t.archived && t.depth == 0 && t.superseded_by.is_none())
+                    .filter(|t| !t.archived && t.depth == 0)
                     .map(|t| (t.clone(), st.is_running(&t.id)))
                     .collect::<Vec<_>>()
             })
             .into_iter()
-            .map(|(t, running)| SessionRow {
+            .enumerate()
+            .map(|(ix, (t, running))| SessionRow {
                 id: t.id.clone(),
                 short_id: "abcd1234".into(),
                 title: t
@@ -250,6 +251,7 @@ mod macos {
                 // Team rows are filtered out above, so every row is its own
                 // sort unit (production stamping lives in project_forest).
                 sort_stamp: t.updated_at,
+                rank: ix as i64,
                 pinned: t.pinned,
                 archived: t.archived,
             })

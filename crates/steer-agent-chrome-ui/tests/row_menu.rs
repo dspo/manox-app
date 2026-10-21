@@ -73,6 +73,7 @@ fn sample_row(id: &str) -> SessionRow {
         kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
         updated_at: 0,
         sort_stamp: 0,
+        rank: 0,
         pinned: false,
         archived: false,
         tag: None,
@@ -81,14 +82,21 @@ fn sample_row(id: &str) -> SessionRow {
 }
 
 /// A projection-shaped row (post-`project_forest`: members carry their
-/// leader's stamp, everyone else their own clock).
-fn row_data(id: &str, updated_at: i64, sort_stamp: i64, team_leader: bool) -> SessionRowData {
+/// leader's stamp and rank, everyone else their own clock and slot).
+fn row_data(
+    id: &str,
+    updated_at: i64,
+    sort_stamp: i64,
+    rank: i64,
+    team_leader: bool,
+) -> SessionRowData {
     SessionRowData {
         id: id.into(),
         short_id: "abcd1234".into(),
         title: "把 sidebar 的 thread 行改成三行布局".into(),
         updated_at,
         sort_stamp,
+        rank,
         status: SessionStatus::Idle,
         kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
         pinned: false,
@@ -112,6 +120,7 @@ fn external_row(id: &str) -> SessionRow {
         },
         updated_at: 0,
         sort_stamp: 0,
+        rank: i64::MAX,
         pinned: false,
         archived: false,
         tag: None,
@@ -517,8 +526,8 @@ fn crossing_rows_lands_the_hover_on_the_row_under_the_pointer(cx: &mut TestAppCo
 }
 
 /// Pinning a team leader must keep the team contiguous: members carry their
-/// leader's sort stamp, so the pinned-first re-order cannot strand a member
-/// behind the next team (the chevron is the only hierarchy marker).
+/// leader's sort stamp AND rank, so the pinned-first re-order cannot strand
+/// a member behind the next team (the chevron is the only hierarchy marker).
 #[gpui::test]
 fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
     // Built through `from_group` — the stamping under test lives there (via
@@ -531,13 +540,13 @@ fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
         hidden: 0,
         expanded: false,
         rows: vec![
-            row_data("leader-1", 300, 300, true),
+            row_data("leader-1", 300, 300, 0, true),
             // Post-projection shape: the member carries its leader's stamp
-            // (project_forest re-stamps it).
-            row_data("member-1", 150, 300, false),
+            // and rank (project_forest re-stamps it).
+            row_data("member-1", 150, 300, 0, false),
             // A standalone session trailing the team: it must keep its OWN
-            // stamp, not inherit the team's.
-            row_data("standalone", 200, 200, false),
+            // stamp and rank, not inherit the team's.
+            row_data("standalone", 200, 200, 1, false),
         ],
     });
     // The projection stamps the member with its leader; the standalone
@@ -546,6 +555,11 @@ fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
         rows.iter().map(|r| r.sort_stamp).collect::<Vec<_>>(),
         [300, 300, 200],
         "from_group must not leak the team stamp onto the standalone row"
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.rank).collect::<Vec<_>>(),
+        [0, 0, 1],
+        "from_group must not leak the team rank onto the standalone row"
     );
 
     let (_visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
@@ -597,7 +611,8 @@ fn tag_edit_wires_enter_and_escape_keystrokes(cx: &mut TestAppContext) {
     assert_eq!(log.borrow().len(), 1, "escape writes nothing");
 }
 
-/// Time grouping: rows bucket by sort_stamp, collapse rides the STABLE
+/// Time grouping: rows bucket by sort_stamp and order by rank, collapse
+/// rides the STABLE
 /// state key (not the translated display name — the P0 regression where a
 /// collapsed bucket re-expanded the very next frame), and drag reorder is
 /// inert in time mode.
@@ -611,17 +626,29 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
         hidden: 0,
         expanded: false,
         rows: vec![
-            // Team sharing the leader's stamp; the member is NEWER on its
-            // own clock (the classic "member just finished, leader idle")
-            // — the shared sort_stamp must keep it below the leader in the
-            // bucket order, not float it above the chevron. And a member
-            // with a much OLDER own-clock stamp must still land in the
-            // leader's bucket (bucketing by per-row updated_at was the
-            // first-round defect this second row pins).
-            row_data("leader", stamp_days_ago(0), stamp_days_ago(0), true),
-            row_data("member", stamp_days_ago(0) + 60, stamp_days_ago(0), false),
-            row_data("member-old", stamp_days_ago(40), stamp_days_ago(0), false),
-            row_data("old", stamp_days_ago(30), stamp_days_ago(30), false),
+            // Team sharing the leader's stamp and rank; the member is
+            // NEWER on its own clock (the classic "member just finished,
+            // leader idle") — the shared stamp and rank must keep it below
+            // the leader in the bucket order, not float it above the
+            // chevron. And a member with a much OLDER own-clock stamp must
+            // still land in the leader's bucket (bucketing by per-row
+            // updated_at was the first-round defect this second row pins).
+            row_data("leader", stamp_days_ago(0), stamp_days_ago(0), 0, true),
+            row_data(
+                "member",
+                stamp_days_ago(0) + 60,
+                stamp_days_ago(0),
+                0,
+                false,
+            ),
+            row_data(
+                "member-old",
+                stamp_days_ago(40),
+                stamp_days_ago(0),
+                0,
+                false,
+            ),
+            row_data("old", stamp_days_ago(30), stamp_days_ago(30), 1, false),
         ],
     });
     let (mut visual, shell) = mount(cx, Rc::new(RefCell::new(Vec::new())), rows);
@@ -697,6 +724,7 @@ fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
         title: title.into(),
         updated_at: stamp,
         sort_stamp: stamp,
+        rank: 0,
         status: SessionStatus::Idle,
         kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
         pinned: false,

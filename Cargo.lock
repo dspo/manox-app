@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "agent-ui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "ai-elements"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -257,6 +257,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc890384c8602f339876ded803c97ad529f3842aba97f6392b3dba0dd171769b"
 dependencies = [
  "equator",
+]
+
+[[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
+dependencies = [
+ "alloc-no-stdlib",
 ]
 
 [[package]]
@@ -511,6 +526,7 @@ dependencies = [
  "compression-core",
  "futures-io",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -1054,6 +1070,27 @@ checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
 dependencies = [
  "bytes",
  "cfg_aliases 0.2.2",
+]
+
+[[package]]
+name = "brotli"
+version = "8.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
 ]
 
 [[package]]
@@ -1653,6 +1690,7 @@ version = "0.4.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef16c47ba2797aa6a909cc37d39911f3a6743811fe7408ac0b0cc0276b656e9"
 dependencies = [
+ "brotli",
  "bzip2",
  "compression-core",
  "flate2",
@@ -2085,7 +2123,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cx"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2110,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "cx-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3542,7 +3580,7 @@ dependencies = [
  "itertools 0.13.0",
  "lsp-types",
  "markdown",
- "markup5ever_rcdom",
+ "markup5ever_rcdom 0.3.0",
  "num-traits",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -4453,15 +4491,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "html2text"
-version = "0.17.1"
+name = "htmd"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1c97eea9d3e6524d8d2a4643ce0e3135500c4c7ca1d02393a485f871bef69d8"
+checksum = "efd66117e0b1eac329399e316f30b9530afcb7cfbd0df59a007023b6673a6c37"
 dependencies = [
- "html5ever 0.39.0",
- "tendril 0.5.1",
- "thiserror 2.0.21",
- "unicode-width 0.2.0",
+ "html5ever 0.38.0",
+ "markup5ever_rcdom 0.38.0+unofficial",
+ "phf 0.13.1",
 ]
 
 [[package]]
@@ -4492,12 +4529,12 @@ dependencies = [
 
 [[package]]
 name = "html5ever"
-version = "0.39.0"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46a1761807faccc9a19e86944bbf40610014066306f96edcdedc2fb714bcb7b8"
+checksum = "1054432bae2f14e0061e33d23402fbaa67a921d319d56adc6bcf887ddad1cbc2"
 dependencies = [
  "log",
- "markup5ever 0.39.0",
+ "markup5ever 0.38.0",
 ]
 
 [[package]]
@@ -4637,8 +4674,8 @@ dependencies = [
 
 [[package]]
 name = "hyperlinks"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 
 [[package]]
 name = "iana-time-zone"
@@ -5702,8 +5739,8 @@ dependencies = [
 
 [[package]]
 name = "manox-agent"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5713,17 +5750,19 @@ dependencies = [
  "brush-core",
  "brush-parser",
  "chrono",
+ "encoding_rs",
  "futures",
  "globset",
  "grep-regex",
  "grep-searcher",
- "html2text",
+ "htmd",
  "http",
  "ignore",
  "image",
  "libc",
  "manox-harness",
  "manox-providers",
+ "markup5ever_rcdom 0.38.0+unofficial",
  "parking_lot",
  "reqwest 0.12.28",
  "rmcp",
@@ -5742,6 +5781,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
+ "url",
  "uuid",
  "xxhash-rust",
  "zstd",
@@ -5749,8 +5789,8 @@ dependencies = [
 
 [[package]]
 name = "manox-ahp"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -5768,8 +5808,8 @@ dependencies = [
 
 [[package]]
 name = "manox-ahp-runtime"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -5796,8 +5836,8 @@ dependencies = [
 
 [[package]]
 name = "manox-harness"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5833,7 +5873,7 @@ dependencies = [
 [[package]]
 name = "manox-providers"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -5845,8 +5885,8 @@ dependencies = [
 
 [[package]]
 name = "manox-session-core"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -5872,8 +5912,8 @@ dependencies = [
 
 [[package]]
 name = "manox-terminal"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5897,8 +5937,8 @@ dependencies = [
 
 [[package]]
 name = "manox-workspace"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5951,9 +5991,9 @@ dependencies = [
 
 [[package]]
 name = "markup5ever"
-version = "0.39.0"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7122d987ec5f704ee56f6e5b41a7d93722e9aae27ae07cafa4036c4d3f9757de"
+checksum = "8983d30f2915feeaaab2d6babdd6bc7e9ed1a00b66b5e6d74df19aa9c0e91862"
 dependencies = [
  "log",
  "tendril 0.5.1",
@@ -5969,7 +6009,19 @@ dependencies = [
  "html5ever 0.27.0",
  "markup5ever 0.12.1",
  "tendril 0.4.3",
- "xml5ever",
+ "xml5ever 0.18.1",
+]
+
+[[package]]
+name = "markup5ever_rcdom"
+version = "0.38.0+unofficial"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "333171ccdf66e915257740d44e38ea5b1b19ce7b45d33cc35cb6f118fbd981ff"
+dependencies = [
+ "html5ever 0.38.0",
+ "markup5ever 0.38.0",
+ "tendril 0.5.1",
+ "xml5ever 0.38.0",
 ]
 
 [[package]]
@@ -9581,7 +9633,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "steer-agent-chat-ui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -9611,7 +9663,7 @@ dependencies = [
 
 [[package]]
 name = "steer-agent-chrome-ui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ai-elements",
  "anyhow",
@@ -9634,7 +9686,7 @@ dependencies = [
 
 [[package]]
 name = "steer-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agent-ui",
  "anyhow",
@@ -9662,7 +9714,7 @@ dependencies = [
 
 [[package]]
 name = "steer-components"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -9670,6 +9722,7 @@ dependencies = [
  "gpui-pre",
  "hyperlinks",
  "log",
+ "markdown",
  "ropey",
  "vte",
 ]
@@ -9702,7 +9755,7 @@ dependencies = [
 
 [[package]]
 name = "steer-i18n"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "fluent",
@@ -9713,7 +9766,7 @@ dependencies = [
 
 [[package]]
 name = "steer-webview"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -9734,7 +9787,7 @@ dependencies = [
 
 [[package]]
 name = "steer-webview-macros"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "http",
  "proc-macro2",
@@ -9788,6 +9841,7 @@ dependencies = [
  "parking_lot",
  "phf_shared 0.13.1",
  "precomputed-hash",
+ "serde",
 ]
 
 [[package]]
@@ -9871,8 +9925,8 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "supervisor"
-version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.4.0#4d3fc58e7f00e4348a33ef93130af50380680e04"
+version = "1.0.0"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -10249,7 +10303,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-ui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "gpui-component",
@@ -10705,12 +10759,17 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
+ "async-compression",
  "bitflags 2.13.2",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -13288,6 +13347,16 @@ dependencies = [
  "log",
  "mac",
  "markup5ever 0.12.1",
+]
+
+[[package]]
+name = "xml5ever"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3dc9559429edf0cd3f327cc0afd9d6b36fa8cec6d93107b7fbe64f806b5f2d9"
+dependencies = [
+ "log",
+ "markup5ever 0.38.0",
 ]
 
 [[package]]

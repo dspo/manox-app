@@ -278,15 +278,6 @@ fn composer_key_context(completion_open: bool) -> &'static str {
     }
 }
 
-/// The Captain's dispatch prompt for one sub-agent address, with the Unix
-/// second it was sent: a sub-agent panel's opening bubble shows the send time,
-/// never the time its tab was opened.
-#[derive(Debug, Clone)]
-struct SubagentPrompt {
-    text: String,
-    dispatched_at: i64,
-}
-
 /// The open sub-agent stream page: the run it renders, the child chat's fold
 /// version it was last built from (a re-subscribe that carried nothing new
 /// must not churn the page), the page entity, the refresh poll (alive while
@@ -452,17 +443,13 @@ pub struct Workspace {
     _mux_lists: gpui::Subscription,
     _rail_updates: gpui::Subscription,
     /// Accumulated child-session events per Agent tool-call id, so a panel
-    /// opened mid-run backfills from the start.
-    subagent_transcripts: HashMap<String, Vec<manox_agent::SubagentChildEvent>>,
     /// Latest completion text per subagent address (from SubagentProgress
     /// status=Success/Error), used as the panel's final answer when the
     /// Agent tool-result is absent (new Steer bus has no ToolResult).
-    subagent_final_text: HashMap<String, String>,
     /// The Captain's dispatch prompt per subagent address with its send time,
     /// captured from the Steer tool call so a panel always shows the opening
     /// user message — correctly attributed and timed — even before the child
     /// streams anything.
-    subagent_prompts: HashMap<String, SubagentPrompt>,
     /// Lazily-built browser tab entities, keyed by `BrowserTabId`. A browser
     /// tab keeps its `BrowserView` (and the underlying native webview) across
     /// tab switches; dropped when the tab closes, which detaches the native
@@ -687,12 +674,17 @@ impl Workspace {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The launch directory is the conversation's anchor: a terminal
+        // launch from a project dir (e.g. `cargo run` inside the repo)
+        // starts a conversation that belongs to that project — the claim's
+        // working directory decides the core bucket the sidebar groups by.
+        // `/` is the GUI-launch signature on macOS: an unbound conversation
+        // must not anchor there, so home is the neutral default; binding a
+        // project via the chip / project "+" overrides it later.
         let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        // An unbound conversation must not inherit the launch terminal's
-        // cwd as its working directory — that is an arbitrary project dir
-        // (or `/` under a GUI launch). Home is the neutral default; binding
-        // a project via the chip / project "+" overrides it later.
-        if let Some(home) = manox_agent::paths::home_dir() {
+        if (!cwd.is_absolute() || cwd.as_path() == "/")
+            && let Some(home) = manox_agent::paths::home_dir()
+        {
             cwd = home;
         }
         // L11: the process-global server — every window and the embedded
@@ -715,6 +707,11 @@ impl Workspace {
         let multiplexer =
             cx.new(|_| crate::multiplexer::SessionMultiplexer::new(ahp_store.clone(), cwd.clone()));
         let session_id = landing_id.clone();
+        // The landing conversation is a project-less object row at boot —
+        // one sqlite write, no journal, no directory, until the user speaks.
+        if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+            objects.create_conversation(&session_id, None);
+        }
         multiplexer.update(cx, |m, cx| {
             m.create_session(&session_id, cx);
             // GW5: the landing session is the focused one from tick one —
@@ -748,19 +745,25 @@ impl Workspace {
         // rides the Projects mirror, the per-thread projects ride the rows).
         let _mux_lists = cx.observe(&multiplexer, |_, _, cx| cx.notify());
         let conversation = cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead));
-        let context_rail = {
-            let rail_store = (store.clone(), session_id.clone());
-            cx.new(|cx| crate::views::context_rail::ContextRail::new(Some(rail_store), cx))
-        };
+
+        let weak_ws = cx.weak_entity();
+        let chat_host: steer_agent_chat_ui::host::ChatHostHandle =
+            std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
         // The rail's background writers (git refresh, subagent progress,
         // plan snapshots) notify only the rail entity; without this
         // observer those notifies never schedule a frame — the changes
         // surface on the next unrelated repaint (silent, self-healing
-        // lag).
+        // lag). The rail's agents rows drill into the child sessions
+        // through the same host the conversation cards use.
+        let context_rail = {
+            let rail_store = (store.clone(), session_id.clone());
+            cx.new(|cx| {
+                let mut rail = crate::views::context_rail::ContextRail::new(Some(rail_store), cx);
+                rail.host = Some(chat_host.clone());
+                rail
+            })
+        };
         let rail_updates = cx.observe(&context_rail, |_, _, cx| cx.notify());
-        let weak_ws = cx.weak_entity();
-        let chat_host: steer_agent_chat_ui::host::ChatHostHandle =
-            std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
 
         let mut ws = Self {
             cwd: cwd.clone(),
@@ -770,9 +773,6 @@ impl Workspace {
             background_threads: Vec::new(),
             _mux_lists,
             _rail_updates: rail_updates,
-            subagent_transcripts: HashMap::new(),
-            subagent_final_text: HashMap::new(),
-            subagent_prompts: HashMap::new(),
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
             externals: Vec::new(),
@@ -3030,6 +3030,12 @@ impl Workspace {
             config.insert("approvalMode".into(), serde_json::json!(mode_wire));
             store.optimistic_config(&sid, &config);
             store.set_config(&sid, config);
+            // The durable pick lands in the object row at once; the engine's
+            // request-boundary handshake applies it (with a notice) from
+            // there on the next message.
+            if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+                objects.set_permission_mode(&sid, Some(&mode_wire));
+            }
         });
         self.add_info_message(
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),

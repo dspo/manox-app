@@ -47,6 +47,11 @@ pub struct ThreadRow {
     /// summary): the host persists it (`session/isArchivedChanged`), the
     /// chrome menu's archive toggle dispatches it back.
     pub archived: bool,
+    /// The row's position in the HOST's sidebar order (0 = top). The
+    /// chrome re-sorts rows by `(pinned, rank)` locally, so carrying the
+    /// rank lets that sort reproduce the host order exactly — no local
+    /// timestamp can reshuffle it. `i64::MAX` (unranked) sorts last.
+    pub rank: i64,
 }
 
 impl ThreadRow {
@@ -87,14 +92,18 @@ impl ThreadRow {
             updated_at: chrono::DateTime::parse_from_rfc3339(&summary.modified_at)
                 .map(|t| t.timestamp())
                 .unwrap_or(0),
+            // Unranked until the multiplexer assigns the host order's
+            // position; the default sorts last.
+            rank: i64::MAX,
         }
     }
 }
 
 /// Project one wire row: the row's own wire flag is the single unread
-/// source (the official IsRead bit folded from the protocol). The sort
-/// stamp defaults to the row's own last-active time; a team's members are
-/// re-stamped to their leader's by [`project_forest`].
+/// source (the official IsRead bit folded from the protocol). The time
+/// stamp and the host rank ride separately — the stamp is a real unix
+/// time the chrome's recency buckets decode, the rank its order key; a
+/// team's members are re-stamped to their leader's by [`project_forest`].
 pub fn project_row(item: &ThreadRow) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),
@@ -102,6 +111,7 @@ pub fn project_row(item: &ThreadRow) -> SessionRowData {
         title: item.title.clone(),
         updated_at: item.updated_at,
         sort_stamp: item.updated_at,
+        rank: item.rank,
         status: five_state(item),
         kind: SessionRowKind::Thread,
         pinned: item.pinned,
@@ -133,7 +143,7 @@ pub fn five_state(item: &ThreadRow) -> SessionStatus {
 /// rows (the wire's team nesting is never deeper — pi sub-agents — so no
 /// recursion is needed). Members no longer indent — the leader's chevron is
 /// the only nesting marker, and the projection re-stamps each member's
-/// `sort_stamp` to its leader's `updated_at` so the team sorts (and survives
+/// `sort_stamp` and `rank` to its leader's so the team sorts (and survives
 /// a pin re-order) as one unit. Orphans (a parent that is missing,
 /// archived, or outside the partition) flatten to top-level rather than
 /// vanishing, keeping their own stamp.
@@ -149,10 +159,12 @@ pub fn project_forest(rows: &[ThreadRow]) -> Vec<SessionRowData> {
                 .collect();
             leader.team_leader = !members.is_empty();
             let unit_stamp = leader.sort_stamp;
+            let unit_rank = leader.rank;
             out.push(leader);
             for m in members {
                 let mut member = project_row(m);
                 member.sort_stamp = unit_stamp;
+                member.rank = unit_rank;
                 out.push(member);
             }
         } else {
@@ -176,7 +188,11 @@ pub fn project_forest(rows: &[ThreadRow]) -> Vec<SessionRowData> {
 /// overlay ([`crate::project_registry`]): a row whose effective project sits
 /// in the set groups as loose, the v2 store's remove-project semantics — the
 /// folder dissolves, the history stays.
-pub fn project_groups(rows: &[ThreadRow], removed: &HashSet<String>) -> Vec<SessionGroup> {
+pub fn project_groups(
+    rows: &[ThreadRow],
+    folders: &[(String, Option<String>)],
+    removed: &HashSet<String>,
+) -> Vec<SessionGroup> {
     // The effective grouping project: the row's own, minus removed paths (a
     // removed row keeps its row data — it re-buckets, it does not vanish).
     let effective = |row: &ThreadRow| -> Option<String> {
@@ -187,9 +203,42 @@ pub fn project_groups(rows: &[ThreadRow], removed: &HashSet<String>) -> Vec<Sess
     let mut order: Vec<String> = Vec::new();
     let mut buckets: HashMap<String, Vec<ThreadRow>> = HashMap::new();
     let mut bucket_project: HashMap<String, Option<String>> = HashMap::new();
+    // The durable project skeleton first: a folder renders even with zero
+    // rows — archiving every conversation never dissolves the project. The
+    // alias is the folder's own name; the directory segment is the fallback.
+    // The path→name map is also the row-filing index: a row joins its
+    // project's folder by PATH, so a non-empty alias cannot split the
+    // project into an empty alias head plus a basename-headed row bucket.
+    let folder_name: HashMap<&str, String> = folders
+        .iter()
+        .filter(|(path, _)| !removed.contains(path))
+        .map(|(path, alias)| {
+            (
+                path.as_str(),
+                alias
+                    .clone()
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or_else(|| project_label(path)),
+            )
+        })
+        .collect();
+    for (path, _) in folders {
+        if removed.contains(path) {
+            continue;
+        }
+        let name = folder_name[path.as_str()].clone();
+        if !buckets.contains_key(&name) {
+            order.push(name.clone());
+            bucket_project.insert(name.clone(), Some(path.clone()));
+        }
+        buckets.entry(name).or_default();
+    }
     for row in rows {
         let project = effective(row);
-        let key = project_label(project.as_deref().unwrap_or(""));
+        let key = project
+            .as_ref()
+            .and_then(|p| folder_name.get(p.as_str()).cloned())
+            .unwrap_or_else(|| project_label(project.as_deref().unwrap_or("")));
         if !buckets.contains_key(&key) {
             order.push(key.clone());
             bucket_project.insert(key.clone(), project);
@@ -199,7 +248,7 @@ pub fn project_groups(rows: &[ThreadRow], removed: &HashSet<String>) -> Vec<Sess
     order
         .into_iter()
         .map(|name| SessionGroup {
-            rows: project_forest(buckets.get(&name).expect("bucket just built")),
+            rows: project_forest(buckets.get(&name).map(Vec::as_slice).unwrap_or(&[])),
             key: name.clone(),
             project: bucket_project.get(&name).cloned().flatten(),
             name,
@@ -237,6 +286,7 @@ mod tests {
             pending_plan: false,
             pinned: false,
             archived: false,
+            rank: 0,
             parent_id: parent.map(|p| p.to_string()),
             depth,
             project: Some("/p/wire".into()),
@@ -278,6 +328,10 @@ mod tests {
         rows[0].updated_at = 300;
         rows[1].updated_at = 150;
         rows[2].archived = true;
+        rows[0].rank = 0;
+        rows[1].rank = 5;
+        rows[2].rank = 2;
+        rows[3].rank = 9;
         let out = project_forest(&rows);
         let ids: Vec<(&str, bool)> = out.iter().map(|r| (r.id.as_str(), r.team_leader)).collect();
         assert_eq!(
@@ -293,12 +347,15 @@ mod tests {
         assert_eq!(out[1].updated_at, 150);
         assert!(out[2].archived);
         assert!(!out[0].archived);
-        // The team shares one sort stamp (the leader's); a flattened orphan
-        // keeps its own.
+        // The team shares one sort stamp AND one host rank (the leader's);
+        // a flattened orphan and an unrelated top row keep their own.
         assert_eq!(out[0].sort_stamp, 300);
-        assert_eq!(out[1].sort_stamp, 300);
+        assert_eq!(out[0].rank, 0);
+        assert_eq!(out[1].sort_stamp, out[0].sort_stamp);
+        assert_eq!(out[1].rank, out[0].rank);
         assert_eq!(out[2].sort_stamp, 0);
-        assert_eq!(out[3].sort_stamp, 0);
+        assert_eq!(out[2].rank, 2);
+        assert_eq!(out[3].rank, 9);
     }
 
     #[test]
@@ -307,7 +364,7 @@ mod tests {
         rows[1].project = None;
         rows[1].tag = Some("mytag".into());
         rows[1].pinned = true;
-        let groups = project_groups(&rows, &HashSet::new());
+        let groups = project_groups(&rows, &[], &HashSet::new());
         let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, vec!["wire", "Chats"]);
         let chats = &groups[1].rows[0];
@@ -319,13 +376,84 @@ mod tests {
     /// a removed project re-buckets to loose WITHOUT losing its rows, and a
     /// no-project group carries no path.
     #[test]
+    fn folder_skeleton_renders_empty_projects_with_aliases() {
+        let mut rows = vec![row("a", 0, None)];
+        rows[0].project = Some("/p/live".into());
+        let folders = vec![
+            ("/p/empty".to_string(), Some("空项目".to_string())),
+            ("/p/live".to_string(), None),
+        ];
+        let removed: HashSet<String> = HashSet::new();
+        let groups = project_groups(&rows, &folders, &removed);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "空项目", "the alias is the folder's name");
+        assert_eq!(groups[0].rows.len(), 0, "an emptied project still renders");
+        assert_eq!(groups[0].project.as_deref(), Some("/p/empty"));
+        assert_eq!(groups[1].name, "live");
+        assert_eq!(groups[1].rows.len(), 1);
+    }
+
+    /// A non-empty alias names the folder but never re-keys it: the
+    /// project's rows file under the alias head by PATH, not under a second
+    /// basename-headed bucket beside an empty alias head.
+    #[test]
+    fn an_aliased_folder_absorbs_its_rows_by_path() {
+        let mut rows = vec![row("a", 0, None), row("b", 0, None)];
+        rows[0].project = Some("/p/live".into());
+        rows[1].project = Some("/p/live".into());
+        let folders = vec![("/p/live".to_string(), Some("别名".to_string()))];
+        let groups = project_groups(&rows, &folders, &HashSet::new());
+        assert_eq!(groups.len(), 1, "one head, no basename twin");
+        assert_eq!(groups[0].name, "别名");
+        assert_eq!(groups[0].project.as_deref(), Some("/p/live"));
+        assert_eq!(groups[0].rows.len(), 2);
+    }
+
+    /// A skeleton folder whose project was client-removed dissolves; its
+    /// rows (if any) re-bucket loose.
+    #[test]
+    fn a_removed_skeleton_folder_dissolves() {
+        let mut rows = vec![row("a", 0, None)];
+        rows[0].project = Some("/p/gone".into());
+        let folders = vec![("/p/gone".to_string(), None)];
+        let removed: HashSet<String> = ["/p/gone".to_string()].into_iter().collect();
+        let groups = project_groups(&rows, &folders, &removed);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "Chats");
+    }
+
+    /// The chrome re-sorts by `(pinned, rank)` locally; the projection
+    /// carries the HOST rank verbatim so that sort reproduces the host
+    /// order — no local timestamp reshuffles it. The sort stamp stays a
+    /// real unix time (the recency buckets decode it), never a rank.
+    #[test]
+    fn the_rank_carries_the_host_order_and_the_stamp_stays_a_time() {
+        let mut rows = [row("a", 0, None), row("b", 0, None)];
+        rows[0].rank = 0;
+        rows[0].updated_at = 1_700_000_000;
+        rows[1].rank = 1;
+        rows[1].updated_at = 1_700_000_500;
+        let projected: Vec<_> = rows.iter().map(project_row).collect();
+        // Order key: the rank ascending reproduces the host order.
+        let mut sorted = projected.clone();
+        sorted.sort_by_key(|r| r.rank);
+        assert_eq!(sorted[0].id, "a");
+        assert_eq!(sorted[1].id, "b");
+        // The stamp is the row's own last-active time, bucket-decodable.
+        assert_eq!(projected[0].sort_stamp, 1_700_000_000);
+        assert_eq!(projected[1].sort_stamp, 1_700_000_500);
+    }
+
+    /// Removed project paths re-bucket their rows loose (the v2
+    /// remove-project semantics): the folder dissolves, the history stays.
+    #[test]
     fn groups_carry_project_and_removed_paths_rebucket_to_loose() {
         let mut rows = vec![row("a", 0, None), row("b", 0, None), row("c", 0, None)];
         rows[0].project = None;
         rows[1].project = Some("/p/wire".into());
         rows[2].project = Some("/p/wire".into());
         let removed: HashSet<String> = ["/p/wire".to_string()].into_iter().collect();
-        let groups = project_groups(&rows, &removed);
+        let groups = project_groups(&rows, &[], &removed);
         // Everything loose: one "Chats" bucket, no project path on it.
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].name, "Chats");
@@ -337,7 +465,7 @@ mod tests {
         );
 
         // Without the removal, the bucket is the project group with the path.
-        let groups = project_groups(&rows, &HashSet::new());
+        let groups = project_groups(&rows, &[], &HashSet::new());
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].name, "Chats");
         assert_eq!(groups[0].project, None);

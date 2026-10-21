@@ -1296,18 +1296,18 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let project = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
-            let view = store.read(cx);
-            crate::ahp_store::leaf(&view.book, &sid)
-                .cwd()
+        // The chip names the conversation's *project*, read from its object
+        // row — not its working directory. The two are disjoint: a
+        // project-less conversation runs in a temporary workspace of its own,
+        // and showing that path would name a directory the user never chose.
+        let project = self.chat.read(cx).store.clone().and_then(|(_, sid)| {
+            manox_agent::object_store::ObjectStore::try_global()
+                .and_then(|objects| objects.project_of(&sid))
                 .map(std::path::PathBuf::from)
         });
         let open = self.chat.read(cx).project_chip_open;
         let workspace = cx.entity().downgrade();
 
-        // The directory identity is the workspace row accounting this
-        // session (dsh parity); the session's own project mirror is the
-        // fallback for sessions no row accounts (loose).
         let (icon, label): (Option<IconName>, SharedString) = match &project {
             Some(dir) => {
                 let name = dir
@@ -1317,9 +1317,11 @@ impl Workspace {
                     .to_string();
                 (Some(IconName::FolderOpen), name.into())
             }
+            // No project: the special project, which reads as the plain
+            // conversation folder it is grouped under.
             None => (
                 Some(IconName::FolderOpen),
-                i18n::t("workspace-project-choose"),
+                i18n::t("workspace-project-unfiled"),
             ),
         };
 
@@ -1393,12 +1395,19 @@ impl Workspace {
                             .and_then(serde_json::Value::as_array)
                             .map(|rows| {
                                 rows.iter()
-                                    .filter_map(serde_json::Value::as_str)
-                                    // The row names the directory the way the
-                                    // sidebar groups name it; the full path
-                                    // stays on the row's tooltip.
-                                    .map(|p| {
-                                        (p.to_string(), crate::sidebar_projection::project_label(p))
+                                    .filter_map(|row| {
+                                        let p = row.get("path")?.as_str()?;
+                                        // The alias is the project's own
+                                        // display name; the directory segment
+                                        // is the fallback.
+                                        let label = row
+                                            .get("alias")
+                                            .and_then(serde_json::Value::as_str)
+                                            .map(str::to_string)
+                                            .unwrap_or_else(|| {
+                                                crate::sidebar_projection::project_label(p)
+                                            });
+                                        Some((p.to_string(), label))
                                     })
                                     .collect()
                             })
@@ -1726,6 +1735,20 @@ impl Workspace {
                     });
                     tracing::info!(path = %path.display(), "project pick SetCwd");
                     Self::register_project_in_store(&path, cx);
+                    // Belonging is the attach decision: the row owns it and
+                    // the sidebar groups by it. The SetCwd above only moves
+                    // a not-yet-interacted session's working directory.
+                    let sid = this
+                        .chat
+                        .read(cx)
+                        .store
+                        .as_ref()
+                        .map(|(_, sid)| sid.clone());
+                    if let Some(sid) = sid
+                        && let Some(objects) = manox_agent::object_store::ObjectStore::try_global()
+                    {
+                        objects.attach(&sid, &path.to_string_lossy());
+                    }
                 }
                 cx.notify();
             })

@@ -6,81 +6,53 @@
 
 use super::*;
 
-/// The call id, uniform across every lifecycle state.
-fn tool_call_id_of(call: &ahp_types::state::ToolCallState) -> &str {
-    use ahp_types::state::ToolCallState as T;
-    match call {
-        T::Streaming(s) => &s.tool_call_id,
-        T::PendingConfirmation(s) => &s.tool_call_id,
-        T::Running(s) => &s.tool_call_id,
-        T::AuthRequired(s) => &s.tool_call_id,
-        T::PendingResultConfirmation(s) => &s.tool_call_id,
-        T::Completed(s) => &s.tool_call_id,
-        T::Cancelled(s) => &s.tool_call_id,
-        T::Unknown(_) => "",
-    }
-}
-
 impl Workspace {
-    /// Open (or focus) a sub-agent observation panel in the right pane. The
-    /// tab label is the subagent's address (`id`); the panel's banner shows
-    /// `topic` — the shared `subagent_topic` derivation the rail and
-    /// conversation rows use.
+    /// Sub-agent drill-down tabs are per-thread ephemeral state: close the
+    /// outgoing thread's panels before rebinding (the transcript itself is
+    /// the child session's own fold now — there is nothing local to clear).
+    pub(super) fn close_subagent_tabs(&mut self, cx: &mut Context<Self>) {
+        crate::chrome_assembly::close_tool_tabs_of_kind("subagent", cx);
+    }
+
+    /// Open (or focus) a sub-agent drill-down in the right pane. The run id
+    /// names the child session (the swarm invariant): the multiplexer
+    /// attaches it and the panel observes the child's own chat fold — the
+    /// journal replays through the child's event bucket and the panel fills
+    /// live, from settling through active to its settled end state.
     pub(crate) fn open_subagent_tab(
         &mut self,
         id: &str,
-        subagent_type: &str,
+        _subagent_type: &str,
         topic: &str,
         status: manox_agent::ToolCallStatus,
         cx: &mut Context<Self>,
     ) {
-        let backfill = self
-            .subagent_transcripts
-            .get(id)
-            .cloned()
-            .unwrap_or_default();
-        let final_text = if backfill.is_empty() {
-            self.agent_final_text(id, cx)
-                .or_else(|| self.subagent_final_text.get(id).cloned())
-        } else {
-            None
-        };
+        self.multiplexer
+            .update(cx, |m, cx| m.open_or_create(id, true, cx));
+        let source = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(store, _)| (store.clone(), id.to_string()));
         let banner = if topic.is_empty() {
             id.to_string()
         } else {
             topic.to_string()
         };
-        let recipient = if subagent_type.is_empty() {
-            "sub-agent".to_string()
-        } else {
-            subagent_type.to_string()
-        };
-        // Transcript rows name the model that runs the child: the child reports
-        // its resolved model at dispatch (`SubagentChildEvent::Model`), and the
-        // parent's live label stands in until one is known.
-        let role = backfill
-            .iter()
-            .find_map(|event| match event {
-                manox_agent::SubagentChildEvent::Model(model) => Some(model.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| self.model_label(cx));
-        let prompt = self.subagent_prompts.get(id).cloned();
         let panel = crate::views::subagent_panel::SubagentPanel::new(
-            banner,
-            role,
-            recipient,
+            banner.clone(),
+            self.model_label(cx),
             status,
-            &backfill,
-            prompt.map(|p| (p.text, p.dispatched_at)),
-            final_text,
             self.chat.read(cx).host.clone(),
+            source,
             cx,
         );
-        let tab = crate::tool_tabs::subagent_tab(id, panel);
-        // The pane open runs on the event path: opening it from inside this
-        // entity's update would re-enter the Workspace (the tab's own `open`
-        // reaches the workspace store) while it is leased.
+        // The tab's identity is the run id (one panel per run — open_tab
+        // dedups by id, so topic-colliding runs must not share a tab);
+        // the label is the task topic, not the bare run id — a row of hex
+        // tails cannot be told apart.
+        let tab = crate::tool_tabs::subagent_tab(id, &banner, panel);
         let address = id.to_string();
         cx.defer(move |cx| {
             if !crate::chrome_assembly::open_tool_tab(tab, cx) {
@@ -90,61 +62,6 @@ impl Workspace {
                 );
             }
         });
-    }
-
-    /// Final answer of a finished Agent call, for panels opened after a
-    /// reload when no live transcript was accumulated. T10c: reads the v2
-    /// display fold (the message rows ARE the transcript).
-    pub(super) fn agent_final_text(&self, id: &str, cx: &App) -> Option<String> {
-        self.chat.read(cx).store.as_ref().and_then(|(store, sid)| {
-            let view = store.read(cx);
-            crate::ahp_store::leaf(&view.book, sid).chat.map(|chat| {
-                chat.turns
-                    .iter()
-                    .flat_map(|t| t.response_parts.iter())
-                    .find_map(|part| match part {
-                        ahp_types::state::ResponsePart::ToolCall(call)
-                            if tool_call_id_of(&call.tool_call) == id =>
-                        {
-                            match &call.tool_call {
-                                ahp_types::state::ToolCallState::Completed(c) => {
-                                    Some(c.content.as_deref().map(|blocks| {
-                                        blocks
-                                            .iter()
-                                            .filter_map(|b| match b {
-                                                ahp_types::state::ToolResultContent::Text(t) => {
-                                                    Some(t.text.as_str())
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    }))
-                                }
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or(None)
-                    .unwrap_or_default()
-            })
-        })
-    }
-
-    /// Drop the per-thread sub-agent observation state: the accumulated child
-    /// transcripts, and every observation panel mounted in the live pane.
-    ///
-    /// The panels must go with it. A panel renders the transcript accumulated
-    /// up to its open, and the shell's per-thread stash would carry it across
-    /// the switch — it would then show the thread's history only as of the
-    /// moment it was left, while the catch-up refills `subagent_transcripts`
-    /// behind it. Retiring them here keeps "a panel shows the transcript as of
-    /// its open" true for the reopened one (the rail row reopens from the
-    /// fresh transcript).
-    pub(super) fn clear_subagent_observation(&mut self, cx: &mut Context<Self>) {
-        self.subagent_transcripts.clear();
-        crate::chrome_assembly::close_tool_tabs_of_kind("subagent", cx);
     }
 
     /// Rebuild the per-thread sub-agent observation state (rail rows + panel
@@ -161,17 +78,6 @@ impl Workspace {
     ) {
         for row in rows {
             let first_line = crate::conversation::first_line(&row.prompt);
-            self.subagent_prompts.insert(
-                row.address.clone(),
-                SubagentPrompt {
-                    text: row.prompt.clone(),
-                    dispatched_at: row.dispatched_at,
-                },
-            );
-            if let Some(text) = &row.final_text {
-                self.subagent_final_text
-                    .insert(row.address.clone(), text.clone());
-            }
             self.chat_rail(cx).update(cx, |r, cx| {
                 r.apply_subagent_progress(
                     &row.address,

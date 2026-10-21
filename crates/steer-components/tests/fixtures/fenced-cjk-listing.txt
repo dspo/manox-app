@@ -1,0 +1,14 @@
+== synth/project-alpha :: fix/resize-behavior
+  PR!101 [merged] ->main 2026-01-02 fix(ui): 窗口缩放行为显式声明，缩放语义不再依赖默认值
+  PR!102 [merged] ->main 2026-01-03 docs: 修正配置路径说明到 ~/.config/synth
+== synth/project-alpha :: docs/config-path
+  PR!102 [merged] ->main 2026-01-03 docs: 修正配置路径说明到 ~/.config/synth
+== synth/project-alpha :: chore/deps-routine
+  PR!103 [open] ->main 2026-01-04 chore: 例行依赖维护，锁文件随同一标签整体移动
+== synth/project-beta :: feat/detail-enrich
+  PR!104 [merged] ->main 2026-01-05 feat(api): 详情页字段显式声明，列表语义不再依赖默认拼装
+  PR!105 [merged] ->main 2026-01-06 test: 补齐边界用例（空串、纯 ASCII、纯 CJK、混排）
+== synth/project-beta :: fix/resize-behavior
+  PR!101 [merged] ->main 2026-01-02 fix(ui): 窗口缩放行为显式声明，缩放语义不再依赖默认值
+== synth/project-gamma :: docs/glyph-metrics
+  PR!106 [merged] ->main 2026-01-07 docs(render): 字形度量说明——混排断言落在字符边界，不落在字节中间

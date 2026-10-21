@@ -249,6 +249,7 @@ impl SessionMultiplexer {
     /// `session/isArchivedChanged` echo drops it from the sidebar the moment
     /// it lands, ahead of any list refresh.
     pub fn thread_list(&self, cx: &App) -> Vec<ThreadRow> {
+        let focused_sid = self.focused.clone();
         let view = self.store.read(cx);
         let book = &view.book;
         let mut rows: Vec<ThreadRow> = book
@@ -260,6 +261,19 @@ impl SessionMultiplexer {
                 // (see `effective_archived` for the read and the doc on this
                 // method for why the filter lives here).
                 if effective_archived(book, sid, summary) {
+                    return None;
+                }
+                // A blank row stays out of the list: an attached session
+                // whose landed fold carries no turns has never been used.
+                // The focused row always shows (a landing thread the user
+                // is typing into must be reachable), and a fold that has
+                // not landed yet is never judged.
+                if focused_sid.as_deref() != Some(sid)
+                    && book.chat_snapshot_landed(sid)
+                    && crate::ahp_store::leaf(book, sid)
+                        .chat
+                        .is_some_and(|c| c.turns.is_empty() && c.active_turn.is_none())
+                {
                     return None;
                 }
                 // The row pin read: see `ext_and_meta_pinned`.
@@ -287,20 +301,51 @@ impl SessionMultiplexer {
                 Some(row)
             })
             .collect();
-        rows.sort_by(|a, b| {
-            let ta = book
-                .summaries
-                .get(&a.id)
-                .map(|s| s.modified_at.as_str())
-                .unwrap_or("");
-            let tb = book
-                .summaries
-                .get(&b.id)
-                .map(|s| s.modified_at.as_str())
-                .unwrap_or("");
-            tb.cmp(ta)
-        });
+        // The HOST's catalogue order is the sidebar's order (the store's
+        // persisted account: folder sequence → pinned band → rank). A local
+        // `modified_at` sort reshuffled the list on every journal append —
+        // clicking a row marked it read, bumped its mtime, and the row
+        // jumped to the top with everything under the cursor shifting.
+        let rank: std::collections::HashMap<&str, usize> = book
+            .summary_order
+            .iter()
+            .enumerate()
+            .map(|(ix, id)| (id.as_str(), ix))
+            .collect();
+        rows.sort_by_key(|row| rank.get(row.id.as_str()).copied().unwrap_or(usize::MAX));
+        for (ix, row) in rows.iter_mut().enumerate() {
+            // The chrome re-sorts rows by `(pinned, rank)` locally;
+            // carrying the rank lets that sort reproduce exactly this
+            // order.
+            row.rank = ix as i64;
+        }
         rows
+    }
+
+    /// The durable project objects (path + user alias), in the host's
+    /// committed folder order — the skeleton the sidebar renders folders
+    /// from, including projects whose every conversation is archived.
+    pub fn project_folders(&self, cx: &App) -> Vec<(String, Option<String>)> {
+        self.store
+            .read(cx)
+            .book
+            .catalogues
+            .get(manox_ahp::ext::channels::WORKSPACES)
+            .and_then(|state| state.get("workspaces"))
+            .and_then(serde_json::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let path = row.get("path")?.as_str()?.to_string();
+                        let alias = row
+                            .get("alias")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string);
+                        Some((path, alias))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The root agents catalogue: one row per provider with its models.
