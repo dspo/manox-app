@@ -2958,6 +2958,49 @@ mod tests {
     /// lowering (`synth_display` -> `build_items`) must fold them into the
     /// activity segment as tool entries. This is the pinning test for
     /// "工具调用看不到".
+    /// The self-describing guarantee: a tool-call Start whose reducer gate
+    /// declined (no active turn — a turn-id the fold never saw) still
+    /// derives its event from the action's own identity. Dropping it would
+    /// drop the reasoning-round boundary and merge every later round into
+    /// the first ("thinking keeps appending above a stack of tools").
+    #[test]
+    fn a_state_missed_tool_start_still_derives_its_event() {
+        use ahp_types::actions::{ChatToolCallStartAction, StateAction};
+
+        let mut book = ChannelBook::default();
+        let uri = chat_uri("c-1");
+        // A turn id the fold never activated: the reducer NoOps, so no
+        // tool-call part ever enters the state.
+        let start = StateAction::ChatToolCallStart(ChatToolCallStartAction {
+            turn_id: "t-ghost".into(),
+            tool_call_id: "tc-1".into(),
+            meta: None,
+            tool_name: "Read".into(),
+            display_name: "Read".into(),
+            intention: Some("Read AGENTS.md".into()),
+            contributor: None,
+        });
+        book.apply(&uri, &start);
+        let chat = book.chats.get("c-1").expect("the fold holds the chat");
+        let event = crate::chat_fold::ChatEvent::from_action(&start, Some(chat))
+            .expect("the action's own identity derives the event");
+        match event {
+            crate::chat_fold::ChatEvent::ToolCall {
+                id,
+                name,
+                title,
+                status,
+                ..
+            } => {
+                assert_eq!(id, "tc-1");
+                assert_eq!(name, "Read");
+                assert_eq!(title, "Read AGENTS.md");
+                assert_eq!(status, manox_agent::thread::ToolCallStatus::Running);
+            }
+            other => panic!("expected a tool-call event, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_tool_loop_surfaces_tools_on_both_paths() {
         use ahp_types::actions::{
