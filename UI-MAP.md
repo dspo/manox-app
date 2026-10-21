@@ -869,7 +869,10 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 渲染的微型会话：子会话（run id 即子会话 id，swarm 不变量）在打开时经 multiplexer attach，
 面板持有自己的 `ConversationState`，观察 `AhpStore` 并排水**该子会话自己的事件桶**
 （`ChatEvent` → `to_thread_event` → `apply`，与主列 live 腿同一词汇与同一 apply 语义）——
-journal 重放与实时 delta 都经此泵进入，运行中钻取是 live 的。相位三态：`subagent-panel-settling`
+journal 重放与实时 delta 都经此泵进入，运行中钻取是 live 的。泵还有**fold 继承**半边：
+事件桶只载本面板订阅之后的 delta，打开前（或已结算后才点开）流过的内容在子会话自己的
+chat fold 里——泵在面板尚无行时按 fold 快照整表重建（`synth_display`，fold 已含已排水事件，
+故重建覆盖之、不重不漏），之后 delta 照常流式叠加。相位三态：`subagent-panel-settling`
 （订阅快照未回）→ 活动（有行）/`subagent-panel-empty`（快照已回、无内容），永不渲染无依据的
 假占位。底部是 `subagent-panel-readonly` 只读说明条（宿主侧 #910 已把子会话标记为
 `ChatInteractivity::ReadOnly`）。入口：会话内子代理卡片点击——卡片的 `AgentTaskItem.run_id`

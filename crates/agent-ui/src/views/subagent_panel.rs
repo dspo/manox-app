@@ -2,10 +2,12 @@
 //! from its own AHP chat fold. The panel owns a conversation pipeline
 //! instance fed by the same fold vocabulary the main column applies
 //! (`ChatEvent` → `to_thread_event` → `apply`); the child session is
-//! attached on open, so its journal replays through the bucket and the
-//! panel fills from empty — settling until the snapshot lands, active once
-//! rows exist, empty when a landed fold carries no rows. A worker chat is
-//! read-only (the host stamps the interactivity; the footer states it).
+//! attached on open, its journal replays through the bucket, and the panel
+//! inherits the child's whole fold the first time it lands — a child that
+//! streamed long before the tab opened (or one that already settled) shows
+//! its full transcript, not just the deltas that follow the open. A worker
+//! chat is read-only (the host stamps the interactivity; the footer states
+//! it).
 
 use std::collections::HashMap;
 
@@ -97,12 +99,17 @@ impl SubagentPanel {
         })
     }
 
-    /// Drain the child session's event bucket into the panel's conversation.
+    /// Drain the child session's event bucket into the panel's conversation,
+    /// and inherit the child's chat fold while the panel has nothing: the
+    /// bucket only carries deltas from this panel's subscribe on, so a child
+    /// that streamed before the tab opened (the usual case — the card is
+    /// clicked after the run started, or again after it settled) would
+    /// otherwise sit on an empty transcript forever. The fold holds
+    /// everything the drained events carried, so the wholesale rebuild
+    /// covers them and nothing doubles; once rows exist the panel is live
+    /// and only deltas apply.
     fn pump(&mut self, sid: &str, store: &Entity<AhpStore>, cx: &mut Context<Self>) {
         let events = store.update(cx, |s, _| s.drain_chat_events(sid));
-        if events.is_empty() {
-            return;
-        }
         let role = self.role.clone();
         let ctx = ApplyCtx {
             host: self.host.clone(),
@@ -116,6 +123,28 @@ impl SubagentPanel {
             self.conversation.update(cx, |c, cx| {
                 c.apply(&thread_event, &role, None, ctx.clone(), cx);
             });
+        }
+        if self.conversation.read(cx).items().is_empty() {
+            let (display, usage) = {
+                let view = store.read(cx);
+                let mut usage = crate::chat_fold::UsageTable::new();
+                let display = view
+                    .book
+                    .chats
+                    .get(sid)
+                    .filter(|_| view.book.chat_snapshot_landed(sid))
+                    .map(|chat| crate::chat_fold::synth_display(chat, &mut usage))
+                    .unwrap_or_default();
+                (display, usage)
+            };
+            if !display.is_empty() {
+                let recipient = manox_agent::MessageAuthor::Agent(String::new());
+                self.conversation.update(cx, |c, cx| {
+                    *c = ConversationState::rebuild_from_display(
+                        &display, &usage, &role, recipient, false, ctx, cx,
+                    );
+                });
+            }
         }
         // Re-arm tail-follow only while the viewport is still near the
         // bottom; a reader scrolled into history must not be yanked back.
@@ -165,6 +194,31 @@ enum Phase {
     Settling,
     Active,
     Empty,
+}
+
+#[cfg(all(test, feature = "test-support"))]
+impl SubagentPanel {
+    /// Run one pump tick against the bound store. Test-support diagnostic:
+    /// the production pump is the store observer this test replaces.
+    pub(crate) fn diagnostic_pump(&mut self, cx: &mut Context<Self>) {
+        let Some((store, sid)) = self.source.clone() else {
+            return;
+        };
+        self.pump(&sid, &store, cx);
+    }
+
+    /// The transcript's assistant texts, in row order.
+    pub(crate) fn diagnostic_transcript_texts(&self, cx: &App) -> Vec<String> {
+        self.conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter_map(|item| match item.read(cx).kind() {
+                crate::conversation::ConvItem::Assistant { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl Render for SubagentPanel {
@@ -273,5 +327,90 @@ impl Render for SubagentPanel {
                     .text_color(theme.muted_foreground)
                     .child(i18n::t("subagent-panel-readonly")),
             )
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
+
+    const RUN: &str = "sub-ns-7";
+
+    fn child_chat(text: &str) -> ahp_types::state::ChatState {
+        serde_json::from_value(serde_json::json!({
+            "resource": chat_uri(RUN),
+            "title": "the child's chat",
+            "status": 0,
+            "modifiedAt": "2026-10-21T00:00:03.000Z",
+            "turns": [{
+                "id": "turn-1",
+                "message": { "text": "fix the login redirect", "origin": { "kind": "user" } },
+                "responseParts": [
+                    { "kind": "markdown", "id": "p1", "content": text },
+                ],
+                "state": "complete",
+            }],
+        }))
+        .expect("the child chat snapshot parses")
+    }
+
+    /// A child that streamed long before the tab opened — or one that already
+    /// settled — shows its whole transcript at the first pump after the
+    /// snapshot lands, and the deltas that follow the open stream on top of
+    /// it without doubling (the fold holds everything the drained events
+    /// carried, so the wholesale rebuild covers them).
+    #[gpui::test]
+    fn a_panel_inherits_the_childs_fold_when_it_lands(cx: &mut TestAppContext) {
+        let store = cx.new(|_| AhpStore::detached());
+        let panel = cx.update(|cx| {
+            SubagentPanel::new(
+                "fix the login redirect".into(),
+                "glm-5.3".into(),
+                manox_agent::ToolCallStatus::Running,
+                steer_agent_chat_ui::host::noop_host(),
+                Some((store.clone(), RUN.to_string())),
+                cx,
+            )
+        });
+
+        let empty = panel.read_with(cx, |p, cx| p.diagnostic_transcript_texts(cx));
+        assert!(empty.is_empty(), "nothing before the snapshot: {empty:?}");
+
+        store.update(cx, |s, _| {
+            s.book
+                .chats
+                .insert(RUN.into(), child_chat("the child's answer"));
+            s.diagnostic_mark_chat_snapshot_landed(RUN);
+        });
+        panel.update(cx, |p, cx| p.diagnostic_pump(cx));
+
+        let texts = panel.read_with(cx, |p, cx| p.diagnostic_transcript_texts(cx));
+        assert!(
+            texts.iter().any(|text| text.contains("the child's answer")),
+            "the inherited transcript carries the fold: {texts:?}"
+        );
+
+        store.update(cx, |s, _| {
+            s.push_chat_event_for_test(RUN, chat_fold::ChatEvent::AgentText(" streamed".into()));
+        });
+        panel.update(cx, |p, cx| p.diagnostic_pump(cx));
+
+        let texts = panel.read_with(cx, |p, cx| p.diagnostic_transcript_texts(cx));
+        let joined = texts.join("\n---\n");
+        assert!(
+            joined.contains("the child's answer"),
+            "the inherited rows survive: {joined}"
+        );
+        assert_eq!(
+            joined.matches("the child's answer").count(),
+            1,
+            "the rebuild must not double the drained content: {joined}"
+        );
+        assert!(
+            joined.contains("streamed"),
+            "the post-open delta streams on top: {joined}"
+        );
     }
 }

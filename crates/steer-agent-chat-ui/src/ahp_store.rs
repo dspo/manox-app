@@ -897,6 +897,25 @@ impl AhpStore {
         self.delivery_failure = None;
     }
 
+    /// Mark one chat id's subscribe snapshot as landed. Test-support
+    /// diagnostic: the drill-down panel's fold inheritance keys on the
+    /// landed flag, and a detached store has no real subscribe to land one.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_mark_chat_snapshot_landed(&mut self, chat_id: &str) {
+        self.book.chat_snapshots.insert(chat_id.to_string());
+    }
+
+    /// Queue one display event into a session's bucket. Test-support
+    /// diagnostic: the drill-down panel's pump consumes exactly this bucket.
+    #[cfg(feature = "test-support")]
+    pub fn push_chat_event_for_test(
+        &mut self,
+        session_id: &str,
+        event: crate::chat_fold::ChatEvent,
+    ) {
+        self.push_chat_event(session_id.to_string(), event);
+    }
+
     /// Route one wire-shaped event through the production dispatch point.
     /// Test-support diagnostic: a detached store has no client pump, so
     /// tests feed envelopes through the same `route` the live pump runs —
