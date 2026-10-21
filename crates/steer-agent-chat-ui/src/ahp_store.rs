@@ -384,7 +384,20 @@ impl ChannelBook {
     /// the page cap, a row added between pages — keep their previous
     /// relative order behind the walked prefix. First-seen append alone
     /// would leave the sidebar pinned at the boot-time order until restart.
-    pub fn commit_summary_walk(&mut self) {
+    ///
+    /// An EXHAUSTED walk named the host's whole active partition, so rows it
+    /// did not name are rows the host no longer lists in it — archived by
+    /// this or another client — and are dropped (`keep` spares ids whose
+    /// reachability is a UI fact rather than a host fact, the focused row).
+    /// The store row book is a mirror, not an append-only log: seeding only
+    /// ever upserted, and a row the host moved to its archived partition
+    /// would otherwise resurface on every walk until a restart.
+    pub fn commit_summary_walk(&mut self, exhausted: bool, keep: &HashSet<String>) {
+        // The prune key is the WALK alone: `summary_order` covers every row
+        // ever seeded (it is the append history), so an id the host no longer
+        // lists survives only through it — exactly the resurrection this
+        // prune exists to end.
+        let walked_names: HashSet<String> = self.walk_order.iter().cloned().collect();
         let mut walked = std::mem::take(&mut self.walk_order);
         let mut seen = HashSet::new();
         walked.retain(|id| seen.insert(id.clone()));
@@ -392,6 +405,11 @@ impl ChannelBook {
             if seen.insert(id.clone()) {
                 walked.push(id.clone());
             }
+        }
+        if exhausted {
+            self.summaries
+                .retain(|id, _| walked_names.contains(id) || keep.contains(id));
+            walked.retain(|id| self.summaries.contains_key(id) || keep.contains(id));
         }
         self.summary_order = walked;
     }
@@ -1524,6 +1542,37 @@ impl AhpStore {
         }
     }
 
+    /// Archive (or unarchive) sessions in one write — `x-manox/archivedChanged`
+    /// on the catalogue root. The ids ride the payload, so the dispatch needs
+    /// no per-row session-channel subscription: the native
+    /// `session/isArchivedChanged` resolves its target from the channel, and
+    /// the host's subscribed-gate refuses it for every row this client has
+    /// not attached (a sidebar archive was a silent no-op), while attaching
+    /// would fold each row's whole journal.
+    ///
+    /// Archiving drops the rows from the catalogue NOW: the sidebar is the
+    /// active list, and the host's store broadcast (a summary walk) confirms
+    /// the drop rather than performing it. A refused write re-seeds the rows
+    /// on that walk, so the optimistic drop self-heals.
+    pub fn archive_sessions(&mut self, session_ids: &[String], archived: bool) {
+        if session_ids.is_empty() {
+            return;
+        }
+        if archived {
+            for id in session_ids {
+                self.book.remove_summary(&session_uri(id));
+            }
+        }
+        self.dispatch(
+            ROOT_RESOURCE_URI,
+            StateAction::Unknown(serde_json::json!({
+                "type": ext::actions::ARCHIVED_CHANGED,
+                "sessions": session_ids,
+                "archived": archived,
+            })),
+        );
+    }
+
     /// Subscribe a session's thread channel once per store lifetime (the
     /// pin path's entry): a re-click on an already-subscribed row issues
     /// no second subscribe round trip. The store never unsubscribes, so
@@ -1674,13 +1723,18 @@ impl AhpStore {
         let reply = self.call("listSessions", list_sessions_params(None));
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             let mut pages = 0usize;
+            let mut exhausted = true;
             let mut reply = reply;
             loop {
                 let value = match reply.recv().await {
                     Ok(Ok(value)) => value,
-                    _ => break,
+                    _ => {
+                        exhausted = false;
+                        break;
+                    }
                 };
                 let Ok(result) = serde_json::from_value::<ListSessionsResult>(value) else {
+                    exhausted = false;
                     break;
                 };
                 pages += 1;
@@ -1695,11 +1749,13 @@ impl AhpStore {
                         pages,
                         "listSessions pagination stopped at the page cap; the sidebar shows a prefix"
                     );
+                    exhausted = false;
                     break;
                 }
                 let Ok(next_reply) =
                     this.update(cx, |store, _| store.call("listSessions", list_sessions_params(Some(&cursor))))
                 else {
+                    exhausted = false;
                     break;
                 };
                 reply = next_reply;
@@ -1708,9 +1764,15 @@ impl AhpStore {
             // (the connection died between pages) must not pin the flag and
             // starve every later refresh. The walk's arrival order folds
             // into the sidebar order on every exit path (a truncated walk
-            // still carries the host's freshest prefix).
+            // still carries the host's freshest prefix). Only a walk that
+            // reached the host's tail may prune: a truncated one names a
+            // prefix, and pruning on it would vanish every older row.
             let _ = this.update(cx, |store, cx| {
-                store.book.commit_summary_walk();
+                let mut keep = HashSet::new();
+                if let Some(focused) = store.focused_session.clone() {
+                    keep.insert(focused);
+                }
+                store.book.commit_summary_walk(exhausted, &keep);
                 store.session_list_in_flight = false;
                 cx.notify();
             });
@@ -3640,7 +3702,7 @@ mod tests {
         };
         let mut book = ChannelBook::default();
         fold_session_page(&mut book, &page(&["s-a", "s-b", "s-c"]));
-        book.commit_summary_walk();
+        book.commit_summary_walk(true, &HashSet::new());
         assert_eq!(book.summary_order, vec!["s-a", "s-b", "s-c"]);
 
         // The host reranked: s-c now leads. A fresh walk (it starts clean,
@@ -3648,7 +3710,7 @@ mod tests {
         book.walk_order.clear();
         fold_session_page(&mut book, &page(&["s-c", "s-a"]));
         fold_session_page(&mut book, &page(&["s-b"]));
-        book.commit_summary_walk();
+        book.commit_summary_walk(true, &HashSet::new());
         assert_eq!(
             book.summary_order,
             vec!["s-c", "s-a", "s-b"],
@@ -3656,15 +3718,64 @@ mod tests {
         );
 
         // A truncated walk (page cap): walked rows take the host order,
-        // unwalked ones trail in their previous relative order.
+        // unwalked ones trail in their previous relative order — and nothing
+        // is pruned (the walk named a prefix, not the partition).
         book.walk_order.clear();
         fold_session_page(&mut book, &page(&["s-b"]));
-        book.commit_summary_walk();
+        book.commit_summary_walk(false, &HashSet::new());
         assert_eq!(
             book.summary_order,
             vec!["s-b", "s-c", "s-a"],
             "the unwalked tail keeps its relative order behind the prefix"
         );
+    }
+
+    /// An exhausted walk named the host's whole active partition: a row it
+    /// did not name is a row the host moved out of it (archived), and the
+    /// client's upsert-only seeding must not resurrect it on every walk.
+    /// The focused row survives regardless — its listing is a UI fact.
+    #[test]
+    fn an_exhausted_walk_prunes_rows_the_host_no_longer_lists() {
+        let page = |ids: &[&str]| -> ListSessionsResult {
+            serde_json::from_value(serde_json::json!({
+                "items": ids
+                    .iter()
+                    .map(|id| serde_json::json!({
+                        "resource": session_uri(id),
+                        "provider": "test",
+                        "title": format!("row {id}"),
+                        "status": 0,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "modifiedAt": "2026-01-01T00:00:00Z",
+                    }))
+                    .collect::<Vec<_>>(),
+                "nextCursor": None::<String>,
+            }))
+            .expect("a page parses")
+        };
+        let mut book = ChannelBook::default();
+        fold_session_page(&mut book, &page(&["s-a", "s-b", "s-c", "s-gone"]));
+        book.commit_summary_walk(true, &HashSet::new());
+
+        // The host archived s-gone: the next walk omits it, the row goes.
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-a", "s-b", "s-c"]));
+        book.commit_summary_walk(true, &HashSet::new());
+        assert!(
+            !book.summaries.contains_key("s-gone"),
+            "an archived row leaves the catalogue at the walk that names its absence"
+        );
+        assert_eq!(book.summary_order, vec!["s-a", "s-b", "s-c"]);
+
+        // The same walk with s-gone kept (focused): the row survives.
+        let mut book = ChannelBook::default();
+        fold_session_page(&mut book, &page(&["s-a", "s-focused"]));
+        let keep: HashSet<String> = ["s-focused".to_string()].into();
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-a"]));
+        book.commit_summary_walk(true, &keep);
+        assert!(book.summaries.contains_key("s-focused"));
+        assert_eq!(book.summary_order, vec!["s-a", "s-focused"]);
     }
 
     #[test]
@@ -3709,6 +3820,58 @@ mod tests {
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
+    }
+
+    /// The archive write rides the catalogue root with the ids in the
+    /// payload — never a per-row session channel the client does not hold —
+    /// and the archived rows leave the catalogue at the write, not at an echo.
+    #[test]
+    fn archive_sessions_rides_the_root_and_drops_the_rows() {
+        let mut store = disconnected_store();
+        let row = |id: &str| -> SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri(id),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            }))
+            .expect("a summary parses")
+        };
+        store
+            .book
+            .seed_summaries(vec![row("s-a"), row("s-b"), row("s-c")]);
+
+        store.archive_sessions(&["s-a".to_string(), "s-c".to_string()], true);
+
+        assert_eq!(
+            store.pending_writes.len(),
+            1,
+            "one write for the whole batch"
+        );
+        let Some(PendingWrite::Dispatch(channel, action)) = store.pending_writes.first() else {
+            panic!("the batch queues while disconnected");
+        };
+        assert_eq!(
+            channel, ROOT_RESOURCE_URI,
+            "the root is the channel every client holds"
+        );
+        let StateAction::Unknown(tag) = action.as_ref() else {
+            panic!("the batch is the extension action");
+        };
+        assert_eq!(tag["type"], ext::actions::ARCHIVED_CHANGED);
+        assert_eq!(tag["sessions"], serde_json::json!(["s-a", "s-c"]));
+        assert_eq!(tag["archived"], true);
+        assert_eq!(
+            store.book.summary_order,
+            vec!["s-b"],
+            "the archived rows leave the active list at the write"
+        );
+
+        // An empty batch writes nothing.
+        store.archive_sessions(&[], true);
+        assert_eq!(store.pending_writes.len(), 1);
     }
 
     #[test]

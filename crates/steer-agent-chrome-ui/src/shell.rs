@@ -157,6 +157,10 @@ pub struct NavAvail {
 pub struct HostHooks {
     pub on_pin: Option<HookOnId>,
     pub on_archive: Option<HookOnId>,
+    /// Batch archive (the selection bar's 归档): the host dispatches the
+    /// archive write for every checked row. Absent → the bar's commit fires
+    /// nothing (a host that offers selection owes this).
+    pub on_batch_archive: Option<HookOnIds>,
     /// Thread-tag write-back (the same store seam the sidebar's
     /// `SetThreadTag` uses). `None` clears the tag.
     pub on_set_tag: Option<HookOnSetTag>,
@@ -195,6 +199,9 @@ pub struct HostHooks {
     /// titlebar both read it. Absent → the item fires nothing.
     pub on_set_external_title: Option<HookOnSetTitle>,
 }
+
+/// Batch-ids callback (the selection bar's archive commit).
+pub type HookOnIds = Box<dyn Fn(&[String], &mut Window, &mut App)>;
 
 /// Everything the shell needs from its host at construction.
 pub struct ShellConfig {
@@ -276,6 +283,10 @@ pub struct Shell {
     /// Row-menu DismissEvent subscription (the menu closes itself on outside
     /// click; the event drives the host side shut).
     row_menu_sub: Option<gpui::Subscription>,
+    /// The batch-selection mode: `Some(checked ids)` while picking. External
+    /// rows are never selectable; the bar commits through
+    /// [`HostHooks::on_batch_archive`].
+    selection: Option<Vec<String>>,
     /// The open group menu (state key, anchor, the host-built menu entity).
     group_menu: Option<(String, gpui::Point<Pixels>, MenuEntity)>,
     /// Group-menu dismissal subscription (same shape as the row menu's).
@@ -343,6 +354,7 @@ impl Shell {
             customizations: config.customizations,
             row_menu: None,
             row_menu_sub: None,
+            selection: None,
             group_menu: None,
             group_menu_sub: None,
             tag_edit: None,
@@ -670,8 +682,10 @@ impl Shell {
         let id_tag_edit = id.to_string();
         let id_tag_clear = id.to_string();
         let id_copy = id.to_string();
+        let id_select = id.to_string();
         let this_pin = this.clone();
         let this_archive = this.clone();
+        let this_select = this.clone();
         let this_tag = this.clone();
         let this_tag2 = this.clone();
 
@@ -715,6 +729,16 @@ impl Shell {
                             this.close_row_menu(cx);
                         });
                     }),
+                )
+                .item(
+                    PopupMenuItem::new(steer_i18n::t("sidebar-multi-select"))
+                        .icon(crate::theme::icons::CHECK)
+                        .on_click(move |_, _window, cx| {
+                            this_select.update(cx, |this, cx| {
+                                this.close_row_menu(cx);
+                                this.begin_selection(&id_select, cx);
+                            });
+                        }),
                 )
                 .separator()
                 .item(
@@ -762,6 +786,93 @@ impl Shell {
         self.row_menu_sub = Some(sub);
         self.row_menu = Some((id.to_string(), anchor, menu));
         cx.notify();
+    }
+
+    // ── batch selection ───────────────────────────────────────────────
+
+    /// Enter selection mode with `id` checked (the row menu's 多选). A second
+    /// entry while already selecting just checks the row.
+    pub fn begin_selection(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.is_selectable(id) {
+            return;
+        }
+        let picked = self.selection.get_or_insert_with(Vec::new);
+        if !picked.iter().any(|p| p == id) {
+            picked.push(id.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Toggle one row's check while selecting; inert outside selection mode
+    /// and for rows that are not threads.
+    pub fn toggle_row_selection(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.is_selectable(id) {
+            return;
+        }
+        let Some(picked) = self.selection.as_mut() else {
+            return;
+        };
+        match picked.iter().position(|p| p == id) {
+            Some(ix) => {
+                picked.remove(ix);
+            }
+            None => picked.push(id.to_string()),
+        }
+        cx.notify();
+    }
+
+    /// Check every selectable row the list holds (the bar's 全选).
+    pub fn select_all_rows(&mut self, cx: &mut Context<Self>) {
+        let Some(picked) = self.selection.as_mut() else {
+            return;
+        };
+        let all: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|row| matches!(row.kind, crate::session_list::SessionRowKind::Thread))
+            .map(|row| row.id.clone())
+            .collect();
+        *picked = all;
+        cx.notify();
+    }
+
+    /// Leave selection mode with nothing archived (the bar's 取消).
+    pub fn exit_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selection.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Commit the batch (the bar's 归档): the host dispatches the write, the
+    /// rows leave the sidebar now (the same optimistic drop the row menu's
+    /// archive performs), and selection mode ends. An empty batch commits
+    /// nothing and stays in selection mode.
+    pub fn commit_selection_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picked) = self.selection.clone() else {
+            return;
+        };
+        if picked.is_empty() {
+            return;
+        }
+        if let Some(hook) = &self.hooks.on_batch_archive {
+            hook(&picked, window, cx);
+        }
+        for id in &picked {
+            self.set_archived(id, true, cx);
+        }
+        self.selection = None;
+        cx.notify();
+    }
+
+    /// The checked ids while selecting (read face for hosts/tests).
+    pub fn selection(&self) -> Option<&[String]> {
+        self.selection.as_deref()
+    }
+
+    fn is_selectable(&self, id: &str) -> bool {
+        self.sessions.iter().any(|row| {
+            row.id == id && matches!(row.kind, crate::session_list::SessionRowKind::Thread)
+        })
     }
 
     pub fn close_row_menu(&mut self, cx: &mut Context<Self>) {
@@ -1726,6 +1837,19 @@ impl Shell {
         let on_row_menu = cx.listener(|this, (id, pos): &(String, gpui::Point<Pixels>), w, cx| {
             this.open_row_menu(id, *pos, w, cx);
         });
+        let selection = self.selection.clone();
+        let on_selection_toggle = cx.listener(|this, id: &String, _w, cx| {
+            this.toggle_row_selection(id, cx);
+        });
+        let on_selection_all = cx.listener(|this, _: &ClickEvent, _w, cx| {
+            this.select_all_rows(cx);
+        });
+        let on_selection_archive = cx.listener(|this, _: &ClickEvent, w, cx| {
+            this.commit_selection_archive(w, cx);
+        });
+        let on_selection_cancel = cx.listener(|this, _: &ClickEvent, _w, cx| {
+            this.exit_selection(cx);
+        });
         let on_group_menu = cx.listener(
             |this, (key, project, pos): &(String, Option<String>, gpui::Point<Pixels>), w, cx| {
                 this.open_group_menu(key, project.as_deref(), *pos, w, cx);
@@ -1832,6 +1956,17 @@ impl Shell {
                 }),
                 group_drag_marker: marker,
                 on_show_more: std::rc::Rc::new(move |key, w, cx| on_show_more(key, w, cx)),
+                selection,
+                on_selection_toggle: std::rc::Rc::new(move |id, w, cx| {
+                    on_selection_toggle(id, w, cx)
+                }),
+                on_selection_all: std::rc::Rc::new(move |e, w, cx| on_selection_all(e, w, cx)),
+                on_selection_archive: std::rc::Rc::new(move |e, w, cx| {
+                    on_selection_archive(e, w, cx)
+                }),
+                on_selection_cancel: std::rc::Rc::new(move |e, w, cx| {
+                    on_selection_cancel(e, w, cx)
+                }),
             })
     }
 

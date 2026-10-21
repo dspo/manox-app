@@ -38,6 +38,11 @@ external-session-resume-failed = 恢复外部 agent 失败
 sidebar-archive = 归档
 
 sidebar-unarchive = 取消归档
+sidebar-multi-select = 多选会话…
+sidebar-selection-count = 已选 { $count } 项
+sidebar-selection-select-all = 全选
+sidebar-selection-archive = 归档
+sidebar-selection-cancel = 取消
 
 sidebar-thread-menu = 会话操作
 

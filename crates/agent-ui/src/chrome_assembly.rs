@@ -533,6 +533,16 @@ fn shell_config(
                     });
                 }
             })),
+            // The selection bar's commit: one `x-manox/archivedChanged`
+            // write for every checked row.
+            on_batch_archive: Some(Box::new({
+                let mux = mux.clone();
+                move |ids, _w, cx| {
+                    mux.update(cx, |mux, cx| {
+                        mux.archive_sessions(ids, true, cx);
+                    });
+                }
+            })),
             // Thread-tag write-back (`None` clears) — the same store write
             // the sidebar's SetThreadTag event lands on.
             on_set_tag: Some(Box::new(|id, tag, _w, _cx| {

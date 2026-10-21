@@ -177,10 +177,14 @@ impl SessionMultiplexer {
         }
     }
 
-    /// Flip a session's archived bit through the protocol
-    /// (`session/isArchivedChanged`): the host journals and persists the
-    /// decision (the store row, the sidecar) and echoes the action back —
-    /// the summary's IsArchived bit is the single state every client reads.
+    /// Flip a session's archived bit through the extension's batch write
+    /// (`x-manox/archivedChanged` on the catalogue root): the host journals
+    /// and persists the decision (the store row, the sidecar) and the next
+    /// summary walk confirms the row's departure. The root ride matters: the
+    /// native `session/isArchivedChanged` resolves its target from the
+    /// session channel, which this client holds only for attached sessions —
+    /// a sidebar archive on any other row was refused by the host's
+    /// subscribed-gate and never landed.
     pub fn toggle_archived(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let view = self.store.read(cx);
         // The live fold outranks the summary row — except a zero-status fold
@@ -208,16 +212,23 @@ impl SessionMultiplexer {
         let Some(archived) = archived else {
             return;
         };
-        self.store.update(cx, |store, _| {
-            store.dispatch(
-                steer_agent_chat_ui::ahp_store::session_uri(session_id),
-                ahp_types::actions::StateAction::SessionIsArchivedChanged(
-                    ahp_types::actions::SessionIsArchivedChangedAction {
-                        is_archived: !archived,
-                    },
-                ),
-            );
+        self.archive_sessions(&[session_id.to_string()], !archived, cx);
+    }
+
+    /// Archive (or unarchive) sessions in one write — the sidebar's batch
+    /// selection commits through here, and the row menu's single toggle is
+    /// a batch of one.
+    pub fn archive_sessions(
+        &mut self,
+        session_ids: &[String],
+        archived: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.update(cx, |store, cx| {
+            store.archive_sessions(session_ids, archived);
+            cx.notify();
         });
+        cx.notify();
     }
 
     /// The sidebar attention count (GW5, the dock badge source): the

@@ -147,6 +147,13 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             on_group_order: None,
             on_pin: Some(Box::new(|id, _w, _cx| store_toggle_pin(id))),
             on_archive: Some(Box::new(|id, _w, _cx| store_toggle_archived(id))),
+            on_batch_archive: Some(Box::new(|ids, _w, _cx| {
+                manox_agent::thread_store::global().with_mut(|s| {
+                    for id in ids {
+                        s.archive_thread(id, true);
+                    }
+                });
+            })),
             on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
                 manox_agent::thread_store::global().with_mut(|s| s.set_thread_tag(id, tag));
             })),
