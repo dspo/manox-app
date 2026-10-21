@@ -104,9 +104,25 @@ impl Workspace {
             .to_string();
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
+        // The draft refill: a never-materialized conversation under the
+        // same project (or project-less) is that project's unfinished
+        // draft — return to it instead of minting a sibling. Its row
+        // already carries the model/permission picks the user left there.
+        let objects = manox_agent::object_store::ObjectStore::try_global();
+        let refill = objects.as_ref().and_then(|store| {
+            store.latest_draft(
+                project
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .as_deref(),
+            )
+        });
         // v3: the id is client-minted; the create carries the inherited
         // config, and the attach lands once the host answered.
-        let sid = uuid::Uuid::new_v4().to_string();
+        let sid = refill
+            .as_ref()
+            .map(|row| row.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let mut config = serde_json::Map::new();
         if let Some(model) = &model {
             config.insert("model".into(), serde_json::json!(model));
@@ -124,6 +140,42 @@ impl Workspace {
         // An empty vector leaves the session directory-less ("choose
         // project" on a thread the user launched FROM a project).
         let cwds = vec![format!("file://{cwd}")];
+        // The object row: created at once, carrying the conversation's
+        // belonging and picks. A refilled draft reuses its row (the picks
+        // it holds win over inheritance); a fresh conversation starts a
+        // new row.
+        if let Some(objects) = objects.as_ref() {
+            objects.create_conversation(
+                &sid,
+                project
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .as_deref(),
+            );
+            let (provider, model_id, approval, effort) = match &refill {
+                Some(row) => (
+                    row.model_provider.clone(),
+                    row.model_id.clone(),
+                    row.permission_mode.clone(),
+                    row.reasoning_effort.clone(),
+                ),
+                None => (None, model.clone(), approval.clone(), effort_str.clone()),
+            };
+            let provider = provider.or_else(|| {
+                model_id
+                    .as_ref()
+                    .and_then(|m| m.split_once('/').map(|(p, _)| p.to_string()))
+            });
+            if provider.is_some() || model_id.is_some() {
+                objects.set_model(&sid, provider.as_deref(), model_id.as_deref());
+            }
+            if let Some(approval) = approval {
+                objects.set_permission_mode(&sid, Some(&approval));
+            }
+            if let Some(effort) = effort {
+                objects.set_reasoning_effort(&sid, Some(&effort));
+            }
+        }
         let config_for_channel = config.clone();
         let cwd_for_channel = cwd.clone();
         let reply = self.with_foreground_store(cx, |store, _| {
@@ -248,6 +300,14 @@ impl Workspace {
             Some(draft) if self.chat.read(cx).recall_index >= 0 => draft.to_string(),
             _ => self.chat_input(cx).read(cx).value().to_string(),
         };
+        // The durable twin: the object row carries the draft across
+        // restarts (the in-memory stash dies with the process), making the
+        // never-materialized conversation refillable the next time the
+        // user creates under the same project.
+        if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+            let text = outgoing.clone();
+            objects.set_draft(&old_id, (!text.is_empty()).then_some(text.as_str()));
+        }
         self.chat.update(cx, |chat, cx| {
             chat.drafts.insert(old_id.clone(), outgoing);
             cx.notify();
@@ -557,11 +617,17 @@ impl Workspace {
         // has none — without this the previous thread's text would bleed into
         // the new one (Bug 1). `set_value` is silent (no Change event), so
         // re-sync the slash menu by hand in case the draft begins with `/`.
-        let saved = self.chat.update(cx, |chat, cc| {
+        let mut saved = self.chat.update(cx, |chat, cc| {
             let v = chat.drafts.remove(&new_id).unwrap_or_default();
             cc.notify();
             v
         });
+        if saved.is_empty()
+            && let Some(objects) = manox_agent::object_store::ObjectStore::try_global()
+            && let Some(draft) = objects.conversation(&new_id).and_then(|row| row.draft)
+        {
+            saved = draft;
+        }
         self.chat_input(cx)
             .update(cx, |s, cx| s.set_value(saved, window, cx));
         self.sync_completion(window, cx);

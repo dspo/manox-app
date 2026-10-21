@@ -707,6 +707,11 @@ impl Workspace {
         let multiplexer =
             cx.new(|_| crate::multiplexer::SessionMultiplexer::new(ahp_store.clone(), cwd.clone()));
         let session_id = landing_id.clone();
+        // The landing conversation is a project-less object row at boot —
+        // one sqlite write, no journal, no directory, until the user speaks.
+        if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+            objects.create_conversation(&session_id, None);
+        }
         multiplexer.update(cx, |m, cx| {
             m.create_session(&session_id, cx);
             // GW5: the landing session is the focused one from tick one —
@@ -3025,6 +3030,12 @@ impl Workspace {
             config.insert("approvalMode".into(), serde_json::json!(mode_wire));
             store.optimistic_config(&sid, &config);
             store.set_config(&sid, config);
+            // The durable pick lands in the object row at once; the engine's
+            // request-boundary handshake applies it (with a notice) from
+            // there on the next message.
+            if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+                objects.set_permission_mode(&sid, Some(&mode_wire));
+            }
         });
         self.add_info_message(
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),

@@ -1733,6 +1733,20 @@ impl Workspace {
                     });
                     tracing::info!(path = %path.display(), "project pick SetCwd");
                     Self::register_project_in_store(&path, cx);
+                    // Belonging is the attach decision: the row owns it and
+                    // the sidebar groups by it. The SetCwd above only moves
+                    // a not-yet-interacted session's working directory.
+                    let sid = this
+                        .chat
+                        .read(cx)
+                        .store
+                        .as_ref()
+                        .map(|(_, sid)| sid.clone());
+                    if let Some(sid) = sid
+                        && let Some(objects) = manox_agent::object_store::ObjectStore::try_global()
+                    {
+                        objects.attach(&sid, path.to_str().unwrap_or_default());
+                    }
                 }
                 cx.notify();
             })
