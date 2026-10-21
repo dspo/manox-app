@@ -497,6 +497,7 @@ workspace-project-choose = Choose project
 workspace-project-new = New project
 
 workspace-project-blank = Create blank project
+workspace-project-unfiled = Conversations
 
 workspace-project-select-folder = Select folder
 

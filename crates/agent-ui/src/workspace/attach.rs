@@ -111,6 +111,12 @@ impl Workspace {
         // `project` the bound folder. The legacy thread mirror is only a
         // pre-snapshot fallback (the #765 round-2 repro: reading the mirror
         // alone lost model AND project on every new thread).
+        //
+        // The inherited *project* is the conversation's belonging, read from
+        // its object row — not its working directory. A project-less
+        // conversation runs in a temporary workspace of its own, and
+        // inheriting that path would file the new thread under a directory
+        // the user never chose.
         let inherited = self.chat.read(cx).store.clone().map(|(store, sid)| {
             let view = store.read(cx);
             let leaf = crate::ahp_store::leaf(&view.book, &sid);
@@ -121,7 +127,8 @@ impl Workspace {
             // inheritance and display cannot diverge unless the host
             // default itself changes between them.
             (
-                leaf.cwd().filter(|p| !p.is_empty()),
+                manox_agent::object_store::ObjectStore::try_global()
+                    .and_then(|objects| objects.project_of(&sid)),
                 leaf.model_id().map(str::to_string),
                 leaf.approval_mode().map(str::to_string),
                 leaf.reasoning_effort().map(str::to_string),

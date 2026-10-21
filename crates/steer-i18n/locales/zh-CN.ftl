@@ -484,6 +484,7 @@ workspace-project-choose = 选择项目
 workspace-project-new = 新建项目
 
 workspace-project-blank = 新建空白项目
+workspace-project-unfiled = 对话
 
 workspace-project-select-folder = 选择文件夹
 
