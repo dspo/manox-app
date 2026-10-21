@@ -8,19 +8,24 @@
 //! by a single hairline border so the card reads as a list rather than a
 //! grid of unrelated items.
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Context, Entity, Focusable, Hsla, InteractiveElement,
-    IntoElement, MouseDownEvent, ParentElement as _, SharedString, StatefulInteractiveElement,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, AnyWindowHandle, App, Context, Entity, Focusable, Hsla, IntoElement,
+    MouseDownEvent, ParentElement as _, SharedString, Styled as _, Window, div, px,
 };
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use gpui::{InteractiveElement, StatefulInteractiveElement, prelude::FluentBuilder as _};
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use gpui_component::h_flex;
 use gpui_component::input::InputState;
 use gpui_component::theme::Theme;
-use gpui_component::{h_flex, v_flex};
+use gpui_component::v_flex;
 
 use crate::i18n;
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use super::SettingsView;
 
 // --- Layout helpers -------------------------------------------------------
@@ -28,6 +33,8 @@ use super::SettingsView;
 /// Wraps the panel content in a vertical scroll container that fills the
 /// right pane. The scrollbar appears automatically; we don't need to track
 /// the scroll position across re-renders for a settings overlay.
+// Consumed only by the macOS-only external-tool panels.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub(super) fn panel_scroll(content: impl IntoElement) -> AnyElement {
     v_flex()
         .flex_1()
@@ -45,6 +52,8 @@ pub(super) fn panel_scroll(content: impl IntoElement) -> AnyElement {
 /// A single settings row: title (left) + control (right), with an optional
 /// muted description. The description slot is an `AnyElement` so callers can
 /// include link chips or other inline widgets without losing styling.
+// Consumed only by the macOS-only external-tool panels.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub(super) fn row_with_control(
     title: SharedString,
     description: Option<AnyElement>,
@@ -95,6 +104,8 @@ pub(super) fn section_header(label: &'static str) -> AnyElement {
         .into_any_element()
 }
 
+// Consumed only by the macOS-only external-tool panels.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub(super) fn hairline(divider: Hsla) -> AnyElement {
     div()
         .h(px(1.))
@@ -184,16 +195,16 @@ pub(super) fn blur_on_click_out(
 /// "Default terminal location" bottom/right): active = filled rounded pill
 /// (secondary bg + foreground text), inactive = plain muted text, no border.
 // Only the macOS-only external-tool panels consume the segmented pair.
-#[cfg(target_os = "macos")]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 type SegmentedApply =
     Arc<dyn Fn(&mut SettingsView, &mut Context<SettingsView>) + Send + Sync + 'static>;
 
 /// One segment of the pair: its label bundled with the callback that picks it,
 /// so the builder stays under the argument-count lint without a params struct.
-#[cfg(target_os = "macos")]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 type SegmentedOption = (SharedString, SegmentedApply);
 
-#[cfg(target_os = "macos")]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn mock_segmented(
     id: impl Into<gpui::ElementId>,
     active: bool,
@@ -234,7 +245,7 @@ fn mock_segmented(
         .into_any_element()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub(super) fn build_segmented_pair(
     id_prefix: &'static str,
     active_is_left: bool,

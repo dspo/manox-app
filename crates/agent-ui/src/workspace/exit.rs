@@ -123,28 +123,33 @@ impl Workspace {
                 beat(cx).await;
             }
             // ── the integrated browser ─────────────────────────────────
-            let browser_tabs = this
-                .update(cx, |ws, _cx| ws.browser_views.len())
-                .unwrap_or(0);
-            if browser_tabs > 0 {
-                if !foreground_is(&this, cx, &sid) {
-                    tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
-                    return;
+            // Compiled out with the integrated browser on Linux/FreeBSD —
+            // there are never any browser tabs to close.
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+            {
+                let browser_tabs = this
+                    .update(cx, |ws, _cx| ws.browser_views.len())
+                    .unwrap_or(0);
+                if browser_tabs > 0 {
+                    if !foreground_is(&this, cx, &sid) {
+                        tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
+                        return;
+                    }
+                    this.update(cx, |ws, cx| ws.note("exit-closing-browser", &[], cx))
+                        .ok();
+                    beat(cx).await;
+                    // A browser tab's `close` re-enters the workspace (it closes
+                    // its webview through `Workspace::close_browser_tab`), so the
+                    // pane-side close runs OUTSIDE the workspace lease, on the
+                    // bare App; the orphan drain afterwards is lease-local.
+                    cx.update(|cx| {
+                        crate::chrome_assembly::close_tool_tabs_of_kind("browser", cx);
+                    });
+                    this.update(cx, |ws, cx| ws.close_all_browser_tabs(cx)).ok();
+                    this.update(cx, |ws, cx| ws.note("exit-browser-closed", &[], cx))
+                        .ok();
+                    beat(cx).await;
                 }
-                this.update(cx, |ws, cx| ws.note("exit-closing-browser", &[], cx))
-                    .ok();
-                beat(cx).await;
-                // A browser tab's `close` re-enters the workspace (it closes
-                // its webview through `Workspace::close_browser_tab`), so the
-                // pane-side close runs OUTSIDE the workspace lease, on the
-                // bare App; the orphan drain afterwards is lease-local.
-                cx.update(|cx| {
-                    crate::chrome_assembly::close_tool_tabs_of_kind("browser", cx);
-                });
-                this.update(cx, |ws, cx| ws.close_all_browser_tabs(cx)).ok();
-                this.update(cx, |ws, cx| ws.note("exit-browser-closed", &[], cx))
-                    .ok();
-                beat(cx).await;
             }
             // ── archive + fresh thread ─────────────────────────────────
             if !foreground_is(&this, cx, &sid) {

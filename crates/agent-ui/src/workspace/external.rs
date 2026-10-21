@@ -207,8 +207,10 @@ impl Workspace {
     /// Drop every live browser webview, mounted as a pane tab or not, and
     /// report how many went away. `/exit`'s browser step runs this after the
     /// pane kind close so the workspace holds no routed webview afterwards.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub(super) fn close_all_browser_tabs(&mut self, cx: &mut Context<Self>) -> usize {
-        let ids: Vec<BrowserTabId> = self.browser_views.keys().copied().collect();
+        let ids: Vec<manox_agent::thread_engine::BrowserTabId> =
+            self.browser_views.keys().copied().collect();
         let n = ids.len();
         for id in ids {
             self.close_browser_tab(id, cx);
