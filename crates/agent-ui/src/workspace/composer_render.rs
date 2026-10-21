@@ -777,6 +777,7 @@ impl Workspace {
             let ws_files = ws.clone();
             let ws_goal = ws.clone();
             let ws_chrome = ws.clone();
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             let ws_internal = ws.clone();
             build_plus_menu(
                 menu,
@@ -806,6 +807,7 @@ impl Workspace {
                         );
                     });
                 },
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
                 move |_window, cx| {
                     let _ = ws_internal.update(cx, |this, cx| {
                         this.close_plus_menu(cx);

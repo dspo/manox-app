@@ -99,6 +99,13 @@ tray-icon = "0.24"
 # dialogs); `blocking` gives the sync spawn/update API used from the main
 # thread.
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+# zbus —— direct use next to ksni on Linux: the tray install probes the session
+# bus for a StatusNotifierWatcher host before trusting the tray (stock GNOME has
+# none — ksni registration alone would silently strand a parked window-less
+# app). Plain `zbus = "5"` (default features: async-io + blocking-api, no
+# tokio) matches the copy ksni already locks, so no second zbus enters the tree
+# and the `async-io` executor story above is preserved.
+zbus = "5"
 # Exact-pinned to the copies the gpui stack already locks (macOS dock badge),
 # so no duplicate objc2 versions enter the tree.
 objc2 = "=0.6.4"

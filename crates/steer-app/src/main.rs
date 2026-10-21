@@ -5,7 +5,7 @@
 //! `agent` crate; UI lives in the `agent-ui` crate.
 
 use gpui::{App, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
-use gpui::{WindowBounds, WindowOptions};
+use gpui::{WindowBounds, WindowDecorations, WindowOptions};
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use std::borrow::Cow;
 
@@ -29,6 +29,26 @@ const MIN_WINDOW_W: f32 = 860.0;
 /// Minimum window height: title bar + several message lines + composer +
 /// footer hairline, with breathing room.
 const MIN_WINDOW_H: f32 = 520.0;
+
+/// Durable per-user directory for the panic log.
+#[cfg(target_os = "macos")]
+fn panic_log_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(|home| std::path::Path::new(&home).join("Library/Logs/Steer"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steer-panic"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn panic_log_dir() -> std::path::PathBuf {
+    if let Some(state) = std::env::var_os("XDG_STATE_HOME")
+        && !state.is_empty()
+    {
+        return std::path::Path::new(&state).join("steer");
+    }
+    std::env::var_os("HOME")
+        .map(|home| std::path::Path::new(&home).join(".local/state/steer"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steer-panic"))
+}
 
 fn main() {
     // Install a panic hook before anything else so a panic anywhere — main
@@ -64,18 +84,18 @@ fn main() {
         tracing::error!("{msg}");
         // Persist every panic to a durable log: launchd swallows stderr, so a
         // panicking process would otherwise leave no record for diagnosis.
-        if let Some(home) = std::env::var_os("HOME") {
-            let dir = std::path::Path::new(&home).join("Library/Logs/Steer");
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dir.join("panic.log"))
-                .and_then(|mut f| {
-                    use std::io::Write as _;
-                    writeln!(f, "{msg}")
-                });
-        }
+        // Platform log homes: macOS `~/Library/Logs/Steer`, elsewhere the
+        // XDG state dir (`$XDG_STATE_HOME` or `~/.local/state`) + `/steer`.
+        let dir = panic_log_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("panic.log"))
+            .and_then(|mut f| {
+                use std::io::Write as _;
+                writeln!(f, "{msg}")
+            });
     }));
 
     tracing_subscriber::fmt()
@@ -399,18 +419,6 @@ fn main() {
                 badge::spawn_pump(cx);
             });
 
-            // Wire the process-wide browser host: bind it to the main
-            // Workspace, register it as the `CapabilityClient` provider (so the
-            // `web_explore_*` tools reach it via `manox_agent::capability::provider()`)
-            // and the agent-ui concrete registry (so `BrowserView` attaches the
-            // notify/inbound bridges at build), then spawn the notify/inbound
-            // drainer on the Workspace — a notify ships through the OnceLock
-            // closure with no `&mut App`, so the drainer (which owns an
-            // `AsyncApp`) is the cx-bearing sink that emits onto the owning
-            // thread.
-            if let Some(workspace) = agent_ui::dispatch::workspace_global() {
-                agent_ui::browser_host::WorkspaceBrowserHost::install(workspace.clone(), cx);
-            }
         })
         .detach();
     });
@@ -451,6 +459,13 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
     let reused = agent_ui::dispatch::workspace_global().is_some();
     let window_options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
+        // macOS parity on Linux: no system titlebar — the chrome toolbar is
+        // the titlebar (its right end carries our own window controls, as the
+        // traffic lights float over content on macOS). Where client-side
+        // decorations are unsupported gpui falls back to server-side and the
+        // toolbar's controls hide themselves (no double chrome).
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        window_decorations: Some(WindowDecorations::Client),
         window_bounds: Some(WindowBounds::centered(size(px(1100.), px(760.)), cx)),
         // Floor below which the window can no longer shrink. Shared with
         // Settings so both views respect one minimum width.

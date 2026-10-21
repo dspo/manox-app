@@ -22,8 +22,8 @@ use crate::theme::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div,
-    px, rgba,
+    ParentElement, Pixels, Render, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    Window, div, px, rgba,
 };
 use gpui_component::input::Input;
 
@@ -70,23 +70,51 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
     });
     let avail = shell.nav_avail(cx);
 
+    // Drag-to-move is armed on mouse-down and only fired once the pointer
+    // actually moves — a plain press+release on the row is a click (or part
+    // of one on an interactive child), and starting an interactive move on
+    // the press would let the window manager swallow the release (same
+    // pattern as gpui-component's TitleBar).
+    let drag = window.use_state(cx, |_, _| TitlebarDrag { armed: false });
+
     div()
         .id("titlebar")
-        .on_mouse_down(MouseButton::Left, |e: &gpui::MouseDownEvent, window, _| {
-            // Empty space / non-interactive children: drag to move, double
-            // click to zoom/restore.
-            if e.click_count >= 2 {
-                window.zoom_window();
-            } else {
+        .on_mouse_down_out(window.listener_for(&drag, |state, _, _, _| state.armed = false))
+        .on_mouse_down(
+            MouseButton::Left,
+            window.listener_for(&drag, |state, e: &gpui::MouseDownEvent, window, _| {
+                // Double click zooms/restores; a plain press only arms the
+                // drag (fired on the first move).
+                if e.click_count >= 2 {
+                    state.armed = false;
+                    window.zoom_window();
+                } else {
+                    state.armed = true;
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            window.listener_for(&drag, |state, _, _, _| state.armed = false),
+        )
+        .on_mouse_move(window.listener_for(&drag, |state, _, window, _| {
+            if state.armed {
+                state.armed = false;
                 window.start_window_move();
             }
-        })
+        }))
         .flex()
         .relative()
         .w_full()
         .h(px(TITLE_H))
         .flex_shrink_0()
-        .pl(px(TRAFFIC_SLOT))
+        // The traffic-light slot exists only on macOS; elsewhere the row
+        // starts at the normal inset.
+        .pl(px(if cfg!(target_os = "macos") {
+            TRAFFIC_SLOT
+        } else {
+            ROW_PAD
+        }))
         .pr(px(ROW_PAD))
         .gap(px(6.))
         .items_center()
@@ -209,7 +237,11 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
                                     .into_any_element(),
                             ],
                         }),
-                ),
+                )
+                // Linux/FreeBSD client-side decorations: our own window
+                // controls at the very right (macOS uses the system traffic
+                // lights over the left slot).
+                .children(window_controls(window)),
         )
         // The session picker trigger: out-of-flow (mounted last so it paints
         // above both wings), pinned to the window's center line at a fixed
@@ -218,6 +250,90 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
         // trigger.
         .child(session_picker(shell, window, cx))
         .into_any_element()
+}
+
+/// Drag-arm state for the toolbar row (see `render`).
+struct TitlebarDrag {
+    armed: bool,
+}
+
+impl Render for TitlebarDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The window controls at the toolbar's right end — Linux/FreeBSD's stand-in
+/// for the macOS traffic lights, shown only while this window actually draws
+/// client-side decorations (where gpui had to fall back to server-side ones,
+/// the window manager's titlebar already carries its own set and ours would
+/// stack a duplicate). The compositor's declared capabilities trim what we
+/// offer: a tiling compositor may honor neither minimize nor maximize; close
+/// is always ours.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn window_controls(window: &Window) -> Vec<AnyElement> {
+    use gpui::Decorations;
+
+    if !matches!(window.window_decorations(), Decorations::Client { .. }) {
+        return Vec::new();
+    }
+    let supported = window.window_controls();
+    let mut controls = Vec::new();
+    if supported.minimize {
+        controls.push(control_button("win-minimize", icons::MINIMIZE, |window| {
+            window.minimize_window();
+        }));
+    }
+    if supported.maximize {
+        let restore = window.is_maximized();
+        controls.push(control_button(
+            "win-maximize",
+            if restore {
+                icons::COPY
+            } else {
+                icons::MAXIMIZE
+            },
+            |window| window.zoom_window(),
+        ));
+    }
+    controls.push(control_button("win-close", icons::CLOSE, |window| {
+        window.remove_window();
+    }));
+    controls
+}
+
+/// One 38×38 hover block, same semantics as gpui-component's window controls:
+/// the mouse-down is swallowed so the row's drag-to-move never fires, and the
+/// click carries the action.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn control_button(
+    id: &'static str,
+    glyph: crate::theme::IconAsset,
+    action: impl Fn(&mut Window) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .w(px(38.))
+        .h_full()
+        .flex_shrink_0()
+        .justify_center()
+        .content_center()
+        .items_center()
+        .rounded(px(6.))
+        .hover(|style| style.bg(crate::theme::LIST_HOVER))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(move |_, window, _| action(window))
+        .child(icon(glyph, 13.))
+        .into_any_element()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn window_controls(_window: &Window) -> Vec<AnyElement> {
+    Vec::new()
 }
 
 /// A session-history nav button: live when the move has an edge to land on,

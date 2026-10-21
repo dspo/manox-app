@@ -8,7 +8,10 @@ publish.workspace = true
 name = "steer_webview"
 path = "src/lib.rs"
 
-[dependencies]
+# The crate body is compiled out on Linux/FreeBSD (see src/lib.rs), so every
+# dependency rides the matching target gate — wry/WebKitGTK/GTK never enter a
+# Linux build.
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
 anyhow.workspace = true
 gpui.workspace = true
 steer-webview-macros.workspace = true

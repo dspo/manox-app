@@ -18,10 +18,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyView, AppContext as _, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ListAlignment, ListState, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, Window, div, px, svg,
+    AnyView, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ListAlignment,
+    ListState, ParentElement, Render, SharedString, Styled, Window, div, px, svg,
 };
+// Serve the example browser tab, which is compiled out on Linux/FreeBSD.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use gpui::{ClickEvent, StatefulInteractiveElement};
 use gpui_component::Root;
 use steer_agent_chat_ui::conversation::{ConvItem, ToolCallItem};
 use steer_agent_chat_ui::host::noop_host;
@@ -87,6 +89,7 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
     ShellConfig {
         main: Arc::new(PreviewMain { view: main_view }),
         tool_kinds: vec![
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             Arc::new(BrowserKind),
             Arc::new(TerminalKind::shell()),
             Arc::new(TerminalKind::agent(
@@ -584,8 +587,10 @@ fn spawn_terminal(
     Ok(terminal_ui::TerminalView::new(proxy, cx))
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 struct BrowserKind;
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 impl ToolTabFactory for BrowserKind {
     fn kind(&self) -> &'static str {
         "browser"
@@ -609,10 +614,12 @@ impl ToolTabFactory for BrowserKind {
 /// One browser tab instance: a wry webview + an address bar (enter / the Go
 /// button navigates); the view entity holds its own subscriptions and
 /// `load_url` is the single navigation entry.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 struct BrowserTab {
     id: String,
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 impl ToolTab for BrowserTab {
     fn kind(&self) -> &'static str {
         "browser"
@@ -651,8 +658,9 @@ impl ToolTab for BrowserTab {
     fn on_active(&self, visible: bool, cx: &mut gpui::App, store: &TabStore) {
         // The wry subview is an OS-level child window: without hide it
         // floats above every other tab.
-        if let Some(view) = store.get::<BrowserTabView>(&self.id) {
-            let webview = view.read(cx).webview.clone();
+        if let Some(view) = store.get::<BrowserTabView>(&self.id)
+            && let Some(webview) = view.read(cx).webview.clone()
+        {
             webview.update(cx, |w, _| {
                 if visible {
                     w.show();
@@ -664,23 +672,31 @@ impl ToolTab for BrowserTab {
     }
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 struct BrowserTabView {
-    webview: Entity<steer_webview::webview::WebView>,
+    /// `None` when the platform refused the embed (e.g. a native Wayland gpui
+    /// window — wry parents Linux child webviews through Xlib only); the tab
+    /// then renders the failure in place of the page.
+    webview: Option<Entity<steer_webview::webview::WebView>>,
     address: Entity<gpui_component::input::InputState>,
     #[allow(dead_code)] // kept for future page-title mirroring
     url: String,
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 impl BrowserTabView {
     fn new(url: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let builder = steer_webview::Builder::new()
             .with_webview_id("chrome-shell-browser")
             .trust_mode(steer_webview::TrustMode::Untrusted);
-        let wry = builder
-            .apply(|b| b.with_url(url))
-            .build_as_child(window)
-            .expect("steer-webview: build_as_child failed");
-        let webview = cx.new(|cx| steer_webview::webview::WebView::new(wry, window, cx));
+        let wry = builder.apply(|b| b.with_url(url)).build_as_child(window);
+        let webview = match wry {
+            Ok(wry) => Some(cx.new(|cx| steer_webview::webview::WebView::new(wry, window, cx))),
+            Err(e) => {
+                eprintln!("shell example: embedded webview build failed: {e} ({url})");
+                None
+            }
+        };
         let address =
             cx.new(|cx| gpui_component::input::InputState::new(window, cx).placeholder("https://"));
         address.update(cx, |s, cx| s.set_value(url, window, cx));
@@ -707,13 +723,16 @@ impl BrowserTabView {
 
     fn load_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.url = url.to_string();
-        self.webview.update(cx, |w, _| w.load_url(url));
+        if let Some(webview) = &self.webview {
+            webview.update(cx, |w, _| w.load_url(url));
+        }
         self.address
             .update(cx, |s, cx| s.set_value(url, window, cx));
         cx.notify();
     }
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 impl Render for BrowserTabView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let go = cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -786,12 +805,27 @@ impl Render for BrowserTabView {
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme::BORDER)
-                    .child(webview),
+                    .children(webview)
+                    .children((self.webview.is_none()).then(|| {
+                        div()
+                            .id("browser-build-error")
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(theme::FG_FAINT)
+                                    .child(steer_i18n::t("browser-webview-unavailable")),
+                            )
+                    })),
             )
     }
 }
 
 /// Complete the URL scheme.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn normalize_url(s: &str) -> String {
     let t = s.trim();
     if t.is_empty() {
