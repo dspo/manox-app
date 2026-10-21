@@ -7,6 +7,46 @@
 
 use super::*;
 
+/// Land the object row for a conversation the app has just minted: its
+/// belonging plus the picks it carries. The row is the conversation's
+/// birth — no journal and no session directory exist until the user speaks
+/// — and it is where every surface reads the config back from, so each
+/// create path must land one. A create path that skips this leaves a
+/// conversation with no object behind it, and the pickers then address an
+/// id the store has never seen.
+fn land_conversation_row(
+    sid: &str,
+    project: Option<&std::path::Path>,
+    provider: Option<&str>,
+    model_id: Option<&str>,
+    approval: Option<&str>,
+    effort: Option<&str>,
+) {
+    let Some(objects) = manox_agent::object_store::ObjectStore::try_global() else {
+        return;
+    };
+    objects.create_conversation(sid, project.map(|p| p.to_string_lossy()).as_deref());
+    if provider.is_some() || model_id.is_some() {
+        objects.set_model(sid, provider, model_id);
+    }
+    if let Some(approval) = approval {
+        objects.set_permission_mode(sid, Some(approval));
+    }
+    if let Some(effort) = effort {
+        objects.set_reasoning_effort(sid, Some(effort));
+    }
+}
+
+/// Split the session config's `model` value into the two halves the row
+/// keeps apart. The app writes the wire form (`provider/id`); a value that
+/// carries no provider keeps its id whole.
+fn split_wire_model(model: Option<&str>) -> (Option<&str>, Option<&str>) {
+    match model.and_then(|m| m.split_once('/')) {
+        Some((provider, id)) => (Some(provider), Some(id)),
+        None => (None, model),
+    }
+}
+
 impl Workspace {
     /// Minimal subscription for a thread parked in `background_threads`. Unlike
     /// `subscribe_thread`, this only coordinates running state and the parked
@@ -144,38 +184,31 @@ impl Workspace {
         // belonging and picks. A refilled draft reuses its row (the picks
         // it holds win over inheritance); a fresh conversation starts a
         // new row.
-        if let Some(objects) = objects.as_ref() {
-            objects.create_conversation(
-                &sid,
-                project
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .as_deref(),
-            );
-            let (provider, model_id, approval, effort) = match &refill {
-                Some(row) => (
-                    row.model_provider.clone(),
-                    row.model_id.clone(),
-                    row.permission_mode.clone(),
-                    row.reasoning_effort.clone(),
-                ),
-                None => (None, model.clone(), approval.clone(), effort_str.clone()),
-            };
-            let provider = provider.or_else(|| {
-                model_id
-                    .as_ref()
-                    .and_then(|m| m.split_once('/').map(|(p, _)| p.to_string()))
-            });
-            if provider.is_some() || model_id.is_some() {
-                objects.set_model(&sid, provider.as_deref(), model_id.as_deref());
+        let (provider, model_id, approval, effort) = match &refill {
+            Some(row) => (
+                row.model_provider.as_deref(),
+                row.model_id.as_deref(),
+                row.permission_mode.as_deref(),
+                row.reasoning_effort.as_deref(),
+            ),
+            None => {
+                let (provider, model_id) = split_wire_model(model.as_deref());
+                (
+                    provider,
+                    model_id,
+                    approval.as_deref(),
+                    effort_str.as_deref(),
+                )
             }
-            if let Some(approval) = approval {
-                objects.set_permission_mode(&sid, Some(&approval));
-            }
-            if let Some(effort) = effort {
-                objects.set_reasoning_effort(&sid, Some(&effort));
-            }
-        }
+        };
+        land_conversation_row(
+            &sid,
+            project.as_deref(),
+            provider,
+            model_id,
+            approval,
+            effort,
+        );
         let config_for_channel = config.clone();
         let cwd_for_channel = cwd.clone();
         let reply = self.with_foreground_store(cx, |store, _| {
@@ -899,10 +932,20 @@ impl Workspace {
         // receipt's minted id attaches through the standard
         // created-session path.
         let cwd_str = cwd.to_string_lossy().to_string();
-        let model_str = model.map(|m| format!("{}/{}", m.provider, m.id));
+        let model_str = model.as_ref().map(|m| format!("{}/{}", m.provider, m.id));
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
         let sid = uuid::Uuid::new_v4().to_string();
+        // The object row, exactly as `start_new_thread` lands it: this
+        // conversation is minted here and never passes through that path.
+        land_conversation_row(
+            &sid,
+            project.as_deref(),
+            model.as_ref().map(|m| m.provider.as_str()),
+            model.as_ref().map(|m| m.id.as_str()),
+            approval.as_deref(),
+            effort_str.as_deref(),
+        );
         let mut config = serde_json::Map::new();
         if let Some(model) = &model_str {
             config.insert("model".into(), serde_json::json!(model));
