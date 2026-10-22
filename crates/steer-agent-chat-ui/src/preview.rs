@@ -1,5 +1,5 @@
 //! The Preview tool's shared vocabulary — the single source of truth for
-//! both halves of the app-side `client_Preview` tool (mounted through
+//! both halves of the app-side `preview` tool (mounted through
 //! `manox_agent::embedder_tools`): the executing side in agent-ui
 //! (`preview_host`) and the rendering side in the conversation column.
 //!
@@ -12,11 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// Model-facing tool name. The `client_` prefix is not cosmetic: the
-/// engine's embedder-tool refresh identifies (and replaces) mounted
-/// embedder tools by that prefix, so the name must stay in lockstep with
-/// `manox_agent::embedder_tools::client_tool_name`.
-pub const TOOL_NAME: &str = "client_Preview";
+/// Model-facing tool name. App-layer tools follow lower_snake_case by
+/// convention (native built-ins are UpCamelCase), and the name must stay
+/// in lockstep with `manox_agent::embedder_tools::embedder_tool_name`.
+pub const TOOL_NAME: &str = "preview";
 
 /// Render-side decode budgets, keyed by preview kind. These bound what the
 /// UI is willing to read and rasterize in one preview; they have nothing to
@@ -154,14 +153,14 @@ pub fn resolved_outcome(output: &str, input: &serde_json::Value) -> Option<Previ
 mod tests {
     use super::*;
 
-    // The refresh machinery matches mounted embedder tools by the `client_`
-    // prefix and replaces them wholesale; if upstream ever changes the
-    // sanitizing rule this fails before the mismatch can ship.
+    // The engine derives the mounted wire name from the registration name
+    // through the upstream sanitizer; if that rule ever changes this
+    // fails before the mismatch can ship.
     #[test]
     fn tool_name_matches_upstream_sanitizing() {
         assert_eq!(
             TOOL_NAME,
-            manox_agent::embedder_tools::client_tool_name("Preview")
+            manox_agent::embedder_tools::embedder_tool_name("preview")
         );
     }
 

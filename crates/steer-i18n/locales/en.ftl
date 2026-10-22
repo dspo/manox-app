@@ -918,5 +918,5 @@ chrome-agent-pick-model = Choose a model for { $agent }
 
 workspace-change-rejected = Change not applied (rejected by the host)
 
-# Preview tool card (chat column, app-provided client_Preview tool)
+# Preview tool card (chat column, app-provided preview tool)
 preview-unavailable = Cannot render the preview (the file may have been moved or deleted)
