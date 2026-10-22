@@ -236,12 +236,42 @@ impl Workspace {
         });
         let sid2 = sid.clone();
         cx.spawn(async move |_, cx| {
-            let failed = match reply {
-                Some(reply) => matches!(reply.recv().await, Ok(Err(_))),
-                None => true,
+            // A create refused with the protocol's SESSION_ALREADY_EXISTS
+            // means the draft the refill named is a session the host still
+            // carries — a legacy archived conversation whose object row
+            // never took the bit (pre-fix data) stayed a draft candidate.
+            // That is not a dead end: the attach below opens the existing
+            // session through the ordinary reopen path, the refill's
+            // intended outcome. Every other failure (and a store unbound,
+            // where no create can even ride) lands a visible notification —
+            // a user-initiated new session must never die quietly.
+            let refusal = match reply {
+                Some(reply) => match reply.recv().await {
+                    Ok(Ok(_)) => None,
+                    Ok(Err(err)) if err.is_already_exists() => {
+                        tracing::warn!(
+                            session_id = %sid2,
+                            error = %err,
+                            "createSession met a live session — opening it instead"
+                        );
+                        None
+                    }
+                    Ok(Err(err)) => Some(err.message),
+                    Err(closed) => Some(closed.to_string()),
+                },
+                None => Some("no foreground session is bound".to_string()),
             };
-            if failed {
-                tracing::warn!("createSession failed");
+            if let Some(err) = refusal {
+                tracing::warn!(session_id = %sid2, error = %err, "createSession failed");
+                let _ = ws.update_in(cx, |_this, window, cx| {
+                    window.push_notification(
+                        Notification::error(i18n::t_str(
+                            "new-thread-create-failed",
+                            &[("err", &err)],
+                        )),
+                        cx,
+                    );
+                });
                 return;
             }
             if let Some(dir) = &dir_for_store {
@@ -875,8 +905,19 @@ impl Workspace {
     /// sidebar's optimistic row drop (the command drops in place; `/exit`
     /// drops inside its own sequence).
     pub(super) fn archive_thread_now(&mut self, sid: &str, cx: &mut Context<Self>) {
-        self.with_foreground_store(cx, |store, _| {
-            store.set_archived(sid, true);
+        // The write rides the catalogue root (`x-manox/archivedChanged`),
+        // the one path that reaches the host for EVERY row — attached or
+        // not — and marks the object row's archived bit on the way
+        // (`AhpStore::archive_sessions`). The native
+        // `session/isArchivedChanged` needs the row's session channel and
+        // is refused for the rest: a silently refused archive left the
+        // conversation live and its never-spoken object row a zombie
+        // draft, which `start_new_thread`'s refill then resurrected as a
+        // `createSession` the host could only answer "already exists" — a
+        // dead click on 新建会话, and a `/exit` whose final beat never
+        // landed.
+        self.multiplexer.update(cx, |mux, cx| {
+            mux.archive_sessions(std::slice::from_ref(&sid.to_string()), true, cx);
         });
         manox_agent::thread_store_global().with_mut(|s| s.archive_thread(sid, true));
     }

@@ -900,3 +900,6 @@ workspace-change-rejected = 更改未生效（宿主拒绝）
 
 # Preview tool card (chat column, app-provided preview tool)
 preview-unavailable = 无法渲染预览（文件可能已被移动或删除）
+
+# New-thread landing（宿主拒绝创建新会话时的落新失败提示）
+new-thread-create-failed = 新建会话失败：{ $err }

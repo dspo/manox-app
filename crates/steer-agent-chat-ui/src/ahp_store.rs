@@ -648,6 +648,46 @@ pub fn work_uri(id: &str) -> String {
 /// A reply slot for a command that awaits the host's answer.
 pub type Reply = async_channel::Receiver<Result<Value, String>>;
 
+/// A [`create_session`](Self::create_session) reply: the failure leg is
+/// typed, carrying the JSON-RPC code beside the display message.
+pub type CodeReply = async_channel::Receiver<Result<Value, CreateSessionError>>;
+
+/// One `createSession` failure: the host answers a re-mint of an id it
+/// still holds with the protocol's stable `-32003`
+/// (`ahp_types::errors::ahp_error_codes::SESSION_ALREADY_EXISTS`), and
+/// the refusal's MEANING is the code — the message is display text the
+/// host may reword. Transport/parse failures carry no code.
+#[derive(Debug, Clone)]
+pub struct CreateSessionError {
+    pub code: Option<i32>,
+    pub message: String,
+}
+
+impl CreateSessionError {
+    /// Whether the host refused because it already holds this session id.
+    pub fn is_already_exists(&self) -> bool {
+        self.code == Some(ahp_types::errors::ahp_error_codes::SESSION_ALREADY_EXISTS)
+    }
+}
+
+impl std::fmt::Display for CreateSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<ahp::ClientError> for CreateSessionError {
+    fn from(err: ahp::ClientError) -> Self {
+        Self {
+            code: match &err {
+                ahp::ClientError::Rpc(rpc) => Some(rpc.code),
+                _ => None,
+            },
+            message: err.to_string(),
+        }
+    }
+}
+
 /// A write issued before the handshake, replayed **in order** on connect —
 /// the landing createSession precedes its subscribes, and the subscribes
 /// precede the active-client claim, so the replay awaits each step before
@@ -658,7 +698,7 @@ enum PendingWrite {
         session_id: String,
         cwds: Vec<String>,
         config: Option<serde_json::Map<String, Value>>,
-        reply: async_channel::Sender<Result<Value, String>>,
+        reply: async_channel::Sender<Result<Value, CreateSessionError>>,
     },
     Subscribe(String),
     Unsubscribe(String),
@@ -1220,7 +1260,7 @@ impl AhpStore {
                         config,
                         reply,
                     } => {
-                        let result = tokio_wait({
+                        let result = tokio_wait_create({
                             let client = client.clone();
                             let channel = session_uri(&session_id);
                             move || async move {
@@ -1238,7 +1278,7 @@ impl AhpStore {
                                         },
                                     )
                                     .await
-                                    .map_err(|err| err.to_string())
+                                    .map_err(CreateSessionError::from)
                             }
                         })
                         .await;
@@ -1654,6 +1694,25 @@ impl AhpStore {
                 self.book.remove_summary(&session_uri(id));
             }
         }
+        // The object row's archived bit is written HERE, at the one choke
+        // point every archive decision (sidebar single, batch, `/exit`'s
+        // teardown, the archive command) passes through. The row is the
+        // draft refill's source of truth: an archived conversation whose
+        // row stayed unarchived outlives its own archive as a zombie
+        // draft, and the next `start_new_thread` refills it into a
+        // `createSession` the host can only answer "already exists".
+        //
+        // The bit lands BEFORE the root dispatch on purpose: a refused
+        // write (unknown ids) leaves the row unresurrectable — the
+        // catalogue's re-seed walk restores the summary row, never the
+        // draft candidacy the refill reads. Failing the other way would
+        // re-mint zombies on the exact rejection this write exists to
+        // retire.
+        if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+            for id in session_ids {
+                objects.set_archived(id, archived);
+            }
+        }
         self.dispatch(
             ROOT_RESOURCE_URI,
             StateAction::Unknown(serde_json::json!({
@@ -1882,22 +1941,25 @@ impl AhpStore {
     }
 
     /// Create a session over a client-minted id (the idempotency key).
-    /// Returns the raw result; callers subscribe the session channel next.
-    /// Before the handshake completes the request is queued and the reply
-    /// resolves once the replay reaches it.
+    /// The failure leg is a [`CreateSessionError`]: the JSON-RPC code the
+    /// host answered (`SESSION_ALREADY_EXISTS` on a re-mint of a held id,
+    /// a typed contract in ahp-types) beside the display message —
+    /// callers branch on the code, never on text. Before the handshake
+    /// completes the request is queued and the reply resolves once the
+    /// replay reaches it.
     pub fn create_session(
         &mut self,
         session_id: &str,
         cwds: Vec<String>,
         config: Option<serde_json::Map<String, Value>>,
-    ) -> Reply {
-        let (tx, rx) = async_channel::bounded::<Result<Value, String>>(1);
+    ) -> CodeReply {
+        let (tx, rx) = async_channel::bounded::<Result<Value, CreateSessionError>>(1);
         if let Some(client) = self.client.clone() {
             // Connected: issue directly (the replay loop only runs during
             // the handshake window).
             let channel = session_uri(session_id);
             manox_agent::runtime::handle().spawn(async move {
-                let result = tokio_wait(move || async move {
+                let result = tokio_wait_create(move || async move {
                     client
                         .request::<_, Value>(
                             "createSession",
@@ -1912,7 +1974,7 @@ impl AhpStore {
                             },
                         )
                         .await
-                        .map_err(|err| err.to_string())
+                        .map_err(CreateSessionError::from)
                 })
                 .await;
                 let _ = tx.send(result).await;
@@ -2433,6 +2495,26 @@ where
     rx.recv()
         .await
         .map_err(|_| "tokio runtime is gone".to_string())?
+}
+
+/// The [`tokio_wait`] shape for the typed `createSession` legs: the host's
+/// JSON-RPC code must survive the runtime hop, so the error channel carries
+/// [`CreateSessionError`] rather than a display string.
+async fn tokio_wait_create<T, F>(
+    f: impl FnOnce() -> F + Send + 'static,
+) -> Result<T, CreateSessionError>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, CreateSessionError>> + Send,
+{
+    let (tx, rx) = async_channel::bounded::<Result<T, CreateSessionError>>(1);
+    manox_agent::runtime::handle().spawn(async move {
+        let _ = tx.send(f().await).await;
+    });
+    rx.recv().await.map_err(|_| CreateSessionError {
+        code: None,
+        message: "tokio runtime is gone".to_string(),
+    })?
 }
 
 /// Answer one host → client request through the bridge channel.
