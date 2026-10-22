@@ -79,7 +79,7 @@ cargo clippy --all-targets
 cargo fmt --all
 ```
 
-Rust **1.95.0**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单）。
+Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单）。
 
 ### Release（tag 触发）
 
