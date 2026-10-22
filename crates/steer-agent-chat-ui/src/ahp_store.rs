@@ -122,6 +122,13 @@ pub struct ChannelBook {
     /// at a time — the material [`Self::commit_summary_walk`] rebuilds
     /// `summary_order` from when the walk ends.
     walk_order: Vec<String>,
+    /// Rows seeded outside a `listSessions` walk and not yet named by one.
+    /// A live arrival — or the local placeholder for a session whose host
+    /// row has not persisted yet — can land WHILE a walk is in flight; that
+    /// walk's snapshot predates the row, so an exhausted commit must not
+    /// read the omission as "archived". The walk that names the id confirms
+    /// it and clears the mark, so a later omission still prunes it.
+    unconfirmed_rows: HashSet<String>,
     pub sessions: HashMap<String, SessionState>,
     pub chats: HashMap<String, ChatState>,
     /// Extension channel URI → folded state (a baseline replaces, deltas fold).
@@ -164,6 +171,7 @@ impl Default for ChannelBook {
             summaries: BTreeMap::new(),
             summary_order: Vec::new(),
             walk_order: Vec::new(),
+            unconfirmed_rows: HashSet::new(),
             sessions: HashMap::new(),
             chats: HashMap::new(),
             ext: HashMap::new(),
@@ -345,6 +353,11 @@ impl ChannelBook {
         let mut changed = false;
         for summary in items {
             let id = id_of(&summary.resource).to_string();
+            // Seeding is not a walk: the host has not yet been seen naming
+            // this row, so a walk snapshot that predates it must not prune it
+            // ([`Self::commit_summary_walk`]). A walk that names it clears the
+            // mark in `fold_session_page`.
+            self.unconfirmed_rows.insert(id.clone());
             let first_sight = !self.summaries.contains_key(&id);
             changed |= self
                 .summaries
@@ -374,6 +387,7 @@ impl ChannelBook {
     pub fn remove_summary(&mut self, session_uri: &str) -> bool {
         let id = id_of(session_uri).to_string();
         self.summary_order.retain(|seen| seen != &id);
+        self.unconfirmed_rows.remove(&id);
         self.summaries.remove(&id).is_some()
     }
 
@@ -388,7 +402,8 @@ impl ChannelBook {
     /// An EXHAUSTED walk named the host's whole active partition, so rows it
     /// did not name are rows the host no longer lists in it — archived by
     /// this or another client — and are dropped (`keep` spares ids whose
-    /// reachability is a UI fact rather than a host fact, the focused row).
+    /// reachability is a UI fact rather than a host fact, the focused row;
+    /// `unconfirmed_rows` spares rows the walk could not have known about).
     /// The store row book is a mirror, not an append-only log: seeding only
     /// ever upserted, and a row the host moved to its archived partition
     /// would otherwise resurface on every walk until a restart.
@@ -407,8 +422,10 @@ impl ChannelBook {
             }
         }
         if exhausted {
-            self.summaries
-                .retain(|id, _| walked_names.contains(id) || keep.contains(id));
+            let unconfirmed = &self.unconfirmed_rows;
+            self.summaries.retain(|id, _| {
+                walked_names.contains(id) || keep.contains(id) || unconfirmed.contains(id)
+            });
             walked.retain(|id| self.summaries.contains_key(id) || keep.contains(id));
         }
         self.summary_order = walked;
@@ -576,6 +593,11 @@ fn list_sessions_params(cursor: Option<&str>) -> ListSessionsParams {
 /// page's ids join the running walk's arrival order.
 fn fold_session_page(book: &mut ChannelBook, result: &ListSessionsResult) -> Option<String> {
     book.seed_summaries(result.items.clone());
+    // The walk is the confirmation: a row it names loses its unconfirmed
+    // mark, so a later exhausted walk that omits it may prune it.
+    for summary in &result.items {
+        book.unconfirmed_rows.remove(id_of(&summary.resource));
+    }
     book.walk_order
         .extend(result.items.iter().map(|s| id_of(&s.resource).to_string()));
     result.next_cursor.clone()
@@ -1506,6 +1528,16 @@ impl AhpStore {
                         if envelope.channel.starts_with("ahp-session:/") {
                             self.pending_unread.remove(id_of(&envelope.channel));
                         }
+                        // The batch archive dropped its rows at the write and
+                        // schedules no walk of its own; a refused batch would
+                        // leave them hidden with nothing to re-seed them. Ask
+                        // for the authoritative list — the rejection means the
+                        // host did not move them.
+                        if manox_ahp::wire::action_tag(&envelope.action)
+                            == ext::actions::ARCHIVED_CHANGED
+                        {
+                            self.refresh_sessions(cx);
+                        }
                         cx.notify();
                     }
                 }
@@ -1743,7 +1775,17 @@ impl AhpStore {
                     cx.notify();
                     next
                 });
-                let Ok(Some(cursor)) = next else { break };
+                let cursor = match next {
+                    Ok(Some(cursor)) => cursor,
+                    // The walk reached the host's tail.
+                    Ok(None) => break,
+                    // The store entity is gone; that is not an exhausted
+                    // walk, and pruning on it would be a guess.
+                    Err(_) => {
+                        exhausted = false;
+                        break;
+                    }
+                };
                 if pages >= LIST_SESSIONS_PAGE_CAP {
                     tracing::warn!(
                         pages,
@@ -3776,6 +3818,70 @@ mod tests {
         book.commit_summary_walk(true, &keep);
         assert!(book.summaries.contains_key("s-focused"));
         assert_eq!(book.summary_order, vec!["s-a", "s-focused"]);
+    }
+
+    /// A row seeded after a walk's snapshot — a live `SessionAdded`, or the
+    /// local placeholder for a session whose host row has not persisted yet —
+    /// is not a row the host archived: the walk that omitted it predates it.
+    /// It survives until a walk names it; from then on an omission prunes.
+    #[test]
+    fn a_live_seeded_row_survives_the_walk_that_predates_it() {
+        let page = |ids: &[&str]| -> ListSessionsResult {
+            serde_json::from_value(serde_json::json!({
+                "items": ids
+                    .iter()
+                    .map(|id| serde_json::json!({
+                        "resource": session_uri(id),
+                        "provider": "test",
+                        "title": format!("row {id}"),
+                        "status": 0,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "modifiedAt": "2026-01-01T00:00:00Z",
+                    }))
+                    .collect::<Vec<_>>(),
+                "nextCursor": None::<String>,
+            }))
+            .expect("a page parses")
+        };
+        let row = |id: &str| -> SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri(id),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            }))
+            .expect("a summary parses")
+        };
+
+        let mut book = ChannelBook::default();
+        fold_session_page(&mut book, &page(&["s-a"]));
+        book.commit_summary_walk(true, &HashSet::new());
+
+        // The row arrives after the walk that never saw it, and the next walk
+        // (still ahead of the host's row) omits it.
+        book.seed_summary_at_front(row("s-live"));
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-a"]));
+        book.commit_summary_walk(true, &HashSet::new());
+        assert!(
+            book.summaries.contains_key("s-live"),
+            "an unconfirmed row is not an archived row"
+        );
+
+        // A walk names it: confirmed. An omission after that is a real
+        // archive and the row goes.
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-a", "s-live"]));
+        book.commit_summary_walk(true, &HashSet::new());
+        book.walk_order.clear();
+        fold_session_page(&mut book, &page(&["s-a"]));
+        book.commit_summary_walk(true, &HashSet::new());
+        assert!(
+            !book.summaries.contains_key("s-live"),
+            "once the host has named the row, its absence is authoritative"
+        );
     }
 
     #[test]

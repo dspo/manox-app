@@ -1166,10 +1166,6 @@ fn id_tag(short_id: &str, id: &str) -> impl IntoElement {
         .child(short)
 }
 
-/// The 16px status slot's content, one glyph per five-state: parked turns
-/// (`PendingAuth`/`PendingPlan`) the filled 8px blue dot, `Unread` the hollow
-/// 6.5px one (distinct semantics, same blue), `Running` the pixel grid,
-/// `Errored` the danger triangle, `Idle` nothing.
 /// The selection-mode leading slot: a faint empty circle, or the accent
 /// check once the row is picked.
 fn check_slot(checked: bool) -> impl IntoElement {
@@ -1182,6 +1178,10 @@ fn check_slot(checked: bool) -> impl IntoElement {
     })
 }
 
+/// The 16px status slot's content, one glyph per five-state: parked turns
+/// (`PendingAuth`/`PendingPlan`) the filled 8px blue dot, `Unread` the hollow
+/// 6.5px one (distinct semantics, same blue), `Running` the pixel grid,
+/// `Errored` the danger triangle, `Idle` nothing.
 fn status_slot(id: &str, status: SessionStatus) -> impl IntoElement {
     match status {
         SessionStatus::Errored => div()

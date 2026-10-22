@@ -71,12 +71,23 @@ fn external_row(id: &str) -> SessionRow {
     }
 }
 
-/// Mount a shell over the rows with the batch-archive and select hooks
-/// logging; returns (visual, shell).
+/// The hooks under test: the batch-archive and select callbacks log.
+fn logging_hooks(batch_log: BatchLog, select_log: SelectLog) -> HostHooks {
+    HostHooks {
+        on_batch_archive: Some(Box::new(move |ids, _w, _cx| {
+            batch_log.borrow_mut().push(ids.to_vec());
+        })),
+        on_select: Some(Box::new(move |id, _w, _cx| {
+            select_log.borrow_mut().push(id.to_string());
+        })),
+        ..Default::default()
+    }
+}
+
+/// Mount a shell over the rows; returns (visual, shell).
 fn mount(
     cx: &mut TestAppContext,
-    batch_log: BatchLog,
-    select_log: SelectLog,
+    hooks: HostHooks,
     rows: Vec<SessionRow>,
 ) -> (VisualTestContext, gpui::Entity<Shell>) {
     cx.update(gpui_component::init);
@@ -93,15 +104,7 @@ fn mount(
             brand: None,
             fixed_rows: vec![],
             customizations: vec![],
-            hooks: HostHooks {
-                on_batch_archive: Some(Box::new(move |ids, _w, _cx| {
-                    batch_log.borrow_mut().push(ids.to_vec());
-                })),
-                on_select: Some(Box::new(move |id, _w, _cx| {
-                    select_log.borrow_mut().push(id.to_string());
-                })),
-                ..Default::default()
-            },
+            hooks,
         };
         let shell = cx.new(|cx| Shell::new(config, window, cx));
         shell.update(cx, |s, _| s.set_sessions(rows));
@@ -126,8 +129,7 @@ fn selection_toggles_and_commits_the_batch_through_one_hook(cx: &mut TestAppCont
     let batch_log: BatchLog = Rc::new(RefCell::new(Vec::new()));
     let (mut visual, shell) = mount(
         cx,
-        batch_log.clone(),
-        Rc::new(RefCell::new(Vec::new())),
+        logging_hooks(batch_log.clone(), Rc::new(RefCell::new(Vec::new()))),
         vec![
             thread_row("t-1"),
             thread_row("t-2"),
@@ -196,8 +198,7 @@ fn a_row_click_while_selecting_toggles_instead_of_switching(cx: &mut TestAppCont
     let select_log: SelectLog = Rc::new(RefCell::new(Vec::new()));
     let (mut visual, shell) = mount(
         cx,
-        Rc::new(RefCell::new(Vec::new())),
-        select_log.clone(),
+        logging_hooks(Rc::new(RefCell::new(Vec::new())), select_log.clone()),
         vec![thread_row("t-1"), thread_row("t-2")],
     );
     shell.update(cx, |s, cx| s.begin_selection("t-1", cx));
@@ -228,8 +229,7 @@ fn cancel_and_an_empty_commit_archive_nothing(cx: &mut TestAppContext) {
     let batch_log: BatchLog = Rc::new(RefCell::new(Vec::new()));
     let (mut visual, shell) = mount(
         cx,
-        batch_log.clone(),
-        Rc::new(RefCell::new(Vec::new())),
+        logging_hooks(batch_log.clone(), Rc::new(RefCell::new(Vec::new()))),
         vec![thread_row("t-1"), thread_row("t-2")],
     );
     shell.update(cx, |s, cx| s.begin_selection("t-1", cx));
@@ -255,4 +255,131 @@ fn cancel_and_an_empty_commit_archive_nothing(cx: &mut TestAppContext) {
     assert!(batch_log.borrow().is_empty());
     assert!(visual.debug_bounds("chrome-session-row-t-1").is_some());
     assert!(visual.debug_bounds("chrome-session-row-t-2").is_some());
+}
+
+/// The selection is a set of live rows: a row that leaves the snapshot
+/// (archived by another client, deleted) leaves the checked set too, so the
+/// count and the commit never speak about a row that no longer exists.
+#[gpui::test]
+fn a_row_that_leaves_the_list_leaves_the_selection(cx: &mut TestAppContext) {
+    let (visual, shell) = mount(
+        cx,
+        logging_hooks(
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(Vec::new())),
+        ),
+        vec![thread_row("t-1"), thread_row("t-2")],
+    );
+    shell.update(cx, |s, cx| s.begin_selection("t-1", cx));
+    shell.update(cx, |s, cx| s.toggle_row_selection("t-2", cx));
+
+    shell.update(cx, |s, _| s.set_sessions(vec![thread_row("t-2")]));
+    visual.run_until_parked();
+    assert_eq!(
+        picked(&shell, cx),
+        Some(vec!["t-2".to_string()]),
+        "the departed row is no longer checked"
+    );
+}
+
+/// A host that offers selection but no batch-archive hook has no write path:
+/// committing is inert (no optimistic drop, selection stays), so the rows do
+/// not vanish until the next snapshot puts them back.
+#[gpui::test]
+fn a_host_without_the_batch_hook_commits_nothing(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount(cx, HostHooks::default(), vec![thread_row("t-1")]);
+    shell.update(cx, |s, cx| s.begin_selection("t-1", cx));
+    shell.update_in(&mut visual, |s, window, cx| {
+        s.commit_selection_archive(window, cx)
+    });
+    visual.run_until_parked();
+
+    assert_eq!(
+        picked(&shell, cx),
+        Some(vec!["t-1".to_string()]),
+        "the commit leaves selection mode untouched"
+    );
+    assert!(
+        visual.debug_bounds("chrome-session-row-t-1").is_some(),
+        "the row was never optimistically dropped"
+    );
+}
+
+/// 全选 covers what the sidebar SHOWS: a collapsed group contributes nothing,
+/// so its members cannot be archived unseen.
+#[gpui::test]
+fn select_all_skips_collapsed_groups(cx: &mut TestAppContext) {
+    let (visual, shell) = mount(
+        cx,
+        logging_hooks(
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(Vec::new())),
+        ),
+        vec![thread_row("t-1"), thread_row("t-2")],
+    );
+    shell.update(cx, |s, cx| s.begin_selection("t-1", cx));
+    shell.update(cx, |s, _| s.toggle_group("Chats"));
+    visual.run_until_parked();
+
+    shell.update(cx, |s, cx| s.select_all_rows(cx));
+    assert_eq!(
+        picked(&shell, cx),
+        Some(vec![]),
+        "a collapsed group's rows are not swept into the batch"
+    );
+}
+
+/// 全选 rides the same projection the list renders: an active search term
+/// narrows the checked set, so 归档 cannot sweep a filtered-out row.
+#[gpui::test]
+fn select_all_respects_the_search_filter(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount(
+        cx,
+        logging_hooks(
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(Vec::new())),
+        ),
+        vec![thread_row("t-1"), thread_row("t-2")],
+    );
+    shell.update(cx, |s, cx| s.begin_selection("t-1", cx));
+    shell.update_in(&mut visual, |s, window, cx| {
+        s.toggle_sidebar_search(window, cx)
+    });
+    visual.simulate_input("t-2");
+
+    shell.update(cx, |s, cx| s.select_all_rows(cx));
+    assert_eq!(
+        picked(&shell, cx),
+        Some(vec!["t-2".to_string()]),
+        "only the row the filter shows is checked"
+    );
+}
+
+/// Escape leaves selection mode: the key bubbles from a focusable row up to
+/// the sidebar root, so 取消 has a keyboard equivalent.
+#[gpui::test]
+fn escape_leaves_selection_mode(cx: &mut TestAppContext) {
+    let (mut visual, shell) = mount(
+        cx,
+        logging_hooks(
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(Vec::new())),
+        ),
+        vec![thread_row("t-1"), thread_row("t-2")],
+    );
+    shell.update(cx, |s, cx| s.begin_selection("t-1", cx));
+    visual.run_until_parked();
+    let at = visual
+        .debug_bounds("chrome-session-row-t-2")
+        .expect("the row paints")
+        .center();
+    visual.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+    visual.simulate_keystrokes("escape");
+
+    assert_eq!(
+        picked(&shell, cx),
+        None,
+        "escape cancels the selection like 取消 does"
+    );
 }

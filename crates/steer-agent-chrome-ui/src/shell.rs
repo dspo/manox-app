@@ -13,8 +13,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, ParentElement, Pixels, StatefulInteractiveElement, Styled, Window, actions, div,
-    px,
+    IntoElement, KeyDownEvent, ParentElement, Pixels, StatefulInteractiveElement, Styled, Window,
+    actions, div, px,
 };
 
 use crate::main_surface::MainSurfaceHandle;
@@ -387,6 +387,18 @@ impl Shell {
     pub fn set_sessions(&mut self, rows: Vec<SessionRow>) {
         self.sessions = rows;
         self.sort_sessions();
+        // A checked row that left the list (archived here or by another
+        // client, deleted, or filtered into a non-thread) must leave the
+        // selection too: the count and the commit are about rows that exist.
+        if let Some(picked) = self.selection.as_mut() {
+            let live: std::collections::HashSet<&str> = self
+                .sessions
+                .iter()
+                .filter(|row| matches!(row.kind, SessionRowKind::Thread))
+                .map(|row| row.id.as_str())
+                .collect();
+            picked.retain(|id| live.contains(id.as_str()));
+        }
     }
 
     pub fn select(&mut self, id: &str, window: &mut Window, cx: &mut App) {
@@ -821,18 +833,24 @@ impl Shell {
         cx.notify();
     }
 
-    /// Check every selectable row the list holds (the bar's 全选).
+    /// Check every selectable row the sidebar currently shows (the bar's
+    /// 全选): the same filtered, non-collapsed projection the list renders,
+    /// so a search term never sweeps invisible rows into an archive commit.
     pub fn select_all_rows(&mut self, cx: &mut Context<Self>) {
-        let Some(picked) = self.selection.as_mut() else {
+        if self.selection.is_none() {
             return;
-        };
-        let all: Vec<String> = self
-            .sessions
+        }
+        let (_, groups, _) = self.sidebar_props(cx);
+        let all: Vec<String> = groups
             .iter()
-            .filter(|row| matches!(row.kind, crate::session_list::SessionRowKind::Thread))
+            .filter(|group| !group.collapsed)
+            .flat_map(|group| group.rows.iter())
+            .filter(|row| matches!(row.kind, SessionRowKind::Thread))
             .map(|row| row.id.clone())
             .collect();
-        *picked = all;
+        if let Some(picked) = self.selection.as_mut() {
+            *picked = all;
+        }
         cx.notify();
     }
 
@@ -847,11 +865,21 @@ impl Shell {
     /// rows leave the sidebar now (the same optimistic drop the row menu's
     /// archive performs), and selection mode ends. An empty batch commits
     /// nothing and stays in selection mode.
+    ///
+    /// A host without the hook has no write path at all: committing would only
+    /// hide the rows until the next snapshot re-seeded them, so the bar is
+    /// inert there (the same contract [`Self::set_tag`] keeps).
     pub fn commit_selection_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picked) = self.selection.clone() else {
             return;
         };
-        if picked.is_empty() {
+        let picked: Vec<String> = picked
+            .into_iter()
+            .filter(|id| self.is_selectable(id))
+            .collect();
+        // An empty batch commits nothing: stay in selection mode so the bar
+        // keeps its 取消 affordance.
+        if picked.is_empty() || self.hooks.on_batch_archive.is_none() {
             return;
         }
         if let Some(hook) = &self.hooks.on_batch_archive {
@@ -1894,12 +1922,22 @@ impl Shell {
         };
 
         let width = self.sidebar_width;
+        // Escape leaves selection mode. The key bubbles from a focused row
+        // (or the bar) up to the sidebar root; menus and inline editors own
+        // their own Escape handling and consume it first.
+        let on_escape = cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+            if this.selection.is_some() && ev.keystroke.key == "escape" {
+                this.exit_selection(cx);
+                cx.stop_propagation();
+            }
+        });
 
         div()
             .w(width)
             .h_full()
             .flex_shrink_0()
             .overflow_hidden()
+            .on_key_down(on_escape)
             .child(SessionList {
                 fixed_rows: fixed,
                 groups,
