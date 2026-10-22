@@ -152,10 +152,18 @@ pub fn build_tool_card(
 /// missing one would land the literal string `null` on the clipboard.
 fn copy_input_text(family: CardFamily, entry: &ToolCallItem) -> Option<SharedString> {
     match family {
-        CardFamily::Bash => input_str(entry, "command"),
-        _ if entry.input.is_null() => None,
-        _ => Some(SharedString::from(entry.input.to_string())),
+        // A Bash call whose command is absent or not a string still has a
+        // machine shape worth quoting.
+        CardFamily::Bash => input_str(entry, "command").or_else(|| raw_input(entry)),
+        _ => raw_input(entry),
     }
+}
+
+/// The call's structured input as the machine wrote it. `Value::Null` means
+/// no parameters reached the fold; serializing it would put the word `null`
+/// on the clipboard, so there is nothing to quote.
+fn raw_input(entry: &ToolCallItem) -> Option<SharedString> {
+    (!entry.input.is_null()).then(|| SharedString::from(entry.input.to_string()))
 }
 
 fn card_icon(family: CardFamily) -> AnyElement {
@@ -597,6 +605,12 @@ mod tests {
         );
         let bare = entry("Bash", serde_json::Value::Null);
         assert_eq!(copy_input_text(CardFamily::Bash, &bare), None);
+        let commandless = entry("Bash", serde_json::json!({"description": "run"}));
+        assert_eq!(
+            copy_input_text(CardFamily::Bash, &commandless).as_deref(),
+            Some(r#"{"description":"run"}"#),
+            "a Bash call without a command still quotes its machine shape"
+        );
         let read = entry("Read", serde_json::json!({"path": "src/lib.rs"}));
         assert_eq!(
             copy_input_text(CardFamily::Read, &read).as_deref(),

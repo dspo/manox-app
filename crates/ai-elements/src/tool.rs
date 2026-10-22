@@ -487,9 +487,10 @@ impl RenderOnce for ToolHeader {
 /// siblings of this frame.
 ///
 /// The body may carry copy controls, always visible at its top-right corner:
-/// `in` copies the tool call's raw input structure, `out` its raw output —
-/// the machine shape, as opposed to selecting the rendered text, which copies
-/// what the card shows.
+/// `in` copies the call's quotable input — the raw argument structure, or the
+/// host's chosen shape where re-running matters (the app quotes a Bash
+/// command) — and `out` its raw output: the machine shape, as opposed to
+/// selecting the rendered text, which copies what the card shows.
 #[derive(IntoElement)]
 pub struct Tool {
     id: ElementId,
@@ -562,9 +563,10 @@ impl Tool {
         self
     }
 
-    /// The tool call's raw input structure, offered by the body's `in` copy
-    /// control. The rendered body is for reading; this is for quoting the
-    /// call as the machine saw it.
+    /// The text the body's `in` copy control quotes: the call's raw argument
+    /// structure, or the host's chosen shape where re-running matters (the
+    /// app quotes a Bash command). The rendered body is for reading; this is
+    /// for quoting the call.
     pub fn copy_input(mut self, raw: impl Into<SharedString>) -> Self {
         self.copy_input = Some(raw.into());
         self
