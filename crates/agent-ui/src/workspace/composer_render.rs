@@ -1,8 +1,8 @@
 //! The composer + overlay render helpers (U9b cluster 8): the composer
 //! element (and its queued-follow-ups / plan-chip / access-placeholder /
-//! plus-menu / send-button / completion-overlay / attachments /
-//! project-chip faces), the browser-suite toggles, the file picker, the
-//! blank-project family, and the project registration leg. Split from `workspace.rs` — `super` is the
+//! send-button / completion-overlay / attachments / project-chip faces),
+//! the browser-suite toggles, the blank-project family, and the project
+//! registration leg. Split from `workspace.rs` — `super` is the
 //! workspace module; the bare-private methods lift `pub(super)` for the
 //! parent's render face and the `tests` child.
 
@@ -140,7 +140,6 @@ impl Workspace {
             });
         }
         let queue = self.render_queued_follow_ups(theme, cx);
-        let plus = self.render_plus_button(cx);
         let project_chip = self.render_project_chip_pi(theme, cx);
         let goal_chip = self.render_goal_chip(theme, cx);
         let plan_chip = self.render_plan_chip(theme, cx);
@@ -246,14 +245,13 @@ impl Workspace {
                     .child(
                         // `min_w_0` lets this group flex-shrink when the row is
                         // narrow; `overflow_hidden` is deliberately NOT set so
-                        // the chips' popovers (project picker, permission menu, `+`
-                        // menu) can overflow upward. `MIN_WINDOW_W` keeps the row
+                        // the chips' popovers (project picker, permission menu)
+                        // can overflow upward. `MIN_WINDOW_W` keeps the row
                         // wide enough that the chips themselves never overflow.
                         h_flex()
                             .items_center()
                             .gap_1()
                             .min_w_0()
-                            .child(plus)
                             .child(project_chip)
                             .when_some(goal_chip, |el, chip| el.child(chip))
                             .when_some(plan_chip, |el, chip| el.child(chip))
@@ -726,190 +724,22 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// Composer `+` button: attachment entry points (files / goal). Closed,
-    /// the bare trigger; open, a PopupMenu anchored above it.
-    pub(super) fn render_plus_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let trigger = Button::new("composer-plus")
-            .ghost()
-            .xsmall()
-            .icon(IconName::Plus)
-            .tooltip(i18n::t("composer-add-label"))
-            .on_click(cx.listener(|this, _, window, cx| {
-                if this.chat.read(cx).plus_open {
-                    this.close_plus_menu(cx);
-                } else {
-                    this.open_plus_menu(window, cx);
-                }
-                cx.notify();
-            }));
-
-        if !self.chat.read(cx).plus_open {
-            return trigger.into_any_element();
-        }
-        let Some(menu) = self.chat.read(cx).plus_menu.clone() else {
-            return trigger.into_any_element();
-        };
-        gpui::div()
-            .relative()
-            .child(trigger)
-            .child(
-                deferred(
-                    gpui::div()
-                        .id("plus-dropdown")
-                        .absolute()
-                        .bottom_full()
-                        .left_0()
-                        .occlude()
-                        .child(menu),
-                )
-                .with_priority(1),
-            )
-            .into_any_element()
-    }
-
-    /// Build the `+` menu: "Files and folders" opens the native picker into
-    /// pending attachments; "Goal" seeds the `/goal` slash command into the
-    /// composer.
-    pub(super) fn open_plus_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let theme = cx.theme().clone();
-        let ws = cx.entity().downgrade();
-        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
-            let ws_files = ws.clone();
-            let ws_goal = ws.clone();
-            let ws_chrome = ws.clone();
-            let ws_internal = ws.clone();
-            build_plus_menu(
-                menu,
-                &theme,
-                move |window, cx| {
-                    let _ = ws_files.update(cx, |this, cx| {
-                        this.close_plus_menu(cx);
-                        this.pick_files(window, cx);
-                        cx.notify();
-                    });
-                },
-                move |window, cx| {
-                    let _ = ws_goal.update(cx, |this, cx| {
-                        this.close_plus_menu(cx);
-                        this.chat_input(cx).update(cx, |state, cx| {
-                            state.set_value("/goal ".to_string(), window, cx);
-                        });
-                        cx.notify();
-                    });
-                },
-                move |_window, cx| {
-                    let _ = ws_chrome.update(cx, |this, cx| {
-                        this.close_plus_menu(cx);
-                        this.activate_browser_tool_suite(
-                            manox_agent::engine::BrowserSuite::ChromeUse,
-                            cx,
-                        );
-                    });
-                },
-                move |_window, cx| {
-                    let _ = ws_internal.update(cx, |this, cx| {
-                        this.close_plus_menu(cx);
-                        this.activate_browser_tool_suite(
-                            manox_agent::engine::BrowserSuite::WebExplore,
-                            cx,
-                        );
-                    });
-                },
-            )
-        });
-        let sub = cx.subscribe(&menu, |this, _menu, _: &DismissEvent, cx| {
-            this.close_plus_menu(cx);
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.plus_open = true;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.plus_menu = Some(menu);
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.plus_menu_sub = Some(sub);
-            cx.notify();
-        });
-    }
-
-    /// Activate a browser tool suite on the bound thread. The chip is
+    /// Deactivate a browser tool suite on the bound thread. The chip is
     /// derived state: it rides the `BrowserSuitesChanged` echo of the
     /// facade mirror, so a landing thread's pre-engine toggle survives until
-    /// the engine materializes. The engine merges the suite names atomically
-    /// against the session's authoritative active-tool set.
-    pub(super) fn activate_browser_tool_suite(
-        &mut self,
-        suite: manox_agent::engine::BrowserSuite,
-        cx: &mut Context<Self>,
-    ) {
-        // U6b①: the toggle rides the gateway (the setter-note family, like
-        // SetPlanMode/SetModel) — the server arm lands it on the session's
-        // facade, whose BrowserSuitesChanged echo drives the chip exactly
-        // as the retired direct facade write did.
-        self.chat
-            .read(cx)
-            .thread
-            .with_mut(|t| t.set_browser_suite(suite, true));
-    }
-
-    /// Deactivate a browser tool suite on the bound thread; the chip follows
-    /// the mirror echo (see `activate_browser_tool_suite`).
+    /// the engine materializes.
     pub(super) fn deactivate_browser_tool_suite(
         &mut self,
         suite: manox_agent::engine::BrowserSuite,
         cx: &mut Context<Self>,
     ) {
-        // U6b①: the gateway leg (see `activate_browser_tool_suite`); the
-        // landing fallback parks in the facade mirror.
+        // U6b①: the toggle rides the gateway (the setter-note family, like
+        // SetPlanMode/SetModel); the landing fallback parks in the facade
+        // mirror.
         self.chat
             .read(cx)
             .thread
             .with_mut(|t| t.set_browser_suite(suite, false));
-    }
-
-    /// Open the native file picker and add chosen paths as pending
-    /// attachments (images render as chips + inline blocks, other files ride
-    /// the attachment chip row).
-    pub(super) fn pick_files(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let result = paths.await;
-            this.update(cx, |this, cx| {
-                if let Ok(Ok(Some(paths))) = result {
-                    for path in paths {
-                        this.chat.update(cx, |chat, cc| {
-                            chat.pending_attachments.push(PendingAttachment::new(path));
-                            cc.notify();
-                        });
-                    }
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    pub(super) fn close_plus_menu(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cx| {
-            chat.plus_open = false;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.plus_menu = None;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.plus_menu_sub = None;
-            cx.notify();
-        });
     }
 
     /// The send/stop control's single click dispatch. The running edge is

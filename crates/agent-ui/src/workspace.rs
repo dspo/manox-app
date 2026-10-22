@@ -49,8 +49,7 @@ use crate::views::completion::{
     mention_source, render_completion, slash_source,
 };
 use crate::views::composer_menu::{
-    PendingAttachment, build_plus_menu, load_attachment, render_attachment_chips,
-    render_browser_chips,
+    PendingAttachment, load_attachment, render_attachment_chips, render_browser_chips,
 };
 use crate::views::popup_menu;
 use crate::views::settings::{SettingsEvent, SettingsView};
@@ -804,9 +803,6 @@ impl Workspace {
                 model_open: false,
                 model_menu: None,
                 model_menu_sub: None,
-                plus_open: false,
-                plus_menu: None,
-                plus_menu_sub: None,
                 access_open: false,
                 project_chip_open: false,
                 project_chip_menu: None,

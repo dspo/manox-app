@@ -391,9 +391,6 @@ pub struct ChatColumn {
     /// PopupMenu entity for the open model selector; created on open, destroyed on close.
     pub model_menu: Option<Entity<PopupMenu>>,
     pub model_menu_sub: Option<Subscription>,
-    pub plus_open: bool,
-    pub plus_menu: Option<Entity<PopupMenu>>,
-    pub plus_menu_sub: Option<Subscription>,
     /// Access-chip dropdown (permission modes). Mirrors the model selector pattern.
     pub access_open: bool,
     /// Project-chip dropdown (recent projects + new project submenu).

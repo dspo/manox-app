@@ -503,29 +503,12 @@ follow-stop-dismiss = 关闭
 follow-stop-indicator-retry = 点击重新连接实时跟进
 ### views/composer_menu.rs
 
-composer-add-label = 添加
 composer-delivery-error = 连接未就绪，消息可能没有送达
 composer-delivery-retry = 重试
 
-composer-plugins-label = 插件
-
-composer-add-files = 文件和文件夹
-
-composer-attach-editor = 附加编辑器
-
-composer-goal-name = 目标
-
-composer-goal-desc = 设置持续努力实现的目标
-
-composer-browser-label = 浏览器
-
 composer-add-chrome = Chrome
 
-composer-add-chrome-desc = 启用 ChromeUse 浏览器自动化工具
-
 composer-add-internal-browser = 内置浏览器
-
-composer-add-internal-browser-desc = 启用内置 WebView 浏览器工具
 
 completion-tag-command = 命令
 
