@@ -4,7 +4,8 @@
 //!
 //! Run with `CHROME_SHOT=/tmp/chrome.png cargo test -p steer-agent-chrome-ui
 //! --test visual`; `CHROME_RIGHT=1` expands the right pane with a dummy tab
-//! (no PTY/webview — those need a real window), `CHROME_PANEL=1` the bottom
+//! (no PTY/webview — those need a real window), `CHROME_SELECT=1` the
+//! sidebar's batch-selection mode with two rows checked, `CHROME_PANEL=1` the bottom
 //! dock, `CHROME_PICKER=1` the titlebar session picker with its dropdown
 //! open. macOS-only: the readback is a Metal texture and the harness's
 //! imports (`VisualTestAppContext`) exist only on that platform.
@@ -33,7 +34,7 @@ mod macos {
     use steer_agent_chat_ui::host::noop_host;
     use steer_agent_chat_ui::views::message::MessageItem;
     use steer_agent_chrome_ui::right_pane::TabStore;
-    use steer_agent_chrome_ui::session_list::SessionStatus;
+    use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
     use steer_agent_chrome_ui::shell::SessionRow;
     use steer_agent_chrome_ui::theme::IconAsset;
     use steer_agent_chrome_ui::{
@@ -77,6 +78,24 @@ mod macos {
                 if std::env::var("CHROME_PICKER").is_ok() {
                     shell.update(cx, |shell, cx| {
                         shell.toggle_session_picker(window, cx);
+                        cx.notify();
+                    });
+                }
+                // CHROME_SELECT=1: the sidebar's batch-selection mode with the
+                // first two thread rows checked — the check circles, the
+                // accent stroke and the bottom action bar.
+                if std::env::var("CHROME_SELECT").is_ok() {
+                    shell.update(cx, |shell, cx| {
+                        let ids: Vec<String> = shell
+                            .sessions
+                            .iter()
+                            .filter(|row| matches!(row.kind, SessionRowKind::Thread))
+                            .map(|row| row.id.clone())
+                            .take(2)
+                            .collect();
+                        for id in ids {
+                            shell.begin_selection(&id, cx);
+                        }
                         cx.notify();
                     });
                 }

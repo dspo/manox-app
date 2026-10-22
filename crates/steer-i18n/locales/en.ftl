@@ -38,6 +38,11 @@ external-session-resume-failed = Failed to resume external agent
 sidebar-archive = Archive
 
 sidebar-unarchive = Unarchive
+sidebar-multi-select = Select sessions…
+sidebar-selection-count = { $count } selected
+sidebar-selection-select-all = Select all
+sidebar-selection-archive = Archive
+sidebar-selection-cancel = Cancel
 
 sidebar-thread-menu = Thread actions
 

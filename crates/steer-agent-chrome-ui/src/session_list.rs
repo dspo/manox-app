@@ -302,6 +302,20 @@ pub struct SessionList {
     /// The fold footer under a group (show more / show less); the payload is
     /// the group's key.
     pub on_show_more: OnId,
+    /// The batch-selection mode's checked set (`Some` = selecting). Thread
+    /// rows render a check circle in place of the status slot and a click
+    /// toggles the check instead of switching sessions; external rows are
+    /// not selectable.
+    pub selection: Option<Vec<String>>,
+    /// Row click while selecting (toggle that row's check).
+    pub on_selection_toggle: OnId,
+    /// The action bar's 全选 (check every selectable thread row).
+    pub on_selection_all: OnUnit,
+    /// The action bar's 归档 (commit the batch; the host dispatches the
+    /// archive write and leaves selection mode).
+    pub on_selection_archive: OnUnit,
+    /// The action bar's 取消 (leave selection mode with nothing archived).
+    pub on_selection_cancel: OnUnit,
 }
 
 impl RenderOnce for SessionList {
@@ -379,7 +393,87 @@ impl RenderOnce for SessionList {
                     ),
             )
             .child(customizations(&self.customizations))
+            .when_some(self.selection.clone(), |this, selection| {
+                this.child(selection_bar(
+                    selection.len(),
+                    self.on_selection_all.clone(),
+                    self.on_selection_archive.clone(),
+                    self.on_selection_cancel.clone(),
+                ))
+            })
     }
+}
+
+/// The batch-selection action bar pinned under the list: the count, then
+/// 全选 / 归档 / 取消. 归档 is lit only while something is checked — an
+/// empty batch has nothing to commit.
+fn selection_bar(
+    count: usize,
+    on_all: OnUnit,
+    on_archive: OnUnit,
+    on_cancel: OnUnit,
+) -> impl IntoElement {
+    let pill = |id: &'static str, label: String, accent: bool| {
+        div()
+            .id(id)
+            .px(px(8.))
+            .py(px(2.))
+            .rounded(px(6.))
+            .text_size(px(12.))
+            .cursor_pointer()
+            .child(label)
+            .map(|this| {
+                if accent {
+                    this.bg(ACCENT).text_color(SHELL_BG)
+                } else {
+                    this.text_color(FG_DIM).hover(|style| style.bg(LIST_HOVER))
+                }
+            })
+    };
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .border_t_1()
+        .border_color(BORDER)
+        .pt(px(6.))
+        .mt(px(2.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.))
+                .text_color(FG_DIM)
+                .child(steer_i18n::t_count("sidebar-selection-count", count as i64)),
+        )
+        .child(
+            pill(
+                "selection-all",
+                steer_i18n::t("sidebar-selection-select-all"),
+                false,
+            )
+            .on_click(move |e, w, cx| on_all(e, w, cx)),
+        )
+        .child(
+            pill(
+                "selection-archive",
+                steer_i18n::t("sidebar-selection-archive"),
+                true,
+            )
+            .map(|this| if count == 0 { this.opacity(0.4) } else { this })
+            .on_click(move |e, w, cx| on_archive(e, w, cx)),
+        )
+        .child(
+            pill(
+                "selection-cancel",
+                steer_i18n::t("sidebar-selection-cancel"),
+                false,
+            )
+            .on_click(move |e, w, cx| on_cancel(e, w, cx)),
+        )
 }
 
 /// A localized hover tooltip view (gpui-component Tooltip over the Root).
@@ -802,6 +896,13 @@ fn session_row(
 ) -> Stateful<gpui::Div> {
     let selected = list.selected.as_deref() == Some(data.id.as_str());
     let hovered = list.hovered.as_deref() == Some(data.id.as_str());
+    // Selection mode is a thread-row affair: an external row keeps its brand
+    // mark and its click stays inert while a batch is being picked.
+    let selectable = list.selection.is_some() && data.kind == SessionRowKind::Thread;
+    let checked = list
+        .selection
+        .as_ref()
+        .is_some_and(|picked| picked.iter().any(|id| id == &data.id));
 
     let focus = list.row_focus.get(&data.id);
     let ix = order.iter().position(|id| id == &data.id).unwrap_or(0);
@@ -821,8 +922,16 @@ fn session_row(
         })
         .on_click({
             let on_select = list.on_select.clone();
+            let on_toggle = list.on_selection_toggle.clone();
+            let selecting = list.selection.is_some();
             let id = data.id.clone();
-            move |_, w, cx| on_select(&id, w, cx)
+            move |_, w, cx| {
+                if selectable {
+                    on_toggle(&id, w, cx);
+                } else if !selecting {
+                    on_select(&id, w, cx);
+                }
+            }
         })
         .on_mouse_down(gpui::MouseButton::Right, {
             let on_menu = list.on_row_menu.clone();
@@ -896,6 +1005,9 @@ fn session_row(
                         // session wears its brand mark (the legacy
                         // RowIcon::External slot).
                         .child(match data.kind {
+                            SessionRowKind::Thread if selectable => {
+                                check_slot(checked).into_any_element()
+                            }
                             SessionRowKind::Thread => {
                                 status_slot(&data.id, data.status).into_any_element()
                             }
@@ -952,9 +1064,11 @@ fn session_row(
                 ),
         );
 
-    // Row surface (selected card / hover / rest) + the 1px stroke kept
-    // transparent in the unselected states so all four share one height.
-    if selected {
+    // Row surface (checked / selected card / hover / rest) + the 1px stroke
+    // kept transparent in the unselected states so all share one height.
+    if checked {
+        row.bg(CARD_BG).border_1().border_color(ACCENT)
+    } else if selected {
         row.bg(CARD_BG).border_1().border_color(CARD_BORDER)
     } else {
         row.border_1()
@@ -1050,6 +1164,18 @@ fn id_tag(short_id: &str, id: &str) -> impl IntoElement {
         .text_color(FG_FAINT)
         .flex_shrink_0()
         .child(short)
+}
+
+/// The selection-mode leading slot: a faint empty circle, or the accent
+/// check once the row is picked.
+fn check_slot(checked: bool) -> impl IntoElement {
+    div().flex().items_center().justify_center().map(|this| {
+        if checked {
+            this.text_color(ACCENT).child(icon(icons::CHECK, 14.))
+        } else {
+            this.text_color(FG_FAINT).child(icon(icons::CIRCLE, 12.))
+        }
+    })
 }
 
 /// The 16px status slot's content, one glyph per five-state: parked turns
