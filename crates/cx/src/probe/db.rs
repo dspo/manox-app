@@ -54,7 +54,9 @@ pub fn load_probe_results(conn: &Connection) -> Result<HashMap<String, ProbeCell
             key,
             ProbeCellResult {
                 status,
-                latency_ms: row.get(4)?,
+                latency_ms: row
+                    .get::<_, Option<i64>>(4)?
+                    .and_then(|ms| u64::try_from(ms).ok()),
                 http_status: row.get(5)?,
                 error_message: row.get(6)?,
                 configured: true,
@@ -134,7 +136,7 @@ pub fn save_probe_result(
             model_id,
             wire_api.display(),
             status_str,
-            result.latency_ms,
+            result.latency_ms.and_then(|ms| i64::try_from(ms).ok()),
             result.http_status,
             result.error_message,
         ],

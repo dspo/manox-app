@@ -19,7 +19,7 @@ libc = "0.2"
 portable-pty = "0.9"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "process", "signal"] }
 futures-util = "0.3"
 glob = "0.3"

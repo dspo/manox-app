@@ -113,7 +113,6 @@ pub fn render_attachment_chips(
 /// Display metadata for an active browser tool suite chip.
 fn browser_chip_meta(suite: manox_agent::engine::BrowserSuite) -> (IconName, &'static str) {
     match suite {
-        manox_agent::engine::BrowserSuite::ChromeUse => (IconName::Globe, "composer-add-chrome"),
         manox_agent::engine::BrowserSuite::WebExplore => {
             (IconName::Frame, "composer-add-internal-browser")
         }

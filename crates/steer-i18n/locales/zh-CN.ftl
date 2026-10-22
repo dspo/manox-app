@@ -506,8 +506,6 @@ follow-stop-indicator-retry = 点击重新连接实时跟进
 composer-delivery-error = 连接未就绪，消息可能没有送达
 composer-delivery-retry = 重试
 
-composer-add-chrome = Chrome
-
 composer-add-internal-browser = 内置浏览器
 
 completion-tag-command = 命令

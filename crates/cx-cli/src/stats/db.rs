@@ -164,9 +164,9 @@ pub(super) fn load_scan_state(conn: &Connection, path: &str) -> Option<ScanState
         params![path],
         |row| {
             Ok(ScanState {
-                mtime_secs: row.get(0)?,
-                size: row.get(1)?,
-                parsed_upto_bytes: row.get(2)?,
+                mtime_secs: row.get::<_, i64>(0)? as u64,
+                size: row.get::<_, i64>(1)? as u64,
+                parsed_upto_bytes: row.get::<_, i64>(2)? as u64,
                 file_id: row.get(3)?,
             })
         },
@@ -210,10 +210,10 @@ fn insert_one(conn: &Connection, entry: &RawEntry, source_path: &str) -> Result<
                 |row| {
                     Ok((
                         row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
+                        row.get::<_, i64>(1)? as u64,
+                        row.get::<_, i64>(2)? as u64,
+                        row.get::<_, i64>(3)? as u64,
+                        row.get::<_, i64>(4)? as u64,
                     ))
                 },
             )
@@ -263,11 +263,11 @@ fn insert_one(conn: &Connection, entry: &RawEntry, source_path: &str) -> Result<
             entry.agent,
             entry.model,
             entry.date,
-            entry.input_tokens,
-            entry.output_tokens,
-            entry.cache_read_input_tokens,
-            entry.cache_creation_input_tokens,
-            entry.reasoning_output_tokens,
+            entry.input_tokens as i64,
+            entry.output_tokens as i64,
+            entry.cache_read_input_tokens as i64,
+            entry.cache_creation_input_tokens as i64,
+            entry.reasoning_output_tokens as i64,
             entry.session_id,
             entry.message_id,
             entry.dedup_primary,
@@ -323,7 +323,13 @@ pub(super) fn mark_file_scanned(
     conn.execute(
         "INSERT OR REPLACE INTO scanned_files (path, mtime_secs, size, parsed_upto_bytes, file_id)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![path, mtime, size, parsed_upto_bytes, file_id],
+        params![
+            path,
+            mtime as i64,
+            size as i64,
+            parsed_upto_bytes as i64,
+            file_id
+        ],
     )?;
     Ok(())
 }
@@ -385,10 +391,10 @@ pub(super) fn load_aggregated(conn: &Connection) -> Result<Vec<UsageRecord>> {
     )?;
 
     let rows = stmt.query_map([], |row| {
-        let in_tokens: u64 = row.get(3)?;
-        let out_tokens: u64 = row.get(4)?;
-        let cache_read: u64 = row.get(5)?;
-        let cache_create: u64 = row.get(6)?;
+        let in_tokens: u64 = row.get::<_, i64>(3)? as u64;
+        let out_tokens: u64 = row.get::<_, i64>(4)? as u64;
+        let cache_read: u64 = row.get::<_, i64>(5)? as u64;
+        let cache_create: u64 = row.get::<_, i64>(6)? as u64;
         Ok(RawAgg {
             agent: row.get(0)?,
             model: row.get(1)?,
