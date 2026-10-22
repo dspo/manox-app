@@ -1,5 +1,5 @@
 //! The app's contribution to a session's tool set: the Preview tool
-//! (`client_Preview`), mounted through `manox_agent::embedder_tools` — the
+//! (`preview`), mounted through `manox_agent::embedder_tools` — the
 //! upstream seam a hosting app uses to add its own tools to every session
 //! (the engine consults the provider at assembly and before every prompt).
 //!
@@ -30,11 +30,10 @@ pub struct PreviewTool {
 impl PreviewTool {
     pub fn new() -> Self {
         Self {
-            // Derived through the upstream sanitizer so the wire name stays
-            // in lockstep with the refresh machinery's `client_` prefix
-            // matching (steer_agent_chat_ui::preview::TOOL_NAME asserts the
-            // equality).
-            name: manox_agent::embedder_tools::client_tool_name("Preview"),
+            // Derived through the upstream sanitizer so the wire name stays in
+            // lockstep with the engine's mounting rule
+            // (steer_agent_chat_ui::preview::TOOL_NAME asserts the equality).
+            name: manox_agent::embedder_tools::embedder_tool_name("preview"),
         }
     }
 }
