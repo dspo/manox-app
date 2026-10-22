@@ -3,9 +3,9 @@
 //! Every markdown surface in the app — message bodies, reasoning rounds,
 //! static chrome, terminal panels — renders through the helpers here, so the
 //! theme bridge, the heading ladders, the code-highlight dispatch (`ansi` /
-//! `diff` / conflict markers / tree-sitter), the inline ```svg block, and the
-//! copy controls stay consistent by construction instead of by per-call-site
-//! discipline.
+//! `diff` / conflict markers / tree-sitter), the inline diagram blocks
+//! (```svg / ```mermaid), and the copy controls stay consistent by construction
+//! instead of by per-call-site discipline.
 //!
 //! This drives the `gpui-base` `TextView` directly (same crates.io train as
 //! `gpui-component`, exact-pinned): the component wrapper folds onto the theme
@@ -168,9 +168,9 @@ impl ChatDocument {
 /// and [`TextView::table_actions`] at the call site where the copy-feedback
 /// host is known.
 ///
-/// `cx` is the app because an ```svg fence is rasterized at parse time (see
-/// [`svg_block`]); the renderer is read here, at the assembly point, and
-/// carried by the document.
+/// `cx` is the app because an ```svg or ```mermaid fence is rasterized at parse
+/// time (see [`svg_block`]); the renderer is read here, at the assembly point,
+/// and carried by the document.
 pub fn message_document(
     state: &Entity<TextViewState>,
     theme: &Theme,
@@ -178,7 +178,7 @@ pub fn message_document(
     cx: &App,
 ) -> TextView {
     let style = message_style(theme, body);
-    svg_block::with_svg_blocks(
+    svg_block::with_diagram_blocks(
         TextView::new(state)
             .style(style.clone())
             .code_block_highlighter(steer_code_highlighter(theme))
@@ -201,7 +201,7 @@ pub fn reasoning_document(
     cx: &App,
 ) -> TextView {
     let style = message_style(theme, body).with_foreground(theme.muted_foreground);
-    svg_block::with_svg_blocks(
+    svg_block::with_diagram_blocks(
         TextView::new(state)
             .style(style.clone())
             .code_block_highlighter(steer_code_highlighter(theme))
@@ -222,7 +222,7 @@ pub fn static_document(
     theme: &Theme,
     cx: &App,
 ) -> TextView {
-    svg_block::with_svg_blocks(
+    svg_block::with_diagram_blocks(
         TextView::markdown(id, linkify_markdown(text.into().as_ref()))
             .style(chrome_style(theme))
             .code_block_highlighter(steer_code_highlighter(theme)),

@@ -695,7 +695,7 @@ impl Workspace {
         // The server's constructor claims the process-wide embedder-tool
         // slot (last-wins), so the Preview tool's chain-install must come
         // after it — earlier wiring would be clobbered (verified on the
-        // machine: the model saw no client_Preview until this ordering was
+        // machine: the model saw no preview tool until this ordering was
         // fixed).
         crate::preview_host::install();
         let ahp_store =

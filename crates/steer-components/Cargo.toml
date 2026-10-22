@@ -15,6 +15,10 @@ gpui-component = { workspace = true, features = ["tree-sitter-languages"] }
 # own `IconName` is a subset without `Code`/`Image`.
 gpui-kit-assets.workspace = true
 log.workspace = true
+# The `$$…$$` math block's typesetter — see the workspace comment on this crate.
+mathra.workspace = true
+# The ```mermaid fence's renderer — see the workspace comment on this crate.
+mermaid-rs-renderer.workspace = true
 # ropey::Rope is what SyntaxHighlighter::update consumes for syntax highlighting.
 ropey.workspace = true
 # vte::ansi::Processor + Handler — parse SGR/color escapes in tool output for the TerminalPanel.

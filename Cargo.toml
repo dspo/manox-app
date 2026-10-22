@@ -30,21 +30,21 @@ publish = false
 [workspace.dependencies]
 # Agent runtime from dspo/manox, consumed via git tags; the CxSessionSource
 # bridge (SessionHandle → PtySource) stays in this repo's steer-ext-agents.
-manox-agent = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
-manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
-manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
-manox-providers = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
-supervisor = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
-manox-terminal = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
-hyperlinks = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
+manox-agent = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
+manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
+manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
+manox-providers = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
+supervisor = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
+manox-terminal = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
+hyperlinks = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
 
 # AHP is the v3 interaction protocol; the app is a pure AHP client (official
 # SDK + the manox extension-channel and in-proc runtime crates). Exact-pinned
 # to match the upstream workspace.
 ahp = "=1.0.0"
 ahp-types = "=1.0.0"
-manox-ahp = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
-manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.5.0" }
+manox-ahp = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
+manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.5.1" }
 
 agent-ui = { path = "crates/agent-ui" }
 steer-app = { path = "crates/steer-app" }
@@ -61,6 +61,14 @@ steer-agent-chat-ui = { path = "crates/steer-agent-chat-ui" }
 steer-agent-chrome-ui = { path = "crates/steer-agent-chrome-ui" }
 
 anyhow = "1"
+# The pure-Rust LaTeX math typesetter behind `$$…$$` blocks: a formula becomes
+# a standalone SVG (STIX Two Math glyph outlines, MATH-table layout) at
+# markdown-parse time and rides the svg fence's raster path.
+mathra = "=1.1.1"
+# The pure-Rust Mermaid renderer behind the ```mermaid fence: mermaid source
+# becomes an SVG document at markdown-parse time and rides the same usvg
+# raster path the svg fence paints. SVG output only — gpui rasterizes.
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 async-channel = "2"
 async-trait = "0.1"
 futures = "0.3"
@@ -169,3 +177,6 @@ debug = "line-tables-only"
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
 gpui-pre-platform = { opt-level = 3 }
+# Mermaid's parser/layout runs during markdown conversion (including every
+# streamed append), so unoptimized code shows up as a slow diagram.
+mermaid-rs-renderer = { opt-level = 3 }

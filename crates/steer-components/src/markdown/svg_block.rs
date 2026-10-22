@@ -1,5 +1,8 @@
 //! Inline ```svg fenced blocks: a fence whose info string names `svg` renders
-//! as the rasterized diagram, with the fence itself one click away.
+//! as the rasterized diagram, with the fence itself one click away. The
+//! ```mermaid fence ([`super::mermaid_block`]) produces an SVG document and
+//! shares everything from [`rasterize`] on: the element, the face flip, the
+//! display cap.
 //!
 //! The block parser is the gate, and it decides at parse time: a fence whose
 //! content rasterizes through the app's own [`SvgRenderer`] becomes a custom
@@ -54,16 +57,11 @@ pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 /// single picture pushes the surface it sits in apart.
 pub const MAX_DISPLAY_HEIGHT: Pixels = px(512.);
 
-/// The paint witnesses the rendered faces carry, for render tests.
-const IMAGE_SELECTOR: &str = "markdown-inline-svg";
-const CODE_SELECTOR: &str = "markdown-inline-svg-code";
-const TOGGLE_SELECTOR: &str = "markdown-inline-svg-toggle";
-
 /// The box one svg rasterizes into, in device pixels: the message column's
 /// width at 2x, and the ceiling on its height too. Both the inline ```svg
 /// block and the Preview card's svg body come through [`rasterize`], so one
 /// box bounds both.
-const RASTER_BOX: f32 = 1400.;
+pub(crate) const RASTER_BOX: f32 = 1400.;
 
 /// Width of the throwaway render that measures a document's aspect. Rasterizing
 /// is what costs; a pixmap this wide costs nothing next to the real one.
@@ -104,6 +102,28 @@ pub fn rasterize(renderer: &SvgRenderer, source: &[u8]) -> Option<Arc<RenderImag
             None
         }
     }
+}
+
+/// Rasterize one svg document at `width` device pixels (the height follows
+/// the document's aspect), bounded by the raster box on both axes — the
+/// math block's entry, whose pictures are em-sized rather than column-sized.
+pub(crate) fn rasterize_at(
+    renderer: &SvgRenderer,
+    source: &[u8],
+    width: f32,
+) -> Option<Arc<RenderImage>> {
+    let text = String::from_utf8_lossy(source);
+    let text = with_svg_namespace(&text);
+    let parsed = renderer.parse_svg(text.as_bytes()).ok()?;
+    let aspect = match renderer.render_parsed(&parsed, width_box(PROBE_WIDTH)) {
+        Ok(probe) => {
+            let size = probe.size(0);
+            size.width.0 as f32 / size.height.0.max(1) as f32
+        }
+        Err(_) => RASTER_BOX,
+    };
+    let width = width.clamp(1., RASTER_BOX).min(RASTER_BOX * aspect);
+    renderer.render_parsed(&parsed, width_box(width)).ok()
 }
 
 /// The namespace usvg requires on the root element.
@@ -182,15 +202,16 @@ fn width_box(width: f32) -> SvgSize {
     SvgSize::Size(Size::new(width, width))
 }
 
-/// Register the inline svg block on a markdown document. Every markdown
-/// surface that shows authored prose goes through this, so an svg fence
-/// renders as its image wherever it appears. Terminal panels are the one
-/// exception: their body is a single `ansi` fence around machine output, so
-/// nothing inside it is parsed as a block of its own.
+/// Register the inline diagram blocks — the ```svg fence and the ```mermaid
+/// fence — on a markdown document. Every markdown surface that shows authored
+/// prose goes through this, so a diagram renders as its image wherever it
+/// appears. Terminal panels are the one exception: their body is a single
+/// `ansi` fence around machine output, so nothing inside it is parsed as a
+/// block of its own.
 ///
 /// `code` is how the surface's own documents are styled: the block's code face
 /// wears it so the revealed fence reads like a code block beside it.
-pub fn with_svg_blocks(view: TextView, code: FaceStyle, cx: &App) -> TextView {
+pub fn with_diagram_blocks(view: TextView, code: FaceStyle, cx: &App) -> TextView {
     let extensions = extensions(cx.svg_renderer(), code);
     view.markdown_extensions(extensions)
 }
@@ -223,13 +244,33 @@ impl Face {
     }
 }
 
-/// The document's Markdown extension registry: the defaults plus this block.
-fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExtensions {
-    MarkdownExtensions::default()
+/// The document's Markdown extension registry: the defaults plus the two
+/// diagram fences and LaTeX math ([`super::math_block`]), which typesets to an
+/// SVG document in both its shapes — the display block and the inline run —
+/// and rides this block's raster path from there.
+pub(crate) fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExtensions {
+    let mermaid_renderer = renderer.clone();
+    let mermaid_code = code.clone();
+    let math_renderer = renderer.clone();
+    let math_text_size = code.size;
+    let extensions = MarkdownExtensions::default()
         .block_parser(move |node, cx| svg_fence(node, cx, &renderer))
         .block_renderer(BLOCK_NAME, move |node, window, cx| {
-            svg_element(node, &code, window, cx)
+            svg_element(node, BLOCK_NAME, &code, window, cx)
         })
+        .block_parser(move |node, cx| {
+            super::mermaid_block::mermaid_fence(node, cx, &mermaid_renderer)
+        })
+        .block_renderer(super::mermaid_block::BLOCK_NAME, move |node, window, cx| {
+            svg_element(
+                node,
+                super::mermaid_block::BLOCK_NAME,
+                &mermaid_code,
+                window,
+                cx,
+            )
+        });
+    super::math_block::math_extensions(extensions, math_renderer, math_text_size)
 }
 
 /// Turn an ```svg fence into a custom block holding its raster, or `None` to
@@ -276,6 +317,7 @@ fn raster_fence(
 /// the row) without the document or the message having to own it.
 fn svg_element(
     node: &MarkdownNode,
+    name: &'static str,
     code: &FaceStyle,
     window: &mut Window,
     cx: &mut App,
@@ -294,8 +336,8 @@ fn svg_element(
         .w_full()
         .min_w_0()
         .child(match showing {
-            Face::Image => image_face(raster),
-            Face::Code => code_face(node, key, code, cx),
+            Face::Image => image_face(raster, name),
+            Face::Code => code_face(node, key, name, code, cx),
         })
         .child(
             div()
@@ -304,7 +346,7 @@ fn svg_element(
                 .right_1()
                 .opacity(0.75)
                 .group_hover(group, |style| style.opacity(1.))
-                .child(face_toggle(key, showing, face, cx)),
+                .child(face_toggle(key, name, showing, face, cx)),
         )
         .into_any_element()
 }
@@ -331,7 +373,7 @@ fn block_key(node: &MarkdownNode) -> u64 {
 /// so a natural-height box parks a wide diagram in dead space. The cap holds
 /// for both dimensions, which keeps the diagram's aspect and centering it
 /// where the column is wider than the capped picture.
-fn image_face(raster: &Arc<RenderImage>) -> AnyElement {
+fn image_face(raster: &Arc<RenderImage>, name: &'static str) -> AnyElement {
     let size = raster.size(0);
     let aspect = size.width.0 as f32 / size.height.0.max(1) as f32;
     let max_w = px(MAX_DISPLAY_HEIGHT.as_f32() * aspect);
@@ -342,7 +384,7 @@ fn image_face(raster: &Arc<RenderImage>) -> AnyElement {
         .max_h(MAX_DISPLAY_HEIGHT)
         .mx_auto()
         .aspect_ratio(aspect)
-        .debug_selector(|| IMAGE_SELECTOR.to_string())
+        .debug_selector(|| format!("markdown-inline-{name}"))
         .child(
             img(ImageSource::Render(raster.clone()))
                 .size_full()
@@ -352,9 +394,15 @@ fn image_face(raster: &Arc<RenderImage>) -> AnyElement {
 }
 
 /// The fence as its own code block: the surface's markdown stack over the
-/// source. No svg block is registered on this document — the fence would
+/// source. No diagram block is registered on this document — the fence would
 /// rasterize again, and that one again.
-fn code_face(node: &MarkdownNode, key: u64, code: &FaceStyle, cx: &mut App) -> AnyElement {
+fn code_face(
+    node: &MarkdownNode,
+    key: u64,
+    name: &'static str,
+    code: &FaceStyle,
+    cx: &mut App,
+) -> AnyElement {
     let mut view = TextView::markdown(("markdown-svg-code", key), node.as_markdown().to_string())
         .style(code.style.clone())
         .code_block_highlighter(steer_code_highlighter(Theme::global(cx)));
@@ -364,7 +412,7 @@ fn code_face(node: &MarkdownNode, key: u64, code: &FaceStyle, cx: &mut App) -> A
     div()
         .w_full()
         .min_w_0()
-        .debug_selector(|| CODE_SELECTOR.to_string())
+        .debug_selector(|| format!("markdown-inline-{name}-code"))
         .child(view)
         .into_any_element()
 }
@@ -372,7 +420,13 @@ fn code_face(node: &MarkdownNode, key: u64, code: &FaceStyle, cx: &mut App) -> A
 /// The hover control that flips the block. Its icon names the face a click
 /// shows — the one the reader is not looking at — and it carries a background
 /// because it sits on the picture.
-fn face_toggle(key: u64, showing: Face, face: Entity<Face>, cx: &mut App) -> AnyElement {
+fn face_toggle(
+    key: u64,
+    name: &'static str,
+    showing: Face,
+    face: Entity<Face>,
+    cx: &mut App,
+) -> AnyElement {
     let next = showing.flipped();
     let icon = match next {
         Face::Image => IconName::Image,
@@ -384,7 +438,7 @@ fn face_toggle(key: u64, showing: Face, face: Entity<Face>, cx: &mut App) -> Any
         .bg(theme.background.opacity(0.85))
         .border_1()
         .border_color(theme.border)
-        .debug_selector(|| TOGGLE_SELECTOR.to_string())
+        .debug_selector(|| format!("markdown-inline-{name}-toggle"))
         .child(
             Button::new(("markdown-svg-toggle", key))
                 .ghost()
