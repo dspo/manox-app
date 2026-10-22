@@ -585,19 +585,10 @@ pub fn first_line(prompt: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether a tool call is a delegation. The runtime names its delegation
-/// tools after the agent definition and describes the call with
-/// `description` + `prompt`, with none of the retired Steer envelope keys —
-/// the same shape `manox_agent::subagent_restore` folds when it rebuilds the
-/// rail rows, so the card predicate and the restore agree by construction.
-pub fn is_agent_task_call(input: Option<&serde_json::Value>) -> bool {
-    input.is_some_and(|value| {
-        value.get("description").is_some()
-            && value.get("prompt").is_some()
-            && value.get("to").is_none()
-            && value.get("reason").is_none()
-    })
-}
+/// The delegation-shape predicate lives in the fold vocabulary (the data
+/// plane reads it too, to name a live sub-agent row); re-exported here so
+/// the conversation's call sites keep one spelling.
+pub use crate::chat_fold::is_agent_task_call;
 
 /// The card's `(subagent_type, description)`: the TYPE is the tool name
 /// (per-agent-definition), the description prefers the call's own

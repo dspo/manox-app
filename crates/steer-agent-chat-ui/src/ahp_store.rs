@@ -2352,7 +2352,7 @@ fn is_delegation_input(input: Option<&ahp_types::state::ToolInput>) -> bool {
     };
     serde_json::from_str::<Value>(raw)
         .ok()
-        .is_some_and(|value| crate::conversation::is_agent_task_call(Some(&value)))
+        .is_some_and(|value| crate::chat_fold::is_agent_task_call(Some(&value)))
 }
 
 /// Resolve each live run's agent type from the parent chat's delegation tool
