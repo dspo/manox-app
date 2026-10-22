@@ -129,8 +129,10 @@ pub fn build_tool_card(
         .name(entry.name.as_str())
         .args(card_args(family, entry, theme))
         .status(status_chip(entry, theme))
-        .copy_input(SharedString::from(entry.input.to_string()))
         .content(card_body(family, entry, cwd));
+    if let Some(raw_input) = copy_input_text(family, entry) {
+        card = card.copy_input(raw_input);
+    }
     // The edit family's quotable shape is the diff itself; every other
     // family quotes the raw output.
     if family == CardFamily::Edit {
@@ -142,6 +144,26 @@ pub fn build_tool_card(
         card = card.on_toggle(move |window, cx| on_toggle(window, cx));
     }
     card.into_any_element()
+}
+
+/// The text the card's "in" chip quotes. `Bash` quotes the command itself —
+/// the shape a user re-runs — and the rest quote the raw call. An input-less
+/// call quotes nothing: the chip serializes the structured input, and a
+/// missing one would land the literal string `null` on the clipboard.
+fn copy_input_text(family: CardFamily, entry: &ToolCallItem) -> Option<SharedString> {
+    match family {
+        // A Bash call whose command is absent or not a string still has a
+        // machine shape worth quoting.
+        CardFamily::Bash => input_str(entry, "command").or_else(|| raw_input(entry)),
+        _ => raw_input(entry),
+    }
+}
+
+/// The call's structured input as the machine wrote it. `Value::Null` means
+/// no parameters reached the fold; serializing it would put the word `null`
+/// on the clipboard, so there is nothing to quote.
+fn raw_input(entry: &ToolCallItem) -> Option<SharedString> {
+    (!entry.input.is_null()).then(|| SharedString::from(entry.input.to_string()))
 }
 
 fn card_icon(family: CardFamily) -> AnyElement {
@@ -551,6 +573,52 @@ pub fn entry_toggle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(name: &str, input: serde_json::Value) -> ToolCallItem {
+        ToolCallItem {
+            id: "t-1".into(),
+            name: name.into(),
+            title: String::new(),
+            status: ToolCallStatus::Success,
+            output: String::new(),
+            is_error: false,
+            input,
+            streaming: false,
+            collapsed: false,
+            user_toggled: false,
+            panel: None,
+            card: None,
+            cwd: None,
+        }
+    }
+
+    /// The "in" chip quotes the command for `Bash` (the shape a user re-runs),
+    /// the raw call for the rest, and nothing for an input-less call: the
+    /// structured input serializes, and a missing one serialized to the
+    /// literal `null` on the clipboard.
+    #[test]
+    fn the_in_chip_quotes_the_command_and_never_the_word_null() {
+        let bash = entry("Bash", serde_json::json!({"command": "cargo test"}));
+        assert_eq!(
+            copy_input_text(CardFamily::Bash, &bash).as_deref(),
+            Some("cargo test")
+        );
+        let bare = entry("Bash", serde_json::Value::Null);
+        assert_eq!(copy_input_text(CardFamily::Bash, &bare), None);
+        let commandless = entry("Bash", serde_json::json!({"description": "run"}));
+        assert_eq!(
+            copy_input_text(CardFamily::Bash, &commandless).as_deref(),
+            Some(r#"{"description":"run"}"#),
+            "a Bash call without a command still quotes its machine shape"
+        );
+        let read = entry("Read", serde_json::json!({"path": "src/lib.rs"}));
+        assert_eq!(
+            copy_input_text(CardFamily::Read, &read).as_deref(),
+            Some(r#"{"path":"src/lib.rs"}"#)
+        );
+        let bare = entry("Read", serde_json::Value::Null);
+        assert_eq!(copy_input_text(CardFamily::Read, &bare), None);
+    }
 
     /// The harness's real read envelope (`manox-harness` hashline): a
     /// `[path#TAG]` header, `N:TEXT` rows with NO space after the colon, and
