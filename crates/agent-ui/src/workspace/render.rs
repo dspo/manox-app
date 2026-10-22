@@ -167,6 +167,17 @@ impl Workspace {
                 this.composer_recall_down(window, cx);
             }),
         )
+        // ⇧⌘↩ interrupts: a dedicated action, NOT the input's Enter — the
+        // Enter path newlines on shift before emitting, and the submit guard
+        // would then leave a stray newline behind. Absolute cancel priority
+        // applies to the turn, not to a pending ask card: while a card is
+        // up, submit_composer answers the card (its own controls are the
+        // only answer surface), matching Enter.
+        .on_action(cx.listener(
+            |this, _: &steer_agent_chat_ui::ComposerSubmitInterrupt, window, cx| {
+                this.submit_interrupt(window, cx);
+            },
+        ))
         .on_action(
             cx.listener(|this, _: &crate::ArchiveCurrentThread, window, cx| {
                 this.archive_current_thread(window, cx);

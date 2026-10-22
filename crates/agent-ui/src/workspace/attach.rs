@@ -371,9 +371,18 @@ impl Workspace {
         // currently visible workspace. Move it aside before rebinding.
         self.chat.update(cx, |chat, cc| {
             let v = std::mem::take(&mut chat.queued_follow_ups);
+            // The interrupted-but-not-yet-sent messages ride the same
+            // per-thread stash: their cancel was dispatched on the OLD
+            // thread's turn and they flush at ITS settle.
+            let outbox = std::mem::take(&mut chat.interrupt_outbox);
             // A live queue drag belongs to the outgoing view: its indices
             // mean nothing against the incoming thread's queue — drop it.
+            // Same for the send menu: it floats on the outgoing footer, and
+            // a stale open flag would pop it on the incoming thread (or out
+            // of nowhere when the next running cluster appears).
             chat.queue_drag = None;
+            chat.send_menu = None;
+            chat.send_menu_sub = None;
             match v.is_empty() {
                 true => {
                     chat.queued_follow_ups_by_thread.remove(&old_id);
@@ -382,12 +391,25 @@ impl Workspace {
                     chat.queued_follow_ups_by_thread.insert(old_id.clone(), v);
                 }
             }
+            match outbox.is_empty() {
+                true => {
+                    chat.interrupt_outbox_by_thread.remove(&old_id);
+                }
+                false => {
+                    chat.interrupt_outbox_by_thread
+                        .insert(old_id.clone(), outbox);
+                }
+            }
             // Restore the incoming thread's stashed follow-up queue (moved
             // aside when it was last switched away); without this the queue
             // silently vanishes on switch-back.
             let restored = chat.queued_follow_ups_by_thread.remove(&new_id);
             if let Some(queue) = restored {
                 chat.queued_follow_ups = queue;
+            }
+            let restored_outbox = chat.interrupt_outbox_by_thread.remove(&new_id);
+            if let Some(outbox) = restored_outbox {
+                chat.interrupt_outbox = outbox;
             }
             cc.notify();
         });
@@ -819,6 +841,11 @@ impl Workspace {
         // The incoming thread's cwd / worktree may differ from the outgoing
         // one; refresh the rail's git stats/branch display for it.
         self.spawn_git_status_refresh(cx);
+        // Steer cards stashed across the switch mirror wire state that kept
+        // moving while the thread was away — replay the parked session's
+        // lifecycle events so consumed/steered/settled states settle before
+        // the user sees the strip.
+        self.replay_parked_chat_events(cx);
         // A stale attach tail must not steal the main column back: the user
         // may have re-entered an external session (or anything else) while
         // this async attach was landing — the synchronous leave in

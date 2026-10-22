@@ -203,13 +203,14 @@ mod suite {
             state,
         };
         use crate::workspace::FollowUpState as S;
+        use crate::workspace::steer_group_insert_index;
 
         let empty = std::collections::VecDeque::new();
-        assert_eq!(super::Workspace::steer_group_insert_index(&empty), 0);
+        assert_eq!(steer_group_insert_index(&empty), 0);
 
         let all_queued: std::collections::VecDeque<_> =
             [q(S::Queued), q(S::Queued)].into_iter().collect();
-        assert_eq!(super::Workspace::steer_group_insert_index(&all_queued), 0);
+        assert_eq!(steer_group_insert_index(&all_queued), 0);
 
         let all_steers: std::collections::VecDeque<_> = [
             q(S::SteerPending {
@@ -219,7 +220,7 @@ mod suite {
         ]
         .into_iter()
         .collect();
-        assert_eq!(super::Workspace::steer_group_insert_index(&all_steers), 2);
+        assert_eq!(steer_group_insert_index(&all_steers), 2);
 
         let mixed: std::collections::VecDeque<_> = [
             q(S::SteerPending {
@@ -231,7 +232,7 @@ mod suite {
         ]
         .into_iter()
         .collect();
-        assert_eq!(super::Workspace::steer_group_insert_index(&mixed), 2);
+        assert_eq!(steer_group_insert_index(&mixed), 2);
     }
 
     #[test]

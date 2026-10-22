@@ -23,7 +23,7 @@ use gpui::{
 /// Shared across both harnesses: workspace struct fields hold
 /// `Option<Entity<PopupMenu>>` regardless of feature.
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _, Size, Theme,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState},
@@ -56,9 +56,16 @@ use crate::views::settings::{SettingsEvent, SettingsView};
 use crate::views::turn_navigator::{TurnNavigator, TurnNavigatorEvent, collect_user_turns};
 use gpui_component::input::InputContent;
 
+pub use composer::SubmitBehavior;
+
 mod attach;
+
 mod catch_up;
 mod chat_column;
+/// The send-mode gallery (test-support only): a driver strip over the real
+/// composer, driven against a detached store. See `examples/send_mode_gallery.rs`.
+#[cfg(feature = "test-support")]
+pub mod gallery;
 use chat_column::ChatColumn;
 use steer_agent_chat_ui::ask_card::AskCardSnapshot;
 mod chips;
@@ -322,7 +329,8 @@ enum RegistryTurnKind {
 // the workspace family resolving unchanged.
 pub use steer_agent_chat_ui::column::{
     AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState, PendingAsk,
-    PendingConfirmation, QueuedFollowUp, parse_pending_ask,
+    PendingConfirmation, QueuedFollowUp, drain_queued_follow_ups, parse_pending_ask,
+    steer_group_insert_index,
 };
 
 /// The visited-thread history behind the titlebar ←/→ moves. Invariants
@@ -803,6 +811,8 @@ impl Workspace {
                 model_open: false,
                 model_menu: None,
                 model_menu_sub: None,
+                send_menu: None,
+                send_menu_sub: None,
                 access_open: false,
                 project_chip_open: false,
                 project_chip_menu: None,
@@ -828,6 +838,8 @@ impl Workspace {
                 turn_rail_preview_gen: 0,
                 turn_rail_box_h: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
                 queued_follow_ups: std::collections::VecDeque::new(),
+                interrupt_outbox: Vec::new(),
+                interrupt_outbox_by_thread: HashMap::new(),
                 queued_follow_ups_by_thread: HashMap::new(),
                 queue_drag: None,
                 composer_placeholder_mode: ComposerPlaceholderMode::Normal,
@@ -1926,6 +1938,11 @@ impl Workspace {
             // the rebuild forever).
             this.sync_live_ask(&store, cx);
             if rebuilt {
+                // The rebuild path returns before the bucket drain below, so
+                // a parked session's accumulated lifecycle events (steer
+                // consumption, settles) replay here instead — the transcript
+                // content came from the snapshot, only the lifecycle is new.
+                this.replay_parked_chat_events(cx);
                 return;
             }
             // Live streaming leg: the pump folded chat actions into the book
@@ -1971,20 +1988,38 @@ impl Workspace {
                         // the transcript.
                         continue;
                     }
-                    crate::chat_fold::ChatEvent::TurnStarted => {
+                    crate::chat_fold::ChatEvent::TurnStarted { steer_id } => {
                         this.chat.update(cx, |chat, cx| {
                             chat.turn_active = true;
                             cx.notify();
                         });
                         this.spawn_thinking_ticker(cx);
+                        // An idle steer wakes its own run: the opening row
+                        // carried the card's id, so the retire rides here —
+                        // the lifecycle above is never skipped for it.
+                        if let Some(message_id) = steer_id {
+                            this.retire_steer_card(message_id, cx);
+                        }
                     }
-                    crate::chat_fold::ChatEvent::TurnFinished => {
+                    crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
                         this.chat.update(cx, |chat, cx| {
                             chat.turn_active = false;
                             cx.notify();
                         });
                         this.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
                         this.spawn_git_status_refresh(cx);
+                        // The follow-up queue settles here: steers the engine
+                        // retracted without injecting strand to Failed (a
+                        // cancelled settle publishes no removal), and the
+                        // queued/interrupt cards flush as the next turn. A
+                        // cancelled settle deliberately leaves plain `Queued`
+                        // cards parked — the user's stop must not silence the
+                        // queue by starting a surprise new run.
+                        this.settle_follow_ups(*cancelled, cx);
+                    }
+                    crate::chat_fold::ChatEvent::SteerConsumed { message_id } => {
+                        this.retire_steer_card(message_id, cx);
+                        continue;
                     }
                     _ => {}
                 }
@@ -2159,9 +2194,33 @@ impl Workspace {
             &input,
             window,
             |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { shift: false, .. } => this.submit_input(window, cx),
+                // The thinkrail key scheme: Enter sends (steers while
+                // running), ⌘↩ queues, ⇧⌘↩ interrupts — three actions on one
+                // key, each an explicit gesture, never sticky mode state.
+                // ⇧⌘↩ rides the dedicated ComposerSubmitInterrupt action
+                // (see render.rs), not an Enter variant: the input's Enter
+                // path newlines on shift before emitting.
+                InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                } => this.submit_input(window, cx),
+                InputEvent::PressEnter {
+                    secondary: true,
+                    shift: false,
+                } => this.submit_steer(window, cx),
                 // Shift+Enter inserts a newline inside the input and does not submit.
-                InputEvent::PressEnter { shift: true, .. } => {}
+                // ⇧⌘↩ never lands here — the dedicated
+                // ComposerSubmitInterrupt action owns the chord (see
+                // render.rs); this arm stays for exhaustiveness only.
+                InputEvent::PressEnter {
+                    secondary: true,
+                    shift: true,
+                } => {}
+                // Shift+Enter inserts a newline inside the input and does not submit.
+                InputEvent::PressEnter {
+                    secondary: false,
+                    shift: true,
+                } => {}
                 InputEvent::Change => this.sync_completion(window, cx),
                 InputEvent::Focus | InputEvent::Blur => {}
             },
@@ -2928,20 +2987,17 @@ impl Workspace {
         true
     }
 
-    /// v2 §D.2 steer path: hand a message to the running turn's server-side
-    /// steer queue. The desktop's `Workspace.thread` is an engine-less render
-    /// mirror, so the old `thread.enqueue_steer` only inserted a local id and
-    /// never reached the server — a dead end where the card sat forever and the
-    /// message was neither injected nor confirmed. This sends the real
-    /// the steer dispatch (host: enqueue while running,
-    /// insert + start a turn while idle). Receipt-only like
-    /// [`Self::send_submit_v2`]; no echo is registered because the message does
-    /// not enter the conversation here — it moves in only when the turn settles
-    /// (see the `TurnFinished` handler). `message_id` is the client-minted id the
-    /// composer card correlates by.
+    /// v2 §D.2 steer path: hand a message to the server's steer queue via
+    /// `chat/pendingMessageSet{kind: steering}`. The backend parks it while
+    /// idle and injects it into the running turn otherwise — one intent
+    /// covers both; the pending id IS the steer id the journal row, the
+    /// removal echo and the composer card all correlate by. Receipt-only
+    /// like [`Self::send_submit_v2`]; the card retires when the wire
+    /// reports the consumption (see `retire_steer_card`). `message_id` is
+    /// the client-minted id the composer card correlates by.
     pub(crate) fn send_steer_v2(
         &mut self,
-        cx: &App,
+        cx: &mut Context<Self>,
         message_id: String,
         text: String,
         images: Vec<serde_json::Value>,
@@ -2951,12 +3007,18 @@ impl Workspace {
             return false;
         };
         tracing::info!(session_id = %sid, "steer sent (ahp)");
+        // The pending-message wire shape is a text message; a steer carrying
+        // attachments has no lossless ride — callers downgrade those to the
+        // queue (text-only too; see `flush_batch`).
         let _ = images;
-        let (tx, rx) = async_channel::bounded::<()>(1);
-        manox_agent::runtime::handle().spawn(async move {
-            let _ = rx.recv().await;
+        store.update(cx, |store, _| {
+            store.set_pending_message(
+                &sid,
+                &message_id,
+                ahp_types::state::PendingMessageKind::Steering,
+                text,
+            );
         });
-        drop((sid, message_id, text, store, tx));
         true
     }
 }
@@ -2997,7 +3059,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.apply_permission_mode(mode, cx);
-        self.send_user_turn(prompt, Vec::new(), cx);
+        let behavior = if self.foreground_running(cx) {
+            SubmitBehavior::Steer
+        } else {
+            SubmitBehavior::Send
+        };
+        self.send_user_turn(prompt, Vec::new(), behavior, cx);
     }
 
     /// Switch the thread's `PermissionMode`, post a localized notice, and

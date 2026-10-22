@@ -52,20 +52,100 @@ const CONTEXT_RING_RADIUS: f32 = 5.5;
 /// Ring stroke width; round-capped like the reference's `stroke-linecap`.
 const CONTEXT_RING_STROKE: f32 = 2.0;
 
-/// Drag payload for a queued follow-up row. The index is all the gesture
-/// needs: rows are transient session state, so the live queue position is
-/// the identity (mirrors the sidebar's id-carrying `DraggedThreadRow`, of
-/// which this is the index-addressed twin).
+/// Drag payload for a queued follow-up row. Rows are transient session
+/// state, so the live queue position is the identity (mirrors the sidebar's
+/// id-carrying `DraggedGroup`, of which this is the index-addressed twin);
+/// the text rides along only to paint the ghost pill.
 #[derive(Clone, PartialEq)]
 pub(super) struct DraggedQueueRow {
     idx: usize,
+    text: SharedString,
 }
 
 impl Render for DraggedQueueRow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        // No visible ghost: the row itself is the thing being moved.
+        // The sidebar's drag ghost: a small bordered pill tracking the
+        // cursor, so the dragged row's content is visible at the pointer.
         gpui::div()
+            .max_w(px(280.))
+            .px(px(6.))
+            .py(px(2.))
+            .rounded(px(4.))
+            .bg(gpui::black().opacity(0.75))
+            .text_size(px(12.))
+            .text_color(gpui::white())
+            .overflow_x_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(self.text.clone())
     }
+}
+
+/// The send cluster chip's color register: primary = the default action
+/// (accent tint), danger = the stop (red), neutral = plain chrome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendChipTone {
+    Neutral,
+    Primary,
+    Danger,
+}
+
+/// One action row of the send menu: icon + localized name + the
+/// platform-honest shortcut hint pinned to the row's right edge in
+/// `secondary_foreground`.
+fn send_menu_row(
+    ws: &gpui::WeakEntity<Workspace>,
+    theme: &Theme,
+    icon: gpui_kit_assets::IconName,
+    name_key: &'static str,
+    keys: String,
+    act: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+) -> PopupMenuItem {
+    let muted = theme.muted_foreground;
+    let secondary = theme.secondary_foreground;
+    let foreground = theme.foreground;
+    PopupMenuItem::element(move |_, _| {
+        h_flex()
+            .items_center()
+            .gap_2()
+            .child(Icon::from(icon).small().text_color(muted))
+            .child(
+                gpui::div()
+                    .text_sm()
+                    .text_color(foreground)
+                    .child(i18n::t(name_key)),
+            )
+            .child(
+                gpui::div()
+                    .ml_auto()
+                    .text_xs()
+                    .text_color(secondary)
+                    .child(keys.clone()),
+            )
+    })
+    .on_click({
+        let ws = ws.clone();
+        move |_, window, cx| {
+            let _ = ws.update(cx, |this, cx| act(this, window, cx));
+        }
+    })
+}
+
+/// What one cluster chip renders.
+struct SendChipSpec {
+    icon: gpui_kit_assets::IconName,
+    label_key: Option<&'static str>,
+    tooltip_key: Option<&'static str>,
+    tone: SendChipTone,
+    enabled: bool,
+}
+
+/// The render-time snapshot of one queued row: the render borrows `cx`
+/// mutably, so the shared `&QueuedFollowUp` can't cross into the row builder.
+struct QueueRowSpec {
+    idx: usize,
+    state: FollowUpState,
+    line: String,
 }
 
 /// Resolve the pointer's boundary on one row: the insertion line hugs the
@@ -89,13 +169,24 @@ fn queue_drag_boundary(
     })
 }
 
-/// Accent 2px hairline: the insertion position for a live queue drag.
-fn insertion_line(theme: &Theme) -> AnyElement {
-    gpui::div()
+/// Accent insertion bar for a live queue drag: absolutely positioned on the
+/// hovered row's top/bottom edge (the sidebar's drop marker), so showing or
+/// flipping it never shifts the rows — an in-flow hairline here pumped every
+/// row down by 2px on each edge flip, which read as layout jitter.
+fn insertion_line(before: bool, theme: &Theme) -> AnyElement {
+    let line = gpui::div()
+        .absolute()
+        .left_0()
+        .right_0()
         .h(px(2.))
-        .w_full()
-        .bg(theme.accent)
-        .into_any_element()
+        .rounded_full()
+        .bg(theme.accent);
+    if before {
+        line.top_0()
+    } else {
+        line.bottom_0()
+    }
+    .into_any_element()
 }
 
 /// The queue row's one-line summary: newlines collapse to spaces, and the
@@ -152,7 +243,7 @@ impl Workspace {
         // class: stop became an empty-input-disabled send exactly when
         // the user most needed to interrupt). Enter still answers a pending
         // ask card, whose own controls are the only answer surface.
-        let send = self.render_send_button(running, cx);
+        let send = self.render_send_cluster(running, theme, cx);
         // Context-occupancy pill (ring + percent) sits between the model and
         // the action it quantifies: session-state cluster, then the send
         // control. Hidden entirely until usage + a resolvable window exist.
@@ -276,169 +367,224 @@ impl Workspace {
 
     /// Render the compact queue above the composer. Every follow-up parked
     /// during the running turn stays visible here until it settles. Row
-    /// layout (left to right): a grip handle, an optional image badge, the
-    /// single-line ellipsized summary, then steer-now / edit / delete.
-    /// `SteerPending` rows are status-only (spacer + badge, no buttons —
-    /// committed, not removable); they also sit at the head of the queue, so
-    /// dragging is offered only on non-pending rows and commits only inside
-    /// the contiguous `Queued` tail — the
-    /// `[SteerPending|Failed …] ++ [Queued …]` invariant is never negotiable
-    /// ([`Workspace::commit_queue_drag`]).
+    /// layout (left to right): the one-line ellipsized summary, a lane
+    /// badge (待引导 / 排队中), then the row's actions —
+    /// 立即打断, the lane move, 编辑, 删除 (see
+    /// [`Self::render_queue_row`]). The drag follows the sidebar's group
+    /// gesture: whole row as the source, a ghost pill at the cursor, an
+    /// absolute accent bar marking the insertion edge, and the strip
+    /// container clearing the marker whenever the pointer leaves a row.
+    /// Commits stay inside the contiguous `Queued` tail — the
+    /// `[SteerPending|Failed …] ++ [Queued …]` invariant is never
+    /// negotiable ([`Workspace::commit_queue_drag`]).
     pub(super) fn render_queued_follow_ups(
         &self,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let mut rows = Vec::with_capacity(self.chat.read(cx).queued_follow_ups.len());
-        for (idx, item) in self.chat.read(cx).queued_follow_ups.iter().enumerate() {
-            let line = queue_row_line(&item.turn.text);
-            let is_pending = matches!(item.state, FollowUpState::SteerPending { .. });
-            let danger = matches!(item.state, FollowUpState::Failed);
-            // SteerPending: read-only status row (no buttons, no handle)
-            if is_pending {
-                let badge = gpui::div()
+    ) -> Option<AnyElement> {
+        if self.chat.read(cx).queued_follow_ups.is_empty() {
+            return None;
+        }
+        let marker = self.chat.read(cx).queue_drag;
+        // Snapshot the fields the row renders (the render borrows cx
+        // mutably, so the shared `&QueuedFollowUp` can't cross into it).
+        let snapshot: Vec<QueueRowSpec> = self
+            .chat
+            .read(cx)
+            .queued_follow_ups
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| QueueRowSpec {
+                idx,
+                state: item.state.clone(),
+                line: queue_row_line(&item.turn.text),
+            })
+            .collect();
+        let mut rows = Vec::with_capacity(snapshot.len());
+        for row in snapshot.into_iter() {
+            rows.push(self.render_queue_row(&row, marker, theme, cx));
+        }
+        // The strip owns the marker's liveness the way the shell root does
+        // for sidebar drags: capture-phase dispatch runs this container
+        // before the rows, so a pointer between rows or off the strip clears
+        // the line a previous row set, and a drop that lands on no row
+        // abandons the gesture instead of committing a stale edge.
+        let strip = v_flex()
+            .id("queue-strip")
+            .w_full()
+            .on_drag_move::<DraggedQueueRow>(cx.listener(|this, _, _, cx| {
+                if this.chat.read(cx).queue_drag.is_some() {
+                    this.chat.update(cx, |chat, cx| {
+                        chat.queue_drag = None;
+                        cx.notify();
+                    });
+                }
+            }))
+            .on_drop::<DraggedQueueRow>(cx.listener(|this, _, _, cx| {
+                if this.chat.read(cx).queue_drag.is_some() {
+                    this.chat.update(cx, |chat, cx| {
+                        chat.queue_drag = None;
+                        cx.notify();
+                    });
+                }
+            }))
+            .children(rows);
+        Some(strip.into_any_element())
+    }
+
+    /// One parked follow-up row. Layout (left to right): the single-line
+    /// ellipsized summary, the lane badge (待引导 / 排队中), then the row's
+    /// actions — 立即打断, the lane move (重新排队 on a steer card, 进入引导
+    /// otherwise — on a failed card it re-sends under a fresh id), 编辑,
+    /// 删除. The whole row is the drag source (the sidebar's gesture:
+    /// no grip, a ghost pill at the cursor), and the insertion marker is an
+    /// absolutely-positioned accent bar on the row's top/bottom edge — zero
+    /// layout shift while the pointer flips edges.
+    fn render_queue_row(
+        &self,
+        row: &QueueRowSpec,
+        marker: Option<QueueRowDrag>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let QueueRowSpec { idx, state, line } = row;
+        let idx = *idx;
+        let danger = matches!(state, FollowUpState::Failed);
+        let line = line.clone();
+
+        let icon_btn =
+            |id: String,
+             icon: gpui_kit_assets::IconName,
+             tip: &'static str,
+             danger_tint: bool,
+             cx: &mut Context<Self>,
+             on_click: fn(&mut Workspace, usize, &mut Window, &mut Context<Workspace>)|
+             -> AnyElement {
+                let mut btn = Button::new(SharedString::from(id))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::from(icon))
+                    .tooltip(i18n::t(tip));
+                if danger_tint {
+                    btn = btn.custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(theme.danger)
+                            .foreground(theme.danger),
+                    );
+                }
+                btn.on_click(
+                    cx.listener(move |this, _, window, cx| on_click(this, idx, window, cx)),
+                )
+                .into_any_element()
+            };
+
+        // Lane-move + 编辑/删除 share one cluster shape across the states.
+        let lane_btn = match state {
+            FollowUpState::SteerPending { .. } => icon_btn(
+                format!("queue-requeue-{idx}"),
+                gpui_kit_assets::IconName::Undo2,
+                "queue-requeue-action",
+                false,
+                cx,
+                |this, idx, _window, cx| this.requeue_follow_up(idx, cx),
+            ),
+            FollowUpState::Queued => icon_btn(
+                format!("queue-steer-{idx}"),
+                gpui_kit_assets::IconName::CornerDownRight,
+                "queued-steer-now-action",
+                false,
+                cx,
+                |this, idx, _window, cx| this.steer_follow_up(idx, cx),
+            ),
+            // A failed row renders exactly like a queued one — same four
+            // actions, the summary text in red as the only distinction. The
+            // 进入引导 click re-sends the online steer under a fresh id (the
+            // old "立即重试" labeled button; same path, converged face).
+            FollowUpState::Failed => icon_btn(
+                format!("queue-steer-{idx}"),
+                gpui_kit_assets::IconName::CornerDownRight,
+                "queued-steer-now-action",
+                false,
+                cx,
+                |this, idx, _window, cx| this.steer_follow_up(idx, cx),
+            ),
+        };
+        let interrupt_btn = icon_btn(
+            format!("queue-interrupt-{idx}"),
+            gpui_kit_assets::IconName::Zap,
+            "queue-row-interrupt-action",
+            true,
+            cx,
+            |this, idx, _window, cx| this.interrupt_from_card(idx, cx),
+        );
+        let edit_btn = icon_btn(
+            format!("queue-edit-{idx}"),
+            gpui_kit_assets::IconName::Pencil,
+            "queued-edit-action",
+            false,
+            cx,
+            |this, idx, window, cx| this.edit_follow_up(idx, window, cx),
+        );
+        let delete_btn = icon_btn(
+            format!("queue-delete-{idx}"),
+            gpui_kit_assets::IconName::Trash,
+            "queued-delete-action",
+            false,
+            cx,
+            |this, idx, _window, cx| this.delete_follow_up(idx, cx),
+        );
+
+        let badge = match state {
+            FollowUpState::SteerPending { .. } => Some(
+                gpui::div()
                     .px_1()
                     .py_0p5()
                     .rounded(theme.radius)
                     .bg(theme.accent.opacity(0.15))
                     .text_sm()
                     .text_color(theme.accent_foreground)
-                    .child(i18n::t("message-steer-pending-badge"));
-                let left = h_flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .flex_1()
-                    .child(gpui::div().w_4().flex_shrink_0()) // spacer for grip
-                    .when(!item.turn.user_images.is_empty(), |l| {
-                        l.child(
-                            Icon::default()
-                                .path("icons/image.svg")
-                                .xsmall()
-                                .text_color(theme.muted_foreground),
-                        )
-                    })
-                    .child(
-                        gpui::div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_xs()
-                            .text_color(theme.foreground)
-                            .child(line),
-                    );
-                rows.push(
-                    h_flex()
-                        .id(format!("queue-pending-row-{idx}"))
-                        .w_full()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .border_b_1()
-                        .border_color(theme.border.opacity(0.6))
-                        .child(left)
-                        .child(badge)
-                        .into_any_element(),
-                );
-                continue;
-            }
-            // Queued / Failed: draggable grip + right-button cluster
-            let payload = DraggedQueueRow { idx };
-            let ghost = payload.clone();
-            let handle = gpui::div()
-                .id(format!("queue-grip-{idx}"))
-                .debug_selector(move || format!("queue-grip-{idx}"))
-                .flex_shrink_0()
-                .cursor_grab()
-                .text_color(theme.muted_foreground)
-                .on_drag(payload, move |_, _, _, cx| cx.new(|_| ghost.clone()))
-                .child(Icon::default().path("icons/grip-vertical.svg").xsmall());
-            let image_badge = (!item.turn.user_images.is_empty()).then(|| {
-                Icon::default()
-                    .path("icons/image.svg")
-                    .xsmall()
+                    .child(i18n::t("message-steer-pending-badge")),
+            ),
+            FollowUpState::Queued => Some(
+                gpui::div()
+                    .px_1()
+                    .py_0p5()
+                    .rounded(theme.radius)
+                    .bg(theme.muted.opacity(0.6))
+                    .text_sm()
                     .text_color(theme.muted_foreground)
-            });
-            let steer_label = if danger {
-                "queued-steer-now-retry-action"
-            } else {
-                "queued-steer-now-action"
+                    .child(i18n::t("message-queued-badge")),
+            ),
+            FollowUpState::Failed => None,
+        };
+
+        // The whole row drags — sidebar gesture — but only a plain `Queued`
+        // row carries the payload (the steer group's order is the wire's,
+        // and a failed row has nowhere to move into).
+        let mut row = h_flex()
+            .id(SharedString::from(format!("queue-row-{idx}")))
+            .w_full()
+            .relative()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(theme.border.opacity(0.6))
+            .when_some(
+                marker.filter(|m| m.line_on == idx),
+                |row, m: QueueRowDrag| {
+                    row.child(insertion_line(matches!(m.edge, QueueDragEdge::Top), theme))
+                },
+            );
+        if matches!(state, FollowUpState::Queued) {
+            let payload = DraggedQueueRow {
+                idx,
+                text: SharedString::from(line.to_owned()),
             };
-            let steer_btn = Button::new(format!("queue-steer-{idx}"))
-                .secondary()
-                .xsmall()
-                .icon(Icon::default().path("icons/corner-right-up.svg"))
-                .label(i18n::t(steer_label))
-                .tooltip(i18n::t(steer_label))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.steer_follow_up(idx, cx);
-                }));
-            let edit_btn = Button::new(format!("queue-edit-{idx}"))
-                .ghost()
-                .xsmall()
-                .icon(Icon::default().path("icons/pencil.svg"))
-                .tooltip(i18n::t("queued-edit-action"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.edit_follow_up(idx, window, cx);
-                }));
-            let delete_btn = Button::new(format!("queue-delete-{idx}"))
-                .ghost()
-                .xsmall()
-                .icon(Icon::default().path("icons/trash-2.svg"))
-                .tooltip(i18n::t("queued-delete-action"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.delete_follow_up(idx, cx);
-                }));
-            let left = h_flex()
-                .items_center()
-                .gap_2()
-                .min_w_0()
-                .flex_1()
-                .child(handle)
-                .when_some(image_badge, |l, badge| l.child(badge))
-                .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_x_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_xs()
-                        .text_color(if danger {
-                            theme.danger
-                        } else {
-                            theme.foreground
-                        })
-                        .child(line),
-                );
-            let right = h_flex()
-                .items_center()
-                .gap_0p5()
-                .flex_shrink_0()
-                .child(steer_btn)
-                .child(edit_btn)
-                .child(delete_btn);
-            let row = h_flex()
-                .id(format!("queue-row-{idx}"))
-                .debug_selector(move || format!("queue-row-{idx}"))
-                .w_full()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .border_b_1()
-                .border_color(theme.border.opacity(0.6))
-                .when(danger, |row| row.bg(theme.danger.opacity(0.08)))
-                .when(
-                    self.chat
-                        .read(cx)
-                        .queue_drag
-                        .is_some_and(|d| d.dragged == idx),
-                    |row| row.opacity(0.4),
-                )
+            let ghost = payload.clone();
+            row = row
+                .on_drag(payload, move |_, _, _, cx| cx.new(|_| ghost.clone()))
                 .on_drag_move::<DraggedQueueRow>(cx.listener(
                     move |this, e: &gpui::DragMoveEvent<DraggedQueueRow>, _, cx| {
                         let Some(edge) = queue_drag_boundary(
@@ -448,14 +594,14 @@ impl Workspace {
                         ) else {
                             return;
                         };
-                        let marker = QueueRowDrag {
+                        let next = QueueRowDrag {
                             dragged: e.drag(cx).idx,
                             line_on: idx,
                             edge,
                         };
-                        if this.chat.read(cx).queue_drag != Some(marker) {
+                        if this.chat.read(cx).queue_drag != Some(next) {
                             this.chat.update(cx, |chat, cx| {
-                                chat.queue_drag = Some(marker);
+                                chat.queue_drag = Some(next);
                                 cx.notify();
                             });
                             cx.notify();
@@ -463,37 +609,44 @@ impl Workspace {
                     },
                 ))
                 .on_drop::<DraggedQueueRow>(cx.listener(
-                    // The payload IS the dragged row (`e.drag(cx).idx`), so
-                    // comparing it to the marker proved nothing; the marker's
-                    // own liveness is the gate — every queue mutation and the
-                    // render prune clear it, and `commit_queue_drag` no-ops
-                    // without one.
                     move |this, _row: &DraggedQueueRow, _, cx| {
                         this.commit_queue_drag(cx);
                     },
                 ));
-            rows.push(row.child(left).child(right).into_any_element());
         }
-        // Insertion marker: accent hairline between rows while dragging.
-        let mut with_marker = Vec::with_capacity(rows.len());
-        if let Some(drag) = self.chat.read(cx).queue_drag {
-            for (i, row) in rows.into_iter().enumerate() {
-                if drag.line_on == i {
-                    if matches!(drag.edge, QueueDragEdge::Top) {
-                        with_marker.push(insertion_line(theme));
-                    }
-                    with_marker.push(row);
-                    if matches!(drag.edge, QueueDragEdge::Bottom) {
-                        with_marker.push(insertion_line(theme));
-                    }
-                } else {
-                    with_marker.push(row);
-                }
-            }
-            with_marker
-        } else {
-            rows
-        }
+        row.child(
+            h_flex().items_center().gap_2().min_w_0().flex_1().child(
+                gpui::div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    // The summary wears the transcript's own body size — the
+                    // row IS the message the model will read next, not chrome.
+                    // Ellipsis + min_w_0 keep it one adaptive line that never
+                    // covers the action cluster.
+                    .text_size(crate::views::message::MESSAGE_BODY_SIZE)
+                    .text_color(if danger {
+                        theme.danger
+                    } else {
+                        theme.foreground
+                    })
+                    .child(line),
+            ),
+        )
+        .children(badge)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_0p5()
+                .flex_shrink_0()
+                .child(interrupt_btn)
+                .child(lane_btn)
+                .child(edit_btn)
+                .child(delete_btn),
+        )
+        .into_any_element()
     }
 
     /// Plan-mode indicator chip: visible while the session plans (read-only
@@ -742,26 +895,224 @@ impl Workspace {
             .with_mut(|t| t.set_browser_suite(suite, false));
     }
 
-    /// The send/stop control's single click dispatch. The running edge is
-    /// re-read from the leaf store — never the render-time glyph — so
-    /// running ⟹ cancel holds unconditionally (absolute cancel priority);
-    /// a pending ask's supplement text keeps its own path through Enter
-    /// (`submit_input`), never this control.
-    pub(crate) fn send_button_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A click with no foreground store is the teardown window: leave a
-        // trace and drop the note, never a panic on the click path.
-        let Some(running) = self.chat.read(cx).store.clone().map(|(store, sid)| {
-            let view = store.read(cx);
-            crate::ahp_store::leaf(&view.book, &sid).running()
-        }) else {
-            tracing::warn!("send/stop dropped: no foreground store bound");
-            return;
+    /// One chip-style control in the send cluster — the model/access chips'
+    /// exact anatomy (px_2/py_1, text_xs label, xsmall icon, accent hover):
+    /// the cluster used to be 24px pill buttons whose label size towered
+    /// over the footer's chip row.
+    fn send_cluster_chip(
+        id: &'static str,
+        spec: SendChipSpec,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+        act: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+    ) -> AnyElement {
+        let SendChipSpec {
+            icon,
+            label_key,
+            tooltip_key,
+            tone,
+            enabled,
+        } = spec;
+        let (fg, hover) = match tone {
+            SendChipTone::Neutral => (theme.muted_foreground, theme.accent.opacity(0.08)),
+            SendChipTone::Primary => (theme.accent_foreground, theme.accent.opacity(0.3)),
+            SendChipTone::Danger => (theme.danger, theme.danger.opacity(0.08)),
         };
-        if running {
-            self.cancel_turn(cx);
-        } else {
-            self.submit_input(window, cx);
+        let chip = h_flex()
+            .id(SharedString::from(id))
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .cursor_pointer()
+            .when(tone == SendChipTone::Primary, |c| {
+                c.bg(theme.accent.opacity(0.12))
+            })
+            .when(enabled, |c| c.hover(|h| h.bg(hover)))
+            .child(Icon::from(icon).xsmall().text_color(fg));
+        let chip = match label_key {
+            Some(key) => chip.child(gpui::div().text_xs().text_color(fg).child(i18n::t(key))),
+            None => chip,
+        };
+        let chip = match tooltip_key {
+            Some(key) => {
+                chip.tooltip(move |window, cx| Tooltip::new(i18n::t(key)).build(window, cx))
+            }
+            None => chip,
+        };
+        if !enabled {
+            return chip.opacity(0.45).into_any_element();
         }
+        chip.on_click(cx.listener(move |this, _, window, cx| act(this, window, cx)))
+            .into_any_element()
+    }
+
+    /// The composer's action cluster (footer right), dressed exactly like
+    /// the footer's other chips. Idle: one 发送 chip. Running: an icon-only
+    /// danger 停止 chip — absolute cancel priority, never gated by a draft
+    /// or a card — plus the default face (排队: Enter parks the draft for
+    /// the settle flush) and the chevron menu (排队 ↩ / 引导 ⌘↩ / 打断
+    /// ⇧⌘↩, most-passive first).
+    pub(super) fn render_send_cluster(
+        &self,
+        running: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !running {
+            let disabled = !self.composer_can_submit(false, cx);
+            return Self::send_cluster_chip(
+                "send-btn",
+                SendChipSpec {
+                    icon: gpui_kit_assets::IconName::ArrowUp,
+                    label_key: Some("send-pill-send"),
+                    tooltip_key: None,
+                    tone: SendChipTone::Primary,
+                    enabled: !disabled,
+                },
+                theme,
+                cx,
+                |this, window, cx| this.submit_input(window, cx),
+            );
+        }
+        let stop = Self::send_cluster_chip(
+            "stop-btn",
+            SendChipSpec {
+                icon: gpui_kit_assets::IconName::Pause,
+                label_key: None,
+                tooltip_key: Some("send-pill-stop"),
+                tone: SendChipTone::Danger,
+                enabled: true,
+            },
+            theme,
+            cx,
+            |this, _window, cx| this.cancel_turn(cx),
+        );
+        // The default face carries the draft gate; the stop chip above never
+        // does (the deadlock class: stop became an empty-input-disabled send
+        // exactly when the user most needed to interrupt).
+        let default_disabled = !self.composer_can_submit(false, cx);
+        let default_face = Self::send_cluster_chip(
+            "send-btn",
+            SendChipSpec {
+                icon: gpui_kit_assets::IconName::ListPlus,
+                label_key: Some("send-pill-queue"),
+                tooltip_key: None,
+                tone: SendChipTone::Primary,
+                enabled: !default_disabled,
+            },
+            theme,
+            cx,
+            |this, window, cx| this.submit_input(window, cx),
+        );
+        // The menu is the project chip's menu, whole-cloth: `PopupMenu`
+        // built open-time, mounted in the cluster's deferred slot, dismissed
+        // by outside click / Escape / row click through its own
+        // `DismissEvent`. The rows read most-passive first — 排队 then 引导
+        // then 打断 — mirroring the keys' escalation (↩ / ⌘↩ / ⇧⌘↩), and
+        // stay enabled on an empty draft so the shortcuts stay discoverable
+        // (the composer guards swallow the empty submit).
+        let chevron = Self::send_cluster_chip(
+            "send-menu-btn",
+            SendChipSpec {
+                icon: gpui_kit_assets::IconName::ChevronDown,
+                label_key: None,
+                tooltip_key: Some("send-menu-tooltip"),
+                tone: SendChipTone::Neutral,
+                enabled: true,
+            },
+            theme,
+            cx,
+            |this, window, cx| this.open_send_menu(window, cx),
+        );
+        let menu_open = self.chat.read(cx).send_menu.is_some();
+        let chevron_slot = if !menu_open {
+            chevron.into_any_element()
+        } else {
+            let menu = self
+                .chat
+                .read(cx)
+                .send_menu
+                .clone()
+                .expect("send_menu exists when open");
+            gpui::div()
+                .relative()
+                .child(chevron)
+                .child(
+                    deferred(
+                        gpui::div()
+                            .id("send-menu")
+                            .absolute()
+                            .bottom_full()
+                            .right_0()
+                            .occlude()
+                            .child(menu),
+                    )
+                    .with_priority(1),
+                )
+                .into_any_element()
+        };
+        h_flex()
+            .items_center()
+            .gap_1()
+            .child(stop)
+            .child(default_face)
+            .child(chevron_slot)
+            .into_any_element()
+    }
+
+    /// Build the send menu: three ACTION rows, not a sticky mode — each
+    /// fires the current draft with that behavior immediately (thinkrail's
+    /// streaming send menu; a persistent mode would make the next plain
+    /// Enter silently obey hidden state).
+    fn open_send_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = cx.entity().downgrade();
+        let theme = cx.theme().clone();
+        let secondary = if cfg!(target_os = "macos") {
+            "⌘"
+        } else {
+            "Ctrl+"
+        };
+        let steer_keys = format!("{secondary}↩");
+        let interrupt_keys = format!("{secondary}⇧↩");
+        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
+            menu.item(send_menu_row(
+                &ws,
+                &theme,
+                gpui_kit_assets::IconName::ListPlus,
+                "send-menu-queue",
+                "↩".to_string(),
+                |this, window, cx| this.submit_input(window, cx),
+            ))
+            .item(send_menu_row(
+                &ws,
+                &theme,
+                gpui_kit_assets::IconName::CornerDownRight,
+                "send-menu-steer",
+                steer_keys,
+                |this, window, cx| this.submit_steer(window, cx),
+            ))
+            .item(send_menu_row(
+                &ws,
+                &theme,
+                gpui_kit_assets::IconName::Zap,
+                "send-menu-interrupt",
+                interrupt_keys,
+                |this, window, cx| this.submit_interrupt(window, cx),
+            ))
+        });
+        let sub = cx.subscribe(&menu, |this, _menu, _: &DismissEvent, cx| {
+            this.chat.update(cx, |chat, cx| {
+                chat.send_menu = None;
+                cx.notify();
+            });
+        });
+        self.chat.update(cx, |chat, cx| {
+            chat.send_menu_sub = Some(sub);
+            chat.send_menu = Some(menu);
+            cx.notify();
+        });
     }
 
     /// Composer context-occupancy pill (the dsh ContextMeter port): a 14px
@@ -977,66 +1328,6 @@ impl Workspace {
                         })),
                 )
             })
-            .into_any_element()
-    }
-
-    /// Circular icon-only send/stop button.
-    ///
-    /// The composer's primary action control, reused across the hero and footer
-    /// layouts. The box is pinned to `SEND_BTN_SIZE` so the icon, spinner, hover
-    /// border, and disabled tint never perturb the composer row's geometry.
-    ///
-    /// States are kept visually disjoint: while a turn is running the button
-    /// is a stop control — Pause glyph, danger tint, always enabled — under
-    /// any pending plan/ask/auth card (absolute cancel priority: interrupting
-    /// a parked turn is never blocked by an unanswered interaction). When idle
-    /// it is a send control — ArrowUp glyph, accent tint — and goes inert
-    /// (`disabled`) the moment the composer has no text and no pending
-    /// attachments, so an empty input never reads as a ready-to-fire primary.
-    /// The follow-up queue is driven by Enter, not by this button, so running
-    /// never disables stop.
-    pub(super) fn render_send_button(&self, running: bool, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let disabled = !self.composer_can_submit(running, cx);
-
-        // Matches the composer chip row height (px_2/py_1 + text_xs ≈ 20px),
-        // so the send control shares the effort/model chips' rhythm instead of
-        // towering over them. The disc corner radius is half the box => circle.
-        const SEND_BTN_SIZE: Pixels = px(24.);
-        const SEND_BTN_RADIUS: Pixels = px(12.);
-
-        // Accent/danger-tinted transparent fills that strengthen on hover/active,
-        // mirroring the chip family's accent.opacity(0.08) hover rather than a
-        // heavy solid disc. Custom variant computes bg as color@~0.2, hover
-        // color@~0.3, active color@~0.4; disabled falls back to color@0.15 +
-        // muted_foreground@0.5 automatically.
-        let variant = if running {
-            ButtonCustomVariant::new(cx)
-                .color(theme.danger)
-                .foreground(theme.danger)
-                .hover(theme.danger.opacity(0.18))
-                .active(theme.danger.opacity(0.28))
-        } else {
-            ButtonCustomVariant::new(cx)
-                .color(theme.accent)
-                .foreground(theme.accent_foreground)
-                .hover(theme.accent.opacity(0.18))
-                .active(theme.accent.opacity(0.28))
-        };
-
-        Button::new("send-btn")
-            .custom(variant)
-            .with_size(Size::Size(SEND_BTN_SIZE))
-            .rounded(SEND_BTN_RADIUS)
-            .icon(if running {
-                IconName::Pause
-            } else {
-                IconName::ArrowUp
-            })
-            .disabled(disabled)
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.send_button_clicked(window, cx);
-            }))
             .into_any_element()
     }
 

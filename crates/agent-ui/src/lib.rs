@@ -76,9 +76,22 @@ pub fn composer_recall_key_bindings() -> Vec<gpui::KeyBinding> {
     ]
 }
 
+/// Keybindings for the composer's streaming send actions: `⇧⌘↩` (interrupt)
+/// has no upstream binding — gpui-base binds only `enter` / `shift-enter` /
+/// `secondary-enter`, and overloading `Enter` for the chord would newline
+/// AND submit. A dedicated action on the composer's own context keeps the
+/// keystroke out of the textarea entirely.
+pub fn composer_send_key_bindings() -> Vec<gpui::KeyBinding> {
+    vec![gpui::KeyBinding::new(
+        "secondary-shift-enter",
+        steer_agent_chat_ui::ComposerSubmitInterrupt,
+        Some("composer > Input"),
+    )]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::composer_recall_key_bindings;
+    use super::{composer_recall_key_bindings, composer_send_key_bindings};
     use steer_agent_chat_ui::turn_navigator_key_bindings;
 
     /// `KeyBinding::new` panics on an unparseable context predicate, so
@@ -86,6 +99,7 @@ mod tests {
     #[test]
     fn key_bindings_parse() {
         assert_eq!(composer_recall_key_bindings().len(), 2);
+        assert_eq!(composer_send_key_bindings().len(), 1);
         assert_eq!(turn_navigator_key_bindings().len(), 7);
     }
 }

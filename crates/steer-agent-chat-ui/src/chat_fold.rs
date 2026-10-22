@@ -53,11 +53,24 @@ pub enum ChatEvent {
         output: String,
         is_error: bool,
     },
-    /// The turn started (`chat/turnStarted` echo).
-    TurnStarted,
+    /// The turn started (`chat/turnStarted` echo). `steer_id` is set when
+    /// the opening row IS a parked steer the runtime woke for — that
+    /// turn start doubles as the steer's consumption receipt, and the
+    /// composer card correlating by the id retires. Emitted for EVERY
+    /// turn start (ours, another client's, an auto-flushed queue); the
+    /// transcript lifecycle must never lose the event to the retire.
+    TurnStarted { steer_id: Option<String> },
     /// The turn reached a terminal state (`chat/turnComplete` /
-    /// `turnCancelled` / `chat/error`).
-    TurnFinished,
+    /// `turnCancelled` / `chat/error`). `cancelled` distinguishes a user
+    /// interrupt from a normal completion — the follow-up queue settles
+    /// differently across the two.
+    TurnFinished { cancelled: bool },
+    /// A steer pending message was consumed by the runtime:
+    /// `chat/pendingMessageRemoved{steering}` (injected into the running
+    /// turn) or a `chat/turnStarted` carrying it as `queuedMessageId` (an
+    /// idle steer waking its own run). Carries the client-minted id the
+    /// composer's steer card correlates by.
+    SteerConsumed { message_id: String },
     /// A compaction summary landed (a `Compaction` user row).
     Compaction { summary: String },
     /// A system notification part (`chat/responsePart`).
@@ -138,8 +151,30 @@ impl ChatEvent {
                     chunk: output,
                 })
             }
-            A::ChatTurnStarted(_) => Some(ChatEvent::TurnStarted),
-            A::ChatTurnComplete(_) | A::ChatTurnCancelled(_) => Some(ChatEvent::TurnFinished),
+            A::ChatTurnStarted(start) => Some(ChatEvent::TurnStarted {
+                // An idle steer wakes its own run: the projection stamps the
+                // opening row with the pending id as `queuedMessageId` (its
+                // own mint for rows that never carried one). The retire
+                // rides ALONGSIDE the lifecycle event, never instead of it.
+                steer_id: start.queued_message_id.clone(),
+            }),
+            A::ChatTurnComplete(_) => Some(ChatEvent::TurnFinished { cancelled: false }),
+            A::ChatTurnCancelled(_) => Some(ChatEvent::TurnFinished { cancelled: true }),
+            A::ChatPendingMessageRemoved(removed) => {
+                // A steering removal is CONSUMPTION as far as the cards are
+                // concerned: the host publishes it only once the injection
+                // is confirmed, and this app's own withdrawals (重新排队 /
+                // 编辑 / 删除) echo back through the same action — those
+                // retire by card id, find the card already gone, and no-op.
+                // A foreign id finds no card either.
+                if removed.kind == ahp_types::state::PendingMessageKind::Steering {
+                    Some(ChatEvent::SteerConsumed {
+                        message_id: removed.id.clone(),
+                    })
+                } else {
+                    None
+                }
+            }
             A::ChatUsage(usage) => Some(ChatEvent::Usage {
                 usage: usage_of(&usage.usage),
             }),
@@ -697,12 +732,16 @@ pub fn to_thread_event(ev: ChatEvent) -> Option<manox_agent::ThreadEvent> {
             output,
             is_error,
         },
-        ChatEvent::TurnStarted => T::TurnStarted,
-        ChatEvent::TurnFinished => T::TurnFinished {
-            cancelled: false,
+        ChatEvent::TurnStarted { .. } => T::TurnStarted,
+        ChatEvent::TurnFinished { cancelled } => T::TurnFinished {
+            cancelled,
             failed: false,
             stranded_steer_ids: Vec::new(),
         },
+        // The steer card's retire path lives in the workspace pump; the
+        // transcript gets the injected row through its own rebuild/user-row
+        // vocabulary, not through this event.
+        ChatEvent::SteerConsumed { .. } => return None,
         ChatEvent::Compaction { summary } => T::Compaction {
             summary,
             messages_compacted: 0,
@@ -723,7 +762,7 @@ pub fn is_user(message: &AhpMessage) -> bool {
 mod tests {
     use super::*;
 
-    fn chat_with_turn(turn: Turn) -> ChatState {
+    pub(super) fn chat_with_turn(turn: Turn) -> ChatState {
         serde_json::from_value(serde_json::json!({
             "resource": "ahp-chat:/c-1",
             "title": "t",
@@ -936,68 +975,177 @@ mod tests {
             other => panic!("completed derives the settle face, got {other:?}"),
         }
     }
-}
+    // ── the mid-turn send-mode event vocabulary ─────────────────────────────
 
-#[gpui::test]
-fn rebuild_renders_user_bubbles_from_a_host_fold_chat(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
-    // The chat state exactly as the host fold leaves it: the same actions
-    // the translator emits for a journal, applied through the published
-    // reducers.
-    use ahp::reducers::apply_action_to_chat;
-    let mut chat: ChatState = serde_json::from_value(serde_json::json!({
-        "resource": "ahp-chat:/c-1",
-        "title": "t",
-        "status": 0,
-        "modifiedAt": "2026-01-01T00:00:00Z",
-        "turns": [],
-    }))
-    .expect("chat parses");
-    let actions: Vec<ahp_types::actions::StateAction> = serde_json::from_value(serde_json::json!([
-        {"type": "chat/turnStarted", "turnId": "t-1",
-         "startedAt": "2026-01-01T00:00:00Z",
-         "message": {"text": "hello world", "origin": {"kind": "user"}}},
-        {"type": "chat/delta", "turnId": "t-1", "partId": "p-1", "content": "hi there"},
-        {"type": "chat/turnComplete", "turnId": "t-1", "duration": 5},
-    ]))
-    .expect("actions parse");
-    for action in &actions {
-        apply_action_to_chat(&mut chat, action);
+    mod send_mode_events {
+        use super::chat_with_turn;
+        use super::*;
+        use ahp_types::actions::{
+            ChatPendingMessageRemovedAction, ChatTurnStartedAction, StateAction,
+        };
+        use ahp_types::state::PendingMessageKind;
+
+        fn minimal_chat() -> ChatState {
+            let turn: Turn = serde_json::from_value(serde_json::json!({
+                "id": "t-1",
+                "message": { "text": "run", "origin": { "kind": "user" } },
+                "responseParts": [],
+                "state": "complete",
+            }))
+            .expect("turn parses");
+            chat_with_turn(turn)
+        }
+
+        #[test]
+        fn a_steering_removal_is_the_injection_receipt() {
+            let action = StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
+                kind: PendingMessageKind::Steering,
+                id: "steer-1".to_string(),
+            });
+            let event = ChatEvent::from_action(&action, Some(&minimal_chat()));
+            assert!(matches!(
+                event,
+                Some(ChatEvent::SteerConsumed { message_id }) if message_id == "steer-1"
+            ));
+        }
+
+        #[test]
+        fn a_queued_removal_derives_nothing() {
+            let action = StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
+                kind: PendingMessageKind::Queued,
+                id: "q-1".to_string(),
+            });
+            assert!(ChatEvent::from_action(&action, Some(&minimal_chat())).is_none());
+        }
+
+        #[test]
+        fn a_turn_start_carrying_a_pending_id_is_an_idle_steer_receipt() {
+            let message: AhpMessage = serde_json::from_value(serde_json::json!({
+                "text": "steered while idle", "origin": { "kind": "user" }
+            }))
+            .expect("message parses");
+            let action = StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: "t-2".to_string(),
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                message,
+                queued_message_id: Some("steer-9".to_string()),
+                meta: None,
+            });
+            let event = ChatEvent::from_action(&action, Some(&minimal_chat()));
+            assert!(matches!(
+                event,
+                Some(ChatEvent::TurnStarted {
+                    steer_id: Some(message_id),
+                }) if message_id == "steer-9"
+            ));
+        }
+
+        #[test]
+        fn a_plain_turn_start_still_fires_turn_started() {
+            let message: AhpMessage = serde_json::from_value(serde_json::json!({
+                "text": "hello", "origin": { "kind": "user" }
+            }))
+            .expect("message parses");
+            let action = StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: "t-2".to_string(),
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                message,
+                queued_message_id: None,
+                meta: None,
+            });
+            assert!(matches!(
+                ChatEvent::from_action(&action, Some(&minimal_chat())),
+                Some(ChatEvent::TurnStarted { steer_id: None })
+            ));
+        }
+
+        #[test]
+        fn turn_settles_carry_the_cancelled_bit() {
+            let complete: StateAction = serde_json::from_value(serde_json::json!({
+                "type": "chat/turnComplete",
+                "turnId": "t-1",
+                "duration": 5,
+            }))
+            .expect("complete parses");
+            assert!(matches!(
+                ChatEvent::from_action(&complete, Some(&minimal_chat())),
+                Some(ChatEvent::TurnFinished { cancelled: false })
+            ));
+            let cancelled: StateAction = serde_json::from_value(serde_json::json!({
+                "type": "chat/turnCancelled",
+                "turnId": "t-1",
+                "duration": 1,
+            }))
+            .expect("cancelled parses");
+            assert!(matches!(
+                ChatEvent::from_action(&cancelled, Some(&minimal_chat())),
+                Some(ChatEvent::TurnFinished { cancelled: true })
+            ));
+        }
     }
-    assert_eq!(chat.turns.len(), 1);
-    assert_eq!(chat.turns[0].message.text, "hello world");
 
-    let mut usage = UsageTable::new();
-    let display = synth_display(&chat, &mut usage);
-    let user_row = display.iter().find_map(|e| match e {
-        HistoryEntry::Message(m) if m.role == Role::User => Some(m.clone()),
-        _ => None,
-    });
-    assert_eq!(
-        user_row.and_then(|m| m.content.first().cloned()),
-        Some(MessageContent::Text("hello world".into()))
-    );
+    #[gpui::test]
+    fn rebuild_renders_user_bubbles_from_a_host_fold_chat(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        // The chat state exactly as the host fold leaves it: the same actions
+        // the translator emits for a journal, applied through the published
+        // reducers.
+        use ahp::reducers::apply_action_to_chat;
+        let mut chat: ChatState = serde_json::from_value(serde_json::json!({
+            "resource": "ahp-chat:/c-1",
+            "title": "t",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [],
+        }))
+        .expect("chat parses");
+        let actions: Vec<ahp_types::actions::StateAction> =
+            serde_json::from_value(serde_json::json!([
+                {"type": "chat/turnStarted", "turnId": "t-1",
+                 "startedAt": "2026-01-01T00:00:00Z",
+                 "message": {"text": "hello world", "origin": {"kind": "user"}}},
+                {"type": "chat/delta", "turnId": "t-1", "partId": "p-1", "content": "hi there"},
+                {"type": "chat/turnComplete", "turnId": "t-1", "duration": 5},
+            ]))
+            .expect("actions parse");
+        for action in &actions {
+            apply_action_to_chat(&mut chat, action);
+        }
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].message.text, "hello world");
 
-    cx.update(|cx| {
-        let conv = crate::conversation::ConversationState::rebuild_from_display(
-            &display,
-            &usage,
-            "lead",
-            manox_agent::MessageAuthor::Lead,
-            false,
-            crate::conversation::ApplyCtx {
-                host: crate::host::noop_host(),
-                cwd: None,
-                fork_source: None,
-            },
-            cx,
-        );
-        let user_bubble = conv.items().iter().any(|item| {
-            matches!(
-                item.read(cx).kind(),
-                crate::conversation::ConvItem::User { text, .. } if text == "hello world"
-            )
+        let mut usage = UsageTable::new();
+        let display = synth_display(&chat, &mut usage);
+        let user_row = display.iter().find_map(|e| match e {
+            HistoryEntry::Message(m) if m.role == Role::User => Some(m.clone()),
+            _ => None,
         });
-        assert!(user_bubble, "the user bubble must render");
-    });
+        assert_eq!(
+            user_row.and_then(|m| m.content.first().cloned()),
+            Some(MessageContent::Text("hello world".into()))
+        );
+
+        cx.update(|cx| {
+            let conv = crate::conversation::ConversationState::rebuild_from_display(
+                &display,
+                &usage,
+                "lead",
+                manox_agent::MessageAuthor::Lead,
+                false,
+                crate::conversation::ApplyCtx {
+                    host: crate::host::noop_host(),
+                    cwd: None,
+                    fork_source: None,
+                },
+                cx,
+            );
+            let user_bubble = conv.items().iter().any(|item| {
+                matches!(
+                    item.read(cx).kind(),
+                    crate::conversation::ConvItem::User { text, .. } if text == "hello world"
+                )
+            });
+            assert!(user_bubble, "the user bubble must render");
+        });
+    }
 }

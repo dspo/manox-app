@@ -905,7 +905,9 @@ impl AhpStore {
     /// A store that never dials the host: the folded book is a plain struct
     /// tests seed directly, and every write queues as a pending write.
     /// Diagnostic-only — the production constructor is [`Self::connect`].
-    #[cfg(feature = "test-support")]
+    /// `test` too: the crate's own unit tests build stores through it and
+    /// must compile without the feature on.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn detached() -> Self {
         Self {
             book: ChannelBook::default(),
@@ -944,12 +946,43 @@ impl AhpStore {
         self.delivery_failure = None;
     }
 
+    /// What a detached store would ride the wire: (channel, action tag)
+    /// per parked dispatch, oldest first. Test-support diagnostic — the
+    /// send-mode tests assert the cancel / steer-set / removal intents off
+    /// this instead of a live host.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_dispatch_log(&self) -> Vec<(String, String)> {
+        self.pending_writes
+            .iter()
+            .filter_map(|write| match write {
+                PendingWrite::Dispatch(channel, action) => {
+                    let tag = match action.as_ref() {
+                        StateAction::ChatTurnStarted(_) => "chat/turnStarted",
+                        StateAction::ChatTurnCancelled(_) => "chat/turnCancelled",
+                        StateAction::ChatPendingMessageSet(_) => "chat/pendingMessageSet",
+                        StateAction::ChatPendingMessageRemoved(_) => "chat/pendingMessageRemoved",
+                        _ => "other",
+                    };
+                    Some((channel.clone(), tag.to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Mark one chat id's subscribe snapshot as landed. Test-support
     /// diagnostic: the drill-down panel's fold inheritance keys on the
     /// landed flag, and a detached store has no real subscribe to land one.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_mark_chat_snapshot_landed(&mut self, chat_id: &str) {
         self.book.chat_snapshots.insert(chat_id.to_string());
+    }
+
+    /// Overwrite one chat's folded state (a fabricated snapshot a fixture
+    /// flips into the book without a host). Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_set_chat(&mut self, chat_id: &str, chat: ChatState) {
+        self.book.chats.insert(chat_id.to_string(), chat);
     }
 
     /// Queue one display event into a session's bucket. Test-support
@@ -4183,26 +4216,7 @@ mod tests {
     /// of dialing the process-singleton host, so a test reads back exactly
     /// what would ride the wire.
     fn disconnected_store() -> AhpStore {
-        AhpStore {
-            book: ChannelBook::default(),
-            client: None,
-            replay_pending: false,
-            chat_events: HashMap::new(),
-            focused_session: None,
-            optimistic_undo: Vec::new(),
-            pending_writes: Vec::new(),
-            request_hook: None,
-            rejections: std::collections::VecDeque::new(),
-            thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
-            delivery_failure: None,
-            queue_head_at: None,
-            handshake_params: None,
-            handshaking: false,
-            session_list_in_flight: false,
-            delivery_signal_tx: None,
-            _tasks: Vec::new(),
-        }
+        AhpStore::detached()
     }
 
     /// The archive write rides the catalogue root with the ids in the
@@ -4255,6 +4269,31 @@ mod tests {
         // An empty batch writes nothing.
         store.archive_sessions(&[], true);
         assert_eq!(store.pending_writes.len(), 1);
+    }
+
+    /// The steer path rides `chat/pendingMessageSet{kind: steering}`: the
+    /// pending id the app mints IS the wire id the backend's journal row,
+    /// removal echo and the composer card all correlate by.
+    #[test]
+    fn a_steer_dispatch_parks_the_pending_message_set() {
+        let mut store = disconnected_store();
+        store.set_pending_message(
+            "c-1",
+            "steer-1",
+            ahp_types::state::PendingMessageKind::Steering,
+            "look at the failing test first".to_string(),
+        );
+        assert_eq!(store.pending_writes.len(), 1);
+        let Some(PendingWrite::Dispatch(channel, action)) = store.pending_writes.first() else {
+            panic!("the steer queues while disconnected");
+        };
+        assert_eq!(channel, &chat_uri("c-1"));
+        let StateAction::ChatPendingMessageSet(set) = action.as_ref() else {
+            panic!("the queued write is the pending-message set");
+        };
+        assert_eq!(set.kind, ahp_types::state::PendingMessageKind::Steering);
+        assert_eq!(set.id, "steer-1");
+        assert_eq!(set.message.text, "look at the failing test first");
     }
 
     #[test]
@@ -4452,19 +4491,28 @@ mod tests {
     #[test]
     fn display_events_bucket_per_session_and_a_drain_takes_one() {
         let mut store = test_store();
-        store.push_chat_event("s-1".to_string(), crate::chat_fold::ChatEvent::TurnStarted);
-        store.push_chat_event("s-2".to_string(), crate::chat_fold::ChatEvent::TurnStarted);
-        store.push_chat_event("s-1".to_string(), crate::chat_fold::ChatEvent::TurnFinished);
+        store.push_chat_event(
+            "s-1".to_string(),
+            crate::chat_fold::ChatEvent::TurnStarted { steer_id: None },
+        );
+        store.push_chat_event(
+            "s-2".to_string(),
+            crate::chat_fold::ChatEvent::TurnStarted { steer_id: None },
+        );
+        store.push_chat_event(
+            "s-1".to_string(),
+            crate::chat_fold::ChatEvent::TurnFinished { cancelled: false },
+        );
 
         let drained = store.drain_chat_events("s-1");
         assert_eq!(drained.len(), 2, "only the bound session's bucket drains");
         assert!(matches!(
             drained[0],
-            crate::chat_fold::ChatEvent::TurnStarted
+            crate::chat_fold::ChatEvent::TurnStarted { .. }
         ));
         assert!(matches!(
             drained[1],
-            crate::chat_fold::ChatEvent::TurnFinished
+            crate::chat_fold::ChatEvent::TurnFinished { .. }
         ));
 
         // The other session's bucket is untouched and drains on its own
