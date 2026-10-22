@@ -66,9 +66,8 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface |
 | TurnNavigator | ✅ | cmd-m 打开；↑/↓ 选条、enter 定位、⌘↵ 回填 composer、⌘C 复制；历史回溯另有 ⌥↑/⌥↓ |
 | TurnRail（左缘轮次导航） | ✅ | 常驻左缘刻度 rail（dsh TurnNavigator 移植，≥2 轮且卡宽 ≥640px 显示）；悬停预览、点击定位、active 随滚动追踪 |
-| 图片附件 | ✅ | 剪贴板粘贴 / plus 选择 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
+| 图片附件 | ✅ | 剪贴板粘贴 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
-| Plus 菜单（文件 / 目标 / 插件） | ✅ 部分 | 文件 → native picker → pending attachments；目标 → seed `/goal`；Plugins 组为静态装饰（待与插件面板 #474 整合） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
 | Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读） |
 | Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewDecisionCard](#planreviewdecisioncard)（底部一键裁决卡），三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |

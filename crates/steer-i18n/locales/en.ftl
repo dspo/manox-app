@@ -517,29 +517,12 @@ follow-stop-dismiss = Dismiss
 follow-stop-indicator-retry = Click to reconnect the live follow
 ### views/composer_menu.rs
 
-composer-add-label = Add
 composer-delivery-error = Connection not ready — your message may not have been delivered
 composer-delivery-retry = Retry
 
-composer-plugins-label = Plugins
-
-composer-add-files = Files and folders
-
-composer-attach-editor = Attach editor
-
-composer-goal-name = Goal
-
-composer-goal-desc = Set a goal for sustained effort
-
-composer-browser-label = Browser
-
 composer-add-chrome = Chrome
 
-composer-add-chrome-desc = Enable ChromeUse browser automation tools
-
 composer-add-internal-browser = Internal Web Browser
-
-composer-add-internal-browser-desc = Enable the built-in webview browser tools
 
 completion-tag-command = Command
 
