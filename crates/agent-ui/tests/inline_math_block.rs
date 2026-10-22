@@ -30,22 +30,30 @@ impl Render for RowProbe {
 }
 
 fn paint_message(cx: &mut TestAppContext, body: &str) -> VisualTestContext {
+    paint_chunks(cx, &[body])
+}
+
+/// The same row, fed the way a streaming response feeds it: one
+/// `AgentText` delta per chunk.
+fn paint_chunks(cx: &mut TestAppContext, chunks: &[&str]) -> VisualTestContext {
     cx.update(gpui_component::init);
     let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
-    let ctx = ApplyCtx {
-        host: steer_agent_chat_ui::host::noop_host(),
-        cwd: None,
-        fork_source: None,
-    };
     cx.update(|cx| {
         conversation.update(cx, |c, cx| {
-            let _ = c.apply(
-                &ThreadEvent::AgentText(body.to_string()),
-                MODEL,
-                None,
-                ctx,
-                cx,
-            );
+            for chunk in chunks {
+                let ctx = ApplyCtx {
+                    host: steer_agent_chat_ui::host::noop_host(),
+                    cwd: None,
+                    fork_source: None,
+                };
+                let _ = c.apply(
+                    &ThreadEvent::AgentText(chunk.to_string()),
+                    MODEL,
+                    None,
+                    ctx,
+                    cx,
+                );
+            }
         });
     });
     let rows = cx.update(|cx| conversation.read(cx).items().to_vec());
@@ -115,6 +123,38 @@ async fn a_list_item_keeps_its_marker_beside_the_formula(cx: &mut TestAppContext
     assert!(
         visual.debug_bounds(BLOCK_SELECTOR).is_none(),
         "a list item's paragraph is never promoted out from under its marker"
+    );
+}
+
+/// A display pair alone in a quote is still a display block; the quote mark
+/// shares its line without owning the content.
+#[gpui::test]
+async fn a_display_pair_inside_a_quote_is_a_block(cx: &mut TestAppContext) {
+    let mut visual = paint_message(cx, "> $$x^2 + y^2 = z^2$$");
+
+    let block = visual
+        .debug_bounds(BLOCK_SELECTOR)
+        .expect("the pair paints as the block inside the quote");
+    assert!(
+        block.size.height > px(8.) && block.size.width > px(40.),
+        "the formula paints at formula size: {block:?}"
+    );
+}
+
+/// A formula split across streamed deltas typesets once its closing dollars
+/// land: the row re-parses the changed tail, and the run replaces the literal
+/// text the earlier chunks painted.
+#[gpui::test]
+async fn a_formula_split_across_chunks_typesets(cx: &mut TestAppContext) {
+    let mut visual = paint_chunks(cx, &["Streaming: $$\\frac{", "a}{b}$$ and $x^", "2$ done."]);
+
+    assert!(
+        visual.debug_bounds(RUN_SELECTOR).is_some(),
+        "the split formula paints as a run once closed"
+    );
+    assert!(
+        visual.debug_bounds(BLOCK_SELECTOR).is_none(),
+        "a mid-sentence pair stays inline across chunks"
     );
 }
 

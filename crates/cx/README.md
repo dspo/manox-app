@@ -90,7 +90,7 @@ responses provider are exposed in the published baseline config.
 
 ## Local development
 
-The manox repo pins Rust 1.95.0 with `rust-toolchain.toml` and CI runs the
+The manox repo pins Rust 1.97.1 with `rust-toolchain.toml` and CI runs the
 same version.
 
 ```bash

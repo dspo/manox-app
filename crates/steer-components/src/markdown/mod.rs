@@ -11,6 +11,10 @@
 //!   autolink that can split a text node);
 //! - [`svg_block`] — ```svg fences as their rasterized image, with a flip to
 //!   the highlighted source;
+//! - [`mermaid_block`] — ```mermaid fences rendered to an SVG document at
+//!   parse time, then painted by the same raster block;
+//! - [`math_block`] — `$$…$$` as a display block and `$…$` as an inline run,
+//!   typeset to an SVG document by the pure-Rust engine behind `mathra`;
 //! - [`terminal_panel`] — the terminal-styled tool-output panel, hosted on a
 //!   `TextView` code block.
 //!
@@ -19,6 +23,7 @@
 
 pub mod linkify;
 pub mod math_block;
+pub mod mermaid_block;
 pub mod svg_block;
 pub mod terminal_panel;
 pub mod text_view;
@@ -26,7 +31,7 @@ pub mod text_view;
 pub use gpui_base::TextView;
 pub use gpui_base::text::TextViewState;
 pub use linkify::{LinkKind, classify_target, linkify_markdown};
-pub use svg_block::with_svg_blocks;
+pub use svg_block::with_diagram_blocks;
 pub use terminal_panel::{GitSummary, PanelKind, TerminalPanel, hashline_text};
 pub use text_view::{
     ChatDocument, chrome_style, code_copy_actions, message_document, message_style, panel_document,

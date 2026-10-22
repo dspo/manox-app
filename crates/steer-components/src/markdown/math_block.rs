@@ -3,7 +3,7 @@
 //! typeset to a standalone SVG document by [`mathra`] — an embedded pure-Rust
 //! engine drawn with the STIX Two Math font's MATH table (fractions, radicals,
 //! scripts, matrices, delimiters), glyphs as path outlines — and both ride the
-//! same [`svg_block::rasterize`] path the diagram fences paint through.
+//! same [`svg_block::rasterize_at`] path the diagram fences paint through.
 //!
 //! The markdown stack does not hand these over as one node. A `$$` fence alone
 //! on its line is `mdast::Node::Math`; a `$$…$$` pair written on one line — the
@@ -28,7 +28,10 @@
 //! it wants a CJK-capable math font inside the engine, not another raster
 //! here.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use gpui::{
     AnyElement, App, ImageSource, InteractiveElement as _, IntoElement as _, ObjectFit,
@@ -168,7 +171,7 @@ fn math_paragraph(
     // A paragraph on a list item's own line keeps its marker beside the
     // content: promoting there would strand the marker alone on the line, so
     // the pair falls through to the inline run instead.
-    if !opens_its_line(cx, node) {
+    if !has_no_list_marker(cx, node) {
         return None;
     }
     let source = cx.node_source(node)?.trim();
@@ -183,16 +186,19 @@ fn math_paragraph(
     )
 }
 
-/// Whether the node starts its source line — nothing but indentation before
-/// it. A list item's paragraph shares its line with the marker; a blockquote's
-/// with `>`.
-fn opens_its_line(cx: &MarkdownParseContext<'_>, node: &markdown_ast::Node) -> bool {
+/// Whether the node's line carries no list marker before it. Indentation and a
+/// blockquote's `>` marks are not markers — a display block inside a quote is
+/// still a display block — but a list item's `-` or `1.` is, because a block
+/// there would strand the marker on a line of its own.
+fn has_no_list_marker(cx: &MarkdownParseContext<'_>, node: &markdown_ast::Node) -> bool {
     let Some(start) = node.position().map(|position| position.start.offset) else {
         return false;
     };
     let source = cx.source();
     let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
-    source[line_start..start].trim().is_empty()
+    source[line_start..start]
+        .chars()
+        .all(|ch| ch == '>' || ch.is_whitespace())
 }
 
 /// The block's element: the formula centered at its natural size — the em box
@@ -283,8 +289,12 @@ impl MarkdownPlugin for InlineMath {
 
 /// Typeset one formula to its raster, or `None` when it is not math this
 /// engine accepts (strict mode: invalid LaTeX is the text it always was).
-/// The ink is applied before rasterizing — see [`INK`].
+/// The ink is applied before rasterizing — see [`INK`]; a formula already set
+/// is a lookup — see [`RASTER_CACHE`].
 fn typeset(value: &str, delimiter: Delimiter, renderer: &SvgRenderer) -> Option<MathRaster> {
+    if let Some(cached) = cached_raster(value, delimiter) {
+        return Some(cached);
+    }
     let output = mathra::convert(
         value,
         &mathra::Options {
@@ -302,12 +312,72 @@ fn typeset(value: &str, delimiter: Delimiter, renderer: &SvgRenderer) -> Option<
     // equation caps at the diagram box like every other picture.
     let width = (width_em * EM_PX * 2.).min(svg_block::RASTER_BOX);
     let raster = rasterize_at(renderer, svg.as_bytes(), width)?;
-    Some(MathRaster {
+    let math = MathRaster {
         raster,
         width_em,
         height_em,
         depth_em,
-    })
+    };
+    remember_raster(value, delimiter, &math);
+    Some(math)
+}
+
+/// How many typeset formulas stay cached, and how many device pixels their
+/// rasters may hold in total. The count bounds the bookkeeping; the pixels
+/// bound what a document full of wide display equations could pin in memory.
+const RASTER_CACHE_CAP: usize = 256;
+const RASTER_CACHE_PIXELS: usize = 8_000_000;
+
+/// The rasters already typeset, oldest first for eviction. Conversion is
+/// cheap; the raster is not, and one parse typesets every inline formula
+/// twice — upstream runs the inline parsers once to decide whether to flatten
+/// unclaimed math, then converts — so the second pass (and every later parse
+/// of the same formula) is a lookup.
+static RASTER_CACHE: OnceLock<Mutex<RasterCache>> = OnceLock::new();
+
+#[derive(Default)]
+struct RasterCache {
+    rasters: HashMap<(String, bool), MathRaster>,
+    order: VecDeque<(String, bool)>,
+    pixels: usize,
+}
+
+fn cached_raster(value: &str, delimiter: Delimiter) -> Option<MathRaster> {
+    let cache = RASTER_CACHE.get_or_init(Default::default);
+    let cache = cache.lock().ok()?;
+    cache
+        .rasters
+        .get(&(value.to_string(), delimiter.display()))
+        .cloned()
+}
+
+fn remember_raster(value: &str, delimiter: Delimiter, math: &MathRaster) {
+    let pixels = {
+        let size = math.raster.size(0);
+        size.width.0.max(0) as usize * size.height.0.max(0) as usize
+    };
+    let cache = RASTER_CACHE.get_or_init(Default::default);
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    let key = (value.to_string(), delimiter.display());
+    if cache.rasters.contains_key(&key) {
+        return;
+    }
+    while cache.order.len() >= RASTER_CACHE_CAP || cache.pixels + pixels > RASTER_CACHE_PIXELS {
+        let Some(oldest) = cache.order.pop_front() else {
+            break;
+        };
+        if let Some(evicted) = cache.rasters.remove(&oldest) {
+            let size = evicted.raster.size(0);
+            cache.pixels = cache
+                .pixels
+                .saturating_sub(size.width.0.max(0) as usize * size.height.0.max(0) as usize);
+        }
+    }
+    cache.order.push_back(key.clone());
+    cache.pixels += pixels;
+    cache.rasters.insert(key, math.clone());
 }
 
 /// Point the root's `color` at the fixed ink and drop mathra's own
@@ -474,6 +544,25 @@ mod tests {
         assert!(typeset(r"\frac{", Delimiter::Display, &renderer).is_none());
         assert!(typeset(r"\notacommand{x}", Delimiter::Display, &renderer).is_none());
         assert!(typeset(r"\frac{", Delimiter::Inline, &renderer).is_none());
+    }
+
+    /// A repeat typeset is the cached raster: one parse sets every formula
+    /// twice (upstream's flatten probe, then the conversion), and the raster
+    /// is the expensive half.
+    #[gpui::test]
+    fn a_repeat_typeset_reuses_the_raster(cx: &mut TestAppContext) {
+        let renderer = cx.update(|cx| cx.svg_renderer());
+        let first = typeset(r"\frac{p}{q}", Delimiter::Inline, &renderer).expect("typesets");
+        let second = typeset(r"\frac{p}{q}", Delimiter::Inline, &renderer).expect("typesets");
+        assert!(
+            Arc::ptr_eq(&first.raster, &second.raster),
+            "the second pass is a lookup, not a raster"
+        );
+        let display = typeset(r"\frac{p}{q}", Delimiter::Display, &renderer).expect("typesets");
+        assert!(
+            !Arc::ptr_eq(&first.raster, &display.raster),
+            "the display layout is its own picture"
+        );
     }
 
     /// The source names its delimiter, and currency is not math.

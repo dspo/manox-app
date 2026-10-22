@@ -65,6 +65,10 @@ anyhow = "1"
 # a standalone SVG (STIX Two Math glyph outlines, MATH-table layout) at
 # markdown-parse time and rides the svg fence's raster path.
 mathra = "=1.1.1"
+# The pure-Rust Mermaid renderer behind the ```mermaid fence: mermaid source
+# becomes an SVG document at markdown-parse time and rides the same usvg
+# raster path the svg fence paints. SVG output only — gpui rasterizes.
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 async-channel = "2"
 async-trait = "0.1"
 futures = "0.3"
@@ -173,3 +177,6 @@ debug = "line-tables-only"
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
 gpui-pre-platform = { opt-level = 3 }
+# Mermaid's parser/layout runs during markdown conversion (including every
+# streamed append), so unoptimized code shows up as a slow diagram.
+mermaid-rs-renderer = { opt-level = 3 }
