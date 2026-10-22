@@ -27,6 +27,7 @@ use gpui_component::{
 use steer_agent_chat_ui::ahp_store::AhpStore;
 use steer_agent_chat_ui::conversation::{ApplyCtx, ConversationState};
 use steer_agent_chat_ui::host::ChatHostHandle;
+use steer_agent_chat_ui::views::subagents::CAPTAIN_LABEL;
 
 use crate::i18n;
 
@@ -39,7 +40,8 @@ pub struct SubagentStreamView {
     /// The model the child's turn headers name (the parent session's label
     /// stands in when the child chat carries none of its own).
     role: String,
-    /// The run's task label, when the host carried one (the header's topic).
+    /// The run's task label — the header's topic (the wire's background-work
+    /// label stands in when no separate activity was carried).
     activity: Option<String>,
     /// The chat fold's client (the process-singleton AHP store).
     store: gpui::WeakEntity<AhpStore>,
@@ -141,7 +143,7 @@ impl Render for SubagentStreamView {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme: Theme = cx.theme().clone();
         use steer_agent_chat_ui::views::subagents::{one_line, task_display_title};
-        // One line, always: the run's label is runtime text and may carry
+        // One line, always: the run's topic is runtime text and may carry
         // newlines — the header must not grow a line per input line.
         let title = one_line(
             &task_display_title(&self.label, self.activity.as_deref().unwrap_or_default())
@@ -176,7 +178,8 @@ impl Render for SubagentStreamView {
                         gpui::div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(i18n::t("subagent-stream-back")),
+                            // Product vocabulary, never translated.
+                            .child(CAPTAIN_LABEL),
                     )
                     .on_click(cx.listener(|_this, _, _, cx| {
                         // The main column returns to the parent conversation;

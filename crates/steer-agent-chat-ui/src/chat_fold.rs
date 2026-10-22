@@ -650,6 +650,19 @@ fn push_input_request(
     }));
 }
 
+/// Whether a tool call's input has the delegation shape: `description` plus
+/// `prompt`, with none of the retired Steer envelope keys. The runtime names
+/// its delegation tools after the agent definition, so this is also how a
+/// call's own name earns the sub-agent type.
+pub fn is_agent_task_call(input: Option<&serde_json::Value>) -> bool {
+    input.is_some_and(|value| {
+        value.get("description").is_some()
+            && value.get("prompt").is_some()
+            && value.get("to").is_none()
+            && value.get("reason").is_none()
+    })
+}
+
 /// Lower a display event onto the `ThreadEvent` vocabulary the live
 /// conversation applier consumes (the mechanical transcription layer: same
 /// shapes the v2 pump emitted, now derived from AHP actions).

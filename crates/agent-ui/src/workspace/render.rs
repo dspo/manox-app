@@ -558,22 +558,24 @@ impl Workspace {
     }
 
     /// The Captain status block above the composer — the Captain's own row
-    /// (`Captain is steering {provider}/{model} · {activity} · {elapsed}`)
-    /// while a turn runs, followed by one row per RUNNING sub-agent, each led
-    /// by a PixelSpinner flush at the left edge. The model segment carries the
-    /// app's wire-color convention (the registration's `-wire` suffix never
-    /// shows as text), and the block retires once neither a turn nor a run is
-    /// live — the message column carries no per-entry status glyphs, this is
-    /// the one live surface.
+    /// (`Captain 正在驾驶{provider}/{model}·{elapsed}·{activity}`) while a turn
+    /// runs, followed by one row per RUNNING sub-agent, each led by a
+    /// PixelSpinner flush at the left edge. Every segment is tight (no spacer
+    /// between the verb, the model, the clock and the activity). The model
+    /// segment carries the app's wire-color convention (the registration's
+    /// `-wire` suffix never shows as text), and the block retires once neither
+    /// a turn nor a run is live — the message column carries no per-entry
+    /// status glyphs, this is the one live surface.
     ///
     /// The sub-agent rows are the parent chat's AHP background work (the host
     /// opens a run's entry on its first running tick and removes it when the
     /// run settles), so they stay listed while their run does — including a
     /// run that outlived the turn that spawned it (AHP: "an entry may have been
-    /// started by an earlier turn"). A row's click opens that child's own
-    /// transcript in the main column; the round trip back is the page's own
-    /// back control (the block is not on screen while the page owns the
-    /// column, so it carries no click of its own).
+    /// started by an earlier turn"). A sub-agent row reads
+    /// `Explore(task)正在驾驶{model}·{elapsed}`. A row's click opens that
+    /// child's own transcript in the main column; the round trip back is the
+    /// page's own back control (the block is not on screen while the page owns
+    /// the column, so it carries no click of its own).
     fn render_captain_strip(
         &self,
         running: bool,
@@ -583,7 +585,7 @@ impl Workspace {
         use ai_elements::{PixelSpinner, PixelSpinnerVariant};
         use steer_agent_chat_ui::conversation::LiveActivity;
         use steer_agent_chat_ui::model_tag::ModelTag;
-        use steer_agent_chat_ui::views::subagents::{one_line, task_display_title};
+        use steer_agent_chat_ui::views::subagents::{CAPTAIN_LABEL, one_line, task_display_title};
 
         let subagents = self.running_subagents(cx);
         if !running && subagents.is_empty() {
@@ -610,6 +612,18 @@ impl Workspace {
                 })
                 .collect::<Vec<_>>()
         };
+        // One tight segment line: name + verb, then the model, the clock and
+        // the activity sit flush against each other (no flex gap). Only the
+        // spinner keeps its own gutter.
+        let status_line = |name: gpui::Div, theme: &Theme| {
+            gpui::div()
+                .flex()
+                .items_center()
+                .min_w_0()
+                .truncate()
+                .child(name)
+                .children(model_spans(theme))
+        };
 
         let mut rows = v_flex().w_full().min_w_0().gap_1();
         // The Captain's own row names a model; a session with none registered
@@ -619,21 +633,19 @@ impl Workspace {
                 let conversation = self.chat.read(cx).conversation.read(cx);
                 (conversation.live_activity(cx), conversation.running_secs())
             };
-            let mut row = gpui::div()
-                .id("captain-strip")
-                .debug_selector(|| "workspace-captain-strip".into())
-                .flex()
-                .items_center()
-                .gap_2()
-                .w_full()
-                .min_w_0()
-                .text_sm()
-                .text_color(muted)
-                .child(spinner())
-                .child(gpui::div().child(crate::i18n::t("captain-steering-prefix")))
-                .children(model_spans(theme));
+            // "Captain" is product vocabulary, never translated; the verb
+            // after it is chrome copy.
+            let prefix = format!("{CAPTAIN_LABEL} {}", crate::i18n::t("steering-verb"));
+            let mut status = status_line(
+                gpui::div()
+                    .min_w_0()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(prefix),
+                theme,
+            );
             if elapsed > 0 {
-                row = row.child(gpui::div().child("·")).child(
+                status = status.child("·").child(
                     gpui::div().child(crate::i18n::t_count("thinking-duration", elapsed as i64)),
                 );
             }
@@ -652,18 +664,57 @@ impl Workspace {
                         .font_family(theme.mono_font_family.clone())
                         .child(one_line(title)),
                 };
-                row = row.child(gpui::div().child("·")).child(summary);
+                status = status.child("·").child(summary);
             }
+            let row = gpui::div()
+                .id("captain-strip")
+                .debug_selector(|| "workspace-captain-strip".into())
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .text_sm()
+                .text_color(muted)
+                .child(spinner())
+                .child(status);
             rows = rows.child(row);
         }
 
         for (ix, work) in subagents.into_iter().enumerate() {
-            // The child's own identity: its agent type plus the run's task
-            // label (`Explore · fix the login redirect`).
-            let title = one_line(
-                &task_display_title(&work.label, work.activity.as_deref().unwrap_or_default())
-                    .unwrap_or_else(|| work.id.clone()),
+            // The run's identity: `Explore(task)`. The background-work entry
+            // carries the topic; the agent type is resolved from the spawning
+            // call. Until that resolves, the entry's own label keeps its old
+            // `label · topic` reading rather than inventing a type.
+            let topic = work
+                .activity
+                .as_deref()
+                .filter(|topic| !topic.is_empty())
+                .unwrap_or(&work.label);
+            let title = match work.kind.as_deref().filter(|kind| !kind.is_empty()) {
+                Some(kind) => task_display_title(kind, topic),
+                None => {
+                    task_display_title(&work.label, work.activity.as_deref().unwrap_or_default())
+                }
+            }
+            .unwrap_or_else(|| work.id.clone());
+            let title = one_line(&title);
+            let mut status = status_line(
+                gpui::div()
+                    .min_w_0()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(crate::i18n::t_str(
+                        "subagent-steering-prefix",
+                        &[("name", title.as_str())],
+                    )),
+                theme,
             );
+            if let Some(secs) = elapsed_secs(&work.started_at) {
+                status = status
+                    .child("·")
+                    .child(gpui::div().child(crate::i18n::t_count("thinking-duration", secs)));
+            }
             // The model segment names the session's model: a sub-agent run on
             // this harness inherits the parent's model unless its own
             // definition pins one, and the run's own model has no AHP seat on
@@ -681,10 +732,7 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.secondary.opacity(0.4)))
                 .child(spinner())
-                .child(gpui::div().min_w_0().truncate().whitespace_nowrap().child(
-                    crate::i18n::t_str("captain-steering-subagent", &[("name", title.as_str())]),
-                ))
-                .children(model_spans(theme))
+                .child(status)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.open_subagent_stream(&work, cx);
                 }));
@@ -714,4 +762,13 @@ impl Workspace {
         // surfaces as the chat's error part now.
         None
     }
+}
+
+/// Whole seconds since an ISO 8601 start stamp; `None` when the stamp is
+/// absent/unparseable or the clock is in the future. The status strip's
+/// elapses are wall-clock (the wire carries the start, not a local instant).
+fn elapsed_secs(started_at: &str) -> Option<i64> {
+    let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let secs = (chrono::Utc::now() - started.with_timezone(&chrono::Utc)).num_seconds();
+    (secs > 0).then_some(secs)
 }

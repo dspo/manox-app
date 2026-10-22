@@ -22,7 +22,7 @@ impl Workspace {
     pub(crate) fn open_subagent_tab(
         &mut self,
         id: &str,
-        _subagent_type: &str,
+        subagent_type: &str,
         topic: &str,
         status: manox_agent::ToolCallStatus,
         cx: &mut Context<Self>,
@@ -42,6 +42,7 @@ impl Workspace {
         };
         let panel = crate::views::subagent_panel::SubagentPanel::new(
             banner.clone(),
+            subagent_type.to_string(),
             self.model_label(cx),
             status,
             self.chat.read(cx).host.clone(),

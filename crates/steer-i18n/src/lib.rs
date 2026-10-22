@@ -395,6 +395,33 @@ mod tests {
         assert!(!zh.is_empty(), "no keys parsed out of the zh-CN bundle");
     }
 
+    /// The Captain strip's two names are product vocabulary and its segments
+    /// are tight: the Captain's verb follows the literal `Captain`, while the
+    /// sub-agent template appends the verb directly to `{type}({topic})` in
+    /// Chinese (no spacer) and with the language's own boundary in English.
+    #[test]
+    fn steering_templates_keep_names_literal_and_segments_tight() {
+        let _g = TEST_LANG_LOCK.lock().unwrap();
+        for (name, want) in [
+            (Language::ZhCn, "Explore(调研 subagent 调度实现)正在驾驶"),
+            (Language::En, "Explore(调研 subagent 调度实现) is steering"),
+        ] {
+            set_lang(name);
+            assert_eq!(
+                t_str(
+                    "subagent-steering-prefix",
+                    &[("name", "Explore(调研 subagent 调度实现)")]
+                )
+                .as_str(),
+                want
+            );
+        }
+        set_lang(Language::ZhCn);
+        assert_eq!(t("steering-verb").as_str(), "正在驾驶");
+        set_lang(Language::En);
+        assert_eq!(t("steering-verb").as_str(), "is steering");
+    }
+
     #[test]
     fn en_plural_minutes() {
         let _g = TEST_LANG_LOCK.lock().unwrap();

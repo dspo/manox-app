@@ -12,6 +12,11 @@ use manox_agent::ToolCallStatus;
 
 use ai_elements::BrailleSpinner;
 
+/// The main agent's literal label. App chrome is localized, but this name is
+/// product vocabulary rendered verbatim in every language — style it through
+/// this constant so no surface can drift into a translation.
+pub const CAPTAIN_LABEL: &str = "Captain";
+
 #[derive(Clone, Debug)]
 pub struct SubagentInfo {
     pub id: String,
@@ -27,7 +32,7 @@ pub fn subagent_display_title(info: &SubagentInfo) -> String {
     task_display_title(&info.subagent_type, &info.description).unwrap_or_default()
 }
 
-/// `{type} · {topic}` with graceful one-sided fallbacks; `None` when both
+/// `{type}({topic})` with graceful one-sided fallbacks; `None` when both
 /// sides are empty (callers pick their own last resort, e.g. the call id).
 pub fn task_display_title(subagent_type: &str, description: &str) -> Option<String> {
     if description.is_empty() {
@@ -35,7 +40,7 @@ pub fn task_display_title(subagent_type: &str, description: &str) -> Option<Stri
     } else if subagent_type.is_empty() {
         Some(description.to_string())
     } else {
-        Some(format!("{subagent_type} · {description}"))
+        Some(format!("{subagent_type}({description})"))
     }
 }
 
@@ -78,7 +83,7 @@ mod tests {
     fn task_display_title_combines_type_and_topic() {
         assert_eq!(
             task_display_title("Explore", "find the auth module").as_deref(),
-            Some("Explore · find the auth module")
+            Some("Explore(find the auth module)")
         );
         assert_eq!(
             task_display_title("Explore", "").as_deref(),

@@ -166,23 +166,19 @@ status-denied = Denied
 
 status-cancelled = Cancelled
 
-### views/message.rs — Thinking status row
-
-context-agents-captain = Captain
-
 ### agent-ui workspace — Captain status strip (above the composer)
+### "Captain" is product vocabulary and is never translated; only the verb
+### after it is.
 
-captain-steering-prefix = Captain is steering
-# The sub-agent lines under the Captain's own: `{ $name }` is the run's agent
-# type plus its task label (e.g. "Explore · fix the login redirect").
-captain-steering-subagent = { $name } is steering
+steering-verb = is steering
+# The sub-agent lines: `{ $name }` is "{type}({task})" (e.g.
+# "Explore(fix the login redirect)"); the type comes from the host verbatim.
+subagent-steering-prefix = { $name } is steering
 turn-process-completed = Completed in 
 captain-activity-thinking = Thinking
 captain-activity-replying = Replying
 
 ### views/subagent_stream.rs (the sub-agent page in the main column)
-
-subagent-stream-back = Captain
 
 subagent-stream-empty = No activity yet — the sub-agent has not written its first turn.
 

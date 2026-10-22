@@ -466,9 +466,10 @@ once neither is — the message column
 carries no per-entry status glyphs anymore (the chain-of-thought markers are
 retired), so this is the single "what is it doing" surface. Its first row is the
 Captain's own: a [`PixelSpinner`](#meerkat) (grid variant, `ai_elements::PixelSpinner`)
-flush at the left = healthy running, then the localized prefix (`captain-steering-prefix`,
-「船长正在驾驶 Captain is steering」), the model via
-[`ModelTag`](#modeltag) (`{provider}/` muted, model tinted by wire api), `·`,
+flush at the left = healthy running, then the literal product name `Captain` +
+the localized verb (`steering-verb`：正在驾驶 / is steering), the model via
+[`ModelTag`](#modeltag) (`{provider}/` muted, model tinted by wire api) flush
+against the verb (no spacer: `Captain 正在驾驶百炼/qwen3.8-flash·234秒`), `·`,
 and the activity — 思考中/Thinking while a reasoning round streams,
 正在回复/Replying while the assistant body streams, or the running tool's
 one-line summary (monospace, runtime-provided; newline runs collapse to single
@@ -488,15 +489,20 @@ projects as the parent chat's AHP background work
 (`leaf.running_subagents()`, `crates/steer-agent-chat-ui/src/ahp_store.rs`) —
 the host opens a run's entry on its first running tick and removes it when the
 run settles, so the rows are exactly the live set. Each row is the same shape
-(`spinner` + `captain-steering-subagent`「{name} 正在驾驶」+ the model tag),
-where `{name}` is the run's agent type plus its task label
-(`task_display_title`: 「Explore · 修登录跳转」— flattened by `one_line` and
-bounded the same way the Captain's own row is: a run's task label is runtime
-text and may carry newlines, and the block must never grow a line per input
-line). The model segment names the
+(`spinner` + `subagent-steering-prefix`「{name}正在驾驶」+ the model tag +
+`·{elapsed}`), where `{name}` is the run's agent type and task label as
+`{type}({topic})` (`task_display_title`: 「Explore(修登录跳转)」— flattened by
+`one_line` and bounded the same way the Captain's own row is: a run's task
+label is runtime text and may carry newlines, and the block must never grow a
+line per input line). The wire's background-work entry carries the topic only;
+the type is resolved from the delegation tool call (its
+`ToolResultSubagentContent.agentName`, or the call's own name on a completion
+receipt naming the run) and stays absent when that call is not in the retained
+fold. The model segment names the
 SESSION's model: a sub-agent run on this harness inherits it unless its own
 definition pins one, and the run's own model has no seat on the parent's
-channel. A sub-agent row's click opens that child's transcript in the main
+channel. The row's clock is wall-clock from the entry's `startedAt`. A
+sub-agent row's click opens that child's transcript in the main
 column ([SubagentStream](#subagentstream)). The Captain's own row carries NO
 click: the block is not on screen while the page owns the column, so the round
 trip back is the page's own back control (no dead affordance here).
@@ -514,8 +520,8 @@ pipeline — the same `synth_display` →
 `ConversationState::rebuild_from_display` fold the conversation column uses, so
 the rows ARE the child's messages (never a second transcript expression). It is
 read-only by design: a child run is driven by the parent's dispatch, not by the
-watcher (no composer, no chips). Header = back control (「船长」→ the
-conversation) + `{type} · {topic}`.
+watcher (no composer, no chips). Header = back control (`Captain` → the
+conversation) + `{type}({topic})`.
 
 Refresh model: the host serves a child chat as a SNAPSHOT (the child's journal
 is folded into the child's own channel and is never bridged to the parent), so
@@ -806,8 +812,8 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 
 段序（自上而下，空段连同分割线一起不画，相邻段不产生双线）：
 
-1. **Captain + subagents**：主 Agent 行字面量 `Captain`（不走 i18n；`views/message.rs` 的署名仍走
-   `context-agents-captain`「船长」，互不相干）。subagent 行 `{type} · {topic}`
+1. **Captain + subagents**：主 Agent 行字面量 `Captain`（不走 i18n；`views/message.rs` 的署名同样
+   是字面量 `Captain`，两种语言都不翻译）。subagent 行 `{type}({topic})`
    （`subagents.rs::task_display_title`）与 Captain 同一条左基线（无缩进、无树符——从属关系唯一，
    不需要视觉编码）。**默认只显示未结束的行**（`ToolCallStatus::Running | PendingApproval` 判定，
    不用 watchdog 的 `health`），已结束的折叠进 `+N`；活行 0 也保留 Captain 行 + `+N`。上限 5。
@@ -869,14 +875,18 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 渲染的微型会话：子会话（run id 即子会话 id，swarm 不变量）在打开时经 multiplexer attach，
 面板持有自己的 `ConversationState`，观察 `AhpStore` 并排水**该子会话自己的事件桶**
 （`ChatEvent` → `to_thread_event` → `apply`，与主列 live 腿同一词汇与同一 apply 语义）——
-journal 重放与实时 delta 都经此泵进入，运行中钻取是 live 的。相位三态：`subagent-panel-settling`
-（订阅快照未回）→ 活动（有行）/`subagent-panel-empty`（快照已回、无内容），永不渲染无依据的
-假占位。底部是 `subagent-panel-readonly` 只读说明条（宿主侧 #910 已把子会话标记为
-`ChatInteractivity::ReadOnly`）。入口：会话内子代理卡片点击——卡片的 `AgentTaskItem.run_id`
-来自派发信封（前台结果 / promotion 回执 / 后台启动回执都携带 `run_id`）；
+journal 重放与实时 delta 都经此泵进入，运行中钻取是 live 的。泵还有**fold 继承**半边：
+事件桶只载本面板订阅之后的 delta，打开前（或已结算后才点开）流过的内容在子会话自己的
+chat fold 里——泵在**尚未继承**时按 fold 快照整表重建（`synth_display`，fold 已含已排水事件，
+故重建覆盖之、不重不漏），之后 delta 照常流式叠加。继承以快照 landed 为键、不以「面板无行」
+为键：领先快照到达的 delta 会先开行，若等「无行」才继承就永远错过打开前的转录。相位三态：
+`subagent-panel-settling`（订阅快照未回）→ 活动（有行）/`subagent-panel-empty`（快照已回、
+无内容），永不渲染无依据的假占位。底部是 `subagent-panel-readonly` 只读说明条（宿主侧 #910
+已把子会话标记为 `ChatInteractivity::ReadOnly`）。入口：会话内子代理卡片点击——卡片的
+`AgentTaskItem.run_id` 来自派发信封（前台结果 / promotion 回执 / 后台启动回执都携带 `run_id`）；
 rail agents 段（#165 起直读 `background_work`）展示运行中花名册。live 行的 wire `label` 只作
-话题（`description`）不作类型——两处同填会把行标题渲染成「Explore · Explore」；类型由
-settled 行的进度事件按 run id 合并补齐。
+话题（`description`）不作类型；类型由父会话的派发 tool call 解析（`ToolResultSubagentContent.agentName`
+或完成回执按 `run_id` 关联到的 call 名），行标题渲染为「Explore(话题)」。
 
 > Source: `crates/agent-ui/src/views/subagent_panel.rs`, `crates/agent-ui/src/workspace/subagent.rs`
 
