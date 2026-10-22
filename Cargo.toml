@@ -173,3 +173,6 @@ debug = "line-tables-only"
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
 gpui-pre-platform = { opt-level = 3 }
+# Mermaid's parser/layout runs during markdown conversion (including every
+# streamed append), so unoptimized code shows up as a slow diagram.
+mermaid-rs-renderer = { opt-level = 3 }

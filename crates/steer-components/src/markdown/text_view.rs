@@ -3,9 +3,9 @@
 //! Every markdown surface in the app — message bodies, reasoning rounds,
 //! static chrome, terminal panels — renders through the helpers here, so the
 //! theme bridge, the heading ladders, the code-highlight dispatch (`ansi` /
-//! `diff` / conflict markers / tree-sitter), the inline ```svg block, and the
-//! copy controls stay consistent by construction instead of by per-call-site
-//! discipline.
+//! `diff` / conflict markers / tree-sitter), the inline diagram blocks
+//! (```svg / ```mermaid), and the copy controls stay consistent by construction
+//! instead of by per-call-site discipline.
 //!
 //! This drives the `gpui-base` `TextView` directly (same crates.io train as
 //! `gpui-component`, exact-pinned): the component wrapper folds onto the theme

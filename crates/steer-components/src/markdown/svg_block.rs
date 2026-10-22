@@ -57,18 +57,6 @@ pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 /// single picture pushes the surface it sits in apart.
 pub const MAX_DISPLAY_HEIGHT: Pixels = px(512.);
 
-/// The paint witnesses the rendered faces carry, for render tests. The
-/// selectors are derived from the block's own name, so the mermaid fence's
-/// faces debug as `markdown-inline-mermaid…` while the svg fence keeps the
-/// strings its tests pinned.
-fn selectors(name: &str) -> (String, String, String) {
-    (
-        format!("markdown-inline-{name}"),
-        format!("markdown-inline-{name}-code"),
-        format!("markdown-inline-{name}-toggle"),
-    )
-}
-
 /// The box one svg rasterizes into, in device pixels: the message column's
 /// width at 2x, and the ceiling on its height too. Both the inline ```svg
 /// block and the Preview card's svg body come through [`rasterize`], so one
@@ -244,13 +232,19 @@ pub(crate) fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExte
     MarkdownExtensions::default()
         .block_parser(move |node, cx| svg_fence(node, cx, &renderer))
         .block_renderer(BLOCK_NAME, move |node, window, cx| {
-            svg_element(node, "svg", &code, window, cx)
+            svg_element(node, BLOCK_NAME, &code, window, cx)
         })
         .block_parser(move |node, cx| {
             super::mermaid_block::mermaid_fence(node, cx, &mermaid_renderer)
         })
         .block_renderer(super::mermaid_block::BLOCK_NAME, move |node, window, cx| {
-            svg_element(node, "mermaid", &mermaid_code, window, cx)
+            svg_element(
+                node,
+                super::mermaid_block::BLOCK_NAME,
+                &mermaid_code,
+                window,
+                cx,
+            )
         })
 }
 
@@ -310,7 +304,6 @@ fn svg_element(
     let face = window.use_keyed_state(("markdown-svg-face", key), cx, |_, _| Face::Image);
     let showing = *face.read(cx);
     let group: SharedString = format!("markdown-svg-{key}").into();
-    let (image, _code_sel, _toggle) = selectors(name);
 
     div()
         .relative()
@@ -318,7 +311,7 @@ fn svg_element(
         .w_full()
         .min_w_0()
         .child(match showing {
-            Face::Image => image_face(raster, &image),
+            Face::Image => image_face(raster, name),
             Face::Code => code_face(node, key, name, code, cx),
         })
         .child(
@@ -355,7 +348,7 @@ fn block_key(node: &MarkdownNode) -> u64 {
 /// so a natural-height box parks a wide diagram in dead space. The cap holds
 /// for both dimensions, which keeps the diagram's aspect and centering it
 /// where the column is wider than the capped picture.
-fn image_face(raster: &Arc<RenderImage>, selector: &str) -> AnyElement {
+fn image_face(raster: &Arc<RenderImage>, name: &'static str) -> AnyElement {
     let size = raster.size(0);
     let aspect = size.width.0 as f32 / size.height.0.max(1) as f32;
     let max_w = px(MAX_DISPLAY_HEIGHT.as_f32() * aspect);
@@ -366,7 +359,7 @@ fn image_face(raster: &Arc<RenderImage>, selector: &str) -> AnyElement {
         .max_h(MAX_DISPLAY_HEIGHT)
         .mx_auto()
         .aspect_ratio(aspect)
-        .debug_selector(|| selector.to_string())
+        .debug_selector(|| format!("markdown-inline-{name}"))
         .child(
             img(ImageSource::Render(raster.clone()))
                 .size_full()
@@ -376,7 +369,7 @@ fn image_face(raster: &Arc<RenderImage>, selector: &str) -> AnyElement {
 }
 
 /// The fence as its own code block: the surface's markdown stack over the
-/// source. No svg block is registered on this document — the fence would
+/// source. No diagram block is registered on this document — the fence would
 /// rasterize again, and that one again.
 fn code_face(
     node: &MarkdownNode,

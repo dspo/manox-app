@@ -11,6 +11,8 @@
 //!   autolink that can split a text node);
 //! - [`svg_block`] — ```svg fences as their rasterized image, with a flip to
 //!   the highlighted source;
+//! - [`mermaid_block`] — ```mermaid fences rendered to an SVG document at
+//!   parse time, then painted by the same raster block;
 //! - [`terminal_panel`] — the terminal-styled tool-output panel, hosted on a
 //!   `TextView` code block.
 //!

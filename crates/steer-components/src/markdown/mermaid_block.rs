@@ -12,6 +12,16 @@
 //! kind, a syntax error — falls through to the ordinary code block, highlight
 //! and copy control included: there is no failure face, a fence that renders
 //! nothing never stopped being code.
+//!
+//! A fence still being written stays code until its closing delimiter lands.
+//! mdast hands an unterminated fence through as a code block too, and mermaid
+//! source parses at almost every line boundary, so converting early would
+//! swap the block under the reader for a diagram that keeps changing (and
+//! rasterize again for every token of the stream).
+//!
+//! The renderer's default palette is the light chrome the app pins. A dark
+//! mode must select the renderer's dark theme here, and the rasters cached in
+//! the parsed documents have to be rebuilt with it.
 
 use std::sync::Arc;
 
@@ -43,6 +53,9 @@ pub fn mermaid_fence(
 /// shared rasterizer, so both fences share one box, one aspect policy and one
 /// display cap. `fence` is the block's text form: the whole fence, delimiters
 /// and info string included, so copy and Markdown round-trip reproduce it.
+/// A fence whose closing delimiter has not arrived is still being written and
+/// never converts: the streaming path reparses it for every delta, and each
+/// one would paint a different diagram.
 fn raster_fence(
     lang: Option<&str>,
     body: &str,
@@ -50,6 +63,9 @@ fn raster_fence(
     renderer: &SvgRenderer,
 ) -> Option<MarkdownNode> {
     if !lang.is_some_and(|lang| lang.eq_ignore_ascii_case(BLOCK_NAME)) {
+        return None;
+    }
+    if !is_closed(fence) {
         return None;
     }
     if body.len() > MAX_SOURCE_BYTES {
@@ -64,6 +80,26 @@ fn raster_fence(
             .text(fence)
             .markdown(fence),
     )
+}
+
+/// Whether the fence source carries its closing delimiter. Only a completed
+/// fence has one: mdast ends an unterminated fence at the last content line,
+/// so the trailing delimiter run is the signal that the model is done writing
+/// the diagram.
+fn is_closed(fence: &str) -> bool {
+    let Some(opening) = fence.lines().next() else {
+        return false;
+    };
+    let opening = opening.trim_start();
+    let Some(delimiter) = opening.chars().next().filter(|c| *c == '`' || *c == '~') else {
+        return false;
+    };
+    let opening_len = opening.chars().take_while(|c| *c == delimiter).count();
+    let Some(closing) = fence.trim_end().lines().next_back() else {
+        return false;
+    };
+    let closing = closing.trim();
+    opening_len >= 3 && closing.len() >= opening_len && closing.chars().all(|c| c == delimiter)
 }
 
 #[cfg(test)]
@@ -146,6 +182,30 @@ mod tests {
         );
         assert!(
             raster_fence(Some("mermaid"), &huge, &fence("mermaid", &huge), &renderer).is_none()
+        );
+    }
+
+    /// An unterminated fence is still streaming in: mermaid source parses at
+    /// almost every line boundary, so the block must stay code until the
+    /// closing delimiter lands. Both delimiter characters are pinned.
+    #[gpui::test]
+    fn a_streaming_fence_stays_code_until_it_closes(cx: &mut TestAppContext) {
+        let renderer = cx.update(|cx| cx.svg_renderer());
+        let body = "flowchart LR\n    A[Input] --> B{Gate}";
+        let open = format!("```mermaid\n{body}\n");
+        assert!(
+            raster_fence(Some("mermaid"), body, &open, &renderer).is_none(),
+            "an open fence never paints"
+        );
+        let closed = format!("```mermaid\n{body}\n```");
+        assert!(
+            raster_fence(Some("mermaid"), body, &closed, &renderer).is_some(),
+            "the closing fence completes it"
+        );
+        let tilde = format!("~~~mermaid\n{body}\n~~~");
+        assert!(
+            raster_fence(Some("mermaid"), body, &tilde, &renderer).is_some(),
+            "tilde fences close the same way"
         );
     }
 }

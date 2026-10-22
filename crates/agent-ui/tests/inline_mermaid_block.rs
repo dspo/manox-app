@@ -34,9 +34,6 @@ impl Render for RowProbe {
 }
 
 fn paint_message(cx: &mut TestAppContext, body: &str) -> VisualTestContext {
-    // The code face (the unrenderable fence's other half) walks the
-    // highlighter, which reads the provider registry.
-    manox_agent::init();
     cx.update(gpui_component::init);
     let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
     let ctx = ApplyCtx {
@@ -134,5 +131,88 @@ async fn the_block_flips_between_its_image_and_its_code(cx: &mut TestAppContext)
     assert!(
         visual.debug_bounds("markdown-inline-mermaid").is_none(),
         "and the image is gone until the next flip"
+    );
+    let code = visual
+        .debug_bounds("markdown-inline-mermaid-code")
+        .expect("the code face has bounds");
+    assert!(
+        code.size.height > px(8.) && code.size.width > px(100.),
+        "the code face has real size: {code:?}"
+    );
+
+    let toggle = visual
+        .debug_bounds("markdown-inline-mermaid-toggle")
+        .expect("the toggle stays put");
+    visual.simulate_click(toggle.center(), gpui::Modifiers::default());
+    draw(&mut visual);
+
+    assert!(
+        visual.debug_bounds("markdown-inline-mermaid").is_some(),
+        "the diagram comes back"
+    );
+    assert!(
+        visual
+            .debug_bounds("markdown-inline-mermaid-code")
+            .is_none(),
+        "and the source folds away again"
+    );
+}
+
+/// A model writes the fence delta by delta. Mermaid source parses at almost
+/// every line boundary, so the block must stay the code the reader is watching
+/// until the closing delimiter lands — then the diagram appears once.
+#[gpui::test]
+async fn a_streamed_mermaid_fence_paints_when_it_closes(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
+    let ctx = ApplyCtx {
+        host: steer_agent_chat_ui::host::noop_host(),
+        cwd: None,
+        fork_source: None,
+    };
+    let apply = |cx: &mut gpui::App, delta: &str| {
+        conversation.update(cx, |c, cx| {
+            let _ = c.apply(
+                &ThreadEvent::AgentText(delta.to_string()),
+                MODEL,
+                None,
+                ctx.clone(),
+                cx,
+            );
+        });
+    };
+
+    cx.update(|cx| {
+        apply(
+            cx,
+            "Here is the flow:\n\n```mermaid\nflowchart LR\n    A[Input] --> B{Gate}\n    B -->|yes| C[Done]",
+        );
+    });
+    let rows = cx.update(|cx| conversation.read(cx).items().to_vec());
+    let window = cx.open_window(size(px(760.), px(600.)), move |_, _| RowProbe {
+        row: rows[0].clone(),
+    });
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    draw(&mut visual);
+
+    assert!(
+        visual.debug_bounds("markdown-inline-mermaid").is_none(),
+        "an open fence stays code, never a half-drawn diagram"
+    );
+    assert!(
+        visual.debug_bounds("message-item-body-0").is_some(),
+        "the body paints while the fence streams"
+    );
+
+    visual.update(|_window, cx| apply(cx, "\n```\n\nThat is it."));
+    draw(&mut visual);
+
+    let block = visual
+        .debug_bounds("markdown-inline-mermaid")
+        .expect("the closed fence paints as an image block");
+    assert!(
+        block.size.height > px(100.) && block.size.width > px(100.),
+        "the diagram paints at image size: {block:?}"
     );
 }
