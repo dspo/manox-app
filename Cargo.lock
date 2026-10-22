@@ -4675,7 +4675,7 @@ dependencies = [
 [[package]]
 name = "hyperlinks"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 
 [[package]]
 name = "iana-time-zone"
@@ -5750,7 +5750,7 @@ dependencies = [
 [[package]]
 name = "manox-agent"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5800,7 +5800,7 @@ dependencies = [
 [[package]]
 name = "manox-ahp"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -5819,7 +5819,7 @@ dependencies = [
 [[package]]
 name = "manox-ahp-runtime"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -5847,7 +5847,7 @@ dependencies = [
 [[package]]
 name = "manox-harness"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -5883,7 +5883,7 @@ dependencies = [
 [[package]]
 name = "manox-providers"
 version = "0.1.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -5896,7 +5896,7 @@ dependencies = [
 [[package]]
 name = "manox-session-core"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -5923,7 +5923,7 @@ dependencies = [
 [[package]]
 name = "manox-terminal"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5948,7 +5948,7 @@ dependencies = [
 [[package]]
 name = "manox-workspace"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6065,6 +6065,18 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "mathra"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5458538710e5240655e54f48526a2591961485f8e6bea8601abdc2a567d77c8b"
+dependencies = [
+ "roxmltree 0.20.0",
+ "serde",
+ "serde_json",
+ "ttf-parser",
+]
 
 [[package]]
 name = "maybe-rayon"
@@ -9750,6 +9762,7 @@ dependencies = [
  "hyperlinks",
  "log",
  "markdown",
+ "mathra",
  "mermaid-rs-renderer",
  "ropey",
  "vte",
@@ -9954,7 +9967,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "supervisor"
 version = "1.0.0"
-source = "git+https://github.com/dspo/manox.git?tag=v0.5.0#ead9fa1de54fee424400900ac156724b167020d7"
+source = "git+https://github.com/dspo/manox.git?tag=v0.5.1#d4b191d79a32f3bc2f0486bb3d243ab8fd204e4f"
 dependencies = [
  "anyhow",
  "async-channel",

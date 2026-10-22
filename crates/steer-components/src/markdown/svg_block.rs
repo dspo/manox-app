@@ -61,7 +61,7 @@ pub const MAX_DISPLAY_HEIGHT: Pixels = px(512.);
 /// width at 2x, and the ceiling on its height too. Both the inline ```svg
 /// block and the Preview card's svg body come through [`rasterize`], so one
 /// box bounds both.
-const RASTER_BOX: f32 = 1400.;
+pub(crate) const RASTER_BOX: f32 = 1400.;
 
 /// Width of the throwaway render that measures a document's aspect. Rasterizing
 /// is what costs; a pixmap this wide costs nothing next to the real one.
@@ -102,6 +102,28 @@ pub fn rasterize(renderer: &SvgRenderer, source: &[u8]) -> Option<Arc<RenderImag
             None
         }
     }
+}
+
+/// Rasterize one svg document at `width` device pixels (the height follows
+/// the document's aspect), bounded by the raster box on both axes — the
+/// math block's entry, whose pictures are em-sized rather than column-sized.
+pub(crate) fn rasterize_at(
+    renderer: &SvgRenderer,
+    source: &[u8],
+    width: f32,
+) -> Option<Arc<RenderImage>> {
+    let text = String::from_utf8_lossy(source);
+    let text = with_svg_namespace(&text);
+    let parsed = renderer.parse_svg(text.as_bytes()).ok()?;
+    let aspect = match renderer.render_parsed(&parsed, width_box(PROBE_WIDTH)) {
+        Ok(probe) => {
+            let size = probe.size(0);
+            size.width.0 as f32 / size.height.0.max(1) as f32
+        }
+        Err(_) => RASTER_BOX,
+    };
+    let width = width.clamp(1., RASTER_BOX).min(RASTER_BOX * aspect);
+    renderer.render_parsed(&parsed, width_box(width)).ok()
 }
 
 /// The namespace usvg requires on the root element.
@@ -223,13 +245,15 @@ impl Face {
 }
 
 /// The document's Markdown extension registry: the defaults plus the two
-/// diagram fences. The mermaid fence produces an SVG document and rides this
-/// block's raster path and element from there, so one face flip, one display
-/// cap and one keyed state serve both.
+/// diagram fences and LaTeX math ([`super::math_block`]), which typesets to an
+/// SVG document in both its shapes — the display block and the inline run —
+/// and rides this block's raster path from there.
 pub(crate) fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExtensions {
     let mermaid_renderer = renderer.clone();
     let mermaid_code = code.clone();
-    MarkdownExtensions::default()
+    let math_renderer = renderer.clone();
+    let math_text_size = code.size;
+    let extensions = MarkdownExtensions::default()
         .block_parser(move |node, cx| svg_fence(node, cx, &renderer))
         .block_renderer(BLOCK_NAME, move |node, window, cx| {
             svg_element(node, BLOCK_NAME, &code, window, cx)
@@ -245,7 +269,8 @@ pub(crate) fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExte
                 window,
                 cx,
             )
-        })
+        });
+    super::math_block::math_extensions(extensions, math_renderer, math_text_size)
 }
 
 /// Turn an ```svg fence into a custom block holding its raster, or `None` to
