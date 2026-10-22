@@ -86,10 +86,22 @@ impl Workspace {
         }
         let role = self.model_label(cx);
         let host = self.chat.read(cx).host.clone();
+        // The row's `label` is the task topic; the page's recipient and
+        // header type are the agent type the spawning call resolved.
+        let kind = row
+            .kind
+            .clone()
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or_else(|| row.label.clone());
+        let topic = row
+            .activity
+            .clone()
+            .filter(|topic| !topic.is_empty())
+            .unwrap_or_else(|| row.label.clone());
         let view = crate::views::subagent_stream::SubagentStreamView::new(
             row.id.clone(),
-            row.label.clone(),
-            row.activity.clone(),
+            kind,
+            Some(topic),
             store.clone(),
             host,
             role,

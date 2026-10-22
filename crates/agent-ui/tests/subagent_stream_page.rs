@@ -168,6 +168,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
     let rows = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_running_subagents(cx));
     assert_eq!(rows.len(), 1, "the block lists the live run");
     assert_eq!(rows[0].id, RUN);
+    assert_eq!(rows[0].kind.as_deref(), Some("Explore"));
     assert_eq!(rows[0].label, "Explore");
     assert_eq!(rows[0].activity.as_deref(), Some("fix the login redirect"));
 

@@ -30,7 +30,7 @@ use crate::cockpit::{
     CockpitPhase, cache_read_ratio, context_budget_pct, format_cache_hit, format_tokens_pi,
 };
 use crate::git_status::GitBranchDisplay;
-use crate::views::subagents::{SubagentInfo, status_indicator, task_display_title};
+use crate::views::subagents::{CAPTAIN_LABEL, SubagentInfo, status_indicator, task_display_title};
 
 // ── Bubble geometry ──────────────────────────────────────────────────────
 
@@ -50,11 +50,6 @@ const SUBAGENTS_CAP: usize = 5;
 const PLANS_CAP: usize = 5;
 const TODOS_CAP: usize = 8;
 const MODELS_CAP: usize = 5;
-
-/// The main agent's literal label. App chrome is localized, but this one
-/// name is a product term rendered verbatim — unlike the message-signature
-/// Captain (`views/message.rs`), which keeps its localized key.
-const CAPTAIN_LABEL: &str = "Captain";
 
 // ── Fold helpers ─────────────────────────────────────────────────────────
 
@@ -626,7 +621,7 @@ impl ContextRail {
     }
 
     /// Captain + subagents. The Captain row always renders; subagent rows
-    /// show `{type} · {topic}` on the SAME left baseline (no indent, no
+    /// show `{type}({topic})` on the SAME left baseline (no indent, no
     /// tree glyphs — the subordination is singular and certain). Only
     /// unfinished rows show by default; finished rows fold into `+N` (a
     /// quiet history keeps the Captain row and a bare `+N`).
@@ -690,7 +685,7 @@ impl ContextRail {
                             id: sub.id,
                             // The wire's label NAMES the run (its topic), it
                             // is not the agent type — carrying it in both
-                            // slots renders "Explore · Explore". The type
+                            // slots renders "Explore(Explore)". The type
                             // fills in from the settled rows once the run's
                             // own progress events land (the merge below is
                             // by id).
@@ -712,7 +707,7 @@ impl ContextRail {
         }
         let fold = subagent_display_order(&roster, self.bubble_expanded.subagents);
         for info in fold.rows {
-            // `{type} · {topic}` with graceful one-sided fallbacks.
+            // `{type}({topic})` with graceful one-sided fallbacks.
             let title = task_display_title(&info.subagent_type, &info.description)
                 .unwrap_or_else(|| info.id.clone());
             // A row click drills into the child session's own transcript

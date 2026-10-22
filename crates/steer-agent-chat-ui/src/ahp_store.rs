@@ -51,11 +51,18 @@ pub struct SubagentWorkRow {
     /// The run id — the child session id, and the id of the child's own chat
     /// (`ahp-chat:/{id}`), which is where the child's transcript lives.
     pub id: String,
-    /// The agent type the host labels the run with (`Explore`, `Sailor`, …).
+    /// The agent type (`Explore`, `Sailor`, …), resolved from the run's
+    /// spawning tool call — the background-work entry itself carries only the
+    /// task label.
+    pub kind: Option<String>,
+    /// The run's task label (the wire's `label` — the topic a row shows).
     pub label: String,
     /// The run's task label (`_meta.latestActivity`), when the host carried
-    /// one.
+    /// one (the current projection sends no `_meta`; kept for older
+    /// snapshots).
     pub activity: Option<String>,
+    /// ISO 8601 stamp the run started at — the elapsed's origin.
+    pub started_at: String,
 }
 
 /// How much of one chat's fold a page has already rendered.
@@ -2336,6 +2343,100 @@ pub struct LeafView<'a> {
     pub metrics: Option<&'a ConversationMetrics>,
 }
 
+/// Whether a tool call's inline input has the delegation shape
+/// (`description` + `prompt`, none of the retired envelope keys) — the same
+/// predicate the transcript's agent card uses, so the two never disagree.
+fn is_delegation_input(input: Option<&ahp_types::state::ToolInput>) -> bool {
+    let Some(ahp_types::state::ToolInput::Inline(raw)) = input else {
+        return false;
+    };
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .is_some_and(|value| crate::conversation::is_agent_task_call(Some(&value)))
+}
+
+/// Resolve each live run's agent type from the parent chat's delegation tool
+/// calls. Two faces carry the link: the spawn call's
+/// `ToolResultSubagentContent` names the child chat plus the agent's internal
+/// name, and once that call completes with its receipt, the receipt text names
+/// `run_id` while the call's own name is the agent definition. A run whose
+/// call is not in the retained fold simply stays unresolved.
+fn subagent_kinds(chat: &ChatState, run_ids: &[String]) -> HashMap<String, String> {
+    let mut kinds = HashMap::new();
+    let mut unresolved: HashSet<&str> = run_ids.iter().map(String::as_str).collect();
+    let active = chat
+        .active_turn
+        .iter()
+        .flat_map(|turn| turn.response_parts.iter());
+    // Newest first: a live run's spawn call is almost always near the tail,
+    // so the early exit lands after a handful of parts.
+    let completed = chat
+        .turns
+        .iter()
+        .rev()
+        .flat_map(|turn| turn.response_parts.iter());
+    for part in active.chain(completed) {
+        let ahp_types::state::ResponsePart::ToolCall(call) = part else {
+            continue;
+        };
+        let (name, content, delegation) = match &call.tool_call {
+            ahp_types::state::ToolCallState::Running(state) => (
+                state.tool_name.as_str(),
+                state.content.as_deref(),
+                is_delegation_input(state.tool_input.as_ref()),
+            ),
+            ahp_types::state::ToolCallState::Completed(state) => (
+                state.tool_name.as_str(),
+                state.content.as_deref(),
+                is_delegation_input(state.tool_input.as_ref()),
+            ),
+            ahp_types::state::ToolCallState::AuthRequired(state) => (
+                state.tool_name.as_str(),
+                state.content.as_deref(),
+                is_delegation_input(state.tool_input.as_ref()),
+            ),
+            ahp_types::state::ToolCallState::PendingResultConfirmation(state) => (
+                state.tool_name.as_str(),
+                state.content.as_deref(),
+                is_delegation_input(state.tool_input.as_ref()),
+            ),
+            _ => continue,
+        };
+        let Some(content) = content else {
+            continue;
+        };
+        for block in content {
+            match block {
+                ahp_types::state::ToolResultContent::Subagent(sub)
+                    if sub.resource.starts_with("ahp-chat:/") =>
+                {
+                    let run_id = id_of(&sub.resource);
+                    if let Some(kind) = sub.agent_name.as_deref().filter(|kind| !kind.is_empty())
+                        && unresolved.remove(run_id)
+                    {
+                        kinds.insert(run_id.to_string(), kind.to_string());
+                    }
+                }
+                // A receipt names `run_id` in its text, but so may any tool's
+                // JSON output. Only a DELEGATION call's own name is the agent
+                // type, so the input shape gates this arm.
+                ahp_types::state::ToolResultContent::Text(text) if delegation => {
+                    if let Some(run_id) = crate::conversation::envelope_run_id(&text.text)
+                        && unresolved.remove(run_id.as_str())
+                    {
+                        kinds.insert(run_id, name.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if unresolved.is_empty() {
+            break;
+        }
+    }
+    kinds
+}
+
 /// Derive a [`LeafView`] for `session_id` (`chat_id` when the default chat
 /// pointer has not landed yet, `chat_id` falls back to the session id).
 pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
@@ -2465,28 +2566,57 @@ impl<'a> LeafView<'a> {
     /// `backgroundWork` subagent entry. The host removes an entry when its run
     /// settles, so this is exactly the live set (the Captain status block
     /// lists them beside the Captain's own line).
+    ///
+    /// The entry names the run and its task label only. The agent TYPE rides
+    /// the delegation tool call (`ToolResultSubagentContent.agentName`, or the
+    /// call's own name on a completion receipt naming the run), so it is
+    /// resolved from the parent fold here — once per row, never invented.
     pub fn running_subagents(&self) -> Vec<SubagentWorkRow> {
-        self.chat
-            .and_then(|c| c.background_work.as_ref())
-            .map(|work| {
-                work.iter()
-                    .filter_map(|entry| match entry {
-                        ahp_types::state::BackgroundWork::Subagent(sub) => Some(SubagentWorkRow {
-                            id: sub.id.clone(),
-                            label: sub.label.clone(),
-                            activity: sub
-                                .meta
-                                .as_ref()
-                                .and_then(|meta| meta.get("latestActivity"))
-                                .and_then(Value::as_str)
-                                .filter(|activity| !activity.is_empty())
-                                .map(str::to_string),
-                        }),
-                        _ => None,
-                    })
-                    .collect()
+        let Some(chat) = self.chat else {
+            return Vec::new();
+        };
+        let Some(work) = chat.background_work.as_ref() else {
+            return Vec::new();
+        };
+        let mut rows: Vec<SubagentWorkRow> = work
+            .iter()
+            .filter_map(|entry| match entry {
+                ahp_types::state::BackgroundWork::Subagent(sub) => Some(SubagentWorkRow {
+                    id: sub.id.clone(),
+                    kind: sub
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("agentType"))
+                        .and_then(Value::as_str)
+                        .filter(|kind| !kind.is_empty())
+                        .map(str::to_string),
+                    label: sub.label.clone(),
+                    activity: sub
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("latestActivity"))
+                        .and_then(Value::as_str)
+                        .filter(|activity| !activity.is_empty())
+                        .map(str::to_string),
+                    started_at: sub.started_at.clone(),
+                }),
+                _ => None,
             })
-            .unwrap_or_default()
+            .collect();
+        let unresolved: Vec<String> = rows
+            .iter()
+            .filter(|row| row.kind.is_none())
+            .map(|row| row.id.clone())
+            .collect();
+        if !unresolved.is_empty() {
+            let kinds = subagent_kinds(chat, &unresolved);
+            for row in &mut rows {
+                if row.kind.is_none() {
+                    row.kind = kinds.get(&row.id).cloned();
+                }
+            }
+        }
+        rows
     }
 
     /// The canonical `provider/model` selection string.
@@ -2816,9 +2946,9 @@ mod tests {
     use ahp_types::actions::{ChatDeltaAction, SessionTitleChangedAction};
 
     /// The sub-agent block's read face: the host's background-work subagent
-    /// entries project into rows (id + agent type + the run's task label),
-    /// every other kind (a shell, a future kind) is skipped, and an entry
-    /// without the `_meta` activity still answers with its type.
+    /// entries project into rows (id + topic + start stamp), every other kind
+    /// (a shell, a future kind) is skipped, and the `_meta` fallback still
+    /// answers with its type when a legacy snapshot carried one.
     #[test]
     fn running_subagents_project_the_background_work_subagent_entries() {
         let mut book = ChannelBook::default();
@@ -2863,15 +2993,143 @@ mod tests {
             vec![
                 SubagentWorkRow {
                     id: "sub-ns-3".into(),
+                    kind: Some("Explore".into()),
                     label: "Explore".into(),
                     activity: Some("fix the login redirect".into()),
+                    started_at: "2026-01-01T00:00:00Z".into(),
                 },
                 SubagentWorkRow {
                     id: "sub-ns-4".into(),
+                    kind: None,
                     label: "Sailor".into(),
                     activity: None,
+                    started_at: "2026-01-01T00:00:00Z".into(),
                 },
             ]
+        );
+    }
+
+    /// The production shape carries no `_meta`: the agent type is recovered
+    /// from the delegation call the parent fold already holds — the run's
+    /// `ToolResultSubagentContent` names the child chat and the agent, while
+    /// the background-work entry names only the topic.
+    #[test]
+    fn a_run_without_meta_resolves_its_type_from_the_spawn_call() {
+        let mut book = ChannelBook::default();
+        let chat: ChatState = serde_json::from_value(serde_json::json!({
+            "resource": chat_uri("s-1"),
+            "title": "parent",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [{
+                "id": "t-1",
+                "message": { "text": "delegate", "origin": { "kind": "user" } },
+                "state": "complete",
+                "responseParts": [{
+                    "kind": "toolCall",
+                    "toolCall": {
+                        "status": "completed",
+                        "toolCallId": "tc-1",
+                        "toolName": "Explore",
+                        "displayName": "Explore",
+                        "invocationMessage": "Delegating",
+                        "success": true,
+                        "pastTenseMessage": "Delegated",
+                        "confirmed": "notNeeded",
+                        "content": [{
+                            "type": "subagent",
+                            "resource": "ahp-chat:/sub-ns-9",
+                            "title": "survey the projection layer",
+                            "agentName": "Explore",
+                        }],
+                    },
+                }],
+            }],
+            "backgroundWork": [{
+                "kind": "subagent",
+                "id": "sub-ns-9",
+                "label": "survey the projection layer",
+                "startedAt": "2026-01-02T00:00:00Z",
+                "chat": "ahp-chat:/sub-ns-9",
+            }],
+        }))
+        .expect("a chat with a delegation call parses");
+        book.chats.insert("s-1".to_string(), chat);
+
+        let rows = leaf(&book, "s-1").running_subagents();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind.as_deref(), Some("Explore"));
+        assert_eq!(rows[0].label, "survey the projection layer");
+        assert_eq!(rows[0].started_at, "2026-01-02T00:00:00Z");
+    }
+
+    /// A run's completion receipt names `run_id`, but so can any tool's JSON
+    /// output. Only a call whose INPUT has the delegation shape may lend its
+    /// name as the agent type; a `TaskStop`-shaped call carrying the same run
+    /// id must not rename the row.
+    #[test]
+    fn only_a_delegation_receipt_names_the_runs_type() {
+        fn chat_with_receipt(tool_name: &str, tool_input: &str) -> ChatState {
+            serde_json::from_value(serde_json::json!({
+                "resource": chat_uri("s-1"),
+                "title": "parent",
+                "status": 0,
+                "modifiedAt": "2026-01-01T00:00:00Z",
+                "turns": [{
+                    "id": "t-1",
+                    "message": { "text": "go", "origin": { "kind": "user" } },
+                    "state": "complete",
+                    "responseParts": [{
+                        "kind": "toolCall",
+                        "toolCall": {
+                            "status": "completed",
+                            "toolCallId": "tc-1",
+                            "toolName": tool_name,
+                            "displayName": tool_name,
+                            "invocationMessage": "Working",
+                            "toolInput": tool_input,
+                            "success": true,
+                            "pastTenseMessage": "Worked",
+                            "confirmed": "notNeeded",
+                            "content": [{
+                                "type": "text",
+                                "text": "{\"kind\":\"background\",\"run_id\":\"sub-ns-9\"}",
+                            }],
+                        },
+                    }],
+                }],
+                "backgroundWork": [{
+                    "kind": "subagent",
+                    "id": "sub-ns-9",
+                    "label": "survey the projection layer",
+                    "startedAt": "2026-01-02T00:00:00Z",
+                    "chat": "ahp-chat:/sub-ns-9",
+                }],
+            }))
+            .expect("a chat with a receipt parses")
+        }
+
+        let mut delegated = ChannelBook::default();
+        delegated.chats.insert(
+            "s-1".to_string(),
+            chat_with_receipt("Sailor", "{\"description\":\"d\",\"prompt\":\"p\"}"),
+        );
+        assert_eq!(
+            leaf(&delegated, "s-1").running_subagents()[0]
+                .kind
+                .as_deref(),
+            Some("Sailor")
+        );
+
+        let mut decoy = ChannelBook::default();
+        decoy.chats.insert(
+            "s-1".to_string(),
+            chat_with_receipt("TaskStop", "{\"run_id\":\"sub-ns-9\"}"),
+        );
+        assert_eq!(
+            leaf(&decoy, "s-1").running_subagents()[0].kind,
+            None,
+            "a non-delegation call must not name the run's type"
         );
     }
 

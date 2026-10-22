@@ -154,23 +154,18 @@ status-denied = 已拒绝
 
 status-cancelled = 已取消
 
-### views/message.rs — Thinking 状态行
-
-context-agents-captain = 船长
-
 ### agent-ui workspace — Captain 状态行（composer 上方）
+### 「Captain」是产品词汇，不翻译（两种语言都保持字面量）；只翻译它后面的动词。
 
-captain-steering-prefix = 船长正在驾驶
-# 船长行下方的子代理行：`{ $name }` 是该 run 的 agent 类型 + 任务标签
-# （例如「Explore · 修复登录跳转」）。
-captain-steering-subagent = { $name } 正在驾驶
+steering-verb = 正在驾驶
+# 子代理行：`{ $name }` 是「类型(任务)」（例如「Explore(修复登录跳转)」，
+# 类型由宿主给出，原样渲染）。
+subagent-steering-prefix = { $name }正在驾驶
 turn-process-completed = 已完成，用时 
 captain-activity-thinking = 思考中
 captain-activity-replying = 正在回复
 
 ### views/subagent_stream.rs（主列中的子代理页）
-
-subagent-stream-back = 船长
 
 subagent-stream-empty = 暂无活动 — 该子代理还没有产出第一轮内容。
 
@@ -202,7 +197,7 @@ plan-mode-cancel-notice = Plan 模式已取消：待生效的开启已撤销，�
 
 thinking-tool-result = 工具结果
 
-thinking-duration = { $count } 秒
+thinking-duration = { $count }秒
 
 activity-failed = { $count } 失败
 

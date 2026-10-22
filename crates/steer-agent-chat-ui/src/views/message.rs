@@ -1141,13 +1141,12 @@ fn copy_button_hoverable(
         .child(copy.button((prefix, ix).into(), text))
 }
 
-/// Display name of an agent in a turn header: the main agent uses the
-/// localized Captain label (shared with the context rail), the host harness
-/// keeps its own name, and named agents keep their manifest / member name
-/// verbatim.
+/// Display name of an agent in a turn header: the main agent is the literal
+/// product word "Captain" (never translated), the host harness keeps its own
+/// name, and named agents keep their manifest / member name verbatim.
 pub fn author_display(author: &manox_agent::MessageAuthor) -> String {
     match author {
-        manox_agent::MessageAuthor::Lead => i18n::t("context-agents-captain").to_string(),
+        manox_agent::MessageAuthor::Lead => crate::views::subagents::CAPTAIN_LABEL.to_string(),
         manox_agent::MessageAuthor::Harness => i18n::t("message-harness-role").to_string(),
         manox_agent::MessageAuthor::Agent(name) => name.clone(),
     }
@@ -3409,7 +3408,7 @@ fn agent_status_indicator(status: ToolCallStatus, theme: &Theme) -> gpui::AnyEle
 }
 
 /// Render a sub-agent task as a single-line clickable item:
-/// `[status_icon] {subagent_type} · {description}`.
+/// `[status_icon] {subagent_type}({description})`.
 /// No expand/collapse, no inline body, no metrics chip. Clicking opens the
 /// sub-agent's observation panel in the right pane (live transcript while
 /// running, final answer after a reload).
@@ -3423,7 +3422,7 @@ pub fn render_agent_task(
 ) -> gpui::AnyElement {
     let icon_el = agent_status_indicator(item.status, theme);
 
-    // "Type · topic"; the call id is the last resort when both are empty.
+    // "Type(topic)"; the call id is the last resort when both are empty.
     let display_title =
         crate::views::subagents::task_display_title(&item.subagent_type, &item.description)
             .unwrap_or_else(|| item.id.clone());
@@ -6060,8 +6059,8 @@ body", cx);
     #[test]
     fn user_turn_header_orders_from_then_recipient_model_time() {
         assert_eq!(
-            user_turn_header("你", "船长", "glm-5.2", "17:55"),
-            "你 > 船长·glm-5.2·17:55"
+            user_turn_header("你", "Captain", "glm-5.2", "17:55"),
+            "你 > Captain·glm-5.2·17:55"
         );
         assert_eq!(
             user_turn_header("You", "Sailor", "", "17:55"),
