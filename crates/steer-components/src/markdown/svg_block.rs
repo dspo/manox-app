@@ -246,8 +246,9 @@ impl Face {
 }
 
 /// The document's Markdown extension registry: the defaults plus this block
-/// and the `$$…$$` math block ([`super::math_block`]), which typesets to an
-/// SVG document and rides this block's raster path from there.
+/// and LaTeX math ([`super::math_block`]) in both its shapes — the display
+/// block and the inline run — which typeset to SVG documents and ride this
+/// block's raster path from there.
 fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExtensions {
     let math_renderer = renderer.clone();
     let text_size = code.size;
