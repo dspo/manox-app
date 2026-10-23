@@ -119,6 +119,129 @@ pub fn open_workspace(
     (window, cell.borrow().clone().expect("workspace captured"))
 }
 
+// ── full-wiring harness (real in-proc host, production chrome assembly) ──
+
+/// Poll budget for the real-host round trips: the create/attach lands on
+/// the tokio runtime and only then wakes the gpui side, so consumers poll
+/// (`run_until_parked` plus a real sleep) instead of parking once.
+pub const PARK_ROUNDS: usize = 100;
+pub const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Boot the full-wiring shape: a hermetic state root, every process-global
+/// the app installs at startup, the production `chrome_assembly` mount, and
+/// the completed AHP handshake. One `#[gpui::test]` per binary (module
+/// header) — the singletons are process-wide.
+pub fn full_wiring_boot(cx: &mut TestAppContext) -> (Entity<Workspace>, gpui::AnyWindowHandle) {
+    cx.update(|_cx| {
+        manox_agent::runtime::init_hermetic_for_test();
+        manox_agent::provider_glue::init();
+        manox_agent::thread_store::init();
+        manox_agent::object_store::init();
+    });
+    cx.background_executor.allow_parking();
+    let cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let capture = cell.clone();
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        steer_i18n::init();
+        agent_ui::slash_command::init(cx);
+    });
+    let window = cx.open_window(size(px(1_280.), px(820.)), move |window, cx| {
+        steer_agent_chrome_ui::register_fonts(cx);
+        let shell = agent_ui::chrome_assembly::mount(window, cx);
+        let ws = agent_ui::dispatch::workspace_global().expect("assembly workspace");
+        *capture.borrow_mut() = Some(ws);
+        gpui_component::Root::new(shell, window, cx)
+    });
+    cx.run_until_parked();
+    let ws = cell.borrow().clone().expect("workspace captured");
+    for _ in 0..PARK_ROUNDS {
+        cx.run_until_parked();
+        if cx.update(|cx| ws.read(cx).diagnostic_ahp_connected(cx)) {
+            break;
+        }
+        std::thread::sleep(PARK_STEP);
+    }
+    cx.run_until_parked();
+    (ws, window.into())
+}
+
+/// The Steer row's own gesture: 新建会话 on the workspace, returning the
+/// minted (or refilled) session id.
+pub fn start_new_thread(
+    cx: &mut TestAppContext,
+    ws: &Entity<Workspace>,
+    window: gpui::AnyWindowHandle,
+    project: Option<std::path::PathBuf>,
+) -> String {
+    let ws = ws.clone();
+    cx.update_window(window, move |_, window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.start_new_thread(project.clone(), window, cx)
+        })
+    })
+    .expect("the full-wiring window is live")
+}
+
+/// Tear down the process globals `full_wiring_boot` installed.
+/// Drain whatever the last command scheduled (the landing's refresh walks
+/// and event pumps park on the real runtime and only wake between polls),
+/// then tear down the process globals `full_wiring_boot` installed. Without
+/// the drain the gpui leak detector can catch a task still holding the
+/// workspace at drop time.
+pub fn full_wiring_teardown(cx: &mut TestAppContext) {
+    cx.run_until_parked();
+    std::thread::sleep(PARK_STEP);
+    cx.run_until_parked();
+    manox_agent::thread_store::drop_global_for_test();
+    agent_ui::dispatch::clear_globals_for_test();
+}
+
+/// The foreground session id the workspace is bound to.
+pub fn foreground_session(cx: &mut TestAppContext, ws: &Entity<Workspace>) -> Option<String> {
+    cx.update(|cx| ws.read(cx).diagnostic_foreground_session(cx))
+}
+
+/// Dispatch `line` through the live slash registry and poll until the
+/// foreground conversation moves off its current id — the shape every
+/// create/exit regression shares. `None` when the command silently no-oped.
+pub fn run_slash_until_foreground_moves(
+    cx: &mut TestAppContext,
+    ws: &Entity<Workspace>,
+    window: gpui::AnyWindowHandle,
+    line: &str,
+) -> Option<String> {
+    let parsed = agent_ui::slash_command::parse(line).unwrap_or_else(|| panic!("{line} parses"));
+    let before = foreground_session(cx, ws).expect("foreground bound");
+    cx.update_window(window, |_, window, cx| {
+        let ws = ws.clone();
+        ws.update(cx, |ws, cx| {
+            agent_ui::slash_command::dispatch(&parsed, ws, window, cx);
+        });
+    })
+    .ok()?;
+    wait_foreground_moved(cx, ws, &before)
+}
+
+/// Poll until the foreground session is not `before` (create, attach and
+/// the `/exit` teardown beats all land asynchronously).
+pub fn wait_foreground_moved(
+    cx: &mut TestAppContext,
+    ws: &Entity<Workspace>,
+    before: &str,
+) -> Option<String> {
+    for _ in 0..PARK_ROUNDS {
+        cx.run_until_parked();
+        let now = foreground_session(cx, ws);
+        if now.is_some() && now.as_deref() != Some(before) {
+            return now;
+        }
+        std::thread::sleep(PARK_STEP);
+    }
+    None
+}
+
 /// A thread facade with a fake engine: `Thread::landing` defers engine
 /// creation, so the test swaps in the fake before anything runs. Returns the
 /// gpui-free `ThreadHandle`; the workspace binds its own `ClientStoreHandle`

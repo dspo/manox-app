@@ -921,3 +921,7 @@ workspace-change-rejected = Change not applied (rejected by the host)
 
 # Preview tool card (chat column, app-provided preview tool)
 preview-unavailable = Cannot render the preview (the file may have been moved or deleted)
+
+# New-thread landing (the fresh conversation the host refused to create)
+new-thread-create-failed = Failed to start a new conversation: { $err }
+new-thread-no-session = no session is bound yet

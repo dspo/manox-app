@@ -73,6 +73,33 @@ impl Workspace {
         cx.observe(&self.multiplexer, |_, _, _| {})
     }
 
+    /// Whether the host has retired a session: archived in the live fold or
+    /// the catalogue, or archived in the host's own store row. The refill
+    /// reads the object row's `archived` bit first, but that bit is this
+    /// client's projection — a row archived by another client (or before the
+    /// bit existed) would otherwise be resurrected as a draft.
+    fn session_retired(&self, cx: &App, id: &str) -> bool {
+        if let Some((store, _)) = self.chat.read(cx).store.as_ref() {
+            let view = store.read(cx);
+            if let Some(state) = view.book.sessions.get(id)
+                && state.status != 0
+            {
+                return state.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0;
+            }
+            if let Some(summary) = view
+                .book
+                .summaries
+                .values()
+                .find(|summary| steer_agent_chat_ui::ahp_store::id_of(&summary.resource) == id)
+            {
+                return summary.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0;
+            }
+        }
+        manox_agent::thread_store::try_global()
+            .and_then(|store| store.read(|state| state.summary_by_id(id).map(|row| row.archived)))
+            .unwrap_or(false)
+    }
+
     /// New thread for the pi harness: no provider reload (registration is
     /// one-shot; actors await readiness themselves). A project binds at
     /// construction time — a single session creation, no orphaned session
@@ -175,10 +202,14 @@ impl Workspace {
                     .as_deref(),
             )
         });
-        let refill =
-            refill.filter(|row| !row.archived && foreground.as_deref() != Some(row.id.as_str()));
-        // v3: the id is client-minted; the create carries the inherited
-        // config, and the attach lands once the host answered.
+        let refill = refill.filter(|row| {
+            !row.archived
+                && foreground.as_deref() != Some(row.id.as_str())
+                && !self.session_retired(cx, &row.id)
+        });
+        // v3: the id is client-minted; a refill carries the draft's own
+        // picks (its row wins over inheritance) and a fresh conversation the
+        // inherited config, and the attach lands once the host answered.
         let sid = refill
             .as_ref()
             .map(|row| row.id.clone())
@@ -192,6 +223,21 @@ impl Workspace {
         }
         if let Some(effort) = &effort_str {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));
+        }
+        if let Some(row) = &refill {
+            if let Some(model_id) = row.model_id.as_deref() {
+                let model = match row.model_provider.as_deref() {
+                    Some(provider) => format!("{provider}/{model_id}"),
+                    None => model_id.to_string(),
+                };
+                config.insert("model".into(), serde_json::json!(model));
+            }
+            if let Some(approval) = &row.permission_mode {
+                config.insert("approvalMode".into(), serde_json::json!(approval));
+            }
+            if let Some(effort) = &row.reasoning_effort {
+                config.insert("reasoningEffort".into(), serde_json::json!(effort));
+            }
         }
         // `working_directories` is the create intent's only directory
         // carrier (the host binds its first entry as the session's cwd): a
@@ -236,12 +282,43 @@ impl Workspace {
         });
         let sid2 = sid.clone();
         cx.spawn(async move |_, cx| {
-            let failed = match reply {
-                Some(reply) => matches!(reply.recv().await, Ok(Err(_))),
-                None => true,
+            // A create refused with the protocol's SESSION_ALREADY_EXISTS
+            // means the refill named a session the host still carries: the
+            // draft is LIVE (the archive-time bit and the host-retired check
+            // keep retired rows out of the refill), and opening it is the
+            // refill's intent — the host's claim table reuses a blank id the
+            // same way. Every other failure (and a store unbound, where no
+            // create can even ride) lands a visible notification: a
+            // user-initiated new session must never die quietly.
+            let mut reopened = false;
+            let refusal = match reply {
+                Some(reply) => match reply.recv().await {
+                    Ok(Ok(_)) => None,
+                    Ok(Err(err)) if err.is_already_exists() => {
+                        reopened = true;
+                        tracing::info!(
+                            session_id = %sid2,
+                            error = %err,
+                            "createSession met a live draft — opening it instead"
+                        );
+                        None
+                    }
+                    Ok(Err(err)) => Some(err.message),
+                    Err(closed) => Some(closed.to_string()),
+                },
+                None => Some(i18n::t("new-thread-no-session").to_string()),
             };
-            if failed {
-                tracing::warn!("createSession failed");
+            if let Some(err) = refusal {
+                tracing::warn!(session_id = %sid2, error = %err, "createSession failed");
+                let _ = ws.update_in(cx, |_this, window, cx| {
+                    window.push_notification(
+                        Notification::error(i18n::t_str(
+                            "new-thread-create-failed",
+                            &[("err", &err)],
+                        )),
+                        cx,
+                    );
+                });
                 return;
             }
             if let Some(dir) = &dir_for_store {
@@ -257,12 +334,20 @@ impl Workspace {
                     tracing::warn!(session_id = %sid2, error = %err, "new-thread attach FAILED")
                 }
             }
+            // A reopened session already carries its channel state — the
+            // durable picks the draft was left with, which the object row
+            // also holds. Re-landing this create's config would fork the
+            // channel from the row (and mutate a live session the host, not
+            // this create, owns).
+            if reopened {
+                return;
+            }
             // The create intent boots the runtime on the directory and the
-            // inherited config, but the session CHANNEL carries neither until
-            // a write lands one — and every composer surface (project chip,
-            // model chip, Captain strip) reads the channel. Land both through
-            // the same writers the composer's own pickers use, so the thread
-            // the user just created shows where it runs and on which model
+            // config, but the session CHANNEL carries neither until a write
+            // lands one — and every composer surface (project chip, model
+            // chip, Captain strip) reads the channel. Land both through the
+            // same writers the composer's own pickers use, so the thread the
+            // user just created shows where it runs and on which model
             // instead of asking for the folder a second time.
             let _ = ws.update(cx, |this, cx| {
                 this.with_foreground_store(cx, |store, sid| {
@@ -875,8 +960,19 @@ impl Workspace {
     /// sidebar's optimistic row drop (the command drops in place; `/exit`
     /// drops inside its own sequence).
     pub(super) fn archive_thread_now(&mut self, sid: &str, cx: &mut Context<Self>) {
-        self.with_foreground_store(cx, |store, _| {
-            store.set_archived(sid, true);
+        // The write rides the catalogue root (`x-manox/archivedChanged`),
+        // the one path that reaches the host for EVERY row — attached or
+        // not — and marks the object row's archived bit on the way
+        // (`AhpStore::archive_sessions`). The native
+        // `session/isArchivedChanged` needs the row's session channel and
+        // is refused for the rest: a silently refused archive left the
+        // conversation live and its never-spoken object row a zombie
+        // draft, which `start_new_thread`'s refill then resurrected as a
+        // `createSession` the host could only answer "already exists" — a
+        // dead click on 新建会话, and a `/exit` whose final beat never
+        // landed.
+        self.multiplexer.update(cx, |mux, cx| {
+            mux.archive_sessions(std::slice::from_ref(&sid.to_string()), true, cx);
         });
         manox_agent::thread_store_global().with_mut(|s| s.archive_thread(sid, true));
     }

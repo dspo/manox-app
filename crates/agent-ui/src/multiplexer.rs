@@ -126,12 +126,16 @@ impl SessionMultiplexer {
     }
 
     /// Create a session over a client-minted id (the idempotency key), then
-    /// attach it. `reply` resolves when the host answered the create.
+    /// attach it. `reply` resolves when the host answered the create; its
+    /// failure leg is typed — the JSON-RPC code rides a
+    /// [`CreateSessionError`](steer_agent_chat_ui::ahp_store::CreateSessionError),
+    /// the refusal a re-mint of a held session gets (`SESSION_ALREADY_EXISTS`)
+    /// is branchable without parsing display text.
     pub fn create_session(
         &mut self,
         session_id: &str,
         cx: &mut Context<Self>,
-    ) -> steer_agent_chat_ui::ahp_store::Reply {
+    ) -> steer_agent_chat_ui::ahp_store::CodeReply {
         // The create is queued when the handshake is still in flight and
         // resolved by the replay in order (before this session's subscribes).
         let reply = self.store.update(cx, |store, _| {
