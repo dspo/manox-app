@@ -1997,20 +1997,11 @@ impl Workspace {
                             cx.notify();
                         });
                         this.spawn_thinking_ticker(cx);
-                        // An idle steer wakes its own run: the opening row
-                        // carried the card's id, so the retire rides here —
-                        // the lifecycle above is never skipped for it. With
-                        // no id threaded (or no card by it), the row's text
-                        // is the fallback match; a same-text misretire from
-                        // another client is extreme and costs one bubble one
-                        // turn early.
-                        let retired = steer_id
-                            .as_deref()
-                            .map(|message_id| this.retire_steer_card(message_id, cx))
-                            .unwrap_or(false);
-                        if !retired && let Some(text) = opening_text.as_deref() {
-                            this.retire_steer_card_matching_text(text, cx);
-                        }
+                        // An idle steer wakes its own run: the retire rides
+                        // here, alongside the lifecycle (never instead of
+                        // it). The id-first rule and its text fallback live
+                        // in `retire_woken_steer`.
+                        this.retire_woken_steer(steer_id.as_deref(), opening_text.as_deref(), cx);
                     }
                     crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
                         this.chat.update(cx, |chat, cx| {

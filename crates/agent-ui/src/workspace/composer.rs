@@ -513,11 +513,11 @@ impl Workspace {
     }
 
     /// Retire the FIRST `SteerPending` card whose text equals `text` — the
-    /// wake-retire fallback for a host that threads no pending id through
-    /// the woken turn's opening row. FIFO first match: the earliest parked
-    /// copy of the text is the one a same-text consumption retires, and a
-    /// second same-text card stays parked for its own receipt (its id- or
-    /// text-matched echo).
+    /// wake-retire fallback. FIFO first match: the earliest parked copy of
+    /// the text is the one a same-text consumption retires, and a second
+    /// same-text card stays parked for its own receipt (its id- or
+    /// text-matched echo). Never call this on its own: go through
+    /// [`Self::retire_woken_steer`], which owns the id-first rule.
     pub(super) fn retire_steer_card_matching_text(
         &mut self,
         text: &str,
@@ -532,6 +532,32 @@ impl Workspace {
                 matches!(&item.state, FollowUpState::SteerPending { .. } if item.turn.text == text)
             });
         self.retire_matched_steer(matched, cx)
+    }
+
+    /// Retire the steer a WOKEN turn belongs to: the opening row's pending
+    /// id first, then — only when the id names no card this client holds —
+    /// the row's text. The id-first rule is what keeps one consumption from
+    /// retiring two same-text cards; the text fallback exists because the
+    /// projection mints `m-{entry}` for a journal row that carried no client
+    /// id, so the woken turn can name a steer the card only recognises by
+    /// its text. A turn start with no pending id is never a wake (a wake's
+    /// opening row is always stamped), so the fallback never runs there;
+    /// the store has already cleared the text for a carried queued
+    /// submission. The one remaining ambiguity is another client's message
+    /// with identical wording.
+    pub(super) fn retire_woken_steer(
+        &mut self,
+        steer_id: Option<&str>,
+        opening_text: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(message_id) = steer_id else {
+            return false;
+        };
+        if self.retire_steer_card(message_id, cx) {
+            return true;
+        }
+        opening_text.is_some_and(|text| self.retire_steer_card_matching_text(text, cx))
     }
 
     /// The shared retire: drop the card at `matched`, push its `steered`
@@ -604,21 +630,9 @@ impl Workspace {
                         cx.notify();
                     });
                     self.spawn_thinking_ticker(cx);
-                    // An idle steer wakes its own run: retire by the pending
-                    // id the opening row carried, falling back to the row's
-                    // text when the host threads none (or the id matches no
-                    // card — the projection mints `m-{entry}` for journal rows
-                    // without a client id, which a card's uuid never is). A
-                    // same-text misretire (another client steering identical
-                    // wording) is extreme and cheap: one bubble, one turn
-                    // early.
-                    let retired = steer_id
-                        .as_deref()
-                        .map(|message_id| self.retire_steer_card(message_id, cx))
-                        .unwrap_or(false);
-                    if !retired && let Some(text) = opening_text.as_deref() {
-                        self.retire_steer_card_matching_text(text, cx);
-                    }
+                    // An idle steer wakes its own run: the retire rides the
+                    // wake's own lifecycle (see `retire_woken_steer`).
+                    self.retire_woken_steer(steer_id.as_deref(), opening_text.as_deref(), cx);
                 }
                 crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
                     self.chat.update(cx, |chat, cx| {

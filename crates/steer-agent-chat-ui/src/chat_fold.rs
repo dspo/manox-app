@@ -61,11 +61,14 @@ pub enum ChatEvent {
     /// transcript lifecycle must never lose the event to the retire.
     TurnStarted {
         steer_id: Option<String>,
-        /// The opening row's text (`None` for an empty one). Serves the
-        /// wake-retire FALLBACK only: a host that threads no pending id
-        /// through the woken turn's opening row (the journal row carries no
-        /// client id there yet) still names the steer the run woke for —
-        /// the row IS the steer's text, so a matching card retires on it.
+        /// The opening row's text (`None` for an empty one). The wake-retire
+        /// FALLBACK only, never a steer marker: every turn start carries its
+        /// opening row's text, so a consumer may match it against a parked
+        /// card only when `steer_id` is also set (a wake is always stamped)
+        /// and the store has ruled out a carried queued submission (see
+        /// `AhpStore::route`). Another client's message with identical
+        /// wording stays ambiguous — the host threading the pending id
+        /// through the woken row is the exit.
         opening_text: Option<String>,
     },
     /// The turn reached a terminal state (`chat/turnComplete` /
@@ -165,9 +168,11 @@ impl ChatEvent {
                 // own mint for rows that never carried one). The retire
                 // rides ALONGSIDE the lifecycle event, never instead of it.
                 steer_id: start.queued_message_id.clone(),
-                // The row's text is the wake-retire fallback: when the host
-                // threads no pending id through the row, a card with this
-                // text still retires (see the field's doc).
+                // The row's text is the wake-retire FALLBACK for a pending id
+                // no card holds: the projection mints `m-{entry}` when the
+                // journal row carried no client id. The store clears it for a
+                // carried queued submission; consumers gate it on `steer_id`
+                // (see the field's doc).
                 opening_text: (!start.message.text.is_empty()).then(|| start.message.text.clone()),
             }),
             A::ChatTurnComplete(_) => Some(ChatEvent::TurnFinished { cancelled: false }),

@@ -587,19 +587,118 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
             );
         });
     });
+
+    // ── a turn start with NO pending id is never a wake: the client's own
+    // optimistic echo (submit_turn carries none) must not retire a parked
+    // steer by text, even when the text matches ─────────────────────────────
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_inject_parked_turn_start(None, Some("引导八：空唤醒不动卡"), cx);
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert_eq!(
+                lanes(&ws.gallery_queue_snapshot(cx)),
+                vec!["steer"],
+                "a no-id turn start leaves the same-text card parked: {:?}",
+                ws.gallery_queue_snapshot(cx)
+            );
+        });
+    });
+
+    // ── a turn start carrying a QUEUED submission is not a steer wake: the
+    // pre-fold queued list names the row, the store clears the wake text, so
+    // an ordinary send with the parked steer's wording retires nothing ──────
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_set_running(true, cx);
+            ws.gallery_submit("引导九：排队行不算唤醒", SubmitBehavior::Steer, cx);
+            ws.gallery_set_running(false, cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            // The queued row lands in the fold first, exactly as the host
+            // broadcasts it, then the turn start carrying that row's id.
+            ws.gallery_route_raw_envelope(
+                pending_set_with(
+                    ahp_types::state::PendingMessageKind::Queued,
+                    "m-q-1",
+                    "引导九：排队行不算唤醒",
+                ),
+                cx,
+            );
+            ws.gallery_route_raw_envelope(
+                turn_started(Some("m-q-1"), "引导九：排队行不算唤醒"),
+                cx,
+            );
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            let snapshot = ws.gallery_queue_snapshot(cx);
+            assert!(
+                snapshot
+                    .iter()
+                    .any(|(lane, text)| lane == "steer" && text == "引导九：排队行不算唤醒"),
+                "a carried queued row never retires a same-text steer: {snapshot:?}"
+            );
+            assert_ne!(
+                ws.gallery_last_user_bubble(cx).as_deref(),
+                Some("引导九：排队行不算唤醒"),
+                "no steered bubble lands for a queued flush"
+            );
+            assert!(
+                ws.gallery_turn_active(cx),
+                "the queued flush still flips the running edge"
+            );
+        });
+    });
 }
 
-/// The accepted `chat/pendingMessageSet{steering}` echo, wire-shaped.
-fn pending_set(id: &str) -> ahp_types::actions::StateAction {
+/// The accepted `chat/pendingMessageSet{kind}` echo, wire-shaped.
+fn pending_set_with(
+    kind: ahp_types::state::PendingMessageKind,
+    id: &str,
+    text: &str,
+) -> ahp_types::actions::StateAction {
     ahp_types::actions::StateAction::ChatPendingMessageSet(
         ahp_types::actions::ChatPendingMessageSetAction {
-            kind: ahp_types::state::PendingMessageKind::Steering,
+            kind,
             id: id.to_string(),
             message: serde_json::from_value(serde_json::json!({
-                "text": "引导六：回执先于回声",
+                "text": text,
                 "origin": { "kind": "user" },
             }))
             .expect("a user message parses"),
         },
+    )
+}
+
+/// A `chat/turnStarted`, wire-shaped.
+fn turn_started(queued_id: Option<&str>, text: &str) -> ahp_types::actions::StateAction {
+    ahp_types::actions::StateAction::ChatTurnStarted(ahp_types::actions::ChatTurnStartedAction {
+        turn_id: "t-wire".to_string(),
+        started_at: "2026-10-22T00:00:02Z".to_string(),
+        message: serde_json::from_value(serde_json::json!({
+            "text": text,
+            "origin": { "kind": "user" },
+        }))
+        .expect("a user message parses"),
+        queued_message_id: queued_id.map(str::to_string),
+        meta: None,
+    })
+}
+
+/// The accepted `chat/pendingMessageSet{steering}` echo used by the
+/// receipt-order regression.
+fn pending_set(id: &str) -> ahp_types::actions::StateAction {
+    pending_set_with(
+        ahp_types::state::PendingMessageKind::Steering,
+        id,
+        "引导六：回执先于回声",
     )
 }
