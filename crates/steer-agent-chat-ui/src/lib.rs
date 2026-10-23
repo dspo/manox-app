@@ -27,6 +27,7 @@ pub mod i18n;
 pub mod model_tag;
 pub mod overlap_diag;
 pub mod preview;
+pub mod text;
 pub mod views;
 
 gpui::actions!(

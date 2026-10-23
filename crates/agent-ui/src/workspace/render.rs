@@ -596,7 +596,8 @@ impl Workspace {
         use ai_elements::{PixelSpinner, PixelSpinnerVariant};
         use steer_agent_chat_ui::conversation::LiveActivity;
         use steer_agent_chat_ui::model_tag::ModelTag;
-        use steer_agent_chat_ui::views::subagents::{CAPTAIN_LABEL, one_line, task_display_title};
+        use steer_agent_chat_ui::text::one_line;
+        use steer_agent_chat_ui::views::subagents::{CAPTAIN_LABEL, task_display_title};
 
         let subagents = self.running_subagents(cx);
         if !running && subagents.is_empty() {

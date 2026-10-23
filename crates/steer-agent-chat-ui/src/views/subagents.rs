@@ -44,15 +44,6 @@ pub fn task_display_title(subagent_type: &str, description: &str) -> Option<Stri
     }
 }
 
-/// Collapse a display string onto ONE line: every whitespace run — the
-/// newlines of a multi-line `bash` body or of a run's task label among them —
-/// becomes a single space. Rows bound the line with `.truncate()` +
-/// `.whitespace_nowrap()`, but those only ellipsize text that is already one
-/// line: a raw multi-line value stretches the row to as many lines as it had.
-pub fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 pub fn status_indicator(status: ToolCallStatus, theme: &Theme) -> AnyElement {
     match status {
         ToolCallStatus::PendingApproval | ToolCallStatus::Running => BrailleSpinner::new()
@@ -94,18 +85,5 @@ mod tests {
             Some("topic only")
         );
         assert_eq!(task_display_title("", ""), None);
-    }
-
-    /// The one-line rule every status row and page header shares: a multi-line
-    /// value collapses to a single spaced line (the row then ellipsizes it on
-    /// width) instead of growing a line per input line.
-    #[test]
-    fn one_line_collapses_whitespace_runs() {
-        assert_eq!(one_line("cargo build"), "cargo build");
-        assert_eq!(
-            one_line("cat <<'EOF'\n  a\n  b\nEOF"),
-            "cat <<'EOF' a b EOF"
-        );
-        assert_eq!(one_line("  \n \t "), "");
     }
 }

@@ -142,7 +142,8 @@ fn build_conversation(
 impl Render for SubagentStreamView {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme: Theme = cx.theme().clone();
-        use steer_agent_chat_ui::views::subagents::{one_line, task_display_title};
+        use steer_agent_chat_ui::text::one_line;
+        use steer_agent_chat_ui::views::subagents::task_display_title;
         // One line, always: the run's topic is runtime text and may carry
         // newlines — the header must not grow a line per input line.
         let title = one_line(
