@@ -327,8 +327,9 @@ mod macos {
         }
     }
 
-    /// A plan review, as the runtime raises one: a single question whose
-    /// `detail` carries the plan body and whose options are the three verdicts.
+    /// A plan review, as the built-in `/plan` skill raises one: a plain ask
+    /// whose `detail` carries the plan body (the request-level `message` on
+    /// the wire) and whose options are the three verdicts.
     /// One card face — no separate decision surface.
     fn plan_review_snapshot() -> AskCardSnapshot {
         AskCardSnapshot {

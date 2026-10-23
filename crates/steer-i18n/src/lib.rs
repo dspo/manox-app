@@ -447,54 +447,6 @@ mod tests {
         assert!(v.contains("Unknown command"), "got: {v}");
     }
 
-    /// The permission-mode notice must resolve all three variants in both
-    /// locales: the workspace posts it on every mode switch, and a missing
-    /// variant renders the raw fluent term. Pin the shapes so a rename or a
-    /// dropped translation fails loudly here.
-    #[test]
-    fn permission_mode_notice_localized() {
-        let _g = TEST_LANG_LOCK.lock().unwrap();
-        set_lang(Language::En);
-        let readonly = t_str("workspace-mode-notice", &[("mode", "readonly")]);
-        assert!(readonly.contains("Read Only"), "got: {readonly}");
-        let workspace = t_str("workspace-mode-notice", &[("mode", "workspacewrite")]);
-        assert!(workspace.contains("Workspace Access"), "got: {workspace}");
-        let full = t_str("workspace-mode-notice", &[("mode", "dangerfullaccess")]);
-        assert!(full.contains("Full Access"), "got: {full}");
-        set_lang(Language::ZhCn);
-        let readonly = t_str("workspace-mode-notice", &[("mode", "readonly")]);
-        assert!(readonly.contains("只读"), "got: {readonly}");
-        let workspace = t_str("workspace-mode-notice", &[("mode", "workspacewrite")]);
-        assert!(workspace.contains("工作区访问"), "got: {workspace}");
-        let full = t_str("workspace-mode-notice", &[("mode", "dangerfullaccess")]);
-        assert!(full.contains("完全访问"), "got: {full}");
-    }
-
-    /// Both directions of the plan chip's pending state must resolve in both
-    /// bundles. `plan_mode_pending` is directionless (`enabled != committed`),
-    /// so a queued switch-on and a queued exit need separate copy — one label
-    /// cannot describe both. Missing from `en.ftl` a term renders the raw key;
-    /// missing from `zh-CN.ftl` it renders the English fallback.
-    #[test]
-    fn plan_chip_pending_localized() {
-        let _g = TEST_LANG_LOCK.lock().unwrap();
-        set_lang(Language::En);
-        assert_eq!(
-            t("plan-chip-pending-enter-label").as_str(),
-            "Plan mode pending"
-        );
-        assert!(t("plan-chip-pending-enter-tooltip").contains("next turn"));
-        assert!(t("plan-chip-pending-exit-label").contains("exiting"));
-        assert!(t("plan-chip-pending-exit-tooltip").contains("stay blocked"));
-        assert!(t("plan-mode-cancel-notice").contains("stays writable"));
-        set_lang(Language::ZhCn);
-        assert!(t("plan-chip-pending-enter-label").contains("待生效"));
-        assert!(t("plan-chip-pending-enter-tooltip").contains("下一轮"));
-        assert!(t("plan-chip-pending-exit-label").contains("待退出"));
-        assert!(t("plan-chip-pending-exit-tooltip").contains("写权限"));
-        assert!(t("plan-mode-cancel-notice").contains("保持可写"));
-    }
-
     /// Keys the agent-ui sources reference only through helper return values —
     /// never as a literal `i18n::t("…")` argument — so the source scan below
     /// cannot see them. Pin them here; the comment names the owning helper so

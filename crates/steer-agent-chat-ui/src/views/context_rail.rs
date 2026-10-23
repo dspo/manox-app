@@ -47,7 +47,6 @@ pub const BUBBLE_MAX_W: f32 = 360.;
 pub const CONTEXT_NEAR_FULL_PCT: f64 = 90.0;
 /// Fold caps — rows shown before a section collapses the rest into `+N`.
 const SUBAGENTS_CAP: usize = 5;
-const PLANS_CAP: usize = 5;
 const TODOS_CAP: usize = 8;
 const MODELS_CAP: usize = 5;
 
@@ -63,7 +62,7 @@ pub struct FoldPlan {
     pub hidden: usize,
 }
 
-/// Prefix fold for the plainly-capped sections (plans / todos / models):
+/// Prefix fold for the plainly-capped sections (todos / models):
 /// expanded shows everything; collapsed shows the first `cap` rows. The
 /// fold size is expansion-independent.
 pub fn fold_window(len: usize, cap: usize, expanded: bool) -> FoldPlan {
@@ -202,46 +201,12 @@ pub fn todo_visual(status: PlanStepStatus, theme: &Theme) -> (TodoGlyph, TodoTex
     }
 }
 
-// ── Plan files ───────────────────────────────────────────────────────────
-
-/// One plan file this conversation wrote, resolved at bubble-open time by
-/// the workspace from the session's `ProposePlan` rows — the model's only
-/// plan-approval channel, whose args carry the slug/title pair verbatim.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PlanFileEntry {
-    /// Display title: the proposal's supplied title, else the slug (the
-    /// file stem — `<slug>-plan.md` is the on-disk name).
-    pub title: String,
-}
-
-impl PlanFileEntry {
-    /// Parse a `ProposePlan` tool call's arguments into an entry, paired
-    /// with its dedupe key. `None` when the slug is missing or blank —
-    /// the caller drops the row (a proposal without a slug never named a
-    /// plan file).
-    pub fn from_proposal(input: &serde_json::Value) -> Option<(String, Self)> {
-        let slug = input
-            .get("slug")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())?;
-        let title = input
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map_or_else(|| slug.to_string(), str::to_string);
-        Some((slug.to_string(), Self { title }))
-    }
-}
-
 // ── Fold sections ────────────────────────────────────────────────────────
 
 /// Which foldable list section a `+N` row belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BubbleSection {
     Subagents,
-    Plans,
     Todos,
     Models,
 }
@@ -251,7 +216,6 @@ pub enum BubbleSection {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct BubbleExpanded {
     subagents: bool,
-    plans: bool,
     todos: bool,
     models: bool,
 }
@@ -260,7 +224,6 @@ impl BubbleExpanded {
     fn flip(&mut self, section: BubbleSection) {
         match section {
             BubbleSection::Subagents => self.subagents = !self.subagents,
-            BubbleSection::Plans => self.plans = !self.plans,
             BubbleSection::Todos => self.todos = !self.todos,
             BubbleSection::Models => self.models = !self.models,
         }
@@ -557,15 +520,12 @@ impl ContextRail {
 
     // ── Bubble rendering ──────────────────────────────────────────────────
 
-    /// The conversation info bubble's content: six segments separated only
+    /// The conversation info bubble's content: the segments separated only
     /// by hairlines (no headings), each empty segment — divider included —
-    /// skipped. `plan_files` arrives newest-first (the workspace collects
-    /// the session's `ProposePlan` rows and reverses); `max_w`/`max_h` are
-    /// the window-derived clamps the caller refines onto the popover
-    /// surface.
+    /// skipped. `max_w`/`max_h` are the window-derived clamps the caller
+    /// refines onto the popover surface.
     pub fn render_bubble(
         this: &Entity<Self>,
-        plan_files: &[PlanFileEntry],
         max_w: Pixels,
         max_h: Pixels,
         cx: &App,
@@ -585,11 +545,6 @@ impl ContextRail {
             &mut sections,
             &theme,
             rail.render_branch_pair_section(&theme, cx),
-        );
-        push_section(
-            &mut sections,
-            &theme,
-            render_plan_files_section(plan_files, expanded.plans, &weak, &theme),
         );
         push_section(
             &mut sections,
@@ -1222,61 +1177,6 @@ fn plus_n_row(
                 .child(SharedString::from(format!("+ {hidden}"))),
         )
         .into_any_element()
-}
-
-/// The plan-file list: one document row per written plan, newest first.
-fn render_plan_files_section(
-    plan_files: &[PlanFileEntry],
-    expanded: bool,
-    rail: &gpui::WeakEntity<ContextRail>,
-    theme: &Theme,
-) -> Option<AnyElement> {
-    if plan_files.is_empty() {
-        return None;
-    }
-    let fold = fold_window(plan_files.len(), PLANS_CAP, expanded);
-    let mut rows: Vec<AnyElement> = plan_files[..fold.visible]
-        .iter()
-        .map(|entry| {
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .items_center()
-                .gap_1p5()
-                .py_0p5()
-                .child(
-                    Icon::new(IconName::FileText)
-                        .xsmall()
-                        .text_color(theme.muted_foreground),
-                )
-                .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .text_color(theme.foreground)
-                        .child(SharedString::from(entry.title.clone())),
-                )
-                .into_any_element()
-        })
-        .collect();
-    if fold.hidden > 0 {
-        rows.push(plus_n_row(
-            BubbleSection::Plans,
-            fold.hidden,
-            expanded,
-            rail,
-            theme,
-        ));
-    }
-    Some(
-        v_flex()
-            .w_full()
-            .min_w_0()
-            .children(rows)
-            .into_any_element(),
-    )
 }
 
 /// The sources segment: the old card carried only the placeholder — it

@@ -54,11 +54,11 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 会话持久化与重启恢复 | ✅ | pi jsonl + `session_meta` sidecar |
 | 转录渲染（MessageList / ToolCallCard / RetryBadge / ErrorMessage） | ✅ | 共享渲染管线 |
 | 权限门控（PermissionMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 三模式都运行（seatbelt 按模式渲染 read-only/workspace-write profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`sandbox_permissions`+`justification` 升级往返经 `ToolCallAuthorization`；AccessChip 切 ReadOnly/WorkspaceAccess/FullAccess，切换热生效（下一次工具调用即按新模式裁决），chip 乐观即时刷新、宿主拒绝时回滚并出纠错 notice（写前对账，`LeafView::approval_mode_or_default`：座位值 → 宿主声明 schema 默认 → 宿主默认，不再本地谎报 ReadOnly） |
-| Slash commands | ✅ 部分 | `/compact`、`/exit`(`/quit`)、`/new`(`/clear` `/archive`)、`/plan`、`/goal`、`/mode`；markdown/skill 适配器经共享 registry。`/exit` 走全量停机序列（`workspace/exit.rs`）：停子代理 → cancel 当前 turn → 关右栏终端/TUI agent 页签与底 dock 终端（PTY drop 即进程树终止）→ 关集成浏览器 → 强制归档（绕过 idle 门禁）→ 落新会话，每步以 info 卡播报；turn 运行中同样可发 |
+| Slash commands | ✅ 部分 | `/compact`、`/exit`(`/quit`)、`/new`(`/clear` `/archive`)、`/goal`、`/mode`（`/plan` 是上游内置 skill：裸文本直通 runtime 的 skill 分发，非本地命令）；markdown/skill 适配器经共享 registry。`/exit` 走全量停机序列（`workspace/exit.rs`）：停子代理 → cancel 当前 turn → 关右栏终端/TUI agent 页签与底 dock 终端（PTY drop 即进程树终止）→ 关集成浏览器 → 强制归档（绕过 idle 门禁）→ 落新会话，每步以 info 卡播报；turn 运行中同样可发 |
 | 模型选择器 | ✅ | pi `ProviderRegistry`，按 provider 显示名分组；写前对账：乐观写入 → 宿主 echo 确认（撤销史销账）/ `rejectionReason` 回滚 + 纠错 notice |
 | 项目（composer chip / 侧栏文件夹 / 绑定新会话） | ✅ | 宿主 workspace registry（`ClientCall::Workspace` + `HostEvent::WorkspaceUpdate` 状态流），客户端不再写 threads.db `projects` 表 |
 | Sidebar / 会话列表 / 新建切换归档 / LLM 标题 | ✅ | pi `SessionRepository` + sidecar；标题双模式语义移植自 manox |
-| ConversationInfoBubble（composer 圆圈上方：Captain/subagents/branch 对/plan 文件/todos/per-model 用量/sources） | ✅ | 用量与圆圈同口径（最近请求输入侧）；per-model 成本行与 ±change 计数随卡片退役 |
+| ConversationInfoBubble（composer 圆圈上方：Captain/subagents/branch 对/todos/per-model 用量/sources） | ✅ | 用量与圆圈同口径（最近请求输入侧）；per-model 成本行与 ±change 计数随卡片退役 |
 | `/compact` + Recap 卡片 | ✅ | 内核 `HarnessEvent` compaction 事件（manual/threshold/overflow） |
 | 后台线程（ctrl-b 置底 / 切换自动 park） | ✅ | `background_threads` + `attach_thread` parking |
 | CLI agent 终端（Claude Code / Codex / GitHub Copilot） | ✅ | 右栏 ToolTab：先落 provider→model 级联（共享投影 `cascade_provider_groups`），选中即以该端点 `AgentBuilder` 拉起 CLI（PTY relay → `TerminalView`；cwd = 前台线程项目目录） |
@@ -70,7 +70,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
 | Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读） |
-| Plan 模式 / PlanReview | ✅ 部分 | 重实现（#441，参照 oh-my-pi）：ProposePlan 结构化工具 + plan 落盘 + 调研指令注入 + 写硬门控；B2-PR-5 后 plan-review 经单个 `AskUserQuestion`（`intent.kind="plan-review"` + `detail`=plan 正文 + `approve` 选项）呈现为 [PlanReviewDecisionCard](#planreviewdecisioncard)（底部一键裁决卡），三选项 Approve / Approve & compact / Request changes（无 Fresh，裁决映射归服务端）；rail 的 plan 节（`UpdatePlan`）消费执行进度，快照经 sidecar 持久化、compaction 后可恢复；PlanPreview 独立 tab 按设计不恢复 |
+| 退役（plan mode 整体删除，随上游 manox PR #946） | — | `/plan` 为上游内置 skill（规划契约一次性注入，见 §Slash 行）；plan 裁决 = 单问题 ask（`detail`=plan 正文，经 wire 的 `ChatInputRequest.message` 折入），批准/修订即普通答案；rail 的 plan 节（`UpdatePlan`）仍消费执行进度，快照经 sidecar 持久化、compaction 后可恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
 分层纪律：crates/manox-harness/src/core 只做 TS Pi 对齐与扩展点；harness 能力扩展一律走
@@ -182,7 +182,7 @@ Process-lifetime system tray installed right after the first main window opens (
 
 #### DockBadge
 
-The count on the macOS Dock icon (`NSDockTile.setBadgeLabel` via `objc2-app-kit`), mirroring the sessions currently owing the user attention: a parked ask / tool-approval card (`pending_auth`), a plan review awaiting a verdict (`pending_plan`), an errored mark, or an unseen settle on a non-focused thread (the client-owned unread mirror). One point per non-archived thread row; the aggregate lives on `Workspace::attention_count` → `SessionMultiplexer::attention_count`. Clear paths mirror the sidebar's own semantics: the interaction flags retire when answered, unread retires on focus, and the leaf's live unread mirror wins over the row flag — so on live rows the badge and the sidebar cannot disagree. Two deliberate divergences: archived rows are dismissed by the badge while the sidebar still paints their attention marks, and `errored` follows the §D.5 mirror rule (only the next list snapshot clears it, like the sidebar's danger triangle — no user gesture retires that point). Not fed from state edges — local unread raises only notify the leaf entity — so a foreground task polls every 500ms (the tray pump's pattern) and only crosses into AppKit when the count changed; counts above 99 render as `99+`. Windows (taskbar overlay icon) and Linux have no backend yet: they keep a clean no-op behind the same API. The pump starts with the tray install block but runs regardless of it.
+The count on the macOS Dock icon (`NSDockTile.setBadgeLabel` via `objc2-app-kit`), mirroring the sessions currently owing the user attention: a parked ask / tool-approval card (`pending_auth`/`pending_ask`), an errored mark, or an unseen settle on a non-focused thread (the client-owned unread mirror). One point per non-archived thread row; the aggregate lives on `Workspace::attention_count` → `SessionMultiplexer::attention_count`. Clear paths mirror the sidebar's own semantics: the interaction flags retire when answered, unread retires on focus, and the leaf's live unread mirror wins over the row flag — so on live rows the badge and the sidebar cannot disagree. Two deliberate divergences: archived rows are dismissed by the badge while the sidebar still paints their attention marks, and `errored` follows the §D.5 mirror rule (only the next list snapshot clears it, like the sidebar's danger triangle — no user gesture retires that point). Not fed from state edges — local unread raises only notify the leaf entity — so a foreground task polls every 500ms (the tray pump's pattern) and only crosses into AppKit when the count changed; counts above 99 render as `99+`. Windows (taskbar overlay icon) and Linux have no backend yet: they keep a clean no-op behind the same API. The pump starts with the tray install block but runs regardless of it.
 
 > Source: `crates/steer-app/src/badge.rs`, `crates/steer-app/src/main.rs`, `crates/agent-ui/src/multiplexer.rs`
 
@@ -320,7 +320,7 @@ Marks are re-derived from the conversation every frame — but only past the wid
 
 #### MessageItem
 
-Single rendered conversation item, centered, full width (no fixed content cap — the transcript adapts to the window width). Each `MessageItem` renders one of the variant cards below based on `ConvItem` kind. Every kind that carries a text body — user (incl. peer deliveries), assistant, error, notice, recap, retry detail, plan review — mounts a persistent `Entity<TextViewState>` (`MessageItem::markdown`, created lazily by `ensure_markdown`) instead of rebuilding one per frame: a persistent body keeps content, selection and streaming motion across frames and leaves inline links clickable; static sub-bodies mount per-frame documents keyed off their element id.
+Single rendered conversation item, centered, full width (no fixed content cap — the transcript adapts to the window width). Each `MessageItem` renders one of the variant cards below based on `ConvItem` kind. Every kind that carries a text body — user (incl. peer deliveries), assistant, error, notice, recap, retry detail — mounts a persistent `Entity<TextViewState>` (`MessageItem::markdown`, created lazily by `ensure_markdown`) instead of rebuilding one per frame: a persistent body keeps content, selection and streaming motion across frames and leaves inline links clickable; static sub-bodies mount per-frame documents keyed off their element id.
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs`
 
@@ -328,7 +328,7 @@ Single rendered conversation item, centered, full width (no fixed content cap �
 
 #### UserMessage
 
-Full-width user turn block rendered inside [TurnFrame](#turnframe): `{from} > {to}·{provider}/{model}·Time` metadata header (`user_turn_header`, the model fragment is the [`ModelTag`](#modeltag) plain form; empty segments drop, no `>` clause when nothing follows `from`), persistent selectable markdown body, copy btn (hover; flips to a check briefly after copying — [Copy Feedback](#copy-feedback)), and a permission-mode-colored frame captured at send time. `from` is the turn's real author — unattributed human input renders the localized "You", otherwise Captain (lead), Harness (host-injected turns, e.g. the plan-execution seed), or the named agent (team peer delivery, shown with a `theme.primary` peer accent); `to` is the agent whose conversation renders the turn (main thread shows Captain, a member thread its own name, a sub-agent panel the sub-agent type) — a view-side fact stamped by the owning `ConversationState`, never persisted. Peer deliveries share this same renderer live and after reload.
+Full-width user turn block rendered inside [TurnFrame](#turnframe): `{from} > {to}·{provider}/{model}·Time` metadata header (`user_turn_header`, the model fragment is the [`ModelTag`](#modeltag) plain form; empty segments drop, no `>` clause when nothing follows `from`), persistent selectable markdown body, copy btn (hover; flips to a check briefly after copying — [Copy Feedback](#copy-feedback)), and a permission-mode-colored frame captured at send time. `from` is the turn's real author — unattributed human input renders the localized "You", otherwise Captain (lead), Harness (host-injected turns, e.g. an answered ask's seed), or the named agent (team peer delivery, shown with a `theme.primary` peer accent); `to` is the agent whose conversation renders the turn (main thread shows Captain, a member thread its own name, a sub-agent panel the sub-agent type) — a view-side fact stamped by the owning `ConversationState`, never persisted. Peer deliveries share this same renderer live and after reload.
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs`
 
@@ -689,7 +689,8 @@ nothing routes on the question's shape. The ask's questions become `AskBlock`s
 (header, question, `detail` as host-rendered markdown, options with the 「推荐」
 badge, multi-select flags); the note placeholder and the 「推荐」 badge label are
 localized here, and a block's detail element rides its own page. A plan review is
-an ordinary one-question ask whose `detail` carries the plan body — the card's
+an ordinary one-question ask whose `detail` (the wire's request-level `message`)
+carries the plan body — the card's
 pending chip (`等待回答`, the sidebar's parked-turn blue dot) and close control are
 its only chrome.
 
@@ -744,20 +745,17 @@ after having been confirmed in it settled remotely and is reconciled away
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`, `render_ask_settled_card`, `ask_answer_markdown`) + `crates/agent-ui/src/workspace/chips.rs` (`ensure_ask_state`, `reply_ask`)
 
-**Plan review** rides that one card: a proposed plan arrives as a single-question
-ask whose `detail` is the plan body (the live edge pulls it off the plan channel
-into the question's support text) and whose options are the three verdicts —
-**Approve**, **Approve & compact**, **Request changes** — so the user picks one
-and the pager's check submits it. The SERVER owns the verdict mapping (Approve →
-keep, Approve & compact → compact, anything else — Request changes / custom /
-skip → refine, and a card close → stop and stay in plan mode awaiting a message);
-the client sends no verdict enum. B2-PR-5's dedicated four-choice verdict drawer,
-its `PendingPlanReview` state/stash/overlay and the `ExecuteFresh`
-create-and-reseed path stay retired, and the app-local decision card that
-replaced them (a warning strip over a scrolled plan with a bottom button row) is
-gone with the rest: one ask design, the gallery's.
+**Plan review** rides that one card: the built-in `/plan` skill's proposal
+arrives as a single-question ask whose `detail` (folded from the wire's
+request-level `ChatInputRequest.message`) is the plan body and whose options are
+the skill contract's verdicts — **Approve** / **Approve with changes** /
+**Revise** — composed by the model, answered like any ask. There is no
+plan-mode state, no verdict enum, and no server-side review chain: the answer
+seeds the next turn (approve → execute, revise → re-present), entirely as prompt
+discipline on the runtime side. The client's only plan surface is the ask card
+itself.
 
-> Source: `crates/agent-ui/src/workspace/chips.rs` (`sync_live_ask` pulls the plan body) + `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`)
+> Source: `crates/agent-ui/src/workspace.rs` (`sync_live_ask` folds `message` into detail via `pending_ask_from_ahp`) + `crates/steer-agent-chat-ui/src/views/message.rs` (`render_ask_form_card`)
 
 #### 3.2.4 Popups & Dropdowns
 
@@ -819,21 +817,17 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 2. **branch / worktree 对**：`┌ {branch}` / `└ {worktree 目录名}`（mono 字体，长名 truncate），
    数据 = `git_branch_display` + store `cwd`（原 `render_branch_block` 的取数方式；±change 计数与
    点击复制随卡片退役，`git_status` 收敛为 branch-only）。
-3. **plan 文件**：本对话写出的 plan 文件行（文档图标 + 标题），来源 = 会话内 `ProposePlan` 工具行
-   （模型唯一的 plan 审批通道，参数带 `slug`/`title`；`Workspace::collect_plan_files` 零拷贝扫描
-   `kind()` 引用，按 slug 去重、末次写入倒序）。标题 =  supplied title，缺省 slug
-   （即 `<slug>-plan.md` 的文件干）。点击开右栏 markdown 预览本期不实现。上限 5。
-4. **todos**：`UpdatePlan` 的 `PlanSnapshot.steps`，稳定排序 InProgress → Pending → Completed
+3. **todos**：`UpdatePlan` 的 `PlanSnapshot.steps`，稳定排序 InProgress → Pending → Completed
    （组内保持原时序，`sort_by_key`）。状态符号 = 统一外径圆环（Pending 空心 muted /
    InProgress accent 环 + accent 内圆、文字 semibold / Completed muted 环 + 勾、文字 muted +
    删除线）——替换旧 `◻ / ▶ / ✔` 三源字形。全部状态可见（Completed 是进度感的一部分）。上限 8。
-5. **per-model 用量**：模型行无树符，`{provider}/{model}` 三段分别渲染（provider 恒 muted、
+4. **per-model 用量**：模型行无树符，`{provider}/{model}` 三段分别渲染（provider 恒 muted、
    `/` muted、model 段按 wire api `pi_wire_text_color` 着色——h_flex 分段排列，不做宽度算术）。
    `├ Context {pct}% {used} / {cap}` = **该模型最后一次请求**的占用 / 窗口上限（与圆圈同口径：
    `last_token_usage` + `model_window_tokens`；只有前台模型可解析，其余模型只画 `└` 行），
    ≥90% 转 warning。`└ ↑in ↓out R{cache_read} CH{hit%}`（`format_cache_hit`，无输入 `--`）。
    按总 token 降序（稳定），上限 5。无段标题、无 per-model 成本行。
-6. **sources**：沿用占位行（`workspace-env-no-sources`），去掉「来源」标题。
+5. **sources**：沿用占位行（`workspace-env-no-sources`），去掉「来源」标题。
 
 `+N` 折叠行：chevron + 计数，与段内行共用左基线；只在隐藏数 > 0 时出现；点击就地展开
 （气泡随内容长高），再点收起。排序必须稳定（store notify 频繁，不稳定排序会跳行闪动）。
@@ -841,8 +835,7 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 > Source: `crates/steer-agent-chat-ui/src/views/context_rail.rs`（`render_bubble` 及各段 builder、
 > `fold_window` / `subagent_display_order` / `sort_todo_steps` / `todo_visual`）；挂载与开关：
 > `crates/agent-ui/src/workspace/composer_render.rs`（`render_context_usage_ring`，
-> 相对/绝对普通挂载 + 尾巴 `icons/context-bubble-tail.svg`）；plan 投影：
-> `crates/agent-ui/src/workspace.rs`（`collect_plan_files`）；验收图：
+> 相对/绝对普通挂载 + 尾巴 `icons/context-bubble-tail.svg`）；验收图：
 > `design/conversation-info-bubble/acceptance/`（`BUBBLE_SHOT=… cargo test -p agent-ui --test
 > visual_bubble`，`BUBBLE_STATE=open|closed`）。
 
@@ -1017,7 +1010,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### SidebarProjection
 
-wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ThreadListItem`（multiplexer 权威行，含 §D.5 增量合并）→ 五态优先级（errored > pending_auth > pending_plan > running > unread，叶子 unread 镜像覆盖 wire 标志）＋ team 森林（leader 保序、member 随后、孤儿拍平；**member 不再缩进**，leader chevron 是唯一嵌套标记）＋ `updated_at`/`archived`/tag/pinned 原样透传 ＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
+wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ThreadListItem`（multiplexer 权威行，含 §D.5 增量合并）→ 五态优先级（errored > pending_auth > pending_ask > running > unread，叶子 unread 镜像覆盖 wire 标志；`pending_ask` = 会话 chat 折叠里有未答的 input request——turn-final 的 ask 会保持 turn 打开直到答案结算）＋ team 森林（leader 保序、member 随后、孤儿拍平；**member 不再缩进**，leader chevron 是唯一嵌套标记）＋ `updated_at`/`archived`/tag/pinned 原样透传 ＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
 
 > Source: `crates/agent-ui/src/sidebar_projection.rs`
 

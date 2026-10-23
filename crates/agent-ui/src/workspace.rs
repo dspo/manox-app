@@ -253,7 +253,6 @@ fn build_permission_content(
 mod composer;
 mod external;
 pub mod external_sessions;
-mod plan_review;
 mod subagent;
 mod subagent_stream;
 
@@ -301,7 +300,7 @@ struct SubagentStreamPage {
 /// park holds NO kernel entity — just the id, the leaf (the wire-state home
 /// whose mirrors the server's §D.5 deltas keep fed while the session stays
 /// attached), and the parked subscription (it coordinates the settle
-/// unread, the parked plan-review stash and the follow-up stash; it never
+/// unread and the follow-up stash; it never
 /// touches `conversation`/`self.chat.thread`, so a background thread's events
 /// cannot be misattributed to the foreground thread). The turn itself runs
 /// server-side and survives parking regardless; nothing detaches or
@@ -439,8 +438,8 @@ pub struct Workspace {
     /// Threads that were running when the user switched away (U6b⑤: the
     /// turn runs server-side and survives the switch on its own — the park
     /// keeps the session ATTACHED so the reclaim re-attaches in place with
-    /// no reopen, and the parked subscription keeps the settle unread, the
-    /// plan-review stash and the follow-up stash coordinated).
+    /// no reopen, and the parked subscription keeps the settle unread and the
+    /// follow-up stash coordinated).
     background_threads: Vec<BackgroundThread>,
     /// Distinct bound-project paths of the active summaries, in list order
     /// (the project chip's "recent, unregistered" section; U2 push cache).
@@ -634,50 +633,6 @@ impl Workspace {
     }
     pub(crate) fn chat_rail(&self, cx: &App) -> Entity<crate::views::context_rail::ContextRail> {
         self.chat.read(cx).context_rail.clone()
-    }
-
-    /// Plan files this conversation wrote, for the bubble's plan segment:
-    /// the session's `ProposePlan` tool rows — the model's only
-    /// plan-approval channel, whose arguments carry the slug/title pair
-    /// verbatim — collected in arrival order, deduped by slug (a
-    /// re-proposal supersedes its predecessor and takes the newest slot),
-    /// returned newest first. Zero-copy: the scan walks `kind()` references.
-    pub(crate) fn collect_plan_files(
-        &self,
-        cx: &App,
-    ) -> Vec<crate::views::context_rail::PlanFileEntry> {
-        type PlanProposal = (String, crate::views::context_rail::PlanFileEntry);
-        let mut found: Vec<PlanProposal> = Vec::new();
-        for item in self.chat.read(cx).conversation.read(cx).items() {
-            let calls: Vec<&crate::conversation::ToolCallItem> = match item.read(cx).kind() {
-                ConvItem::ToolCall(call) => vec![call],
-                ConvItem::Thinking(container) => container
-                    .entries
-                    .iter()
-                    .filter_map(|entry| match entry {
-                        crate::conversation::ActivityEntry::Tool(call) => Some(call),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            for call in calls {
-                if call.name != manox_agent::plan_mode::PROPOSE_PLAN
-                    || call.status != manox_agent::ToolCallStatus::Success
-                {
-                    // A failed proposal never wrote the plan file (the tool
-                    // rejects missing/empty files before anything lands).
-                    continue;
-                }
-                if let Some((slug, entry)) =
-                    crate::views::context_rail::PlanFileEntry::from_proposal(&call.input)
-                {
-                    found.retain(|(existing, _)| existing != &slug);
-                    found.push((slug, entry));
-                }
-            }
-        }
-        found.into_iter().rev().map(|(_, entry)| entry).collect()
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -1272,8 +1227,8 @@ impl Workspace {
             .map(|a| (a.auth_id.clone(), a.tool_call_id.clone()))
     }
 
-    /// Whether any blocking overlay (plan review, ask, generic approval,
-    /// blank project) is up.
+    /// Whether any blocking overlay (ask, generic approval, blank project)
+    /// is up.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_blocking_overlay_active(&self, cx: &App) -> bool {
         self.blocking_overlay_active(cx)
@@ -1333,39 +1288,11 @@ impl Workspace {
                 .and_then(|(chat_id, req)| {
                     let _ = chat_id;
                     match crate::ahp_store::pending_ask_from_ahp(req.id.clone(), req) {
-                        Some(mut ask) => {
-                            // A plan-review elicitation renders the plan itself:
-                            // pull the proposal's markdown from the plan channel
-                            // into the question's support text.
-                            if req.id.starts_with("plan-review:") {
-                                let plan =
-                                    crate::ahp_store::plan_review_of(&view.book, &sid, &req.id);
-                                // A verdict on the plan channel means the review
-                                // is settled engine-side. The chat-level part can
-                                // never fold answered once its turn archived (the
-                                // reducer only settles active-turn parts, and a
-                                // plan review outlives its turn), so without this
-                                // check the card would re-seed forever with the
-                                // composer locked in ask-supplement mode — the
-                                // #88 device repro.
-                                if plan.is_some_and(|p| {
-                                    p.get("type").and_then(serde_json::Value::as_str)
-                                        == Some(manox_ahp::ext::actions::PLAN_REVIEW_SETTLED)
-                                }) {
-                                    tracing::info!(
-                                        request_id = %req.id,
-                                        "live ask: plan review already settled on the plan channel"
-                                    );
-                                    return None;
-                                }
-                                if let Some(q) = ask.questions.first_mut()
-                                    && let Some(content) = plan.and_then(|p| {
-                                        p.get("content").and_then(serde_json::Value::as_str)
-                                    })
-                                {
-                                    q.detail = content.to_string();
-                                }
-                            }
+                        Some(ask) => {
+                            // The ask's support markdown (a plan review's plan
+                            // body included) rides the request-level `message`
+                            // — `pending_ask_from_ahp` folds it into the first
+                            // question's detail.
                             Some((req.id.clone(), ask))
                         }
                         None => {
@@ -1494,9 +1421,8 @@ impl Workspace {
         // escalation or any pre-run gate) parks the model on a decision the
         // conversation card delivers. A question-less elicitation has NO
         // surface by design — the current runtime cannot mint one (the
-        // translator always emits structured questions; plan-review rides
-        // its own single-select), and the arm below warns if that ever
-        // changes.
+        // translator always emits structured questions), and the arm below
+        // warns if that ever changes.
         let live_auth = {
             let view = store.read(cx);
             let sid = self
@@ -2830,7 +2756,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Persist a UI annotation (`Error` / `Notice` / `PlanReview`) as an
+    /// Persist a UI annotation (`Error` / `Notice`) as an
     /// `annotation_set` row on the session journal. Fire-and-forget; the
     /// chat-face echo displays it live and the rebuild folds it back in place.
     fn append_ui_note(
@@ -2859,7 +2785,6 @@ impl Workspace {
         let kind_str = match kind {
             manox_agent::db::UiNoteKind::Error => "error",
             manox_agent::db::UiNoteKind::Notice => "notice",
-            manox_agent::db::UiNoteKind::PlanReview => "plan_review",
         };
         // The annotations channel (dspo/manox#884) is the durable face: the
         // dispatch lands an `annotation_set` journal row host-side, so the

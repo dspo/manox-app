@@ -1,5 +1,5 @@
 //! The composer + overlay render helpers (U9b cluster 8): the composer
-//! element (and its queued-follow-ups / plan-chip / access-placeholder /
+//! element (and its queued-follow-ups / access-placeholder /
 //! send-button / completion-overlay / attachments / project-chip faces),
 //! the browser-suite toggles, the blank-project family, and the project
 //! registration leg. Split from `workspace.rs` — `super` is the
@@ -234,12 +234,11 @@ impl Workspace {
         let queue = self.render_queued_follow_ups(theme, cx);
         let project_chip = self.render_project_chip_pi(theme, cx);
         let goal_chip = self.render_goal_chip(theme, cx);
-        let plan_chip = self.render_plan_chip(theme, cx);
         let follow_stop_chip = self.render_follow_stop_chip(theme, cx);
         let access = self.render_access_placeholder(theme, cx);
         let model = self.render_model_selector_pi(theme, cx);
         // Absolute cancel priority: the stop form is driven by the raw
-        // running edge alone — a pending ask/approve/plan card never swaps
+        // running edge alone — a pending ask/approve card never swaps
         // the control into a send glyph the user cannot fire (the deadlock
         // class: stop became an empty-input-disabled send exactly when
         // the user most needed to interrupt). Enter still answers a pending
@@ -346,7 +345,6 @@ impl Workspace {
                             .min_w_0()
                             .child(project_chip)
                             .when_some(goal_chip, |el, chip| el.child(chip))
-                            .when_some(plan_chip, |el, chip| el.child(chip))
                             .child(access)
                             // The stopped-follow projection rides at the
                             // group's tail: its arrival must never shift
@@ -648,103 +646,6 @@ impl Workspace {
                 .child(delete_btn),
         )
         .into_any_element()
-    }
-
-    /// Plan-mode indicator chip: visible while the session plans (read-only
-    /// research + plan-file writes), so the state is never silent. Clicking
-    /// it leaves plan mode — the escape hatch when a review card is missed
-    /// or the model stalls in research.
-    ///
-    /// A selection that has not committed yet renders as a muted outline: the
-    /// engine applies it at the next turn boundary, so the chip must not claim
-    /// the new state before the boundary passes.
-    ///
-    /// `plan_mode_pending` carries no direction (`enabled != committed`), so
-    /// `active && pending` means an exit is already requested while plan mode
-    /// still gates writes. Clicking there must cancel back to `active`;
-    /// re-sending `false` would re-request the same exit and change nothing.
-    pub(super) fn render_plan_chip(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let (active, pending) = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                let plan_mode = crate::ahp_store::plan_mode_of(&view.book, sid);
-                (plan_mode, false)
-            })
-            .unwrap_or((false, false));
-        if !active && !pending {
-            return None;
-        }
-        // Exiting: plan mode is in force but a leave is queued for the
-        // boundary. Entering: a switch-on is queued while still inactive.
-        let exiting = active && pending;
-        Some(
-            h_flex()
-                .id("plan-mode-chip")
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded(theme.radius)
-                .when(pending, |chip| {
-                    chip.border_1().border_color(theme.warning.opacity(0.5))
-                })
-                .bg(theme.warning.opacity(if pending { 0.05 } else { 0.12 }))
-                .hover(|s| s.bg(theme.warning.opacity(0.22)))
-                .cursor_pointer()
-                .tooltip(move |window, cx| {
-                    let key = match (pending, exiting) {
-                        (true, true) => "plan-chip-pending-exit-tooltip",
-                        (true, false) => "plan-chip-pending-enter-tooltip",
-                        _ => "plan-chip-exit-tooltip",
-                    };
-                    Tooltip::new(i18n::t(key)).build(window, cx)
-                })
-                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    // Pending cancels by re-selecting the committed state; a
-                    // committed chip leaves plan mode.
-                    let target = if pending { active } else { false };
-                    this.set_thread_plan_mode(target, cx);
-                    // The notice must track what actually happened:
-                    // - cancelling a queued switch-on never took write access
-                    //   away, so "full write access restored" would be false;
-                    //   `/plan` already announced it as on, so the cancel needs
-                    //   its own notice to retract that.
-                    // - cancelling a queued exit returns to plan mode, which is
-                    //   still in force.
-                    // - a committed chip either leaves plan mode or was already
-                    //   off, in which case the chip was not rendered.
-                    let key = match (active, pending) {
-                        (false, true) => "plan-mode-cancel-notice",
-                        (true, true) => "plan-mode-on-notice",
-                        _ => "plan-mode-off-notice",
-                    };
-                    this.add_info_message(i18n::t(key).to_string(), cx);
-                }))
-                .child(
-                    Icon::new(IconName::LayoutDashboard)
-                        .xsmall()
-                        .text_color(theme.warning),
-                )
-                .child(
-                    gpui::div()
-                        .text_xs()
-                        .text_color(theme.warning)
-                        .child(i18n::t(match (pending, exiting) {
-                            (true, true) => "plan-chip-pending-exit-label",
-                            (true, false) => "plan-chip-pending-enter-label",
-                            _ => "plan-chip-label",
-                        })),
-                )
-                .into_any_element(),
-        )
     }
 
     /// Persistent projection of the §二.3 follow-stop state: a compact
@@ -1181,12 +1082,6 @@ impl Workspace {
 
         let rail = self.chat_rail(cx);
         let bubble_open = rail.read(cx).bubble_open;
-        // Only the open bubble pays for the plan-file scan.
-        let plan_files = if bubble_open {
-            self.collect_plan_files(cx)
-        } else {
-            Vec::new()
-        };
 
         let pill = h_flex()
             .id("context-usage-pill")
@@ -1267,7 +1162,6 @@ impl Workspace {
                         .max_h(px(640.))
                         .child(ContextRail::render_bubble(
                             &rail_entity,
-                            &plan_files,
                             max_w,
                             px(640.),
                             cx,

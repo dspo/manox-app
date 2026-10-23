@@ -1128,13 +1128,9 @@ impl ConversationState {
             // summarization is in flight); the conversation list renders nothing
             // for it. The workspace flips the cockpit phase on this event.
             | ThreadEvent::CompactionStarted { .. } => ApplyOutcome::Unchanged,
-            // Plan review cards are pushed by the workspace on `PlanReady`
-            // (they need the pending-verdict state the workspace owns);
-            // there is no ToolCall card to backfill — the plan arrives as a
-            // text block, not a tool call.
-            ThreadEvent::PlanReady { .. }
-            | ThreadEvent::PlanModeChanged { .. }
-            | ThreadEvent::PlanUpdated { .. } => ApplyOutcome::Unchanged,
+            // The rail's plan rows are workspace-owned projections of the
+            // `UpdatePlan` tool calls; there is no card to backfill here.
+            ThreadEvent::PlanUpdated { .. } => ApplyOutcome::Unchanged,
             // `SteerInjected` is fired by the turn loop at drain time. The
             // workspace owns the queue→list transition (it pairs the event with
             // the matching `SteerPending` queue card and pushes the bubble here
@@ -2322,10 +2318,6 @@ fn note_to_item(n: &UiNoteRecord) -> ConvItem {
     match n.kind {
         UiNoteKind::Error => ConvItem::Error(text),
         UiNoteKind::Notice => ConvItem::Notice(text),
-        // Legacy manox-era notes render as plain notices; pi sessions never
-        // persist plan-review notes (a plan now reaches the user as an
-        // `AskUserQuestion` with a `plan-review` intent, not a verdict card).
-        UiNoteKind::PlanReview => ConvItem::Notice(text),
     }
 }
 

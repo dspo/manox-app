@@ -771,8 +771,8 @@ pub fn foreground_project() -> Option<std::path::PathBuf> {
         .clone()
 }
 
-/// The right-pane registry: client-owned presentation state (the plan's
-/// home for pane snapshots after the db retired). Session-lifetime — the
+/// The right-pane registry: client-owned presentation state (the home for
+/// pane snapshots after the db retired). Session-lifetime — the
 /// pane layout a process remembers is the pane layout it opened with.
 static PANE_REGISTRY: std::sync::Mutex<Option<HashMap<String, String>>> =
     std::sync::Mutex::new(None);
