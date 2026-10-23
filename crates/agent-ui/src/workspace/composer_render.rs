@@ -10,6 +10,7 @@ use super::*;
 use crate::DismissContextBubble;
 use crate::cockpit::{context_budget_pct, format_tokens_pi};
 use crate::views::context_rail::{BUBBLE_MAX_W, BUBBLE_MIN_W, CONTEXT_NEAR_FULL_PCT, ContextRail};
+use crate::views::popup_menu::MAX_LIST_HEIGHT;
 use gpui::{
     Anchor, Focusable as _, Hsla, PathBuilder, PathStyle, Point, StrokeOptions, canvas, point,
 };
@@ -251,7 +252,7 @@ impl Workspace {
         // The completion popover overlays the composer; anchoring it on the
         // composer's own v_flex keeps it glued to the input bar in both hero
         // and footer, with a single mount point and ElementId.
-        let completion_overlay = self.render_completion_overlay(cx);
+        let completion_overlay = self.render_completion_overlay(window, cx);
 
         v_flex()
             .w_full()
@@ -1338,7 +1339,19 @@ impl Workspace {
     /// overflow — `div().absolute().bottom_full()` inside `deferred` does not
     /// position correctly and gets clipped by the body wrapper's `overflow_hidden`.
     /// A click on a row confirms it.
-    pub(super) fn render_completion_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    ///
+    /// The anchor point is the caret, not the input box: the textarea stashes
+    /// fresh caret geometry at prepaint (gpui-base 0.8's
+    /// `prepaint_caret_geometry`), so the popover stays glued to the typing
+    /// position through soft wraps and multi-line growth. Render reads the
+    /// last prepaint, so the anchor trails the caret by at most one frame;
+    /// before the first prepaint there is no geometry yet and the overlay
+    /// falls back to the input-box corner it used before.
+    pub(super) fn render_completion_overlay(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let state = self.chat.read(cx).completion.as_ref()?;
         let theme = cx.theme().clone();
         let on_select = cx.listener(|this, ix: &usize, window, cx| {
@@ -1346,17 +1359,28 @@ impl Workspace {
         });
         let on_select: SelectHandler =
             std::rc::Rc::new(move |ix, window, cx| on_select(&ix, window, cx));
+        let anchor = match self.chat_input(cx).read(cx).prepaint_caret_geometry() {
+            Some(geo) => {
+                let origin = caret_anchor_origin(
+                    geo.cursor_bounds(),
+                    geo.line_height(),
+                    geo.scroll_offset().y,
+                    window.viewport_size(),
+                    MAX_LIST_HEIGHT + px(16.),
+                    px(8.),
+                );
+                anchored().anchor(Anchor::TopLeft).position(origin)
+            }
+            None => anchored().anchor(Anchor::BottomLeft),
+        };
         Some(
             deferred(
-                anchored()
-                    .anchor(Anchor::BottomLeft)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(
-                        gpui::div()
-                            .id("completion-dropdown")
-                            .occlude()
-                            .child(render_completion(state, &theme, on_select)),
-                    ),
+                anchor.snap_to_window_with_margin(px(8.)).child(
+                    gpui::div()
+                        .id("completion-dropdown")
+                        .occlude()
+                        .child(render_completion(state, &theme, on_select)),
+                ),
             )
             .with_priority(1)
             .into_any_element(),
