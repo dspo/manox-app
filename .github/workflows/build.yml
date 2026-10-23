@@ -4,76 +4,48 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Run the pipeline on any branch without pushing a commit (useful to measure a
+  # CI change before it lands).
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# A superseded push to a PR keeps a runner for a result nobody reads; cancel it.
+# Main pushes are left alone: they are the runs people actually read.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
-  RUSTFLAGS: "-D warnings"
+  # lld over the default bfd: this workspace links 40+ test binaries that each
+  # carry the whole GPUI + runtime graph, which is where bfd spends minutes.
+  RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=lld"
+  # No incremental state: every job is a single cold build, so the extra
+  # artifacts are pure disk cost on a runner that is short on it.
+  CARGO_INCREMENTAL: "0"
 
 jobs:
-  build:
-    name: cargo build
+  # Grep/format checks over the tree: no dependency graph, no apt, no compile.
+  # A formatting slip fails in ~30s instead of after a full build.
+  guards:
+    name: fmt + guards
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libfontconfig1-dev \
-            libx11-dev \
-            libxcb1-dev \
-            libxrender-dev \
-            libxrandr-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxi-dev \
-            libxcursor-dev \
-            libxinerama-dev \
-            libglib2.0-dev \
-            libwayland-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Restore target cache
-        uses: actions/cache/restore@v4
-        continue-on-error: true
-        with:
-          path: target/
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-target-
+          components: rustfmt
 
       # The agent runtime comes from dspo/manox via git dependencies (public
       # repo — no token needed); revs are pinned by the committed Cargo.lock.
       - name: GPUI track guard
         run: ./script/check-no-zed-git.sh
-
-      # Chrome/chat split invariant: the chat crate never depends on
-      # terminals, webviews, or external-agent wiring (PLAN-CHROME-CHAT-SPLIT
-      # §1 — the executable definition of the decoupling).
-      - name: Chat-crate dependency guard
-        run: ./script/check-chat-crate-deps.sh
 
       # v3 wire-vocabulary guard: view-layer crates read the AhpStore only
       # (no v2 wire/store vocabulary in agent-ui & friends).
@@ -90,23 +62,83 @@ jobs:
       - name: Fmt check
         run: cargo fmt --all -- --check
 
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        uses: ./.github/actions/linux-deps
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Chrome/chat split invariant: the chat crate never depends on terminals,
+      # webviews, or external-agent wiring (PLAN-CHROME-CHAT-SPLIT §1 — the
+      # executable definition of the decoupling).
+      - name: Chat-crate dependency guard
+        run: ./script/check-chat-crate-deps.sh
+
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # The job name is the branch-protection check name; keep `cargo build`.
+  test:
+    name: cargo build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        uses: ./.github/actions/linux-deps
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy
+
+      # Registry only, ~300 MB and a ~3s restore. The build tree is deliberately
+      # not cached: unpacking the old 9.8 GB tarball took 5m53s (45s download,
+      # the rest single-threaded tar extraction of 40+ linked test binaries that
+      # any code change relinks anyway), while a cold build of the whole graph
+      # is ~9.5 min — the cache saved ~2.5 min net and, at 9.8 GB of a 10 GB
+      # per-repo pool, evicted itself often enough that one run in six
+      # restored nothing. Dropping it also hands back the disk headroom the
+      # runner needs to link at all.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
 
       # One feature-inclusive run. agent-ui's test-support suite
       # (interactive-card wire regressions) compiles ONLY under the flag, so
       # the workspace run must enable it — separately, the second build of
       # the whole app (the feature changes manox-agent's features) no longer
-      # fits the runner's 14 GB disk now that RustPython is in the graph; ld
-      # died with SIGBUS on the full filesystem while linking the last
-      # binaries.
+      # fits the runner's disk now that RustPython is in the graph; ld died
+      # with SIGBUS on the full filesystem while linking the last binaries.
       - name: Test
-        run: cargo test --workspace --all-targets --features agent-ui/test-support --no-fail-fast
-
-      - name: Save target cache
-        if: github.event_name == 'push' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: target/
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+        run: >-
+          cargo test --workspace --all-targets --locked
+          --features agent-ui/test-support --no-fail-fast
