@@ -770,6 +770,9 @@ impl ConversationState {
                 id,
                 host,
             )
+            // Live sends only — the entrance rise never plays for rows a
+            // rebuild synthesized from the snapshot.
+            .entering_now()
         }));
     }
 
