@@ -107,10 +107,19 @@ pub fn init_harness(cx: &mut TestAppContext) {
 pub fn open_workspace(
     cx: &mut TestAppContext,
 ) -> (gpui::WindowHandle<gpui_component::Root>, Entity<Workspace>) {
+    open_workspace_at(cx, 1_120.)
+}
+
+/// The same shell at an explicit width — the narrow-card layout probes need
+/// to drive the strip at a width the default window never reaches.
+pub fn open_workspace_at(
+    cx: &mut TestAppContext,
+    width: f32,
+) -> (gpui::WindowHandle<gpui_component::Root>, Entity<Workspace>) {
     let cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let capture = cell.clone();
-    let window = cx.open_window(size(px(1_120.), px(780.)), move |window, cx| {
+    let window = cx.open_window(size(px(width), px(780.)), move |window, cx| {
         let workspace = cx.new(|cx| Workspace::new(window, cx));
         *capture.borrow_mut() = Some(workspace.clone());
         gpui_component::Root::new(workspace, window, cx)
