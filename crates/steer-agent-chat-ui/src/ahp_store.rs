@@ -24,8 +24,8 @@ use ahp_types::actions::StateAction;
 use ahp_types::actions::{
     ChatInputCompletedAction, ChatPendingMessageRemovedAction, ChatPendingMessageSetAction,
     ChatToolCallConfirmedAction, ChatTurnCancelledAction, ChatTurnStartedAction,
-    SessionActiveClientSetAction, SessionConfigChangedAction, SessionIsArchivedChangedAction,
-    SessionTitleChangedAction, SessionWorkingDirectorySetAction,
+    SessionActiveClientSetAction, SessionConfigChangedAction, SessionTitleChangedAction,
+    SessionWorkingDirectorySetAction,
 };
 use ahp_types::commands::{
     ChatSource, CreateChatParams, CreateSessionParams, FetchTurnsParams, ForkChatSource,
@@ -1694,20 +1694,23 @@ impl AhpStore {
                 self.book.remove_summary(&session_uri(id));
             }
         }
-        // The object row's archived bit is written HERE, at the one choke
-        // point every archive decision (sidebar single, batch, `/exit`'s
-        // teardown, the archive command) passes through. The row is the
-        // draft refill's source of truth: an archived conversation whose
-        // row stayed unarchived outlives its own archive as a zombie
-        // draft, and the next `start_new_thread` refills it into a
-        // `createSession` the host can only answer "already exists".
+        // The object row's archived bit is written HERE, at the one app-side
+        // choke point every archive decision (sidebar single, batch,
+        // `/exit`'s teardown, the archive command) passes through. The row is
+        // the draft refill's source of truth: an archived conversation whose
+        // row stayed unarchived outlives its own archive as a zombie draft,
+        // and the next `start_new_thread` refills it into a `createSession`
+        // the host can only answer "already exists".
         //
-        // The bit lands BEFORE the root dispatch on purpose: a refused
-        // write (unknown ids) leaves the row unresurrectable — the
-        // catalogue's re-seed walk restores the summary row, never the
-        // draft candidacy the refill reads. Failing the other way would
-        // re-mint zombies on the exact rejection this write exists to
-        // retire.
+        // It is written unconditionally, before the dispatch: that is a
+        // crash-ordering choice, not a causality between the two. A crash
+        // between them leaves the row retired — the conservative side, since
+        // the refill must not resurrect a draft the user just archived — and
+        // a refused dispatch leaves it retired too: the catalogue walk that
+        // re-seeds a rejected batch restores the summary row, never the
+        // draft candidacy. Archives that never pass through this client (a
+        // host cascade, another client) do not write the bit; the refill's
+        // host-retired check is the guard for those.
         if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
             for id in session_ids {
                 objects.set_archived(id, archived);
@@ -2379,14 +2382,6 @@ impl AhpStore {
         self.optimistic_config(session_id, &config);
         let action = StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
             directory: format!("file://{path}"),
-        });
-        self.dispatch(session_uri(session_id), action);
-    }
-
-    /// Archive or unarchive the session.
-    pub fn set_archived(&mut self, session_id: &str, archived: bool) {
-        let action = StateAction::SessionIsArchivedChanged(SessionIsArchivedChangedAction {
-            is_archived: archived,
         });
         self.dispatch(session_uri(session_id), action);
     }

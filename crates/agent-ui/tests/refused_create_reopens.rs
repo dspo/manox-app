@@ -1,12 +1,12 @@
-//! FULL-WIRING pin for the reopen leg: a refill that names a session the
+//! FULL-WIRING pin for the reopen leg: a refill that names a live draft the
 //! host still carries gets `createSession` refused with the protocol's
 //! SESSION_ALREADY_EXISTS — the landing must OPEN that session (the refill's
 //! whole point: return to the unfinished conversation) instead of dying on
-//! the refusal. This is the ONLY carrier for the pre-fix zombie rows (an
-//! archived conversation whose object row never took the bit), so the
-//! archived-bit choke point alone cannot retire them.
+//! the refusal. The archive-time bit keeps retired rows out of the refill, so
+//! a refusal that gets here is a live blank draft — the same shape the host's
+//! claim table reuses for a blank id.
 //!
-//! The legacy shape is forged with public APIs only: the boot landing is
+//! The shape is forged with public APIs only: the boot landing is
 //! host-created, its row unarchived and never spoken; a second mint moves
 //! the foreground away, and stamping that one as spoken (what any first
 //! message does) leaves the landing as the draft pool's only candidate.
@@ -47,7 +47,7 @@ async fn refused_create_reopens_the_held_session(cx: &mut TestAppContext) {
     let minted = common::start_new_thread(cx, &ws, window, None);
     assert_eq!(
         minted, landing,
-        "the refill must name the legacy draft the host still carries"
+        "the refill must name the live draft the host still carries"
     );
 
     // The reopen leg: the create refusal is not a dead end — the landing

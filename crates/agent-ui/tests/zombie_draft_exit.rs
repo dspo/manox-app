@@ -1,7 +1,9 @@
 //! FULL-WIRING regressions for the zombie-draft chain: archiving must mark
-//! the object row (never mint a new zombie), and `/exit` must land even when
-//! the draft pool holds a session the host still carries (the reopen leg for
-//! EXISTING pre-fix zombies — reverting either half fails a test here).
+//! the object row (never mint a new zombie), and a later mint must skip the
+//! archived row instead of refilling it into a `createSession` the host
+//! answers "already exists". The archived row is made the draft pool's ONLY
+//! candidate (the fresh conversation is stamped spoken), so removing the bit
+//! write deterministically lands the next mint back on it.
 #![cfg(feature = "test-support")]
 
 mod common;
@@ -9,7 +11,7 @@ mod common;
 use gpui::TestAppContext;
 
 #[gpui::test]
-async fn exit_refills_a_zombie_draft_and_still_lands(cx: &mut TestAppContext) {
+async fn archived_draft_is_not_refilled_and_exit_lands(cx: &mut TestAppContext) {
     let (ws, window) = common::full_wiring_boot(cx);
     let objects = manox_agent::object_store::ObjectStore::try_global().expect("object store");
 
@@ -27,11 +29,16 @@ async fn exit_refills_a_zombie_draft_and_still_lands(cx: &mut TestAppContext) {
         "archiving must mark the object row — an unmarked row is a zombie draft"
     );
 
-    // 2. `/exit` lands a fresh conversation even with host-known rows in
-    //    the archive (the draft pool's exclusion must not dead-end the
-    //    mint).
+    // 2. The fresh conversation is spoken, so the archived landing is the
+    //    draft pool's only candidate. `/exit` must mint a new conversation,
+    //    never reopen the archived one the refill would otherwise name.
+    objects.mark_human_message(&second, 1_770_000_000);
     let third = common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
         .expect("/exit must land a fresh foreground conversation");
+    assert_ne!(
+        third, first,
+        "/exit must not reopen the archived draft it just left"
+    );
     assert_ne!(second, third);
     let exited_row = objects
         .conversation(&second)
