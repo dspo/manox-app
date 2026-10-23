@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, ElementId, Entity, FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement,
-    Pixels, SharedString, StyleRefinement, Styled as _, WeakEntity, Window, hsla, px, rems,
+    Pixels, SharedString, Styled as _, WeakEntity, Window, hsla, rems,
 };
 use gpui_base::TextView;
 use gpui_base::text::{CodeBlock, TableData, TextViewMotion, TextViewState};
@@ -30,7 +30,7 @@ use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use ropey::Rope;
 
 use crate::copy_feedback::{CopyFeedbackHost, copy_button};
-use crate::markdown::linkify::linkify_markdown;
+use crate::markdown::linkify::{linkify_markdown, pin_reference_definitions};
 use crate::markdown::svg_block;
 
 // --- theme bridge ------------------------------------------------------------
@@ -38,10 +38,7 @@ use crate::markdown::svg_block;
 /// The app document style shared by every surface: theme colors, tight
 /// paragraph gap, per-surface heading ladder. Code blocks keep the old
 /// transparent-on-message look (hairline via `border`, no filled panel).
-fn base_style(
-    theme: &Theme,
-    heading: impl Fn(u8) -> StyleRefinement + Send + Sync + 'static,
-) -> gpui_base::TextViewStyle {
+fn base_style(theme: &Theme) -> gpui_base::TextViewStyle {
     gpui_base::TextViewStyle::default()
         .with_foreground(theme.foreground)
         .with_muted_foreground(theme.muted_foreground)
@@ -50,7 +47,6 @@ fn base_style(
         .with_code_background(theme.muted)
         .with_border(theme.border)
         .with_paragraph_gap(rems(0.5))
-        .with_heading(heading)
         .with_inline_code(HighlightStyle {
             color: Some(theme.info),
             background_color: Some(theme.accent.opacity(0.6)),
@@ -59,42 +55,24 @@ fn base_style(
         .with_dark(theme.is_dark())
 }
 
-/// Heading ladder for the dense conversation list: every heading at body size,
-/// H1 one step up, levels discriminated by weight (H1/H2 black, H3+ bold) —
-/// the old `HeadingMode::Uniform` contract.
-pub fn message_style(theme: &Theme, body: Pixels) -> gpui_base::TextViewStyle {
-    base_style(theme, move |level| {
-        let mut r = StyleRefinement::default();
-        r.text.font_size = Some(if level == 1 { body + px(3.) } else { body }.into());
-        r.text.font_weight = Some(if level <= 2 {
-            FontWeight::BLACK
-        } else {
-            FontWeight::BOLD
-        });
-        r
-    })
+/// Heading typography rides upstream's relative ladder (0.8.0 heading
+/// hierarchy: size, line height and section spacing all scale with the
+/// inherited font size, weight uniform semibold, H6 muted) — the app pins no
+/// heading overrides of its own, so the ladder tracks the body size each
+/// mount sets.
+pub fn message_style(theme: &Theme) -> gpui_base::TextViewStyle {
+    base_style(theme)
 }
 
-/// Heading ladder for chrome-density mounts: the old `HeadingMode::Scaled`
-/// contract — H1–H3 at the base size (H1 black, the rest bold), H4+ a step
-/// down, no heading taller than the body's natural rhythm.
+/// Heading typography as in [`message_style`]: upstream's ladder, unpinned.
 pub fn chrome_style(theme: &Theme) -> gpui_base::TextViewStyle {
-    base_style(theme, |level| {
-        let mut r = StyleRefinement::default();
-        r.text.font_size = Some(if level <= 3 { px(16.) } else { px(14.) }.into());
-        r.text.font_weight = Some(if level == 1 {
-            FontWeight::BLACK
-        } else {
-            FontWeight::BOLD
-        });
-        r
-    })
+    base_style(theme)
 }
 
 /// Transparent-surface style for terminal panels: the panel body reads as
 /// inline text on the message card, not a filled code panel.
 pub fn panel_style(theme: &Theme) -> gpui_base::TextViewStyle {
-    message_style(theme, px(13.)).with_code_background(hsla(0., 0., 0., 0.))
+    message_style(theme).with_code_background(hsla(0., 0., 0., 0.))
 }
 
 // --- document constructors ----------------------------------------------------
@@ -128,11 +106,19 @@ impl std::fmt::Debug for ChatDocument {
 impl ChatDocument {
     /// Mount (or adopt) the document for `text`, reusing the existing entity
     /// and incremental path when already present.
+    ///
+    /// `text` runs through [`pin_reference_definitions`] before linkify, so a
+    /// reference definition arriving mid-stream cannot flip already-rendered
+    /// text and shrink a leaf under recorded fade ranges (the
+    /// `invalid text run` aborts; see the pinning doc for the mechanism). A
+    /// line whose shape the pinning changes as it grows — a definition
+    /// completing, a fence closing — diverges the transformed source and falls
+    /// to `set_text`, whose replace clears the stale fade segments wholesale.
     pub fn sync(&mut self, text: &str, cx: &mut impl gpui::AppContext) {
         if self.raw.as_deref() == Some(text) {
             return;
         }
-        let next = linkify_markdown(text);
+        let next = linkify_markdown(&pin_reference_definitions(text));
         let state = match &self.state {
             Some(state) => state.clone(),
             None => {
@@ -177,7 +163,7 @@ pub fn message_document(
     body: Pixels,
     cx: &App,
 ) -> TextView {
-    let style = message_style(theme, body);
+    let style = message_style(theme);
     svg_block::with_diagram_blocks(
         TextView::new(state)
             .style(style.clone())
@@ -200,7 +186,7 @@ pub fn reasoning_document(
     body: Pixels,
     cx: &App,
 ) -> TextView {
-    let style = message_style(theme, body).with_foreground(theme.muted_foreground);
+    let style = message_style(theme).with_foreground(theme.muted_foreground);
     svg_block::with_diagram_blocks(
         TextView::new(state)
             .style(style.clone())
@@ -429,8 +415,32 @@ pub fn steer_code_highlighter(
             };
             tree_sitter_runs(&code, lang, &highlight_theme)
         };
-        clamp_runs(runs, &code)
+        normalize_runs(clamp_runs(runs, &code))
     }
+}
+
+/// Sort by start and clip overlaps so the list is always in the one shape
+/// the run builder accepts (ascending, disjoint): upstream filters bounds
+/// only, and a tree-sitter capture set that ever overlapped would reach
+/// `StyledText::with_runs` unmerged — fade_highlights combines only while a
+/// fade frame is active.
+fn normalize_runs(
+    mut runs: Vec<(Range<usize>, HighlightStyle)>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    runs.sort_by_key(|(range, _)| (range.start, range.end));
+    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::with_capacity(runs.len());
+    for (mut range, style) in runs {
+        if let Some((last, _)) = out.last() {
+            if range.end <= last.end {
+                continue;
+            }
+            range.start = range.start.max(last.end);
+        }
+        if range.start < range.end {
+            out.push((range, style));
+        }
+    }
+    out
 }
 
 /// Snap every highlight range onto the block's char boundaries, inside its
