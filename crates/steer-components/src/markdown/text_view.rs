@@ -30,7 +30,7 @@ use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use ropey::Rope;
 
 use crate::copy_feedback::{CopyFeedbackHost, copy_button};
-use crate::markdown::linkify::linkify_markdown;
+use crate::markdown::linkify::{linkify_markdown, pin_reference_definitions};
 use crate::markdown::svg_block;
 
 // --- theme bridge ------------------------------------------------------------
@@ -128,11 +128,19 @@ impl std::fmt::Debug for ChatDocument {
 impl ChatDocument {
     /// Mount (or adopt) the document for `text`, reusing the existing entity
     /// and incremental path when already present.
+    ///
+    /// `text` runs through [`pin_reference_definitions`] before linkify, so a
+    /// reference definition arriving mid-stream cannot flip already-rendered
+    /// text and shrink a leaf under recorded fade ranges (the
+    /// `invalid text run` aborts; see the pinning doc for the mechanism). A
+    /// line whose shape the pinning changes as it grows — a definition
+    /// completing, a fence closing — diverges the transformed source and falls
+    /// to `set_text`, whose replace clears the stale fade segments wholesale.
     pub fn sync(&mut self, text: &str, cx: &mut impl gpui::AppContext) {
         if self.raw.as_deref() == Some(text) {
             return;
         }
-        let next = linkify_markdown(text);
+        let next = linkify_markdown(&pin_reference_definitions(text));
         let state = match &self.state {
             Some(state) => state.clone(),
             None => {
@@ -429,8 +437,32 @@ pub fn steer_code_highlighter(
             };
             tree_sitter_runs(&code, lang, &highlight_theme)
         };
-        clamp_runs(runs, &code)
+        normalize_runs(clamp_runs(runs, &code))
     }
+}
+
+/// Sort by start and clip overlaps so the list is always in the one shape
+/// the run builder accepts (ascending, disjoint): upstream filters bounds
+/// only, and a tree-sitter capture set that ever overlapped would reach
+/// `StyledText::with_runs` unmerged — fade_highlights combines only while a
+/// fade frame is active.
+fn normalize_runs(
+    mut runs: Vec<(Range<usize>, HighlightStyle)>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    runs.sort_by_key(|(range, _)| (range.start, range.end));
+    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::with_capacity(runs.len());
+    for (mut range, style) in runs {
+        if let Some((last, _)) = out.last() {
+            if range.end <= last.end {
+                continue;
+            }
+            range.start = range.start.max(last.end);
+        }
+        if range.start < range.end {
+            out.push((range, style));
+        }
+    }
+    out
 }
 
 /// Snap every highlight range onto the block's char boundaries, inside its

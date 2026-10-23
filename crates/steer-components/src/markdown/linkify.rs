@@ -101,6 +101,96 @@ pub fn classify_target(target: &str) -> LinkKind {
     }
 }
 
+/// Escape the opening `[` of link-reference-definition lines outside fenced
+/// code, so a definition arriving mid-stream cannot flip text that has already
+/// rendered: `文[^1]续` draws `[^1]` literally, but the moment `[^1]: 注`
+/// streams in upstream reparses the reference to `[1]` — a leaf that shrinks
+/// under fade ranges gpui-base recorded against the longer rendering. The
+/// stale ranges then tear a run boundary through a CJK char and
+/// `StyledText::with_runs` aborts the process (see `ChatDocument::sync`).
+/// An escaped bracket prints as itself, so today's literal rendering is what
+/// survives; definition lines show as literal text instead of being consumed.
+///
+/// Definitions nest behind blockquote and list markers too, and a reference
+/// anywhere in the document flips on them all the same, so those prefixes
+/// are looked through. A false positive costs nothing visible — the escape
+/// is invisible — it only forfeits that line's reference semantics, which
+/// the pinning forfeits everywhere by design.
+pub fn pin_reference_definitions(src: &str) -> String {
+    let fences = fenced_blocks(src);
+    let mut fence_ix = 0usize;
+    let mut out = String::with_capacity(src.len());
+    let mut offset = 0usize;
+    for line in src.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        while fence_ix < fences.len() && fences[fence_ix].end <= line_start {
+            fence_ix += 1;
+        }
+        let in_fence = fence_ix < fences.len()
+            && fences[fence_ix].start <= line_start
+            && line_start < fences[fence_ix].end;
+        match (!in_fence).then(|| definition_bracket(line)).flatten() {
+            Some(bracket) => {
+                out.push_str(&line[..bracket]);
+                out.push('\\');
+                out.push_str(&line[bracket..]);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// The byte offset of the `[` opening a link-reference definition on `line`,
+/// looking through up to a few nested blockquote (`>`) and list (`-`, `*`,
+/// `+`, `1.`, `1)`) markers. CommonMark allows three leading spaces per
+/// container; four make an indented code block, which stays literal.
+fn definition_bracket(line: &str) -> Option<usize> {
+    let mut rest = line;
+    let mut offset = 0usize;
+    for _ in 0..6 {
+        let indent = rest.len() - rest.trim_start_matches(' ').len();
+        if indent > 3 {
+            return None;
+        }
+        offset += indent;
+        rest = &rest[indent..];
+        if let Some(after) = rest.strip_prefix('>') {
+            offset += 1;
+            rest = after;
+            if let Some(after) = rest.strip_prefix(' ') {
+                offset += 1;
+                rest = after;
+            }
+            continue;
+        }
+        let marker = if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
+            2
+        } else {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if (1..=9).contains(&digits)
+                && (rest[digits..].starts_with(". ") || rest[digits..].starts_with(") "))
+            {
+                digits + 2
+            } else {
+                0
+            }
+        };
+        if marker > 0 {
+            offset += marker;
+            rest = &rest[marker..];
+            continue;
+        }
+        break;
+    }
+    if !rest.starts_with('[') {
+        return None;
+    }
+    let close = 1 + rest[1..].find(']')?;
+    rest[close..].starts_with("]:").then_some(offset)
+}
+
 /// Byte ranges of `src` where auto-detection must not run: fenced code blocks,
 /// inline code spans, existing inline links / images, and `<scheme:..>`
 /// autolinks. Indented (4-space) code blocks are not masked — they need block
@@ -133,18 +223,21 @@ fn consolidate(ranges: &mut Vec<Range<usize>>) {
 
 /// Fenced code blocks: an opening fence line (3+ backticks or tildes) through
 /// the matching closing fence line (or end of input for an unterminated fence).
+/// Both fence kinds carry at most three leading spaces — four start an
+/// indented code block instead, so such a line is content, not a fence.
 fn fenced_blocks(src: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut open: Option<(u8, usize, usize)> = None; // (fence char, fence len, start offset)
     let mut offset = 0usize;
     for line in src.split_inclusive('\n') {
-        let trimmed = line.trim_start();
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let trimmed = &line[indent..];
         let fence_char = trimmed.as_bytes().first().copied();
         let fence_len = trimmed
             .bytes()
             .take_while(|&b| Some(b) == fence_char && (b == b'`' || b == b'~'))
             .count();
-        let opens = fence_len >= 3 && matches!(fence_char, Some(b'`') | Some(b'~'));
+        let opens = indent <= 3 && fence_len >= 3 && matches!(fence_char, Some(b'`') | Some(b'~'));
         match open {
             None => {
                 if opens {
@@ -154,7 +247,8 @@ fn fenced_blocks(src: &str) -> Vec<Range<usize>> {
             Some((ch, len, start)) => {
                 // A closing fence is the same char, at least as long, alone on
                 // its line (info strings only appear on openers).
-                if fence_char == Some(ch)
+                if indent <= 3
+                    && fence_char == Some(ch)
                     && fence_len >= len
                     && trimmed[fence_len..].trim_end().is_empty()
                 {
@@ -329,6 +423,101 @@ mod tests {
             linkify_markdown("see https://example.com/x today"),
             "see [https://example.com/x](https://example.com/x) today"
         );
+    }
+
+    #[test]
+    fn a_definition_line_is_pinned() {
+        assert_eq!(
+            pin_reference_definitions("文[^1]续\n\n[^1]: 注\n"),
+            "文[^1]续\n\n\\[^1]: 注\n"
+        );
+        assert_eq!(
+            pin_reference_definitions("[label]: https://example.com\n"),
+            "\\[label]: https://example.com\n"
+        );
+    }
+
+    #[test]
+    fn pinning_needs_the_colon_right_after_the_label() {
+        let src = "[merged] ->main 2026-10-08 docs: path to ~/.kube/config\n";
+        assert_eq!(pin_reference_definitions(src), src);
+    }
+
+    #[test]
+    fn definitions_behind_quote_and_list_markers_are_pinned() {
+        assert_eq!(
+            pin_reference_definitions("> 引用[^1]\n> [^1]: 注\n"),
+            "> 引用[^1]\n> \\[^1]: 注\n"
+        );
+        assert_eq!(
+            pin_reference_definitions("- [a]: b\n1. [c]: d\n> - [e]: f\n"),
+            "- \\[a]: b\n1. \\[c]: d\n> - \\[e]: f\n"
+        );
+    }
+
+    #[test]
+    fn task_list_items_are_not_definitions() {
+        let src = "- [ ] 待办\n- [x] 已办\n";
+        assert_eq!(pin_reference_definitions(src), src);
+    }
+
+    #[test]
+    fn an_indented_code_block_line_is_not_pinned() {
+        assert_eq!(
+            pin_reference_definitions("code:\n\n    [a]: b\n"),
+            "code:\n\n    [a]: b\n"
+        );
+        assert_eq!(pin_reference_definitions("   [a]: b\n"), "   \\[a]: b\n");
+    }
+
+    #[test]
+    fn fenced_code_is_left_verbatim() {
+        let src = "```ansi\n[a]: b\n[^1]: c\n```\n\n[d]: e\n";
+        assert_eq!(
+            pin_reference_definitions(src),
+            "```ansi\n[a]: b\n[^1]: c\n```\n\n\\[d]: e\n"
+        );
+        // Unterminated fence: everything after the opener is code.
+        let open = "```rust\nfn main() {}\n[f]: g";
+        assert_eq!(pin_reference_definitions(open), open);
+    }
+
+    #[test]
+    fn tilde_fences_are_left_verbatim_too() {
+        let src = "~~~\n[x]: y\n~~~\n";
+        assert_eq!(pin_reference_definitions(src), src);
+    }
+
+    #[test]
+    fn a_four_space_fence_line_is_not_a_fence() {
+        // Four leading spaces are an indented code block, so the definition
+        // that interrupts it still pins; masking it as a fence would leave
+        // the flip — and the crash — live.
+        assert_eq!(
+            pin_reference_definitions("前文\n\n    ```\n[a]: b\n"),
+            "前文\n\n    ```\n\\[a]: b\n"
+        );
+    }
+
+    #[test]
+    fn an_indented_fence_line_inside_a_fence_does_not_close_it() {
+        let src = "```\ncode\n    ```\nstill code\n```\n\n[a]: b\n";
+        assert_eq!(
+            pin_reference_definitions(src),
+            "```\ncode\n    ```\nstill code\n```\n\n\\[a]: b\n"
+        );
+    }
+
+    #[test]
+    fn pinning_is_idempotent() {
+        let once = pin_reference_definitions("text\n\n[^1]: 注\n");
+        assert_eq!(pin_reference_definitions(&once), once);
+    }
+
+    #[test]
+    fn text_without_definitions_is_byte_identical() {
+        let src = "中文 **加粗** 与 [text](https://example.com) 及 `code`。\n第二行 [merged]。\n";
+        assert_eq!(pin_reference_definitions(src), src);
     }
 
     #[test]

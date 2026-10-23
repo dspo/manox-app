@@ -136,6 +136,17 @@ fn static_body(
 /// dispatcher (bare URL → browser, detected path → VS Code), the streaming
 /// motion, and the per-block copy controls wired to the item's copy-feedback
 /// registry when one is available.
+///
+/// The streaming fade is safe here only because [`ChatDocument::sync`] pins
+/// link-reference-definition lines before the text reaches upstream: without
+/// that, a definition arriving mid-stream flips an earlier literal
+/// `[label]`/`[^note]` into a link/footnote, the leaf shrinks under fade
+/// ranges gpui-base already recorded, and the next draw aborts in
+/// `StyledText::with_runs` on a mid-char run boundary (five production
+/// crashes 10-19..10-22; deterministic 20-byte repro in
+/// `crates/agent-ui/tests/cjk_fuzz_deep.rs`). If the fade ever misbehaves
+/// again, look for a new construct that retroactively shortens rendered text
+/// before touching this wiring.
 fn decorate_document(
     view: steer_components::markdown::TextView,
     streaming: bool,
