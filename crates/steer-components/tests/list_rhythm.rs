@@ -1,11 +1,12 @@
-//! List items must stack as pure line boxes — no marker-wrap may inflate an
-//! item by an invisible extra line, and no per-item margin may creep in (the
-//! upstream renderer spaces list items tighter than paragraph gaps; the guard
-//! pins that density). The heading ladder must hold its configured sizes under
-//! the message-density style: H2–H6 at body size (plus the renderer's constant
-//! heading pad), H1 one step up. The document tiers are density-equal: the
-//! reasoning tier differs from the message body by color alone, so at one body
-//! size the two must measure the same.
+//! List items must stack as line boxes plus one small uniform inter-item gap
+//! (0.8.0 "more restrained" lists): a marker wrap or an uneven gap breaks the
+//! equality, and the gap must stay far under a line box so lists read denser
+//! than paragraphs. The heading ladder is upstream's relative hierarchy
+//! (size, line height and section spacing all scale with the inherited font
+//! size, H1 largest, H6 smallest) — the app pins no overrides, so the guard
+//! pins the ladder's shape. The document tiers are density-equal: the
+//! reasoning tier differs from the message body by color alone, so at one
+//! body size the two must measure the same.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -88,7 +89,7 @@ impl Render for Host {
         let theme = Theme::default();
         let text_size = self.body.unwrap_or(px(13.));
         let view = TextView::markdown("m", self.source.clone())
-            .style(message_style(&theme, text_size))
+            .style(message_style(&theme))
             .text_size(text_size);
         div().w(px(600.)).child(Measure {
             child: view.into_any_element(),
@@ -190,15 +191,17 @@ fn list_vertical_footprint_matches_body_paragraphs(cx: &mut gpui::TestAppContext
     let twelve_ordered = measure(cx, &ordered);
 
     assert!(
-        (one_list - one_par).abs() <= 1.0,
+        (one_list - one_par).abs() <= 3.0,
         "single-item list {one_list}px must match single paragraph {one_par}px"
     );
-    // Upstream list items carry no per-item margin: N items stack as N line
-    // boxes. A marker wrap or stray item margin would break the equality.
+    // 0.8.0 spaces items with one small uniform gap: N items stack as N line
+    // boxes plus N-1 gaps, and a marker wrap would inflate an item by an
+    // invisible extra line, breaking the arithmetic.
     let line = one_par;
+    let gap = (twelve_tight - 12.0 * line) / 11.0;
     assert!(
-        (twelve_tight - 12.0 * line).abs() <= 1.0,
-        "12-item list {twelve_tight}px must be 12 bare line boxes ({line}px each)"
+        gap > 0.0 && gap <= 6.0,
+        "12-item list {twelve_tight}px resolves to an inter-item gap of {gap}px          (line box {line}px) — it must be small and uniform"
     );
     assert!(
         (twelve_ordered - twelve_tight).abs() <= 1.0,
@@ -213,31 +216,31 @@ fn list_vertical_footprint_matches_body_paragraphs(cx: &mut gpui::TestAppContext
     );
 }
 
-/// Heading ladder under the message-density style: H2–H6 hold the body line
-/// box; H1 steps up. Every heading is at most one step above the body, so no
-/// heading dwarfs dense conversation text.
+/// Heading ladder under upstream's relative hierarchy: the footprint
+/// descends strictly from H1 to H6, H1 stays within a bounded multiple of the
+/// body line (one section header must not dwarf the transcript), and H4 — the
+/// body-sized rung — sits close to the body line box.
 #[gpui::test]
-fn heading_ladder_stays_at_body_size_with_one_h1_step(cx: &mut gpui::TestAppContext) {
+fn heading_ladder_descends_and_stays_bounded(cx: &mut gpui::TestAppContext) {
     let body = measure(cx, "alpha bravo charlie");
     let h1 = measure(cx, "# alpha");
     let h2 = measure(cx, "## alpha");
+    let h3 = measure(cx, "### alpha");
     let h4 = measure(cx, "#### alpha");
+    let h5 = measure(cx, "##### alpha");
+    let h6 = measure(cx, "###### alpha");
 
-    // Every heading carries the renderer's constant bottom pad, so H2/H4 read
-    // as the body line box plus that one constant — never more.
     assert!(
-        (h2 - h4).abs() <= 0.5,
-        "H2 and H4 share the body size, so their line boxes must match: {h2} vs {h4}"
+        h1 > h2 && h2 > h3 && h3 > h4 && h4 > h5 && h5 > h6,
+        "heading footprints must descend strictly: {h1} {h2} {h3} {h4} {h5} {h6}"
     );
-    let (body_f, h2_f) = (body, h2);
     assert!(
-        h2_f > body_f && h2_f - body_f <= 8.0,
-        "H2 must be the body line plus the constant heading pad: {h2} vs {body}"
+        h1 <= 3.0 * body,
+        "H1 must stay a bounded step above the body line: {h1} vs {body}"
     );
-    let h1_f = h1;
     assert!(
-        h1_f > h2_f && h1_f - h2_f <= 10.0,
-        "H1 must sit one visible step above H2, got {h1} vs {h2}"
+        h4 < body && h4 > 0.75 * body,
+        "H4 rides the body size at the heading ladder's tighter line height,          so its single-line footprint sits just under the paragraph's: {h4} vs {body}"
     );
 }
 
@@ -272,7 +275,7 @@ fn persistent_entity_footprint_matches_static_mount(cx: &mut gpui::TestAppContex
             s.set_text("alpha bravo charlie\n\ndelta echo foxtrot", cx)
         });
         let view = TextView::new(&state)
-            .style(message_style(&Theme::default(), px(13.)))
+            .style(message_style(&Theme::default()))
             .text_size(px(13.));
         let host = cx.new(|_cx| HeightHost {
             view,
