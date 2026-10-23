@@ -416,7 +416,7 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
     );
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
-            ws.gallery_inject_parked_turn_start(&steer_id, cx);
+            ws.gallery_inject_parked_turn_start(Some(&steer_id), None, cx);
             ws.gallery_replay_parked(cx);
         });
     });
@@ -437,4 +437,169 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
             );
         });
     });
+
+    // ── wire-shape regression: the host publishes the consumption removal
+    // the instant the injection is confirmed — BEFORE the router broadcasts
+    // the accepted pendingMessageSet echo. The removal lands on an EMPTY
+    // fold slot (the reducer NoOps); through the REAL route (not a
+    // pre-derived event), the receipt must still retire the card and land
+    // the bubble, and the late echo must strand nothing ────────────────────
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_set_running(true, cx);
+            ws.gallery_submit("引导六：回执先于回声", SubmitBehavior::Steer, cx);
+        });
+    });
+    let steer_id = visual
+        .update(|_window, cx| ws.update(cx, |ws, cx| ws.gallery_first_steer_id(cx)))
+        .expect("sixth steer parked");
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            // The wire order: the removal first...
+            ws.gallery_route_raw_envelope(
+                ahp_types::actions::StateAction::ChatPendingMessageRemoved(
+                    ahp_types::actions::ChatPendingMessageRemovedAction {
+                        kind: ahp_types::state::PendingMessageKind::Steering,
+                        id: steer_id.clone(),
+                    },
+                ),
+                cx,
+            );
+            // ...then the accepted Set echo. The slot was empty when the
+            // removal landed: without the receipt bypass the removal was a
+            // NoOp and this card stranded forever.
+            ws.gallery_route_raw_envelope(pending_set(&steer_id), cx);
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert!(
+                !lanes(&ws.gallery_queue_snapshot(cx)).contains(&"steer"),
+                "the removal-first receipt retires the card: {:?}",
+                ws.gallery_queue_snapshot(cx)
+            );
+            assert_eq!(
+                ws.gallery_last_user_bubble(cx).as_deref(),
+                Some("引导六：回执先于回声"),
+                "the bubble lands on the receipt, not on the echo"
+            );
+        });
+    });
+
+    // ── idle-wake retire, text-fallback edition: a wake whose TurnStarted
+    // threads no matching pending id (the projection mints m-{entry} for
+    // journal rows that never carried a client id) still retires the card
+    // by its opening row's text ────────────────────────────────────────────
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_set_running(true, cx);
+            ws.gallery_submit("引导七：唤醒只带文本", SubmitBehavior::Steer, cx);
+            ws.gallery_set_running(false, cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            // A foreign id matches no card; the opening row's text does.
+            ws.gallery_inject_parked_turn_start(
+                Some("m-foreign"),
+                Some("引导七：唤醒只带文本"),
+                cx,
+            );
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert!(
+                ws.gallery_turn_active(cx),
+                "the wake still flips the running edge"
+            );
+            assert!(
+                ws.gallery_queue_snapshot(cx).is_empty(),
+                "the text fallback retires the card: {:?}",
+                ws.gallery_queue_snapshot(cx)
+            );
+            assert_eq!(
+                ws.gallery_last_user_bubble(cx).as_deref(),
+                Some("引导七：唤醒只带文本"),
+                "the steered bubble lands"
+            );
+        });
+    });
+
+    // ── a wake with neither a matching id nor text must not retire: no
+    // strand-guess on a bare lifecycle event ────────────────────────────────
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_set_running(true, cx);
+            ws.gallery_submit("引导八：空唤醒不动卡", SubmitBehavior::Steer, cx);
+            ws.gallery_set_running(false, cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_inject_parked_turn_start(Some("m-foreign"), None, cx);
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert!(
+                lanes(&ws.gallery_queue_snapshot(cx)).contains(&"steer"),
+                "a bare wake leaves the card parked: {:?}",
+                ws.gallery_queue_snapshot(cx)
+            );
+        });
+    });
+
+    // ── the id match wins when both id and text are present: two
+    // same-text cards, a wake naming the FIRST card's id retires exactly
+    // that one — the text fallback must not double-fire behind a
+    // successful id retire ────────────────────────────────────────────────
+    let first_steer_id = visual
+        .update(|_window, cx| ws.update(cx, |ws, cx| ws.gallery_first_steer_id(cx)))
+        .expect("eighth steer parked");
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_set_running(true, cx);
+            ws.gallery_submit("引导八：空唤醒不动卡", SubmitBehavior::Steer, cx);
+            ws.gallery_set_running(false, cx);
+            ws.gallery_inject_parked_turn_start(
+                Some(&first_steer_id),
+                Some("引导八：空唤醒不动卡"),
+                cx,
+            );
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert_eq!(
+                lanes(&ws.gallery_queue_snapshot(cx)),
+                vec!["steer"],
+                "the id retire took the FIRST card only; the same-text twin \
+                 stays parked for its own receipt"
+            );
+            assert!(
+                ws.gallery_turn_active(cx),
+                "the wake's lifecycle edge still flipped"
+            );
+        });
+    });
+}
+
+/// The accepted `chat/pendingMessageSet{steering}` echo, wire-shaped.
+fn pending_set(id: &str) -> ahp_types::actions::StateAction {
+    ahp_types::actions::StateAction::ChatPendingMessageSet(
+        ahp_types::actions::ChatPendingMessageSetAction {
+            kind: ahp_types::state::PendingMessageKind::Steering,
+            id: id.to_string(),
+            message: serde_json::from_value(serde_json::json!({
+                "text": "引导六：回执先于回声",
+                "origin": { "kind": "user" },
+            }))
+            .expect("a user message parses"),
+        },
+    )
 }

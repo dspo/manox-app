@@ -502,15 +502,44 @@ impl Workspace {
     /// Retire ONE `SteerPending` card whose steer the wire just consumed:
     /// the model has it, so the card leaves the queue immediately and its
     /// `steered` bubble enters the message list — the injection instant, not
-    /// the turn boundary. A no-op when no card matches the id (a foreign
-    /// steer from another client, or a card an earlier settle already
-    /// settled).
-    pub(super) fn retire_steer_card(&mut self, message_id: &str, cx: &mut Context<Self>) {
+    /// the turn boundary. Returns whether a card actually retired; `false`
+    /// when no card matches the id (a foreign steer from another client, or
+    /// a card an earlier settle already settled).
+    pub(super) fn retire_steer_card(&mut self, message_id: &str, cx: &mut Context<Self>) -> bool {
         let matched = self.chat.read(cx).queued_follow_ups.iter().position(|item| {
             matches!(&item.state, FollowUpState::SteerPending { message_id: id } if id == message_id)
         });
+        self.retire_matched_steer(matched, cx)
+    }
+
+    /// Retire the FIRST `SteerPending` card whose text equals `text` — the
+    /// wake-retire fallback for a host that threads no pending id through
+    /// the woken turn's opening row. FIFO first match: the earliest parked
+    /// copy of the text is the one a same-text consumption retires, and a
+    /// second same-text card stays parked for its own receipt (its id- or
+    /// text-matched echo).
+    pub(super) fn retire_steer_card_matching_text(
+        &mut self,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let matched = self
+            .chat
+            .read(cx)
+            .queued_follow_ups
+            .iter()
+            .position(|item| {
+                matches!(&item.state, FollowUpState::SteerPending { .. } if item.turn.text == text)
+            });
+        self.retire_matched_steer(matched, cx)
+    }
+
+    /// The shared retire: drop the card at `matched`, push its `steered`
+    /// bubble into the transcript. `false` for a `None` match — a no-op,
+    /// never an error.
+    fn retire_matched_steer(&mut self, matched: Option<usize>, cx: &mut Context<Self>) -> bool {
         let Some(idx) = matched else {
-            return;
+            return false;
         };
         let Some(item) = self.chat.update(cx, |chat, cc| {
             let v = chat.queued_follow_ups.remove(idx);
@@ -521,7 +550,7 @@ impl Workspace {
             cc.notify();
             v
         }) else {
-            return;
+            return false;
         };
         let mut meta = item.turn.meta.clone();
         meta.steered = true;
@@ -537,6 +566,7 @@ impl Workspace {
         self.sync_list_count(cx);
         self.follow_message_tail(cx);
         cx.notify();
+        true
     }
 
     /// Replay the parked session's accumulated LIFECYCLE events before the
@@ -565,14 +595,29 @@ impl Workspace {
         let events = store.update(cx, |s, _| s.drain_chat_events(&sid));
         for event in events {
             match event {
-                crate::chat_fold::ChatEvent::TurnStarted { steer_id } => {
+                crate::chat_fold::ChatEvent::TurnStarted {
+                    steer_id,
+                    opening_text,
+                } => {
                     self.chat.update(cx, |chat, cx| {
                         chat.turn_active = true;
                         cx.notify();
                     });
                     self.spawn_thinking_ticker(cx);
-                    if let Some(message_id) = steer_id {
-                        self.retire_steer_card(&message_id, cx);
+                    // An idle steer wakes its own run: retire by the pending
+                    // id the opening row carried, falling back to the row's
+                    // text when the host threads none (or the id matches no
+                    // card — the projection mints `m-{entry}` for journal rows
+                    // without a client id, which a card's uuid never is). A
+                    // same-text misretire (another client steering identical
+                    // wording) is extreme and cheap: one bubble, one turn
+                    // early.
+                    let retired = steer_id
+                        .as_deref()
+                        .map(|message_id| self.retire_steer_card(message_id, cx))
+                        .unwrap_or(false);
+                    if !retired && let Some(text) = opening_text.as_deref() {
+                        self.retire_steer_card_matching_text(text, cx);
                     }
                 }
                 crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
