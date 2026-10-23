@@ -59,7 +59,18 @@ pub enum ChatEvent {
     /// composer card correlating by the id retires. Emitted for EVERY
     /// turn start (ours, another client's, an auto-flushed queue); the
     /// transcript lifecycle must never lose the event to the retire.
-    TurnStarted { steer_id: Option<String> },
+    TurnStarted {
+        steer_id: Option<String>,
+        /// The opening row's text (`None` for an empty one). The wake-retire
+        /// FALLBACK only, never a steer marker: every turn start carries its
+        /// opening row's text, so a consumer may match it against a parked
+        /// card only when `steer_id` is also set (a wake is always stamped)
+        /// and the store has ruled out a carried queued submission (see
+        /// `AhpStore::route`). Another client's message with identical
+        /// wording stays ambiguous — the host threading the pending id
+        /// through the woken row is the exit.
+        opening_text: Option<String>,
+    },
     /// The turn reached a terminal state (`chat/turnComplete` /
     /// `turnCancelled` / `chat/error`). `cancelled` distinguishes a user
     /// interrupt from a normal completion — the follow-up queue settles
@@ -157,6 +168,12 @@ impl ChatEvent {
                 // own mint for rows that never carried one). The retire
                 // rides ALONGSIDE the lifecycle event, never instead of it.
                 steer_id: start.queued_message_id.clone(),
+                // The row's text is the wake-retire FALLBACK for a pending id
+                // no card holds: the projection mints `m-{entry}` when the
+                // journal row carried no client id. The store clears it for a
+                // carried queued submission; consumers gate it on `steer_id`
+                // (see the field's doc).
+                opening_text: (!start.message.text.is_empty()).then(|| start.message.text.clone()),
             }),
             A::ChatTurnComplete(_) => Some(ChatEvent::TurnFinished { cancelled: false }),
             A::ChatTurnCancelled(_) => Some(ChatEvent::TurnFinished { cancelled: true }),
@@ -1036,8 +1053,45 @@ mod tests {
                 event,
                 Some(ChatEvent::TurnStarted {
                     steer_id: Some(message_id),
+                    ..
                 }) if message_id == "steer-9"
             ));
+        }
+
+        /// The wake-retire fallback: the opening row's text rides the event
+        /// even when the host threads no pending id (empty → `None`).
+        #[test]
+        fn a_turn_start_carries_the_opening_text_as_the_wake_retire_fallback() {
+            let start = |text: &str| {
+                let message: AhpMessage = serde_json::from_value(serde_json::json!({
+                    "text": text, "origin": { "kind": "user" }
+                }))
+                .expect("message parses");
+                StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                    turn_id: "t-2".to_string(),
+                    started_at: "2026-01-01T00:00:00Z".to_string(),
+                    message,
+                    queued_message_id: None,
+                    meta: None,
+                })
+            };
+            assert!(matches!(
+                ChatEvent::from_action(&start("引导：先看失败项"), Some(&minimal_chat())),
+                Some(ChatEvent::TurnStarted {
+                    opening_text: Some(text),
+                    ..
+                }) if text == "引导：先看失败项"
+            ));
+            assert!(
+                matches!(
+                    ChatEvent::from_action(&start(""), Some(&minimal_chat())),
+                    Some(ChatEvent::TurnStarted {
+                        opening_text: None,
+                        ..
+                    })
+                ),
+                "an empty opening row carries no text to match by"
+            );
         }
 
         #[test]
@@ -1055,7 +1109,7 @@ mod tests {
             });
             assert!(matches!(
                 ChatEvent::from_action(&action, Some(&minimal_chat())),
-                Some(ChatEvent::TurnStarted { steer_id: None })
+                Some(ChatEvent::TurnStarted { steer_id: None, .. })
             ));
         }
 

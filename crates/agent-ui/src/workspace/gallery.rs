@@ -66,6 +66,10 @@ fn install_scene(ws: &mut Workspace, cx: &mut Context<Workspace>) {
         .expect("the assembly binds a foreground session");
     let mut store = AhpStore::detached();
     store.diagnostic_set_chat(&sid, fabricated_chat(&sid, true));
+    // A real store's session catalogue owns the chat; bucket routing
+    // (`session_of_chat`) resolves through it, so the detached fixture
+    // seeds the owning row too.
+    store.diagnostic_seed_session_for_chat(&sid, &sid);
     let store = cx.new(|_| store);
     ws.chat.update(cx, |chat, cc| {
         chat.store = Some((store, sid.clone()));
@@ -221,6 +225,37 @@ impl Workspace {
         self.replay_parked_chat_events(cx);
     }
 
+    /// Route one raw wire envelope through the store's production dispatch
+    /// point (`route`), exactly as the host's broadcast lands — the true
+    /// wire-shape edition of the consumption tests (a removal may precede
+    /// its `pendingMessageSet` echo; the pre-derived event injection skips
+    /// the fold gate that ordering exposes).
+    pub fn gallery_route_raw_envelope(
+        &mut self,
+        action: ahp_types::actions::StateAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            return;
+        };
+        let channel = chat_uri(&sid);
+        store.update(cx, |store, cx| {
+            store.diagnostic_route_event(
+                ahp::ClientEvent {
+                    channel: channel.clone(),
+                    event: ahp::SubscriptionEvent::Action(ahp_types::actions::ActionEnvelope {
+                        channel,
+                        action,
+                        server_seq: 1,
+                        origin: None,
+                        rejection_reason: None,
+                    }),
+                },
+                cx,
+            );
+        });
+    }
+
     /// Inject a wire consumption receipt into the store's event bucket, as
     /// the backend's injection echo would land while the thread is parked.
     pub fn gallery_inject_steer_consumed(&mut self, message_id: &str, cx: &mut Context<Self>) {
@@ -325,8 +360,16 @@ impl Workspace {
     }
 
     /// Inject a parked turn-start whose opening row IS a steer: the
-    /// idle-steer wake path's receipt (TurnStarted carrying the id).
-    pub fn gallery_inject_parked_turn_start(&mut self, message_id: &str, cx: &mut Context<Self>) {
+    /// idle-steer wake path's receipt. `steer_id` is the id the row threads
+    /// (`None` when the host threads none); `opening_text` is the row's text
+    /// fallback (`None` for an empty row). The retire matches by id first,
+    /// then by text.
+    pub fn gallery_inject_parked_turn_start(
+        &mut self,
+        steer_id: Option<&str>,
+        opening_text: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some((store, sid)) = self.chat.read(cx).store.clone() else {
             return;
         };
@@ -334,7 +377,8 @@ impl Workspace {
             store.push_chat_event_for_test(
                 &sid,
                 crate::chat_fold::ChatEvent::TurnStarted {
-                    steer_id: Some(message_id.to_string()),
+                    steer_id: steer_id.map(str::to_string),
+                    opening_text: opening_text.map(str::to_string),
                 },
             );
         });

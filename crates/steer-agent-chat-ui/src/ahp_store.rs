@@ -171,6 +171,32 @@ pub enum FoldEffect {
     Rejected(String),
 }
 
+/// Derive the steering injection receipt from one envelope's (channel,
+/// action) — the display event the fold's effect must not gate.
+///
+/// Returns the bare chat id the envelope rode plus the
+/// [`crate::chat_fold::ChatEvent::SteerConsumed`] the composer's steer card
+/// retires by. `None` for everything else: a non-chat channel, any other
+/// action, and a `Queued` removal (the plain queue is a local surface; its
+/// cards retire at the settle, not on a wire removal).
+fn steering_receipt_of(
+    channel: &str,
+    action: &StateAction,
+) -> Option<(String, crate::chat_fold::ChatEvent)> {
+    let StateAction::ChatPendingMessageRemoved(removed) = action else {
+        return None;
+    };
+    if !channel.starts_with("ahp-chat:/") || removed.kind != PendingMessageKind::Steering {
+        return None;
+    }
+    Some((
+        id_of(channel).to_string(),
+        crate::chat_fold::ChatEvent::SteerConsumed {
+            message_id: removed.id.clone(),
+        },
+    ))
+}
+
 impl Default for ChannelBook {
     fn default() -> Self {
         Self {
@@ -1025,6 +1051,18 @@ impl AhpStore {
         self.book.chats.insert(chat_id.to_string(), chat);
     }
 
+    /// Seed a bare session whose default chat is `chat_id`, so a chat
+    /// channel's owning session resolves (`session_of_chat`). Test-support
+    /// diagnostic: a detached store's book has no session catalogue, and
+    /// bucket routing (receipts as much as derived events) resolves through
+    /// it.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_seed_session_for_chat(&mut self, session_id: &str, chat_id: &str) {
+        let mut session = empty_session(&session_uri(session_id));
+        session.default_chat = Some(chat_uri(chat_id));
+        self.book.sessions.insert(session_id.to_string(), session);
+    }
+
     /// Queue one display event into a session's bucket. Test-support
     /// diagnostic: the drill-down panel's pump consumes exactly this bucket.
     #[cfg(feature = "test-support")]
@@ -1550,6 +1588,25 @@ impl AhpStore {
                 } else {
                     None
                 };
+                // A turn start that carries a queued submission is not a
+                // steer wake: the pre-fold `queued_messages` still holds that
+                // row (this very action is what clears it). The projection
+                // stamps a carried queued row the same `m-{entry}` id a
+                // wake's steer row gets, so the id alone cannot tell the two
+                // apart; the pre-fold list can. The wake-retire text is
+                // dropped below, so an ordinary send whose text equals a
+                // parked steer's never retires that steer.
+                let carried_queued = matches!(
+                    &envelope.action,
+                    StateAction::ChatTurnStarted(start)
+                        if start.queued_message_id.as_deref().is_some_and(|id| {
+                            chat_id
+                                .as_deref()
+                                .and_then(|chat_id| self.book.chats.get(chat_id))
+                                .and_then(|chat| chat.queued_messages.as_deref())
+                                .is_some_and(|queued| queued.iter().any(|m| m.id == id))
+                        })
+                );
                 match self.book.apply(&envelope.channel, &envelope.action) {
                     FoldEffect::Changed => {
                         // The official unread rise (#870's app half):
@@ -1596,7 +1653,7 @@ impl AhpStore {
                         }
                         if let Some(chat_id) = chat_id
                             && let Some(chat) = self.book.chats.get(&chat_id)
-                            && let Some(event) = crate::chat_fold::ChatEvent::from_action(
+                            && let Some(mut event) = crate::chat_fold::ChatEvent::from_action(
                                 &envelope.action,
                                 Some(chat),
                             )
@@ -1607,12 +1664,60 @@ impl AhpStore {
                             // no legitimate display consumer, so the event
                             // is dropped; the fold's rebuild covers content.
                             if let Some(session_id) = owning {
+                                // A queued flush carries its opening text like
+                                // any other turn start, but no steer can hide
+                                // behind it (see `carried_queued`): leaving
+                                // the text in would let it retire a same-text
+                                // parked steer.
+                                if carried_queued
+                                    && let crate::chat_fold::ChatEvent::TurnStarted {
+                                        opening_text,
+                                        ..
+                                    } = &mut event
+                                {
+                                    *opening_text = None;
+                                }
                                 self.push_chat_event(session_id, event);
                             }
                         }
                         cx.notify();
                     }
-                    FoldEffect::Ignored => {}
+                    FoldEffect::Ignored => {
+                        // A steering removal can reach this arm as a RECEIPT.
+                        // The host publishes `chat/pendingMessageRemoved
+                        // {steering}` the instant the injection into the
+                        // running turn is confirmed, while the router
+                        // broadcasts the accepted `pendingMessageSet` echo
+                        // only after the handler returns — the removal lands
+                        // FIRST, the fold's single `steering_message` slot is
+                        // still empty, and the SDK reducer answers NoOp for an
+                        // id the slot does not hold. That NoOp does not
+                        // disprove the receipt (it is a receipt BECAUSE the
+                        // host only publishes it after a confirmed
+                        // injection), so the display event is derived from
+                        // the envelope alone; the composer's steer card
+                        // correlates on it (`retire_steer_card`). The
+                        // `Changed` arm keeps deriving through `from_action`
+                        // — when the slot DOES match, that arm yields the
+                        // same event, and one envelope enters only one arm.
+                        //
+                        // The empty slot is not only the wire-order race: the
+                        // fold holds ONE steer while the kernel parks many, so
+                        // a later steer's Set evicts the earlier id and that
+                        // earlier steer's removal NoOps for the same reason —
+                        // with no ordering race at all. A removal is a
+                        // receipt by host construction (it is published only
+                        // after a confirmed injection), so the effect gate,
+                        // not the reducer, decides whether to believe it.
+                        if let Some((chat_id, event)) =
+                            steering_receipt_of(&envelope.channel, &envelope.action)
+                            && let Some(session_id) =
+                                self.book.session_of_chat(&chat_id).map(str::to_string)
+                        {
+                            self.push_chat_event(session_id, event);
+                            cx.notify();
+                        }
+                    }
                     FoldEffect::Rejected(reason) => {
                         tracing::warn!(channel = %envelope.channel, reason = %reason,
                             "dispatch rejected");
@@ -4376,6 +4481,201 @@ mod tests {
         assert_eq!(set.message.text, "look at the failing test first");
     }
 
+    /// How many `SteerConsumed` events one envelope yields through the
+    /// store's derivation arms (the fold's effect decides which runs), so the
+    /// no-duplicate property is asserted against the same shape `route`
+    /// executes. This is a mini-model, not `route` itself — the wire-shape
+    /// guarantee through the real dispatch is pinned in
+    /// `agent-ui/tests/send_mode_lanes.rs`.
+    fn receipts_via_fold_arms(
+        book: &mut ChannelBook,
+        channel: &str,
+        action: &StateAction,
+    ) -> usize {
+        use crate::chat_fold::ChatEvent;
+        let effect = book.apply(channel, action);
+        let chat = book.chats.get(id_of(channel));
+        match effect {
+            FoldEffect::Changed => ChatEvent::from_action(action, chat).is_some() as usize,
+            FoldEffect::Ignored => steering_receipt_of(channel, action).is_some() as usize,
+            FoldEffect::Rejected(_) => 0,
+        }
+    }
+
+    /// A steering removal is an INJECTION RECEIPT even when the fold ignored
+    /// it. The host publishes the removal the instant the injection is
+    /// confirmed — before the accepted `pendingMessageSet` echo is
+    /// broadcast — so on the wire the removal lands while the fold's single
+    /// steering slot is still empty and the reducer NoOps. The receipt
+    /// derivation bypasses the fold effect and lands in the OWNING session's
+    /// bucket; this is the wire-order regression that stranded steer cards
+    /// mid-turn (retire never fired, bubble never pushed).
+    ///
+    /// The empty slot is only one route into this arm: see
+    /// [`a_removal_for_a_steer_a_later_set_evicted_still_derives_a_receipt`]
+    /// for the same NoOp with no ordering race at all.
+    #[test]
+    fn a_steering_removal_derives_the_receipt_even_when_the_fold_ignored_it() {
+        let mut store = test_store();
+        let mut session = empty_session(&session_uri("s-1"));
+        session.default_chat = Some(chat_uri("c-1"));
+        store.book.sessions.insert("s-1".to_string(), session);
+
+        let channel = chat_uri("c-1");
+        let action = StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
+            kind: PendingMessageKind::Steering,
+            id: "steer-1".to_string(),
+        });
+        assert_eq!(
+            store.book.apply(&channel, &action),
+            FoldEffect::Ignored,
+            "no Set ever landed: the empty slot NoOps the removal"
+        );
+
+        let Some((chat_id, event)) = steering_receipt_of(&channel, &action) else {
+            panic!("the removal derives a receipt despite the NoOp fold");
+        };
+        assert_eq!(chat_id, "c-1");
+        assert!(matches!(
+            &event,
+            crate::chat_fold::ChatEvent::SteerConsumed { message_id } if message_id == "steer-1"
+        ));
+
+        // The chat id is not the bucket key: resolution goes through the
+        // owning session, exactly as route's Ignored arm does.
+        let session_id = store
+            .book
+            .session_of_chat(&chat_id)
+            .expect("the session catalogue owns the chat")
+            .to_string();
+        store.push_chat_event(session_id, event);
+        let drained = store.drain_chat_events("s-1");
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(
+            drained[0],
+            crate::chat_fold::ChatEvent::SteerConsumed { .. }
+        ));
+        assert!(store.drain_chat_events("s-none").is_empty());
+    }
+
+    /// One consumption, exactly one receipt — whichever order the removal
+    /// and the Set echo land in. Echo first: the slot matches, the removal
+    /// folds Changed and the Changed arm's `from_action` derives the event.
+    /// Removal first: the empty slot NoOps, the Ignored arm's receipt
+    /// derivation does. One envelope enters exactly one arm, so a consumed
+    /// steer never retires two cards.
+    #[test]
+    fn one_consumption_yields_exactly_one_receipt_in_either_wire_order() {
+        let channel = chat_uri("c-1");
+        let set = StateAction::ChatPendingMessageSet(ChatPendingMessageSetAction {
+            kind: PendingMessageKind::Steering,
+            id: "steer-1".to_string(),
+            message: user_message("look at the failing test".to_string()),
+        });
+        let removed = StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
+            kind: PendingMessageKind::Steering,
+            id: "steer-1".to_string(),
+        });
+
+        // Echo first (the slot-matched path): the Set lands, the removal
+        // folds Changed — and only the Changed arm's derivation fires.
+        let mut book = ChannelBook::default();
+        let mut count = receipts_via_fold_arms(&mut book, &channel, &set);
+        count += receipts_via_fold_arms(&mut book, &channel, &removed);
+        assert_eq!(
+            count, 1,
+            "echo-first: exactly the Changed arm derives the receipt"
+        );
+
+        // Removal first (the stranded-card path): the removal NoOps and the
+        // Ignored arm's bypass derives; the later Set echo adds nothing (a
+        // set carries no display face).
+        let mut book = ChannelBook::default();
+        let mut count = receipts_via_fold_arms(&mut book, &channel, &removed);
+        assert_eq!(
+            book.apply(&channel, &set),
+            FoldEffect::Changed,
+            "the echo still lands the slot for content reads"
+        );
+        count += receipts_via_fold_arms(&mut book, &channel, &set);
+        assert_eq!(
+            count, 1,
+            "removal-first: exactly the Ignored arm derives the receipt"
+        );
+    }
+
+    /// The single steering slot holds ONE steer while the kernel parks many:
+    /// a later steer's `Set` evicts the earlier id, so the earlier steer's
+    /// removal NoOps even with perfect wire ordering. The Ignored-arm receipt
+    /// is what retires that earlier card — which is why the bypass is not
+    /// merely a workaround for the removal-before-echo race and must survive
+    /// any upstream ordering fix.
+    #[test]
+    fn a_removal_for_a_steer_a_later_set_evicted_still_derives_a_receipt() {
+        let channel = chat_uri("c-1");
+        let set = |id: &str| {
+            StateAction::ChatPendingMessageSet(ChatPendingMessageSetAction {
+                kind: PendingMessageKind::Steering,
+                id: id.to_string(),
+                message: user_message(format!("steer {id}")),
+            })
+        };
+        let removed = |id: &str| {
+            StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
+                kind: PendingMessageKind::Steering,
+                id: id.to_string(),
+            })
+        };
+
+        let mut book = ChannelBook::default();
+        assert_eq!(book.apply(&channel, &set("steer-a")), FoldEffect::Changed);
+        assert_eq!(
+            book.apply(&channel, &set("steer-b")),
+            FoldEffect::Changed,
+            "the second parked steer owns the single slot"
+        );
+        assert_eq!(
+            book.apply(&channel, &removed("steer-a")),
+            FoldEffect::Ignored,
+            "the injection of the FIRST steer NoOps: the slot holds the second"
+        );
+        assert_eq!(
+            receipts_via_fold_arms(&mut book, &channel, &removed("steer-a")),
+            1,
+            "the Ignored arm still derives the first steer's receipt"
+        );
+        assert_eq!(
+            book.chats
+                .get("c-1")
+                .and_then(|chat| chat.steering_message.as_ref())
+                .map(|pending| pending.id.as_str()),
+            Some("steer-b"),
+            "consuming steer-a never clears the still-parked steer-b"
+        );
+        assert_eq!(
+            receipts_via_fold_arms(&mut book, &channel, &removed("steer-b")),
+            1,
+            "steer-b's own removal folds Changed and derives its receipt"
+        );
+    }
+
+    /// A `Queued` removal is not a steering consumption: the plain queue's
+    /// cards are local surfaces that retire at the settle. Nor is a steering
+    /// removal on a non-chat channel.
+    #[test]
+    fn a_queued_removal_derives_no_receipt() {
+        let queued = StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
+            kind: PendingMessageKind::Queued,
+            id: "q-1".to_string(),
+        });
+        assert!(steering_receipt_of(&chat_uri("c-1"), &queued).is_none());
+        let steering = StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
+            kind: PendingMessageKind::Steering,
+            id: "steer-1".to_string(),
+        });
+        assert!(steering_receipt_of(&session_uri("s-1"), &steering).is_none());
+    }
+
     #[test]
     fn confirmation_verdicts_carry_the_translator_auth_stamp() {
         for (approved, decision) in [(true, "allow"), (false, "deny")] {
@@ -4573,11 +4873,17 @@ mod tests {
         let mut store = test_store();
         store.push_chat_event(
             "s-1".to_string(),
-            crate::chat_fold::ChatEvent::TurnStarted { steer_id: None },
+            crate::chat_fold::ChatEvent::TurnStarted {
+                steer_id: None,
+                opening_text: None,
+            },
         );
         store.push_chat_event(
             "s-2".to_string(),
-            crate::chat_fold::ChatEvent::TurnStarted { steer_id: None },
+            crate::chat_fold::ChatEvent::TurnStarted {
+                steer_id: None,
+                opening_text: None,
+            },
         );
         store.push_chat_event(
             "s-1".to_string(),

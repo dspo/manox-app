@@ -502,15 +502,70 @@ impl Workspace {
     /// Retire ONE `SteerPending` card whose steer the wire just consumed:
     /// the model has it, so the card leaves the queue immediately and its
     /// `steered` bubble enters the message list — the injection instant, not
-    /// the turn boundary. A no-op when no card matches the id (a foreign
-    /// steer from another client, or a card an earlier settle already
-    /// settled).
-    pub(super) fn retire_steer_card(&mut self, message_id: &str, cx: &mut Context<Self>) {
+    /// the turn boundary. Returns whether a card actually retired; `false`
+    /// when no card matches the id (a foreign steer from another client, or
+    /// a card an earlier settle already settled).
+    pub(super) fn retire_steer_card(&mut self, message_id: &str, cx: &mut Context<Self>) -> bool {
         let matched = self.chat.read(cx).queued_follow_ups.iter().position(|item| {
             matches!(&item.state, FollowUpState::SteerPending { message_id: id } if id == message_id)
         });
+        self.retire_matched_steer(matched, cx)
+    }
+
+    /// Retire the FIRST `SteerPending` card whose text equals `text` — the
+    /// wake-retire fallback. FIFO first match: the earliest parked copy of
+    /// the text is the one a same-text consumption retires, and a second
+    /// same-text card stays parked for its own receipt (its id- or
+    /// text-matched echo). Never call this on its own: go through
+    /// [`Self::retire_woken_steer`], which owns the id-first rule.
+    pub(super) fn retire_steer_card_matching_text(
+        &mut self,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let matched = self
+            .chat
+            .read(cx)
+            .queued_follow_ups
+            .iter()
+            .position(|item| {
+                matches!(&item.state, FollowUpState::SteerPending { .. } if item.turn.text == text)
+            });
+        self.retire_matched_steer(matched, cx)
+    }
+
+    /// Retire the steer a WOKEN turn belongs to: the opening row's pending
+    /// id first, then — only when the id names no card this client holds —
+    /// the row's text. The id-first rule is what keeps one consumption from
+    /// retiring two same-text cards; the text fallback exists because the
+    /// projection mints `m-{entry}` for a journal row that carried no client
+    /// id, so the woken turn can name a steer the card only recognises by
+    /// its text. A turn start with no pending id is never a wake (a wake's
+    /// opening row is always stamped), so the fallback never runs there;
+    /// the store has already cleared the text for a carried queued
+    /// submission. The one remaining ambiguity is another client's message
+    /// with identical wording.
+    pub(super) fn retire_woken_steer(
+        &mut self,
+        steer_id: Option<&str>,
+        opening_text: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(message_id) = steer_id else {
+            return false;
+        };
+        if self.retire_steer_card(message_id, cx) {
+            return true;
+        }
+        opening_text.is_some_and(|text| self.retire_steer_card_matching_text(text, cx))
+    }
+
+    /// The shared retire: drop the card at `matched`, push its `steered`
+    /// bubble into the transcript. `false` for a `None` match — a no-op,
+    /// never an error.
+    fn retire_matched_steer(&mut self, matched: Option<usize>, cx: &mut Context<Self>) -> bool {
         let Some(idx) = matched else {
-            return;
+            return false;
         };
         let Some(item) = self.chat.update(cx, |chat, cc| {
             let v = chat.queued_follow_ups.remove(idx);
@@ -521,7 +576,7 @@ impl Workspace {
             cc.notify();
             v
         }) else {
-            return;
+            return false;
         };
         let mut meta = item.turn.meta.clone();
         meta.steered = true;
@@ -537,6 +592,7 @@ impl Workspace {
         self.sync_list_count(cx);
         self.follow_message_tail(cx);
         cx.notify();
+        true
     }
 
     /// Replay the parked session's accumulated LIFECYCLE events before the
@@ -565,15 +621,18 @@ impl Workspace {
         let events = store.update(cx, |s, _| s.drain_chat_events(&sid));
         for event in events {
             match event {
-                crate::chat_fold::ChatEvent::TurnStarted { steer_id } => {
+                crate::chat_fold::ChatEvent::TurnStarted {
+                    steer_id,
+                    opening_text,
+                } => {
                     self.chat.update(cx, |chat, cx| {
                         chat.turn_active = true;
                         cx.notify();
                     });
                     self.spawn_thinking_ticker(cx);
-                    if let Some(message_id) = steer_id {
-                        self.retire_steer_card(&message_id, cx);
-                    }
+                    // An idle steer wakes its own run: the retire rides the
+                    // wake's own lifecycle (see `retire_woken_steer`).
+                    self.retire_woken_steer(steer_id.as_deref(), opening_text.as_deref(), cx);
                 }
                 crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
                     self.chat.update(cx, |chat, cx| {

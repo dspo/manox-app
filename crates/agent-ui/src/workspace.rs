@@ -1988,18 +1988,20 @@ impl Workspace {
                         // the transcript.
                         continue;
                     }
-                    crate::chat_fold::ChatEvent::TurnStarted { steer_id } => {
+                    crate::chat_fold::ChatEvent::TurnStarted {
+                        steer_id,
+                        opening_text,
+                    } => {
                         this.chat.update(cx, |chat, cx| {
                             chat.turn_active = true;
                             cx.notify();
                         });
                         this.spawn_thinking_ticker(cx);
-                        // An idle steer wakes its own run: the opening row
-                        // carried the card's id, so the retire rides here —
-                        // the lifecycle above is never skipped for it.
-                        if let Some(message_id) = steer_id {
-                            this.retire_steer_card(message_id, cx);
-                        }
+                        // An idle steer wakes its own run: the retire rides
+                        // here, alongside the lifecycle (never instead of
+                        // it). The id-first rule and its text fallback live
+                        // in `retire_woken_steer`.
+                        this.retire_woken_steer(steer_id.as_deref(), opening_text.as_deref(), cx);
                     }
                     crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
                         this.chat.update(cx, |chat, cx| {
