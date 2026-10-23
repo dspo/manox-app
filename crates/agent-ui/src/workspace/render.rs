@@ -606,23 +606,43 @@ impl Workspace {
 
         let muted = theme.muted_foreground;
         let spinner = || {
-            PixelSpinner::new()
-                .variant(PixelSpinnerVariant::Grid)
-                .color(muted)
+            // The 16px frame is fixed: shrink 0 keeps a tight row from
+            // squeezing the glyph (the status line's own flex base is large).
+            gpui::div()
+                .flex_shrink_0()
+                .child(
+                    PixelSpinner::new()
+                        .variant(PixelSpinnerVariant::Grid)
+                        .color(muted),
+                )
                 .into_any_element()
         };
-        // Everything left of the trailing activity summary is fixed content
-        // (prefix, model name, separator, clock): flex-shrink 0 keeps taffy
-        // from spreading overflow across the row, so the summary — or a
-        // sub-agent row's variable-length title — is the only element that
-        // yields and truncates.
+        // The lead-in's chrome (prefix, separators, clock) is fixed: shrink 0
+        // keeps taffy from spreading a long activity summary's overflow across
+        // it. The model name and the activity are runtime text — an unresolved
+        // id is the raw wire string, a tool summary an arbitrary title — so
+        // both ellipsize rather than pushing the clock (or each other) out of
+        // the row. A sub-agent row's `{type}({task})` prefix is variable-length
+        // for the same reason and stays the row's shrinkable text.
         let model_spans = |theme: &Theme| {
             tag.spans(theme)
                 .into_iter()
-                .map(|(text, color)| gpui::div().flex_shrink_0().text_color(color).child(text))
+                .map(|(text, color)| {
+                    gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(color)
+                        .child(text)
+                })
                 .collect::<Vec<_>>()
         };
         let separator = || gpui::div().flex_shrink_0().child("·");
+        let clock = |secs: i64| {
+            gpui::div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .child(crate::i18n::t_count("thinking-duration", secs))
+        };
         // One tight segment line: name + verb, then the model, the clock and
         // the activity sit flush against each other (no flex gap). Only the
         // spinner keeps its own gutter.
@@ -656,28 +676,31 @@ impl Workspace {
             );
             if elapsed > 0 {
                 status = status.child(separator()).child(
-                    gpui::div()
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .child(crate::i18n::t_count("thinking-duration", elapsed as i64)),
+                    clock(elapsed as i64).debug_selector(|| "workspace-captain-clock".into()),
                 );
             }
             if let Some(activity) = activity {
+                // Every arm yields the same way: a bare div's automatic
+                // min-width would clamp it to its one-line text, so overflow
+                // would clip it instead of ellipsizing at its own end.
                 let summary = match &activity {
-                    LiveActivity::Thinking => {
-                        gpui::div().child(crate::i18n::t("captain-activity-thinking"))
-                    }
-                    LiveActivity::Replying => {
-                        gpui::div().child(crate::i18n::t("captain-activity-replying"))
-                    }
+                    LiveActivity::Thinking => gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .child(crate::i18n::t("captain-activity-thinking")),
+                    LiveActivity::Replying => gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .child(crate::i18n::t("captain-activity-replying")),
                     LiveActivity::Tool(title) => gpui::div()
                         .min_w_0()
                         .truncate()
-                        .whitespace_nowrap()
                         .font_family(theme.mono_font_family.clone())
                         .child(one_line(title)),
                 };
-                status = status.child(separator()).child(summary);
+                status = status
+                    .child(separator())
+                    .child(summary.debug_selector(|| "workspace-captain-activity".into()));
             }
             let row = gpui::div()
                 .id("captain-strip")
@@ -724,12 +747,7 @@ impl Workspace {
                 theme,
             );
             if let Some(secs) = elapsed_secs(&work.started_at) {
-                status = status.child(separator()).child(
-                    gpui::div()
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .child(crate::i18n::t_count("thinking-duration", secs)),
-                );
+                status = status.child(separator()).child(clock(secs));
             }
             // The model segment names the session's model: a sub-agent run on
             // this harness inherits the parent's model unless its own
