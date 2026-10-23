@@ -520,8 +520,6 @@ follow-stop-indicator-retry = Click to reconnect the live follow
 composer-delivery-error = Connection not ready — your message may not have been delivered
 composer-delivery-retry = Retry
 
-composer-add-chrome = Chrome
-
 composer-add-internal-browser = Internal Web Browser
 
 completion-tag-command = Command

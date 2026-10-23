@@ -3787,7 +3787,7 @@ mod tests {
         book.ext.insert(
             work_uri("s-1"),
             XManoxState {
-                browser_suites: Some(vec!["chrome".into()]),
+                browser_suites: Some(vec!["webexplore".into()]),
                 goal: Some(serde_json::json!({ "text": "ship" })),
                 ..Default::default()
             },
@@ -3802,7 +3802,10 @@ mod tests {
             plan_snapshot_of(&book, "s-1"),
             Some(&serde_json::json!({ "v": 1 }))
         );
-        assert_eq!(browser_suites_of(&book, "s-1"), vec!["chrome".to_string()]);
+        assert_eq!(
+            browser_suites_of(&book, "s-1"),
+            vec!["webexplore".to_string()]
+        );
         assert_eq!(
             goal_of(&book, "s-1"),
             Some(&serde_json::json!({ "text": "ship" }))

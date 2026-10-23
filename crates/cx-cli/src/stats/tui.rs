@@ -111,7 +111,10 @@ fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     records: Vec<UsageRecord>,
     today: String,
-) -> Result<()> {
+) -> Result<()>
+where
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let mut app = StatsApp::new(records, today);
     loop {
         terminal.draw(|f| draw(f, &mut app))?;

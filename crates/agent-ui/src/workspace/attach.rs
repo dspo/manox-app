@@ -562,12 +562,10 @@ impl Workspace {
                 let view = store.read(cx);
                 crate::ahp_store::browser_suites_of(&view.book, &sid)
                     .into_iter()
-                    .filter_map(|s| {
-                        serde_json::from_value::<manox_agent::engine::BrowserSuite>(
-                            serde_json::Value::String(s),
-                        )
-                        .ok()
-                    })
+                    // The channel carries plain wire names; from_wire is the
+                    // closed-vocabulary parse, and retired slugs in restored
+                    // state drop out as `None` — per-item, no compat read.
+                    .filter_map(|s| manox_agent::engine::BrowserSuite::from_wire(&s))
                     .collect()
             })
             .unwrap_or_else(|| {

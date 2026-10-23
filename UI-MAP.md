@@ -595,7 +595,7 @@ Vertical stack of up to two chip rows above the composer (conditional,
 rendered by `Workspace::render_attachments`): a file/image attachment row
 (`render_attachment_chips`, cleared on submit) and an opt-in browser-suite row
 (`render_browser_chips`, persists across submits; removing a chip deactivates
-the ChromeUse / WebExplore tool suite).
+the WebExplore tool suite).
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs` + `crates/agent-ui/src/views/composer_menu.rs`
 
@@ -607,7 +607,7 @@ Single attachment chip: icon + filename + remove btn.
 
 #### BrowserSuiteChip
 
-Single browser-tool-suite chip: globe/frame icon + localized suite name +
+Single browser-tool-suite chip: frame icon + localized suite name +
 remove btn. Removing it calls `deactivate_browser_tool_suite`.
 
 > Source: `crates/agent-ui/src/views/composer_menu.rs`
