@@ -41,6 +41,7 @@ gpui::actions!(
         CompletionDismiss,
         ComposerRecallUp,
         ComposerRecallDown,
+        ComposerSubmitInterrupt,
         UndoLastQueued,
         ToggleTurnNavigator,
         CopySelectedTurn,

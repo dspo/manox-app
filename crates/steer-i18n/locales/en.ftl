@@ -179,7 +179,7 @@ steering-verb = is steering
 # The sub-agent lines: `{ $name }` is "{type}({task})" (e.g.
 # "Explore(fix the login redirect)"); the type comes from the host verbatim.
 subagent-steering-prefix = { $name } is steering
-turn-process-completed = Completed in 
+turn-process-completed = Completed in
 captain-activity-thinking = Thinking
 captain-activity-replying = Replying
 
@@ -678,15 +678,34 @@ composer-image-process-failed = Some pasted images could not be sent (unsupporte
 
 composer-placeholder-followup = Request a follow-up change…
 
+# Split send pill (idle send / streaming steer + stop + chevron menu)
+send-pill-send = Send
+
+send-pill-queue = Queue
+
+send-pill-stop = Stop
+
+send-menu-tooltip = Send actions
+
+send-menu-steer = Steer
+
+send-menu-queue = Queue
+
+send-menu-interrupt = Interrupt
+
 queued-steer-now-action = Steer now
 
-queued-steer-now-retry-action = Retry now
+queue-requeue-action = Re-queue
+
+queue-row-interrupt-action = Interrupt now
 
 queued-edit-action = Edit
 
 queued-delete-action = Remove
 
 message-steer-pending-badge = Waiting to steer
+
+message-queued-badge = Queued
 
 message-steered-badge = Steered
 # Plan review card verdict buttons

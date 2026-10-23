@@ -166,7 +166,7 @@ steering-verb = 正在驾驶
 # 子代理行：`{ $name }` 是「类型(任务)」（例如「Explore(修复登录跳转)」，
 # 类型由宿主给出，原样渲染）。
 subagent-steering-prefix = { $name }正在驾驶
-turn-process-completed = 已完成，用时 
+turn-process-completed = 已完成，用时
 captain-activity-thinking = 思考中
 captain-activity-replying = 正在回复
 
@@ -657,15 +657,34 @@ composer-image-process-failed = 部分粘贴的图片无法发送（格式不支
 
 composer-placeholder-followup = 要求后续变更…
 
-queued-steer-now-action = 立即
+# Split send pill (idle send / streaming steer + stop + chevron menu)
+send-pill-send = 发送
 
-queued-steer-now-retry-action = 立即重试
+send-pill-queue = 排队
+
+send-pill-stop = 停止
+
+send-menu-tooltip = 发送动作
+
+send-menu-steer = 引导
+
+send-menu-queue = 排队
+
+send-menu-interrupt = 打断
+
+queued-steer-now-action = 进入引导
+
+queue-requeue-action = 重新排队
+
+queue-row-interrupt-action = 立即打断
 
 queued-edit-action = 编辑
 
 queued-delete-action = 移除
 
 message-steer-pending-badge = 待引导
+
+message-queued-badge = 排队中
 
 message-steered-badge = 已引导
 # Plan review card verdict buttons

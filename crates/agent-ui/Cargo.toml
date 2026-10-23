@@ -81,6 +81,14 @@ manox-ahp.workspace = true
 manox-session-core.workspace = true
 
 
+[[example]]
+name = "send_mode_gallery"
+required-features = ["test-support"]
+
+[[test]]
+name = "send_mode_lanes"
+required-features = ["test-support"]
+
 [dev-dependencies]
 manox-agent = { workspace = true, features = ["test-support"] }
 manox-terminal = { workspace = true, features = ["test-support"] }
@@ -97,3 +105,10 @@ gpui-pre-macos = { version = "=0.3.7", features = ["test-support"] }
 
 [lints.clippy]
 dbg_macro = "deny"
+
+# The dev-profile example binaries outgrow macOS ld's compact-unwind
+# fast path (`__eh_frame` > 16MB) — a linker performance note, not a
+# correctness signal, and dev-only. Kept as a targeted allow instead of
+# letting every `cargo run` spray it.
+[lints.rust]
+linker_messages = "allow"

@@ -1,11 +1,26 @@
 //! The composer turn surface (U9b cluster 3): submit and its turn
-//! builders, the steer/queued follow-up lifecycle (parked stash flush,
-//! pending bubbles, stranded-steer healing, drop/undo), and the recall
-//! walk over sent turns. Split from `workspace.rs` — `super` is the
-//! workspace module; private methods are lifted `pub(super)` so the
-//! parent (render/keyboard handlers) and its `tests` child keep
-//! calling them. The generic wire helpers they ride (`send_note`,
-//! `send_submit_v2`) stay in the parent.
+//! builders, the mid-turn send modes (steer / queue / interrupt) with
+//! their follow-up lifecycle (steer dispatch + retirement, settle flush,
+//! drop/undo), and the recall walk over sent turns. Split from
+//! `workspace.rs` — `super` is the workspace module; private methods are
+//! lifted `pub(super)` so the parent (render/keyboard handlers) and its
+//! `tests` child keep calling them. The generic wire helpers they ride
+//! (`send_note`, `send_submit_v2`, `send_steer_v2`) stay in the parent.
+
+/// The per-send delivery choice (thinkrail's streaming send modes): an
+/// ACTION taken at submit time — never sticky state, so a plain Enter never
+/// silently obeys a mode the user forgot about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitBehavior {
+    /// Idle submit: an ordinary new turn.
+    Send,
+    /// Deliver at the running turn's next model-call boundary.
+    Steer,
+    /// Park for the settle flush.
+    Queue,
+    /// Cancel the running turn NOW; the message goes out at the settle.
+    Interrupt,
+}
 
 use super::*;
 
@@ -14,19 +29,29 @@ use super::*;
 /// sites used to repeat verbatim. Non-image blocks are `None`; a failed
 /// decode is dropped (an undecodable attachment cannot ride the wire).
 impl Workspace {
-    /// Flip EVERY parked thread's `SteerPending` card to `Failed` when its turn
-    /// Drain the stashed `Queued` follow-ups of a parked thread whose turn
-    /// just settled: the follow-up turn runs on the parked thread itself,
-    /// mirroring the foreground flush without a conversation bubble (a
-    /// switch-back rebuild shows it through the thread mirror). U1-flush:
-    /// the flush rides the gateway — all but the last drain as
-    /// `AppendUserMessage` notes (accept without a run) and the last as the
-    /// v2 `Submit` that starts the next turn, matching the foreground
-    /// flush's batching. The pre-migration direct facade write
-    /// (`insert_user_message` + `run_turn`) bypassed the journal's
-    /// accept-time persistence (K5) and the server's queue/drain merge; the
-    /// parked thread has no optimistic bubble, so no echo is pushed — the
+    /// The composer's Enter (the send pill's default face rides the same
+    /// route): an ordinary turn while idle, a QUEUE while running — the most
+    /// passive lane is the default, so the barest gesture never disturbs the
+    /// running turn.
     pub(crate) fn submit_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let behavior = if self.foreground_running(cx) {
+            SubmitBehavior::Queue
+        } else {
+            SubmitBehavior::Send
+        };
+        self.submit_composer(behavior, window, cx);
+    }
+
+    /// The composer's submit gate: read the input, route ask-card answers
+    /// first, block on the empty/picker guards, intercept slash commands,
+    /// then hand the message to [`Self::send_user_turn`]. Attachments decode
+    /// off the UI thread before the handoff.
+    fn submit_composer(
+        &mut self,
+        behavior: SubmitBehavior,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         tracing::info!("composer submit fired");
         // T10c (§D.6): the v1 `history_phase` loading gate is gone — the
         // follow stream's Snapshot → window Replace is the restore boundary,
@@ -39,6 +64,11 @@ impl Workspace {
             cc.notify();
             v
         });
+        // A pending ask card answers FIRST, for every behavior — ⇧⌘↩
+        // included. The card is the ask's only answer surface, and its
+        // settle unblocks the turn the interrupt would target; "absolute
+        // cancel priority" belongs to the STOP PILL, which never routes
+        // through here.
         if self.chat.read(cx).pending_ask.is_some() {
             self.chat.update(cx, |chat, cx| {
                 chat.pending_attachments = attachments;
@@ -114,7 +144,12 @@ impl Workspace {
             match result {
                 crate::slash_command::SlashResult::Handled => return,
                 crate::slash_command::SlashResult::InjectUserTurn(msg) => {
-                    self.send_user_turn(msg, Vec::new(), cx);
+                    let behavior = if self.foreground_running(cx) {
+                        SubmitBehavior::Steer
+                    } else {
+                        SubmitBehavior::Send
+                    };
+                    self.send_user_turn(msg, Vec::new(), behavior, cx);
                     return;
                 }
                 crate::slash_command::SlashResult::NoOp => {}
@@ -122,11 +157,14 @@ impl Workspace {
         }
 
         if attachments.is_empty() {
-            self.send_user_turn(text, Vec::new(), cx);
+            self.send_user_turn(text, Vec::new(), behavior, cx);
             return;
         }
 
-        // Reading attachment bytes is blocking IO; do it off the UI thread, then start the turn.
+        // Reading attachment bytes is blocking IO; do it off the UI thread,
+        // then start the turn. The chosen behavior rides the closure: an
+        // interrupt with attachments must still cancel (the queue downgrade
+        // below only covers the steer lane's text-only wire shape).
         cx.spawn(async move |this, cx| {
             let (text, extra, failed) = cx
                 .background_spawn(async move {
@@ -182,7 +220,7 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.send_user_turn(text, extra, cx);
+                this.send_user_turn(text, extra, behavior, cx);
                 if failed > 0 {
                     this.add_info_message(i18n::t("composer-image-process-failed").to_string(), cx);
                 }
@@ -280,11 +318,37 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Append the user turn (text plus any image content) to the thread and start the run.
+    /// ⌘↩: a steer while running — one notch more assertive than the
+    /// default queue, still restrained (delivers at the model's next step,
+    /// never cancels). Idle, it degrades to an ordinary send.
+    pub(crate) fn submit_steer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let behavior = if self.foreground_running(cx) {
+            SubmitBehavior::Steer
+        } else {
+            SubmitBehavior::Send
+        };
+        self.submit_composer(behavior, window, cx);
+    }
+
+    pub(crate) fn submit_interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit_composer(SubmitBehavior::Interrupt, window, cx);
+    }
+
+    /// Route a submitted user turn. While the thread is idle every behavior
+    /// sends the same ordinary turn. While a turn runs:
+    /// - steer: hand the text to the server's steer queue (wire
+    ///   `pendingMessageSet{steering}`) — the running turn injects it at
+    ///   the next model-call boundary. Attachments have no wire ride here
+    ///   and downgrade to the queue.
+    /// - queue: park a `Queued` card; the turn's settle flushes the whole
+    ///   queue as one combined turn (see `settle_follow_ups`).
+    /// - interrupt: cancel the running turn now; the message leaves the
+    ///   composer and rides the settle outbox — no card state.
     pub(super) fn send_user_turn(
         &mut self,
         text: String,
         images: Vec<manox_agent::language_model::MessageContent>,
+        behavior: SubmitBehavior,
         cx: &mut Context<Self>,
     ) {
         let meta = self.user_turn_meta(cx);
@@ -296,10 +360,93 @@ impl Workspace {
             meta,
             user_images,
         };
-        // A turn is running — every new message first parks as a visible
-        // follow-up. Steering is an explicit per-item action.
-        if self
-            .chat
+        let running = self.foreground_running(cx);
+        if !running || behavior == SubmitBehavior::Send {
+            // The thread is idle (not running). A free-form message dispatches
+            // as a normal turn. (A plan-review verdict now reaches the user as
+            // an `AskUserQuestion` card, and a send while that card is up
+            // submits it — see `submit_input` — so there is no stale verdict
+            // card to dismiss on this path any more.)
+            self.append_and_run_user_turn(turn, weak, cx);
+            // The conversation exists the moment the message is sent: refetch
+            // the sidebar list now (the transcript-side refetch on the user
+            // MessageEnd notice then fills in the summary text).
+            self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
+            return;
+        }
+        self.chat.update(cx, |chat, cx| {
+            chat.queue_drag = None;
+            cx.notify();
+        });
+        match behavior {
+            SubmitBehavior::Send => unreachable!("handled above"),
+            SubmitBehavior::Interrupt => {
+                // Absolute cancel priority: the interrupt fires before
+                // anything else, then the message waits out the settle in the
+                // outbox — deliberately NOT a card; the queue strip never
+                // grows a 「待打断」 lane.
+                self.cancel_turn(cx);
+                self.chat.update(cx, |chat, cc| {
+                    chat.interrupt_outbox.push(turn);
+                    cc.notify();
+                });
+                // The settle may have landed between the running read and the
+                // cancel (a fold still shows the turn running with no active
+                // turn to cancel). If nothing is running any more, nothing
+                // will settle — flush now instead of parking forever.
+                if !self.foreground_running(cx) {
+                    self.settle_follow_ups(false, cx);
+                }
+                cx.notify();
+            }
+            SubmitBehavior::Steer if turn.images.is_empty() => {
+                // (Re-)send the online steer and park the card at the
+                // steer-group boundary. A dropped send (no session bound)
+                // must NOT fake `SteerPending` — the untouched message joins
+                // the queue and flushes normally later.
+                if let Some(message_id) = self.enqueue_steer_pending(&turn, cx) {
+                    self.chat.update(cx, |chat, cx| {
+                        let insert_at = steer_group_insert_index(&chat.queued_follow_ups);
+                        chat.queued_follow_ups.insert(
+                            insert_at,
+                            QueuedFollowUp {
+                                turn,
+                                state: FollowUpState::SteerPending { message_id },
+                            },
+                        );
+                        cx.notify();
+                    });
+                } else {
+                    self.park_queued_turn(turn, cx);
+                }
+                cx.notify();
+            }
+            SubmitBehavior::Steer | SubmitBehavior::Queue => {
+                // Steer with attachments downgrades: the pending-message wire
+                // shape is text-only. The queue keeps the text; the images
+                // ride only via the card's edit action (the flush turn is
+                // text-only too — see `flush_batch`).
+                self.park_queued_turn(turn, cx);
+            }
+        }
+    }
+
+    /// Park a turn as a plain `Queued` card above the composer.
+    fn park_queued_turn(&mut self, turn: DeferredUserTurn, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cc| {
+            chat.queued_follow_ups.push_back(QueuedFollowUp {
+                turn,
+                state: FollowUpState::Queued,
+            });
+            cc.notify();
+        });
+        cx.notify();
+    }
+
+    /// Re-read whether the foreground session's leaf still holds an active
+    /// turn (the post-action race check the mode routes use).
+    pub(super) fn foreground_running(&self, cx: &App) -> bool {
+        self.chat
             .read(cx)
             .store
             .as_ref()
@@ -307,46 +454,15 @@ impl Workspace {
                 let view = store.read(cx);
                 crate::ahp_store::leaf(&view.book, sid).running()
             })
-            .unwrap_or_else(|| {
-                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
-                Default::default()
-            })
-        {
-            self.chat.update(cx, |chat, cx| {
-                chat.queue_drag = None;
-                cx.notify();
-            });
-            self.chat.update(cx, |chat, cc| {
-                chat.queued_follow_ups.push_back(QueuedFollowUp {
-                    turn,
-                    state: FollowUpState::Queued,
-                });
-                cc.notify();
-            });
-            cx.notify();
-            return;
-        }
-        // The thread is idle (not running). A free-form message dispatches as
-        // a normal turn. (A plan-review verdict now reaches the user as an
-        // `AskUserQuestion` card, and a send while that card is up submits it —
-        // see `submit_input` — so there is no stale verdict card to dismiss on
-        // this path any more.)
-        self.append_and_run_user_turn(turn, weak, cx);
-        // The conversation exists the moment the message is sent: refetch
-        // the sidebar list now (the transcript-side refetch on the user
-        // MessageEnd notice then fills in the summary text).
-        self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
+            .unwrap_or(false)
     }
 
-    /// Promote a parked follow-up to an ONLINE steer: mint a local message id,
-    /// hand the message to the server's steer queue for the running turn. The
-    /// card stays parked in the queue (the caller re-inserts it at the
-    /// steer-group boundary) until the model consumes it — the injected row
-    /// retires it ([`Self::retire_injected_steer`]). The old path called
-    /// `thread.enqueue_steer` on the engine-less render mirror, which only
-    /// inserted a local id and never reached the server — a dead end.
-    /// Returns the minted `message_id`: the server threads it through as the
-    /// injected row's durable identity, so the card retires by id.
+    /// Promote a follow-up to an ONLINE steer: mint a local message id and
+    /// hand the text to the server's steer queue (`send_steer_v2` →
+    /// `chat/pendingMessageSet{steering}`). Returns the minted id — the
+    /// identity the journal row, the removal echo and the composer card
+    /// all correlate by (`retire_steer_card`) — or `None` when no session
+    /// is bound (the caller parks the message as a plain queue card).
     pub(super) fn enqueue_steer_pending(
         &mut self,
         turn: &DeferredUserTurn,
@@ -358,35 +474,8 @@ impl Workspace {
             .then_some(message_id)
     }
 
-    /// Index at which a promoted steer card belongs so the queue keeps its
-    /// invariant `[SteerPending|Failed …] ++ [Queued …]`: the head of the queued
-    /// group — i.e. the end of the steer group — which is also `queue.len()`
-    /// when there are no plain `Queued` items.
-    pub(super) fn steer_group_insert_index(
-        queue: &std::collections::VecDeque<QueuedFollowUp>,
-    ) -> usize {
-        queue
-            .iter()
-            .position(|item| matches!(item.state, FollowUpState::Queued))
-            .unwrap_or(queue.len())
-    }
-
-    /// Foreground settle of a turn that finished normally: move every
-    /// `SteerPending` card out of the queue and into the message list as a
-    /// `steered` user bubble. The card may promote on THIS settle even when the
-    /// server injected it during a continuation run it auto-starts afterwards:
-    /// delivery is guaranteed by the server's steer-continuation contract
-    /// (dspo/manox — idle steers wake their own run, residue at a normal settle
-    /// chains a `continue_`, and an aborted run withdraws every stranded steer
-    /// from the kernel queue so a retry can never double-deliver). The remaining
-    /// `Queued` cards flush as the next turn afterwards, so the list order ends
-    /// up matching the real delivery order (injected steers first, then the
-    /// Retire ONE `SteerPending` card whose injected row just landed
-    /// (`ThreadEvent::UserRowLanded`): the model has consumed the steer, so the
-    /// card leaves the queue immediately and its `steered` bubble enters the
-    /// list — the dsh `claimed` instant, not the turn boundary. A no-op when no
-    /// card matches the id (every ordinary prompt row reports the same event;
-    /// only steers carry a card id). The settle path stays as the fallback for
+    /// Append the user turn (text plus any image content) to the thread and
+    /// start the run: optimistic bubble first, then the protocol submit.
     pub(super) fn append_and_run_user_turn(
         &mut self,
         turn: DeferredUserTurn,
@@ -410,27 +499,225 @@ impl Workspace {
         let _ = self.send_submit_v2(turn.text.clone(), attachments, cx);
     }
 
-    /// Drain every parked `Queued` follow-up into a single new turn. Multiple
-    /// messages coalesce into one user block, keeping the request prefix stable
-    /// (mirrors the team inbox flush). `Failed` cards stay parked for the user
-    /// to retry; every `SteerPending` card has already been routed by the
-    /// `TurnFinished` settle boundary — promoted into the message list
-    /// ([`Self::promote_settled_steers`]) or stranded to `Failed`
-    /// ([`Self::mark_stranded_steers_failed`]) — before this runs, so none
-    /// Settle the foreground steer group at a turn boundary with the server's
-    /// per-id verdict: `stranded` is `stranded_steer_ids.len()` from the wire —
-    /// the server retracts only the not-yet-injected tail (FIFO), so the first
-    /// `N - stranded` cards were injected (promote into the list) and the LAST
-    /// `stranded` retracted (Failed, retryable). `stranded.min(n)` keeps a
-    /// miscount harmless. A normal settle carries zero stranded and promotes
-    /// Settle a parked thread's steer group by the same per-id rule: the
-    /// retracted tail turns `Failed`, every other card drops (a parked thread
-    /// Promote a parked follow-up to a steer. While running, hand it to the
-    /// server's steer queue and park the card at the head of the queued group
-    /// (the end of the steer group) — no message-list bubble is pushed; the card
-    /// moves into the list only when the turn settles (see
-    /// [`Self::promote_settled_steers`]). While idle, send it as a fresh ordinary
-    /// turn instead.
+    /// Retire ONE `SteerPending` card whose steer the wire just consumed:
+    /// the model has it, so the card leaves the queue immediately and its
+    /// `steered` bubble enters the message list — the injection instant, not
+    /// the turn boundary. A no-op when no card matches the id (a foreign
+    /// steer from another client, or a card an earlier settle already
+    /// settled).
+    pub(super) fn retire_steer_card(&mut self, message_id: &str, cx: &mut Context<Self>) {
+        let matched = self.chat.read(cx).queued_follow_ups.iter().position(|item| {
+            matches!(&item.state, FollowUpState::SteerPending { message_id: id } if id == message_id)
+        });
+        let Some(idx) = matched else {
+            return;
+        };
+        let Some(item) = self.chat.update(cx, |chat, cc| {
+            let v = chat.queued_follow_ups.remove(idx);
+            // A retire can land mid-drag (the removal echo is wire-timed):
+            // void the stale marker so a release can never move the wrong
+            // row — same discipline as the manual queue mutations.
+            chat.queue_drag = None;
+            cc.notify();
+            v
+        }) else {
+            return;
+        };
+        let mut meta = item.turn.meta.clone();
+        meta.steered = true;
+        self.chat_conversation(cx).update(cx, |c, cx| {
+            c.push_user(
+                item.turn.text.clone(),
+                item.turn.user_images.clone(),
+                meta,
+                self.chat.read(cx).host.clone(),
+                cx,
+            )
+        });
+        self.sync_list_count(cx);
+        self.follow_message_tail(cx);
+        cx.notify();
+    }
+
+    /// Replay the parked session's accumulated LIFECYCLE events before the
+    /// stashed follow-up surface settles against them. A thread switched
+    /// away keeps its subscription: consumption echoes, wake runs and
+    /// settles land in the store's event bucket while no transcript is
+    /// bound, and the live pump only drains the foreground session's bucket
+    /// — a re-attach's first notify returns early on the rebuild path, so
+    /// without this replay a steer consumed while parked keeps its card
+    /// forever and a cancelled settle never strands anything.
+    ///
+    /// Only lifecycle events replay. The transcript content (deltas, tool
+    /// rows) the rebuild already synthesized from the snapshot — replaying
+    /// it would duplicate rows. After the replay, a remaining SteerPending
+    /// card is genuinely still parked on the wire (its echo would have been
+    /// in this bucket), so nothing is ever marked Failed on a guess: the
+    /// only strand signals are positive ones — a replayed cancelled settle
+    /// (below, via settle_follow_ups) or the card's own withdraw actions.
+    /// The fold's single steering_message slot is deliberately NOT an
+    /// oracle: the manox kernel queue holds many steers while AHP folds one
+    /// slot, so the slot can neither prove nor disprove a card.
+    pub(super) fn replay_parked_chat_events(&mut self, cx: &mut Context<Self>) {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            return;
+        };
+        let events = store.update(cx, |s, _| s.drain_chat_events(&sid));
+        for event in events {
+            match event {
+                crate::chat_fold::ChatEvent::TurnStarted { steer_id } => {
+                    self.chat.update(cx, |chat, cx| {
+                        chat.turn_active = true;
+                        cx.notify();
+                    });
+                    self.spawn_thinking_ticker(cx);
+                    if let Some(message_id) = steer_id {
+                        self.retire_steer_card(&message_id, cx);
+                    }
+                }
+                crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
+                    self.chat.update(cx, |chat, cx| {
+                        chat.turn_active = false;
+                        cx.notify();
+                    });
+                    self.settle_follow_ups(cancelled, cx);
+                }
+                // The removal echo IS the injection receipt (the backend
+                // publishes it only once the injection is confirmed).
+                crate::chat_fold::ChatEvent::SteerConsumed { message_id } => {
+                    self.retire_steer_card(&message_id, cx);
+                }
+                _ => {}
+            }
+        }
+        cx.notify();
+    }
+
+    /// Settle the follow-up queue at a turn boundary. A cancelled settle
+    /// strands every `SteerPending` card to `Failed` — the engine retracted
+    /// the not-yet-injected steers without publishing removals, so no
+    /// consumption echo will ever arrive; the retract is mirrored back to
+    /// the wire (`pendingMessageRemoved`) so the fold's steering slot
+    /// clears too. Then the settle outbox (the 立即打断 messages) flushes
+    /// as the next turn, and the plain queue follows on a normal settle
+    /// only — the user's stop must not start a surprise new run behind the
+    /// queue. One submit per settle: a settle that flushed the outbox leaves
+    /// the queue for the NEXT settle (that turn's own), so two batches never
+    /// go back-to-back with the first still running.
+    pub(super) fn settle_follow_ups(&mut self, cancelled: bool, cx: &mut Context<Self>) {
+        // Settles drain cards by wire timing too — drop any in-flight drag
+        // marker (its indices can never address the post-settle queue) and
+        // the send menu (the running cluster it floats on just ended).
+        self.chat.update(cx, |chat, cx| {
+            let drag = chat.queue_drag.take().is_some();
+            let menu = chat.send_menu.take();
+            if drag || menu.is_some() {
+                cx.notify();
+            }
+        });
+        if cancelled {
+            let stranded: Vec<String> = self
+                .chat
+                .read(cx)
+                .queued_follow_ups
+                .iter()
+                .filter_map(|item| match &item.state {
+                    FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !stranded.is_empty() {
+                self.chat.update(cx, |chat, cc| {
+                    for item in chat.queued_follow_ups.iter_mut() {
+                        if matches!(item.state, FollowUpState::SteerPending { .. }) {
+                            item.state = FollowUpState::Failed;
+                        }
+                    }
+                    cc.notify();
+                });
+                if let Some((store, sid)) = self.chat.read(cx).store.clone() {
+                    store.update(cx, |store, _| {
+                        for id in &stranded {
+                            store.remove_pending_message(
+                                &sid,
+                                id,
+                                ahp_types::state::PendingMessageKind::Steering,
+                            );
+                        }
+                    });
+                }
+            }
+        }
+        let outbox = self.chat.update(cx, |chat, cc| {
+            let outbox = std::mem::take(&mut chat.interrupt_outbox);
+            cc.notify();
+            outbox
+        });
+        if !outbox.is_empty() {
+            // The outbox turn goes first — and while it RUNS the queue stays
+            // parked: a second back-to-back submit would be the one mid-run
+            // chat/submit no other client path ever issues (the queue exists
+            // precisely to avoid that). The queue flushes at THIS turn's own
+            // settle instead.
+            self.flush_batch(outbox, cx);
+            return;
+        }
+        if !cancelled {
+            let due = self.chat.update(cx, |chat, cc| {
+                let due = drain_queued_follow_ups(&mut chat.queued_follow_ups);
+                cc.notify();
+                due
+            });
+            if !due.is_empty() {
+                self.flush_batch(due, cx);
+            }
+        }
+    }
+
+    /// Flush one batch of turns as a single combined new turn (blank-line
+    /// separated user block, request prefix stable). A dropped submit
+    /// re-parks the batch as retryable `Failed` cards. TEXT-ONLY: the
+    /// wire's turn message has no image ride today (the front-door submit
+    /// drops them just the same), so a card's pasted images deliver only
+    /// through its edit action, which re-attaches them to the composer.
+    fn flush_batch(&mut self, due: Vec<DeferredUserTurn>, cx: &mut Context<Self>) {
+        let text = due
+            .iter()
+            .map(|turn| turn.text.trim())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let sent = !text.is_empty() && self.send_submit_v2(text.clone(), Vec::new(), cx);
+        if !sent {
+            // Nothing rode the wire — re-park everything as retryable
+            // Failed cards (front-first, preserving the original order).
+            self.chat.update(cx, |chat, cc| {
+                for turn in due.into_iter().rev() {
+                    chat.queued_follow_ups.push_front(QueuedFollowUp {
+                        turn,
+                        state: FollowUpState::Failed,
+                    });
+                }
+                cc.notify();
+            });
+            cx.notify();
+            return;
+        }
+        let meta = self.user_turn_meta(cx);
+        self.chat_conversation(cx).update(cx, |c, cx| {
+            c.push_user(text, Vec::new(), meta, self.chat.read(cx).host.clone(), cx)
+        });
+        self.sync_list_count(cx);
+        self.follow_message_tail(cx);
+        cx.notify();
+    }
+
+    /// Promote a parked follow-up to an ONLINE steer: hand it to the
+    /// server's steer queue and park the card at the head of the queued
+    /// group (the end of the steer group) until the wire reports the
+    /// consumption (see [`Self::retire_steer_card`]). While idle, send it
+    /// as a fresh ordinary turn instead. Works from every parked state
+    /// except an in-flight steer itself.
     pub(super) fn steer_follow_up(&mut self, idx: usize, cx: &mut Context<Self>) {
         let running = self
             .chat
@@ -470,8 +757,7 @@ impl Workspace {
                         chat.queue_drag = None;
                         cx.notify();
                     });
-                    let insert_at =
-                        Self::steer_group_insert_index(&self.chat.read(cx).queued_follow_ups);
+                    let insert_at = steer_group_insert_index(&self.chat.read(cx).queued_follow_ups);
                     self.chat.update(cx, |chat, cx| {
                         chat.queued_follow_ups.insert(insert_at, item);
                         cx.notify();
@@ -485,8 +771,7 @@ impl Workspace {
             FollowUpState::SteerPending { .. } => {
                 // Already handed to the server steer queue; restore untouched
                 // (wherever the last settle left it).
-                let insert_at =
-                    Self::steer_group_insert_index(&self.chat.read(cx).queued_follow_ups);
+                let insert_at = steer_group_insert_index(&self.chat.read(cx).queued_follow_ups);
                 self.chat.update(cx, |chat, cx| {
                     chat.queued_follow_ups.insert(insert_at, item);
                     cx.notify();
@@ -495,8 +780,82 @@ impl Workspace {
         }
     }
 
-    /// Commit a queue-row drag: reorder the parked `Queued` tail locally. This
-    /// is session UI state only — the flush order the model eventually sees is
+    /// Withdraw a wire-parked steer (编辑 / 删除 / 重新排队 all free the
+    /// slot first). The backend maps the removal to a kernel-queue drop; a
+    /// steer the server already injected no-ops it.
+    fn withdraw_steer(&mut self, message_id: &str, cx: &mut Context<Self>) {
+        if let Some((store, sid)) = self.chat.read(cx).store.clone() {
+            store.update(cx, |store, _| {
+                store.remove_pending_message(
+                    &sid,
+                    message_id,
+                    ahp_types::state::PendingMessageKind::Steering,
+                );
+            });
+        }
+    }
+
+    /// 重新排队 on a 待引导 card: withdraw the wire steer and demote the card
+    /// to the plain queue (it flushes as part of the settle batch instead of
+    /// injecting into the running turn).
+    pub(super) fn requeue_follow_up(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(mut item) = self.chat.update(cx, |chat, cc| {
+            let v = chat.queued_follow_ups.remove(idx);
+            cc.notify();
+            v
+        }) else {
+            return;
+        };
+        let insert_at = match &item.state {
+            FollowUpState::SteerPending { message_id } => {
+                self.withdraw_steer(message_id, cx);
+                item.state = FollowUpState::Queued;
+                steer_group_insert_index(&self.chat.read(cx).queued_follow_ups)
+            }
+            _ => steer_group_insert_index(&self.chat.read(cx).queued_follow_ups),
+        };
+        self.chat.update(cx, |chat, cx| {
+            chat.queue_drag = None;
+            chat.queued_follow_ups.insert(insert_at, item);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// 立即打断 on a parked card: the running turn's cancel fires NOW and
+    /// the message rides the settle outbox (no card state — the interrupt is
+    /// an action, not a lane). While idle it degrades to an ordinary send.
+    pub(super) fn interrupt_from_card(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(item) = self.chat.update(cx, |chat, cc| {
+            let v = chat.queued_follow_ups.remove(idx);
+            cc.notify();
+            v
+        }) else {
+            return;
+        };
+        if let FollowUpState::SteerPending { message_id } = &item.state {
+            self.withdraw_steer(message_id, cx);
+        }
+        let running = self.foreground_running(cx);
+        self.chat.update(cx, |chat, cc| {
+            chat.interrupt_outbox.push(item.turn);
+            cc.notify();
+        });
+        if running {
+            self.cancel_turn(cx);
+        }
+        // Same post-action race check the interrupt submit rides: a settle
+        // that landed between the read and the cancel means nothing will
+        // flush us later.
+        if !self.foreground_running(cx) {
+            self.settle_follow_ups(false, cx);
+        }
+        cx.notify();
+    }
+
+    /// Commit a queue-row drag: reorder the parked `Queued` tail locally.
+    /// This is session UI state only — the flush order the model eventually
+    /// sees follows these rows one-for-one.
     pub(super) fn commit_queue_drag(&mut self, cx: &mut Context<Self>) {
         self.chat.update(cx, |chat, cc| {
             chat.commit_queue_drag();
@@ -522,12 +881,13 @@ impl Workspace {
         }) else {
             return;
         };
-        if matches!(item.state, FollowUpState::SteerPending { .. }) {
-            self.chat.update(cx, |chat, cx| {
-                chat.queued_follow_ups.insert(idx, item);
-                cx.notify();
-            });
-            return;
+        // A 待引导 card goes back into the composer too: the wire steer is
+        // withdrawn first, so the slot frees for the next one and the text
+        // can never deliver twice (a steer the server already injected
+        // no-ops the withdrawal — that row stays, and the edited draft
+        // becomes a fresh send).
+        if let FollowUpState::SteerPending { message_id } = &item.state {
+            self.withdraw_steer(message_id, cx);
         }
         self.chat.update(cx, |chat, cx| {
             chat.queue_drag = None;
@@ -554,15 +914,22 @@ impl Workspace {
     }
 
     pub(super) fn delete_follow_up(&mut self, idx: usize, cx: &mut Context<Self>) {
-        // `SteerPending` cards are not removable: the steer is already handed to
-        // the server and the protocol has no steer-withdrawal channel, so
-        // deleting the card would let it inject invisibly (see the composer
-        // render's disabled delete). `Queued` and `Failed` cards drop freely.
-        let Some(item) = self.chat.read(cx).queued_follow_ups.get(idx) else {
-            return;
-        };
-        if matches!(item.state, FollowUpState::SteerPending { .. }) {
-            return;
+        // Deleting a 待引导 card withdraws the wire steer first (the kernel
+        // queue drops it); an already-injected steer no-ops the withdrawal
+        // and its row simply stays in the transcript. `Queued` / `Failed`
+        // cards are local-only and drop freely.
+        let state = self
+            .chat
+            .read(cx)
+            .queued_follow_ups
+            .get(idx)
+            .map(|i| i.state.clone());
+        match state {
+            Some(FollowUpState::SteerPending { message_id }) => {
+                self.withdraw_steer(&message_id, cx)
+            }
+            Some(_) => {}
+            None => return,
         }
         self.chat.update(cx, |chat, cx| {
             chat.queued_follow_ups.remove(idx);
@@ -576,10 +943,10 @@ impl Workspace {
     }
 
     pub(super) fn undo_last_queued(&mut self, cx: &mut Context<Self>) {
-        // Drop the last plain `Queued` card (the ⌘⌥/ undo affordance). Skip any
-        // `SteerPending` cards sitting at the tail — an online steer can't be
-        // withdrawn, so it isn't undoable — and leave `Failed` cards for the
-        // explicit retry/remove path.
+        // Drop the last plain `Queued` card (the ⌘⌥/ undo affordance). Skip
+        // any `SteerPending` cards sitting at the tail — undo never touches
+        // the wire (use the row's 重新排队 to withdraw a steer) — and leave
+        // `Failed` cards for the explicit retry/remove path.
         let Some(item) = self.chat.read(cx).queued_follow_ups.back() else {
             return;
         };
