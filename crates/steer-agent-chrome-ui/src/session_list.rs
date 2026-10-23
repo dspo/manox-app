@@ -1288,7 +1288,13 @@ fn title_line(
                 .h_full()
                 .with_animation(
                     SharedString::from(format!("marquee-{}", data.id)),
-                    gpui::Animation::new(Duration::from_secs_f32(total)).repeat(),
+                    gpui::Animation::new(Duration::from_secs_f32(total))
+                        .repeat()
+                        // 24px/s reads as smooth at 30fps; unthrottled the
+                        // repeat loop repaints the whole window at the
+                        // display's refresh rate for as long as the row is
+                        // hovered.
+                        .with_max_fps(30.),
                     move |el, t| {
                         let tt = t * total;
                         let x = if tt < MARQUEE_PAUSE {
@@ -1387,7 +1393,14 @@ fn pixel_grid(id: &str) -> impl IntoElement {
         .overflow_hidden()
         .with_animation(
             SharedString::from(format!("pxgrid-{id}")),
-            gpui::Animation::new(Duration::from_millis(PIXEL_GRID_MS as u64)).repeat(),
+            gpui::Animation::new(Duration::from_millis(PIXEL_GRID_MS as u64))
+                .repeat()
+                // The cycle renders six discrete steps of ~303ms each, so 12fps
+                // samples every step ~4x with identical pixels between. The
+                // grid sits on every running session's row; unthrottled it
+                // would repaint the whole window at the display's refresh rate
+                // for as long as any session runs.
+                .with_max_fps(12.),
             |el, t| {
                 let q_ms = (t * 6.).floor().min(5.) / 5. * PIXEL_GRID_MS;
                 el.children(PIXEL_DOTS.iter().enumerate().map(|(i, (delay, variant))| {
