@@ -31,7 +31,10 @@ use ai_elements::{AskBlock, AskOption, BrailleSpinner};
 use base64::Engine as _;
 use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui::prelude::*;
-use gpui::{App, ClipboardItem, Entity, Render, SharedString, WeakEntity, px};
+use gpui::{
+    Animation, AnimationExt as _, App, ClipboardItem, Entity, Render, SharedString, WeakEntity,
+    ease_out_quint, px,
+};
 use gpui_component::Disableable as _;
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
@@ -279,7 +282,24 @@ pub struct MessageItem {
     /// Copy controls' copied-feedback state, keyed by each control's
     /// `ElementId` (see `copy_feedback`).
     copied: CopiedRegistry,
+    /// This row was pushed by a live send (not synthesized by a rebuild), so
+    /// its first paint runs the entrance rise+fade. Restored history
+    /// constructs items with this unset.
+    live_entrance: bool,
+    /// When the entrance clock started, latched at the first paint — the same
+    /// frame the animation element records its own start. Gating the wrapper
+    /// on this (rather than on the push instant) drops it exactly when the
+    /// run ends, so a late first frame cannot cut the animation's tail.
+    entrance_clock: Option<Instant>,
 }
+
+/// How long a live-sent bubble's entrance (rise + fade-in) runs. Short
+/// enough to read as motion, not as waiting.
+const BUBBLE_ENTRANCE: Duration = Duration::from_millis(280);
+/// The distance a live-sent bubble rises over during its entrance. A
+/// draw-only offset (no layout impact — the virtualized list's measurements
+/// never see it).
+const BUBBLE_ENTRANCE_RISE: f32 = 14.0;
 
 impl CopyFeedbackHost for MessageItem {
     fn copied(&mut self) -> &mut CopiedRegistry {
@@ -304,7 +324,17 @@ impl MessageItem {
             confirmation: None,
             copied: CopiedRegistry::default(),
             card_subs: Vec::new(),
+            live_entrance: false,
+            entrance_clock: None,
         }
+    }
+
+    /// Mark this row as a live send: its first paint runs the entrance
+    /// rise+fade (see [`BUBBLE_ENTRANCE`]). Only the live-send path calls
+    /// this; restored history must not animate.
+    pub(crate) fn entering_now(mut self) -> Self {
+        self.live_entrance = true;
+        self
     }
 
     pub fn kind(&self) -> &ConvItem {
@@ -932,7 +962,7 @@ impl Render for MessageItem {
             registry: &self.copied,
             owner: Some(cx.entity().downgrade()),
         };
-        centered(render_item(
+        let element = centered(render_item(
             &self.kind,
             self.id,
             &self.model,
@@ -952,7 +982,37 @@ impl Render for MessageItem {
             this.on_prepaint(move |bounds, _window, _cx| {
                 crate::overlap_diag::record_body(diag_id, bounds);
             })
-        })
+        });
+        // A live-sent bubble enters with a short rise + fade: a fresh row
+        // sliding up from just below its resting spot reads as "sent", and
+        // history restored from a rebuild never sets `live_entrance`, so it
+        // never animates. `top` offsets the DRAW only — the row's layout
+        // height is untouched, so the virtualized list's measurements are not
+        // disturbed. Keyed on the row id: the animation's start frame is
+        // recorded per element id, so re-renders mid-run never replay it,
+        // and once the clock passes the duration the wrapper is gone (the
+        // plain element already sits at the end state).
+        if self.live_entrance && self.entrance_clock.is_none() {
+            // The animation element records its start at first layout in
+            // THIS frame; anchoring the gate here (not at push time) keeps
+            // the two clocks together, so a late first frame cannot cut the
+            // run's tail when the wrapper drops.
+            self.entrance_clock = Some(Instant::now());
+        }
+        match self.entrance_clock {
+            Some(start) if start.elapsed() < BUBBLE_ENTRANCE => element
+                .with_animation(
+                    ("bubble-entrance", self.id),
+                    Animation::new(BUBBLE_ENTRANCE).with_easing(ease_out_quint()),
+                    |el, delta| {
+                        el.relative()
+                            .top(px(BUBBLE_ENTRANCE_RISE * (1.0 - delta)))
+                            .opacity(delta)
+                    },
+                )
+                .into_any_element(),
+            _ => element.into_any_element(),
+        }
     }
 }
 
