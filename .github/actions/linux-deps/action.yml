@@ -7,6 +7,26 @@ description: >-
 runs:
   using: composite
   steps:
+    # The .debs are the last network dependency in the pipeline, and a single
+    # slow mirror has already held one of these jobs for 18 minutes while its
+    # sibling installed the same set in 21 seconds. Keep them locally so a warm
+    # run never touches the network.
+    - name: Prepare the apt archive directory
+      shell: bash
+      # The cache action extracts as the runner user; apt fills the directory
+      # as root, so hand it over before the restore.
+      run: |
+        sudo mkdir -p /var/cache/apt/archives
+        sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+    - name: Cache apt packages
+      uses: actions/cache@v4
+      with:
+        path: /var/cache/apt/archives
+        # Bump the version when the package list below changes.
+        key: apt-debs-${{ runner.os }}-v1
+        restore-keys: apt-debs-${{ runner.os }}-
+
     - name: Install system dependencies
       shell: bash
       run: |
@@ -31,17 +51,25 @@ runs:
           libjavascriptcoregtk-4.1-dev
         )
 
-        # The runner image ships a populated apt index, so try that first: an
-        # unconditional `apt-get update` fetches one index per configured repo
-        # (Ubuntu archives, Microsoft, HashiCorp…) and a single slow mirror can
-        # hold the job for 10+ minutes — the tail that dominated this repo's
-        # slowest CI runs. Only refresh when the shipped index cannot satisfy
-        # the request.
-        if sudo apt-get install -y --no-install-recommends "${pkgs[@]}"; then
+        # 1. Fully offline: every .deb came back with the cache.
+        if sudo apt-get install -y --no-install-recommends \
+             --no-download "${pkgs[@]}"; then
+          echo "system deps installed from cached .debs (no network)"
           exit 0
         fi
 
+        # 2. The runner image ships a populated apt index. Use it before
+        #    reaching for `apt-get update`: that fetches one index per
+        #    configured repo (Ubuntu archives, Microsoft, HashiCorp, …) and a
+        #    single slow mirror holds the job.
+        if sudo apt-get install -y --no-install-recommends \
+             -o APT::Keep-Downloaded-Packages=true "${pkgs[@]}"; then
+          exit 0
+        fi
+
+        # 3. Only refresh the index when the shipped one cannot satisfy us.
         echo "::warning::install from the image's apt index failed; refreshing"
         sudo apt-get -o Acquire::Retries=3 \
           -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update -y
-        sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+        sudo apt-get install -y --no-install-recommends \
+          -o APT::Keep-Downloaded-Packages=true "${pkgs[@]}"
