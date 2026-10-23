@@ -223,18 +223,21 @@ fn consolidate(ranges: &mut Vec<Range<usize>>) {
 
 /// Fenced code blocks: an opening fence line (3+ backticks or tildes) through
 /// the matching closing fence line (or end of input for an unterminated fence).
+/// Both fence kinds carry at most three leading spaces — four start an
+/// indented code block instead, so such a line is content, not a fence.
 fn fenced_blocks(src: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut open: Option<(u8, usize, usize)> = None; // (fence char, fence len, start offset)
     let mut offset = 0usize;
     for line in src.split_inclusive('\n') {
-        let trimmed = line.trim_start();
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let trimmed = &line[indent..];
         let fence_char = trimmed.as_bytes().first().copied();
         let fence_len = trimmed
             .bytes()
             .take_while(|&b| Some(b) == fence_char && (b == b'`' || b == b'~'))
             .count();
-        let opens = fence_len >= 3 && matches!(fence_char, Some(b'`') | Some(b'~'));
+        let opens = indent <= 3 && fence_len >= 3 && matches!(fence_char, Some(b'`') | Some(b'~'));
         match open {
             None => {
                 if opens {
@@ -244,7 +247,8 @@ fn fenced_blocks(src: &str) -> Vec<Range<usize>> {
             Some((ch, len, start)) => {
                 // A closing fence is the same char, at least as long, alone on
                 // its line (info strings only appear on openers).
-                if fence_char == Some(ch)
+                if indent <= 3
+                    && fence_char == Some(ch)
                     && fence_len >= len
                     && trimmed[fence_len..].trim_end().is_empty()
                 {
@@ -482,6 +486,26 @@ mod tests {
     fn tilde_fences_are_left_verbatim_too() {
         let src = "~~~\n[x]: y\n~~~\n";
         assert_eq!(pin_reference_definitions(src), src);
+    }
+
+    #[test]
+    fn a_four_space_fence_line_is_not_a_fence() {
+        // Four leading spaces are an indented code block, so the definition
+        // that interrupts it still pins; masking it as a fence would leave
+        // the flip — and the crash — live.
+        assert_eq!(
+            pin_reference_definitions("前文\n\n    ```\n[a]: b\n"),
+            "前文\n\n    ```\n\\[a]: b\n"
+        );
+    }
+
+    #[test]
+    fn an_indented_fence_line_inside_a_fence_does_not_close_it() {
+        let src = "```\ncode\n    ```\nstill code\n```\n\n[a]: b\n";
+        assert_eq!(
+            pin_reference_definitions(src),
+            "```\ncode\n    ```\nstill code\n```\n\n\\[a]: b\n"
+        );
     }
 
     #[test]

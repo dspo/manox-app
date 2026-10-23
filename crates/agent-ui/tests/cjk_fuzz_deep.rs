@@ -456,7 +456,13 @@ async fn minimal_repro(cx: &mut TestAppContext) {
     if std::env::var("CJK_FUZZ_REPRO").is_err() {
         return;
     }
-    let raw = std::env::var("CJK_FUZZ_DOC").unwrap_or_else(|_| "文[^1]续\n\n[^1]: 注".to_string());
+    let raw = match std::env::var("CJK_FUZZ_DOC") {
+        Ok(doc) => doc,
+        Err(_) if std::env::var_os("CJK_FUZZ_DOC").is_none() => "文[^1]续\n\n[^1]: 注".to_string(),
+        // A non-UTF-8 value would otherwise silently run the default document
+        // and read as a crash that never came from the input under test.
+        Err(_) => panic!("CJK_FUZZ_DOC is not valid UTF-8"),
+    };
     let step: usize = std::env::var("CJK_FUZZ_STEP")
         .ok()
         .and_then(|s| s.parse().ok())
