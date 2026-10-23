@@ -108,7 +108,7 @@ mod suite {
     }
 
     /// The Captain strip's activity summary is ONE line — pinned beside the
-    /// helper in `steer_agent_chat_ui::views::subagents` (`one_line`).
+    /// helper in `steer_agent_chat_ui::text` (`one_line`).
     #[test]
     fn an_edited_recalled_turn_becomes_the_working_line() {
         let turns = ["newest", "middle"];

@@ -34,6 +34,7 @@ pub type CardToggle = Box<dyn Fn(&mut Window, &mut App)>;
 use crate::conversation::{ActivityEntry, ConvItem, ToolCallItem};
 use crate::host::ChatHostHandle;
 use crate::i18n;
+use crate::text::one_line;
 
 /// Lines a card body renders before the truncation note takes over.
 const LINE_CAP: usize = 400;
@@ -179,11 +180,29 @@ fn card_icon(family: CardFamily) -> AnyElement {
     Icon::new(name).xsmall().into_any_element()
 }
 
-/// The header's argument summary, from the structured input: the file for
-/// file tools, the command for `Bash`, the pattern for the search tools.
+/// The header's argument summary as it renders: one clipped row of mono
+/// text. [`header_summary`] flattens the value first; `.truncate()` only
+/// ellipsizes a line that is already one line.
 fn card_args(family: CardFamily, entry: &ToolCallItem, theme: &Theme) -> AnyElement {
     let mono = theme.mono_font_family.clone();
     let muted = theme.muted_foreground;
+    let summary = header_summary(family, entry);
+    gpui::div()
+        .min_w_0()
+        .truncate()
+        .font_family(mono)
+        .text_xs()
+        .text_color(muted)
+        .child(summary)
+        .into_any_element()
+}
+
+/// The header's argument summary, from the structured input: the file for
+/// file tools, the command for `Bash`, the pattern for the search tools —
+/// flattened onto one line so a multi-line Bash command cannot ride its
+/// literal newlines into the header and stretch the row. The "in" chip
+/// ([`copy_input_text`]) still quotes the raw call.
+fn header_summary(family: CardFamily, entry: &ToolCallItem) -> String {
     let summary: SharedString = match family {
         CardFamily::Read | CardFamily::Write | CardFamily::Edit => {
             input_str(entry, "path").unwrap_or_else(|| entry.title.clone().into())
@@ -205,14 +224,7 @@ fn card_args(family: CardFamily, entry: &ToolCallItem, theme: &Theme) -> AnyElem
             }
         }
     };
-    gpui::div()
-        .min_w_0()
-        .overflow_hidden()
-        .font_family(mono)
-        .text_xs()
-        .text_color(muted)
-        .child(summary)
-        .into_any_element()
+    one_line(&summary)
 }
 
 fn input_str(entry: &ToolCallItem, key: &str) -> Option<SharedString> {
@@ -667,5 +679,73 @@ mod tests {
         assert_eq!(lines[2].kind, CodeLineKind::Added);
         assert_eq!(lines[2].new, Some(4));
         assert_eq!(lines[3].new, Some(5));
+    }
+
+    /// The header summary flattens a multi-line Bash command to one
+    /// single-spaced row — hard `\n`, `\r\n`, blank and indented rows all
+    /// normalize — while the "in" chip keeps the raw command for re-running.
+    #[test]
+    fn bash_header_summary_flattens_but_the_copy_stays_raw() {
+        let command = "echo first\n\r\n  echo second\r\n\techo third";
+        let bash = entry("Bash", serde_json::json!({ "command": command }));
+        let summary = header_summary(CardFamily::Bash, &bash);
+        assert_eq!(summary, "echo first echo second echo third");
+        assert!(
+            !summary.contains(['\n', '\r']),
+            "the header renders a single line"
+        );
+        assert_eq!(
+            copy_input_text(CardFamily::Bash, &bash).as_deref(),
+            Some(command),
+            "the quoted command stays verbatim so a user can re-run it"
+        );
+    }
+
+    /// A lone carriage return is a break too: `str::lines` alone leaves it
+    /// inside the row, where it can still split the header.
+    #[test]
+    fn bash_header_summary_flattens_a_lone_carriage_return() {
+        let bash = entry(
+            "Bash",
+            serde_json::json!({ "command": "echo first\recho second" }),
+        );
+        assert_eq!(
+            header_summary(CardFamily::Bash, &bash),
+            "echo first echo second"
+        );
+    }
+
+    /// A single-line command passes through the summary untouched.
+    #[test]
+    fn single_line_header_summary_passes_through() {
+        let bash = entry(
+            "Bash",
+            serde_json::json!({ "command": "cargo test --all --features test-support" }),
+        );
+        assert_eq!(
+            header_summary(CardFamily::Bash, &bash),
+            "cargo test --all --features test-support"
+        );
+    }
+
+    /// The search families keep their `pattern · path` shape after flattening.
+    #[test]
+    fn grep_header_summary_joins_pattern_and_path() {
+        let grep = entry(
+            "Grep",
+            serde_json::json!({ "pattern": "fn main", "path": "src/main.rs" }),
+        );
+        assert_eq!(
+            header_summary(CardFamily::Grep, &grep),
+            "fn main · src/main.rs"
+        );
+    }
+
+    /// A file card with no `path` falls back to its title, flattened too.
+    #[test]
+    fn read_header_summary_flattens_the_title_fallback() {
+        let mut read = entry("Read", serde_json::json!({}));
+        read.title = "line one\nline two".into();
+        assert_eq!(header_summary(CardFamily::Read, &read), "line one line two");
     }
 }
