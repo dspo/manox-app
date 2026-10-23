@@ -51,25 +51,34 @@ runs:
           libjavascriptcoregtk-4.1-dev
         )
 
+        # Every install keeps the .debs: they are the next run's cache.
+        install() {
+          sudo apt-get install -y --no-install-recommends \
+            -o APT::Keep-Downloaded-Packages=true \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 "$@"
+        }
+
         # 1. Fully offline: every .deb came back with the cache.
         if sudo apt-get install -y --no-install-recommends \
              --no-download "${pkgs[@]}"; then
           echo "system deps installed from cached .debs (no network)"
-          exit 0
+        elif install "${pkgs[@]}"; then
+          # 2. The runner image ships a populated apt index. Use it before
+          #    reaching for `apt-get update`: that fetches one index per
+          #    configured repo (Ubuntu archives, Microsoft, HashiCorp, …) and a
+          #    single slow mirror holds the job.
+          :
+        else
+          # 3. Only refresh the index when the shipped one cannot satisfy us.
+          echo "::warning::apt index cannot satisfy us; refreshing"
+          sudo apt-get -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update -y
+          install "${pkgs[@]}"
         fi
 
-        # 2. The runner image ships a populated apt index. Use it before
-        #    reaching for `apt-get update`: that fetches one index per
-        #    configured repo (Ubuntu archives, Microsoft, HashiCorp, …) and a
-        #    single slow mirror holds the job.
-        if sudo apt-get install -y --no-install-recommends \
-             -o APT::Keep-Downloaded-Packages=true "${pkgs[@]}"; then
-          exit 0
-        fi
-
-        # 3. Only refresh the index when the shipped one cannot satisfy us.
-        echo "::warning::install from the image's apt index failed; refreshing"
-        sudo apt-get -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update -y
-        sudo apt-get install -y --no-install-recommends \
-          -o APT::Keep-Downloaded-Packages=true "${pkgs[@]}"
+        # The cache save tars this directory as the runner user, and apt leaves
+        # `partial/` root-only (mode 700): a single permission error aborts the
+        # whole archive, which is how the first attempt silently saved nothing.
+        sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+        echo "archived .debs: $(ls /var/cache/apt/archives/*.deb | wc -l)"
