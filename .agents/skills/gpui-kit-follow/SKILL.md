@@ -37,6 +37,8 @@ description: manox-app 的 gpui-kit 版本跟进方法论——评估新发布�
 
 每轮评估从零出发。历史结论——包括「明确不跟进」的组件（见 references/hand-rolled.md 末节）——只作上下文缓存用来加速（跳过已确认的背景调查），**不作为跳过评估的理由**：新版本可能带来新发现，而评估成本低（下一节三问全是机械对照）。消费清单和热点表都会随代码漂移，每轮都要重新生成/重读。
 
+特别地，hand-rolled.md 末节的「下期确认清单」是上一轮**作者显式搁置**的项（含评估者代决的项）：每轮评估结束前须逐项再次向 dspo/manox-app 作者确认本期是否跟进，不可静默续期；确认后销账（跟进 → 转热点表立项行；再搁置 → 更新轮次留在清单）。
+
 ## 评估三问（两清单对照）
 
 **问一：breaking 打到消费面了吗？**
@@ -44,12 +46,13 @@ description: manox-app 的 gpui-kit 版本跟进方法论——评估新发布�
 
 ```bash
 grep -rhoE "gpui_component::[a-zA-Z_:+]+" crates --include="*.rs" | sort -u
+grep -rhoE "gpui_base::[a-zA-Z_:+]+" crates --include="*.rs" | sort -u   # 本仓直接消费 gpui-base（TextView 栈），breaking 同样要对
 ```
 
-清单外的 breaking 判「不命中」，仍记录在案供下轮作背景。逐条核对 release notes 的 breaking 节，给出命中/不命中结论。
+清单外的 breaking 判「不命中」，仍记录在案供下轮作背景。逐条核对 release notes 的 breaking 节，给出命中/不命中结论。另注意 release notes 里「无签名变化但改默认行为」的条目（如 0.8.0 的 ScrollBounce 默认开启 / 嵌套滚动不再联动）——它们不体现在编译面，只能靠清单+行为对照抓。
 
 **问二：新特性打到手搓面了吗？**
-读 `references/hand-rolled.md`（手搓热点表），与 release notes 新特性求交。有交点才展开对照评估：能力覆盖度？与像素校准/设计语言冲突？迁移量多大？评估产出 = adoption 候选（去做）或冲突结论（记录）。
+读 `references/hand-rolled.md`（手搓热点表），与 release notes 新特性求交。有交点才展开对照评估：能力覆盖度？与像素校准/设计语言冲突？迁移量多大？评估产出 = adoption 候选（逐点向作者说明利弊成本、问本期是否跟进；跟进的入计划）、冲突结论（记录）、或搁置项（入「下期确认清单」）。
 
 **问三：快照进了什么？**
 读 gpui-pre crate 自带的 `[package.metadata]` zed-rev 映射，对照 zed 仓的 commit 范围，重点扫 rendering / input / IME 相关变更。
