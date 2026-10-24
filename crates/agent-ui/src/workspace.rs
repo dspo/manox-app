@@ -27,6 +27,7 @@ use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState},
+    speech::{SpeechButton, SpeechEvent, SpeechState},
     v_flex,
 };
 /// `WindowExt::push_notification` + `Notification` are shared: the
@@ -484,6 +485,15 @@ pub struct Workspace {
     /// cost when the user never opens Settings.
     settings_view: Option<Entity<SettingsView>>,
     settings_sub: Option<Subscription>,
+    /// Composer dictation: the speech session behind the mic button. Created
+    /// unconditionally — where the platform has no system recognizer (Linux)
+    /// or the process lacks the Info.plist usage keys (test binaries; the
+    /// steer binary embeds them, see steer-app `build.rs`), `SpeechButton`
+    /// renders nothing, so the entry only exists where dictation can actually
+    /// run. The final transcript lands at the composer's caret (see
+    /// [`Self::land_dictation`]).
+    pub(crate) speech: Entity<SpeechState>,
+    _speech_events: Subscription,
 }
 
 /// Top-level rendering mode of the app page. `Settings` and the two
@@ -721,6 +731,22 @@ impl Workspace {
         };
         let rail_updates = cx.observe(&context_rail, |_, _, cx| cx.notify());
 
+        // Composer dictation: one speech session state per composer. The mic
+        // button self-hides wherever the platform cannot recognize; the
+        // subscription lands the final transcript and surfaces failures.
+        let speech = cx.new(SpeechState::new);
+        let speech_events = cx.subscribe_in(
+            &speech,
+            window,
+            |this, _, event: &SpeechEvent, window, cx| match event {
+                SpeechEvent::Final(text) => this.land_dictation(text.clone(), window, cx),
+                SpeechEvent::Error(error) => {
+                    tracing::warn!(%error, "composer dictation ended with an error");
+                }
+                _ => {}
+            },
+        );
+
         let mut ws = Self {
             cwd: cwd.clone(),
             nav: NavHistory::default(),
@@ -729,6 +755,8 @@ impl Workspace {
             background_threads: Vec::new(),
             _mux_lists,
             _rail_updates: rail_updates,
+            speech,
+            _speech_events: speech_events,
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
             externals: Vec::new(),
@@ -873,6 +901,18 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_chat_input(&self, cx: &App) -> Entity<gpui_component::input::TextareaState> {
         self.chat_input(cx)
+    }
+
+    /// Drive the dictation landing directly with a finished transcript, for
+    /// probes that pin where the text lands without a live recognizer.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_land_dictation(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.land_dictation(SharedString::from(text.to_string()), window, cx);
     }
 
     /// The composer's hovered `@`-mention chip (registry key + window-space
@@ -2127,6 +2167,22 @@ impl Workspace {
     /// moves this count on the next read.
     pub fn attention_count(&self, cx: &App) -> usize {
         self.multiplexer.read(cx).attention_count(cx)
+    }
+
+    /// Land a finished dictation transcript at the composer's caret. The
+    /// insert rides the public edit API so the input's `Change` event fires
+    /// and the completion popover re-syncs; the composer takes focus back so
+    /// the next keystroke (or Enter-to-send) lands in it. An empty transcript
+    /// (the recognizer heard nothing) is a no-op that doesn't steal focus.
+    fn land_dictation(&mut self, text: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        self.chat_input(cx).update(cx, |state, cx| {
+            state.insert(text, window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
     }
 
     fn subscribe_input(&self, window: &mut Window, cx: &mut Context<Self>) -> Subscription {

@@ -155,6 +155,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
+            libasound2-dev \
             libfontconfig1-dev \
             libx11-dev \
             libxcb1-dev \
@@ -240,7 +241,7 @@ jobs:
       - name: Install build dependencies
         run: >
           dnf install -y gcc python3 file rpm-build openssl-devel zlib-devel
-          pkgconf-pkg-config
+          pkgconf-pkg-config alsa-lib-devel
           fontconfig-devel libX11-devel libxcb-devel libXrender-devel
           libXrandr-devel libxkbcommon-devel libxkbcommon-x11-devel
           libXi-devel libXcursor-devel libXinerama-devel glib2-devel

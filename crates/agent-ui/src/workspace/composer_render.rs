@@ -244,6 +244,10 @@ impl Workspace {
         // the user most needed to interrupt). Enter still answers a pending
         // ask card, whose own controls are the only answer surface.
         let send = self.render_send_cluster(running, theme, cx);
+        // Dictation entry (macOS first): sits left of the send cluster and
+        // renders nothing where dictation cannot work, so unsupported
+        // platforms reserve no space and never see a dead button.
+        let dictation = self.render_dictation_button(cx);
         // Context-occupancy pill (ring + percent) sits between the model and
         // the action it quantifies: session-state cluster, then the send
         // control. Hidden entirely until usage + a resolvable window exist.
@@ -403,6 +407,7 @@ impl Workspace {
                             .flex_shrink_0()
                             .child(model)
                             .when_some(context_ring, |el, ring| el.child(ring))
+                            .children(dictation)
                             .child(send),
                     ),
             )
@@ -893,6 +898,20 @@ impl Workspace {
         }
         chip.on_click(cx.listener(move |this, _, window, cx| act(this, window, cx)))
             .into_any_element()
+    }
+
+    /// The composer's dictation entry: the upstream `SpeechButton` over the
+    /// workspace's speech state. A click starts a session, the next click
+    /// stops it, and the final transcript lands at the caret
+    /// ([`Workspace::land_dictation`]). `None` wherever dictation cannot
+    /// work — no system recognizer (Linux), or a process without the
+    /// Info.plist usage keys — so the row reserves no space and never shows
+    /// a dead button on an unsupported platform.
+    fn render_dictation_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.speech
+            .read(cx)
+            .has_recognizer()
+            .then(|| SpeechButton::new(&self.speech).xsmall().into_any_element())
     }
 
     /// The composer's action cluster (footer right), dressed exactly like

@@ -152,7 +152,7 @@ sysinfo = "0.39"
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 
-gpui-component = { version = "=0.8.0", features = ["tree-sitter-languages"] }
+gpui-component = { version = "=0.8.0", features = ["tree-sitter-languages", "speech"] }
 gpui-kit-assets = { version = "=0.8.0" }
 # gpui-base — the same rich-text core gpui-component 0.8.0 builds on (same
 # release train). The markdown stack drives the base-layer TextView directly:
