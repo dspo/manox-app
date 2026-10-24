@@ -1,6 +1,6 @@
 # gpui-kit 0.8.0 跟进计划（2026-10-23 制定）
 
-执行状态（2026-10-23 晚更新）：**PR 0 bump 已合入 main（#209）**；PR 1（caret 锚定）已开 **#213**；并行会话的重复 bump PR #204 已去重关闭建议、其 CI 修复 #206 已先行合入（lld 链接，CI 失败根因之一）；E1–E3 与 PR 2–6 按序排期。skill 侧记录（hand-rolled.md 0.8.0 轮 + 下期确认清单）随本文件同 PR 落库。
+执行状态（2026-10-24 收尾，全项落地）：PR 0 bump **#209**；PR 1 caret 锚定 **#213**；PR 2 聊天列回弹 **#216**；PR 3 chip 悬停 **#217**；PR 5 divider **#218**；PR 4 右栏 DiffTab **#220**；PR 6 语音听写 **#221**；E1 on_paste 迁移 **#222**——全部已合并。E2（Combobox）评估结论不迁移：模型选择器为 PopupMenu 子菜单树形态不匹配，titlebar picker 迁移收益为负；E3（Empty）不迁移：整页空态组件与分组行内提示形态不匹配（结论详见 hand-rolled.md 各行）。下期确认清单仍留三项：syntect 三比、MessageScroller（待聊天管线重建落地）、gpui-webview 对位。过程记录：重复 bump PR #204 已去重、其 CI 修复 #206 先行合入；skill 记录经 #214 与本收尾 PR 两轮落库。
 
 评估依据：gpui-component/gpui-base 0.7.0→0.8.0 源码 diff、[v0.8.0 release notes](https://github.com/longbridge/gpui-kit/releases/tag/v0.8.0)、zed 快照映射 `1a28cff → 93d7456`（2026-09-27 ~ 10-10，22 个 gpui 提交）。评估三问结论：breaking 不命中（`cargo check --all-targets` 全绿，唯一 warning 为传递依赖 `block v0.1.6` future-incompat）；新特性 × 手搓热点求交结果见下。
 
