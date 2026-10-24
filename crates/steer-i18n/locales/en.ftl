@@ -459,22 +459,17 @@ workspace-ask-skipped = Skipped
 
 workspace-cancel = Cancel
 
-workspace-mode-readonly-title = Read Only
+access-mode-sandbox-title = Sandbox access
 
-workspace-mode-workspacewrite-title = Workspace Access
+access-mode-full-access-title = Full access
 
-workspace-mode-dangerfullaccess-title = Full Access
+access-mode-chip-sandbox = Sandbox access
 
-workspace-chip-mode-readonly = Read Only
-
-workspace-chip-mode-workspacewrite = Workspace Access
-
-workspace-chip-mode-dangerfullaccess = Full Access
+access-mode-chip-full-access = Full access
 
 workspace-mode-notice = { $mode ->
-    [readonly] Read Only: bash runs but writes are denied by the seatbelt; fs mutations are refused.
-    [workspacewrite] Workspace Access: writes under the workspace, the steer home (~/.manox), and temp areas run; out-of-workspace targets are refused. Escalate a denied call with sandbox_permissions + justification.
-   *[dangerfullaccess] Full Access: no sandbox; bash runs unsandboxed, fs mutations are unfenced.
+    [sandbox] Sandbox access: file writes are fenced to the workspace, the steer home (~/.manox), and temp areas; bash rides the seatbelt profile. Escalate a denied call with require_escalated + justification. Network is not yet confined (the sandbox does not cover the network side yet).
+   *[fullaccess] Full access: no sandbox; bash runs unsandboxed, fs mutations are unfenced.
 }
 
 workspace-project-choose = Choose project
@@ -526,7 +521,7 @@ turn-navigator-copied = Message copied to clipboard.
 
 ### slash_command.rs
 
-slash-mode-unknown = Unknown permission mode "{ $mode }" — expected read-only, workspace-write, or danger-full-access
+slash-mode-unknown = Unknown access mode "{ $mode }" — expected sandbox or full-access
 
 ### /exit teardown sequence (workspace/exit.rs)
 

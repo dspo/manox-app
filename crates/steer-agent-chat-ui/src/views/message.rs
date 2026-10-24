@@ -41,7 +41,7 @@ use gpui_component::{
     v_flex,
 };
 use manox_agent::language_model::{LanguageModelToolResult, MessageContent, Role};
-use manox_agent::thread::PermissionMode;
+use manox_agent::thread::AccessMode;
 use manox_agent::{Message, TokenUsage, ToolCallStatus};
 use steer_components::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_button};
 use steer_components::markdown::GitSummary;
@@ -1222,8 +1222,8 @@ fn render_user(
     let accent = if meta.is_some_and(|m| m.peer) {
         theme.primary
     } else {
-        meta.and_then(|m| m.approval_mode)
-            .map(|mode| approval_mode_color(mode, theme))
+        meta.and_then(|m| m.access_mode)
+            .map(|mode| access_mode_color(mode, theme))
             .unwrap_or(theme.accent)
     };
 
@@ -1296,11 +1296,10 @@ fn render_user(
         .into_any_element()
 }
 
-fn approval_mode_color(mode: PermissionMode, theme: &Theme) -> gpui::Hsla {
+fn access_mode_color(mode: AccessMode, theme: &Theme) -> gpui::Hsla {
     match mode {
-        PermissionMode::ReadOnly => theme.warning,
-        PermissionMode::WorkspaceWrite => theme.info,
-        PermissionMode::DangerFullAccess => theme.danger,
+        AccessMode::Sandbox => theme.info,
+        AccessMode::FullAccess => theme.danger,
     }
 }
 

@@ -19,7 +19,7 @@ fn land_conversation_row(
     project: Option<&std::path::Path>,
     provider: Option<&str>,
     model_id: Option<&str>,
-    approval: Option<&str>,
+    access: Option<&str>,
     effort: Option<&str>,
 ) {
     let Some(objects) = manox_agent::object_store::ObjectStore::try_global() else {
@@ -29,8 +29,8 @@ fn land_conversation_row(
     if provider.is_some() || model_id.is_some() {
         objects.set_model(sid, provider, model_id);
     }
-    if let Some(approval) = approval {
-        objects.set_permission_mode(sid, Some(approval));
+    if let Some(access) = access {
+        objects.set_access_mode(sid, Some(access));
     }
     if let Some(effort) = effort {
         objects.set_reasoning_effort(sid, Some(effort));
@@ -148,7 +148,7 @@ impl Workspace {
             let view = store.read(cx);
             let leaf = crate::ahp_store::leaf(&view.book, &sid);
             // Inheritance reads the EXPLICIT values only (no
-            // `approval_mode_or_default`): a seat-less source has nothing
+            // `access_mode_or_default`): a seat-less source has nothing
             // worth pinning into the child, and the child then lands on
             // the host default — the same value display falls back to, so
             // inheritance and display cannot diverge unless the host
@@ -157,7 +157,7 @@ impl Workspace {
                 manox_agent::object_store::ObjectStore::try_global()
                     .and_then(|objects| objects.project_of(&sid)),
                 leaf.model_id().map(str::to_string),
-                leaf.approval_mode().map(str::to_string),
+                leaf.access_mode().map(str::to_string),
                 leaf.reasoning_effort().map(str::to_string),
             )
         });
@@ -169,7 +169,7 @@ impl Workspace {
         });
         let project = inherited_project;
         let model = inherited.as_ref().and_then(|(_, m, _, _)| m.clone());
-        let approval = inherited.as_ref().and_then(|(_, _, a, _)| a.clone());
+        let access = inherited.as_ref().and_then(|(_, _, a, _)| a.clone());
         let effort_str = inherited.as_ref().and_then(|(_, _, _, e)| e.clone());
         let cwd = project
             .as_ref()
@@ -181,7 +181,7 @@ impl Workspace {
         // The draft refill: a never-materialized conversation under the
         // same project (or project-less) is that project's unfinished
         // draft — return to it instead of minting a sibling. Its row
-        // already carries the model/permission picks the user left there.
+        // already carries the model/access picks the user left there.
         // The FOREGROUND session and archived rows are excluded: the
         // landing conversation (created project-less at boot, never
         // spoken) is itself the latest project-less draft, and a just
@@ -218,8 +218,8 @@ impl Workspace {
         if let Some(model) = &model {
             config.insert("model".into(), serde_json::json!(model));
         }
-        if let Some(approval) = &approval {
-            config.insert("approvalMode".into(), serde_json::json!(approval));
+        if let Some(access) = &access {
+            config.insert("accessMode".into(), serde_json::json!(access));
         }
         if let Some(effort) = &effort_str {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));
@@ -232,8 +232,8 @@ impl Workspace {
                 };
                 config.insert("model".into(), serde_json::json!(model));
             }
-            if let Some(approval) = &row.permission_mode {
-                config.insert("approvalMode".into(), serde_json::json!(approval));
+            if let Some(access) = &row.access_mode {
+                config.insert("accessMode".into(), serde_json::json!(access));
             }
             if let Some(effort) = &row.reasoning_effort {
                 config.insert("reasoningEffort".into(), serde_json::json!(effort));
@@ -250,31 +250,19 @@ impl Workspace {
         // belonging and picks. A refilled draft reuses its row (the picks
         // it holds win over inheritance); a fresh conversation starts a
         // new row.
-        let (provider, model_id, approval, effort) = match &refill {
+        let (provider, model_id, access, effort) = match &refill {
             Some(row) => (
                 row.model_provider.as_deref(),
                 row.model_id.as_deref(),
-                row.permission_mode.as_deref(),
+                row.access_mode.as_deref(),
                 row.reasoning_effort.as_deref(),
             ),
             None => {
                 let (provider, model_id) = split_wire_model(model.as_deref());
-                (
-                    provider,
-                    model_id,
-                    approval.as_deref(),
-                    effort_str.as_deref(),
-                )
+                (provider, model_id, access.as_deref(), effort_str.as_deref())
             }
         };
-        land_conversation_row(
-            &sid,
-            project.as_deref(),
-            provider,
-            model_id,
-            approval,
-            effort,
-        );
+        land_conversation_row(&sid, project.as_deref(), provider, model_id, access, effort);
         let config_for_channel = config.clone();
         let cwd_for_channel = cwd.clone();
         let reply = self.with_foreground_store(cx, |store, _| {
@@ -1020,7 +1008,7 @@ impl Workspace {
     }
 
     /// Archive the active thread and open a fresh one that inherits the
-    /// outgoing thread's project, model, permission mode, and reasoning effort —
+    /// outgoing thread's project, model, access mode, and reasoning effort —
     /// `/new` starts a clean conversation without dropping the working
     /// context. No-op while a turn is running (see
     /// `archive_active_thread_if_idle`).
@@ -1064,15 +1052,15 @@ impl Workspace {
                 .reasoning_effort()
                 .map(str::to_string)
         });
-        let approval = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
+        let access = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
             let view = store.read(cx);
             crate::ahp_store::leaf(&view.book, &sid)
-                .approval_mode()
+                .access_mode()
                 .map(str::to_string)
         });
         // U6b③: the inherited state rides the v2 CreateSession intent —
         // the compat-note create this replaces carried only the cwd, so
-        // the parked model/project/effort/permission never reached the
+        // the parked model/project/effort/access never reached the
         // server (the #765 round-2 inheritance defect's shape); the
         // receipt's minted id attaches through the standard
         // created-session path.
@@ -1088,15 +1076,15 @@ impl Workspace {
             project.as_deref(),
             model.as_ref().map(|m| m.provider.as_str()),
             model.as_ref().map(|m| m.id.as_str()),
-            approval.as_deref(),
+            access.as_deref(),
             effort_str.as_deref(),
         );
         let mut config = serde_json::Map::new();
         if let Some(model) = &model_str {
             config.insert("model".into(), serde_json::json!(model));
         }
-        if let Some(approval) = &approval {
-            config.insert("approvalMode".into(), serde_json::json!(approval));
+        if let Some(access) = &access {
+            config.insert("accessMode".into(), serde_json::json!(access));
         }
         if let Some(effort) = &effort_str {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));

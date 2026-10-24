@@ -20,7 +20,7 @@
 //!   `EvalResult` notification, paired by `request_id`.
 //! - Inbound (page → agent): `__manox_request_write__` is fire-and-forget on
 //!   the page side; the host observes and drops the request (an untrusted
-//!   page gains no write path regardless of `PermissionMode`).
+//!   page gains no write path regardless of `AccessMode`).
 //!
 //! The webview crate's notify/inbound bridges fire on the gpui main thread via
 //! `PlatformDispatcher::dispatch_on_main_thread`, whose runnable carries no

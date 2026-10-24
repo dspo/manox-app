@@ -317,15 +317,15 @@ fn builtin_meta(name: &str) -> &'static manox_agent::slash_builtins::BuiltinSlas
     manox_agent::slash_builtins::canonical_builtin(name).expect("registered built-in command")
 }
 
-/// `/mode` — cycle or set the permission mode on the current thread.
+/// `/mode` — toggle or set the access mode on the current thread.
 ///
-/// `/mode` (no args) cycles from the EFFECTIVE mode (seated value, the
-/// host-declared schema default, or the host's own `workspace-write`
-/// default) — a thread that never journaled a mode starts its cycle from
-/// `workspace-write`, so the first press lands on `danger-full-access`,
+/// `/mode` (no args) toggles from the EFFECTIVE mode (seated value, the
+/// host-declared schema default, or the host's own `sandbox`
+/// default) — a thread that never journaled a mode starts its toggle from
+/// `sandbox`, so the first press lands on `full-access`,
 /// never on a mode the session is not running. `/mode <name>` sets the
-/// named mode (`read-only`,
-/// `workspace-write`, `danger-full-access`); an optional prompt after the mode
+/// named mode (`sandbox`,
+/// `full-access`); an optional prompt after the mode
 /// name immediately starts a turn under the new mode.
 struct ModeCommand;
 
@@ -352,12 +352,12 @@ impl SlashCommand for ModeCommand {
             Some((head, tail)) => (head, tail.trim()),
             None => (trimmed, ""),
         };
-        let parsed: Result<manox_agent::thread::PermissionMode, _> =
+        let parsed: Result<manox_agent::thread::AccessMode, _> =
             serde_json::from_value(serde_json::Value::String(name.to_string()));
         match parsed {
             Ok(mode) => {
                 if rest.is_empty() {
-                    workspace.apply_permission_mode(mode, cx);
+                    workspace.apply_access_mode(mode, cx);
                 } else {
                     workspace.start_mode_turn(mode, rest.to_string(), cx);
                 }

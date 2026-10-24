@@ -445,22 +445,17 @@ workspace-ask-skipped = 已跳过
 
 workspace-cancel = 取消
 
-workspace-mode-readonly-title = 只读
+access-mode-sandbox-title = 沙箱访问
 
-workspace-mode-workspacewrite-title = 工作区访问
+access-mode-full-access-title = 完全访问
 
-workspace-mode-dangerfullaccess-title = 完全访问
+access-mode-chip-sandbox = 沙箱访问
 
-workspace-chip-mode-readonly = 只读
-
-workspace-chip-mode-workspacewrite = 工作区访问
-
-workspace-chip-mode-dangerfullaccess = 完全访问
+access-mode-chip-full-access = 完全访问
 
 workspace-mode-notice = { $mode ->
-    [readonly] 只读模式：bash 可运行但写入被 seatbelt 拒绝；文件变更被拒绝。
-    [workspacewrite] 工作区访问：工作区、steer 状态目录（~/.manox）与临时目录下的写入放行；工作区之外的目标被拒绝。被拒绝时可用 sandbox_permissions + justification 申请升级。
-   *[dangerfullaccess] 完全访问：无沙箱；bash 不受限运行，文件变更不受约束。
+    [sandbox] 沙箱访问：文件写入围栏到工作区、steer 状态目录（~/.manox）与临时目录；bash 走 seatbelt 配置。被拒绝时可用 require_escalated + justification 申请升级；网络暂不受限（沙箱尚未在网络面收口）。
+   *[fullaccess] 完全访问：无沙箱；bash 不受限运行，文件变更不受约束。
 }
 
 workspace-project-choose = 选择项目
@@ -512,7 +507,7 @@ turn-navigator-copied = 消息已复制到剪贴板。
 
 ### slash_command.rs
 
-slash-mode-unknown = 未知权限模式“{ $mode }”— 应为 read-only、workspace-write 或 danger-full-access
+slash-mode-unknown = 未知访问模式“{ $mode }”— 应为 sandbox 或 full-access
 
 ### /exit 停机序列（workspace/exit.rs）
 
