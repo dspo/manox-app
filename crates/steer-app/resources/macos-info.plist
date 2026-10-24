@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Embedded into the dev binary's __TEXT,__info_plist section (see
+     build.rs) so a bare `cargo run` binary can prompt for microphone and
+     speech-recognition access. A bundled .app reads its own generated
+     Info.plist (script/bundle-mac) instead; this file never ships. -->
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.dspo.steer</string>
+    <key>CFBundleName</key>
+    <string>Steer</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Steer 需要访问麦克风，把您说的话转成文字插入输入框。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Steer 使用 macOS 系统语音识别把您的语音转成文字；识别完全在本机完成，音频不会上传。</string>
+</dict>
+</plist>

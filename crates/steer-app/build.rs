@@ -15,6 +15,22 @@ fn main() {
     let repo_root = manifest_dir.join("../..");
     let lock_path = repo_root.join("Cargo.lock");
 
+    // macOS: embed the Info.plist into the binary's __TEXT,__info_plist
+    // section so a bare `cargo run` binary can prompt for microphone +
+    // speech-recognition access — the system reads a bundled .app's
+    // Info.plist and this section only when there is none, so the release
+    // bundle (script/bundle-mac) is unaffected. Without the usage keys the
+    // speech recognizer refuses to construct (the dictation button would
+    // never render in dev) and the first access prompt kills the process.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let plist = manifest_dir.join("resources/macos-info.plist");
+        println!("cargo:rerun-if-changed={}", plist.display());
+        println!(
+            "cargo:rustc-link-arg-bins=-Wl,-sectcreate,__TEXT,__info_plist,{}",
+            plist.display()
+        );
+    }
+
     // The repo root is a worktree while a change is in flight, where `.git` is a
     // file pointing at the real git dir; watch that dir's HEAD and reflog so a
     // new commit re-runs this script.

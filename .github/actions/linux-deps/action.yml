@@ -24,7 +24,7 @@ runs:
       with:
         path: /var/cache/apt/archives
         # Bump the version when the package list below changes.
-        key: apt-debs-${{ runner.os }}-v1
+        key: apt-debs-${{ runner.os }}-v2
         restore-keys: apt-debs-${{ runner.os }}-
 
     - name: Install system dependencies
@@ -33,6 +33,7 @@ runs:
         pkgs=(
           lld
           pkg-config
+          libasound2-dev
           libfontconfig1-dev
           libx11-dev
           libxcb1-dev
