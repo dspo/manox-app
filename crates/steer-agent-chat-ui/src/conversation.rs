@@ -1861,6 +1861,11 @@ impl ConversationState {
                 // UI state (badge/chip) handled by `Workspace`; not a conversation item.
                 ApplyOutcome::Unchanged
             }
+            ThreadEvent::NetworkAccessChanged { .. } => {
+                // UI state (the access menu's network radio) handled by
+                // `Workspace`; not a conversation item.
+                ApplyOutcome::Unchanged
+            }
             ThreadEvent::BrowserSuitesChanged { .. } => {
                 // Composer chips handled by `Workspace`; not a conversation item.
                 ApplyOutcome::Unchanged
