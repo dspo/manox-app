@@ -27,7 +27,9 @@ set -euo pipefail
 # generator records every DT_NEEDED soname and versioned symbol of both binaries
 # as a Requires, which is the same link set bundle-deb reconstructs by hand with
 # ldd + dpkg -S. The script prints nothing about them, but warns if the set came
-# out empty.
+# out empty. bubblewrap is declared explicitly in the spec preamble on top of
+# that generated set: the Linux sandbox hard-requires the bwrap binary, which
+# no ELF link pulls in.
 #
 
 build_flag="--release"
@@ -185,6 +187,10 @@ License:        Proprietary
 URL:            https://github.com/dspo/manox-app
 Packager:       dspo <dspo@users.noreply.github.com>
 Source0:        ${bundle_id}.desktop
+# Outside the ELF generator's reach (a standalone binary, not a linked library),
+# and the point of the sandbox: without it the runtime degrades to per-call
+# approval instead of confining bash.
+Requires:       bubblewrap
 
 # The binaries are already built in the cargo tree, and both bundles that came
 # before ship them exactly as cargo left them: no debuginfo subpackage, and no

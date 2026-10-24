@@ -26,7 +26,8 @@ set -euo pipefail
 # Runtime Depends are computed from the linked binary by mapping every NEEDED
 # shared object to its owning package (ldd + dpkg -S); the static fallback
 # covers the gpui/wry stack (GTK3, WebKit2GTK, JavaScriptCore, libsoup,
-# xkbcommon).
+# xkbcommon). bubblewrap is declared on top of that set: the Linux sandbox the
+# runtime hard-requires the bwrap binary, which no ELF link pulls in.
 
 build_flag="--release"
 target_dir="release"
@@ -132,6 +133,9 @@ if [[ -z "${depends}" ]]; then
     echo "Warning: ldd+dpkg -S mapping produced nothing — using static Depends fallback"
     depends="libgtk-3-0, libwebkit2gtk-4.1-0, libjavascriptcoregtk-4.1-0, libsoup-3.0-0, libxkbcommon0"
 fi
+# The sandbox is a requirement, not a nice-to-have: without bwrap the runtime
+# degrades to per-call approval, so make the package pull bubblewrap in.
+depends="${depends}, bubblewrap"
 
 # --- Assemble the package root ---
 stage_dir="target/deb/${pkg_name}"
