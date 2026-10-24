@@ -620,9 +620,9 @@ Horizontal flex: [InputField](#inputfield) + [SendCluster](#sendcluster) + chips
 
 #### InputField
 
-Multi-line auto-grow text input, placeholder text.
+Multi-line auto-grow text input, placeholder text. An `@`-mention chip inside the value hints its full registry key on hover: a small popover card (`mention-hover-tip`, deferred overlay beside the [CompletionPopover](#completionpopover)'s mount) pinned right under the hovered chip's laid-out rect via gpui-kit 0.8 `Textarea::on_token_hover` — shown only when the key differs from the chip's short name, since a matching pair would repeat the chip verbatim. Slash `/` tokens get no tooltip.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` (via `gpui_component::Input`)
+> Source: `crates/agent-ui/src/workspace/composer_render.rs` (via `gpui_component::Input`; hover state on `ChatColumn.mention_hover`, `crates/steer-agent-chat-ui/src/column.rs`)
 
 #### SendCluster
 

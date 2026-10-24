@@ -818,6 +818,7 @@ impl Workspace {
                 project_chip_menu: None,
                 project_chip_menu_sub: None,
                 completion: None,
+                mention_hover: None,
                 recall_index: -1,
                 recall_draft: None,
                 turn_navigator: None,
@@ -922,6 +923,16 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_chat_input(&self, cx: &App) -> Entity<gpui_component::input::TextareaState> {
         self.chat_input(cx)
+    }
+
+    /// The composer's hovered `@`-mention chip (registry key + window-space
+    /// chip rect), for the hover-tooltip probe.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_mention_hover(
+        &self,
+        cx: &App,
+    ) -> Option<(gpui::SharedString, gpui::Bounds<gpui::Pixels>)> {
+        self.chat.read(cx).mention_hover.clone()
     }
 
     /// The turn rail's hovered mark, for interaction tests.
@@ -2230,7 +2241,20 @@ impl Workspace {
                     secondary: false,
                     shift: true,
                 } => {}
-                InputEvent::Change => this.sync_completion(window, cx),
+                InputEvent::Change => {
+                    // Content changes can delete the hovered chip outright
+                    // (atomic backspace, submit clear) — the token's element
+                    // vanishes with it, so no exit event ever retires the
+                    // hover state. Clear it here, before it can outlive the
+                    // content it described.
+                    if this.chat.read(cx).mention_hover.is_some() {
+                        this.chat.update(cx, |chat, cx| {
+                            chat.mention_hover = None;
+                            cx.notify();
+                        });
+                    }
+                    this.sync_completion(window, cx);
+                }
                 InputEvent::Focus | InputEvent::Blur => {}
             },
         )
