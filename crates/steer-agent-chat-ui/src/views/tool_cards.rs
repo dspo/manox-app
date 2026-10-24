@@ -116,13 +116,15 @@ pub fn ensure_tool_card(
 }
 
 /// One tool call as a card. `on_toggle` routes the header click back into the
-/// conversation's own fold (the card's state only mirrors it).
+/// conversation's own fold (the card's state only mirrors it); `host` feeds
+/// the edit family's full-diff entry (the right pane's diff tab).
 pub fn build_tool_card(
     entry: &ToolCallItem,
     state: &Entity<ToolState>,
     cwd: Option<SharedString>,
     theme: &Theme,
     on_toggle: Option<CardToggle>,
+    host: Option<ChatHostHandle>,
 ) -> AnyElement {
     let family = card_family(&entry.name).expect("card family");
     let mut card = Tool::new(gpui::ElementId::Name(entry.id.clone().into()), state)
@@ -140,6 +142,16 @@ pub fn build_tool_card(
         card = card.copy_diff(SharedString::from(entry.output.clone()));
     } else {
         card = card.copy_output(SharedString::from(entry.output.clone()));
+    }
+    // The edit family's full-diff entry: the in-band body caps at LINE_CAP,
+    // the right pane's diff tab renders the whole patch. Attached only when
+    // the output could actually be a diff — an error text or an empty one
+    // has nothing to open.
+    if family == CardFamily::Edit && !entry.is_error && !entry.output.is_empty() {
+        card = card.open_diff(
+            i18n::t("tool-diff-open-in-pane"),
+            entry_open_diff(host, entry.id.clone()),
+        );
     }
     if let Some(on_toggle) = on_toggle {
         card = card.on_toggle(move |window, cx| on_toggle(window, cx));
@@ -579,6 +591,48 @@ pub fn entry_toggle(
             }
             cx.notify();
         });
+    }
+}
+
+/// The edit card's full-diff entry: the click re-reads the entry by id (the
+/// copy chips' build-time capture would freeze the patch of one render pass;
+/// patches grow while a call streams) and hands the patch plus the target
+/// path to the host — the workspace owns where it opens (the right pane's
+/// diff tab).
+fn entry_open_diff(
+    host: Option<ChatHostHandle>,
+    tool_id: String,
+) -> impl Fn(&mut Window, &mut App) + Clone {
+    move |_window, cx| {
+        let Some(host) = host.clone() else {
+            return;
+        };
+        let Some(conv) = host.conversation(cx) else {
+            return;
+        };
+        let payload = conv.update(cx, |c, cx| {
+            let (cix, eix) = c.find_thinking_entry(&tool_id, &*cx)?;
+            let item = c.items().get(cix)?.clone();
+            item.update(cx, |item, _| {
+                let ConvItem::Thinking(t) = item.kind_mut() else {
+                    return None;
+                };
+                match t.entries.get_mut(eix) {
+                    Some(ActivityEntry::Tool(entry)) => {
+                        let path = entry
+                            .input
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        Some((path, entry.output.clone()))
+                    }
+                    _ => None,
+                }
+            })
+        });
+        if let Some((path, patch)) = payload {
+            host.open_right_diff(path, patch, cx);
+        }
     }
 }
 

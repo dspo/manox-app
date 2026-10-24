@@ -23,7 +23,7 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, SharedString, Window, px,
 };
 use steer_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
-use steer_agent_chrome_ui::theme::{IconAsset, icon, icons};
+use steer_agent_chrome_ui::theme::{FG_DIM, IconAsset, icon, icons};
 use steer_ext_agents::cx_session::CxSessionSource;
 
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
@@ -861,6 +861,120 @@ impl ToolTab for EditorTab {
     }
 }
 
+// ── tool-card diff ────────────────────────────────────────────────────────
+
+/// The diff kind (the registry lookup key the workspace's open-diff path
+/// uses).
+pub const DIFF_KIND: &str = "diff";
+
+/// The edit family's full-diff kind: ONE tab per pane, its content REPLACED
+/// every time an edit card's open-diff chip fires. The instance id is fixed
+/// (no per-open minting — `open_kind`'s dedup then turns a second open into
+/// a focus), and the content lives on the workspace (`right_diff`) — the
+/// workspace re-parses each patch on its own event path, so an already-open
+/// tab shows the new patch without a close/reopen cycle. No quick action: a
+/// diff tab with no patch behind it is an empty page, so the kind is
+/// reachable only from the cards. Session-lived (no persisted form): the
+/// patch is a live tool output, and the workspace retires the tab on thread
+/// switch rather than showing another thread's patch.
+pub struct DiffTool {
+    ws: Entity<crate::Workspace>,
+}
+
+impl DiffTool {
+    pub fn new(ws: Entity<crate::Workspace>) -> Self {
+        Self { ws }
+    }
+}
+
+impl ToolTabFactory for DiffTool {
+    fn kind(&self) -> &'static str {
+        DIFF_KIND
+    }
+
+    fn create(&self) -> Arc<dyn ToolTab> {
+        Arc::new(DiffTab {
+            id: DIFF_KIND.to_string(),
+            ws: self.ws.clone(),
+        })
+    }
+
+    fn quick_action(&self) -> Option<SharedString> {
+        None
+    }
+
+    fn icon(&self, _cx: &App) -> AnyElement {
+        icon(icons::CODE, 15.).into_any_element()
+    }
+}
+
+struct DiffTab {
+    id: String,
+    ws: Entity<crate::Workspace>,
+}
+
+impl ToolTab for DiffTab {
+    fn kind(&self) -> &'static str {
+        DIFF_KIND
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn title(&self, cx: &App) -> SharedString {
+        match self.ws.read(cx).right_diff.as_ref() {
+            Some(diff) => diff.title.clone(),
+            None => steer_i18n::t("chrome-tab-diff").into(),
+        }
+    }
+
+    fn icon(&self, _cx: &App) -> AnyElement {
+        icon(icons::CODE, 15.).into_any_element()
+    }
+
+    /// Nothing to mint: the parsed diff lives on the workspace (see
+    /// [`DiffTool`]) and `render` reads it. An open with no patch behind it
+    /// (the pane's "+" on an active diff tab mints another instance whose
+    /// id dedups away) renders the empty body like any other tab.
+    fn open(
+        &self,
+        _window: &mut Window,
+        _cx: &mut App,
+        _store: &mut TabStore,
+        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
+    ) {
+    }
+
+    fn render(&self, _window: &mut Window, cx: &App, _store: &TabStore) -> AnyElement {
+        use gpui::{InteractiveElement as _, ParentElement as _, Styled as _, div, px};
+        match self.ws.read(cx).right_diff.as_ref() {
+            Some(diff) => {
+                let body = match &diff.state {
+                    Ok(state) => gpui_component::diff::Diff::new(state).into_any_element(),
+                    Err(e) => div()
+                        .w_full()
+                        .p(px(12.))
+                        .text_color(FG_DIM)
+                        .child(e.clone())
+                        .into_any_element(),
+                };
+                div()
+                    .id("right-diff-tab")
+                    .size_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .debug_selector(|| "right-diff-tab".into())
+                    .child(body)
+                    .into_any_element()
+            }
+            None => div_missing().into_any_element(),
+        }
+    }
+}
+
 // ── shared helpers ────────────────────────────────────────────────────────
 
 /// A standalone PTY spawn (the chrome-example path): the tab owns its
@@ -942,5 +1056,6 @@ pub fn registry(
             mux.clone(),
         )),
         Arc::new(EditorTool),
+        Arc::new(DiffTool::new(ws.clone())),
     ]
 }

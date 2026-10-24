@@ -490,7 +490,10 @@ impl RenderOnce for ToolHeader {
 /// `in` copies the call's quotable input — the raw argument structure, or the
 /// host's chosen shape where re-running matters (the app quotes a Bash
 /// command) — and `out` its raw output: the machine shape, as opposed to
-/// selecting the rendered text, which copies what the card shows.
+/// selecting the rendered text, which copies what the card shows. An
+/// `open_diff` chip rides the same row: a card whose body is a capped view of
+/// something the host can show in full hands the expansion to a callback (the
+/// app opens the right pane's diff tab) instead of growing the transcript.
 #[derive(IntoElement)]
 pub struct Tool {
     id: ElementId,
@@ -504,6 +507,7 @@ pub struct Tool {
     copy_input: Option<SharedString>,
     copy_output: Option<SharedString>,
     copy_diff: Option<SharedString>,
+    open_diff: Option<(SharedString, ToolToggle)>,
     on_toggle: Option<ToolToggle>,
     animated: bool,
 }
@@ -522,6 +526,7 @@ impl Tool {
             copy_input: None,
             copy_output: None,
             copy_diff: None,
+            open_diff: None,
             on_toggle: None,
             animated: true,
         }
@@ -586,6 +591,19 @@ impl Tool {
         self
     }
 
+    /// An extra body chip next to the copy controls: `label` (host-localized
+    /// vocabulary — the crate injects no copy) on a chip whose click hands
+    /// `on_open` the window and app. The full-view counterpart to the copy
+    /// chips: the body shows the capped shape, the callback the whole thing.
+    pub fn open_diff(
+        mut self,
+        label: impl Into<SharedString>,
+        on_open: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.open_diff = Some((label.into(), std::rc::Rc::new(on_open)));
+        self
+    }
+
     /// The default header's toggle override — see [`ToolHeader::on_toggle`].
     pub fn on_toggle(mut self, on_toggle: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_toggle = Some(std::rc::Rc::new(on_toggle));
@@ -616,6 +634,7 @@ impl RenderOnce for Tool {
             copy_input,
             copy_output,
             copy_diff,
+            open_diff,
             on_toggle,
             animated,
         } = self;
@@ -651,37 +670,43 @@ impl RenderOnce for Tool {
             // that hides is one a failing command's user cannot find. A click
             // presses, lands on the clipboard, and the glyph flashes to a
             // check for COPY_FLASH.
-            let controls = (copy_input.is_some() || copy_output.is_some() || copy_diff.is_some())
-                .then(|| {
-                    h_flex()
-                        .absolute()
-                        .top_1()
-                        .right_1()
-                        .gap_1()
-                        .children(copy_input.map(|raw| {
-                            copy_chip((id.clone(), "copy-in"), "in", CopySide::In, raw, &state, cx)
-                        }))
-                        .children(copy_output.map(|raw| {
-                            copy_chip(
-                                (id.clone(), "copy-out"),
-                                "out",
-                                CopySide::Out,
-                                raw,
-                                &state,
-                                cx,
-                            )
-                        }))
-                        .children(copy_diff.map(|raw| {
-                            copy_chip(
-                                (id.clone(), "copy-diff"),
-                                "diff",
-                                CopySide::Diff,
-                                raw,
-                                &state,
-                                cx,
-                            )
-                        }))
-                });
+            let controls = (copy_input.is_some()
+                || copy_output.is_some()
+                || copy_diff.is_some()
+                || open_diff.is_some())
+            .then(|| {
+                h_flex()
+                    .absolute()
+                    .top_1()
+                    .right_1()
+                    .gap_1()
+                    .children(copy_input.map(|raw| {
+                        copy_chip((id.clone(), "copy-in"), "in", CopySide::In, raw, &state, cx)
+                    }))
+                    .children(copy_output.map(|raw| {
+                        copy_chip(
+                            (id.clone(), "copy-out"),
+                            "out",
+                            CopySide::Out,
+                            raw,
+                            &state,
+                            cx,
+                        )
+                    }))
+                    .children(copy_diff.map(|raw| {
+                        copy_chip(
+                            (id.clone(), "copy-diff"),
+                            "diff",
+                            CopySide::Diff,
+                            raw,
+                            &state,
+                            cx,
+                        )
+                    }))
+                    .children(open_diff.map(|(label, on_open)| {
+                        open_chip((id.clone(), "open-diff"), label, on_open, cx)
+                    }))
+            });
             let wrapper = div()
                 .w_full()
                 .min_w_0()
@@ -788,6 +813,44 @@ fn copy_chip(
                 .text_xs()
                 .font_family(mono)
                 .text_color(muted)
+                .child(label),
+        )
+}
+
+/// The full-view chip: the copy chips' chrome (no flash — nothing landed), the
+/// click routed to the host's open callback instead of the clipboard. `label`
+/// is host-localized text; the glyph names the destination, not the action.
+fn open_chip(
+    id: impl Into<gpui::ElementId>,
+    label: SharedString,
+    on_open: ToolToggle,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_1p5()
+        .py_0p5()
+        .rounded(px(5.))
+        .bg(theme.background.opacity(0.85))
+        .border_1()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .active(|chip| chip.opacity(0.7))
+        .on_click(move |_, window, cx| on_open(window, cx))
+        .child(
+            div()
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(IconName::PanelRight).xsmall()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_family(theme.mono_font_family.clone())
+                .text_color(theme.muted_foreground)
                 .child(label),
         )
 }

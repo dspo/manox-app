@@ -60,6 +60,12 @@ pub trait ChatHost: Send + Sync + 'static {
         status: manox_agent::ToolCallStatus,
         cx: &mut App,
     );
+    /// Open an edit tool call's full unified diff in the right pane's diff
+    /// tab (single tab — a later call replaces its content). `path` is the
+    /// call's target file when the input carried one; `patch` is the raw
+    /// tool output (the app's `[path#TAG]` envelope line included — the
+    /// host strips it before parsing).
+    fn open_right_diff(&self, path: Option<String>, patch: String, cx: &mut App);
 }
 
 /// An all-no-op host for tests: every action swallows, every accessor is
@@ -91,6 +97,7 @@ impl ChatHost for NoopHost {
         _cx: &mut App,
     ) {
     }
+    fn open_right_diff(&self, _path: Option<String>, _patch: String, _cx: &mut App) {}
 }
 
 /// A shared [`NoopHost`] handle for tests.

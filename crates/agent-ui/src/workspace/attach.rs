@@ -427,6 +427,10 @@ impl Workspace {
         // outgoing pane yet — the panels closed here are exactly the
         // outgoing thread's).
         self.close_subagent_tabs(cx);
+        // The diff tab rides the same per-thread rule: its payload is the
+        // LATEST opened patch anywhere, so a tab carried across the switch
+        // would show another thread's patch.
+        self.close_diff_tabs(cx);
 
         // Save the outgoing thread's unsent composer text before switching, so
         // a draft survives a round-trip through another thread (Bug 1). A
