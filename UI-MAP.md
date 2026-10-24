@@ -53,7 +53,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 会话主路径（流式文本 / thinking / 工具卡片 / cancel / steer） | ✅ | `pi_backend::session` + `adapt`；空闲 `prompt()`，运行中 `steer()` |
 | 会话持久化与重启恢复 | ✅ | pi jsonl + `session_meta` sidecar |
 | 转录渲染（MessageList / ToolCallCard / RetryBadge / ErrorMessage） | ✅ | 共享渲染管线 |
-| 权限门控（AccessMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 两档都运行（sandbox 档 ride seatbelt profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`require_escalated`+`justification` 升级往返经 `ToolCallAuthorization`；AccessChip 切 Sandbox/FullAccess，切换热生效（下一次工具调用即按新模式裁决），chip 乐观即时刷新、宿主拒绝时回滚并出纠错 notice（写前对账，`LeafView::access_mode_or_default`：座位值 → 宿主声明 schema 默认 → 宿主默认，旧三档持久串一律落默认 Sandbox） |
+| 权限门控（AccessMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 两档都运行（sandbox 档 ride seatbelt profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`require_escalated`+`justification` 升级往返经 `ToolCallAuthorization`；AccessChip 切 Sandbox/FullAccess，切换热生效（下一次工具调用即按新模式裁决），chip 乐观即时刷新、宿主拒绝时回滚并出纠错 notice（写前对账，`LeafView::access_mode_or_default`：座位值 → 宿主声明 schema 默认 → 宿主默认，旧三档持久串一律落默认 Sandbox）；同一菜单的「网络」组切 sandbox 档 `networkAccess`（默认关、会话内存态，`LeafView::network_access_or_default` 同回退链；开启后无 allowlist 直连、有 allowlist 走受管代理 + 域名确认卡） |
 | Slash commands | ✅ 部分 | `/compact`、`/exit`(`/quit`)、`/new`(`/clear` `/archive`)、`/goal`、`/mode`（`/plan` 是上游内置 skill：裸文本直通 runtime 的 skill 分发，非本地命令）；markdown/skill 适配器经共享 registry。`/exit` 走全量停机序列（`workspace/exit.rs`）：停子代理 → cancel 当前 turn → 关右栏终端/TUI agent 页签与底 dock 终端（PTY drop 即进程树终止）→ 关集成浏览器 → 强制归档（绕过 idle 门禁）→ 落新会话，每步以 info 卡播报；turn 运行中同样可发 |
 | 模型选择器 | ✅ | pi `ProviderRegistry`，按 provider 显示名分组；写前对账：乐观写入 → 宿主 echo 确认（撤销史销账）/ `rejectionReason` 回滚 + 纠错 notice |
 | 项目（composer chip / 侧栏文件夹 / 绑定新会话） | ✅ | 宿主 workspace registry（`ClientCall::Workspace` + `HostEvent::WorkspaceUpdate` 状态流），客户端不再写 threads.db `projects` 表 |
@@ -781,7 +781,7 @@ Trigger: [ModelChip](#modelchip). Model selector dropdown: provider submenus for
 
 #### AccessMenu
 
-Trigger: [AccessChip](#accesschip). [AccessMode](#access-modes) selector: two title-only rows — Sandbox access / Full access, check on the current one. No header row, no "Learn more", no per-mode descriptions.
+Trigger: [AccessChip](#accesschip). [AccessMode](#access-modes) selector: two title-only rows — Sandbox access / Full access, check on the current one — plus a network group beneath: a muted non-interactive 网络/Network label row and the two-state `networkAccess` radio (关/Off — wifi-off, muted; 开/On — globe, info), check on the active one. No header row, no "Learn more", no per-mode descriptions. Clicks route through `Workspace::apply_access_mode` / `apply_network_access`: write-ahead config write (`accessMode` / `networkAccess`, the latter session-memory only), localized notice, menu close.
 
 > Source: `crates/agent-ui/src/workspace.rs` (`build_permission_content`)
 
@@ -1205,7 +1205,7 @@ Two file-effect tiers drive the seatbelt profile (bash) and the fs write fence; 
 
 #### Sandbox access
 
-Green (shield) — file writes fenced to the workspace, the manox home (~/.manox), and temp areas; bash rides the seatbelt profile (default). Network is not yet confined.
+Green (shield) — file writes fenced to the workspace, the manox home (~/.manox), and temp areas; bash rides the seatbelt profile (default). Sandbox network is off by default (`networkAccess` config, AHP session-mutable, memory-only — a restored session starts closed again); the [AccessMenu](#accessmenu) network group flips it on (direct when no allowlist, through the host's managed proxy + domain confirm cards when `~/.manox/settings.toml [sandbox.network] allow` is configured).
 
 #### Full access
 
