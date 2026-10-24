@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gpui::{Entity, FocusHandle, ListState, Subscription};
+use gpui::{Bounds, Entity, FocusHandle, ListState, Pixels, SharedString, Subscription};
 use gpui_component::input::{InputState, TextareaState};
 use gpui_component::menu::PopupMenu;
 
@@ -404,6 +404,13 @@ pub struct ChatColumn {
     /// overlay — it never grabs focus, so the `InputState` keeps focus and the
     /// query filters live on every keystroke.
     pub completion: Option<CompletionState>,
+    /// The `@`-mention chip currently under the pointer: its registry key
+    /// plus the chip's laid-out window-space rect. The chip itself shows
+    /// only the short name, so the key is the tooltip's one payload — set
+    /// only while they differ (a matching pair would repeat the chip
+    /// verbatim). Driven by the textarea's `on_token_hover`; the composer
+    /// render lifts it into a deferred tooltip pinned under the chip.
+    pub mention_hover: Option<(SharedString, Bounds<Pixels>)>,
     /// Searchable, newest-first snapshot of the active thread's user turns.
     pub turn_navigator: Option<Entity<TurnNavigator>>,
     pub turn_navigator_sub: Option<Subscription>,

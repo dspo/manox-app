@@ -253,6 +253,7 @@ impl Workspace {
         // composer's own v_flex keeps it glued to the input bar in both hero
         // and footer, with a single mount point and ElementId.
         let completion_overlay = self.render_completion_overlay(window, cx);
+        let mention_tip = self.render_mention_hover_tip(cx);
 
         v_flex()
             .w_full()
@@ -260,6 +261,7 @@ impl Workspace {
             .relative()
             .children(queue)
             .children(completion_overlay)
+            .children(mention_tip)
             // Own paste at the capture phase so a clipboard image becomes a
             // pending attachment instead of letting `InputState::paste` insert
             // the image's alt-text. `stop_propagation` keeps the inner input's
@@ -325,7 +327,50 @@ impl Workspace {
                     wrap.child(
                         Textarea::new(&self.chat.read(cx).input_state)
                             .appearance(false)
-                            .text_size(crate::views::message::MESSAGE_BODY_SIZE),
+                            .text_size(crate::views::message::MESSAGE_BODY_SIZE)
+                            .on_token_hover({
+                                let chat = self.chat.clone();
+                                let ws = cx.entity().downgrade();
+                                move |event, _, cx| {
+                                    let changed = chat.update(cx, |chat, _| {
+                                        let next = if event.is_hovered() {
+                                            // The chip already shows its short name;
+                                            // the tooltip earns its place only when
+                                            // the registry key differs.
+                                            (event.token().id() != event.token().text()).then(
+                                                || (event.token().id().clone(), event.bounds()),
+                                            )
+                                        } else if chat
+                                            .mention_hover
+                                            .as_ref()
+                                            .is_some_and(|(id, _)| id == event.token().id())
+                                        {
+                                            // GPUI delivers a token's exit after the
+                                            // next token's entry, so an exit only
+                                            // clears the chip it belongs to.
+                                            None
+                                        } else {
+                                            chat.mention_hover.clone()
+                                        };
+                                        if chat.mention_hover == next {
+                                            return false;
+                                        }
+                                        chat.mention_hover = next;
+                                        true
+                                    });
+                                    if changed {
+                                        // Chat notifies have no observer bridging
+                                        // them to a frame from this `&mut App`
+                                        // context (the context rail needed the same
+                                        // bridge at construction), so the tooltip's
+                                        // mount/unmount rides on a workspace
+                                        // repaint. Weak because the installed
+                                        // listener outlives the frame inside the
+                                        // input state.
+                                        let _ = ws.update(cx, |_, cx| cx.notify());
+                                    }
+                                }
+                            }),
                     )
                 },
             )
@@ -1381,6 +1426,43 @@ impl Workspace {
                         .occlude()
                         .child(render_completion(state, &theme, on_select)),
                 ),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
+    /// The hovered `@`-mention chip's tooltip (the column's `mention_hover`):
+    /// the chip's full registry key in a small popover card pinned right under
+    /// the chip's laid-out rect — the hover event's window-space bounds, so
+    /// soft wraps and multi-line growth ride for free. `snap_to_window` keeps
+    /// the card inside the window when the chip sits near an edge. `None`
+    /// renders nothing.
+    pub(super) fn render_mention_hover_tip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (key, chip) = self.chat.read(cx).mention_hover.clone()?;
+        let theme = cx.theme().clone();
+        let origin = point(chip.origin.x, chip.origin.y + chip.size.height + px(4.));
+        Some(
+            deferred(
+                anchored()
+                    .anchor(Anchor::TopLeft)
+                    .position(origin)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        gpui::div()
+                            .id("mention-hover-tip")
+                            .debug_selector(|| "mention-hover-tip".to_string())
+                            .occlude()
+                            .max_w(px(360.))
+                            .popover_style(cx)
+                            .px_2()
+                            .py_1()
+                            .rounded(theme.radius)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .font_family(theme.mono_font_family.clone())
+                            .child(key),
+                    ),
             )
             .with_priority(1)
             .into_any_element(),
