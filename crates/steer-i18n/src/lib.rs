@@ -447,6 +447,29 @@ mod tests {
         assert!(v.contains("Unknown command"), "got: {v}");
     }
 
+    /// The permission-mode notice must resolve all three variants in both
+    /// locales: the workspace posts it on every mode switch, and a missing
+    /// variant renders the raw fluent term. Pin the shapes so a rename or a
+    /// dropped translation fails loudly here.
+    #[test]
+    fn permission_mode_notice_localized() {
+        let _g = TEST_LANG_LOCK.lock().unwrap();
+        set_lang(Language::En);
+        let readonly = t_str("workspace-mode-notice", &[("mode", "readonly")]);
+        assert!(readonly.contains("Read Only"), "got: {readonly}");
+        let workspace = t_str("workspace-mode-notice", &[("mode", "workspacewrite")]);
+        assert!(workspace.contains("Workspace Access"), "got: {workspace}");
+        let full = t_str("workspace-mode-notice", &[("mode", "dangerfullaccess")]);
+        assert!(full.contains("Full Access"), "got: {full}");
+        set_lang(Language::ZhCn);
+        let readonly = t_str("workspace-mode-notice", &[("mode", "readonly")]);
+        assert!(readonly.contains("只读"), "got: {readonly}");
+        let workspace = t_str("workspace-mode-notice", &[("mode", "workspacewrite")]);
+        assert!(workspace.contains("工作区访问"), "got: {workspace}");
+        let full = t_str("workspace-mode-notice", &[("mode", "dangerfullaccess")]);
+        assert!(full.contains("完全访问"), "got: {full}");
+    }
+
     /// Keys the agent-ui sources reference only through helper return values —
     /// never as a literal `i18n::t("…")` argument — so the source scan below
     /// cannot see them. Pin them here; the comment names the owning helper so

@@ -646,9 +646,8 @@ pub fn chat_uri(id: &str) -> String {
     format!("ahp-chat:/{id}")
 }
 
-/// Build the plan extension channel URI for a chat id — the one home of the
-/// plan-review lifecycle (proposal and verdict), whose baseline is the only
-/// fold-visible record of a review's settlement.
+/// Build the plan extension channel URI for a chat id — the home of the
+/// execution-plan snapshots the rail restores its UpdatePlan todos from.
 pub fn plan_uri(id: &str) -> String {
     format!("{}{id}", manox_ahp::ext::channels::PLAN)
 }
@@ -3112,8 +3111,10 @@ pub fn pending_ask_from_ahp(
     // The wire has no per-question detail slot, so the runtime carries the
     // questions' `detail` support markdown on the request-level `message`
     // (verbatim for a single question, joined under headers for several) —
-    // a plan review is just an ask whose detail is the plan.
-    let detail = request.message.clone().unwrap_or_default();
+    // a plan review is just an ask whose detail is the plan. The document
+    // belongs to the request, so it folds into the first question's detail
+    // only, never duplicated under every card.
+    let mut detail = request.message.clone();
     let mut parsed = Vec::with_capacity(questions.len());
     for q in questions {
         let (id, question, header, multi, options) = match q {
@@ -3179,7 +3180,7 @@ pub fn pending_ask_from_ahp(
             id,
             question,
             header,
-            detail: detail.clone(),
+            detail: detail.take().unwrap_or_default(),
             multi_select: multi,
             options,
         });
@@ -3940,6 +3941,28 @@ mod tests {
         };
         let ask = pending_ask_from_ahp("auth-1".to_string(), &request).expect("parses");
         assert_eq!(ask.questions[0].detail, "# Plan\n\n- step one");
+
+        // A multi-question ask carries the joined document on the request —
+        // it folds into the first question only, never per card.
+        let mut two = request.clone();
+        two.questions.as_mut().expect("questions").push(
+            ahp_types::state::ChatInputQuestion::SingleSelect(
+                ahp_types::state::ChatInputSingleSelectQuestion {
+                    id: "q2".to_string(),
+                    title: Some("Follow-up".to_string()),
+                    message: "Scope?".to_string(),
+                    required: None,
+                    options: vec![],
+                    allow_freeform_input: None,
+                },
+            ),
+        );
+        let ask = pending_ask_from_ahp("auth-1".to_string(), &two).expect("parses");
+        assert_eq!(ask.questions[0].detail, "# Plan\n\n- step one");
+        assert_eq!(
+            ask.questions[1].detail, "",
+            "the document is not duplicated"
+        );
 
         let mut bare = request.clone();
         bare.message = None;
