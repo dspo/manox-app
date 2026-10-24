@@ -45,8 +45,8 @@ use crate::conversation::{ApplyOutcome, ConversationState, UserImage, UserTurnMe
 use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
-    CompletionState, SelectHandler, build_replacement, build_replacement_content, detect,
-    mention_source, render_completion, slash_source,
+    CompletionState, SelectHandler, build_replacement, build_replacement_content,
+    caret_anchor_origin, detect, mention_source, render_completion, slash_source,
 };
 use crate::views::composer_menu::{
     PendingAttachment, load_attachment, render_attachment_chips, render_browser_chips,
@@ -915,6 +915,13 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_list_state(&self, cx: &App) -> ListState {
         self.chat.read(cx).list_state.clone()
+    }
+
+    /// The composer input entity, for probes that drive the real textarea and
+    /// read back its prepaint caret geometry (the completion-anchor probe).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_chat_input(&self, cx: &App) -> Entity<gpui_component::input::TextareaState> {
+        self.chat_input(cx)
     }
 
     /// The turn rail's hovered mark, for interaction tests.

@@ -10,11 +10,45 @@
 use std::rc::Rc;
 
 use crate::i18n;
-use gpui::{AnyElement, App, ScrollHandle, SharedString, Window, prelude::*, px};
+use gpui::{
+    AnyElement, App, Bounds, Pixels, Point, ScrollHandle, SharedString, Size, Window, point,
+    prelude::*, px,
+};
 use gpui_component::input::{InlineToken, InlineTokenError, InputContent};
 use gpui_component::{Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
 
 use crate::views::popup_menu::{self, LIST_HORIZONTAL_PADDING, MAX_LIST_HEIGHT};
+
+/// The popover's pinned content width; the anchor math clamps the popover's x
+/// against it so a caret near the right edge cannot push it off-window.
+pub const COMPLETION_WIDTH: Pixels = px(520.);
+
+/// The caret-anchored popover origin, in window coordinates: one line below
+/// the caret, nudged left — the same relation upstream's completion menu
+/// derives from `prepaint_caret_geometry`. Below wins, but the popover flips
+/// above the caret when the list would not fit under it, and x stays clamped
+/// into the window with `margin` on both sides.
+pub fn caret_anchor_origin(
+    caret: Bounds<Pixels>,
+    line_height: Pixels,
+    scroll_offset_y: Pixels,
+    window: Size<Pixels>,
+    list_height: Pixels,
+    margin: Pixels,
+) -> Point<Pixels> {
+    let x = (caret.origin.x - px(4.))
+        .max(margin)
+        .min((window.width - COMPLETION_WIDTH - margin).max(margin));
+    let caret_top = caret.origin.y + scroll_offset_y;
+    let below = caret_top + line_height + px(4.);
+    let above = caret_top - list_height - px(4.);
+    let y = if below + list_height > window.height - margin {
+        above.max(margin)
+    } else {
+        below
+    };
+    point(x, y)
+}
 
 /// What a completion row represents — drives its icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -355,13 +389,14 @@ pub fn render_completion(
         }));
 
     popup_menu::popup_container(theme, list)
-        .w(px(520.))
+        .w(COMPLETION_WIDTH)
         .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::size;
 
     #[test]
     fn slash_source_reads_the_catalogue_object_shape() {
@@ -488,5 +523,87 @@ mod tests {
         assert_eq!(content.text().as_ref(), "hello @github ");
         assert_eq!(caret, content.text().len());
         assert_eq!(content.tokens()[0].range(), 6..13);
+    }
+
+    #[test]
+    fn caret_anchor_sits_one_line_below_the_caret() {
+        let caret = Bounds {
+            origin: point(px(100.), px(200.)),
+            size: size(px(2.), px(16.)),
+        };
+        let origin = caret_anchor_origin(
+            caret,
+            px(16.),
+            px(0.),
+            size(px(1120.), px(768.)),
+            px(300.),
+            px(8.),
+        );
+        assert_eq!(origin, point(px(96.), px(220.)));
+    }
+
+    #[test]
+    fn caret_anchor_compensates_the_input_scroll_offset() {
+        let caret = Bounds {
+            origin: point(px(100.), px(30.)),
+            size: size(px(2.), px(16.)),
+        };
+        let origin = caret_anchor_origin(
+            caret,
+            px(16.),
+            px(40.),
+            size(px(1120.), px(768.)),
+            px(300.),
+            px(8.),
+        );
+        assert_eq!(origin.y, px(30.) + px(40.) + px(16.) + px(4.));
+    }
+
+    #[test]
+    fn caret_anchor_flips_above_when_the_list_does_not_fit_below() {
+        // Caret low in a 768px window: below (700+16+4) + 300 overflows, so
+        // the popover lands above the caret, clear of the margin.
+        let caret = Bounds {
+            origin: point(px(100.), px(700.)),
+            size: size(px(2.), px(16.)),
+        };
+        let origin = caret_anchor_origin(
+            caret,
+            px(16.),
+            px(0.),
+            size(px(1120.), px(768.)),
+            px(300.),
+            px(8.),
+        );
+        assert_eq!(origin.y, px(700.) - px(300.) - px(4.));
+    }
+
+    #[test]
+    fn caret_anchor_clamps_x_into_the_window() {
+        // A caret near the right edge: x clamps to window - width - margin.
+        let caret = Bounds {
+            origin: point(px(1100.), px(200.)),
+            size: size(px(2.), px(16.)),
+        };
+        let origin = caret_anchor_origin(
+            caret,
+            px(16.),
+            px(0.),
+            size(px(1120.), px(768.)),
+            px(300.),
+            px(8.),
+        );
+        assert_eq!(origin.x, px(1120.) - COMPLETION_WIDTH - px(8.));
+
+        // A window narrower than the list keeps the popover at the margin.
+        let origin = caret_anchor_origin(
+            caret,
+            px(16.),
+            px(0.),
+            size(px(400.), px(768.)),
+            px(300.),
+            px(8.),
+        );
+        assert_eq!(origin.x, px(8.));
     }
 }
