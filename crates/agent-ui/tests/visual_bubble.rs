@@ -41,7 +41,7 @@ mod macos {
 
     use agent_ui::ahp_store::AhpStore;
     use agent_ui::assets::ExtrasAssetSource;
-    use agent_ui::views::context_rail::{BUBBLE_MAX_W, BUBBLE_MIN_W, ContextRail, PlanFileEntry};
+    use agent_ui::views::context_rail::{BUBBLE_MAX_W, BUBBLE_MIN_W, ContextRail};
     use ahp_types::state::{ChatState, SessionState};
     use gpui::{
         App, AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement,
@@ -256,23 +256,7 @@ mod macos {
                     rail.bubble_open = open;
                 });
 
-                // Seven written plans (cap 5 → `+2`).
-                let plan_files: Vec<PlanFileEntry> = [
-                    "conversation-info-bubble",
-                    "chrome-callout-refactor",
-                    "x",
-                    "y",
-                    "z",
-                    "older-plan",
-                    "oldest-plan",
-                ]
-                .iter()
-                .map(|slug| PlanFileEntry {
-                    title: format!("{slug}-plan"),
-                })
-                .collect();
-
-                let sheet = cx.new(|_| BubbleSheet { rail, plan_files });
+                let sheet = cx.new(|_| BubbleSheet { rail });
                 cx.new(|cx| Root::new(sheet, window, cx))
             })
             .expect("offscreen window");
@@ -327,14 +311,12 @@ mod macos {
 
     struct BubbleSheet {
         rail: gpui::Entity<ContextRail>,
-        plan_files: Vec<PlanFileEntry>,
     }
 
     impl Render for BubbleSheet {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = cx.theme().clone();
             let rail = self.rail.clone();
-            let plan_files = self.plan_files.clone();
 
             v_flex()
                 .size_full()
@@ -373,10 +355,7 @@ mod macos {
                                         .text_color(theme.muted_foreground)
                                         .child("百炼 · glm-5.2 · high"),
                                 )
-                                .child(PopoverHost {
-                                    rail: rail.clone(),
-                                    plan_files: plan_files.clone(),
-                                })
+                                .child(PopoverHost { rail: rail.clone() })
                                 .child(
                                     gpui::div()
                                         .size(px(24.))
@@ -401,7 +380,6 @@ mod macos {
     #[derive(IntoElement)]
     struct PopoverHost {
         rail: gpui::Entity<ContextRail>,
-        plan_files: Vec<PlanFileEntry>,
     }
 
     impl gpui::RenderOnce for PopoverHost {
@@ -444,13 +422,7 @@ mod macos {
                 .occlude()
                 .popover_style(cx)
                 .p_3()
-                .child(ContextRail::render_bubble(
-                    &rail,
-                    &self.plan_files,
-                    max_w,
-                    max_h,
-                    cx,
-                ));
+                .child(ContextRail::render_bubble(&rail, max_w, max_h, cx));
 
             // The bubble slot: a zero-height full-width row pulled up over the
             // pill by a fixed apron, so the surface's bottom edge lands a

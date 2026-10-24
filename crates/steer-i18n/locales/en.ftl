@@ -195,24 +195,6 @@ subagent-panel-readonly = Subagent worker chat · read-only
 
 subagent-panel-final-note = Live transcript is not retained across reloads; showing the sub-agent's final answer.
 
-plan-chip-label = Plan mode
-
-plan-chip-exit-tooltip = Exit plan mode
-
-plan-chip-pending-enter-label = Plan mode pending
-
-plan-chip-pending-enter-tooltip = Takes effect next turn. Click to keep it off.
-
-plan-chip-pending-exit-label = Plan · exiting
-
-plan-chip-pending-exit-tooltip = Writes stay blocked until the next turn. Click to stay in plan mode.
-
-plan-mode-on-notice = Plan mode on: the working tree is read-only; the model researches, writes the plan file, and submits it for your approval via ProposePlan.
-
-plan-mode-off-notice = Plan mode off: full write access restored.
-
-plan-mode-cancel-notice = Plan mode cancel: the pending switch-on was dropped; the working tree stays writable.
-
 thinking-tool-result = tool result
 
 thinking-duration = { $count }s
@@ -706,7 +688,6 @@ message-steer-pending-badge = Waiting to steer
 message-queued-badge = Queued
 
 message-steered-badge = Steered
-# Plan review card verdict buttons
 ### about.rs (About window)
 
 about-title = About Steer

@@ -41,8 +41,8 @@ pub enum SlashResult {
     #[default]
     Handled,
     /// The command wants the remaining text sent as a normal user turn after
-    /// performing any side effects (e.g. `/plan fix it` enables plan mode then
-    /// runs the prompt). The `String` is the text to send (may differ from input).
+    /// performing any side effects. The `String` is the text to send (may
+    /// differ from input).
     InjectUserTurn(String),
     /// The command did nothing; the input should be treated as a normal
     /// message. Distinct from `Handled` so the caller can fall back to
@@ -127,7 +127,6 @@ impl SlashCommandRegistry {
 pub fn init(_cx: &mut App) {
     let mut commands: Vec<Box<dyn SlashCommand>> = vec![
         Box::new(ModeCommand),
-        Box::new(PlanCommand),
         Box::new(CompactCommand),
         Box::new(ExitCommand),
         Box::new(NewCommand),
@@ -318,11 +317,6 @@ fn builtin_meta(name: &str) -> &'static manox_agent::slash_builtins::BuiltinSlas
     manox_agent::slash_builtins::canonical_builtin(name).expect("registered built-in command")
 }
 
-/// `/plan` — toggle plan mode. Entering wires the read-only gate and the
-/// plan-mode research instructions; `/plan <prompt>` also starts planning
-/// the prompt immediately. Running `/plan` again exits plan mode (full
-/// write access restored). Plans are submitted for approval through the
-/// `ProposePlan` tool, never as prose.
 /// `/mode` — cycle or set the permission mode on the current thread.
 ///
 /// `/mode` (no args) cycles from the EFFECTIVE mode (seated value, the
@@ -376,40 +370,6 @@ impl SlashCommand for ModeCommand {
             }
         }
         SlashResult::Handled
-    }
-}
-
-struct PlanCommand;
-
-impl SlashCommand for PlanCommand {
-    fn name(&self) -> &str {
-        builtin_meta("plan").name
-    }
-    fn description(&self) -> SharedString {
-        builtin_meta("plan").description.into()
-    }
-    fn execute(
-        &self,
-        args: &str,
-        workspace: &mut Workspace,
-        _window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) -> SlashResult {
-        // Toggle plan mode. Entering: the engine wires the read-only gate
-        // and injects the plan-mode instructions every turn; a prompt passed
-        // alongside becomes the first planning turn. Leaving: the gate lifts.
-        if workspace.thread_plan_mode(cx) {
-            workspace.set_thread_plan_mode(false, cx);
-            workspace.add_info_message(i18n::t("plan-mode-off-notice").to_string(), cx);
-            return SlashResult::Handled;
-        }
-        workspace.set_thread_plan_mode(true, cx);
-        if args.trim().is_empty() {
-            workspace.add_info_message(i18n::t("plan-mode-on-notice").to_string(), cx);
-            SlashResult::Handled
-        } else {
-            SlashResult::InjectUserTurn(args.to_string())
-        }
     }
 }
 
@@ -709,10 +669,12 @@ mod tests {
         assert!(r.get("exit").is_some());
         assert!(r.get("new").is_some());
         assert!(r.get("nope").is_none());
+        // `/plan` is a runtime skill, never a local command: the raw text
+        // passes through to the host's skill dispatch.
+        assert!(r.get("plan").is_none());
         {
             // The pi registry only carries the commands its engine supports.
             assert!(r.get("mode").is_none());
-            assert!(r.get("plan").is_none());
             assert!(r.get("goal").is_none());
         }
     }

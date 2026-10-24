@@ -6,7 +6,7 @@
 //! own `SidebarThreadItem::from_wire`, whose semantics this mirrors:
 //!
 //! - five-state machine: `errored` (danger triangle) → `pending_auth` /
-//!   `pending_plan` (filled blue dot) → `running` (pixel grid) → the
+//!   `pending_ask` (filled blue dot) → `running` (pixel grid) → the
 //!   client-owned unread mirror (hollow dot) → idle; the leaf's unread
 //!   mirror wins over the deprecated wire flag (GW5);
 //! - team forest: `parent_id`/`depth` rows nest under their leader
@@ -34,7 +34,7 @@ pub struct ThreadRow {
     pub unread: bool,
     pub errored: bool,
     pub pending_auth: bool,
-    pub pending_plan: bool,
+    pub pending_ask: bool,
     pub pinned: bool,
     pub parent_id: Option<String>,
     pub depth: i32,
@@ -56,11 +56,11 @@ pub struct ThreadRow {
 
 impl ThreadRow {
     /// Derive a row from the AHP summary and its extension state. The
-    /// five-state inputs are bit tests over the summary's status set; plan
-    /// pending rides the extension fold's plan review lifecycle. Sub-agent
-    /// nesting (depth/parent) has no summary face yet — flat, until the
-    /// work channel carries the tree.
-    pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_plan: bool) -> Self {
+    /// five-state inputs are bit tests over the summary's status set; a
+    /// pending ask is the live fold's open input request (the turn stays
+    /// open until the answer settles). Sub-agent nesting (depth/parent) has
+    /// no summary face yet — flat, until the work channel carries the tree.
+    pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_ask: bool) -> Self {
         let bits = summary.status;
         Self {
             id: crate::ahp_store::id_of(&summary.resource).to_string(),
@@ -70,7 +70,7 @@ impl ThreadRow {
             errored: bits & WireStatus::Error.bits() != 0,
             archived: bits & WireStatus::IsArchived.bits() != 0,
             pending_auth: bits & WireStatus::InputNeeded.bits() != 0,
-            pending_plan,
+            pending_ask,
             pinned,
             parent_id: None,
             depth: 0,
@@ -127,8 +127,8 @@ pub fn five_state(item: &ThreadRow) -> SessionStatus {
         SessionStatus::Errored
     } else if item.pending_auth {
         SessionStatus::PendingAuth
-    } else if item.pending_plan {
-        SessionStatus::PendingPlan
+    } else if item.pending_ask {
+        SessionStatus::PendingAsk
     } else if item.running {
         SessionStatus::Running
     } else if item.unread {
@@ -283,7 +283,7 @@ mod tests {
             unread: false,
             errored: false,
             pending_auth: false,
-            pending_plan: false,
+            pending_ask: false,
             pinned: false,
             archived: false,
             rank: 0,
@@ -303,15 +303,15 @@ mod tests {
         assert_eq!(five_state(&r), SessionStatus::Unread);
         r.running = true;
         assert_eq!(five_state(&r), SessionStatus::Running);
-        r.pending_plan = true;
-        assert_eq!(five_state(&r), SessionStatus::PendingPlan);
+        r.pending_ask = true;
+        assert_eq!(five_state(&r), SessionStatus::PendingAsk);
         r.pending_auth = true;
         assert_eq!(five_state(&r), SessionStatus::PendingAuth);
         r.errored = true;
         assert_eq!(five_state(&r), SessionStatus::Errored);
         r.errored = false;
         r.pending_auth = false;
-        r.pending_plan = false;
+        r.pending_ask = false;
         r.running = false;
         assert_eq!(five_state(&r), SessionStatus::Unread);
     }

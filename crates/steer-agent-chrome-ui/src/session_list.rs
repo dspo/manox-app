@@ -114,7 +114,7 @@ pub struct SessionRowData {
 }
 
 /// The row's five-state machine (parity with the agent-ui sidebar). States
-/// where a turn stopped and waits for a human (`PendingAuth`/`PendingPlan`)
+/// where a turn stopped and waits for a human (`PendingAuth`/`PendingAsk`)
 /// render the filled blue dot; `Unread` the hollow one; `Running` the pixel
 /// grid; `Errored` the danger triangle; `Idle` the empty slot.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -123,7 +123,7 @@ pub enum SessionStatus {
     Running,
     Unread,
     PendingAuth,
-    PendingPlan,
+    PendingAsk,
     Errored,
 }
 
@@ -1179,7 +1179,7 @@ fn check_slot(checked: bool) -> impl IntoElement {
 }
 
 /// The 16px status slot's content, one glyph per five-state: parked turns
-/// (`PendingAuth`/`PendingPlan`) the filled 8px blue dot, `Unread` the hollow
+/// (`PendingAuth`/`PendingAsk`) the filled 8px blue dot, `Unread` the hollow
 /// 6.5px one (distinct semantics, same blue), `Running` the pixel grid,
 /// `Errored` the danger triangle, `Idle` nothing.
 fn status_slot(id: &str, status: SessionStatus) -> impl IntoElement {
@@ -1189,7 +1189,7 @@ fn status_slot(id: &str, status: SessionStatus) -> impl IntoElement {
             .text_color(ERR_RED)
             .child(icon(icons::WARNING, 11.))
             .into_any_element(),
-        SessionStatus::PendingAuth | SessionStatus::PendingPlan => div()
+        SessionStatus::PendingAuth | SessionStatus::PendingAsk => div()
             .size(px(8.))
             .rounded_full()
             .bg(BADGE_BLUE_BG)

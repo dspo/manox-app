@@ -93,11 +93,8 @@ impl SessionMultiplexer {
     /// Attach (subscribe) a session. Idempotent: a second call for a live
     /// session only refreshes its catalogue row. The session and its default
     /// chat channel are subscribed; the chat's turns stream from there. The
-    /// plan channel rides along: its baseline is the only fold-visible record
-    /// of a plan review's settlement (the verdict lands after the turn has
-    /// archived, and the chat-level part can then never fold answered), and
-    /// without the subscription the live-ask edge cannot tell a settled
-    /// review from an open one — the #88 composer lock. The thread channel
+    /// plan channel rides along: it carries the execution-plan snapshots
+    /// (`UpdatePlan`) the rail's restore fallback reads. The thread channel
     /// rides for the row state (pin/label/leaf — upstream #842 moved the rows
     /// there and nothing on the session channel ever folded them), and the
     /// work channel for the browser-suite surface.
@@ -293,8 +290,13 @@ impl SessionMultiplexer {
                 }
                 // The row pin read: see `ext_and_meta_pinned`.
                 let pinned = ext_and_meta_pinned(book, Some(summary), &thread_uri(sid));
-                let pending_plan = steer_agent_chat_ui::ahp_store::plan_review_proposed(book, sid);
-                let mut row = ThreadRow::from_summary(summary, pinned, pending_plan);
+                // A pending ask is fold-visible on the chat's open input
+                // request (the turn-final card holds its turn open until the
+                // answer settles) — any unanswered question lights the dot.
+                let pending_ask = crate::ahp_store::leaf(book, sid)
+                    .open_chat_input()
+                    .is_some();
+                let mut row = ThreadRow::from_summary(summary, pinned, pending_ask);
                 // The live fold wins over the summary row for the unread
                 // bit (the pin-read pattern): the official
                 // `session/isReadChanged` echoes land on the session state

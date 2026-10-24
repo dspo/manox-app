@@ -646,9 +646,8 @@ pub fn chat_uri(id: &str) -> String {
     format!("ahp-chat:/{id}")
 }
 
-/// Build the plan extension channel URI for a chat id — the one home of the
-/// plan-review lifecycle (proposal and verdict), whose baseline is the only
-/// fold-visible record of a review's settlement.
+/// Build the plan extension channel URI for a chat id — the home of the
+/// execution-plan snapshots the rail restores its UpdatePlan todos from.
 pub fn plan_uri(id: &str) -> String {
     format!("{}{id}", manox_ahp::ext::channels::PLAN)
 }
@@ -2780,43 +2779,16 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
     }
 }
 
-/// The plan-review payload (`{requestId, title, content, planFile}`) from the
-/// session's plan channel, when it belongs to `request_id` — the plan content
-/// the review card renders beneath the verdict question.
-/// The plan channel URI a session's plan rows ride: the default chat's plan
-/// channel once the pointer has landed, else the session-id form (the
-/// pre-pointer subscription). The single key authority for the subscription
-/// face and every read face — they must never fork.
+/// The plan channel URI a session's execution-plan rows ride: the default
+/// chat's plan channel once the pointer has landed, else the session-id form
+/// (the pre-pointer subscription). The single key authority for the
+/// subscription face and every read face — they must never fork.
 pub fn plan_channel_for(book: &ChannelBook, session_id: &str) -> String {
     let chat_id = book
         .default_chat(session_id)
         .map(|uri| id_of(&uri).to_string())
         .unwrap_or_else(|| session_id.to_string());
     format!("{}{chat_id}", manox_ahp::ext::channels::PLAN)
-}
-
-pub fn plan_review_of<'a>(
-    book: &'a ChannelBook,
-    session_id: &str,
-    request_id: &str,
-) -> Option<&'a Value> {
-    let channel = plan_channel_for(book, session_id);
-    book.ext
-        .get(&channel)?
-        .plan_review
-        .as_ref()
-        .filter(|payload| payload.get("requestId").and_then(Value::as_str) == Some(request_id))
-}
-
-/// Whether the session's plan mode is engaged — the composer plan chip's read
-/// face. Plan rows ride the `x-manox-plan` channel keyed by the default chat
-/// id (the session id until the pointer lands); the thread-channel ext state
-/// carries nothing for them, so a `LeafView.ext` read is always `None`.
-pub fn plan_mode_of(book: &ChannelBook, session_id: &str) -> bool {
-    book.ext
-        .get(&plan_channel_for(book, session_id))
-        .and_then(|x| x.plan_mode)
-        .unwrap_or(false)
 }
 
 /// The session's current plan document (the kernel snapshot shape the plan
@@ -2844,19 +2816,6 @@ pub fn goal_of<'a>(book: &'a ChannelBook, session_id: &str) -> Option<&'a Value>
     book.ext
         .get(&work_uri(session_id))
         .and_then(|x| x.goal.as_ref())
-}
-
-/// Whether the session's plan channel holds an open (proposed) review — the
-/// sidebar row badge's read. Resolves the chat id the same way
-/// [`plan_review_of`] does, falling back to the session id when the pointer
-/// has not landed.
-pub fn plan_review_proposed(book: &ChannelBook, session_id: &str) -> bool {
-    book.ext
-        .get(&plan_channel_for(book, session_id))
-        .and_then(|x| x.plan_review.as_ref())
-        .and_then(|r| r.get("state"))
-        .and_then(Value::as_str)
-        == Some("proposed")
 }
 
 /// The call id of a confirmation-state tool call (pending / pending-result).
@@ -3149,6 +3108,13 @@ pub fn pending_ask_from_ahp(
     if questions.is_empty() {
         return None;
     }
+    // The wire has no per-question detail slot, so the runtime carries the
+    // questions' `detail` support markdown on the request-level `message`
+    // (verbatim for a single question, joined under headers for several) —
+    // a plan review is just an ask whose detail is the plan. The document
+    // belongs to the request, so it folds into the first question's detail
+    // only, never duplicated under every card.
+    let mut detail = request.message.clone();
     let mut parsed = Vec::with_capacity(questions.len());
     for q in questions {
         let (id, question, header, multi, options) = match q {
@@ -3214,7 +3180,7 @@ pub fn pending_ask_from_ahp(
             id,
             question,
             header,
-            detail: String::new(),
+            detail: detail.take().unwrap_or_default(),
             multi_select: multi,
             options,
         });
@@ -3945,6 +3911,65 @@ mod tests {
         assert_eq!(book.ext[&channel].label.as_deref(), Some("audit"));
     }
 
+    /// The ask's support markdown rides the request-level `message` (the
+    /// wire has no per-question detail slot): the fold copies it into the
+    /// first question's detail so the card renders the document beneath the
+    /// question — a plan review is just an ask whose detail is the plan.
+    #[test]
+    fn pending_ask_folds_the_request_message_into_detail() {
+        use ahp_types::state::ChatInputOption;
+        let request = ahp_types::state::ChatInputRequest {
+            id: "auth-1".to_string(),
+            message: Some("# Plan\n\n- step one".to_string()),
+            url: None,
+            questions: Some(vec![ahp_types::state::ChatInputQuestion::SingleSelect(
+                ahp_types::state::ChatInputSingleSelectQuestion {
+                    id: "q1".to_string(),
+                    title: Some("Plan review".to_string()),
+                    message: "Approve this plan?".to_string(),
+                    required: None,
+                    options: vec![ChatInputOption {
+                        id: "approve".to_string(),
+                        label: "Approve".to_string(),
+                        description: None,
+                        recommended: Some(true),
+                    }],
+                    allow_freeform_input: None,
+                },
+            )]),
+            answers: None,
+        };
+        let ask = pending_ask_from_ahp("auth-1".to_string(), &request).expect("parses");
+        assert_eq!(ask.questions[0].detail, "# Plan\n\n- step one");
+
+        // A multi-question ask carries the joined document on the request —
+        // it folds into the first question only, never per card.
+        let mut two = request.clone();
+        two.questions.as_mut().expect("questions").push(
+            ahp_types::state::ChatInputQuestion::SingleSelect(
+                ahp_types::state::ChatInputSingleSelectQuestion {
+                    id: "q2".to_string(),
+                    title: Some("Follow-up".to_string()),
+                    message: "Scope?".to_string(),
+                    required: None,
+                    options: vec![],
+                    allow_freeform_input: None,
+                },
+            ),
+        );
+        let ask = pending_ask_from_ahp("auth-1".to_string(), &two).expect("parses");
+        assert_eq!(ask.questions[0].detail, "# Plan\n\n- step one");
+        assert_eq!(
+            ask.questions[1].detail, "",
+            "the document is not duplicated"
+        );
+
+        let mut bare = request.clone();
+        bare.message = None;
+        let ask = pending_ask_from_ahp("auth-1".to_string(), &bare).expect("parses");
+        assert_eq!(ask.questions[0].detail, "", "no message means no detail");
+    }
+
     #[test]
     fn the_row_accessors_read_their_verbatim_channels() {
         let mut book = ChannelBook::default();
@@ -3960,9 +3985,7 @@ mod tests {
         book.ext.insert(
             plan_uri("s-1"),
             XManoxState {
-                plan_mode: Some(true),
                 plan: Some(serde_json::json!({ "v": 1 })),
-                plan_review: Some(serde_json::json!({ "state": "proposed" })),
                 ..Default::default()
             },
         );
@@ -3974,7 +3997,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(plan_mode_of(&book, "s-1"));
         assert_eq!(
             goal_of(&book, "s-1"),
             Some(&serde_json::json!({ "text": "ship" }))
@@ -4000,7 +4022,6 @@ mod tests {
                 .and_then(|x| x.goal.as_ref())
                 .is_none()
         );
-        assert!(plan_review_proposed(&book, "s-1"));
         assert_eq!(
             book.ext.get(&thread_uri("s-1")).and_then(|x| x.pinned),
             Some(true)
@@ -4008,8 +4029,6 @@ mod tests {
         // An unsubscribed channel reads empty rather than panicking.
         assert!(browser_suites_of(&book, "s-2").is_empty());
         assert!(goal_of(&book, "s-2").is_none());
-        assert!(!plan_mode_of(&book, "s-2"));
-        assert!(!plan_review_proposed(&book, "s-2"));
     }
 
     /// The official unread count (#870's app half): the live session fold
