@@ -467,8 +467,19 @@ access-mode-chip-sandbox = Sandbox access
 
 access-mode-chip-full-access = Full access
 
+network-access-label = Network
+
+network-access-off-title = Off
+
+network-access-on-title = On
+
+network-access-notice = { $state ->
+    [off] Sandbox network is off: confined bash no longer reaches the network.
+   *[on] Sandbox network is on: subject to the domain allowlist and approvals; direct when no allowlist is configured.
+}
+
 workspace-mode-notice = { $mode ->
-    [sandbox] Sandbox access: file writes are fenced to the workspace, the steer home (~/.manox), and temp areas; bash rides the seatbelt profile. Escalate a denied call with require_escalated + justification. Network is not yet confined (the sandbox does not cover the network side yet).
+    [sandbox] Sandbox access: file writes are fenced; the network is off by default and can be enabled from the access menu (subject to the domain allowlist and approvals once on).
    *[fullaccess] Full access: no sandbox; bash runs unsandboxed, fs mutations are unfenced.
 }
 

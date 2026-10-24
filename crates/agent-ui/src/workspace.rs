@@ -40,6 +40,7 @@ use manox_agent::PermissionDecision;
 use manox_agent::thread::AccessMode;
 use manox_agent::thread_engine::BrowserTabId;
 use manox_agent::{Thread, ThreadId};
+use manox_harness::sandbox::NetworkAccess;
 
 use crate::OpenSettings;
 use crate::ToggleTurnNavigator;
@@ -171,26 +172,31 @@ fn mode_chip_visual(mode: AccessMode, theme: &Theme) -> (SharedString, gpui::Hsl
 }
 
 /// Build the popover content for the access chip: two selectable mode rows
-/// (icon + title, check on the right for the active one) — titles only, no
-/// header and no per-mode descriptions. The whole thing is a plain `v_flex`
+/// (icon + title, check on the right for the active one) plus a network
+/// group beneath — a label row and the two-state `networkAccess` radio
+/// (Off/On) — titles only, no header and no per-mode descriptions. The
+/// whole thing is a plain `v_flex`
 /// so it sizes to its content with no `flex_1` distribution
 /// across items. The chip's dropdown wraps this in a `popover_style` div
 /// for the opaque card chrome — that path doesn't go through `PopupMenu`
 /// at all, sidestepping the per-`ElementItem` `flex_1`/`min_h(26)` wrapper
 /// that was producing both the height-leak bug and the clip-to-26 bug.
 ///
-/// Every clickable row routes through `Workspace::apply_access_mode` so
-/// the mode switch + notice + menu close stay in one place. `theme` is
+/// Every clickable row routes through `Workspace::apply_access_mode` /
+/// `Workspace::apply_network_access` so the switch + notice + menu close
+/// stay in one place. `theme` is
 /// consumed up front: every value used inside the `'static` row closures is
 /// pre-extracted into owned `SharedString`/`Hsla`/`IconName`, so the
 /// closures don't capture a short-lived theme reference.
 fn build_permission_content(
     workspace: WeakEntity<Workspace>,
     current: AccessMode,
+    network: NetworkAccess,
     cx: &mut gpui::App,
 ) -> gpui::Div {
     let info: gpui::Hsla = cx.theme().info;
     let danger: gpui::Hsla = cx.theme().danger;
+    let muted: gpui::Hsla = cx.theme().muted_foreground;
 
     let make_row = |mode: AccessMode,
                     title: SharedString,
@@ -221,6 +227,35 @@ fn build_permission_content(
             })
     };
 
+    let make_network_row = |access: NetworkAccess,
+                            title: SharedString,
+                            icon: AssetIcon,
+                            accent: gpui::Hsla,
+                            selected: bool| {
+        let ws = workspace.clone();
+        h_flex()
+            .id(("network-access-row", access as usize))
+            .w_full()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .child(Icon::new(icon).small().text_color(accent))
+            .child(
+                gpui::div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(accent)
+                    .child(title),
+            )
+            .when(selected, |el| {
+                el.child(Icon::new(IconName::Check).small().text_color(accent))
+            })
+            .on_click(move |_event, _window, cx| {
+                let _ = ws.update(cx, |this, cx| this.apply_network_access(access, cx));
+            })
+    };
+
     v_flex()
         .w_full()
         .gap_2()
@@ -238,6 +273,37 @@ fn build_permission_content(
             AssetIcon::TriangleAlert,
             danger,
             current == AccessMode::FullAccess,
+        ))
+        // The network group's label row: non-interactive header, muted so
+        // the two radio rows below carry the color coding.
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(AssetIcon::Network).small().text_color(muted))
+                .child(
+                    gpui::div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(i18n::t("network-access-label")),
+                ),
+        )
+        .child(make_network_row(
+            NetworkAccess::Off,
+            i18n::t("network-access-off-title"),
+            AssetIcon::WifiOff,
+            muted,
+            network == NetworkAccess::Off,
+        ))
+        .child(make_network_row(
+            NetworkAccess::On,
+            i18n::t("network-access-on-title"),
+            AssetIcon::Globe,
+            info,
+            network == NetworkAccess::On,
         ))
 }
 mod composer;
@@ -3153,6 +3219,29 @@ impl Workspace {
         });
         self.add_info_message(
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),
+            cx,
+        );
+        self.close_access_menu(cx);
+        cx.notify();
+    }
+
+    /// Switch the sandbox's `networkAccess` config key (AHP session-mutable,
+    /// wire `off`/`on`) with the same single-funnel shape as
+    /// `apply_access_mode`: write-ahead config write, localized notice,
+    /// menu close. The wire value is the serde (kebab) form so the host's
+    /// schema enum round-trips. No object-row write, unlike the access
+    /// mode: upstream the switch is session-memory state only (a restored
+    /// session starts closed again), so there is no durable pick to mirror.
+    pub(crate) fn apply_network_access(&mut self, access: NetworkAccess, cx: &mut Context<Self>) {
+        let wire = access.wire();
+        self.with_foreground_store(cx, |store, sid| {
+            let mut config = serde_json::Map::new();
+            config.insert("networkAccess".into(), serde_json::json!(wire));
+            store.optimistic_config(&sid, &config);
+            store.set_config(&sid, config);
+        });
+        self.add_info_message(
+            i18n::t_str("network-access-notice", &[("state", wire)]).to_string(),
             cx,
         );
         self.close_access_menu(cx);

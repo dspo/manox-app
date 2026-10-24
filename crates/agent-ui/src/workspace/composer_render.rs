@@ -787,16 +787,21 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Selector read face (§J11): the composer's access chip derives its
-        // access mode from the fold — the seated value, the declared
-        // schema default, or the host's own default, never a local guess.
-        let mode = self
+        // access mode and the sandbox network switch from the fold — the
+        // seated value, the declared schema default, or the host/enum
+        // default, never a local guess.
+        let (mode, network) = self
             .chat
             .read(cx)
             .store
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).access_mode_or_default()
+                let leaf = crate::ahp_store::leaf(&view.book, sid);
+                (
+                    leaf.access_mode_or_default(),
+                    leaf.network_access_or_default(),
+                )
             })
             .unwrap_or_default();
         let open = self.chat.read(cx).access_open;
@@ -861,7 +866,7 @@ impl Workspace {
         // so `max_w` alone leaves the popover at ~140px and the subtitles
         // wrap into single-word lines. A fixed 360px width gives the
         // subtitles room to wrap at word boundaries.
-        let content = build_permission_content(workspace.clone(), mode, cx);
+        let content = build_permission_content(workspace.clone(), mode, network, cx);
         gpui::div()
             .relative()
             .child(trigger)

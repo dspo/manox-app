@@ -466,6 +466,40 @@ mod tests {
         assert!(full.contains("完全访问"), "got: {full}");
     }
 
+    /// The network-access notice resolves both `off`/`on` variants in both
+    /// locales, and the sandbox access-mode notice reflects the v0.6.5
+    /// network story (off by default, opt-in from the access menu) instead
+    /// of the retired "network not yet confined" claim.
+    #[test]
+    fn network_access_notice_localized() {
+        let _g = TEST_LANG_LOCK.lock().unwrap();
+        set_lang(Language::En);
+        let off = t_str("network-access-notice", &[("state", "off")]);
+        assert!(off.contains("off"), "got: {off}");
+        let on = t_str("network-access-notice", &[("state", "on")]);
+        assert!(on.contains("allowlist"), "got: {on}");
+        assert!(t("network-access-label").as_str() == "Network");
+        assert!(t("network-access-off-title").as_str() == "Off");
+        assert!(t("network-access-on-title").as_str() == "On");
+        set_lang(Language::ZhCn);
+        let off = t_str("network-access-notice", &[("state", "off")]);
+        assert!(off.contains("已关闭"), "got: {off}");
+        let on = t_str("network-access-notice", &[("state", "on")]);
+        assert!(on.contains("允许清单"), "got: {on}");
+        assert!(t("network-access-label").as_str() == "网络");
+        assert!(t("network-access-off-title").as_str() == "关");
+        assert!(t("network-access-on-title").as_str() == "开");
+        let sandbox = t_str("workspace-mode-notice", &[("mode", "sandbox")]);
+        assert!(
+            sandbox.contains("网络默认关闭"),
+            "the sandbox notice must carry the v0.6.5 network story: {sandbox}"
+        );
+        assert!(
+            !sandbox.contains("网络暂不受限"),
+            "the retired not-yet-confined claim must not resurface: {sandbox}"
+        );
+    }
+
     /// Keys the agent-ui sources reference only through helper return values —
     /// never as a literal `i18n::t("…")` argument — so the source scan below
     /// cannot see them. Pin them here; the comment names the owning helper so
