@@ -253,6 +253,7 @@ fn build_permission_content(
 mod composer;
 mod external;
 pub mod external_sessions;
+mod right_diff;
 mod subagent;
 mod subagent_stream;
 
@@ -480,6 +481,10 @@ pub struct Workspace {
     /// column). One page at a time — the block lists the live runs, and the
     /// page renders the one that was clicked.
     subagent_stream: Option<SubagentStreamPage>,
+    /// The right pane's diff tab content (the edit family's full-diff face —
+    /// see `right_diff.rs`): ONE tab per pane, its content replaced by every
+    /// open-diff click. Session-lived, retired on thread switch.
+    pub(crate) right_diff: Option<right_diff::RightDiff>,
     /// Bumped on every transition into or out of Settings. Embedded in the
     /// slide animation's element id so a fresh tween fires on each direction
     /// change (an old id would replay from the cached delta and visibly
@@ -741,6 +746,7 @@ impl Workspace {
             active_external: None,
             exiting_settings: false,
             subagent_stream: None,
+            right_diff: None,
             settings_transition_gen: 0,
             settings_view: None,
             settings_sub: None,

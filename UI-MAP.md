@@ -23,7 +23,7 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 根视图 | `steer_agent_chrome_ui::Shell`（壳：38px 工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
 | 侧栏 | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影） |
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
-| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
+| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
 | Settings | 主区卡内换页：上游 `gpui_component::setting::Settings` 壳（`Workspace::render_settings_card`） |
 
@@ -368,7 +368,7 @@ One contiguous thinking + tool-call segment within a user turn, rendered as an *
 
 **Blank text parts are not boundaries**: providers on interleaved-thinking wire often emit an empty text block between reasoning rounds — both the rebuild path (`ItemBuilder`) and the live path (a blank `AgentText` delta) skip them, so the run stays one segment instead of splitting into two headers with nothing visible between them.
 
-**Tool cards (the ai-elements families)**: `Read` / `Write` / `Edit` / `Bash` / `BashOutput` / `Grep` / `Glob` render as [`Tool`](#tool) cards — a headless `ActivityStep` carries the card, whose own header (icon + name + mono args + localized status chip) is the fold. The card's `Entity<ToolState>` (`ToolCallItem.card`, mounted by `ensure_tool_card` on the sync paths, `no_auto_fold`) is a pure mirror: the conversation's `collapsed`/`user_toggled` stays the fold authority, the header click routes back through `entry_toggle`, and the only state the card owns is the copy flash (observers held on `MessageItem.card_subs`). Bodies are [`CodeView`](#codeview) / [`ShellView`](#shellview) with the family's parsers (read envelope, unified diff, grep hits); 400-line cap with the `tool-output-truncated` note; streaming bodies read the live tail.
+**Tool cards (the ai-elements families)**: `Read` / `Write` / `Edit` / `Bash` / `BashOutput` / `Grep` / `Glob` render as [`Tool`](#tool) cards — a headless `ActivityStep` carries the card, whose own header (icon + name + mono args + localized status chip) is the fold. The card's `Entity<ToolState>` (`ToolCallItem.card`, mounted by `ensure_tool_card` on the sync paths, `no_auto_fold`) is a pure mirror: the conversation's `collapsed`/`user_toggled` stays the fold authority, the header click routes back through `entry_toggle`, and the only state the card owns is the copy flash (observers held on `MessageItem.card_subs`). Bodies are [`CodeView`](#codeview) / [`ShellView`](#shellview) with the family's parsers (read envelope, unified diff, grep hits); 400-line cap with the `tool-output-truncated` note; streaming bodies read the live tail. Edit cards additionally carry a 「在右栏打开 diff」 chip next to the copy controls (`entry_open_diff` re-reads the settled entry by id on click and hands `(path, output)` to `ChatHost::open_right_diff`) — the full-patch face lives in the right pane's [DiffTab](#difftab), the in-band body stays capped.
 
 The component holds no policy: `open` is `layout.expanded` (which folds in the approval force-open), clicks write the caller's state, and the reveal is layout-neutral (the collapse height never animates — the list caches row heights). Segments with fewer than two entries render flat under a model-only header with no cover to click. An approval-pending entry force-opens the segment so the interactive row is never hidden. The assistant reply that follows a segment renders no model row of its own — the header is the single place the model shows. The elapsed counter ticks every second via a gpui background timer spawned on `TurnStarted` and self-terminating on terminal `Stop`/`Error`; `frozen_secs` pins the final value. Ordinary tool calls fold here instead of producing standalone cards; a reasoning round's body is its persistent `Entity<TextViewState>` markdown (selection survives across frames). Attaching a thread replays the leaf window's live-only tail (`workspace/catch_up.rs`), so an in-flight tool's streamed output survives a switch away and back.
 
@@ -904,6 +904,25 @@ inbound 写入请求桥 —— 页面没有 Tauri 命令面。进程级桥在构
 
 > Source: `crates/agent-ui/src/views/browser_view.rs`
 
+#### DiffTab
+
+Edit 类工具卡的完整 diff 页签（`ToolTab` kind `diff`）。**单页签、内容替换**：实例 id 固定为
+kind 名（`open_kind` 按 id 去重，第二次打开只聚焦），内容实体由 workspace 持有
+（`Workspace::right_diff`：页签标题 + 解析结果）——`DiffFile::parse`（gpui-component 0.8 的
+`diff` 模块）在 workspace 的事件路径上跑（页签 `render` 只读，不在渲染期建实体），再次打开
+替换该实体，已开的页签无需 close/reopen 就换到新 patch。页签体是上游 `Diff`
+（unified 模式默认：行号、语法高亮、hunk 折叠/展开、选区复制、变更指示条全走上游默认；
+虚拟化自滚动，右栏即有界容器）。数据面：卡片回调 `entry_open_diff` 按工具 id 重读结算后的
+entry，把 `(path, output)` 交给 `ChatHost::open_right_diff` → workspace 剥掉运行时信封行
+（`[path#TAG]`，与卡片手解的同一首行规则）后交上游解析；解析失败不静默——页签照开、正文显示
+解析错误。页签标题 = 调用 path 的文件名，缺失时落 patch 自身首个文件，再落 `chrome-tab-diff`。
+会话级生命周期（无持久化形态）：patch 是活工具输出，线程切换时与 sub-agent 面板同规则退役
+（workspace 侧 payload 是全局最新 patch，带过线程会串内容）。入口只有 Edit 卡片 chip，无
+快捷动作（空 diff 页签没有意义）。
+
+> Source: `crates/agent-ui/src/tool_tabs.rs`（`DiffTool`/`DiffTab`）,
+> `crates/agent-ui/src/workspace/right_diff.rs`, `crates/ai-elements/src/tool.rs`（`open_diff` chip）
+
 
 ## 4. ViewMode::Settings
 
@@ -1024,7 +1043,7 @@ wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar
 
 #### ToolTabRegistry
 
-chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮）。
+chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮）、**diff**（见 [DiffTab](#difftab)，注册表内但不上快捷操作页——无 patch 的空 diff 页签没有意义，入口只在 Edit 卡片上）。
 
 > Source: `crates/agent-ui/src/tool_tabs.rs`
 
@@ -1129,7 +1148,7 @@ The conversation-loading sprite (`ai_elements::Meerkat`): a 12×14-cell pixel me
 
 #### Tool
 
-The tool-call card frame (`ai_elements::Tool` / `ToolHeader` / `ToolState`): icon + tool name + mono argument summary + status chip over a collapsible body, mirroring Vercel AI Elements' Tool triple. Lifecycle contract (the Reasoning arrangement on tool vocabulary): a `Running` edge opens the body, a settle folds it one second later (`AUTO_FOLD_DELAY`), a hand toggle pins it, `no_auto_fold` hands the clock to a host that owns the fold elsewhere — the conversation's arrangement (see [ActivitySegment](#activitysegment)). Always-visible copy chips at the body's top-right quote the raw call — `in` = input JSON, `out` = raw output, `diff` for the edit family — pressing, landing on the clipboard, and flashing a check for 1.2 s (state in `ToolState`, so a host must observe the entity for the flash to repaint). The header click can be rerouted with `on_toggle` (the conversation routes it back through its own fold). Selection copy is WYSIWYG: the body rides the rich-text core (see [CodeView](#codeview) / [ShellView](#shellview)).
+The tool-call card frame (`ai_elements::Tool` / `ToolHeader` / `ToolState`): icon + tool name + mono argument summary + status chip over a collapsible body, mirroring Vercel AI Elements' Tool triple. Lifecycle contract (the Reasoning arrangement on tool vocabulary): a `Running` edge opens the body, a settle folds it one second later (`AUTO_FOLD_DELAY`), a hand toggle pins it, `no_auto_fold` hands the clock to a host that owns the fold elsewhere — the conversation's arrangement (see [ActivitySegment](#activitysegment)). Always-visible copy chips at the body's top-right quote the raw call — `in` = input JSON, `out` = raw output, `diff` for the edit family — pressing, landing on the clipboard, and flashing a check for 1.2 s (state in `ToolState`, so a host must observe the entity for the flash to repaint). `open_diff(label, on_open)` rides the same row as one more chip (no flash — nothing lands): a card whose body is a capped view hands the full view to a host callback (the app opens the right pane's diff tab); `label` is host-localized, the crate injects no copy. The header click can be rerouted with `on_toggle` (the conversation routes it back through its own fold). Selection copy is WYSIWYG: the body rides the rich-text core (see [CodeView](#codeview) / [ShellView](#shellview)).
 
 > Source: `crates/ai-elements/src/tool.rs`. Mount point: `crates/steer-agent-chat-ui/src/views/tool_cards.rs`.
 

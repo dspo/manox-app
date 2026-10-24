@@ -91,6 +91,33 @@ pub fn close_tool_tabs_of_kind(kind: &str, cx: &mut App) -> bool {
         .is_ok()
 }
 
+/// Open (or focus) a right-pane tool kind from outside the view tree (the
+/// edit cards' open-diff path). `false` when no shell or window is live —
+/// the gesture has no surface then.
+pub fn open_right_kind(kind: &str, cx: &mut App) -> bool {
+    let Some(shell) = shell_handle() else {
+        return false;
+    };
+    let Some(handle) = crate::dispatch::window_global() else {
+        return false;
+    };
+    handle
+        .update(cx, |_, window, cx| {
+            shell.update(cx, |shell, cx| shell.open_right(kind, window, cx));
+        })
+        .is_ok()
+}
+
+/// The open tool-tab instance ids in the live pane, in open order — the
+/// diagnostics face for single-instance kinds (the diff tab must never
+/// duplicate). Empty when no shell is live.
+pub fn pane_open_tab_ids(cx: &App) -> Vec<String> {
+    let Some(shell) = shell_handle() else {
+        return Vec::new();
+    };
+    shell.read(cx).right.read(cx).tab_ids()
+}
+
 /// Take the live dock's panel view and drop it — dropping the terminal view
 /// tears its PTY down (process-tree SIGTERM → SIGKILL), which is how `/exit`
 /// stops the dock's subprocesses. `false` when no shell/window is live or the

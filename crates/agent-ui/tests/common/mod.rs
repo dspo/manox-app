@@ -163,6 +163,11 @@ pub fn full_wiring_boot(cx: &mut TestAppContext) -> (Entity<Workspace>, gpui::An
         *capture.borrow_mut() = Some(ws);
         gpui_component::Root::new(shell, window, cx)
     });
+    // The production main installs this right after the window opens
+    // (`steer-app/src/main.rs`); the pane-opening paths route through it
+    // (the sub-agent panels, the edit cards' diff tab), so the harness
+    // installs it too.
+    agent_ui::dispatch::set_window(window);
     cx.run_until_parked();
     let ws = cell.borrow().clone().expect("workspace captured");
     for _ in 0..PARK_ROUNDS {

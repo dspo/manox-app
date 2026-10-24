@@ -151,6 +151,8 @@ status-running = 运行中
 status-success = 完成
 tool-output-truncated = 输出已截断，拷贝 out 可得完整内容
 
+tool-diff-open-in-pane = 在右栏打开 diff
+
 status-continued = 继续讨论
 
 status-error = 出错
@@ -873,6 +875,7 @@ workspace-history-loading-heading = 加载对话…
 
 chrome-tab-editor = 编辑器
 chrome-quick-editor = 打开编辑器
+chrome-tab-diff = Diff
 chrome-editor-placeholder = 在此书写 markdown…
 
 chrome-agent-pick-model = 为 { $agent } 选择模型

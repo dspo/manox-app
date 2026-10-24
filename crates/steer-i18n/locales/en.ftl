@@ -163,6 +163,8 @@ status-running = Running
 status-success = Done
 tool-output-truncated = Output truncated — copy `out` for the full text
 
+tool-diff-open-in-pane = Open diff in right pane
+
 status-continued = Continued
 
 status-error = Error
@@ -894,6 +896,7 @@ workspace-history-loading-heading = Loading conversation…
 
 chrome-tab-editor = Editor
 chrome-quick-editor = Open the editor
+chrome-tab-diff = Diff
 chrome-editor-placeholder = Write markdown here…
 
 chrome-agent-pick-model = Choose a model for { $agent }

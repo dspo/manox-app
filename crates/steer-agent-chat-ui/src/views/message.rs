@@ -2399,6 +2399,7 @@ fn tool_step(
             e.cwd.clone(),
             theme,
             Some(Box::new(on_toggle)),
+            tool_ctx.map(|c| c.host.clone()),
         );
         return ActivityStep::new(id).content(card);
     }
@@ -4612,6 +4613,7 @@ mod tests {
             _cx: &mut App,
         ) {
         }
+        fn open_right_diff(&self, _path: Option<String>, _patch: String, _cx: &mut App) {}
     }
 
     /// The ask card's keys reach it through the FOCUS PATH — the card takes

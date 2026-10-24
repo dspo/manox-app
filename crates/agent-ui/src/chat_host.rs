@@ -88,4 +88,10 @@ impl ChatHost for WorkspaceChatHost {
             });
         }
     }
+
+    fn open_right_diff(&self, path: Option<String>, patch: String, cx: &mut App) {
+        if let Some(ws) = up(self, cx) {
+            ws.update(cx, |w, cx| w.open_right_diff(path, patch, cx));
+        }
+    }
 }

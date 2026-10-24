@@ -276,6 +276,13 @@ impl RightPane {
         kinds
     }
 
+    /// The open tabs' instance ids, in open order — the host's read-only
+    /// probe for single-instance kinds (a replace-on-open kind must never
+    /// duplicate).
+    pub fn tab_ids(&self) -> Vec<String> {
+        self.open.iter().map(|t| t.id().to_string()).collect()
+    }
+
     /// Open a fresh instance of `kind` (minting a new id) and focus it. Side
     /// effects complete on the event path.
     pub fn open_kind(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
