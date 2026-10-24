@@ -32,8 +32,11 @@ use gpui_component::{
 /// `WindowExt::push_notification` + `Notification` are shared: the
 /// ChatGPT.app launch path (#410) reports outcomes under either harness.
 use gpui_component::{WindowExt as _, notification::Notification, tooltip::Tooltip};
+/// The full Lucide catalog (the app registers `AllAssets`): the access-mode
+/// visuals need `Shield`, which the component-compat `IconName` subset lacks.
+use gpui_kit_assets::IconName as AssetIcon;
 use manox_agent::PermissionDecision;
-use manox_agent::thread::PermissionMode;
+use manox_agent::thread::AccessMode;
 use manox_agent::thread_engine::BrowserTabId;
 use manox_agent::{Thread, ThreadId};
 
@@ -145,34 +148,28 @@ fn ask_input_json(
     })
 }
 
-/// Map a `PermissionMode` to the chip's (label, accent color, icon) triple.
+/// Map an `AccessMode` to the chip's (label, accent color, icon) triple.
 ///
 /// Colors are theme tokens, not raw hsla values, so the chip follows the
-/// active theme (light/dark) without bespoke palettes per mode. The
-/// WorkspaceWrite accent uses `info` (green) as a "this is the safe
-/// default" signal — staying gray would be visually identical to a disabled
-/// state.
-fn mode_chip_visual(mode: PermissionMode, theme: &Theme) -> (SharedString, gpui::Hsla, IconName) {
+/// active theme (light/dark) without bespoke palettes per mode. The Sandbox
+/// accent uses `info` (green) as a "this is the safe default" signal —
+/// staying gray would be visually identical to a disabled state.
+fn mode_chip_visual(mode: AccessMode, theme: &Theme) -> (SharedString, gpui::Hsla, AssetIcon) {
     match mode {
-        PermissionMode::ReadOnly => (
-            i18n::t("workspace-chip-mode-readonly"),
-            theme.warning,
-            IconName::Eye,
-        ),
-        PermissionMode::WorkspaceWrite => (
-            i18n::t("workspace-chip-mode-workspacewrite"),
+        AccessMode::Sandbox => (
+            i18n::t("access-mode-chip-sandbox"),
             theme.info,
-            IconName::FolderOpen,
+            AssetIcon::Shield,
         ),
-        PermissionMode::DangerFullAccess => (
-            i18n::t("workspace-chip-mode-dangerfullaccess"),
+        AccessMode::FullAccess => (
+            i18n::t("access-mode-chip-full-access"),
             theme.danger,
-            IconName::TriangleAlert,
+            AssetIcon::TriangleAlert,
         ),
     }
 }
 
-/// Build the popover content for the access chip: three selectable mode rows
+/// Build the popover content for the access chip: two selectable mode rows
 /// (icon + title, check on the right for the active one) — titles only, no
 /// header and no per-mode descriptions. The whole thing is a plain `v_flex`
 /// so it sizes to its content with no `flex_1` distribution
@@ -181,23 +178,22 @@ fn mode_chip_visual(mode: PermissionMode, theme: &Theme) -> (SharedString, gpui:
 /// at all, sidestepping the per-`ElementItem` `flex_1`/`min_h(26)` wrapper
 /// that was producing both the height-leak bug and the clip-to-26 bug.
 ///
-/// Every clickable row routes through `Workspace::apply_permission_mode` so
+/// Every clickable row routes through `Workspace::apply_access_mode` so
 /// the mode switch + notice + menu close stay in one place. `theme` is
 /// consumed up front: every value used inside the `'static` row closures is
 /// pre-extracted into owned `SharedString`/`Hsla`/`IconName`, so the
 /// closures don't capture a short-lived theme reference.
 fn build_permission_content(
     workspace: WeakEntity<Workspace>,
-    current: PermissionMode,
+    current: AccessMode,
     cx: &mut gpui::App,
 ) -> gpui::Div {
     let info: gpui::Hsla = cx.theme().info;
-    let warning: gpui::Hsla = cx.theme().warning;
     let danger: gpui::Hsla = cx.theme().danger;
 
-    let make_row = |mode: PermissionMode,
+    let make_row = |mode: AccessMode,
                     title: SharedString,
-                    icon: IconName,
+                    icon: AssetIcon,
                     accent: gpui::Hsla,
                     selected: bool| {
         let ws = workspace.clone();
@@ -220,7 +216,7 @@ fn build_permission_content(
                 el.child(Icon::new(IconName::Check).small().text_color(accent))
             })
             .on_click(move |_event, _window, cx| {
-                let _ = ws.update(cx, |this, cx| this.apply_permission_mode(mode, cx));
+                let _ = ws.update(cx, |this, cx| this.apply_access_mode(mode, cx));
             })
     };
 
@@ -229,25 +225,18 @@ fn build_permission_content(
         .gap_2()
         .p_2()
         .child(make_row(
-            PermissionMode::ReadOnly,
-            i18n::t("workspace-mode-readonly-title"),
-            IconName::Eye,
-            warning,
-            current == PermissionMode::ReadOnly,
-        ))
-        .child(make_row(
-            PermissionMode::WorkspaceWrite,
-            i18n::t("workspace-mode-workspacewrite-title"),
-            IconName::FolderOpen,
+            AccessMode::Sandbox,
+            i18n::t("access-mode-sandbox-title"),
+            AssetIcon::Shield,
             info,
-            current == PermissionMode::WorkspaceWrite,
+            current == AccessMode::Sandbox,
         ))
         .child(make_row(
-            PermissionMode::DangerFullAccess,
-            i18n::t("workspace-mode-dangerfullaccess-title"),
-            IconName::TriangleAlert,
+            AccessMode::FullAccess,
+            i18n::t("access-mode-full-access-title"),
+            AssetIcon::TriangleAlert,
             danger,
-            current == PermissionMode::DangerFullAccess,
+            current == AccessMode::FullAccess,
         ))
 }
 mod composer;
@@ -2708,20 +2697,20 @@ impl Workspace {
     }
 
     fn user_turn_meta(&self, cx: &mut Context<Self>) -> UserTurnMeta {
-        let permission_mode = self
+        let access_mode = self
             .chat
             .read(cx)
             .store
             .clone()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid).approval_mode_or_default()
+                crate::ahp_store::leaf(&view.book, &sid).access_mode_or_default()
             })
             .unwrap_or_default();
         UserTurnMeta::new(
             chrono::Utc::now().timestamp(),
             self.model_label(cx),
-            Some(permission_mode),
+            Some(access_mode),
         )
     }
 
@@ -2988,10 +2977,9 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// Cycle the permission mode on the current thread (`/mode` no-args
-    /// form): ReadOnly → WorkspaceAccess → FullAccess → ReadOnly. The mode
-    /// change notice rides `apply_permission_mode` so the conversation shows
-    /// the switch.
+    /// Toggle the access mode on the current thread (`/mode` no-args
+    /// form): Sandbox ↔ FullAccess. The mode change notice rides
+    /// `apply_access_mode` so the conversation shows the switch.
     pub(crate) fn cycle_mode(&mut self, cx: &mut Context<Self>) {
         let next = match self
             .chat
@@ -3000,15 +2988,14 @@ impl Workspace {
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).approval_mode_or_default()
+                crate::ahp_store::leaf(&view.book, sid).access_mode_or_default()
             })
             .expect("foreground store present")
         {
-            PermissionMode::ReadOnly => PermissionMode::WorkspaceWrite,
-            PermissionMode::WorkspaceWrite => PermissionMode::DangerFullAccess,
-            PermissionMode::DangerFullAccess => PermissionMode::ReadOnly,
+            AccessMode::Sandbox => AccessMode::FullAccess,
+            AccessMode::FullAccess => AccessMode::Sandbox,
         };
-        self.apply_permission_mode(next, cx);
+        self.apply_access_mode(next, cx);
     }
 
     /// Apply `mode` and immediately send `prompt` as a user turn — the
@@ -3018,11 +3005,11 @@ impl Workspace {
     /// running.
     pub(crate) fn start_mode_turn(
         &mut self,
-        mode: PermissionMode,
+        mode: AccessMode,
         prompt: String,
         cx: &mut Context<Self>,
     ) {
-        self.apply_permission_mode(mode, cx);
+        self.apply_access_mode(mode, cx);
         let behavior = if self.foreground_running(cx) {
             SubmitBehavior::Steer
         } else {
@@ -3031,7 +3018,7 @@ impl Workspace {
         self.send_user_turn(prompt, Vec::new(), behavior, cx);
     }
 
-    /// Switch the thread's `PermissionMode`, post a localized notice, and
+    /// Switch the thread's `AccessMode`, post a localized notice, and
     /// close the popover. Centralized so slash command, chip click, and the
     /// settings panel wiring all funnel through one path. The write is
     /// write-ahead: the chip flips optimistically (the model picker's
@@ -3039,29 +3026,28 @@ impl Workspace {
     /// value, so the two never disagree; the host's echo confirms
     /// silently, and a refusal always lands a corrective notice that
     /// names the reason and rolls both back.
-    pub(crate) fn apply_permission_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+    pub(crate) fn apply_access_mode(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
         let mode_key = match mode {
-            PermissionMode::ReadOnly => "readonly",
-            PermissionMode::WorkspaceWrite => "workspacewrite",
-            PermissionMode::DangerFullAccess => "dangerfullaccess",
+            AccessMode::Sandbox => "sandbox",
+            AccessMode::FullAccess => "fullaccess",
         };
         // The wire value is the serde (kebab-case) form so the AgentServer's
-        // `from_value::<PermissionMode>` round-trips; `mode_key` stays the
-        // lowercase form the i18n `workspace-mode-notice` selector keys on.
+        // `from_value::<AccessMode>` round-trips; `mode_key` stays the
+        // flattened form the i18n `workspace-mode-notice` selector keys on.
         let mode_wire = serde_json::to_value(mode)
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
         self.with_foreground_store(cx, |store, sid| {
             let mut config = serde_json::Map::new();
-            config.insert("approvalMode".into(), serde_json::json!(mode_wire));
+            config.insert("accessMode".into(), serde_json::json!(mode_wire));
             store.optimistic_config(&sid, &config);
             store.set_config(&sid, config);
             // The durable pick lands in the object row at once; the engine's
             // request-boundary handshake applies it (with a notice) from
             // there on the next message.
             if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
-                objects.set_permission_mode(&sid, Some(&mode_wire));
+                objects.set_access_mode(&sid, Some(&mode_wire));
             }
         });
         self.add_info_message(
@@ -3096,7 +3082,7 @@ fn wire_commands_has(commands: &serde_json::Value, name: &str, kind: &str) -> bo
 }
 
 /// Read the sidebar decoration columns the wire `ThreadListItem` does not
-/// carry yet (U2 dual-track): per-thread project/tag/approval-mode plus the
+/// carry yet (U2 dual-track): per-thread project/tag/access-mode plus the
 /// registered-project folder list. Returns `(meta by id, distinct active
 /// project paths in list order, known projects)`. The meta map spans both
 /// store partitions (active rows win) so a tag lookup addresses archived

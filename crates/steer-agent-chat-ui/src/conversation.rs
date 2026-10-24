@@ -15,7 +15,7 @@ use gpui::{App, AppContext as _, Entity, SharedString};
 use manox_agent::ThreadEvent;
 use manox_agent::db::{HistoryEntry, UiNoteKind, UiNoteRecord};
 use manox_agent::language_model::StopReason;
-use manox_agent::thread::PermissionMode;
+use manox_agent::thread::AccessMode;
 use manox_agent::{Message, TokenUsage, ToolCallStatus};
 
 use crate::host::ChatHostHandle;
@@ -31,7 +31,7 @@ pub struct UserImage(pub Arc<gpui::Image>);
 pub struct UserTurnMeta {
     pub timestamp: i64,
     pub model_id: String,
-    pub approval_mode: Option<PermissionMode>,
+    pub access_mode: Option<AccessMode>,
     /// True when this user message entered the message list via the steer
     /// queue drain (mid-turn injection) rather than starting a fresh turn.
     /// Mirrors `MessageUiMetadata::steered`; set by the drain-driven enqueue
@@ -52,11 +52,11 @@ pub struct UserTurnMeta {
 }
 
 impl UserTurnMeta {
-    pub fn new(timestamp: i64, model_id: String, approval_mode: Option<PermissionMode>) -> Self {
+    pub fn new(timestamp: i64, model_id: String, access_mode: Option<AccessMode>) -> Self {
         Self {
             timestamp,
             model_id,
-            approval_mode,
+            access_mode,
             steered: false,
             author: None,
             recipient: None,
@@ -69,9 +69,7 @@ impl UserTurnMeta {
         Self {
             timestamp: message.timestamp,
             model_id: ui.and_then(|m| m.model_id.clone()).unwrap_or_default(),
-            approval_mode: ui
-                .and_then(|m| m.approval_mode)
-                .map(PermissionMode::from_i64),
+            access_mode: ui.and_then(|m| m.access_mode).map(AccessMode::from_i64),
             steered: ui.and_then(|m| m.steered).unwrap_or(false),
             author: ui.and_then(|m| m.author.clone()),
             recipient,
@@ -1839,7 +1837,7 @@ impl ConversationState {
                 let meta = UserTurnMeta {
                     timestamp: chrono::Utc::now().timestamp(),
                     model_id: String::new(),
-                    approval_mode: None,
+                    access_mode: None,
                     steered: false,
                     author: Some(manox_agent::MessageAuthor::from_routing(from)),
                     recipient: Some(self.recipient.clone()),
@@ -1859,7 +1857,7 @@ impl ConversationState {
                 }));
                 ApplyOutcome::Appended
             }
-            ThreadEvent::PermissionModeChanged { .. } => {
+            ThreadEvent::AccessModeChanged { .. } => {
                 // UI state (badge/chip) handled by `Workspace`; not a conversation item.
                 ApplyOutcome::Unchanged
             }

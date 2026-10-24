@@ -1,4 +1,4 @@
-//! Regression: a tool confirmation park (a `sandbox_permissions` escalation
+//! Regression: a tool confirmation park (a `require_escalated` escalation
 //! from Edit/Write/Bash) must surface as the unified confirmation card — the
 //! parked call promoted to its own conversation row carrying the fold's
 //! decision buttons — and the verdict must clear the parked state. Before

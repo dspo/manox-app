@@ -53,7 +53,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 会话主路径（流式文本 / thinking / 工具卡片 / cancel / steer） | ✅ | `pi_backend::session` + `adapt`；空闲 `prompt()`，运行中 `steer()` |
 | 会话持久化与重启恢复 | ✅ | pi jsonl + `session_meta` sidecar |
 | 转录渲染（MessageList / ToolCallCard / RetryBadge / ErrorMessage） | ✅ | 共享渲染管线 |
-| 权限门控（PermissionMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 三模式都运行（seatbelt 按模式渲染 read-only/workspace-write profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`sandbox_permissions`+`justification` 升级往返经 `ToolCallAuthorization`；AccessChip 切 ReadOnly/WorkspaceAccess/FullAccess，切换热生效（下一次工具调用即按新模式裁决），chip 乐观即时刷新、宿主拒绝时回滚并出纠错 notice（写前对账，`LeafView::approval_mode_or_default`：座位值 → 宿主声明 schema 默认 → 宿主默认，不再本地谎报 ReadOnly） |
+| 权限门控（AccessMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 两档都运行（sandbox 档 ride seatbelt profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`require_escalated`+`justification` 升级往返经 `ToolCallAuthorization`；AccessChip 切 Sandbox/FullAccess，切换热生效（下一次工具调用即按新模式裁决），chip 乐观即时刷新、宿主拒绝时回滚并出纠错 notice（写前对账，`LeafView::access_mode_or_default`：座位值 → 宿主声明 schema 默认 → 宿主默认，旧三档持久串一律落默认 Sandbox） |
 | Slash commands | ✅ 部分 | `/compact`、`/exit`(`/quit`)、`/new`(`/clear` `/archive`)、`/goal`、`/mode`（`/plan` 是上游内置 skill：裸文本直通 runtime 的 skill 分发，非本地命令）；markdown/skill 适配器经共享 registry。`/exit` 走全量停机序列（`workspace/exit.rs`）：停子代理 → cancel 当前 turn → 关右栏终端/TUI agent 页签与底 dock 终端（PTY drop 即进程树终止）→ 关集成浏览器 → 强制归档（绕过 idle 门禁）→ 落新会话，每步以 info 卡播报；turn 运行中同样可发 |
 | 模型选择器 | ✅ | pi `ProviderRegistry`，按 provider 显示名分组；写前对账：乐观写入 → 宿主 echo 确认（撤销史销账）/ `rejectionReason` 回滚 + 纠错 notice |
 | 项目（composer chip / 侧栏文件夹 / 绑定新会话） | ✅ | 宿主 workspace registry（`ClientCall::Workspace` + `HostEvent::WorkspaceUpdate` 状态流），客户端不再写 threads.db `projects` 表 |
@@ -150,7 +150,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### 状态
 
-- [PermissionMode](#permission-modes) · [ToolCallStatus](#tool-call-statuses)
+- [AccessMode](#access-modes) · [ToolCallStatus](#tool-call-statuses)
 
 ---
 
@@ -328,7 +328,7 @@ Single rendered conversation item, centered, full width (no fixed content cap �
 
 #### UserMessage
 
-Full-width user turn block rendered inside [TurnFrame](#turnframe): `{from} > {to}·{provider}/{model}·Time` metadata header (`user_turn_header`, the model fragment is the [`ModelTag`](#modeltag) plain form; empty segments drop, no `>` clause when nothing follows `from`), persistent selectable markdown body, copy btn (hover; flips to a check briefly after copying — [Copy Feedback](#copy-feedback)), and a permission-mode-colored frame captured at send time. `from` is the turn's real author — unattributed human input renders the localized "You", otherwise Captain (lead), Harness (host-injected turns, e.g. an answered ask's seed), or the named agent (team peer delivery, shown with a `theme.primary` peer accent); `to` is the agent whose conversation renders the turn (main thread shows Captain, a member thread its own name, a sub-agent panel the sub-agent type) — a view-side fact stamped by the owning `ConversationState`, never persisted. Peer deliveries share this same renderer live and after reload.
+Full-width user turn block rendered inside [TurnFrame](#turnframe): `{from} > {to}·{provider}/{model}·Time` metadata header (`user_turn_header`, the model fragment is the [`ModelTag`](#modeltag) plain form; empty segments drop, no `>` clause when nothing follows `from`), persistent selectable markdown body, copy btn (hover; flips to a check briefly after copying — [Copy Feedback](#copy-feedback)), and an access-mode-colored frame captured at send time. `from` is the turn's real author — unattributed human input renders the localized "You", otherwise Captain (lead), Harness (host-injected turns, e.g. an answered ask's seed), or the named agent (team peer delivery, shown with a `theme.primary` peer accent); `to` is the agent whose conversation renders the turn (main thread shows Captain, a member thread its own name, a sub-agent panel the sub-agent type) — a view-side fact stamped by the owning `ConversationState`, never persisted. Peer deliveries share this same renderer live and after reload.
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs`
 
@@ -644,7 +644,7 @@ Compact context-occupancy pill in the footer's right control cluster, between [M
 
 #### AccessChip
 
-Dropdown chip showing [PermissionMode](#permission-modes) → [AccessMenu](#accessmenu) popup.
+Dropdown chip showing [AccessMode](#access-modes) → [AccessMenu](#accessmenu) popup.
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
@@ -775,7 +775,7 @@ Trigger: [ModelChip](#modelchip). Model selector dropdown: provider submenus for
 
 #### AccessMenu
 
-Trigger: [AccessChip](#accesschip). [PermissionMode](#permission-modes) selector: three title-only rows — Read Only / Workspace Access / Full Access, check on the current one. No header row, no "Learn more", no per-mode descriptions.
+Trigger: [AccessChip](#accesschip). [AccessMode](#access-modes) selector: two title-only rows — Sandbox access / Full access, check on the current one. No header row, no "Learn more", no per-mode descriptions.
 
 > Source: `crates/agent-ui/src/workspace.rs` (`build_permission_content`)
 
@@ -1193,21 +1193,17 @@ Hover tooltip.
 
 ---
 
-## 8. Permission Modes
+## 8. Access Modes
 
-Three file-effect modes drive the seatbelt profile (bash) and the fs write fence; a denied call carries a `[sandbox: …]` marker and a `sandbox_permissions`+`justification` escalation path through the `ToolCallAuthorization` card. Switching is hot: a mid-turn switch governs the very next tool call, and the chip flips optimistically on click (`/mode` also dispatches immediately mid-turn).
+Two file-effect tiers drive the seatbelt profile (bash) and the fs write fence; a denied call carries a `[sandbox: …]` marker and a `require_escalated`+`justification` escalation path through the `ToolCallAuthorization` card. Switching is hot: a mid-turn switch governs the very next tool call, and the chip flips optimistically on click (`/mode` also dispatches immediately mid-turn).
 
-#### Read Only
+#### Sandbox access
 
-Amber — bash runs but writes are denied by the seatbelt; fs mutations refused.
+Green (shield) — file writes fenced to the workspace, the manox home (~/.manox), and temp areas; bash rides the seatbelt profile (default). Network is not yet confined.
 
-#### Workspace Access
+#### Full access
 
-Green — writes under the workspace, the manox home (~/.manox), and temp areas; bash confined to the workspace-write profile (default).
-
-#### Full Access
-
-Red — no sandbox; bash unsandboxed, fs mutations unfenced.
+Red (triangle alert) — no sandbox; bash unsandboxed, fs mutations unfenced.
 ---
 
 ## 9. Tool Call Statuses

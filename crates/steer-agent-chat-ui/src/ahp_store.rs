@@ -2459,7 +2459,7 @@ impl AhpStore {
         self.dispatch(chat_uri(chat_id), action);
     }
 
-    /// Merge session config keys (model / reasoningEffort / approvalMode).
+    /// Merge session config keys (model / reasoningEffort / accessMode).
     pub fn set_config(&mut self, session_id: &str, config: serde_json::Map<String, Value>) {
         let action = StateAction::SessionConfigChanged(SessionConfigChangedAction {
             config,
@@ -2913,38 +2913,40 @@ impl<'a> LeafView<'a> {
             .and_then(Value::as_str)
     }
 
-    /// The selected approval mode (canonical string form).
-    pub fn approval_mode(&self) -> Option<&str> {
+    /// The selected access mode (canonical string form).
+    pub fn access_mode(&self) -> Option<&str> {
         self.session
             .and_then(|s| s.config.as_ref())
-            .and_then(|c| c.values.get("approvalMode"))
+            .and_then(|c| c.values.get(config_keys::ACCESS_MODE))
             .and_then(Value::as_str)
     }
 
-    /// The session's effective approval mode for display and turn
+    /// The session's effective access mode for display and turn
     /// stamping: the folded value, else the host-declared schema default,
-    /// else the host's own default (`WorkspaceWrite`). A seat-less session
-    /// runs under the host default — the retired local `ReadOnly` fallback
+    /// else the host's own default (`Sandbox`). A seat-less session
+    /// runs under the host default — the retired three-tier local fallback
     /// contradicted it, so every reopen of a thread that never journaled a
-    /// mode displayed a restriction the runtime did not enforce.
-    pub fn approval_mode_or_default(&self) -> manox_agent::thread::PermissionMode {
+    /// mode displayed a restriction the runtime did not enforce. A folded
+    /// value outside the two-tier vocabulary (a pre-v0.5.3 persisted wire
+    /// string) parses to the same default.
+    pub fn access_mode_or_default(&self) -> manox_agent::thread::AccessMode {
         let wire = self
-            .approval_mode()
+            .access_mode()
             .map(str::to_string)
             .or_else(|| {
                 self.session
                     .and_then(|s| s.config.as_ref())
-                    .and_then(|c| c.schema.properties.get(config_keys::APPROVAL_MODE))
+                    .and_then(|c| c.schema.properties.get(config_keys::ACCESS_MODE))
                     .and_then(|prop| prop.default.as_ref())
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })
             .unwrap_or_else(|| {
-                manox_agent::thread::PermissionMode::default()
+                manox_agent::thread::AccessMode::default()
                     .wire()
                     .to_string()
             });
-        manox_agent::thread::PermissionMode::from_wire(&wire).unwrap_or_default()
+        manox_agent::thread::AccessMode::from_wire(&wire).unwrap_or_default()
     }
 
     /// The most recent request's token usage: the in-flight turn's report
@@ -5113,18 +5115,46 @@ mod tests {
     }
 
     #[test]
-    fn approval_mode_defaults_follow_the_seated_value_then_schema_then_host() {
+    fn access_mode_defaults_follow_the_seated_value_then_schema_then_host() {
         use ahp_types::state::{SessionConfigPropertySchema, SessionConfigState};
-        use manox_agent::thread::PermissionMode;
+        use manox_agent::thread::AccessMode;
         use serde_json::json;
 
         let mut book = ChannelBook::default();
         // A seat-less session runs under the host default — the retired
-        // `ReadOnly` fallback contradicted it on every such reopen.
+        // three-tier local fallback contradicted it on every such reopen.
         assert_eq!(
-            leaf(&book, "s-1").approval_mode_or_default(),
-            PermissionMode::WorkspaceWrite
+            leaf(&book, "s-1").access_mode_or_default(),
+            AccessMode::Sandbox
         );
+        // Legacy persisted wire strings (the pre-v0.5.3 three-tier axis) sit
+        // outside the closed two-tier vocabulary: they parse to the default.
+        for legacy in ["read-only", "workspace-write", "danger-full-access"] {
+            let mut book = ChannelBook::default();
+            {
+                let state = book
+                    .sessions
+                    .entry("s-1".to_string())
+                    .or_insert_with(|| empty_session(&session_uri("s-1")));
+                let mut config = SessionConfigState {
+                    schema: ahp_types::state::SessionConfigSchema {
+                        r#type: "object".to_string(),
+                        properties: std::collections::HashMap::new(),
+                        required: None,
+                    },
+                    values: serde_json::Map::new(),
+                };
+                config
+                    .values
+                    .insert(config_keys::ACCESS_MODE.to_string(), json!(legacy));
+                state.config = Some(config);
+            }
+            assert_eq!(
+                leaf(&book, "s-1").access_mode_or_default(),
+                AccessMode::Sandbox,
+                "legacy wire string {legacy:?} lands on the default"
+            );
+        }
 
         {
             let state = book
@@ -5133,12 +5163,12 @@ mod tests {
                 .or_insert_with(|| empty_session(&session_uri("s-1")));
             let mut schema_properties = std::collections::HashMap::new();
             schema_properties.insert(
-                "approvalMode".to_string(),
+                config_keys::ACCESS_MODE.to_string(),
                 SessionConfigPropertySchema {
                     r#type: "string".to_string(),
-                    title: "Approval mode".to_string(),
+                    title: "Access mode".to_string(),
                     description: None,
-                    default: Some(json!("read-only")),
+                    default: Some(json!("sandbox")),
                     r#enum: None,
                     enum_labels: None,
                     enum_descriptions: None,
@@ -5163,8 +5193,8 @@ mod tests {
             });
         }
         assert_eq!(
-            leaf(&book, "s-1").approval_mode_or_default(),
-            PermissionMode::ReadOnly,
+            leaf(&book, "s-1").access_mode_or_default(),
+            AccessMode::Sandbox,
             "the host-declared schema default is the seat-less truth"
         );
 
@@ -5175,10 +5205,10 @@ mod tests {
             .as_mut()
             .unwrap()
             .values
-            .insert("approvalMode".to_string(), json!("danger-full-access"));
+            .insert(config_keys::ACCESS_MODE.to_string(), json!("full-access"));
         assert_eq!(
-            leaf(&book, "s-1").approval_mode_or_default(),
-            PermissionMode::DangerFullAccess,
+            leaf(&book, "s-1").access_mode_or_default(),
+            AccessMode::FullAccess,
             "the seated value outranks the schema default"
         );
     }
