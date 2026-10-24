@@ -128,6 +128,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
