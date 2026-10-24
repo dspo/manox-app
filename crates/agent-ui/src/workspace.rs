@@ -26,7 +26,7 @@ use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState, Paste, RopeExt, Textarea, TextareaState},
+    input::{Input, InputEvent, InputState, RopeExt, Textarea, TextareaState},
     speech::{SpeechButton, SpeechEvent, SpeechState},
     v_flex,
 };
@@ -901,6 +901,51 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_chat_input(&self, cx: &App) -> Entity<gpui_component::input::TextareaState> {
         self.chat_input(cx)
+    }
+
+    /// The composer's staged pending attachments, for the paste-intercept
+    /// probe (a clipboard image must land here, not in the input rope).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_pending_attachments(&self, cx: &App) -> Vec<PendingAttachment> {
+        self.chat.read(cx).pending_attachments.clone()
+    }
+
+    /// The completion popover's trigger + item names, for probes that pin the
+    /// re-sync (an empty list means the popover closed).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_completion(&self, cx: &App) -> Option<(char, Vec<String>)> {
+        self.chat.read(cx).completion.as_ref().map(|state| {
+            (
+                state.trigger,
+                state
+                    .items
+                    .iter()
+                    .map(|item| item.name.to_string())
+                    .collect(),
+            )
+        })
+    }
+
+    /// Plant a live completion snapshot, as a populated skill/command source
+    /// would have produced. Diagnostic-only: the popover sources are empty in
+    /// tests, so the paste probe pins the re-sync by whether this planted
+    /// snapshot gets replaced (no trigger after the paste → closed).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_seed_completion(&mut self, cx: &mut Context<Self>) {
+        use crate::views::completion::{CompletionItem, CompletionKind};
+        self.chat.update(cx, |chat, cc| {
+            chat.completion = Some(CompletionState::new(
+                '@',
+                0,
+                vec![CompletionItem {
+                    name: "planted-skill".into(),
+                    description: "planted".into(),
+                    kind: CompletionKind::Skill,
+                }],
+                0,
+            ));
+            cc.notify();
+        });
     }
 
     /// Drive the dictation landing directly with a finished transcript, for

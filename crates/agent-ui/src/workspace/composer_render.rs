@@ -265,36 +265,6 @@ impl Workspace {
             .children(queue)
             .children(completion_overlay)
             .children(mention_tip)
-            // Own paste at the capture phase so a clipboard image becomes a
-            // pending attachment instead of letting `InputState::paste` insert
-            // the image's alt-text. `stop_propagation` keeps the inner input's
-            // text-paste handler from also running; text is inserted via the
-            // public `replace` so the completion popover re-sync still fires.
-            .capture_action(cx.listener(|this, _: &Paste, window, cx| {
-                cx.stop_propagation();
-                let Some(clipboard) = cx.read_from_clipboard() else {
-                    return;
-                };
-                let entries = clipboard.entries();
-                let has_image = entries
-                    .iter()
-                    .any(|e| matches!(e, gpui::ClipboardEntry::Image(_)));
-                if has_image {
-                    for entry in entries {
-                        if let gpui::ClipboardEntry::Image(image) = entry {
-                            this.handle_pasted_image(image.clone(), cx);
-                        }
-                    }
-                    cx.notify();
-                } else {
-                    let text = clipboard.text().unwrap_or_default();
-                    if !text.is_empty() {
-                        this.chat_input(cx)
-                            .update(cx, |state, cx| state.replace(text, window, cx));
-                        this.sync_completion(window, cx);
-                    }
-                }
-            }))
             .when_some(
                 self.chat
                     .read(cx)
@@ -331,6 +301,93 @@ impl Workspace {
                         Textarea::new(&self.chat.read(cx).input_state)
                             .appearance(false)
                             .text_size(crate::views::message::MESSAGE_BODY_SIZE)
+                            // The input's own paste hook (gpui-component 0.8)
+                            // replaces the capture-phase `Paste` interception
+                            // this v_flex used to carry. Images stage as
+                            // pending attachments and `true` consumes the
+                            // paste, so the image's alt-text never reaches the
+                            // rope. A clipboard with no text entry is copied
+                            // files: `ClipboardItem::text()` would fall back
+                            // to their path string and the engine would paste
+                            // it as text, so the paths stage through the
+                            // pending-attachment pipeline instead. Plain text
+                            // returns `false`: the action falls through to the
+                            // engine, which inserts it at the caret as one
+                            // atomic edit and emits `InputEvent::Change` — the
+                            // workspace subscription re-syncs the completion
+                            // popover from it (the same contract the old
+                            // public-`replace` + explicit `sync_completion`
+                            // pair provided). The closure rides the same
+                            // weak-entity bridge as the hover listener below:
+                            // the hook runs on `&mut App`, not the workspace
+                            // context.
+                            .on_paste({
+                                let ws = cx.entity().downgrade();
+                                move |item, _, cx| {
+                                    let entries = item.entries();
+                                    // Images win over text, as the old capture
+                                    // intercept did: an image+text clipboard
+                                    // stages the images and nothing is
+                                    // inserted.
+                                    if entries
+                                        .iter()
+                                        .any(|e| matches!(e, gpui::ClipboardEntry::Image(_)))
+                                    {
+                                        let _ = ws.update(cx, |this, cx| {
+                                            for entry in entries {
+                                                if let gpui::ClipboardEntry::Image(image) = entry {
+                                                    this.handle_pasted_image(image.clone(), cx);
+                                                }
+                                            }
+                                            cx.notify();
+                                        });
+                                        // Consumed: the image's alt-text must
+                                        // never reach the rope.
+                                        return true;
+                                    }
+                                    // A clipboard with no text entry makes
+                                    // `ClipboardItem::text()` fall back to the
+                                    // file paths' display string — the engine
+                                    // would paste it as raw path text. Copied
+                                    // files stage through the pending-attachment
+                                    // pipeline instead (the `File` variant the
+                                    // submit path inlines via `load_attachment`).
+                                    if !entries
+                                        .iter()
+                                        .any(|e| matches!(e, gpui::ClipboardEntry::String(_)))
+                                    {
+                                        let _ = ws.update(cx, |this, cx| {
+                                            for entry in entries {
+                                                if let gpui::ClipboardEntry::ExternalPaths(paths) =
+                                                    entry
+                                                {
+                                                    for path in paths.paths() {
+                                                        this.chat.update(cx, |chat, cx| {
+                                                            chat.pending_attachments.push(
+                                                                PendingAttachment::new(
+                                                                    path.clone(),
+                                                                ),
+                                                            );
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            cx.notify();
+                                        });
+                                        return true;
+                                    }
+                                    // Plain text: `false` lets the action fall
+                                    // through to the engine, which inserts it at
+                                    // the caret as one atomic edit and emits
+                                    // `InputEvent::Change` — the workspace
+                                    // subscription re-syncs the completion
+                                    // popover from it (the same contract the old
+                                    // public-`replace` + explicit
+                                    // `sync_completion` pair provided).
+                                    false
+                                }
+                            })
                             .on_token_hover({
                                 let chat = self.chat.clone();
                                 let ws = cx.entity().downgrade();
