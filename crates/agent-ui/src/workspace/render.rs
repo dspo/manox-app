@@ -485,6 +485,8 @@ impl Workspace {
                             }
                         };
                         let list_state = self.chat.read(cx).list_state.clone();
+                        let bounce_state = self.chat.read(cx).list_state.clone();
+                        let chat_for_bounce = self.chat.clone();
                         let width_state = self.chat.read(cx).list_state.clone();
                         let message_list_width = self.chat.read(cx).message_list_width.clone();
                         let diag_state = self.chat.read(cx).list_state.clone();
@@ -495,6 +497,24 @@ impl Workspace {
                                 .h_full()
                                 .min_h_0()
                                 .min_w_0();
+                            // macOS-native rubber-band on precise scrolling,
+                            // via gpui-kit 0.8's shared overscroll engine. The
+                            // bounce scrolls the ListState itself, past the
+                            // list's own scroll handler, so notify the chat
+                            // here as that handler would — render-time scroll
+                            // consumers (the turn rail's active mark) read
+                            // `logical_scroll_top` and must keep up. Tail
+                            // follow is native ListState state
+                            // (`FollowMode::Tail`), so the bounce's scroll
+                            // path keeps its disengage/re-arm semantics.
+                            let list_el = gpui_base::ScrollBounce::new(
+                                "chat-list-bounce",
+                                &bounce_state,
+                                list_el,
+                            )
+                            .on_scroll(move |_, cx| {
+                                chat_for_bounce.update(cx, |_, cx| cx.notify());
+                            });
                             let list_wrap = v_flex()
                                 .debug_selector(|| "workspace-message-list".into())
                                 .flex_1()
