@@ -1,18 +1,27 @@
-//! Panel resize handles:
-//! - a handle only **initiates** the drag (the `on_drag` payload, `<|>`
-//!   cursor) and the double-click reset;
+//! Panel resize handles, riding upstream `gpui_base::resize_handle` bands:
+//! - the band owns the hit strip, the col-resize cursor, the
+//!   Idle→Hovered→Pressed→Dragging progression and the drag channel; a
+//!   handle only **initiates** the drag (the `on_drag` payload) and the
+//!   double-click reset;
 //! - `on_drag_move` lives on the **shell root** (see `shell.rs`), which does
 //!   the absolute-coordinate math against the root (whole-window) bounds —
-//!   mounted on the 6px handle itself, `ev.bounds` would be the handle's
+//!   mounted on the band itself, `ev.bounds` would be the handle's
 //!   bounds and the width would jump to the clamp edge and then track the
 //!   moving strip, which is unusable;
 //! - the payload types are one per side (gpui dispatches by `TypeId`; a
 //!   shared type makes both handles fire on one drag).
+//!
+//! The bands paint nothing (`invisible_appearance`): the 2026-Light seams
+//! are the card gaps themselves, so base's hairline is suppressed rather
+//! than restyled.
+
+use std::rc::Rc;
 
 use gpui::{
-    AppContext as _, CursorStyle, InteractiveElement, IntoElement, MouseButton, Render,
-    StatefulInteractiveElement, Styled, div, px,
+    AppContext as _, Axis, ClickEvent, InteractiveElement, IntoElement, MouseButton,
+    ParentElement as _, Render, Styled, div, px,
 };
+use gpui_base::{InteractiveElementExt as _, ResizeHandleRenderer, resize_handle};
 
 use crate::shell::Shell;
 
@@ -52,60 +61,68 @@ impl Render for DraggedRightDivider {
     }
 }
 
-/// The invisible sidebar|main handle: absolutely positioned, centered on the
-/// card seam (`left = sidebar_width`). Width math lives on the shell root
-/// (see the module docs).
+/// The chrome's handle appearance: nothing. A divider paints no stroke — the
+/// renderer yields an empty element so base's built-in hairline never shows.
+fn invisible_appearance() -> ResizeHandleRenderer {
+    Rc::new(|_, _, _| Some(gpui::Empty.into_any_element()))
+}
+
+/// The invisible sidebar|main handle: the band straddles the seam, hanging
+/// off a zero-width anchor that rides the sidebar's right edge (`left =
+/// sidebar_width`). Width math lives on the shell root (see the module docs).
 pub(crate) fn sidebar_handle(shell: &Shell, cx: &mut gpui::Context<Shell>) -> impl IntoElement {
     div()
-        .id("sidebar-resize-handle")
         .absolute()
         .top_0()
         .bottom_0()
         .left(px(f32::from(shell.sidebar_width)))
-        .w(px(HANDLE_WIDTH))
-        .cursor(CursorStyle::ResizeLeftRight)
-        .on_drag(DraggedSidebarDivider, |_, _, _, cx| {
-            cx.stop_propagation();
-            cx.new(|_| DraggedSidebarDivider)
-        })
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
-        .on_mouse_up(
-            MouseButton::Left,
-            cx.listener(|this, e: &gpui::MouseUpEvent, _w, cx| {
-                if e.click_count >= 2 {
-                    this.set_sidebar_width(SIDEBAR_DEFAULT);
-                    cx.notify();
-                }
-            }),
+        .w(px(0.))
+        .child(
+            resize_handle::<DraggedSidebarDivider, DraggedSidebarDivider>(
+                "sidebar-resize-handle",
+                Axis::Horizontal,
+            )
+            .with_appearance(invisible_appearance())
+            .on_drag(DraggedSidebarDivider, |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| DraggedSidebarDivider)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_double_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.set_sidebar_width(SIDEBAR_DEFAULT);
+                cx.notify();
+            })),
         )
 }
 
-/// The main-card|right-pane sash — an **in-layout flex child**: its 6px width
-/// is the card seam itself, invisible (no divider stroke drawn).
+/// The main-card|right-pane sash: the 6px strip stays the seam itself (an
+/// in-layout flex child, invisible), and the band rides it absolutely so the
+/// drag keeps the strip's geometry.
 pub(crate) fn chat_right_sash(cx: &mut gpui::Context<Shell>) -> impl IntoElement {
     div()
-        .id("right-resize-sash")
         .w(px(HANDLE_WIDTH))
         .h_full()
         .flex_shrink_0()
-        .cursor(CursorStyle::ResizeLeftRight)
-        .on_drag(DraggedRightDivider, |_, _, _, cx| {
-            cx.stop_propagation();
-            cx.new(|_| DraggedRightDivider)
-        })
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
-        .on_mouse_up(
-            MouseButton::Left,
-            cx.listener(|this, e: &gpui::MouseUpEvent, _w, cx| {
-                if e.click_count >= 2 {
-                    this.right
-                        .update(cx, |pane, _cx| pane.set_width(RIGHT_DEFAULT));
-                    cx.notify();
-                }
-            }),
+        .relative()
+        .child(
+            resize_handle::<DraggedRightDivider, DraggedRightDivider>(
+                "right-resize-sash",
+                Axis::Horizontal,
+            )
+            .with_appearance(invisible_appearance())
+            .on_drag(DraggedRightDivider, |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| DraggedRightDivider)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_double_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.right
+                    .update(cx, |pane, _cx| pane.set_width(RIGHT_DEFAULT));
+                cx.notify();
+            })),
         )
 }

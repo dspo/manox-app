@@ -17,6 +17,10 @@ harness = false
 [dependencies]
 gpui.workspace = true
 gpui-component.workspace = true
+# The resize-handle band is a base-layer primitive: the component wrapper
+# wires the design-system divider appearance, which the chrome suppresses —
+# the 2026-Light seams are the card gaps themselves.
+gpui-base.workspace = true
 # Chrome icons live as paths into this bundle's full Lucide catalog: the lib
 # implements `IconNamed for theme::IconAsset` so the constants feed
 # gpui-component icon slots directly, and the guard test pins every path to
