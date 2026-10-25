@@ -148,11 +148,15 @@ fn frame_cells(grid: &[&str; 14]) -> Vec<(usize, usize, Hsla)> {
 /// runtime behavior.
 fn loop_animation(rate: f32) -> Animation {
     // gpui animations are oneshot by default; the loading page can stay up
-    // arbitrarily long, so the loop must repeat.
+    // arbitrarily long, so the loop must repeat. The sprite shows SLOTS_PER_SEC
+    // discrete frames per second; 4 samples per slot is visual headroom, and
+    // without it the repeat loop would repaint the whole window at the
+    // display's refresh rate for as long as the loading page is up.
     Animation::new(Duration::from_secs_f64(
         CYCLE.len() as f64 / (SLOTS_PER_SEC * rate) as f64,
     ))
     .repeat()
+    .with_max_fps(SLOTS_PER_SEC * rate * 4.)
 }
 
 /// The pixel meerkat: the conversation-loading glyph.
