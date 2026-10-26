@@ -65,42 +65,6 @@ pub struct SubagentWorkRow {
     pub started_at: String,
 }
 
-/// How much of one chat's fold a page has already rendered.
-///
-/// Cheap to read and compare — an id, two counts and the fold's last-entry
-/// stamp, never a copy of the content. It moves on every way a transcript
-/// grows: a settled turn was appended or the in-flight turn settled, the
-/// in-flight turn gained a part or a new id, or the fold's stamp advanced.
-///
-/// The stamp carries the fine-grained half BY DESIGN: the projection stamps
-/// `modifiedAt` with the journal's last entry, so a change that appends no new
-/// part (text streaming inside one part, a tool call's state inside an existing
-/// part) still moves it. This is a VERSION, not a content hash — a producer
-/// that rewrote a settled turn while leaving `modifiedAt` behind would be
-/// invisible here, and that is the contract.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChatFoldVersion {
-    /// Settled turns.
-    turns: usize,
-    /// The in-flight turn: `(id, part count)`. An AHP turn's parts grow IN
-    /// PLACE, so the turn count alone never moves while a run streams.
-    active: Option<(String, usize)>,
-    /// The fold's last-entry stamp.
-    modified_at: String,
-}
-
-/// Read one chat's current fold version.
-pub fn chat_fold_version(chat: &ChatState) -> ChatFoldVersion {
-    ChatFoldVersion {
-        turns: chat.turns.len(),
-        active: chat
-            .active_turn
-            .as_ref()
-            .map(|turn| (turn.id.clone(), turn.response_parts.len())),
-        modified_at: chat.modified_at.clone(),
-    }
-}
-
 /// How the client identifies itself to the host (echo correlation, active
 /// client claims).
 pub const CLIENT_ID: &str = "desktop";
@@ -171,30 +135,75 @@ pub enum FoldEffect {
     Rejected(String),
 }
 
-/// Derive the steering injection receipt from one envelope's (channel,
-/// action) — the display event the fold's effect must not gate.
-///
-/// Returns the bare chat id the envelope rode plus the
-/// [`crate::chat_fold::ChatEvent::SteerConsumed`] the composer's steer card
-/// retires by. `None` for everything else: a non-chat channel, any other
-/// action, and a `Queued` removal (the plain queue is a local surface; its
-/// cards retire at the settle, not on a wire removal).
+/// One steer-consumption receipt: the client-minted id the composer's card
+/// retires by, plus the wake-retire text (an idle steer waking its own run
+/// carries the opening row's text for the `m-{entry}` id-miss fallback).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteerReceipt {
+    pub message_id: String,
+    pub wake_text: Option<String>,
+}
+
+/// A host refusal of one of this client's writes, keyed by the envelope's
+/// `server_seq` so re-delivery can never duplicate a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusalRecord {
+    pub seq: u64,
+    pub text: String,
+    /// The turn id the refused action named (`chat/turnStarted`), so the
+    /// transcript can retire the optimistic bubble that turn was minted for.
+    pub turn_id: Option<String>,
+}
+
+/// The per-session receipt tables' cap: consumption receipts and refusals
+/// are consumed by the transcript sync within a notify of arriving, so the
+/// cap only bounds a parked session's backlog.
+const RECEIPT_TABLE_CAP: usize = 512;
+
+/// Derive the steer-consumption receipt from one envelope's (channel,
+/// action). Two wire shapes are receipts: a `chat/pendingMessageRemoved
+/// {steering}` (the injection into the running turn is confirmed — the host
+/// publishes it only after the fact), and a `chat/turnStarted` carrying the
+/// pending id as `queuedMessageId` (an idle steer waking its own run; `wake`
+/// names it, with the opening row's text as the retire fallback). `None`
+/// for everything else: a non-chat channel, any other action, a `Queued`
+/// removal (the plain queue is a local surface; its cards retire at the
+/// settle), and a carried queued submission (a plain send whose text rides
+/// `queuedMessageId` — the projection stamps carried rows the same minted
+/// id a wake gets, so the pre-fold queue is the arbiter; the caller passes
+/// `carried_queued` it computed against the pre-fold state).
 fn steering_receipt_of(
     channel: &str,
     action: &StateAction,
-) -> Option<(String, crate::chat_fold::ChatEvent)> {
-    let StateAction::ChatPendingMessageRemoved(removed) = action else {
-        return None;
-    };
-    if !channel.starts_with("ahp-chat:/") || removed.kind != PendingMessageKind::Steering {
+    carried_queued: bool,
+) -> Option<(String, SteerReceipt)> {
+    if !channel.starts_with("ahp-chat:/") {
         return None;
     }
-    Some((
-        id_of(channel).to_string(),
-        crate::chat_fold::ChatEvent::SteerConsumed {
-            message_id: removed.id.clone(),
-        },
-    ))
+    match action {
+        StateAction::ChatPendingMessageRemoved(removed)
+            if removed.kind == PendingMessageKind::Steering =>
+        {
+            Some((
+                id_of(channel).to_string(),
+                SteerReceipt {
+                    message_id: removed.id.clone(),
+                    wake_text: None,
+                },
+            ))
+        }
+        StateAction::ChatTurnStarted(start) if !carried_queued => {
+            let message_id = start.queued_message_id.clone()?;
+            Some((
+                id_of(channel).to_string(),
+                SteerReceipt {
+                    wake_text: (!start.message.text.is_empty()).then(|| start.message.text.clone()),
+                    message_id,
+                },
+            ))
+        }
+        _ => None,
+    }
 }
 
 impl Default for ChannelBook {
@@ -763,14 +772,6 @@ enum DeliverySignal {
     DispatchRecovered,
 }
 
-/// Per-session display-event bucket bound. A bucket is a delta log against
-/// the conversation's build state: the live leg applies it, and a rebuild
-/// from the book — which already folded every event the bucket holds —
-/// consumes it outright. A bucket belonging to a session nobody has bound
-/// since accumulates unread; the oldest entries are dropped, because the
-/// rebuild (not the bucket) is what makes that session's content whole.
-const CHAT_EVENT_BUCKET_CAP: usize = 512;
-
 /// The GPUI-facing store. One per process: the host is a singleton (L11) and
 /// this is its only desktop client.
 pub struct AhpStore {
@@ -779,13 +780,18 @@ pub struct AhpStore {
     /// True while the pre-connect queue is being replayed; writes issued in
     /// that window queue behind the replay instead of racing it.
     replay_pending: bool,
-    /// Display events derived from chat-channel folds since their last
-    /// drain, bucketed by the owning session — the live-streaming leg the
-    /// conversation applier consumes. AHP stamps every action envelope with
-    /// its channel while chat payloads carry no URI of their own, so a
-    /// derived display event must re-attach the channel's session here;
-    /// consumers drain only the bucket they hold a binding for.
-    chat_events: HashMap<String, VecDeque<crate::chat_fold::ChatEvent>>,
+    /// Host refusals of this client's writes, keyed by the owning session —
+    /// the transcript's refusal notices, drained by its sync. A chat payload
+    /// carries no URI of its own, so the owning session is resolved at
+    /// record time (through `session_of_chat`, exactly as the retired
+    /// display-event bucket did).
+    refusals: HashMap<String, VecDeque<RefusalRecord>>,
+    /// Steer-consumption receipts, keyed by the owning session — the
+    /// composer's steer cards retire through these (a removal echo, or a
+    /// wake turn-start carrying the pending id). State-keyed, not display
+    /// events: the composer consults the table on every sync, and a
+    /// re-attach's first sync replays whatever accumulated while parked.
+    steer_receipts: HashMap<String, VecDeque<SteerReceipt>>,
     /// The foreground session id (the multiplexer publishes on focus
     /// changes): chat activity in any OTHER session rises the official
     /// unread bit (`session/isReadChanged` — client-owned observation
@@ -861,7 +867,8 @@ impl AhpStore {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: HashMap::new(),
+            refusals: HashMap::new(),
+            steer_receipts: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -978,7 +985,8 @@ impl AhpStore {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: HashMap::new(),
+            refusals: HashMap::new(),
+            steer_receipts: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -1043,6 +1051,26 @@ impl AhpStore {
         self.book.chat_snapshots.insert(chat_id.to_string());
     }
 
+    /// Queue one steer-consumption receipt into a session's table, as the
+    /// backend's removal echo or a wake turn-start would land while the
+    /// thread is parked. Test-support diagnostic: a detached store has no
+    /// wire, so tests seed the table the composer's sync drains.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_inject_steer_receipt(
+        &mut self,
+        session_id: &str,
+        message_id: String,
+        wake_text: Option<String>,
+    ) {
+        self.record_steer_receipt(
+            session_id.to_string(),
+            SteerReceipt {
+                message_id,
+                wake_text,
+            },
+        );
+    }
+
     /// Overwrite one chat's folded state (a fabricated snapshot a fixture
     /// flips into the book without a host). Test-support diagnostic.
     #[cfg(feature = "test-support")]
@@ -1060,17 +1088,6 @@ impl AhpStore {
         let mut session = empty_session(&session_uri(session_id));
         session.default_chat = Some(chat_uri(chat_id));
         self.book.sessions.insert(session_id.to_string(), session);
-    }
-
-    /// Queue one display event into a session's bucket. Test-support
-    /// diagnostic: the drill-down panel's pump consumes exactly this bucket.
-    #[cfg(feature = "test-support")]
-    pub fn push_chat_event_for_test(
-        &mut self,
-        session_id: &str,
-        event: crate::chat_fold::ChatEvent,
-    ) {
-        self.push_chat_event(session_id.to_string(), event);
     }
 
     /// Route one wire-shaped event through the production dispatch point.
@@ -1475,13 +1492,34 @@ impl AhpStore {
         self.request_hook = Some(hook);
     }
 
-    /// Bucket one derived display event under its owning session, dropping
-    /// the oldest entry past [`CHAT_EVENT_BUCKET_CAP`].
-    fn push_chat_event(&mut self, session_id: String, event: crate::chat_fold::ChatEvent) {
-        let bucket = self.chat_events.entry(session_id).or_default();
-        bucket.push_back(event);
-        while bucket.len() > CHAT_EVENT_BUCKET_CAP {
-            bucket.pop_front();
+    /// Record a host refusal under its owning session, deduped by the
+    /// envelope's `server_seq` (a re-delivered envelope re-records nothing),
+    /// dropping the oldest past [`RECEIPT_TABLE_CAP`].
+    fn record_refusal(
+        &mut self,
+        session_id: String,
+        seq: u64,
+        text: String,
+        turn_id: Option<String>,
+    ) {
+        let table = self.refusals.entry(session_id).or_default();
+        if table.iter().any(|r| r.seq == seq) {
+            return;
+        }
+        table.push_back(RefusalRecord { seq, text, turn_id });
+        while table.len() > RECEIPT_TABLE_CAP {
+            table.pop_front();
+        }
+    }
+
+    /// Record a steer-consumption receipt under its owning session, dropping
+    /// the oldest past [`RECEIPT_TABLE_CAP`]. Duplicates (the same removal
+    /// re-delivered) retire the first time; a second record is inert.
+    fn record_steer_receipt(&mut self, session_id: String, receipt: SteerReceipt) {
+        let table = self.steer_receipts.entry(session_id).or_default();
+        table.push_back(receipt);
+        while table.len() > RECEIPT_TABLE_CAP {
+            table.pop_front();
         }
     }
 
@@ -1558,13 +1596,20 @@ impl AhpStore {
                                     }
                                 }
                             }
-                            self.push_chat_event(
+                            // The refusal speaks on the OWNING session's
+                            // table (a chat payload carries no URI of its
+                            // own), and the transcript sync turns it into a
+                            // keyed notice row — the optimistic bubble a
+                            // refused submit pushed is at least explained.
+                            self.record_refusal(
                                 session_id,
-                                crate::chat_fold::ChatEvent::Notice {
-                                    text: format!(
-                                        "{}: {reason}",
-                                        steer_i18n::t("workspace-change-rejected")
-                                    ),
+                                envelope.server_seq,
+                                format!("{}: {reason}", steer_i18n::t("workspace-change-rejected")),
+                                match &envelope.action {
+                                    ahp_types::actions::StateAction::ChatTurnStarted(start) => {
+                                        Some(start.turn_id.clone())
+                                    }
+                                    _ => None,
                                 },
                             );
                         }
@@ -1592,9 +1637,8 @@ impl AhpStore {
                 // row (this very action is what clears it). The projection
                 // stamps a carried queued row the same `m-{entry}` id a
                 // wake's steer row gets, so the id alone cannot tell the two
-                // apart; the pre-fold list can. The wake-retire text is
-                // dropped below, so an ordinary send whose text equals a
-                // parked steer's never retires that steer.
+                // apart; the pre-fold list can — an ordinary send whose text
+                // equals a parked steer's never retires that steer.
                 let carried_queued = matches!(
                     &envelope.action,
                     StateAction::ChatTurnStarted(start)
@@ -1606,6 +1650,22 @@ impl AhpStore {
                                 .is_some_and(|queued| queued.iter().any(|m| m.id == id))
                         })
                 );
+                // A consumption receipt is a receipt by host construction —
+                // a removal publishes only after a confirmed injection, a
+                // wake's queuedMessageId stamps only the woken row — so the
+                // envelope alone decides it, ahead of the fold's outcome
+                // gate (a removal can reach the Ignored arm when the fold's
+                // single steering slot was already evicted, and that NoOp
+                // does not disprove the receipt).
+                if let Some((session_owner, receipt)) =
+                    steering_receipt_of(&envelope.channel, &envelope.action, carried_queued)
+                    && let Some(session_id) = self
+                        .book
+                        .session_of_chat(&session_owner)
+                        .map(str::to_string)
+                {
+                    self.record_steer_receipt(session_id, receipt);
+                }
                 match self.book.apply(&envelope.channel, &envelope.action) {
                     FoldEffect::Changed => {
                         // The official unread rise (#870's app half):
@@ -1650,72 +1710,12 @@ impl AhpStore {
                                 ),
                             );
                         }
-                        if let Some(chat_id) = chat_id
-                            && let Some(chat) = self.book.chats.get(&chat_id)
-                            && let Some(mut event) = crate::chat_fold::ChatEvent::from_action(
-                                &envelope.action,
-                                Some(chat),
-                            )
-                        {
-                            // The derived event re-attaches the channel's
-                            // owning session — an envelope with no owning
-                            // session (a chat no session catalog lists) has
-                            // no legitimate display consumer, so the event
-                            // is dropped; the fold's rebuild covers content.
-                            if let Some(session_id) = owning {
-                                // A queued flush carries its opening text like
-                                // any other turn start, but no steer can hide
-                                // behind it (see `carried_queued`): leaving
-                                // the text in would let it retire a same-text
-                                // parked steer.
-                                if carried_queued
-                                    && let crate::chat_fold::ChatEvent::TurnStarted {
-                                        opening_text,
-                                        ..
-                                    } = &mut event
-                                {
-                                    *opening_text = None;
-                                }
-                                self.push_chat_event(session_id, event);
-                            }
-                        }
                         cx.notify();
                     }
                     FoldEffect::Ignored => {
-                        // A steering removal can reach this arm as a RECEIPT.
-                        // The host publishes `chat/pendingMessageRemoved
-                        // {steering}` the instant the injection into the
-                        // running turn is confirmed, while the router
-                        // broadcasts the accepted `pendingMessageSet` echo
-                        // only after the handler returns — the removal lands
-                        // FIRST, the fold's single `steering_message` slot is
-                        // still empty, and the SDK reducer answers NoOp for an
-                        // id the slot does not hold. That NoOp does not
-                        // disprove the receipt (it is a receipt BECAUSE the
-                        // host only publishes it after a confirmed
-                        // injection), so the display event is derived from
-                        // the envelope alone; the composer's steer card
-                        // correlates on it (`retire_steer_card`). The
-                        // `Changed` arm keeps deriving through `from_action`
-                        // — when the slot DOES match, that arm yields the
-                        // same event, and one envelope enters only one arm.
-                        //
-                        // The empty slot is not only the wire-order race: the
-                        // fold holds ONE steer while the kernel parks many, so
-                        // a later steer's Set evicts the earlier id and that
-                        // earlier steer's removal NoOps for the same reason —
-                        // with no ordering race at all. A removal is a
-                        // receipt by host construction (it is published only
-                        // after a confirmed injection), so the effect gate,
-                        // not the reducer, decides whether to believe it.
-                        if let Some((chat_id, event)) =
-                            steering_receipt_of(&envelope.channel, &envelope.action)
-                            && let Some(session_id) =
-                                self.book.session_of_chat(&chat_id).map(str::to_string)
-                        {
-                            self.push_chat_event(session_id, event);
-                            cx.notify();
-                        }
+                        // Nothing to fold. Content reaches the transcript
+                        // through the projection; a receipt that rode this
+                        // arm was already recorded above.
                     }
                     FoldEffect::Rejected(reason) => {
                         tracing::warn!(channel = %envelope.channel, reason = %reason,
@@ -2286,16 +2286,23 @@ impl AhpStore {
         self.book.apply_snapshot(uri, state)
     }
 
-    /// Drain the display events of one session — the bucket the caller
-    /// holds a binding for (the foreground pair's id half). The LIVE leg
-    /// applies them; a REBUILD caller must call this too and DROP the
-    /// result: the conversation it just synthesized from the book already
-    /// contains everything the bucket holds, so leaving the bucket in place
-    /// would let the next notify replay it onto the rebuilt list (every
-    /// parked delta rendered twice on a switch-back). Buckets of other
-    /// sessions stay theirs until their own bind drains them.
-    pub fn drain_chat_events(&mut self, session_id: &str) -> Vec<crate::chat_fold::ChatEvent> {
-        self.chat_events
+    /// Take the refusal notices accumulated for one session — the caller
+    /// that renders the foreground transcript (its sync already holds the
+    /// binding). The projection keys its rows by the refusals'
+    /// `server_seq`, so a record that outlives its row cannot duplicate.
+    pub fn drain_refusals(&mut self, session_id: &str) -> Vec<RefusalRecord> {
+        self.refusals
+            .remove(session_id)
+            .map(Vec::from)
+            .unwrap_or_default()
+    }
+
+    /// Take the steer-consumption receipts accumulated for one session.
+    /// The composer retires the matching card (and enters its `steered`
+    /// bubble) for each; a receipt with no card is a foreign steer or an
+    /// already-settled card and is dropped.
+    pub fn drain_steer_receipts(&mut self, session_id: &str) -> Vec<SteerReceipt> {
+        self.steer_receipts
             .remove(session_id)
             .map(Vec::from)
             .unwrap_or_default()
@@ -2685,7 +2692,7 @@ fn is_delegation_input(input: Option<&ahp_types::state::ToolInput>) -> bool {
     };
     serde_json::from_str::<Value>(raw)
         .ok()
-        .is_some_and(|value| crate::chat_fold::is_agent_task_call(Some(&value)))
+        .is_some_and(|value| crate::transcript::is_agent_task_call(Some(&value)))
 }
 
 /// Resolve each live run's agent type from the parent chat's delegation tool
@@ -3435,79 +3442,6 @@ mod tests {
         );
     }
 
-    /// The fold version's contract: counts and the last-entry stamp are what
-    /// move it (never the content), so a settled turn rewritten UNDER THE SAME
-    /// STAMP is invisible — a version, not a content hash. Production stamps
-    /// every changed fold (`modifiedAt` = the journal's last entry), which is
-    /// what makes that safe, and the page only needs to know "did anything
-    /// land since the build?".
-    #[test]
-    fn the_fold_version_moves_on_counts_and_the_stamp_only() {
-        fn chat(stamp: &str, settled: usize, settled_text: &str, active_parts: usize) -> ChatState {
-            let turns: Vec<serde_json::Value> = (0..settled)
-                .map(|ix| {
-                    serde_json::json!({
-                        "id": format!("t{ix}"),
-                        "message": { "text": "q", "origin": { "kind": "user" } },
-                        "responseParts": [{ "kind": "markdown", "id": format!("t{ix}-p0"), "content": settled_text }],
-                        "state": "complete",
-                    })
-                })
-                .collect();
-            let mut value = serde_json::json!({
-                "resource": chat_uri("s-1"),
-                "title": "fold version probe",
-                "status": 0,
-                "modifiedAt": stamp,
-                "turns": turns,
-            });
-            if active_parts > 0 {
-                let parts: Vec<serde_json::Value> = (0..active_parts)
-                    .map(|ix| {
-                        serde_json::json!({ "kind": "markdown", "id": format!("a{ix}"), "content": "streaming" })
-                    })
-                    .collect();
-                value.as_object_mut().expect("object").insert(
-                    "activeTurn".into(),
-                    serde_json::json!({
-                        "id": "active",
-                        "startedAt": stamp,
-                        "message": { "text": "q", "origin": { "kind": "user" } },
-                        "responseParts": parts,
-                    }),
-                );
-            }
-            serde_json::from_value(value).expect("the version probe chat parses")
-        }
-
-        let base = chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 1));
-        assert_eq!(
-            base,
-            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 1)),
-            "an unchanged fold is the same version"
-        );
-        assert_ne!(
-            base,
-            chat_fold_version(&chat("2026-01-01T00:00:00Z", 2, "a", 1)),
-            "a settled turn was appended"
-        );
-        assert_ne!(
-            base,
-            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "a", 2)),
-            "the in-flight turn gained a part (in place)"
-        );
-        assert_ne!(
-            base,
-            chat_fold_version(&chat("2026-01-01T00:00:01Z", 1, "a", 1)),
-            "the fold's stamp advanced"
-        );
-        assert_eq!(
-            base,
-            chat_fold_version(&chat("2026-01-01T00:00:00Z", 1, "rewritten", 1)),
-            "a settled turn rewritten under the SAME stamp is invisible — a version, not a hash"
-        );
-    }
-
     #[test]
     fn typed_session_actions_fold_into_the_session_state() {
         let mut book = ChannelBook::default();
@@ -3583,94 +3517,48 @@ mod tests {
     }
 
     /// The screenshot session's shape (a Read loop whose fold carries the
-    /// tool calls): the LIVE derivation (fold then `from_action`, the
-    /// pump's exact order) must yield tool events, and the rebuild
-    /// lowering (`synth_display` -> `build_items`) must fold them into the
-    /// activity segment as tool entries. This is the pinning test for
-    /// "工具调用看不到".
+    /// tool calls): the folded state must carry the tool call, and the
+    /// projection must fold it into the activity segment as a tool entry.
+    /// This is the pinning test for "工具调用看不到".
     /// The self-describing guarantee: a tool-call Start whose reducer gate
     /// declined (no active turn — a turn-id the fold never saw) still
-    /// derives its event from the action's own identity. Dropping it would
-    /// drop the reasoning-round boundary and merge every later round into
-    /// the first ("thinking keeps appending above a stack of tools").
+    /// lands its identity in the state's tool book, so the projection
+    /// renders it. Dropping it would drop the reasoning-round boundary and
+    /// merge every later round into the first ("thinking keeps appending
+    /// above a stack of tools").
     #[test]
-    fn a_state_missed_tool_start_still_derives_its_event() {
-        use ahp_types::actions::{ChatToolCallStartAction, StateAction};
-
-        let mut book = ChannelBook::default();
-        let uri = chat_uri("c-1");
-        // A turn id the fold never activated: the reducer NoOps, so no
-        // tool-call part ever enters the state.
-        let start = StateAction::ChatToolCallStart(ChatToolCallStartAction {
-            turn_id: "t-ghost".into(),
-            tool_call_id: "tc-1".into(),
-            meta: None,
-            tool_name: "Read".into(),
-            display_name: "Read".into(),
-            intention: Some("Read AGENTS.md".into()),
-            contributor: None,
-        });
-        book.apply(&uri, &start);
-        let chat = book.chats.get("c-1").expect("the fold holds the chat");
-        let event = crate::chat_fold::ChatEvent::from_action(&start, Some(chat))
-            .expect("the action's own identity derives the event");
-        match event {
-            crate::chat_fold::ChatEvent::ToolCall {
-                id,
-                name,
-                title,
-                status,
-                ..
-            } => {
-                assert_eq!(id, "tc-1");
-                assert_eq!(name, "Read");
-                assert_eq!(title, "Read AGENTS.md");
-                assert_eq!(status, manox_agent::thread::ToolCallStatus::Running);
-            }
-            other => panic!("expected a tool-call event, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_tool_loop_surfaces_tools_on_both_paths() {
-        use ahp_types::actions::{
-            ChatDeltaAction, ChatReasoningAction, ChatResponsePartAction,
-            ChatToolCallCompleteAction, ChatToolCallReadyAction, ChatToolCallStartAction,
-            ChatTurnCompleteAction, ChatTurnStartedAction,
-        };
-        use ahp_types::state::{
-            MarkdownResponsePart, Message, MessageKind, MessageOrigin, ResponsePart,
-            ToolCallResult, ToolInput, ToolResultContent, ToolResultTextContent,
-        };
+    fn a_tool_loop_projects_tools_into_one_segment() {
+        use crate::conversation::ConvItem;
+        use crate::transcript::{ItemKey, Overlays, ProjectEnv, project};
 
         let mut book = ChannelBook::default();
         let uri = chat_uri("c-1");
         let turn_id = "t-1".to_string();
-        let base = Message {
-            text: "调用一个 Read tool!".into(),
-            origin: MessageOrigin {
-                kind: MessageKind::User,
-            },
-            attachments: None,
-            model: None,
-            agent: None,
-            meta: None,
-        };
         let actions = vec![
             StateAction::ChatTurnStarted(ChatTurnStartedAction {
                 turn_id: turn_id.clone(),
-                started_at: "2026-10-15T07:44:00.000Z".into(),
-                message: base,
+                started_at: "2026-10-14T00:00:00Z".into(),
+                message: user_message("read the file".into()),
                 queued_message_id: None,
                 meta: None,
             }),
-            StateAction::ChatReasoning(ChatReasoningAction {
+            StateAction::ChatResponsePart(ahp_types::actions::ChatResponsePartAction {
                 turn_id: turn_id.clone(),
-                part_id: "p-r1".into(),
-                content: "The user wants me to call a Read tool.".into(),
+                part: ahp_types::state::ResponsePart::Reasoning(
+                    ahp_types::state::ReasoningResponsePart {
+                        id: "p-r1".into(),
+                        content: String::new(),
+                    },
+                ),
                 meta: None,
             }),
-            StateAction::ChatToolCallStart(ChatToolCallStartAction {
+            StateAction::ChatReasoning(ahp_types::actions::ChatReasoningAction {
+                turn_id: turn_id.clone(),
+                part_id: "p-r1".into(),
+                content: "thinking about it".into(),
+                meta: None,
+            }),
+            StateAction::ChatToolCallStart(ahp_types::actions::ChatToolCallStartAction {
                 turn_id: turn_id.clone(),
                 tool_call_id: "tc-1".into(),
                 meta: None,
@@ -3679,119 +3567,113 @@ mod tests {
                 intention: Some("Read AGENTS.md".into()),
                 contributor: None,
             }),
-            StateAction::ChatToolCallReady(ChatToolCallReadyAction {
+            StateAction::ChatToolCallReady(ahp_types::actions::ChatToolCallReadyAction {
                 turn_id: turn_id.clone(),
                 tool_call_id: "tc-1".into(),
                 meta: None,
                 contributor: None,
-                intention: Some("Read AGENTS.md".into()),
-                invocation_message: ahp_types::StringOrMarkdown::Plain("Read AGENTS.md".into()),
-                tool_input: Some(ToolInput::Inline(r#"{"path":"AGENTS.md"}"#.into())),
+                intention: None,
+                invocation_message: "Read AGENTS.md".into(),
+                tool_input: Some(ahp_types::state::ToolInput::Inline("{}".to_string())),
                 confirmation_title: None,
                 risk_assessment: None,
                 edits: None,
                 editable: None,
-                confirmed: None,
                 options: None,
+                confirmed: Some(ahp_types::state::ToolCallConfirmationReason::NotNeeded),
             }),
-            StateAction::ChatToolCallComplete(ChatToolCallCompleteAction {
+            StateAction::ChatToolCallComplete(ahp_types::actions::ChatToolCallCompleteAction {
                 turn_id: turn_id.clone(),
                 tool_call_id: "tc-1".into(),
-                meta: None,
-                result: ToolCallResult {
+                result: ahp_types::state::ToolCallResult {
                     success: true,
-                    past_tense_message: ahp_types::StringOrMarkdown::Plain("Read AGENTS.md".into()),
-                    content: Some(vec![ToolResultContent::Text(ToolResultTextContent {
-                        text: "# AGENTS.md body".into(),
-                    })]),
+                    past_tense_message: "Read it".into(),
+                    content: Some(vec![ahp_types::state::ToolResultContent::Text(
+                        ahp_types::state::ToolResultTextContent {
+                            text: "fn main() {}".into(),
+                        },
+                    )]),
                     structured_content: None,
                     error: None,
                 },
-                requires_result_confirmation: None,
-            }),
-            StateAction::ChatResponsePart(ChatResponsePartAction {
-                turn_id: turn_id.clone(),
-                part: ResponsePart::Markdown(MarkdownResponsePart {
-                    id: "p-m1".into(),
-                    content: String::new(),
-                }),
+                requires_result_confirmation: Some(false),
                 meta: None,
             }),
-            StateAction::ChatDelta(ChatDeltaAction {
+            StateAction::ChatResponsePart(ahp_types::actions::ChatResponsePartAction {
+                turn_id: turn_id.clone(),
+                part: ahp_types::state::ResponsePart::Markdown(
+                    ahp_types::state::MarkdownResponsePart {
+                        id: "p-m1".into(),
+                        content: String::new(),
+                    },
+                ),
+                meta: None,
+            }),
+            StateAction::ChatDelta(ahp_types::actions::ChatDeltaAction {
                 turn_id: turn_id.clone(),
                 part_id: "p-m1".into(),
-                content: "完成。".into(),
+                content: "done".into(),
                 meta: None,
             }),
-            StateAction::ChatTurnComplete(ChatTurnCompleteAction {
+            StateAction::ChatTurnComplete(ahp_types::actions::ChatTurnCompleteAction {
                 turn_id: turn_id.clone(),
                 duration: 1_000,
                 meta: None,
             }),
         ];
-
-        // The pump's exact order: fold first, then derive from the updated
-        // state.
-        let mut derived: Vec<crate::chat_fold::ChatEvent> = Vec::new();
         for action in &actions {
             book.apply(&uri, action);
-            if let Some(chat) = book.chats.get("c-1")
-                && let Some(event) = crate::chat_fold::ChatEvent::from_action(action, Some(chat))
-            {
-                derived.push(event);
-            }
         }
-        let tool_events = derived
-            .iter()
-            .filter(|e| matches!(e, crate::chat_fold::ChatEvent::ToolCall { .. }))
-            .count();
-        let result_events = derived
-            .iter()
-            .filter(|e| matches!(e, crate::chat_fold::ChatEvent::ToolResult { .. }))
-            .count();
-        // Start (streaming) and Ready (running) each derive one advance.
-        assert_eq!(
-            tool_events, 2,
-            "the live derivation yields both tool-call advances"
-        );
-        assert_eq!(
-            result_events, 1,
-            "the completion derives a tool-result event"
-        );
-
-        // The rebuild lowering over the same folded state.
         let chat = book.chats.get("c-1").expect("the fold holds the chat");
-        let mut usage = crate::chat_fold::UsageTable::new();
-        let display = crate::chat_fold::synth_display(chat, &mut usage);
-        // `rebuild_from_display`'s message half (the display carries no
-        // notes for this sequence, so the two are equivalent here).
-        let messages: Vec<manox_agent::Message> = display
+        let recipient = manox_agent::MessageAuthor::Lead;
+        let host = crate::host::noop_host();
+        let env = ProjectEnv {
+            role: "test-model",
+            recipient: &recipient,
+            host: &host,
+            cwd: None,
+            fork_source: false,
+            promoted_confirmation: None,
+        };
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(chat), &mut overlays, &env);
+        let kinds: Vec<(&ItemKey, &ConvItem)> = nodes.iter().map(|n| (&n.key, &n.kind)).collect();
+        let user = kinds
             .iter()
-            .filter_map(|e| match e {
-                manox_agent::db::HistoryEntry::Message(m) => Some(m.clone()),
-                _ => None,
-            })
-            .collect();
-        let items = crate::views::message::build_items(
-            &messages,
-            &std::collections::HashMap::new(),
-            false,
-            None,
-        );
-        let segment = items
-            .iter()
-            .find_map(|i| match i {
-                crate::conversation::ConvItem::Thinking(t) => Some(t),
-                _ => None,
-            })
-            .expect("one activity segment");
+            .filter(|(k, _)| matches!(k, ItemKey::User(_)))
+            .count();
+        assert_eq!(user, 1, "one user row: {kinds:?}");
+        let segment = kinds.iter().find_map(|(_, k)| match k {
+            ConvItem::Thinking(t) => Some(t),
+            _ => None,
+        });
+        let segment = segment.expect("one activity segment");
         assert!(
-            segment
-                .entries
-                .iter()
-                .any(|e| matches!(e, crate::conversation::ActivityEntry::Tool(_))),
-            "the tool entry folds into the segment: entries={:?}",
-            segment.entries.len()
+            segment.entries.iter().any(|e| matches!(e, crate::conversation::ActivityEntry::Tool(t) if t.id == "tc-1" && t.output == "fn main() {}")),
+            "the tool entry carries the state's own result output"
+        );
+        assert!(
+            segment.entries.iter().any(|e| matches!(e, crate::conversation::ActivityEntry::Reasoning { text, .. } if text == "thinking about it")),
+            "the reasoning round folds into the segment"
+        );
+        // The settled turn derives its process head from the state's duration,
+        // spliced between its user row and the first segment.
+        let keys: Vec<String> = nodes.iter().map(|n| n.key.to_string()).collect();
+        let user_ix = keys.iter().position(|k| k.starts_with("user:")).unwrap();
+        let tp_ix = keys.iter().position(|k| k.starts_with("tp:")).unwrap();
+        let seg_ix = keys.iter().position(|k| k.starts_with("seg:")).unwrap();
+        assert_eq!(tp_ix, user_ix + 1, "the head sits above the first segment");
+        assert_eq!(seg_ix, tp_ix + 1);
+        let answer = kinds.iter().find_map(|(_, k)| match k {
+            ConvItem::Assistant {
+                text, streaming, ..
+            } => Some((text.as_str(), *streaming)),
+            _ => None,
+        });
+        assert_eq!(
+            answer,
+            Some(("done", false)),
+            "the answer is archived and carries the state's content"
         );
     }
 
@@ -4058,7 +3940,8 @@ mod tests {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: HashMap::new(),
+            refusals: HashMap::new(),
+            steer_receipts: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -4517,27 +4400,6 @@ mod tests {
         assert_eq!(set.message.text, "look at the failing test first");
     }
 
-    /// How many `SteerConsumed` events one envelope yields through the
-    /// store's derivation arms (the fold's effect decides which runs), so the
-    /// no-duplicate property is asserted against the same shape `route`
-    /// executes. This is a mini-model, not `route` itself — the wire-shape
-    /// guarantee through the real dispatch is pinned in
-    /// `agent-ui/tests/send_mode_lanes.rs`.
-    fn receipts_via_fold_arms(
-        book: &mut ChannelBook,
-        channel: &str,
-        action: &StateAction,
-    ) -> usize {
-        use crate::chat_fold::ChatEvent;
-        let effect = book.apply(channel, action);
-        let chat = book.chats.get(id_of(channel));
-        match effect {
-            FoldEffect::Changed => ChatEvent::from_action(action, chat).is_some() as usize,
-            FoldEffect::Ignored => steering_receipt_of(channel, action).is_some() as usize,
-            FoldEffect::Rejected(_) => 0,
-        }
-    }
-
     /// A steering removal is an INJECTION RECEIPT even when the fold ignored
     /// it. The host publishes the removal the instant the injection is
     /// confirmed — before the accepted `pendingMessageSet` echo is
@@ -4551,7 +4413,7 @@ mod tests {
     /// [`a_removal_for_a_steer_a_later_set_evicted_still_derives_a_receipt`]
     /// for the same NoOp with no ordering race at all.
     #[test]
-    fn a_steering_removal_derives_the_receipt_even_when_the_fold_ignored_it() {
+    fn a_steering_removal_receipts_even_when_the_fold_ignored_it() {
         let mut store = test_store();
         let mut session = empty_session(&session_uri("s-1"));
         session.default_chat = Some(chat_uri("c-1"));
@@ -4568,38 +4430,31 @@ mod tests {
             "no Set ever landed: the empty slot NoOps the removal"
         );
 
-        let Some((chat_id, event)) = steering_receipt_of(&channel, &action) else {
+        // The receipt is derived from the envelope alone — the same
+        // derivation `route` runs ahead of the fold's outcome gate — and is
+        // recorded in the OWNING session's table.
+        let Some((chat_id, receipt)) = steering_receipt_of(&channel, &action, false) else {
             panic!("the removal derives a receipt despite the NoOp fold");
         };
         assert_eq!(chat_id, "c-1");
-        assert!(matches!(
-            &event,
-            crate::chat_fold::ChatEvent::SteerConsumed { message_id } if message_id == "steer-1"
-        ));
-
-        // The chat id is not the bucket key: resolution goes through the
-        // owning session, exactly as route's Ignored arm does.
         let session_id = store
             .book
             .session_of_chat(&chat_id)
             .expect("the session catalogue owns the chat")
             .to_string();
-        store.push_chat_event(session_id, event);
-        let drained = store.drain_chat_events("s-1");
+        store.record_steer_receipt(session_id, receipt);
+        let drained = store.drain_steer_receipts("s-1");
         assert_eq!(drained.len(), 1);
-        assert!(matches!(
-            drained[0],
-            crate::chat_fold::ChatEvent::SteerConsumed { .. }
-        ));
-        assert!(store.drain_chat_events("s-none").is_empty());
+        assert_eq!(drained[0].message_id, "steer-1");
+        assert_eq!(drained[0].wake_text, None);
+        assert!(store.drain_steer_receipts("s-none").is_empty());
     }
 
     /// One consumption, exactly one receipt — whichever order the removal
-    /// and the Set echo land in. Echo first: the slot matches, the removal
-    /// folds Changed and the Changed arm's `from_action` derives the event.
-    /// Removal first: the empty slot NoOps, the Ignored arm's receipt
-    /// derivation does. One envelope enters exactly one arm, so a consumed
-    /// steer never retires two cards.
+    /// and the Set echo land in. The SET is never a receipt in either order
+    /// (the echo carries no display face of its own); the REMOVAL is the one
+    /// receipt, derived from the envelope alone, so the wire order cannot
+    /// double-fire or drop the retire.
     #[test]
     fn one_consumption_yields_exactly_one_receipt_in_either_wire_order() {
         let channel = chat_uri("c-1");
@@ -4612,42 +4467,20 @@ mod tests {
             kind: PendingMessageKind::Steering,
             id: "steer-1".to_string(),
         });
-
-        // Echo first (the slot-matched path): the Set lands, the removal
-        // folds Changed — and only the Changed arm's derivation fires.
         let mut book = ChannelBook::default();
-        let mut count = receipts_via_fold_arms(&mut book, &channel, &set);
-        count += receipts_via_fold_arms(&mut book, &channel, &removed);
-        assert_eq!(
-            count, 1,
-            "echo-first: exactly the Changed arm derives the receipt"
-        );
-
-        // Removal first (the stranded-card path): the removal NoOps and the
-        // Ignored arm's bypass derives; the later Set echo adds nothing (a
-        // set carries no display face).
-        let mut book = ChannelBook::default();
-        let mut count = receipts_via_fold_arms(&mut book, &channel, &removed);
-        assert_eq!(
-            book.apply(&channel, &set),
-            FoldEffect::Changed,
-            "the echo still lands the slot for content reads"
-        );
-        count += receipts_via_fold_arms(&mut book, &channel, &set);
-        assert_eq!(
-            count, 1,
-            "removal-first: exactly the Ignored arm derives the receipt"
-        );
+        assert_eq!(book.apply(&channel, &set), FoldEffect::Changed);
+        assert!(steering_receipt_of(&channel, &set, false).is_none());
+        assert!(steering_receipt_of(&channel, &removed, false).is_some());
     }
 
     /// The single steering slot holds ONE steer while the kernel parks many:
     /// a later steer's `Set` evicts the earlier id, so the earlier steer's
-    /// removal NoOps even with perfect wire ordering. The Ignored-arm receipt
-    /// is what retires that earlier card — which is why the bypass is not
-    /// merely a workaround for the removal-before-echo race and must survive
-    /// any upstream ordering fix.
+    /// removal NoOps even with perfect wire ordering. The envelope-derived
+    /// receipt is what retires that earlier card — which is why the receipt
+    /// rides the envelope, not the fold effect, and must survive any
+    /// upstream ordering fix.
     #[test]
-    fn a_removal_for_a_steer_a_later_set_evicted_still_derives_a_receipt() {
+    fn a_removal_for_a_steer_a_later_set_evicted_still_receipts() {
         let channel = chat_uri("c-1");
         let set = |id: &str| {
             StateAction::ChatPendingMessageSet(ChatPendingMessageSetAction {
@@ -4675,10 +4508,9 @@ mod tests {
             FoldEffect::Ignored,
             "the injection of the FIRST steer NoOps: the slot holds the second"
         );
-        assert_eq!(
-            receipts_via_fold_arms(&mut book, &channel, &removed("steer-a")),
-            1,
-            "the Ignored arm still derives the first steer's receipt"
+        assert!(
+            steering_receipt_of(&channel, &removed("steer-a"), false).is_some(),
+            "the first steer's receipt rides the envelope despite the NoOp fold"
         );
         assert_eq!(
             book.chats
@@ -4688,10 +4520,9 @@ mod tests {
             Some("steer-b"),
             "consuming steer-a never clears the still-parked steer-b"
         );
-        assert_eq!(
-            receipts_via_fold_arms(&mut book, &channel, &removed("steer-b")),
-            1,
-            "steer-b's own removal folds Changed and derives its receipt"
+        assert!(
+            steering_receipt_of(&channel, &removed("steer-b"), false).is_some(),
+            "steer-b's own removal receipts"
         );
     }
 
@@ -4704,12 +4535,12 @@ mod tests {
             kind: PendingMessageKind::Queued,
             id: "q-1".to_string(),
         });
-        assert!(steering_receipt_of(&chat_uri("c-1"), &queued).is_none());
+        assert!(steering_receipt_of(&chat_uri("c-1"), &queued, false).is_none());
         let steering = StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
             kind: PendingMessageKind::Steering,
             id: "steer-1".to_string(),
         });
-        assert!(steering_receipt_of(&session_uri("s-1"), &steering).is_none());
+        assert!(steering_receipt_of(&session_uri("s-1"), &steering, false).is_none());
     }
 
     #[test]
@@ -4900,77 +4731,91 @@ mod tests {
         ));
     }
 
-    /// Derived display events land in the bucket of the session the
-    /// envelope's channel resolves to, and a drain takes exactly one bucket:
-    /// the routing identity the wire only puts on the envelope must survive
-    /// derivation (the cross-thread stream-bleed regression).
+    /// Receipts and refusals land in the table of the session the
+    /// envelope's channel resolves to, and a drain takes exactly one
+    /// session's table: the routing identity the wire only puts on the
+    /// envelope must survive derivation (the cross-thread stream-bleed
+    /// regression).
     #[test]
-    fn display_events_bucket_per_session_and_a_drain_takes_one() {
+    fn receipts_table_per_session_and_a_drain_takes_one() {
         let mut store = test_store();
-        store.push_chat_event(
-            "s-1".to_string(),
-            crate::chat_fold::ChatEvent::TurnStarted {
-                steer_id: None,
-                opening_text: None,
-            },
-        );
-        store.push_chat_event(
-            "s-2".to_string(),
-            crate::chat_fold::ChatEvent::TurnStarted {
-                steer_id: None,
-                opening_text: None,
-            },
-        );
-        store.push_chat_event(
-            "s-1".to_string(),
-            crate::chat_fold::ChatEvent::TurnFinished { cancelled: false },
-        );
+        for (sid, cid) in [("s-1", "c-1"), ("s-2", "c-2")] {
+            let mut session = empty_session(&session_uri(sid));
+            session.default_chat = Some(chat_uri(cid));
+            store.book.sessions.insert(sid.to_string(), session);
+        }
+        let removed = |cid: &str, id: &str| {
+            (
+                chat_uri(cid),
+                StateAction::ChatPendingMessageRemoved(ChatPendingMessageRemovedAction {
+                    kind: PendingMessageKind::Steering,
+                    id: id.to_string(),
+                }),
+            )
+        };
+        let own = |store: &AhpStore, cid: &str, id: &str| {
+            let (channel, action) = removed(cid, id);
+            let (chat_id, receipt) =
+                steering_receipt_of(&channel, &action, false).expect("the removal receipts");
+            let session = store
+                .book
+                .session_of_chat(&chat_id)
+                .expect("the session catalogue owns the chat")
+                .to_string();
+            (session, receipt)
+        };
+        let (owner1, receipt1) = own(&store, "c-1", "steer-1");
+        store.record_steer_receipt(owner1, receipt1);
+        let (owner2, receipt2) = own(&store, "c-2", "steer-2");
+        store.record_steer_receipt(owner2, receipt2);
+        store.record_refusal("s-1".to_string(), 7, "r7".to_string(), None);
 
-        let drained = store.drain_chat_events("s-1");
-        assert_eq!(drained.len(), 2, "only the bound session's bucket drains");
-        assert!(matches!(
-            drained[0],
-            crate::chat_fold::ChatEvent::TurnStarted { .. }
-        ));
-        assert!(matches!(
-            drained[1],
-            crate::chat_fold::ChatEvent::TurnFinished { .. }
-        ));
+        let drained = store.drain_steer_receipts("s-1");
+        assert_eq!(drained.len(), 1, "only the bound session's table drains");
+        assert_eq!(drained[0].message_id, "steer-1");
+        let refusals = store.drain_refusals("s-1");
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].seq, 7);
 
-        // The other session's bucket is untouched and drains on its own
-        // binding; events are consumed once.
-        assert_eq!(store.drain_chat_events("s-2").len(), 1);
-        assert!(store.drain_chat_events("s-2").is_empty());
-        // A session with no bucket drains empty rather than panicking.
-        assert!(store.drain_chat_events("s-none").is_empty());
+        // The other session's table is untouched and drains on its own
+        // binding; records are consumed once.
+        assert_eq!(store.drain_steer_receipts("s-2").len(), 1);
+        assert!(store.drain_steer_receipts("s-2").is_empty());
+        // A session with no table drains empty rather than panicking.
+        assert!(store.drain_steer_receipts("s-none").is_empty());
+        assert!(store.drain_refusals("s-none").is_empty());
     }
 
-    /// A bucket nobody drains (a parked session streaming in the background)
+    /// A table nobody drains (a parked session streaming in the background)
     /// is bounded: the oldest entries drop, the newest survive — correctness
-    /// is the book's job, the bucket only covers the bound session's live
-    /// deltas.
+    /// is the book's job, the tables only cover the bound session's sync.
     #[test]
-    fn a_display_event_bucket_is_bounded_dropping_oldest_first() {
+    fn a_receipt_table_is_bounded_dropping_oldest_first() {
         let mut store = test_store();
-        let total = CHAT_EVENT_BUCKET_CAP + 2;
+        let total = RECEIPT_TABLE_CAP + 2;
         for ix in 0..total {
-            store.push_chat_event(
-                "s-1".to_string(),
-                crate::chat_fold::ChatEvent::AgentText(ix.to_string()),
-            );
+            store.record_refusal("s-1".to_string(), ix as u64, ix.to_string(), None);
         }
-        let drained = store.drain_chat_events("s-1");
-        assert_eq!(drained.len(), CHAT_EVENT_BUCKET_CAP, "the bucket is capped");
-        let first = match drained.first() {
-            Some(crate::chat_fold::ChatEvent::AgentText(text)) => text.as_str(),
-            other => panic!("unexpected first event: {other:?}"),
-        };
-        assert_eq!(first, "2", "the two oldest entries dropped");
-        let last = match drained.last() {
-            Some(crate::chat_fold::ChatEvent::AgentText(text)) => text.as_str(),
-            other => panic!("unexpected last event: {other:?}"),
-        };
-        assert_eq!(last, (total - 1).to_string(), "the newest entry survives");
+        let drained = store.drain_refusals("s-1");
+        assert_eq!(drained.len(), RECEIPT_TABLE_CAP, "the table is capped");
+        assert_eq!(
+            drained.first().map(|r| r.seq),
+            Some(2),
+            "the two oldest dropped"
+        );
+        assert_eq!(
+            drained.last().map(|r| r.seq),
+            Some((total - 1) as u64),
+            "the newest record survives"
+        );
+        // A re-delivered envelope never duplicates its refusal row.
+        store.record_refusal(
+            "s-1".to_string(),
+            (total - 1) as u64,
+            "again".to_string(),
+            None,
+        );
+        assert_eq!(store.drain_refusals("s-1").len(), 1);
     }
 
     /// A bare store for accessor tests: no client, no channels.
@@ -4979,7 +4824,8 @@ mod tests {
             book: ChannelBook::default(),
             client: None,
             replay_pending: false,
-            chat_events: HashMap::new(),
+            refusals: HashMap::new(),
+            steer_receipts: HashMap::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),

@@ -42,8 +42,7 @@ use manox_agent::{Thread, ThreadId};
 use crate::OpenSettings;
 use crate::ToggleTurnNavigator;
 use crate::cockpit::format_elapsed;
-use crate::conversation::ConvItem;
-use crate::conversation::{ApplyOutcome, ConversationState, UserImage, UserTurnMeta};
+use crate::conversation::{ConvItem, ConversationState, UserImage, UserTurnMeta};
 use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
@@ -123,28 +122,6 @@ fn thread_cwd(
     } else {
         Some(SharedString::from(cwd.to_string_lossy().to_string()))
     }
-}
-
-/// The synthesized ask card's `ToolUse` input: the same shape the fold's
-/// elicitation lowering and the rebuild path parse, so every path to the
-/// card agrees on one input contract.
-fn ask_input_json(
-    ask: &steer_agent_chat_ui::column::PendingAsk,
-    request_id: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "requestId": request_id,
-        "questions": ask.questions.iter().map(|q| serde_json::json!({
-            "id": q.id,
-            "question": q.question,
-            "header": q.header,
-            "multiSelect": q.multi_select,
-            "options": q.options.iter().map(|o| serde_json::json!({
-                "label": o.label,
-                "description": o.description,
-            })).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
-    })
 }
 
 /// Build the composer footer's inline access-mode switch: a two-segment
@@ -255,7 +232,6 @@ fn composer_key_context(completion_open: bool) -> &'static str {
 /// subscription.
 struct SubagentStreamPage {
     id: String,
-    version: Option<steer_agent_chat_ui::ahp_store::ChatFoldVersion>,
     view: Entity<crate::views::subagent_stream::SubagentStreamView>,
     _poll: gpui::Task<()>,
     _sub: Subscription,
@@ -557,28 +533,215 @@ enum RecallStep {
 }
 
 impl Workspace {
-    fn apply_list_outcome(&mut self, outcome: ApplyOutcome, cx: &mut App) {
-        let count_changed = self.sync_list_count(cx);
-        match outcome {
-            ApplyOutcome::Remeasure(ix) => {
-                self.chat.read(cx).list_state.remeasure_items(ix..ix + 1)
-            }
-            ApplyOutcome::RemeasureAll => self.chat.read(cx).list_state.remeasure(),
-            ApplyOutcome::RemeasureAndAppend { remeasure_ix } => {
-                self.chat
-                    .read(cx)
-                    .list_state
-                    .remeasure_items(remeasure_ix..remeasure_ix + 1);
-                if !count_changed {
-                    let tail = self.chat.read(cx).list_count.saturating_sub(1);
-                    self.chat
-                        .read(cx)
-                        .list_state
-                        .remeasure_items(tail..tail + 1);
+    /// Reconcile the message list with one projection pass: splice on a
+    /// count change, remeasure exactly the rows whose content mutated, and
+    /// remeasure everything when the shape moved beyond a tail append.
+    fn apply_projection(&mut self, change: crate::conversation::ProjectionChange, cx: &mut App) {
+        self.sync_list_count(cx);
+        let list_state = self.chat.read(cx).list_state.clone();
+        for ix in &change.changed {
+            list_state.remeasure_items(*ix..*ix + 1);
+        }
+        if change.structural {
+            list_state.remeasure();
+        }
+    }
+
+    /// The single transcript sync — the one funnel every trigger converges
+    /// on: the store observe on any fold change, a thread attach, an
+    /// optimistic submit. Projects the foreground session's chat fold into
+    /// the conversation (the same keyed diff whether the fold just grew one
+    /// delta or just arrived whole), reconciles the list, and drives the
+    /// turn-lifecycle edges the state transitions imply.
+    pub(crate) fn sync_conversation(
+        &mut self,
+        store: &gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        // A stale observer (the outgoing thread's, before its rebind) must
+        // not drive the foreground transcript.
+        let bound = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .is_some_and(|(s, _)| s.entity_id() == store.entity_id());
+        if !bound {
+            return;
+        }
+        let sid = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone())
+            .expect("bound above");
+        let running = {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, &sid).running()
+        };
+        let cancelled = {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, &sid)
+                .chat
+                .is_none_or(|chat| {
+                    chat.active_turn.is_none()
+                        && chat.turns.last().is_some_and(|turn| {
+                            turn.state == ahp_types::state::TurnState::Cancelled
+                        })
+                })
+        };
+        let was_running = self.chat.read(cx).turn_active;
+
+        // Steer-consumption receipts retire their cards first, so the
+        // `steered` bubbles they push land in the same projection pass.
+        let receipts = store.update(cx, |s, _| s.drain_steer_receipts(&sid));
+        for receipt in receipts {
+            match receipt.wake_text {
+                Some(text) => {
+                    self.retire_woken_steer(Some(&receipt.message_id), Some(&text), cx);
+                }
+                None => {
+                    self.retire_steer_card(&receipt.message_id, cx);
                 }
             }
-            ApplyOutcome::Unchanged | ApplyOutcome::Appended | ApplyOutcome::RemovedTail => {}
         }
+
+        // The projection itself: one keyed diff over the fold. The fold is
+        // read inside the conversation update — the diff walks the state,
+        // it never copies it.
+        let role = self.model_label(cx);
+        let recipient = self.recipient_author(cx);
+        let host = self.chat.read(cx).host.clone();
+        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
+        let fork_source = self.fork_source_session(cx);
+        let promoted = self
+            .chat
+            .read(cx)
+            .pending_confirmation
+            .as_ref()
+            .map(|parked| parked.tool_call_id.clone());
+        let conversation = self.chat_conversation(cx);
+        let env = steer_agent_chat_ui::transcript::ProjectEnv {
+            role: &role,
+            recipient: &recipient,
+            host: &host,
+            cwd: cwd.as_deref(),
+            fork_source: fork_source.is_some(),
+            promoted_confirmation: promoted.as_deref(),
+        };
+        let change = conversation.update(cx, |conv, cx| {
+            let refusals = store.update(cx, |s, _| s.drain_refusals(&sid));
+            conv.absorb_refusals(
+                refusals
+                    .into_iter()
+                    .map(|r| steer_agent_chat_ui::transcript::RefusalNotice {
+                        seq: r.seq,
+                        text: r.text,
+                        turn_id: r.turn_id,
+                    })
+                    .collect(),
+            );
+            // Two phases: the fold borrow lives only across the stage.
+            let nodes = {
+                let view = store.read(cx);
+                let leaf = crate::ahp_store::leaf(&view.book, &sid);
+                conv.stage(leaf.chat, &env)
+            };
+            conv.reconcile(nodes, &env, cx)
+        });
+        self.apply_projection(change, cx);
+
+        // The chat's presence is the loading gate's whole question now: a
+        // landed fold carries whatever history it has (possibly none — the
+        // hero screen is the empty projection), and the projection keeps the
+        // transcript identical to it from here on.
+        let chat_landed = {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, &sid).chat.is_some()
+        };
+        if chat_landed && self.chat.read(cx).awaiting_history.is_some() {
+            self.chat.update(cx, |chat, cx| {
+                chat.awaiting_history = None;
+                cx.notify();
+            });
+        }
+        // The plan-channel subscription follows the default-chat pointer
+        // (the two diverge on session continuation).
+        self.sync_plan_channel(cx);
+
+        // Turn-lifecycle edges: the state's running bit against the last
+        // sync's mirror. The rising edge arms the elapsed tickers; the
+        // falling edge settles the follow-up queue (a cancelled settle
+        // strands the parked steers) and refreshes the sidebar/git views.
+        if running != was_running {
+            self.chat.update(cx, |chat, cx| {
+                chat.turn_active = running;
+                cx.notify();
+            });
+            if running {
+                self.spawn_thinking_ticker(cx);
+            } else {
+                self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
+                self.spawn_git_status_refresh(cx);
+                self.settle_follow_ups(cancelled, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Submit a user turn optimistically: the bubble renders this frame and
+    /// is adopted by the turn `turn_id` mints — identity, not text, so a
+    /// `/skill`'s compact bubble still pairs with the journal's expanded
+    /// body. Re-arms tail-follow, the same discipline the old direct push
+    /// had.
+    pub(super) fn push_optimistic_bubble(
+        &mut self,
+        text: String,
+        images: Vec<UserImage>,
+        meta: UserTurnMeta,
+        turn_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((store, sid)) = self.chat_store(cx) else {
+            return;
+        };
+        let conversation = self.chat_conversation(cx);
+        let role = self.model_label(cx);
+        let recipient = self.recipient_author(cx);
+        let host = self.chat.read(cx).host.clone();
+        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
+        let fork_source = self.fork_source_session(cx);
+        let promoted = self
+            .chat
+            .read(cx)
+            .pending_confirmation
+            .as_ref()
+            .map(|parked| parked.tool_call_id.clone());
+        let env = steer_agent_chat_ui::transcript::ProjectEnv {
+            role: &role,
+            recipient: &recipient,
+            host: &host,
+            cwd: cwd.as_deref(),
+            fork_source: fork_source.is_some(),
+            promoted_confirmation: promoted.as_deref(),
+        };
+        conversation.update(cx, |conv, cx| {
+            let chat = {
+                let view = store.read(cx);
+                let leaf = crate::ahp_store::leaf(&view.book, &sid);
+                leaf.chat.cloned()
+            };
+            let bubble = steer_agent_chat_ui::transcript::OverlayBubbleSeed {
+                text,
+                images,
+                meta,
+                turn_id,
+            };
+            conv.push_optimistic_user(chat.as_ref(), bubble, &env, cx);
+        });
+        self.sync_list_count(cx);
+        self.follow_message_tail(cx);
     }
 
     pub(crate) fn with_foreground_store<R>(
@@ -1167,12 +1330,15 @@ impl Workspace {
         });
     }
 
-    /// Run the store-observe's rebuild guard directly. Diagnostic-only: the
-    /// production guard fires on store notify, which a detached test store
-    /// never produces. Returns `(rebuilt, chat_landed)`.
+    /// Run the transcript sync directly. Diagnostic-only: the production
+    /// sync fires on store notify, which a detached test store never
+    /// produces.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_run_rebuild_guard(&mut self, cx: &mut Context<Self>) -> (bool, bool) {
-        self.sync_rebuild_from_book(cx)
+    pub fn diagnostic_sync_conversation(&mut self, cx: &mut Context<Self>) {
+        if let Some((store, _)) = self.chat.read(cx).store.clone() {
+            self.sync_conversation(&store, cx);
+        }
+        self.sync_plan_channel(cx);
     }
 
     /// The dismiss leg (`dismiss_ask`): the ask card's close and the stop
@@ -1180,18 +1346,6 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_dismiss_ask(&mut self, cx: &mut Context<Self>) {
         self.dismiss_ask(cx);
-    }
-
-    /// The rebuild watermark triple: (built pre-snapshot, built turn count,
-    /// conversation item count). Diagnostic-only.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_rebuild_watermark(&self, cx: &App) -> (bool, usize, usize) {
-        let chat = self.chat.read(cx);
-        (
-            chat.rebuilt_pre_snapshot,
-            chat.built_turns,
-            chat.conversation.read(cx).items().len(),
-        )
     }
 
     /// The transcript's assistant texts, in order — the prose a replayed
@@ -1417,17 +1571,10 @@ impl Workspace {
                         .as_ref()
                         .is_none_or(|a| a.id != ask.id);
                     if stale {
-                        let input = ask_input_json(&ask, &request_id);
-                        let summary = ask
-                            .questions
-                            .first()
-                            .map(|q| q.header.clone())
-                            .unwrap_or_default();
                         tracing::info!(
                             request_id = %request_id,
                             questions = ask.questions.len(),
-                            summary = %summary,
-                            "live ask: seeding the interactive card"
+                            "live ask: arming the interactive card"
                         );
                         self.chat.update(cx, |chat, cx| {
                             chat.pending_ask = Some(ask);
@@ -1436,7 +1583,10 @@ impl Workspace {
                             cx.notify();
                         });
                         self.reset_ask_state(cx);
-                        self.ensure_ask_tool_item(&request_id, &summary, input, cx);
+                        // The ask card's row is the projection's: the fold's
+                        // open elicitation is an `ir:` part, and the sync
+                        // renders it as the interactive card the snapshot
+                        // attaches to. No synthesis leg here anymore.
                     }
                 }
             }
@@ -1546,68 +1696,6 @@ impl Workspace {
         }
     }
 
-    /// Synthesize the top-level AskUserQuestion card when the conversation
-    /// lacks the `ToolCall` item the interactive ask card renders on: the
-    /// live ask edge seeds it for a freshly arrived elicitation, the
-    /// resurface loop for one whose underlying ToolUse folded into an
-    /// activity segment. Without the item the ask snapshot cannot attach and
-    /// the interactive UI never renders.
-    fn ensure_ask_tool_item(
-        &mut self,
-        id: &str,
-        summary: &str,
-        input: serde_json::Value,
-        cx: &mut Context<Self>,
-    ) {
-        let conversation = self.chat_conversation(cx);
-        if conversation.read(cx).find_tool(id, cx).is_some() {
-            return;
-        }
-        // The runtime always supplies a non-empty English summary for its own
-        // tool call, and runtime-supplied values are never re-localized here;
-        // the card's own empty-header fallback lives at the render site.
-        let role = self.model_label(cx);
-        let host = self.chat.read(cx).host.clone();
-        conversation.update(cx, |conversation, cx| {
-            conversation.push_tool_call(
-                crate::conversation::ToolCallItem {
-                    id: id.to_string(),
-                    name: manox_agent::tools::ASK_USER_QUESTION.to_string(),
-                    title: summary.to_string(),
-                    status: manox_agent::ToolCallStatus::PendingApproval,
-                    output: String::new(),
-                    is_error: false,
-                    input,
-                    streaming: false,
-                    collapsed: false,
-                    user_toggled: false,
-                    panel: None,
-                    card: None,
-                    cwd: None,
-                },
-                role,
-                host,
-                cx,
-            );
-        });
-        self.sync_list_count(cx);
-        self.chat.update(cx, |chat, _| {
-            chat.list_state.set_follow_mode(FollowMode::Tail);
-        });
-    }
-
-    /// Diagnostic-only wrapper around `ensure_ask_tool_item`.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_ensure_ask_tool_item(
-        &mut self,
-        id: &str,
-        summary: &str,
-        input: serde_json::Value,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_ask_tool_item(id, summary, input, cx);
-    }
-
     /// Sync the ask snapshots (render-time path). Diagnostic-only.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_sync_ask_card_snapshots(&mut self, cx: &mut Context<Self>) {
@@ -1642,37 +1730,6 @@ impl Workspace {
     /// The accumulated output of the activity-segment tool entry with the given
     /// id, when one exists. Diagnostic-only: this is how the attach catch-up's
     /// replay of a parked thread's streamed `ToolOutput` is observed.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_tool_output(&self, id: &str, cx: &App) -> Option<String> {
-        let conversation = self.chat_conversation(cx);
-        let conversation = conversation.read(cx);
-        let (cix, eix) = conversation.find_thinking_entry(id, cx)?;
-        let item = conversation.items().get(cix)?.read(cx);
-        match item.kind() {
-            ConvItem::Thinking(container) => match container.entries.get(eix) {
-                Some(crate::conversation::ActivityEntry::Tool(entry)) => Some(entry.output.clone()),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// The attempt numbers of the retry notices the transcript shows, in order.
-    /// Diagnostic-only: this is how the attach catch-up's turn gate on the
-    /// replayed `Retry` row is observed.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_retry_attempts(&self, cx: &App) -> Vec<u32> {
-        self.chat_conversation(cx)
-            .read(cx)
-            .items()
-            .iter()
-            .filter_map(|item| match item.read(cx).kind() {
-                ConvItem::Retry { attempt, .. } => Some(*attempt),
-                _ => None,
-            })
-            .collect()
-    }
-
     /// The pending question card's id, if one is surfaced. Diagnostic-only.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_pending_ask_id(&self, cx: &App) -> Option<String> {
@@ -1750,123 +1807,14 @@ impl Workspace {
         });
     }
 
-    /// Rebuild the conversation view from the thread's v2 display fold. The
-    /// trigger is the follow stream's authoritative history boundary
-    /// (`WindowChange::Replace` → `ThreadEvent::HistoryRestored`, §D.1); the
-    /// T10c-era successor of the deleted `ThreadHistory` note replay.
-    /// Wire the workspace to the foreground leaf: the `ThreadEvent` stream
-    /// drives the conversation surface, and the entity-level observe repaints
-    /// on projection-only frames (the mid-session chip updates — see the
-    /// `store_observe` field note).
-    /// Rebuild the foreground conversation from the book's chat fold (the
-    /// AHP successor of the v2 snapshot-rebuild: the subscribe snapshot is
-    /// the authoritative transcript, and `synth_display` lowers it).
-    pub(crate) fn rebuild_conversation_from_book(&mut self, cx: &mut Context<Self>) {
-        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
-            return;
-        };
-        let (running, display, usage, pre_snapshot, built_turns) = {
-            let view = store.read(cx);
-            let leaf = crate::ahp_store::leaf(&view.book, &sid);
-            let running = leaf.running();
-            let Some(chat) = leaf.chat else {
-                tracing::info!(session_id = %sid, "rebuild: no chat in the book yet");
-                return;
-            };
-            let mut usage = crate::chat_fold::UsageTable::new();
-            let display = crate::chat_fold::synth_display(chat, &mut usage);
-            let user_rows = display
-                .iter()
-                .filter(|e| {
-                    matches!(e, manox_agent::db::HistoryEntry::Message(m) if m.role == manox_agent::language_model::Role::User)
-                })
-                .count();
-            let entry_count = display.len();
-            let turns = chat.turns.len();
-            tracing::info!(
-                session_id = %sid,
-                turns,
-                entries = entry_count,
-                user_rows,
-                first_user_text_empty = chat.turns.first().is_some_and(|t| t.message.text.is_empty()),
-                "rebuild: synthesized transcript from the chat fold"
-            );
-            let pre_snapshot = !view.book.chat_snapshot_landed(&sid);
-            (running, display, usage, pre_snapshot, chat.turns.len())
-        };
-        let role = self.model_label(cx);
-        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
-        let fork_source = self.fork_source_session(cx);
-        let new_conv = cx.new(|cx| {
-            ConversationState::rebuild_from_display(
-                &display,
-                &usage,
-                &role,
-                manox_agent::MessageAuthor::Lead,
-                running,
-                crate::conversation::ApplyCtx {
-                    host: self.chat.read(cx).host.clone(),
-                    cwd,
-                    fork_source,
-                },
-                cx,
-            )
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.conversation = new_conv;
-            chat.rebuilt_pre_snapshot = pre_snapshot;
-            chat.built_turns = built_turns;
-            // The snapshot landed with displayable history: the loading gate's
-            // job is done.
-            chat.awaiting_history = None;
-            cx.notify();
-        });
-        // The rebuild synthesized the transcript from the book, which already
-        // folded every event this session's bucket holds — consume the bucket
-        // (drop it) so the next notify's live leg cannot replay those deltas
-        // onto the freshly rebuilt list (the switch-back double-render).
-        let _ = store.update(cx, |s, _| s.drain_chat_events(&sid));
-        self.sync_list_count(cx);
-        cx.notify();
-    }
-
-    /// The store-observe's rebuild guard, shared with the diagnostic test
-    /// entry: rebuild the foreground conversation when the fold outgrew what
-    /// the conversation was built from. Returns `(rebuilt, chat_landed)`.
-    fn sync_rebuild_from_book(&mut self, cx: &mut Context<Self>) -> (bool, bool) {
-        let (displayable, chat_landed, snapshot_landed, turns_now) = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid).chat.map(|c| {
-                    (
-                        !c.turns.is_empty() || c.active_turn.is_some(),
-                        true,
-                        view.book.chat_snapshot_landed(&sid),
-                        c.turns.len(),
-                    )
-                })
-            })
-            .unwrap_or((false, false, false, 0));
-        // A build that ran before the chat snapshot landed (first replay
-        // deltas beat the subscribe answer) froze whatever partial fold
-        // existed then; once the snapshot lands with more settled turns than
-        // the build saw, rebuild over it — the one-shot empty check below can
-        // never fire again on a non-empty skeleton.
-        let healing = {
-            let chat = self.chat.read(cx);
-            chat.rebuilt_pre_snapshot && snapshot_landed && turns_now > chat.built_turns
-        };
-        // Align the plan-channel subscription with the default-chat pointer:
-        // plan rows are emitted on `x-manox-plan:/<active chat id>`, and the
-        // attach-time subscription rides the session id until the pointer
-        // lands (the two diverge on session continuation). One re-issue per
-        // pointer value; the key comes from `plan_channel_for` — the same
-        // authority every read face uses, so they cannot fork.
-        if chat_landed && let Some((store, sid)) = self.chat.read(cx).store.clone() {
+    /// Align the plan-channel subscription with the default-chat pointer:
+    /// plan rows are emitted on `x-manox-plan:/<active chat id>`, and the
+    /// attach-time subscription rides the session id until the pointer lands
+    /// (the two diverge on session continuation). One re-issue per pointer
+    /// value; the key comes from `plan_channel_for` — the same authority
+    /// every read face uses, so they cannot fork.
+    fn sync_plan_channel(&mut self, cx: &mut Context<Self>) {
+        if let Some((store, sid)) = self.chat.read(cx).store.clone() {
             let plan_channel = {
                 let view = store.read(cx);
                 crate::ahp_store::plan_channel_for(&view.book, &sid)
@@ -1884,12 +1832,6 @@ impl Workspace {
                 });
             }
         }
-        if displayable && (healing || self.chat_conversation(cx).read(cx).is_empty(cx)) {
-            self.rebuild_conversation_from_book(cx);
-            (true, chat_landed)
-        } else {
-            (false, chat_landed)
-        }
     }
 
     fn subscribe_thread(&self, cx: &mut Context<Self>) -> (Subscription, Subscription) {
@@ -1904,144 +1846,21 @@ impl Workspace {
             return (a, b);
         };
         let repaint = cx.observe(&store, |this, store, cx| {
-            // Snapshot → transcript transition: the attach-time rebuild ran
-            // against an empty fold (the chat snapshot lands asynchronously
-            // after subscribe), so the hero screen would stick forever. The
-            // moment the fold holds anything displayable — settled turns, or
-            // a first turn still in flight (`active_turn`, whose content
-            // synth_display lowers the same way) — and the conversation is
-            // still empty, rebuild from the snapshot. The drained deltas are
-            // already inside it, so the drain skips one round.
-            let (rebuilt, chat_landed) = this.sync_rebuild_from_book(cx);
+            // Live ask edge first: the fold's open elicitation and the open
+            // tool confirmation arm the pending state the projection reads —
+            // `promoted_confirmation` (the parked call's top-level card) is
+            // assembled in THIS pass's environment, so arming must precede
+            // projecting or the card waits a notify.
+            this.sync_live_ask(&store, cx);
+            // The one transcript sync — the projection reads whatever the
+            // fold now holds, so a first snapshot, a replayed journal and a
+            // single streaming delta all take the same keyed diff.
+            this.sync_conversation(&store, cx);
             // The sub-agent page rides the same notify: the parent's
             // background-work ticks are what say a child run advanced, and a
             // child chat is served snapshot-only — the re-subscribe this
             // triggers is the only way its page can follow the run.
             this.refresh_subagent_stream(cx);
-            if !rebuilt && chat_landed && this.chat.read(cx).awaiting_history.is_some() {
-                // The chat snapshot landed but holds no displayable turn: the
-                // reopened session is genuinely empty. Drop the loading gate so
-                // the hero screen returns (without this the loading view would
-                // stick forever on an empty history).
-                this.chat.update(cx, |chat, cx| {
-                    chat.awaiting_history = None;
-                    cx.notify();
-                });
-            }
-            // Live ask edge: the fold's open elicitation IS the pending ask.
-            // Runs AFTER the rebuild so a freshly seeded card lands on the
-            // rebuilt conversation instead of the empty skeleton it replaces
-            // (seeding first would make the skeleton non-empty and starve
-            // the rebuild forever).
-            this.sync_live_ask(&store, cx);
-            if rebuilt {
-                // The rebuild path returns before the bucket drain below, so
-                // a parked session's accumulated lifecycle events (steer
-                // consumption, settles) replay here instead — the transcript
-                // content came from the snapshot, only the lifecycle is new.
-                this.replay_parked_chat_events(cx);
-                return;
-            }
-            // Live streaming leg: the pump folded chat actions into the book
-            // and bucketed the derived display events per owning session.
-            // Drain the bucket of the session this workspace binds RIGHT NOW
-            // — the pair's id half, re-read per notify (a switch rebinds the
-            // pair while the store entity stays). A parked session's stream
-            // lands in its own bucket and reaches a transcript only while
-            // that session is the one bound here.
-            let bound_sid = match this.chat.read(cx).store.clone() {
-                Some((bound, sid)) if bound.entity_id() == store.entity_id() => sid,
-                _ => return,
-            };
-            let events = store.update(cx, |s, _| s.drain_chat_events(&bound_sid));
-            if events.is_empty() {
-                return;
-            }
-            let role = this.model_label(cx);
-            for event in events {
-                match &event {
-                    crate::chat_fold::ChatEvent::Notice { text } => {
-                        let host = this.chat.read(cx).host.clone();
-                        let ix = this.chat.update(cx, |chat, cx| {
-                            let ix = chat.conversation.update(cx, |c, cx| {
-                                c.push_notice(
-                                    text.clone(),
-                                    crate::conversation::NoticeAnchor::TurnEnd,
-                                    host.clone(),
-                                    cx,
-                                )
-                            });
-                            cx.notify();
-                            ix
-                        });
-                        // The note cards' live leg: this arm is their only
-                        // display (the dispatch site no longer pushes locally),
-                        // so the virtualized list must learn about the row.
-                        this.apply_list_insert(ix, cx);
-                        continue;
-                    }
-                    crate::chat_fold::ChatEvent::Usage { .. } => {
-                        // The rail's metrics fold carries usage; nothing in
-                        // the transcript.
-                        continue;
-                    }
-                    crate::chat_fold::ChatEvent::TurnStarted {
-                        steer_id,
-                        opening_text,
-                    } => {
-                        this.chat.update(cx, |chat, cx| {
-                            chat.turn_active = true;
-                            cx.notify();
-                        });
-                        this.spawn_thinking_ticker(cx);
-                        // An idle steer wakes its own run: the retire rides
-                        // here, alongside the lifecycle (never instead of
-                        // it). The id-first rule and its text fallback live
-                        // in `retire_woken_steer`.
-                        this.retire_woken_steer(steer_id.as_deref(), opening_text.as_deref(), cx);
-                    }
-                    crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
-                        this.chat.update(cx, |chat, cx| {
-                            chat.turn_active = false;
-                            cx.notify();
-                        });
-                        this.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
-                        this.spawn_git_status_refresh(cx);
-                        // The follow-up queue settles here: steers the engine
-                        // retracted without injecting strand to Failed (a
-                        // cancelled settle publishes no removal), and the
-                        // queued/interrupt cards flush as the next turn. A
-                        // cancelled settle deliberately leaves plain `Queued`
-                        // cards parked — the user's stop must not silence the
-                        // queue by starting a surprise new run.
-                        this.settle_follow_ups(*cancelled, cx);
-                    }
-                    crate::chat_fold::ChatEvent::SteerConsumed { message_id } => {
-                        this.retire_steer_card(message_id, cx);
-                        continue;
-                    }
-                    _ => {}
-                }
-                let thread_event = crate::chat_fold::to_thread_event(event);
-                let Some(thread_event) = thread_event else {
-                    continue;
-                };
-                let cwd = thread_cwd(&this.chat.read(cx).thread, &this.chat.read(cx).store, cx);
-                let outcome = this.chat_conversation(cx).update(cx, |c, cx| {
-                    c.apply(
-                        &thread_event,
-                        &role,
-                        None,
-                        crate::conversation::ApplyCtx {
-                            host: this.chat.read(cx).host.clone(),
-                            cwd,
-                            fork_source: None,
-                        },
-                        cx,
-                    )
-                });
-                this.apply_list_outcome(outcome, cx);
-            }
             cx.notify();
         });
         let successor = cx.observe(&store, |this, store, cx| {
@@ -2519,19 +2338,6 @@ impl Workspace {
     /// count (append/remove) and remeasure the affected index/indices. Call
     /// after any `ConversationState::apply` (the outcome tells which path) so
     /// the virtualized list's per-item height cache never goes stale.
-    /// Splice a single newly inserted conversation item at `ix` into
-    /// `list_state`. Mid-list insertions (anchored notices) can't ride the
-    /// tail-diff in `sync_list_count`, so this splices at the exact position
-    /// and bumps `list_count` to keep the two reconciliations consistent (a
-    /// later `sync_list_count` sees an equal count and is a no-op).
-    fn apply_list_insert(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cc| {
-            chat.list_state.splice(ix..ix, 1);
-            chat.list_count += 1;
-            cc.notify();
-        });
-    }
-
     /// Re-engage tail-follow. `FollowMode::Tail` pins to the end natively and
     /// keeps following; an upward user scroll disengages it and landing back
     /// at the bottom re-arms it. This is the user-initiated "jump to live
@@ -2969,15 +2775,17 @@ impl Workspace {
     /// row is not treated as a remote (unmatched) insertion.
     ///
     /// Returns `true` when the submit rode the connection (session bound).
+    /// Returns the turn id the submit minted, or `None` when it never rode
+    /// the wire (no session bound).
     pub(crate) fn send_submit_v2(
         &mut self,
         text: String,
         images: Vec<serde_json::Value>,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Option<String> {
         let Some((store, sid)) = self.chat.read(cx).store.clone() else {
             tracing::warn!("submit dropped: no session bound to the workspace");
-            return false;
+            return None;
         };
         tracing::info!(session_id = %sid, "submit sent (ahp)");
         let _ = images;
@@ -3003,7 +2811,7 @@ impl Workspace {
         store.update(cx, |store, _| {
             store.submit_turn(&sid, &turn_id, text, None);
         });
-        true
+        Some(turn_id)
     }
 
     /// v2 §D.2 steer path: hand a message to the server's steer queue via

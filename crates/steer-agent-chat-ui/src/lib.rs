@@ -17,7 +17,6 @@
 
 pub mod ahp_store;
 pub mod ask_card;
-pub mod chat_fold;
 pub mod cockpit;
 pub mod column;
 pub mod conversation;
@@ -28,6 +27,7 @@ pub mod model_tag;
 pub mod overlap_diag;
 pub mod preview;
 pub mod text;
+pub mod transcript;
 pub mod views;
 
 gpui::actions!(

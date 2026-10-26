@@ -23,7 +23,7 @@
 //!   nothing new neither rebuilds nor churns the page.
 
 use super::*;
-use steer_agent_chat_ui::ahp_store::{ChatFoldVersion, SubagentWorkRow, chat_fold_version};
+use steer_agent_chat_ui::ahp_store::SubagentWorkRow;
 
 /// How often an open page fetches a fresh child-chat snapshot.
 const SUBAGENT_STREAM_POLL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -68,15 +68,13 @@ impl Workspace {
             .as_ref()
             .is_some_and(|page| page.id == row.id)
         {
-            // Already on this run: the re-subscribe above is the refresh. The
-            // version is synced to what the rebuild renders, and the poll is
-            // re-armed (assigning drops the old task, which cancels it) —
-            // defence in depth: the "page exists ⟺ its mode owns the column"
-            // invariant already routes a re-open through the create arm.
+            // Already on this run: the re-subscribe above is the refresh, and
+            // the poll is re-armed (assigning drops the old task, which
+            // cancels it) — defence in depth: the "page exists ⟺ its mode
+            // owns the column" invariant already routes a re-open through the
+            // create arm.
             let poll = Self::spawn_subagent_stream_poll(cx, row.id.clone());
-            let version = child_fold_version(&store, &row.id, cx);
             if let Some(page) = self.subagent_stream.as_mut() {
-                page.version = version;
                 page._poll = poll;
                 page.view.update(cx, |view, cx| view.refresh(cx));
             }
@@ -107,7 +105,6 @@ impl Workspace {
             role,
             cx,
         );
-        let version = child_fold_version(&store, &row.id, cx);
         let sub = cx.subscribe(
             &view,
             |this, _, _: &crate::views::subagent_stream::BackToConversation, cx| {
@@ -117,7 +114,6 @@ impl Workspace {
         let poll = Self::spawn_subagent_stream_poll(cx, row.id.clone());
         self.subagent_stream = Some(SubagentStreamPage {
             id: row.id.clone(),
-            version,
             view,
             _poll: poll,
             _sub: sub,
@@ -138,28 +134,18 @@ impl Workspace {
         }
     }
 
-    /// Rebuild the open page from its child chat's fold when the fold grew
-    /// (the store observe's notify — the same one that drives the
-    /// conversation rebuild). Gated on the MODE, not just the field: a page
-    /// that no longer owns the main column must not keep fetching.
+    /// Re-project the open page from its child chat's fold (the store
+    /// observe's notify — the same one that drives the conversation sync).
+    /// Gated on the MODE, not just the field: a page that no longer owns the
+    /// main column must not keep fetching. The keyed projection is its own
+    /// freshness check — a pass that lands nothing new notifies nothing.
     pub(crate) fn refresh_subagent_stream(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.view_mode, ViewMode::SubagentStream) {
             return;
         }
-        let Some(page_id) = self.subagent_stream.as_ref().map(|page| page.id.clone()) else {
-            return;
-        };
-        let Some((store, _)) = self.chat_store(cx) else {
-            return;
-        };
-        let version = child_fold_version(&store, &page_id, cx);
         let Some(page) = self.subagent_stream.as_mut() else {
             return;
         };
-        if page.version == version {
-            return;
-        }
-        page.version = version;
         page.view.update(cx, |view, cx| view.refresh(cx));
     }
 
@@ -197,13 +183,4 @@ impl Workspace {
             }
         })
     }
-}
-
-/// The child chat's fold version, if the fold holds it at all.
-fn child_fold_version(
-    store: &Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
-    id: &str,
-    cx: &App,
-) -> Option<ChatFoldVersion> {
-    store.read(cx).book.chats.get(id).map(chat_fold_version)
 }

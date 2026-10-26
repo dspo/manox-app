@@ -75,19 +75,16 @@ fn seed_session(
     });
 }
 
-/// The notices a consumer actually reads: the display buckets are keyed by
-/// the OWNING SESSION, so an `ahp-chat:` refusal must resolve through it
-/// rather than through the chat's own id. Draining the chat's bucket here as
-/// well would hide a notice posted where nothing reads it — exactly the
-/// stranded bubble these tests exist to catch.
+/// The notices a consumer actually reads: the refusal table is keyed by the
+/// OWNING SESSION, so an `ahp-chat:` refusal must resolve through it rather
+/// than through the chat's own id. Draining the chat's table here as well
+/// would hide a notice posted where nothing reads it — exactly the stranded
+/// bubble these tests exist to catch.
 fn notice_texts(store: &gpui::Entity<AhpStore>, cx: &mut gpui::TestAppContext) -> Vec<String> {
     store.update(cx, |s, _| {
-        s.drain_chat_events("s-1")
-            .iter()
-            .filter_map(|event| match event {
-                steer_agent_chat_ui::chat_fold::ChatEvent::Notice { text } => Some(text.clone()),
-                _ => None,
-            })
+        s.drain_refusals("s-1")
+            .into_iter()
+            .map(|record| record.text)
             .collect()
     })
 }

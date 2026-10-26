@@ -1,70 +1,106 @@
-//! Regression: the AskUserQuestion card synthesized when the rebuilt
-//! conversation lacks the top-level `ToolCall` item the interactive drawer
-//! renders on. A parked interaction whose underlying ToolUse folded into an
-//! activity segment leaves no card on a switch-back rebuild; the workspace
-//! must synthesize the gate-created card.
+//! The ask card is the projection's: the fold's open elicitation (an `ir:`
+//! part) renders as the interactive card, and the workspace's pending-ask
+//! state attaches its snapshot to that one row. This pins the two faces that
+//! used to need a synthesis leg — a transcript whose tool call folded into a
+//! segment carries no ask card until the fold holds the elicitation, and the
+//! elicitation yields exactly one interactive card.
 #![cfg(feature = "test-support")]
 
 mod common;
 
-use agent_ui::Workspace;
-use agent_ui::conversation::{ApplyCtx, ConversationState};
-use common::{bash_tool_use_message, init_harness, open_workspace};
+use common::{init_harness, open_workspace};
 use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
+
+fn user_message() -> ahp_types::state::Message {
+    serde_json::from_value(serde_json::json!({
+        "text": "run the build",
+        "origin": { "kind": "user" },
+    }))
+    .expect("a user message parses")
+}
+
+fn select_request(id: &str) -> ahp_types::state::ChatInputRequest {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "questions": [{
+            "kind": "single-select", "id": "q", "title": "Pick",
+            "message": "Which one?",
+            "options": [
+                { "id": "a", "label": "A" },
+                { "id": "b", "label": "B" },
+            ],
+        }],
+    }))
+    .expect("the select request parses")
+}
 
 #[gpui::test]
-async fn ask_card_synthesized_when_rebuild_misses_the_tool_item(cx: &mut TestAppContext) {
+async fn the_folds_elicitation_is_the_one_interactive_ask_card(cx: &mut TestAppContext) {
     init_harness(cx);
     let (window, workspace) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
-    let payload = serde_json::json!({
-        "questions": [
-            {
-                "question": "Which one?",
-                "header": "Pick",
-                "options": [
-                    { "label": "A" },
-                    { "label": "B" },
-                ],
-            }
-        ]
+
+    let store = cx.update(|cx| cx.new(|_| AhpStore::detached()));
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store.clone(), "sess-1", cx);
     });
 
-    // The conversation a switch-back rebuilds: a Bash ToolUse folded into a
-    // Thinking segment, no top-level AskUserQuestion card.
-    let _weak = gpui::WeakEntity::<Workspace>::new_invalid();
-    let conversation = cx.new(|cx| {
-        ConversationState::rebuild_from_display(
-            &[manox_agent::db::HistoryEntry::Message(
-                bash_tool_use_message("t1"),
-            )],
-            &std::collections::HashMap::new(),
-            "test-model",
-            manox_agent::MessageAuthor::Lead,
-            true,
-            ApplyCtx {
-                host: steer_agent_chat_ui::host::noop_host(),
-                cwd: None,
-                fork_source: None,
-            },
-            cx,
-        )
+    // A settled turn whose Bash call folded into an activity segment: no
+    // top-level ask card exists.
+    store.update(&mut visual.cx, |s, _| {
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &ahp_types::actions::StateAction::ChatTurnStarted(
+                ahp_types::actions::ChatTurnStartedAction {
+                    turn_id: "turn-1".to_string(),
+                    started_at: "2026-09-30T00:00:00Z".to_string(),
+                    message: user_message(),
+                    queued_message_id: None,
+                    meta: None,
+                },
+            ),
+        );
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &ahp_types::actions::StateAction::ChatToolCallStart(
+                ahp_types::actions::ChatToolCallStartAction {
+                    turn_id: "turn-1".to_string(),
+                    tool_call_id: "tc-1".to_string(),
+                    meta: None,
+                    tool_name: "Bash".to_string(),
+                    display_name: "Bash".to_string(),
+                    intention: Some("Run the build".to_string()),
+                    contributor: None,
+                },
+            ),
+        );
     });
     workspace.update(&mut visual.cx, |ws, cx| {
-        ws.diagnostic_replace_conversation(conversation, cx);
+        ws.diagnostic_sync_conversation(cx);
     });
     assert_eq!(
         workspace.read_with(&visual.cx, |ws, cx| ws
             .diagnostic_tool_call_count("ask1", cx)),
         0,
-        "rebuilt conversation must lack the top-level ask card"
+        "a transcript without an elicitation carries no ask card"
     );
 
-    // Re-surfacing the pending authorization: seed the ask and run the
-    // synthesis the resurface loop performs per gate entry.
+    // The elicitation arrives the production way — an `ir:` part on the
+    // running turn — and the pending-ask state arms from the same fold.
+    store.update(&mut visual.cx, |s, _| {
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &ahp_types::actions::StateAction::ChatInputRequested(
+                ahp_types::actions::ChatInputRequestedAction {
+                    request: select_request("ask1"),
+                },
+            ),
+        );
+    });
     workspace.update(&mut visual.cx, |ws, cx| {
-        ws.diagnostic_seed_ask("ask1", payload.clone(), cx);
-        ws.diagnostic_ensure_ask_tool_item("ask1", "summary", payload.clone(), cx);
+        ws.diagnostic_sync_conversation(cx);
+        ws.diagnostic_sync_live_ask(cx);
     });
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_sync_ask_card_snapshots(cx);
@@ -73,7 +109,7 @@ async fn ask_card_synthesized_when_rebuild_misses_the_tool_item(cx: &mut TestApp
     let interactive = workspace.read_with(&visual.cx, |ws, cx| {
         ws.diagnostic_ask_card_interactive("ask1", cx)
     });
-    assert!(interactive, "synthesized ask card must be interactive");
+    assert!(interactive, "the projected ask card must be interactive");
     let cards = workspace.read_with(&visual.cx, |ws, cx| {
         ws.diagnostic_tool_call_count("ask1", cx)
     });

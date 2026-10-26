@@ -270,23 +270,7 @@ impl Workspace {
             format!("/{key} {args}")
         };
         let meta = self.user_turn_meta(cx);
-        // Persist the send-time chrome with the turn: the expanded macro/skill
-        // body is the model-facing text, and `display_text` keeps the bubble
-        // showing the compact `/key args` invocation after a reload — the same
-        // form the live view shows at send time.
         let _weak = cx.weak_entity();
-        self.chat_conversation(cx).update(cx, |c, cx| {
-            c.push_user(
-                display_text,
-                Vec::new(),
-                meta,
-                self.chat.read(cx).host.clone(),
-                cx,
-            )
-        });
-        self.sync_list_count(cx);
-        // Re-engage tail-follow so the streaming reply stays in view.
-        self.follow_message_tail(cx);
         // U2: the registry hit check reads the gateway's command snapshot —
         // the server projects the same command/skill registries the macro
         // and skill adapters dispatch against, so a remote server's
@@ -302,8 +286,13 @@ impl Workspace {
             RegistryTurnKind::Skill => wire_commands_has(&commands, key, "skill"),
         };
         if hit {
+            // The journal carries the EXPANDED macro/skill body while the
+            // bubble shows the compact `/key args` invocation, so these two
+            // texts never match: the minted turn id is what pairs them.
             let submit_text = format!("/{key} {args}");
-            let _ = self.send_submit_v2(submit_text, Vec::new(), cx);
+            if let Some(turn_id) = self.send_submit_v2(submit_text, Vec::new(), cx) {
+                self.push_optimistic_bubble(display_text, Vec::new(), meta, Some(turn_id), cx);
+            }
         } else {
             let notice_key = match kind {
                 RegistryTurnKind::Command => "workspace-unknown-command",
@@ -482,21 +471,19 @@ impl Workspace {
         _weak: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) {
-        // UI state tracking (always) — conversation bubble + list housekeeping.
-        self.chat_conversation(cx).update(cx, |c, cx| {
-            c.push_user(
+        // UI state tracking (always) — the optimistic bubble enters now and
+        // is adopted by the turn the submit mints. A submit that never rode
+        // the wire pushes no bubble: the row would have no turn behind it.
+        let attachments: Vec<serde_json::Value> = Vec::new();
+        if let Some(turn_id) = self.send_submit_v2(turn.text.clone(), attachments, cx) {
+            self.push_optimistic_bubble(
                 turn.text.clone(),
                 turn.user_images.clone(),
-                turn.meta.clone(),
-                self.chat.read(cx).host.clone(),
+                turn.meta,
+                Some(turn_id),
                 cx,
-            )
-        });
-        self.sync_list_count(cx);
-        self.follow_message_tail(cx);
-        // Dual-path: protocol Submit (kernel inserts + runs) vs direct insert + run.
-        let attachments: Vec<serde_json::Value> = Vec::new();
-        let _ = self.send_submit_v2(turn.text.clone(), attachments, cx);
+            );
+        }
     }
 
     /// Retire ONE `SteerPending` card whose steer the wire just consumed:
@@ -580,76 +567,18 @@ impl Workspace {
         };
         let mut meta = item.turn.meta.clone();
         meta.steered = true;
-        self.chat_conversation(cx).update(cx, |c, cx| {
-            c.push_user(
-                item.turn.text.clone(),
-                item.turn.user_images.clone(),
-                meta,
-                self.chat.read(cx).host.clone(),
-                cx,
-            )
-        });
-        self.sync_list_count(cx);
-        self.follow_message_tail(cx);
+        // A steer is injected into the RUNNING turn, so it has no turn id of
+        // its own: it pairs by text, and only with a turn that appears after
+        // this point (an idle steer waking its own run).
+        self.push_optimistic_bubble(
+            item.turn.text.clone(),
+            item.turn.user_images.clone(),
+            meta,
+            None,
+            cx,
+        );
         cx.notify();
         true
-    }
-
-    /// Replay the parked session's accumulated LIFECYCLE events before the
-    /// stashed follow-up surface settles against them. A thread switched
-    /// away keeps its subscription: consumption echoes, wake runs and
-    /// settles land in the store's event bucket while no transcript is
-    /// bound, and the live pump only drains the foreground session's bucket
-    /// — a re-attach's first notify returns early on the rebuild path, so
-    /// without this replay a steer consumed while parked keeps its card
-    /// forever and a cancelled settle never strands anything.
-    ///
-    /// Only lifecycle events replay. The transcript content (deltas, tool
-    /// rows) the rebuild already synthesized from the snapshot — replaying
-    /// it would duplicate rows. After the replay, a remaining SteerPending
-    /// card is genuinely still parked on the wire (its echo would have been
-    /// in this bucket), so nothing is ever marked Failed on a guess: the
-    /// only strand signals are positive ones — a replayed cancelled settle
-    /// (below, via settle_follow_ups) or the card's own withdraw actions.
-    /// The fold's single steering_message slot is deliberately NOT an
-    /// oracle: the manox kernel queue holds many steers while AHP folds one
-    /// slot, so the slot can neither prove nor disprove a card.
-    pub(super) fn replay_parked_chat_events(&mut self, cx: &mut Context<Self>) {
-        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
-            return;
-        };
-        let events = store.update(cx, |s, _| s.drain_chat_events(&sid));
-        for event in events {
-            match event {
-                crate::chat_fold::ChatEvent::TurnStarted {
-                    steer_id,
-                    opening_text,
-                } => {
-                    self.chat.update(cx, |chat, cx| {
-                        chat.turn_active = true;
-                        cx.notify();
-                    });
-                    self.spawn_thinking_ticker(cx);
-                    // An idle steer wakes its own run: the retire rides the
-                    // wake's own lifecycle (see `retire_woken_steer`).
-                    self.retire_woken_steer(steer_id.as_deref(), opening_text.as_deref(), cx);
-                }
-                crate::chat_fold::ChatEvent::TurnFinished { cancelled } => {
-                    self.chat.update(cx, |chat, cx| {
-                        chat.turn_active = false;
-                        cx.notify();
-                    });
-                    self.settle_follow_ups(cancelled, cx);
-                }
-                // The removal echo IS the injection receipt (the backend
-                // publishes it only once the injection is confirmed).
-                crate::chat_fold::ChatEvent::SteerConsumed { message_id } => {
-                    self.retire_steer_card(&message_id, cx);
-                }
-                _ => {}
-            }
-        }
-        cx.notify();
     }
 
     /// Settle the follow-up queue at a turn boundary. A cancelled settle
@@ -746,8 +675,12 @@ impl Workspace {
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let sent = !text.is_empty() && self.send_submit_v2(text.clone(), Vec::new(), cx);
-        if !sent {
+        let sent = if text.is_empty() {
+            None
+        } else {
+            self.send_submit_v2(text.clone(), Vec::new(), cx)
+        };
+        if sent.is_none() {
             // Nothing rode the wire — re-park everything as retryable
             // Failed cards (front-first, preserving the original order).
             self.chat.update(cx, |chat, cc| {
@@ -763,11 +696,7 @@ impl Workspace {
             return;
         }
         let meta = self.user_turn_meta(cx);
-        self.chat_conversation(cx).update(cx, |c, cx| {
-            c.push_user(text, Vec::new(), meta, self.chat.read(cx).host.clone(), cx)
-        });
-        self.sync_list_count(cx);
-        self.follow_message_tail(cx);
+        self.push_optimistic_bubble(text, Vec::new(), meta, sent, cx);
         cx.notify();
     }
 

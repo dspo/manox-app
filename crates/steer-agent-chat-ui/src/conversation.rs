@@ -1,29 +1,28 @@
 //! Conversation view state.
 //!
-//! A gpui `Entity` holding one `Entity<MessageItem>` per conversation item.
-//! `Thread` holds the canonical messages; this maintains a render-oriented
-//! view: thinking and body text split into separate items, and tool calls are
-//! tracked by id for status/output. Each item lives in its own `Entity` so a
-//! streaming delta notifies (and re-renders) only that item, leaving already-
-//! finished items' markdown untouched.
+//! A gpui `Entity` holding one keyed row per projected transcript node. The
+//! content authority is the AHP chat state: [`ConversationState::project`]
+//! diffs [`crate::transcript::project`]'s nodes against the live rows and
+//! updates each `Entity<MessageItem>` in place — a streaming delta re-renders
+//! only its own row, a settled turn folds its segment immediately, and a
+//! row's identity never shifts (rows are keyed by protocol part ids, so a
+//! replayed fold lands on the row that is already on screen). Client-local
+//! state lives in [`crate::transcript::Overlays`]: optimistic send bubbles,
+//! workspace info notices, host refusal notices, and per-turn clock anchors.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{App, AppContext as _, Entity, SharedString};
-use manox_agent::ThreadEvent;
-use manox_agent::db::{HistoryEntry, UiNoteKind, UiNoteRecord};
-use manox_agent::language_model::StopReason;
-use manox_agent::thread::AccessMode;
-use manox_agent::{Message, TokenUsage, ToolCallStatus};
+use manox_agent::thread::ToolCallStatus;
 
-use crate::host::ChatHostHandle;
-use crate::views::message::{AutoCollapseTarget, ItemBuilder, MessageItem, schedule_auto_collapse};
+use crate::transcript::{ItemKey, Node, Overlays, ProjectEnv};
+use crate::views::message::MessageItem;
 
 /// A decoded image attached to a user message, kept only for UI preview. The
-/// canonical bytes live in the `Thread`'s `MessageContent::Image`; this holds
-/// a gpui image so the user bubble can render a thumbnail without re-decoding.
+/// canonical bytes live in the submitted turn's content; this holds a gpui
+/// image so the user bubble can render a thumbnail without re-decoding.
 #[derive(Debug, Clone)]
 pub struct UserImage(pub Arc<gpui::Image>);
 
@@ -31,12 +30,10 @@ pub struct UserImage(pub Arc<gpui::Image>);
 pub struct UserTurnMeta {
     pub timestamp: i64,
     pub model_id: String,
-    pub access_mode: Option<AccessMode>,
-    /// True when this user message entered the message list via the steer
-    /// queue drain (mid-turn injection) rather than starting a fresh turn.
-    /// Mirrors `MessageUiMetadata::steered`; set by the drain-driven enqueue
-    /// path so `render_user` can show a "steered" badge and historical reload
-    /// keeps the marker.
+    pub access_mode: Option<manox_agent::thread::AccessMode>,
+    /// True when this user message entered the message list through a steer
+    /// injection (mid-turn) rather than starting a fresh turn as a typed
+    /// send. Projected rows inherit the marker from the adopting bubble.
     pub steered: bool,
     /// The agent that authored this user turn; `None` = human input and
     /// the bubble header shows the localized "You".
@@ -52,7 +49,11 @@ pub struct UserTurnMeta {
 }
 
 impl UserTurnMeta {
-    pub fn new(timestamp: i64, model_id: String, access_mode: Option<AccessMode>) -> Self {
+    pub fn new(
+        timestamp: i64,
+        model_id: String,
+        access_mode: Option<manox_agent::thread::AccessMode>,
+    ) -> Self {
         Self {
             timestamp,
             model_id,
@@ -61,19 +62,6 @@ impl UserTurnMeta {
             author: None,
             recipient: None,
             peer: false,
-        }
-    }
-
-    pub fn from_message(message: &Message, recipient: Option<manox_agent::MessageAuthor>) -> Self {
-        let ui = message.ui.as_ref();
-        Self {
-            timestamp: message.timestamp,
-            model_id: ui.and_then(|m| m.model_id.clone()).unwrap_or_default(),
-            access_mode: ui.and_then(|m| m.access_mode).map(AccessMode::from_i64),
-            steered: ui.and_then(|m| m.steered).unwrap_or(false),
-            author: ui.and_then(|m| m.author.clone()),
-            recipient,
-            peer: ui.map(|m| m.peer).unwrap_or(false),
         }
     }
 }
@@ -90,9 +78,8 @@ pub enum ConvItem {
         text: String,
         streaming: bool,
         /// Per-turn token usage (input/output/cache) for the user message that
-        /// preceded this assistant reply. Populated on turn `Stop`; `None`
-        /// while streaming or when the provider didn't report usage.
-        token_usage: Option<TokenUsage>,
+        /// opened this reply's turn, projected from the state's `turn.usage`.
+        token_usage: Option<manox_agent::TokenUsage>,
         /// True when an activity segment immediately precedes this reply:
         /// the segment's header row carries the model name, so this reply
         /// renders no model row of its own (pure-text answers stay bare).
@@ -103,29 +90,27 @@ pub enum ConvItem {
         /// visible and explains itself instead of vanishing.
         entry_id: Option<String>,
         /// Why this reply cannot be forked, or `None` when it can. Resolved
-        /// where the journal context is known (the builder), so rendering only
-        /// decides how to draw the control.
+        /// by the projection, so rendering only decides how to draw it.
         fork_unavailable: Option<crate::views::message::ForkUnavailable>,
     },
     /// One contiguous activity segment within a user turn, rendered as a
     /// segment shell: a header row carrying the model display name plus the
     /// clickable cover (chevron + per-kind counts "Read×7 · 思考×8", elapsed,
-    /// failure/approval badges) over the segment's entries. A segment spans
-    /// the whole tool-use loop of a turn — `StopReason::ToolUse` (the model
-    /// paused to run a tool) does NOT close it; only a terminal stop
-    /// (`EndTurn`/`MaxTokens`/`Refusal`/cancel/error) freezes the segment.
-    /// Collapsed shows only the header (live or settled); expanded lists
-    /// every entry (slight indent + left rail), each itself expandable to its
-    /// full tool output. The assistant reply that follows a segment renders
-    /// no model row of its own — the header is the single place the model
-    /// shows. Segments with fewer than two entries render flat under a
-    /// model-name-only header.
+    /// failure/approval badges) over the segment's entries. A segment is a
+    /// maximal run of consecutive reasoning/tool-call parts — the runtime
+    /// projection closes text/reasoning slots at every tool call, so part
+    /// boundaries are the segment boundaries and the projection never has to
+    /// guess them from arrival rhythm. Collapsed shows only the header;
+    /// expanded lists every entry. The assistant reply that follows a
+    /// segment renders no model row of its own — the header is the single
+    /// place the model shows. Segments with fewer than two entries render
+    /// flat under a model-name-only header.
     Thinking(ThinkingContainer),
     /// The whole-turn process head (dsh's TurnProcess row): sits ABOVE the
     /// turn's first segment once the turn settled —「已完成，用时 N 秒」—
-    /// and folding it hides the turn's segments (the reply is exempt).
-    /// Hiding is a render-layer overlay (the segments stay in the list);
-    /// `hidden_by_turn_process` resolves it.
+    /// derived from the state's own `turn.duration`, so the live path shows
+    /// it the moment the turn archives. Folding it hides the turn's segments
+    /// (the reply is exempt); `hidden_by_turn_process` resolves that.
     TurnProcess {
         /// Settled run length; `None`/0 renders the bare「已完成」.
         secs: Option<i64>,
@@ -133,102 +118,17 @@ pub enum ConvItem {
         user_toggled: bool,
     },
     /// A top-level tool-call card — the `AskUserQuestion` clarify card while
-    /// pending and its answered-state fallback, plus any defensive orphan.
+    /// pending and its answered-state fallback, a Preview call's artifact,
+    /// or a promoted pending-confirmation copy.
     ToolCall(ToolCallItem),
     AgentTask(AgentTaskItem),
     /// A runtime error from the agent (red danger styling).
     Error(String),
-    /// An ephemeral system notice — status changes, slash-command acks, etc.
-    /// Plain text only (i18n chrome strings / mode-change notices); the body
-    /// renders as a paginated `TerminalPanel`, so markdown syntax is not
-    /// interpreted. Rendered with neutral tones, not danger colors.
+    /// An ephemeral system notice — status changes, slash-command acks, host
+    /// refusals. Plain text only (i18n chrome strings / mode-change notices);
+    /// the body renders as a paginated `TerminalPanel`, so markdown syntax is
+    /// not interpreted. Rendered with neutral tones, not danger colors.
     Notice(String),
-    /// A context-compaction summary: older history was folded into this handoff
-    /// note. The summary is model-generated text (rendered as markdown, not
-    /// localized); only the card title goes through i18n. Collapsible like a
-    /// reasoning block — collapsed by default so the recap stays out of the
-    /// way until the user wants to inspect what was dropped.
-    Recap {
-        summary: String,
-        collapsed: bool,
-        user_toggled: bool,
-    },
-
-    /// Prompt-cache invalidation divider: the provider-side prefix cache was
-    /// lost since the previous turn. Rendered as a slim rule + label (not
-    /// full-width), matching oh-my-pi's `CacheInvalidationMarkerComponent`.
-    CacheMiss {
-        reprocessed_tokens: u64,
-    },
-    /// Provider is retrying the HTTP handshake after a transient failure
-    /// (429 / 5xx / network). Transient: the first real content or terminal
-    /// error event replaces it in place. `reason` is a short label shown on the
-    /// badge; `detail` is the truncated provider body shown when expanded.
-    /// `collapsed` / `user_toggled` preserve the user's expand choice across
-    /// coalesced attempts.
-    Retry {
-        attempt: u32,
-        max_attempts: u32,
-        delay_secs: u64,
-        reason: String,
-        detail: Option<String>,
-        collapsed: bool,
-        user_toggled: bool,
-    },
-    /// A background task status card — shows a background Bash or subagent
-    /// task's kind, description, task ID, status, event count, and Stop
-    /// button while running. Updated in-place by task ID.
-    BackgroundTask(BackgroundTaskItem),
-}
-
-/// A background task card in the conversation, keyed by task ID so the UI
-/// can update it in-place as events arrive.
-#[derive(Debug, Clone)]
-pub struct BackgroundTaskItem {
-    pub task_id: String,
-    pub kind: manox_agent::background_task::TaskKind,
-    pub description: String,
-    pub status: manox_agent::background_task::TaskStatus,
-    pub event_count: u64,
-    pub total_bytes: u64,
-    pub exit_code: Option<i32>,
-    pub failure_summary: Option<String>,
-    pub created_at: Option<std::time::Instant>,
-    /// Recent events (for display in an expandable body).
-    pub recent_events: Vec<String>,
-}
-
-fn recent_background_task_output(task_id: &str) -> Vec<String> {
-    let Some(task) = manox_agent::background_task::get_by_str(task_id) else {
-        return Vec::new();
-    };
-    latest_background_task_output(task.recent_events())
-}
-
-fn latest_background_task_output(
-    events: Vec<manox_agent::background_task::TaskEvent>,
-) -> Vec<String> {
-    let mut output: Vec<String> = events
-        .into_iter()
-        .rev()
-        .filter_map(|event| match event.event {
-            manox_agent::background_task::TaskEventKind::Output(text) => Some(text),
-            _ => None,
-        })
-        .take(20)
-        .collect();
-    output.reverse();
-    output
-}
-
-impl ConvItem {
-    /// Whether this item is a `BackgroundTask` card with the given task ID.
-    pub fn is_background_task_with_id(&self, task_id: &str) -> bool {
-        match self {
-            ConvItem::BackgroundTask(bt) => bt.task_id == task_id,
-            _ => false,
-        }
-    }
 }
 
 /// A tool-call item, tracking status/output by id.
@@ -242,29 +142,20 @@ pub struct ToolCallItem {
     pub is_error: bool,
     /// The structured tool input, used for aggregate counts by target (file
     /// path / command / pattern) without re-parsing the localized title.
-    /// Populated from `ThreadEvent::ToolCall` (live) or the persisted
-    /// `MessageContent::ToolUse` (history rebuild). Empty for orphan
-    /// `ToolResult`s with no matching `ToolCall`.
     pub input: serde_json::Value,
-    /// True while live `ToolOutput` chunks are still streaming in; flipped to
-    /// false once the final `ToolResult` lands the canonical output.
+    /// True while live output is still streaming in (the call is running
+    /// inside an active turn); flipped to false when the call settles.
     pub streaming: bool,
-    /// True ⇒ body hidden. Auto-flipped to true ~1s after the tool call
-    /// reaches a terminal status (Success / Error / Denied) unless
-    /// `user_toggled` is set, so a completed tool call plays out its stream
-    /// and then folds. Live entries are created expanded; restored-history
-    /// entries mount collapsed.
+    /// True ⇒ body hidden. Projection-derived: a completed ask card folds
+    /// once its answer lands, unless `user_toggled` says the user chose.
     pub collapsed: bool,
     /// Becomes true the first time the user clicks the card header. Once
-    /// set, the auto-collapse logic stops touching `collapsed` so the user's
-    /// manual choice survives subsequent status transitions within the same
-    /// tool call.
+    /// set, the projection's derived fold stops touching `collapsed` so the
+    /// user's manual choice survives subsequent state transitions.
     pub user_toggled: bool,
     /// Persistent `Entity<TerminalPanel>` carrying the terminal-styled output
     /// body + document-level selection. `None` until first sync
-    /// (`MessageItem::sync_tool_*_panel`), so a freshly constructed entry
-    /// renders the per-frame fallback until the streaming/rebuild path mounts
-    /// the persistent panel — mirroring the reasoning `markdown` field.
+    /// (`MessageItem::sync_tool_*_panel`).
     pub panel: Option<Entity<steer_components::markdown::TerminalPanel>>,
     /// The ai-elements tool card's mirrored state (status + fold), mounted by
     /// `MessageItem::ensure_tool_card` for the card families. `None` for
@@ -277,18 +168,20 @@ pub struct ToolCallItem {
 
 /// An entry within a `ThinkingContainer`'s activity segment. A segment mixes
 /// reasoning rounds (model thinking text) and tool calls into one unified tree
-/// so the collapsed header can summarize the whole turn's activity.
+/// so the collapsed header can summarize the whole turn's activity. A round
+/// IS a reasoning part and a tool node IS a tool-call part — both keyed by
+/// their protocol ids, so the segment's shape is the fold's shape.
 #[derive(Debug, Clone)]
 pub enum ActivityEntry {
-    /// One reasoning round: a contiguous run of `AgentThinking` deltas. A new
-    /// round starts when thinking resumes after being interrupted by a tool
-    /// call, assistant text, or terminal stop. Auto-collapses ~1s after
-    /// streaming ends unless the user toggled it.
+    /// One reasoning round: one `ReasoningResponsePart` (the runtime closes
+    /// the reasoning slot at every tool call, so part boundaries are the
+    /// round boundaries). Collapses when a newer sibling arrives or the turn
+    /// settles, unless `user_toggled`.
     Reasoning {
-        /// The round's stable identity, minted at creation
-        /// ([`next_reasoning_entry_id`]). The UI addresses the entry by it
-        /// exactly as a tool entry is addressed by its tool-call id — see
-        /// [`ThinkingContainer::find_entry_index`].
+        /// The round's stable identity — the part id in the `rs:` namespace
+        /// (see [`crate::transcript::reasoning_entry_id`]). The UI addresses
+        /// the entry by it exactly as a tool entry is addressed by its
+        /// tool-call id — see [`ThinkingContainer::find_entry_index`].
         id: String,
         text: String,
         streaming: bool,
@@ -297,13 +190,22 @@ pub enum ActivityEntry {
         /// Persistent `ChatDocument` (upstream `TextViewState` plus the source
         /// cache that keeps streaming deltas on the incremental `push_str`
         /// path), mirroring the top-level reasoning body. `None` until first
-        /// sync (`MessageItem::sync_reasoning_entry`), so a freshly constructed
-        /// entry renders a per-frame fallback until the streaming/rebuild path
-        /// mounts the persistent document.
+        /// sync (`MessageItem::sync_reasoning_entry`).
         markdown: Option<steer_components::markdown::ChatDocument>,
     },
     /// One tool invocation (reuses `ToolCallItem` for status/output/collapse).
     Tool(ToolCallItem),
+}
+
+impl ActivityEntry {
+    /// The entry's stable id — the reconcile and the click paths address
+    /// entries by it.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Reasoning { id, .. } => id,
+            Self::Tool(tool) => &tool.id,
+        }
+    }
 }
 
 /// What the foreground turn is doing right now — the composer's status
@@ -325,41 +227,39 @@ pub enum LiveActivity {
 /// rounds + tool calls); the container owns the segment-level summary,
 /// collapse, and elapsed-time state.
 ///
-/// A segment spans the full tool-use loop of a user turn: a `StopReason::ToolUse`
-/// (the model paused to execute a tool) does NOT close it — `accepting_entries`
-/// stays true so the next model response's tool calls fold into the same
-/// segment. Only a terminal stop (`EndTurn`/`MaxTokens`/`Refusal`/cancel/error)
-/// flips `accepting_entries` off and freezes the elapsed time.
+/// A segment spans a maximal run of reasoning/tool-call parts of one turn:
+/// the projection bounds segments by part kind, so a `StopReason::ToolUse`
+/// (the model paused to execute a tool) and a mid-turn answer are both just
+/// part boundaries — no arrival-rhythm heuristic anywhere.
 #[derive(Debug, Clone)]
 pub struct ThinkingContainer {
-    /// The segment's activity entries in arrival order: reasoning rounds and
-    /// tool calls interleaved as they occurred during the turn.
+    /// The segment's activity entries in stream order: reasoning rounds and
+    /// tool calls interleaved as the fold carries them.
     pub entries: Vec<ActivityEntry>,
-    /// True while the turn is still in progress — new `ToolCall` events fold
-    /// into this segment rather than opening a fresh one. `StopReason::ToolUse`
-    /// keeps it true; a terminal `Stop` flips it off. Independent of whether
-    /// any individual entry is currently live.
+    /// True while the turn is still in progress — new parts fold into this
+    /// segment rather than opening a fresh one. Independent of whether any
+    /// individual entry is currently live.
     pub accepting_entries: bool,
     /// True while the segment is live (turn running) OR any entry is still
     /// streaming / non-terminal. Drives the spinner + "Thinking for Xs" label
     /// vs the frozen "Thought for Xs".
     pub streaming: bool,
     /// True ⇒ the segment renders its header row alone; false ⇒ every entry
-    /// renders under the header. Auto-flipped to true on terminal `Stop`
-    /// unless the user toggled. Segments with fewer than two entries ignore
-    /// this and render flat (no cover).
+    /// renders under the header. Derived: a settled segment folds unless the
+    /// user toggled. Segments with fewer than two entries ignore this and
+    /// render flat (no cover).
     pub collapsed: bool,
     pub user_toggled: bool,
     /// When the segment started; the live "for Xs" is
     /// `started_at.elapsed().as_secs()`, recomputed each render while the
-    /// ticker fires. Seeded from the turn's start time so the duration covers
-    /// the whole turn, not just from the first `ToolCall`.
+    /// ticker fires. Anchored on the turn's own `started_at` so the elapsed
+    /// covers the whole turn, not just since the first tool call.
     pub started_at: Instant,
     /// The elapsed seconds captured when the segment went terminal. Once set,
     /// "Thought for Xs" renders this fixed value instead of re-reading
-    /// `started_at` (which would keep growing on every later re-render). `None`
-    /// for freshly rebuilt historical segments, where the duration is unknown
-    /// and the label degrades to a bare "Thought".
+    /// `started_at` (which would keep growing on every later re-render).
+    /// Derived from the turn's own `duration`; `None` while the turn runs or
+    /// when the fold carried no duration.
     pub frozen_secs: Option<u64>,
 }
 
@@ -376,108 +276,12 @@ impl ThinkingContainer {
         }
     }
 
-    /// Re-derive `streaming` from `accepting_entries` and the entries' live
-    /// flags + statuses. Call after any entry mutation that may have flipped a
-    /// status or streaming flag. The segment stays live (`streaming == true`)
-    /// as long as it is still accepting entries — even if every entry is
-    /// terminal — because a `StopReason::ToolUse` means the turn continues and
-    /// more tool calls will arrive. Once `accepting_entries` is false (terminal
-    /// stop) and all entries are terminal, `streaming` goes false and the
-    /// elapsed is pinned here at the real turn-completion moment. Idempotent:
-    /// a later call re-derives the same `false` but leaves an already-pinned
-    /// value untouched.
-    pub fn recompute_streaming(&mut self) {
-        let was_streaming = self.streaming;
-        let any_entry_live = self.entries.iter().any(|e| match e {
-            ActivityEntry::Reasoning { streaming, .. } => *streaming,
-            ActivityEntry::Tool(t) => {
-                t.streaming
-                    || matches!(
-                        t.status,
-                        ToolCallStatus::Running | ToolCallStatus::PendingApproval
-                    )
-            }
-        });
-        self.streaming = self.accepting_entries || any_entry_live;
-        if was_streaming && !self.streaming && self.frozen_secs.is_none() {
-            self.frozen_secs = Some(self.started_at.elapsed().as_secs());
-        }
-    }
-
-    /// Freeze the segment for a terminal stop (`EndTurn`/`MaxTokens`/`Refusal`/
-    /// cancel/error). Stops accepting entries, flips `streaming` off, and pins
-    /// the elapsed time. Idempotent.
-    pub fn finalize_segment(&mut self) {
-        self.accepting_entries = false;
-        if self.frozen_secs.is_none() {
-            self.frozen_secs = Some(self.started_at.elapsed().as_secs());
-        }
-        self.streaming = false;
-    }
-    /// Fold every entry the user has not pinned open: during a live stream
-    /// the NEWEST entry owns the stage, so the one before it folds the moment
-    /// the next arrives (the user's manual expansion is sticky and never
-    /// fought). Runs just before a new entry is pushed.
-    pub fn fold_preceding(&mut self) {
-        for entry in &mut self.entries {
-            match entry {
-                ActivityEntry::Reasoning {
-                    collapsed,
-                    user_toggled,
-                    ..
-                } if !*user_toggled && !*collapsed => *collapsed = true,
-                ActivityEntry::Tool(t) if !t.user_toggled && !t.collapsed => t.collapsed = true,
-                _ => {}
-            }
-        }
-    }
-
-    /// Flip every streaming reasoning round's `streaming` flag off and re-derive
-    /// `streaming`, WITHOUT closing the segment — `accepting_entries` stays true
-    /// so subsequent tool calls still fold in. Called on a mid-turn
-    /// `Stop(ToolUse)`: the current reasoning round is done (the model emitted a
-    /// tool call), so the next `AgentThinking` must open a fresh round instead
-    /// of appending to this one (which would show the prior round's body still
-    /// growing while the answer text is already rendering). Mirrors the
-    /// reasoning-finalization half of `close_for_text` without the
-    /// `accepting_entries = false` / elapsed-pin that only a text boundary or
-    /// terminal stop warrants. Idempotent.
-    pub fn finalize_reasoning_rounds(&mut self) {
-        for entry in &mut self.entries {
-            if let ActivityEntry::Reasoning { streaming, .. } = entry {
-                *streaming = false;
-            }
-        }
-        self.recompute_streaming();
-    }
-
-    /// Stop accepting entries because assistant text has arrived mid-turn —
-    /// the model moved on to the answer, so this segment's reasoning/tool
-    /// activity is done. Mirrors `build_items`'s `close_segment` on
-    /// `MessageContent::Text`: sets `accepting_entries = false` so subsequent
-    /// `AgentThinking` opens a fresh segment instead of folding into this one
-    /// (temporal inversion, issue #216). Also finalizes any still-streaming
-    /// reasoning rounds (idempotent with `finalize_reasoning_rounds`, which a
-    /// mid-turn `Stop(ToolUse)` already ran) and re-derives `streaming` so the
-    /// spinner stops and the elapsed timer pins. Unlike `finalize_segment`
-    /// (terminal stop), does NOT auto-collapse entries or the container
-    /// itself; the caller (`MessageItem::close_segment_for_text`) folds the
-    /// shell to its cover at the text boundary.
-    pub fn close_for_text(&mut self) {
-        self.finalize_reasoning_rounds();
-        self.accepting_entries = false;
-        self.recompute_streaming();
-    }
-
     /// Find an activity entry — a reasoning round or a tool call — by its id.
     /// Ids are unique across the two kinds (tool entries carry the protocol's
-    /// tool-call id, reasoning rounds an id minted at creation), so one lookup
-    /// serves both. Returns the entry's index within `entries`.
+    /// tool-call id, reasoning rounds the part id in the `rs:` namespace), so
+    /// one lookup serves both. Returns the entry's index within `entries`.
     pub fn find_entry_index(&self, id: &str) -> Option<usize> {
-        self.entries.iter().position(|e| match e {
-            ActivityEntry::Reasoning { id: entry_id, .. } => entry_id == id,
-            ActivityEntry::Tool(t) => t.id == id,
-        })
+        self.entries.iter().position(|e| e.id() == id)
     }
 
     /// Get a mutable reference to a tool entry by id.
@@ -487,43 +291,6 @@ impl ThinkingContainer {
             _ => None,
         })
     }
-
-    /// Get a reference to the last reasoning entry if it is still streaming.
-    /// Used by `apply()` to decide whether to append deltas to the existing
-    /// reasoning round or start a new one.
-    pub fn last_streaming_reasoning_index(&self) -> Option<usize> {
-        self.entries.iter().rposition(|e| {
-            matches!(
-                e,
-                ActivityEntry::Reasoning {
-                    streaming: true,
-                    ..
-                }
-            )
-        })
-    }
-}
-
-/// Mint the identity of a new reasoning round. Thinking deltas carry no
-/// protocol id, so the UI gives each round one at creation: activity entries
-/// are addressed by id at click time (a render-time index into `items` can
-/// outlive the list shape it counted into), exactly as tool entries carry the
-/// protocol's tool-call id.
-///
-/// The minted shape — a `reasoning:` namespace over a fresh UUID — keeps the
-/// two id spaces [`ThinkingContainer::find_entry_index`] resolves disjoint
-/// by construction rather than by luck: a wire tool-call id is an opaque
-/// provider token and never takes this shape, so the wire-id lookups
-/// (`item_contains_tool`, `pair_tool_result`) can never land on a reasoning
-/// round. A plain counter (`reasoning-N`) sat inside the space of plausible
-/// wire ids and only avoided collisions accidentally.
-///
-/// Minted ids are process-local render-side names: nothing is persisted, and
-/// a history rebuild mints fresh ids rather than replaying the live round's.
-/// An id is only ever read back within the render→click cycle that carries
-/// it, so the churn across that boundary is unobservable.
-pub fn next_reasoning_entry_id() -> String {
-    format!("reasoning:{}", uuid::Uuid::new_v4())
 }
 
 impl Default for ThinkingContainer {
@@ -553,8 +320,6 @@ pub struct AgentTaskItem {
 /// flattened and capped at 60 chars with an ellipsis. Local presentation
 /// rule (the runtime helper of the same shape was removed with the retired
 /// harness).
-/// The run id a delegation envelope names (`run_id` in the foreground
-/// result, the promotion receipt, and the background start receipt).
 pub fn envelope_run_id(output: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(output)
         .ok()
@@ -583,10 +348,10 @@ pub fn first_line(prompt: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The delegation-shape predicate lives in the fold vocabulary (the data
-/// plane reads it too, to name a live sub-agent row); re-exported here so
-/// the conversation's call sites keep one spelling.
-pub use crate::chat_fold::is_agent_task_call;
+/// The delegation-shape predicate lives in the projection vocabulary (the
+/// data plane reads it too, to name a live sub-agent row); re-exported here
+/// so the conversation's call sites keep one spelling.
+pub use crate::transcript::is_agent_task_call;
 
 /// The card's `(subagent_type, description)`: the TYPE is the tool name
 /// (per-agent-definition), the description prefers the call's own
@@ -608,262 +373,289 @@ pub fn agent_task_labels(name: &str, input: &serde_json::Value) -> (String, Stri
     (name.to_string(), description)
 }
 
-/// A single renderable conversation item list plus the turn-timing state that
-/// seeds activity segments. Items only ever grow (append or mid-list insert);
-/// `next_item_id` keeps `MessageItem::id` unique and stable across inserts.
-/// The id anchors all entity-held state on a row (markdown document
-/// selection, terminal-panel pagination cursor, element ids), which must not
-/// shift for the lifetime of the item; the list index only keys transient
-/// per-frame chrome, so its displacement on a mid-list insert is harmless.
+/// What one projection pass did to the row list, so the caller can keep the
+/// message list's `ListState` in sync (splice on append, remeasure on
+/// in-place mutation).
+#[derive(Debug, Default)]
+pub struct ProjectionChange {
+    /// The row count moved — splice the list.
+    pub count_changed: bool,
+    /// Rows changed in place at these indexes; remeasure each.
+    pub changed: Vec<usize>,
+    /// The list's shape moved beyond a tail append (a mid-list insert, a
+    /// removal, a reorder) — remeasure everything; the cached heights are
+    /// untrustworthy.
+    pub structural: bool,
+}
+
+impl ProjectionChange {
+    pub fn any(&self) -> bool {
+        self.count_changed || !self.changed.is_empty() || self.structural
+    }
+}
+
+/// The conversation's rows plus its client-local overlays. Content is never
+/// owned here — every [`Self::project`] call re-derives it from the chat
+/// state the caller passes. `items` and `keys` are parallel arrays: the
+/// entity a row renders and the stable identity it answers to.
 #[derive(Debug)]
 pub struct ConversationState {
     items: Vec<Entity<MessageItem>>,
-    /// Monotonic item-id counter. `MessageItem::id` is an opaque element-key,
-    /// decoupled from the list index so an anchored (mid-list) insertion does
-    /// not renumber existing items (which would reset gpui element state).
-    next_item_id: usize,
-    /// The start instant of the current (or most recent) user turn, captured on
-    /// `ThreadEvent::TurnStarted`. Seeded into each new activity segment's
-    /// `started_at` so the elapsed covers the whole turn — reasoning warmup,
-    /// model latency, and every tool-use loop iteration — not just from the
-    /// first `ToolCall`. Falls back to `Instant::now()` for the rebuild path
-    /// (where durations are unknown anyway).
-    turn_started_at: Instant,
-    /// Where this turn's first activity segment landed — the terminal stop
-    /// splices the [`ConvItem::TurnProcess`] head there.
-    turn_first_process_ix: Option<usize>,
-    /// Carry-over state for the streaming history preview
-    /// (`append_history_messages`): the item builder's turn/segment state, so
-    /// a tool loop spanning a batch boundary folds into one activity segment.
-    /// Dropped when the authoritative `rebuild_from_display` replaces this
-    /// conversation (`HistoryRestored`).
-    history_builder: Option<crate::views::message::ItemBuilder>,
+    keys: Vec<ItemKey>,
+    overlays: Overlays,
     /// The agent whose conversation this list renders — every user bubble's
     /// header `to`. Fixed for the conversation's lifetime: the main thread's
     /// is its own agent, a sub-agent panel's is the sub-agent definition.
     recipient: manox_agent::MessageAuthor,
-}
-
-/// Where a notice lands in the item list.
-///
-/// `TurnEnd` mirrors the persisted placement (the rebuild renders a note at
-/// its session append position — the list tail when that turn is the last
-/// one). `After` anchors a notice to a specific item (e.g. the tool call that
-/// triggered an approval decision) so it reads at its occurrence position
-/// instead of the global tail.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NoticeAnchor {
-    /// The end of the current (last) turn — the list tail when idle.
-    TurnEnd,
-    /// Immediately after the item at this index (clamped to the list length).
-    After(usize),
-}
-
-/// What `apply` did to the item list, so the caller can keep the message
-/// list's `ListState` in sync (splice on append, remeasure on in-place
-/// mutation).
-#[derive(Debug)]
-pub enum ApplyOutcome {
-    /// No item touched (e.g. `ToolCallAuthorization`).
-    Unchanged,
-    /// An existing item's content changed at the index; remeasure that item.
-    Remeasure(usize),
-    /// Every item may have changed height (terminal `Stop` collapses every
-    /// activity segment and tool card); remeasure the whole list.
-    RemeasureAll,
-    /// A new item was appended at the end; splice the list count up.
-    Appended,
-    /// A trailing transient item (a `Retry` badge) was popped without a
-    /// replacement pushed. Splice the list count down by one at the tail.
-    RemovedTail,
-    /// An existing item was mutated at `remeasure_ix` (dirtying its height
-    /// cache) AND a new item was appended at the tail. The `AgentText`
-    /// `needs_new` arm hits this whenever a live activity segment is closed
-    /// for the incoming reply: `close_segment_for_text` finalizes the segment
-    /// (freezing elapsed, scheduling entries' delayed collapse → height change)
-    /// before the new assistant bubble is pushed. Remeasure the segment so its
-    /// cached height catches up to the finalized state, and splice the count
-    /// for the appended bubble.
-    RemeasureAndAppend { remeasure_ix: usize },
-}
-
-/// Workspace context threaded through `apply` / `rebuild_from_display`: the
-/// host handle (for item toggle callbacks) plus the thread cwd snapshot (for
-/// the `TerminalPanel` prompt line). Bundled so the signatures stay under
-/// clippy's argument-count limit. The cwd is a per-call snapshot taken by the
-/// caller from the `Thread` entity — reading the `Workspace` itself would
-/// double-lease inside a `Workspace::update`.
-#[derive(Clone)]
-pub struct ApplyCtx {
-    pub host: ChatHostHandle,
-    pub cwd: Option<SharedString>,
-    /// The session whose journal these rows came from, when the rows are a
-    /// faithful replay of it. `Some` only for the main conversation: rows
-    /// rebuilt from a journal carry that session's durable entry ids, so a
-    /// fork anchored on them is addressable. Synthetic rows (the sub-agent
-    /// panel's answer backfill, compaction retained tails) leave this `None`
-    /// — their ids are locally minted or borrowed from another entry, so a
-    /// fork anchored on one would name an entry the session does not have.
-    pub fork_source: Option<String>,
+    /// Monotonic item-id counter. `MessageItem::id` is an opaque element-key,
+    /// decoupled from the list index so a mid-list insert never renumbers
+    /// existing items (which would reset gpui element state).
+    next_item_id: usize,
+    /// The start instant of the current (or most recent) turn — the Captain
+    /// strip's clock. Re-anchored on the active turn's own `started_at` at
+    /// every projection.
+    turn_started_at: Instant,
 }
 
 impl ConversationState {
     pub fn new(recipient: manox_agent::MessageAuthor) -> Self {
         Self {
             items: Vec::new(),
+            keys: Vec::new(),
+            overlays: Overlays::default(),
+            recipient,
             next_item_id: 0,
             turn_started_at: Instant::now(),
-            turn_first_process_ix: None,
-            history_builder: None,
-            recipient,
         }
     }
 
     pub fn items(&self) -> &[Entity<MessageItem>] {
         &self.items
     }
-    /// Allocate the next unique item id. Decoupled from the list index (see
-    /// `next_item_id`) so anchored mid-list inserts never renumber siblings.
+
+    /// The row keys, in list order (diagnostic read face).
+    pub fn keys(&self) -> &[ItemKey] {
+        &self.keys
+    }
+
+    /// True when the conversation has no substantive items (user, assistant,
+    /// reasoning, tool call, or agent task). Notice-only items (error cards
+    /// used for slash-command acknowledgements and mode switches) don't count
+    /// so a mode-switch notice on the empty first screen doesn't prematurely
+    /// leave the hero layout.
+    pub fn is_empty(&self, cx: &App) -> bool {
+        self.items.iter().all(|item| {
+            matches!(
+                item.read(cx).kind(),
+                ConvItem::Error(_) | ConvItem::Notice(_)
+            )
+        })
+    }
+
     fn alloc_id(&mut self) -> usize {
         let id = self.next_item_id;
         self.next_item_id += 1;
         id
     }
 
-    /// True when the conversation has no substantive items (user, assistant,
-    /// reasoning, tool call, or agent task). Notice-only items (error cards
-    /// used for slash-command acknowledgements and mode switches) don't count
-    /// so a mode-switch notice on the empty first screen doesn't prematurely leave
-    /// the hero layout.
-    pub fn is_empty(&self, cx: &App) -> bool {
-        self.items.iter().all(|e| {
-            matches!(
-                e.read(cx).kind(),
-                ConvItem::Error(_) | ConvItem::Notice(_) | ConvItem::CacheMiss { .. }
-            )
-        })
+    /// Project the chat state (or its absence) into the row list: the single
+    /// entry point every trigger converges on — the live stream's store
+    /// notify, a thread attach, an optimistic submit, a sub-agent panel's
+    /// pump. Pure over content; the overlays carry the client-local state.
+    ///
+    /// A caller whose fold reference borrows the same `cx` this needs
+    /// mutably (the workspace reads the store while updating this entity)
+    /// splits the call: [`Self::stage`] computes the nodes against the
+    /// borrowed fold, then [`Self::reconcile`] applies them.
+    pub fn project(
+        &mut self,
+        chat: Option<&ahp_types::state::ChatState>,
+        env: &ProjectEnv,
+        cx: &mut App,
+    ) -> ProjectionChange {
+        let nodes = self.stage(chat, env);
+        self.reconcile(nodes, env, cx)
     }
 
-    /// Append a user message with any pasted/image attachments.
-    pub fn push_user(
+    /// Phase one of the projection: diff the fold against the overlays into
+    /// the desired row list. No GPUI state is touched — the fold reference
+    /// may borrow whatever it likes.
+    pub fn stage(
         &mut self,
-        text: String,
-        images: Vec<UserImage>,
-        meta: UserTurnMeta,
-        host: ChatHostHandle,
+        chat: Option<&ahp_types::state::ChatState>,
+        env: &ProjectEnv,
+    ) -> Vec<Node> {
+        if let Some(active) = chat.and_then(|chat| chat.active_turn.as_ref()) {
+            self.turn_started_at =
+                crate::transcript::turn_anchor(&active.id, &active.started_at, &mut self.overlays);
+        }
+        crate::transcript::project(chat, &mut self.overlays, env)
+    }
+
+    /// Diff the projected nodes against the live rows: matched keys update
+    /// in place, new keys build rows at their position, vanished keys drop.
+    /// An optimistic bubble whose text a landed turn carries is adopted —
+    /// the state row reuses the bubble's entity so the entrance animation
+    /// and element ids survive the hand-off.
+    pub fn reconcile(
+        &mut self,
+        nodes: Vec<Node>,
+        env: &ProjectEnv,
+        cx: &mut App,
+    ) -> ProjectionChange {
+        let mut change = ProjectionChange::default();
+        let old_keys = std::mem::take(&mut self.keys);
+        let old_items = std::mem::take(&mut self.items);
+        let old_index: HashMap<&ItemKey, usize> =
+            old_keys.iter().enumerate().map(|(ix, k)| (k, ix)).collect();
+        let mut taken = vec![false; old_items.len()];
+        let mut kept_order: Vec<usize> = Vec::new();
+        for node in &nodes {
+            let matched = old_index.get(&node.key).copied().filter(|&ix| !taken[ix]);
+            let adopted = matched.is_none().then(|| {
+                // Adoption: a `user:{turn}` node may claim an unclaimed
+                // optimistic row carrying its exact text — the entity (with
+                // its entrance animation and element ids) survives the
+                // hand-off to state ownership.
+                let ConvItem::User { text, .. } = &node.kind else {
+                    return None;
+                };
+                (0..old_keys.len()).find(|&ix| {
+                    !taken[ix]
+                        && matches!(old_keys[ix], ItemKey::Optimistic(_))
+                        && old_items[ix]
+                            .read(cx)
+                            .kind()
+                            .user_text()
+                            .is_some_and(|t| t == text.as_str())
+                })
+            });
+            match matched.or(adopted.flatten()) {
+                Some(ix) => {
+                    taken[ix] = true;
+                    kept_order.push(ix);
+                    if sync_row(&old_items[ix], node, env, cx) {
+                        change.changed.push(self.items.len());
+                    }
+                    self.items.push(old_items[ix].clone());
+                    self.keys.push(node.key.clone());
+                }
+                None => {
+                    // A fresh row materializes below an existing kept one
+                    // only through a mid-list insert; above the kept prefix
+                    // it is a tail append.
+                    if self.items.len() < kept_order.len() {
+                        change.structural = true;
+                    }
+                    let id = self.alloc_id();
+                    let entering = matches!(node.key, ItemKey::Optimistic(_));
+                    let item = new_node_item(node.kind.clone(), &node.role, id, env, entering, cx);
+                    self.items.push(item);
+                    self.keys.push(node.key.clone());
+                }
+            }
+        }
+        // Kept rows whose relative order changed mean a reorder — only the
+        // adoption path can produce one (the state row takes the bubble's
+        // slot), and the heights around it must be re-measured.
+        let mut max_seen = 0usize;
+        for ix in &kept_order {
+            if *ix < max_seen {
+                change.structural = true;
+            }
+            max_seen = max_seen.max(*ix);
+        }
+        // Any old row left untaken was dropped by the fold.
+        if taken.iter().any(|t| !t) {
+            change.structural = true;
+        }
+        change.count_changed = self.items.len() != old_items.len() || change.structural;
+        // No explicit notify here: the caller drives this through
+        // `Entity::update`, whose return already marks the conversation
+        // changed for the height-observe.
+        change
+    }
+
+    /// Submit a user turn optimistically: the bubble renders immediately and
+    /// is adopted by the turn that lands — by the client-minted `turn_id`
+    /// when the caller has one, by text only against turns minted after this
+    /// point. Re-projects so the row is on screen this frame.
+    pub fn push_optimistic_user(
+        &mut self,
+        chat: Option<&ahp_types::state::ChatState>,
+        bubble: crate::transcript::OverlayBubbleSeed,
+        env: &ProjectEnv,
         cx: &mut App,
     ) {
-        let mut meta = meta;
-        // The header's `to` is whoever owns this conversation, so it is stamped
-        // here rather than carried by every caller.
+        let crate::transcript::OverlayBubbleSeed {
+            text,
+            images,
+            mut meta,
+            turn_id,
+        } = bubble;
+        // The header's `to` is whoever owns this conversation, so it is
+        // stamped here rather than carried by every caller.
         meta.recipient = Some(self.recipient.clone());
-        let id = self.alloc_id();
-        let role = meta.model_id.clone();
-        self.items.push(cx.new(|_| {
-            MessageItem::new(
-                ConvItem::User {
-                    text,
-                    images,
-                    meta: Some(meta),
-                },
-                role,
-                id,
-                host,
-            )
-            // Live sends only — the entrance rise never plays for rows a
-            // rebuild synthesized from the snapshot.
-            .entering_now()
-        }));
+        let serial = self.overlays.next_serial;
+        self.overlays.next_serial += 1;
+        // Count the rows the fold holds now, the active turn included: the
+        // text fallback must not pair with any of them.
+        let minted_turns = chat
+            .map(|c| c.turns.len() + usize::from(c.active_turn.is_some()))
+            .unwrap_or(0);
+        self.overlays
+            .bubbles
+            .push(crate::transcript::OverlayBubble {
+                serial,
+                text,
+                images,
+                meta,
+                turn_id,
+                minted_turns,
+            });
+        self.project(chat, env, cx);
     }
 
-    /// The `NoticeAnchor` for a notice tied to a tool call: directly after the
-    /// item that carries the tool call — a top-level `ToolCall` card or the
-    /// activity segment containing it — falling back to the turn end when the
-    /// item has not reached the list yet (event-ordering race).
-    pub fn notice_anchor_for_tool(&self, tool_call_id: &str, cx: &App) -> NoticeAnchor {
-        if let Some(ix) = self.find_tool(tool_call_id, cx) {
-            return NoticeAnchor::After(ix);
+    /// Take the host refusals the store drained for this session into the
+    /// overlays, so the next projection renders them as keyed notice rows.
+    /// A refusal naming a turn retires the optimistic bubble that turn was
+    /// minted for — the row never had content behind it, and leaving it
+    /// would strand a phantom message beside the notice explaining it.
+    ///
+    /// A `server_seq` already on the table is dropped here: the store's table
+    /// drains, so a re-delivered envelope is recorded again, and the rows are
+    /// keyed by that seq — two copies would project two rows under one key.
+    pub fn absorb_refusals(&mut self, refusals: Vec<crate::transcript::RefusalNotice>) {
+        for refusal in refusals {
+            if let Some(turn_id) = refusal.turn_id.as_deref() {
+                self.overlays
+                    .bubbles
+                    .retain(|bubble| bubble.turn_id.as_deref() != Some(turn_id));
+            }
+            if !self.overlays.refusals.iter().any(|r| r.seq == refusal.seq) {
+                self.overlays.refusals.push(refusal);
+            }
         }
-        if let Some((cix, _)) = self.find_thinking_entry(tool_call_id, cx) {
-            return NoticeAnchor::After(cix);
-        }
-        NoticeAnchor::TurnEnd
+        let cap = 128;
+        let excess = self.overlays.refusals.len().saturating_sub(cap);
+        self.overlays.refusals.drain(..excess);
     }
 
-    /// Insert a system-styled notice at the given anchor. Does not touch the
-    /// canonical `Thread` messages — UI-only, for slash-command
-    /// acknowledgements, approval decision records, and similar ephemeral
-    /// notices. Returns the list index the notice was inserted at.
-    pub fn push_notice(
-        &mut self,
-        text: String,
-        anchor: NoticeAnchor,
-        host: ChatHostHandle,
-        cx: &mut App,
-    ) -> usize {
-        let ix = match anchor {
-            NoticeAnchor::TurnEnd => self.items.len(),
-            NoticeAnchor::After(i) => (i + 1).min(self.items.len()),
-        };
-        let id = self.alloc_id();
-        self.items.insert(
-            ix,
-            cx.new(|_| MessageItem::new(ConvItem::Notice(text), String::new(), id, host)),
-        );
-        ix
-    }
-
-    /// Push a synthetic top-level `ToolCall` card at the tail, mirroring the
-    /// gate-created AskUserQuestion card. The workspace synthesizes it when
-    /// re-surfacing a pending authorization whose live `ToolCall` event was
-    /// emitted while the thread was parked: the rebuilt conversation only
-    /// carries the underlying ToolUse (an escalated tool folds into its
-    /// activity segment; a direct ask can miss the mirror's sync window), so
-    /// without this card the ask snapshot cannot attach and the interaction
-    /// UI never renders.
-    pub fn push_tool_call(
-        &mut self,
-        item: ToolCallItem,
-        role: String,
-        host: ChatHostHandle,
-        cx: &mut App,
-    ) {
-        let item_id = self.alloc_id();
-        self.items
-            .push(cx.new(|_| MessageItem::new(ConvItem::ToolCall(item), role, item_id, host)));
-    }
-
-    /// Remove the top-level tool row with `id` — the promoted confirmation
-    /// card's retire leg (a synthesized row carries no history of its own
-    /// once the park leaves it). Returns whether a row was removed.
-    pub fn remove_tool(&mut self, id: &str, cx: &App) -> bool {
-        let Some(ix) = self.find_tool(id, cx) else {
-            return false;
-        };
-        self.items.remove(ix);
-        true
-    }
-
+    /// Locate the top-level `ToolCall` card with `id` — the ask card the
+    /// interactive surface attaches to.
     pub fn find_tool(&self, id: &str, cx: &App) -> Option<usize> {
         self.items
             .iter()
-            .position(|e| matches!(e.read(cx).kind(), ConvItem::ToolCall(t) if t.id == id))
-    }
-
-    fn find_agent_task(&self, id: &str, cx: &App) -> Option<usize> {
-        self.items
-            .iter()
-            .position(|e| matches!(e.read(cx).kind(), ConvItem::AgentTask(t) if t.id == id))
+            .position(|item| matches!(item.read(cx).kind(), ConvItem::ToolCall(t) if t.id == id))
     }
 
     /// Locate a `Thinking` container's entry — a reasoning round or a tool
-    /// call — by id. Returns `(container_index, entry_index)` so the caller can
-    /// update the entry in place. Scans every container in arrival order so an
-    /// id always resolves to its owning entry regardless of which trailing
-    /// container is active or what was inserted above it since the id was read.
+    /// call — by id. Returns `(container_index, entry_index)` so the caller
+    /// can update the entry in place. Scans every container in arrival order
+    /// so an id always resolves to its owning entry.
     pub fn find_thinking_entry(&self, id: &str, cx: &App) -> Option<(usize, usize)> {
-        for (cix, e) in self.items.iter().enumerate() {
-            if let ConvItem::Thinking(t) = e.read(cx).kind()
+        for (cix, item) in self.items.iter().enumerate() {
+            if let ConvItem::Thinking(t) = item.read(cx).kind()
                 && let Some(eix) = t.find_entry_index(id)
             {
                 return Some((cix, eix));
@@ -883,19 +675,20 @@ impl ConversationState {
     /// turn's LAST segment is exempt too (see below).
     pub fn hidden_by_turn_process(&self, ix: usize, cx: &App) -> bool {
         if !matches!(
-            self.items.get(ix).map(|e| e.read(cx).kind()),
+            self.items.get(ix).map(|item| item.read(cx).kind()),
             Some(ConvItem::Thinking(_))
         ) {
             return false;
         }
-        let folded_head = self.items[..ix]
-            .iter()
-            .rev()
-            .find_map(|e| match e.read(cx).kind() {
-                ConvItem::TurnProcess { collapsed, .. } => Some(*collapsed),
-                ConvItem::User { .. } => Some(false),
-                _ => None,
-            });
+        let folded_head =
+            self.items[..ix]
+                .iter()
+                .rev()
+                .find_map(|item| match item.read(cx).kind() {
+                    ConvItem::TurnProcess { collapsed, .. } => Some(*collapsed),
+                    ConvItem::User { .. } => Some(false),
+                    _ => None,
+                });
         if folded_head != Some(true) {
             return false;
         }
@@ -908,13 +701,13 @@ impl ConversationState {
         // one's exemption.
         self.items[ix + 1..]
             .iter()
-            .take_while(|e| {
+            .take_while(|item| {
                 !matches!(
-                    e.read(cx).kind(),
+                    item.read(cx).kind(),
                     ConvItem::User { .. } | ConvItem::TurnProcess { .. }
                 )
             })
-            .any(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
+            .any(|item| matches!(item.read(cx).kind(), ConvItem::Thinking(_)))
     }
 
     /// Whether the row at `ix` should tighten its bottom gap: an assistant
@@ -923,10 +716,10 @@ impl ConversationState {
     /// (the reverse direction keeps it: a reply needs its air).
     pub fn tight_gap_after(&self, ix: usize, cx: &App) -> bool {
         matches!(
-            self.items.get(ix).map(|e| e.read(cx).kind()),
+            self.items.get(ix).map(|item| item.read(cx).kind()),
             Some(ConvItem::Assistant { .. })
         ) && matches!(
-            self.items.get(ix + 1).map(|e| e.read(cx).kind()),
+            self.items.get(ix + 1).map(|item| item.read(cx).kind()),
             Some(ConvItem::Thinking(_))
         )
     }
@@ -934,22 +727,6 @@ impl ConversationState {
     /// The running turn's elapsed seconds (the Captain strip's clock).
     pub fn running_secs(&self) -> u64 {
         self.turn_started_at.elapsed().as_secs()
-    }
-
-    /// Stamp the segment at `ix` with whether the nearest earlier segment
-    /// already shows the same model — a repeated header must not re-display
-    /// it. Called at every segment push (live and rebuild paths).
-    fn sync_model_repeats(&mut self, ix: usize, cx: &mut App) {
-        let Some(tag) = self.items[ix].read(cx).segment_model().cloned() else {
-            return;
-        };
-        let repeats = self.items[..ix].iter().rev().find_map(|e| {
-            let item = e.read(cx);
-            item.segment_model()
-                .filter(|prev| **prev == tag)
-                .map(|_| ())
-        });
-        self.items[ix].update(cx, |item, _| item.model_repeats = repeats.is_some());
     }
 
     /// The trailing turn's live activity for the composer's status strip.
@@ -995,4731 +772,1558 @@ impl ConversationState {
         }
     }
 
-    /// The index of the active activity segment — a `Thinking` container that
-    /// is still accepting entries (the turn is in progress, surviving
-    /// `StopReason::ToolUse`). A new `ToolCall` folds into this segment; `None`
-    /// when no live segment exists, in which case the caller opens a fresh one.
-    ///
-    /// A segment sitting *above* the most recent user message is never active:
-    /// a user message is a hard turn boundary (mirroring `build_items`'s
-    /// `close_segment` on a prompt), so later activity must open a fresh
-    /// segment below the bubble rather than fold into a stale segment above
-    /// it — which would render above the message the user just sent, in
-    /// inverted chronological order. This holds even when the prior segment
-    /// was left accepting entries because its turn ended without a terminal
-    /// `Stop` (a provider error that only emitted `Error`, or a stream that
-    /// closed without `MessageStop`) and for a mid-turn steer, without needing
-    /// the stale segment to have been finalized first.
-    fn find_active_activity_segment(&self, cx: &App) -> Option<usize> {
-        let last_user_ix = self
-            .items
-            .iter()
-            .rposition(|e| matches!(e.read(cx).kind(), ConvItem::User { .. }));
-        self.items
-            .iter()
-            .rposition(
-                |e| matches!(e.read(cx).kind(), ConvItem::Thinking(t) if t.accepting_entries),
-            )
-            .filter(|&ix| last_user_ix.is_none_or(|u| ix > u))
-    }
-
-    /// Apply a `ThreadEvent` delta (excludes `ToolCallAuthorization`, which `Workspace` handles).
-    /// `last_request_usage` is the token usage for the turn's last user message;
-    /// consumed only on `Stop` to label the just-finished assistant reply.
-    pub fn apply(
-        &mut self,
-        event: &ThreadEvent,
-        role: &str,
-        last_request_usage: Option<TokenUsage>,
-        ctx: ApplyCtx,
-        cx: &mut App,
-    ) -> ApplyOutcome {
-        // `fork_source` is unused here: this folds live events, and a live
-        // stream has no durable row to anchor a fork on.
-        let ApplyCtx {
-            host,
-            cwd,
-            fork_source: _,
-        } = ctx;
-        // A blank text delta is not content: no retry-badge retirement, no
-        // segment close, no empty assistant bubble — thinking across it
-        // stays one segment (the same exemption the rebuild path applies to
-        // an empty text part).
-        if let ThreadEvent::AgentText(d) = &event
-            && d.trim().is_empty()
-        {
-            return ApplyOutcome::Unchanged;
-        }
-        // A trailing `Retry` badge is stale the moment a real content or
-        // terminal-error event lands — that event means the retry either
-        // succeeded (assistant text / tool call) or exhausted the budget
-        // (Error). Pop the badge first so the arm below pushes its own item
-        // into the freed slot. Non-item events (usage, mode change, …) and
-        // the `Retry` event itself skip this.
-        let popped_retry = matches!(
-            event,
-            ThreadEvent::AgentText(_)
-                | ThreadEvent::AgentThinking(_)
-                | ThreadEvent::ToolCall { .. }
-                | ThreadEvent::Error(_)
-                | ThreadEvent::Compaction { .. }
-        ) && self.pop_trailing_retry(cx);
-
-        let outcome = match event {
-            // Shared steer-lifecycle vocabulary: synthesized by a client fold
-            // when an injected steer's durable row arrives, never emitted by
-            // the server (translate skips it). The desktop's pending-steer
-            // retirement rides its existing history-reload path, so there is
-            // nothing to settle here yet — recognized, not ignored by accident.
-            ThreadEvent::UserRowLanded { .. } => ApplyOutcome::Unchanged,
-
-            // A compaction landed — render the handoff summary as a Recap card.
-            // The card is appended (never updated in place): a compaction is a
-            // one-time boundary marker, and the summary text is final.
-            ThreadEvent::Compaction { summary, .. } => {
-                let id = self.alloc_id();
-                self.items.push(cx.new(|_| {
-                    MessageItem::new(
-                        ConvItem::Recap {
-                            summary: summary.clone(),
-                            collapsed: true,
-                            user_toggled: false,
-                        },
-                        role.to_string(),
-                        id,
-                        host,
-                    )
-                }));
-                ApplyOutcome::Appended
-            }
-
-            // Prompt-cache invalidation landed — insert a slim divider
-            // card above the current assistant turn. Same insertion pattern
-            // as the Recap (compaction) card: append, never update.
-            ThreadEvent::CacheInvalidation {
-                reprocessed_tokens,
-            } => {
-                let id = self.alloc_id();
-                self.items.push(cx.new(|_| {
-                    MessageItem::new(
-                        ConvItem::CacheMiss {
-                            reprocessed_tokens: *reprocessed_tokens,
-                        },
-                        String::new(),
-                        id,
-                        host,
-                    )
-                }));
-                ApplyOutcome::Appended
-            }
-            // `<proposed_plan>` streaming + completion are owned by the
-            // workspace's review overlay, not the conversation list — there is
-            // no ToolCall card to backfill (the plan arrives as a text block,
-            // not a tool call).
-            // `PlanUpdated` mirrors to the Context Rail (handled in the
-            // workspace subscription), not the conversation list.
-            // Token usage + model/effort changes are surfaced elsewhere (sidebar /
-            // model-history overlay). No conversation item.
-            ThreadEvent::TokenUsageUpdated(_)
-            | ThreadEvent::SideCallMetricsUpdated(_)
-            | ThreadEvent::MainCallMetricsUpdated(_)
-            | ThreadEvent::ModelChanged { .. }
-            | ThreadEvent::ReasoningEffortChanged { .. }
-            // `CompactionStarted` is a cockpit-only phase signal (the side-LLM
-            // summarization is in flight); the conversation list renders nothing
-            // for it. The workspace flips the cockpit phase on this event.
-            | ThreadEvent::CompactionStarted { .. } => ApplyOutcome::Unchanged,
-            // The rail's plan rows are workspace-owned projections of the
-            // `UpdatePlan` tool calls; there is no card to backfill here.
-            ThreadEvent::PlanUpdated { .. } => ApplyOutcome::Unchanged,
-            // `SteerInjected` is fired by the turn loop at drain time. The
-            // workspace owns the queue→list transition (it pairs the event with
-            // the matching `SteerPending` queue card and pushes the bubble here
-            // via `push_user`); the conversation list takes no direct action.
-            | ThreadEvent::SteerInjected { .. } => ApplyOutcome::Unchanged,
-            // The pi backend restored an existing session; the workspace
-            // rebuilds the conversation from the authoritative history.
-            | ThreadEvent::HistoryRestored => ApplyOutcome::Unchanged,
-            // A streaming history preview batch landed; the workspace appends
-            // the newly available messages itself (`append_history_messages`).
-            | ThreadEvent::HistoryProgress => ApplyOutcome::Unchanged,
-            // `TurnStarted` is a UI-only signal routed to `ThreadStore` by the
-            // workspace to light the sidebar running indicator; it carries no
-            // conversation content. We capture the turn's start instant here so
-            // the first activity segment's elapsed covers the whole turn
-            // (reasoning warmup + model latency), not just from the first
-            // `ToolCall`.
-            ThreadEvent::TurnStarted => {
-                self.turn_started_at = Instant::now();
-                self.turn_first_process_ix = None;
-                ApplyOutcome::Unchanged
-            }
-            ThreadEvent::TurnFinished { .. } => {
-                // Authoritative end-of-turn boundary. A turn that ended
-                // without a terminal `Stop` (a provider error that only
-                // emitted `Error`, or a stream that closed without
-                // `MessageStop`) would otherwise leave its last activity
-                // segment accepting entries — a perpetual spinner whose
-                // elapsed never pins, and the root condition for the
-                // next turn's thinking folding into a segment above the
-                // new user bubble (guarded against independently by
-                // `find_active_activity_segment` ignoring segments above
-                // the last user bubble). Seal it here. Idempotent with
-                // the `Stop` arm.
-                let changed = self.finalize_streaming_items(true, cx);
-                if changed {
-                    ApplyOutcome::RemeasureAll
-                } else {
-                    ApplyOutcome::Unchanged
-                }
-            }
-            // Goal lifecycle is surfaced by the composer chip + status popover,
-            // not as a conversation item.
-            ThreadEvent::GoalChanged { .. } => ApplyOutcome::Unchanged,
-            // Worktree binding is session state (facade mirror), not a
-            // conversation item.
-            ThreadEvent::CwdChanged { .. } => ApplyOutcome::Unchanged,
-            ThreadEvent::AgentText(delta) => {
-                let needs_new = match self.items.last() {
-                    Some(e) => !matches!(
-                        e.read(cx).kind(),
-                        ConvItem::Assistant {
-                            streaming: true,
-                            ..
-                        }
-                    ),
-                    None => true,
-                };
-                if needs_new {
-                    // Close the active activity segment so subsequent
-                    // `AgentThinking` opens a fresh one — mirrors
-                    // `build_items`'s `close_segment` on `MessageContent::Text`.
-                    // Without this, thinking arriving after the answer text
-                    // folds into the pre-answer segment (issue #216).
-                    // The closed segment's header carries the model name, so
-                    // the reply suppresses its own model row.
-                    // `close_segment_for_text` may also collapse entries,
-                    // dirtying the segment's height cache; carry the index
-                    // back so the caller remeasures it alongside splicing in
-                    // the new bubble (a bare `Appended` would only splice the
-                    // tail and leave the closed segment's height stale).
-                    let closed_segment_ix =
-                        if let Some(cix) = self.find_active_activity_segment(cx) {
-                            self.items[cix].update(cx, |item, cx| {
-                                item.close_segment_for_text(cx);
-                                cx.notify();
-                            });
-                            Some(cix)
-                        } else {
-                            None
-                        };
-                    let activity_header = closed_segment_ix.is_some();
-                    let id = self.alloc_id();
-                    self.items.push(cx.new(|cx| {
-                        let mut item = MessageItem::new(
-                            ConvItem::Assistant {
-                                text: delta.clone(),
-                                streaming: true,
-                                token_usage: None,
-                                activity_header,
-                                // A live stream has no durable row yet; the
-                                // authoritative rebuild supplies the anchor.
-                                entry_id: None,
-                                fork_unavailable: Some(
-                                    crate::views::message::ForkUnavailable::NotLanded,
-                                ),
-                            },
-                            role.to_string(),
-                            id,
-                            host,
-                        );
-                        item.update_text(delta, cx);
-                        item
-                    }));
-                    match closed_segment_ix {
-                        Some(remeasure_ix) => ApplyOutcome::RemeasureAndAppend { remeasure_ix },
-                        None => ApplyOutcome::Appended,
-                    }
-                } else {
-                    let ix = self.items.len() - 1;
-                    self.items[ix].update(cx, |item, cx| {
-                        // Snapshot the text *after* appending the delta so the
-                        // parser and the `text` field (the copy-button source)
-                        // stay in lockstep — feeding a pre-append snapshot here
-                        // would render the body one delta behind forever, and
-                        // `finalize()` on stream stop would re-parse that stale
-                        // text, permanently dropping the last delta.
-                        let full_text = match item.kind_mut() {
-                            ConvItem::Assistant { text, .. } => {
-                                text.push_str(delta);
-                                text.clone()
-                            }
-                            _ => return,
-                        };
-                        item.update_text(&full_text, cx);
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(ix)
-                }
-            }
-            ThreadEvent::AgentThinking(delta) => {
-                // Fold reasoning into the active activity segment. A contiguous
-                // run of deltas appends to the last streaming reasoning entry;
-                // a gap (interrupted by a tool call or new turn) starts a
-                // fresh round. If no segment exists yet, open one.
-                let turn_started_at = self.turn_started_at;
-                let (cix, pushed) = match self.find_active_activity_segment(cx) {
-                    Some(i) => (i, false),
-                    None => {
-                        let i = self.items.len();
-                        let id = self.alloc_id();
-                        self.items.push(cx.new(|_| {
-                            let mut container = ThinkingContainer::new();
-                            container.started_at = turn_started_at;
-                            MessageItem::new(
-                                ConvItem::Thinking(container),
-                                role.to_string(),
-                                id,
-                                host.clone(),
-                            )
-                        }));
-                        (i, true)
-                    }
-                };
-                self.sync_model_repeats(cix, cx);
-                if self.turn_first_process_ix.is_none() {
-                    self.turn_first_process_ix = Some(cix);
-                }
-                let delta = delta.clone();
-                self.items[cix].update(cx, |item, cx| {
-                    let eix = if let ConvItem::Thinking(t) = item.kind_mut() {
-                        let eix = if let Some(eix) = t.last_streaming_reasoning_index() {
-                            // Append to the existing streaming reasoning round.
-                            if let ActivityEntry::Reasoning { text, .. } =
-                                &mut t.entries[eix]
-                            {
-                                text.push_str(&delta);
-                            }
-                            eix
-                        } else {
-                            // Start a new reasoning round: the round before
-                            // it folds unless the user pinned it open.
-                            t.fold_preceding();
-                            let eix = t.entries.len();
-                            t.entries.push(ActivityEntry::Reasoning {
-                                id: next_reasoning_entry_id(),
-                                text: delta,
-                                streaming: true,
-                                collapsed: false,
-                                user_toggled: false,
-                                markdown: None,
-                            });
-                            eix
-                        };
-                        t.recompute_streaming();
-                        Some(eix)
-                    } else {
-                        None
-                    };
-                    // Mount/sync the persistent `ChatDocument` so streaming
-                    // deltas drive incremental parsing + document-level
-                    // selection (drag + Cmd/Ctrl+C), mirroring the top-level body.
-                    if let Some(eix) = eix {
-                        item.sync_reasoning_entry(eix, cx);
-                    }
-                    cx.notify();
-                });
-                if pushed {
-                    ApplyOutcome::Appended
-                } else {
-                    ApplyOutcome::Remeasure(cix)
-                }
-            }
-            ThreadEvent::ToolCall {
-                id,
-                name,
-                title,
-                status,
-                input,
-            } => {
-                if is_agent_task_call(input.as_ref()) {
-                    let (subagent_type, description) = input
-                        .as_ref()
-                        .map(|input| agent_task_labels(name, input))
-                        .unwrap_or_else(|| (name.to_string(), String::new()));
-                    if let Some(ix) = self.find_agent_task(id, cx) {
-                        self.items[ix].update(cx, |item, cx| {
-                            if let ConvItem::AgentTask(t) = item.kind_mut() {
-                                if !subagent_type.is_empty() {
-                                    t.subagent_type = subagent_type.clone();
-                                }
-                                if !description.is_empty() {
-                                    t.description = description.clone();
-                                }
-                                t.status = *status;
-                            }
-                            cx.notify();
-                        });
-                        ApplyOutcome::Remeasure(ix)
-                    } else {
-                        let item_id = self.alloc_id();
-                        self.items.push(cx.new(|_| {
-                            MessageItem::new(
-                                ConvItem::AgentTask(AgentTaskItem {
-                                    id: id.clone(),
-                                    run_id: None,
-                                    subagent_type,
-                                    description,
-                                    status: *status,
-                                    is_error: false,
-                                }),
-                                role.to_string(),
-                                item_id,
-                                host,
-                            )
-                        }));
-                        ApplyOutcome::Appended
-                    }
-                } else if name == manox_agent::tools::ASK_USER_QUESTION {
-                    // Top-level card, never folded into an activity segment.
-                    // `AskUserQuestion` drives an inline clarify card via
-                    // `render_ask_user_card` while pending and a plain answered
-                    // card once its result lands.
-                    if let Some(ix) = self.find_tool(id, cx) {
-                        let carries_args = input.is_some();
-                        self.items[ix].update(cx, |item, cx| {
-                            if let ConvItem::ToolCall(t) = item.kind_mut() {
-                                // The open card's pending face is owned by the
-                                // live elicitation: a lifecycle advance
-                                // (running/ready) must not disarm the
-                                // interactive gate before the user answers —
-                                // the answer settles the card through the
-                                // result arm. Only an argument-bearing event
-                                // refreshes the title/input.
-                                if carries_args {
-                                    t.title = title.clone();
-                                    if let Some(input) = input.clone() {
-                                        t.input = input;
-                                    }
-                                }
-                                t.name = name.clone();
-                            }
-                            cx.notify();
-                        });
-                        ApplyOutcome::Remeasure(ix)
-                    } else {
-                        // A row minted from the lifecycle alone opens on the
-                        // ask's natural face (the result arm corrects it if
-                        // the call is already settled).
-                        let item_id = self.alloc_id();
-                        self.items.push(cx.new(|_| {
-                            MessageItem::new(
-                                ConvItem::ToolCall(ToolCallItem {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                    title: title.clone(),
-                                    status: ToolCallStatus::PendingApproval,
-                                    output: String::new(),
-                                    is_error: false,
-                                    input: input.clone().unwrap_or(serde_json::Value::Null),
-                                    streaming: matches!(*status, ToolCallStatus::Running),
-                                    collapsed: false,
-                                    user_toggled: false,
-                                    panel: None,
-                        card: None,
-                        cwd: None,
-                                }),
-                                role.to_string(),
-                                item_id,
-                                host,
-                            )
-                        }));
-                        ApplyOutcome::Appended
-                    }
-                } else if name == crate::preview::TOOL_NAME && self.find_tool(id, cx).is_none() {
-                    // Preview: a user-facing artifact, so like the ask card it
-                    // stays a top-level card — the rendered body is the point
-                    // of the call and must never fold into an activity
-                    // segment. Follow-up lifecycle events take the ordinary
-                    // branch's absorb path against the minted row.
-                    let item_id = self.alloc_id();
-                    self.items.push(cx.new(|_| {
-                        MessageItem::new(
-                            ConvItem::ToolCall(ToolCallItem {
-                                id: id.clone(),
-                                name: name.clone(),
-                                title: title.clone(),
-                                status: *status,
-                                output: String::new(),
-                                is_error: false,
-                                input: input.clone().unwrap_or(serde_json::Value::Null),
-                                streaming: matches!(*status, ToolCallStatus::Running),
-                                collapsed: false,
-                                user_toggled: false,
-                                panel: None,
-                                card: None,
-                                cwd: None,
-                            }),
-                            role.to_string(),
-                            item_id,
-                            host,
-                        )
-                    }));
-                    ApplyOutcome::Appended
-                } else {
-                    // Ordinary tool call: fold into the active activity
-                    // segment, unless a top-level card already owns this id —
-                    // a pending interaction card (`name` = AskUserQuestion)
-                    // absorbs the follow-up lifecycle in place (renaming to
-                    // the actual tool) instead of spawning a parallel segment.
-                    if let Some(ix) = self.find_tool(id, cx) {
-                        let name = name.clone();
-                        let title = title.clone();
-                        let status = *status;
-                        let input = input.clone();
-                        self.items[ix].update(cx, |item, cx| {
-                            if let ConvItem::ToolCall(t) = item.kind_mut() {
-                                // An open ask card's face belongs to its
-                                // elicitation: no lifecycle advance may
-                                // rename or disarm it (the ASK arm documents
-                                // the same invariant; this is the defensive
-                                // half for anything that slips past the
-                                // derived events' naming).
-                                if t.name == manox_agent::tools::ASK_USER_QUESTION
-                                    && t.status == ToolCallStatus::PendingApproval
-                                {
-                                    if let Some(input) = input {
-                                        t.title = title;
-                                        t.input = input;
-                                    }
-                                    cx.notify();
-                                    return;
-                                }
-                                // A nameless advance must not wipe the row's
-                                // identity (the derived events name their
-                                // tools; this is defense in depth).
-                                if !name.is_empty() {
-                                    t.name = name;
-                                }
-                                t.status = status;
-                                // Status-only events carry no arguments: they
-                                // must not downgrade the argument-derived
-                                // title/input minted by the start event.
-                                if let Some(input) = input {
-                                    t.title = title;
-                                    t.input = input;
-                                }
-                                if matches!(
-                                    status,
-                                    ToolCallStatus::Success
-                                        | ToolCallStatus::Error
-                                        | ToolCallStatus::Denied
-                                ) && !t.user_toggled
-                                    && !t.collapsed
-                                    // A preview card's body is the artifact
-                                    // the user was shown; folding it away a
-                                    // second after it renders would undo the
-                                    // call's whole purpose.
-                                    && t.name != crate::preview::TOOL_NAME
-                                {
-                                    schedule_auto_collapse(AutoCollapseTarget::Tool(t.id.clone()), cx);
-                                }
-                            }
-                            cx.notify();
-                        });
-                        ApplyOutcome::Remeasure(ix)
-                    } else {
-                        let turn_started_at = self.turn_started_at;
-                        let (cix, pushed) = match self.find_active_activity_segment(cx) {
-                            Some(i) => (i, false),
-                            None => {
-                                let i = self.items.len();
-                                let id = self.alloc_id();
-                                self.items.push(cx.new(|_| {
-                                    let mut container = ThinkingContainer::new();
-                                    container.started_at = turn_started_at;
-                                    MessageItem::new(
-                                        ConvItem::Thinking(container),
-                                        role.to_string(),
-                                        id,
-                                        host,
-                                    )
-                                }));
-                                (i, true)
-                            }
-                        };
-                        self.sync_model_repeats(cix, cx);
-                        if self.turn_first_process_ix.is_none() {
-                            self.turn_first_process_ix = Some(cix);
-                        }
-                        let id = id.clone();
-                        let name = name.clone();
-                        let title = title.clone();
-                        let status = *status;
-                        let event_input = input.clone();
-                        self.items[cix].update(cx, |item, cx| {
-                            if let ConvItem::Thinking(t) = item.kind_mut() {
-                                if let Some(entry) = t.get_tool_entry_mut(&id) {
-                                    entry.name = name;
-                                    entry.status = status;
-                                    // Arg-less events advance the status only;
-                                    // the start event's title/input stay.
-                                    if let Some(input) = event_input {
-                                        entry.title = title;
-                                        entry.input = input;
-                                    }
-                                    // A terminal status does NOT fold the
-                                    // entry: the next entry's arrival or the
-                                    // reply text does (fold_preceding /
-                                    // close_segment_for_text) — the result
-                                    // must stay readable until then.
-                                } else {
-                                    // The newest entry owns the stage: fold
-                                    // the ones before it (user pins win).
-                                    t.fold_preceding();
-                                    // A tool call interrupts the reasoning
-                                    // round in flight — the model moved on to
-                                    // act, so the next `AgentThinking` opens a
-                                    // fresh round instead of appending to this
-                                    // one (the rule `ActivityEntry::Reasoning`
-                                    // documents). AHP has no mid-turn
-                                    // `Stop(ToolUse)` to say so: in the live
-                                    // stream the tool call IS that boundary,
-                                    // and without it every round of a turn's
-                                    // tool loop appends to the first, leaving
-                                    // one merged thinking block above every
-                                    // tool call of the turn.
-                                    t.finalize_reasoning_rounds();
-                                    t.entries.push(ActivityEntry::Tool(ToolCallItem {
-                                        id,
-                                        name,
-                                        title,
-                                        status,
-                                        output: String::new(),
-                                        is_error: false,
-                                        input: event_input.unwrap_or(serde_json::Value::Null),
-                                        streaming: matches!(status, ToolCallStatus::Running),
-                                        // A tool entry folds by default —
-                                        // the title row names the call; a
-                                        // manual expansion is sticky
-                                        // (`user_toggled`) and nothing
-                                        // re-folds it.
-                                        collapsed: true,
-                                        user_toggled: false,
-                                        panel: None,
-                                        card: None,
-                                        cwd: None,
-                                    }));
-                                }
-                                t.recompute_streaming();
-                            }
-                            cx.notify();
-                        });
-                        if pushed {
-                            ApplyOutcome::Appended
-                        } else {
-                            ApplyOutcome::Remeasure(cix)
-                        }
-                    }
-                }
-            }
-            ThreadEvent::ToolOutput { id, chunk } => {
-                // Subagent text/thinking is no longer forwarded to the parent
-                // message flow — the observation panel subscribes to the child
-                // thread directly. Only match ThinkingContainer entries here.
-                if let Some((cix, eix)) = self.find_thinking_entry(id, cx) {
-                    self.items[cix].update(cx, |item, cx| {
-                        if let ConvItem::Thinking(t) = item.kind_mut() {
-                            if let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(eix) {
-                                entry.output.push_str(chunk);
-                                entry.streaming = true;
-                            }
-                            t.streaming = true;
-                        }
-                        item.sync_tool_entry_panel(eix, cwd, cx);
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(cix)
-                } else {
-                    ApplyOutcome::Unchanged
-                }
-            }
-            ThreadEvent::ToolResult {
-                id,
-                output,
-                is_error,
-            } => {
-                let status = if *is_error {
-                    ToolCallStatus::Error
-                } else {
-                    ToolCallStatus::Success
-                };
-                if let Some(ix) = self.find_agent_task(id, cx) {
-                    self.items[ix].update(cx, |item, cx| {
-                        if let ConvItem::AgentTask(t) = item.kind_mut() {
-                            let next_status = if !*is_error && t.status == ToolCallStatus::Continued
-                            {
-                                ToolCallStatus::Continued
-                            } else {
-                                status
-                            };
-                            t.is_error = *is_error;
-                            t.status = next_status;
-                            t.run_id = envelope_run_id(output).or(t.run_id.clone());
-                        }
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(ix)
-                } else if let Some((cix, eix)) = self.find_thinking_entry(id, cx) {
-                    let entry_output = output.clone();
-                    let entry_is_error = *is_error;
-                    self.items[cix].update(cx, |item, cx| {
-                        if let ConvItem::Thinking(t) = item.kind_mut() {
-                            if let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(eix) {
-                                entry.output = entry_output;
-                                entry.is_error = entry_is_error;
-                                entry.streaming = false;
-                                entry.status = status;
-                                // The result landing does NOT fold the entry:
-                                // the call and its result read as an open pair
-                                // until the next node or the reply text
-                                // arrives (fold_preceding /
-                                // close_segment_for_text).
-                            }
-                            // A finalized entry does NOT close the segment —
-                            // `accepting_entries` stays true across the
-                            // tool-use loop. Only a terminal `Stop` freezes
-                            // the segment (see the `Stop` arm). The container
-                            // collapses only when the whole turn goes terminal.
-                            t.recompute_streaming();
-                        }
-                        item.sync_tool_entry_panel(eix, cwd, cx);
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(cix)
-                } else if let Some(ix) = self.find_tool(id, cx) {
-                    self.items[ix].update(cx, |item, cx| {
-                        if let ConvItem::ToolCall(t) = item.kind_mut() {
-                            t.output = output.clone();
-                            t.is_error = *is_error;
-                            t.streaming = false;
-                            t.status = status;
-                            // Delayed auto-collapse: the card folds ~1s after the
-                            // terminal status lands unless the user toggled it.
-                            // Preview cards are exempt — the rendered body is
-                            // the artifact the user was shown.
-                            if !t.user_toggled
-                                && !t.collapsed
-                                && t.name != crate::preview::TOOL_NAME
-                            {
-                                schedule_auto_collapse(AutoCollapseTarget::Tool(t.id.clone()), cx);
-                            }
-                        }
-                        item.sync_tool_call_panel(cwd, cx);
-                        cx.notify();
-                    });
-                    ApplyOutcome::Remeasure(ix)
-                } else {
-                    // No matching entry; insert as a finalized single-entry
-                    // activity segment so the orphan result still renders as a
-                    // `⎿` line rather than a bare ToolCall card.
-                    let ix = self.items.len();
-                    let item_id = self.alloc_id();
-                    let entry = ToolCallItem {
-                        id: id.clone(),
-                        name: String::new(),
-                        title: String::new(),
-                        status,
-                        output: output.clone(),
-                        is_error: *is_error,
-                        input: serde_json::Value::Null,
-                        streaming: false,
-                        collapsed: true,
-                        user_toggled: false,
-                        panel: None,
-                        card: None,
-                        cwd: None,
-                    };
-                    let mut container = ThinkingContainer::new();
-                    container.accepting_entries = false;
-                    container.streaming = false;
-                    container.collapsed = false;
-                    container.entries.push(ActivityEntry::Tool(entry));
-                    self.items.push(cx.new(|_| {
-                        MessageItem::new(ConvItem::Thinking(container), role.to_string(), item_id, host.clone())
-                    }));
-                    self.sync_model_repeats(ix, cx);
-                    // Mount the orphan entry's persistent panel after push — the
-                    // panel needs an `&mut Context<MessageItem>` to create the
-                    // Entity, which the `cx.new(|_| …)` closure above lacks.
-                    self.items[ix].update(cx, |item, cx| {
-                        item.sync_tool_entry_panel(0, cwd, cx);
-                        cx.notify();
-                    });
-                    ApplyOutcome::Appended
-                }
-            }
-            ThreadEvent::ToolCallAuthorization { .. } => {
-                // Handled by `Workspace` (question card); not part of the conversation flow.
-                ApplyOutcome::Unchanged
-            }
-            ThreadEvent::Stop(reason) => {
-                // `StopReason::ToolUse` is mid-turn: the model paused to
-                // execute a tool. Only finalize assistant/reasoning text
-                // streaming; the activity segment stays open so the next
-                // model response's tool calls fold into the same segment.
-                // A terminal stop (`EndTurn`/`MaxTokens`/`Refusal`) freezes
-                // the segment and auto-collapses everything.
-                let terminal = !matches!(reason, StopReason::ToolUse);
-                if terminal
-                    && let Some(at) = self.turn_first_process_ix.take()
-                    && matches!(self.items.get(at).map(|e| e.read(cx).kind()), Some(ConvItem::Thinking(_)))
-                {
-                    // The settled turn earns its process head above the
-                    // first segment, EXPANDED (folding is the reader's
-                    // call); the reply is exempt from the overlay.
-                    let secs = self.turn_started_at.elapsed().as_secs() as i64;
-                    let head = cx.new(|_| {
-                        MessageItem::new(
-                            ConvItem::TurnProcess {
-                                secs: (secs > 0).then_some(secs),
-                                collapsed: false,
-                                user_toggled: false,
-                            },
-                            role.to_string(),
-                            self.alloc_id(),
-                            host.clone(),
-                        )
-                    });
-                    self.items.insert(at, head);
-                    // Fall through: the turn's items still finalize and the
-                    // arm's tail already returns RemeasureAll for a
-                    // non-empty list.
-                }
-                self.finalize_streaming_items(terminal, cx);
-                // Stamp the per-turn usage onto the last assistant reply so its
-                // footer can show input/output/cache totals for this turn. Walk
-                // backward: the last item may be a tool call or reasoning block
-                // emitted after the assistant text, not the assistant itself.
-                if let Some(usage) = last_request_usage {
-                    for e in self.items.iter().rev() {
-                        let stamped = e.update(cx, |item, _cx| {
-                            if let ConvItem::Assistant { token_usage, .. } = item.kind_mut() {
-                                *token_usage = Some(usage);
-                                true
-                            } else {
-                                false
-                            }
-                        });
-                        if stamped {
-                            e.update(cx, |_, cx| cx.notify());
-                            break;
-                        }
-                    }
-                }
-                // Finalizing may grow/shrink any item (streaming → finalized
-                // body swap, segment auto-collapse); remeasure everything.
-                if self.items.is_empty() {
-                    ApplyOutcome::Unchanged
-                } else {
-                    ApplyOutcome::RemeasureAll
-                }
-            }
-            ThreadEvent::Error(e) => {
-                let id = self.alloc_id();
-                self.items.push(cx.new(|_| {
-                    MessageItem::new(ConvItem::Error(e.to_string()), role.to_string(), id, host)
-                }));
-                ApplyOutcome::Appended
-            }
-            ThreadEvent::PeerMessage { from, content } => {
-                // A peer delivery is a user-role turn the human did not type:
-                // it renders in the same turn frame as every other user bubble,
-                // header reading `{sender} > {this agent}·…`.
-                let id = self.alloc_id();
-                let meta = UserTurnMeta {
-                    timestamp: chrono::Utc::now().timestamp(),
-                    model_id: String::new(),
-                    access_mode: None,
-                    steered: false,
-                    author: Some(manox_agent::MessageAuthor::from_routing(from)),
-                    recipient: Some(self.recipient.clone()),
-                    peer: true,
-                };
-                self.items.push(cx.new(|_| {
-                    MessageItem::new(
-                        ConvItem::User {
-                            text: content.clone(),
-                            images: Vec::new(),
-                            meta: Some(meta),
-                        },
-                        role.to_string(),
-                        id,
-                        host,
-                    )
-                }));
-                ApplyOutcome::Appended
-            }
-            ThreadEvent::AccessModeChanged { .. } => {
-                // UI state (badge/chip) handled by `Workspace`; not a conversation item.
-                ApplyOutcome::Unchanged
-            }
-            ThreadEvent::NetworkAccessChanged { .. } => {
-                // Not a conversation item. The app's network policy is
-                // always-on: the app re-seeds `networkAccess=on` on every
-                // attach (the key is session-memory state), so the echo
-                // drives no UI.
-                ApplyOutcome::Unchanged
-            }
-            ThreadEvent::BrowserSuitesChanged { .. } => {
-                // Composer chips handled by `Workspace`; not a conversation item.
-                ApplyOutcome::Unchanged
-            }
-            ThreadEvent::PrefixStability { .. } => {
-                // Cache discipline signal: no conversation item, the drift
-                // flags are only consumed by debug telemetry views (if at all).
-                ApplyOutcome::Unchanged
-            }
-            ThreadEvent::Retry {
-                attempt,
-                max_attempts,
-                delay_secs,
-                reason,
-                detail,
-            } => {
-                // Coalesce consecutive retries into the same tail item so the
-                // badge counts up in place rather than stacking a row per
-                // attempt. The first retry after real content pushes a new item.
-                if let Some(last) = self.items.last() {
-                    let is_retry = matches!(last.read(cx).kind(), ConvItem::Retry { .. });
-                    if is_retry {
-                        let ix = self.items.len() - 1;
-                        let last = last.clone();
-                        let attempt = *attempt;
-                        let max_attempts = *max_attempts;
-                        let delay_secs = *delay_secs;
-                        let reason = reason.clone();
-                        let detail = detail.clone();
-                        last.update(cx, |item, cx| {
-                            if let ConvItem::Retry {
-                                attempt: a,
-                                max_attempts: m,
-                                delay_secs: d,
-                                reason: r,
-                                detail: det,
-                                ..
-                            } = item.kind_mut()
-                            {
-                                *a = attempt;
-                                *m = max_attempts;
-                                *d = delay_secs;
-                                *r = reason;
-                                *det = detail;
-                            }
-                            cx.notify();
-                        });
-                        return ApplyOutcome::Remeasure(ix);
-                    }
-                }
-                let id = self.alloc_id();
-                self.items.push(cx.new(|_| {
-                    MessageItem::new(
-                        ConvItem::Retry {
-                            attempt: *attempt,
-                            max_attempts: *max_attempts,
-                            delay_secs: *delay_secs,
-                            reason: reason.clone(),
-                            detail: detail.clone(),
-                            collapsed: true,
-                            user_toggled: false,
-                        },
-                        String::new(),
-                        id,
-                        host.clone(),
-                    )
-                }));
-                ApplyOutcome::Appended
-            }
-            ThreadEvent::BackgroundTaskUpdated { snapshot } => {
-                // Find an existing BackgroundTask card with this task_id and
-                // update it in-place; otherwise push a new card.
-                let task_id = snapshot.task_id.clone();
-                let existing_ix = self.items.iter().position(|e| {
-                    e.read(cx).kind().is_background_task_with_id(&task_id)
-                });
-                if let Some(ix) = existing_ix {
-                    self.items[ix].update(cx, |item, _| {
-                        if let ConvItem::BackgroundTask(bt) = item.kind_mut() {
-                            bt.status = snapshot.status;
-                            bt.event_count = snapshot.event_count;
-                            bt.total_bytes = snapshot.total_bytes;
-                            bt.exit_code = snapshot.exit_code;
-                            bt.failure_summary = snapshot.failure_summary.clone();
-                            // Refresh recent events from the task's ring buffer.
-                            bt.recent_events = recent_background_task_output(&task_id);
-                        }
-                    });
-                    ApplyOutcome::Remeasure(ix)
-                } else {
-                    // New task card.
-                    let recent_events = recent_background_task_output(&task_id);
-                    let id = self.alloc_id();
-                    let entity = cx.new(|_| {
-                        MessageItem::new(
-                            ConvItem::BackgroundTask(BackgroundTaskItem {
-                                task_id: snapshot.task_id.clone(),
-                                kind: snapshot.kind,
-                                description: snapshot.description.clone(),
-                                status: snapshot.status,
-                                event_count: snapshot.event_count,
-                                total_bytes: snapshot.total_bytes,
-                                exit_code: snapshot.exit_code,
-                                failure_summary: snapshot.failure_summary.clone(),
-                                created_at: Some(Instant::now()),
-                                recent_events,
-                            }),
-                            role.to_string(),
-                            id,
-                            host,
-                        )
-                    });
-                    self.items.push(entity);
-                    ApplyOutcome::Appended
-                }
-            }
-            // Title metadata rides the chrome (title bar / sidebar), not the
-            // transcript; no conversation item.
-            ThreadEvent::TitleChanged { .. } => ApplyOutcome::Unchanged,
-        };
-        if popped_retry {
-            match outcome {
-                // A `Remeasure(ix)` against a post-pop index is still valid —
-                // the pop was at the tail, so `ix` still points at the same
-                // item. The retry pop itself is covered by the count splice.
-                ApplyOutcome::Remeasure(ix) => ApplyOutcome::Remeasure(ix),
-                // `RemeasureAndAppend { remeasure_ix }` survives a tail retry
-                // pop unchanged: `remeasure_ix` points at a closed activity
-                // segment well before the tail, so the pop doesn't move it,
-                // and the appended bubble nets out against the popped retry
-                // (count splice in `sync_list_count` sees zero change). Keep
-                // the remeasure so the segment's stale height is corrected.
-                ApplyOutcome::RemeasureAndAppend { remeasure_ix } => {
-                    ApplyOutcome::RemeasureAndAppend { remeasure_ix }
-                }
-                // A plain `Appended` (no segment mutated) + a popped retry
-                // means the new tail item occupies the popped retry's slot
-                // (count net-0, no splice). Its cached height is the retry
-                // badge's, so remeasure the tail to correct it on this frame
-                // rather than leaving a one-frame vertical overlap until the
-                // next event's remeasure.
-                ApplyOutcome::Appended => {
-                    let tail = self.items.len().saturating_sub(1);
-                    ApplyOutcome::Remeasure(tail)
-                }
-                _ => ApplyOutcome::RemovedTail,
-            }
-        } else {
-            outcome
-        }
-    }
-
-    /// Drop the trailing item if it is a stale `Retry` badge, so the real
-    /// content event that follows pushes its own item into the freed slot.
-    /// Returns whether an item was actually removed (for the list
-    /// splice-down).
-    fn pop_trailing_retry(&mut self, cx: &App) -> bool {
-        if self
-            .items
-            .last()
-            .is_some_and(|e| matches!(e.read(cx).kind(), ConvItem::Retry { .. }))
-        {
-            self.items.pop();
-            return true;
-        }
-        false
-    }
-
-    /// Sweep every item through `MessageItem::finalize_streaming` — the
-    /// terminal-`Stop` treatment, reused at the `TurnFinished` boundary so a
-    /// turn that ended without a terminal `Stop` (a provider error that only
-    /// emitted `Error`, or a stream that closed without `MessageStop`) still
-    /// freezes its activity segment instead of leaving a perpetual spinner.
-    /// Returns whether any item had live streaming state that finalizing could
-    /// change the height of, so the caller can decide whether the list's
-    /// per-item height cache needs a remeasure. `terminal` distinguishes a
-    /// hard boundary (turn end, which freezes segments and pins elapsed) from
-    /// a mid-turn `Stop(ToolUse)` (reasoning rounds only). Idempotent.
-    fn finalize_streaming_items(&mut self, terminal: bool, cx: &mut App) -> bool {
-        let changed = self.items.iter().any(|e| match e.read(cx).kind() {
-            ConvItem::Thinking(t) => t.accepting_entries || t.streaming,
-            ConvItem::Assistant { streaming, .. } => *streaming,
-            ConvItem::ToolCall(t) => t.streaming,
-            _ => false,
-        });
-        for e in &self.items {
-            e.update(cx, |item, cx| {
-                item.finalize_streaming(terminal, cx);
-                cx.notify();
-            });
-        }
-        changed
-    }
-
     pub fn clear(&mut self) {
         self.items.clear();
+        self.keys.clear();
+        self.overlays = Overlays::default();
     }
+}
 
-    /// Rebuild view state from a `Thread`'s display sequence (used when
-    /// loading a historical thread): messages interleaved with the persisted
-    /// UI annotation cards, in session append order — reload reproduces the
-    /// live placement without the model request ever learning the cards
-    /// exist.
-    ///
-    /// Plain notes render in place; notes carrying a `data.tool_call_id`
-    /// splice in right after the item holding their tool call — matching
-    /// the live anchored placement — falling back to the tail when
-    /// compaction dropped the tool item.
-    pub fn rebuild_from_display(
-        display: &[HistoryEntry],
-        usage: &std::collections::HashMap<String, TokenUsage>,
-        role: &str,
-        recipient: manox_agent::MessageAuthor,
-        running: bool,
-        ctx: ApplyCtx,
-        cx: &mut App,
-    ) -> Self {
-        let ApplyCtx {
-            host,
-            cwd,
-            fork_source,
-        } = ctx;
-        let mut builder = ItemBuilder::new(Some(recipient.clone())).with_fork_source(fork_source);
-        let mut prev_segment_model: Option<crate::model_tag::ModelTag> = None;
-        let mut kinds: Vec<ConvItem> = Vec::new();
-        let mut pending: Vec<Message> = Vec::new();
-        let mut deferred: Vec<&UiNoteRecord> = Vec::new();
-        for entry in display {
-            match entry {
-                HistoryEntry::Message(message) => pending.push(message.clone()),
-                HistoryEntry::Note(note) => {
-                    if note.data.get("tool_call_id").is_some() {
-                        deferred.push(note);
-                    } else {
-                        if !pending.is_empty() {
-                            builder.extend(&pending, usage, &mut kinds);
-                            pending.clear();
-                        }
-                        kinds.push(note_to_item(note));
-                    }
-                }
-            }
-        }
-        if !pending.is_empty() {
-            builder.extend(&pending, usage, &mut kinds);
-        }
-        builder.finish(&mut kinds, running);
-        // Group by splice target so several notes anchored to the same tool
-        // keep emit order (inserting one-by-one at ix+1 would reverse them);
-        // applying the groups in descending index order keeps earlier
-        // positions valid.
-        let mut grouped: Vec<(usize, Vec<ConvItem>)> = Vec::new();
-        let mut tail: Vec<ConvItem> = Vec::new();
-        for note in deferred {
-            let tool_id = note
-                .data
-                .get("tool_call_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let kind = note_to_item(note);
-            match kinds.iter().position(|it| item_contains_tool(it, tool_id)) {
-                Some(ix) => match grouped.last_mut() {
-                    Some((last_ix, items)) if *last_ix == ix => items.push(kind),
-                    _ => grouped.push((ix, vec![kind])),
-                },
-                None => tail.push(kind),
-            }
-        }
-        for (ix, items) in grouped.into_iter().rev() {
-            kinds.splice(ix + 1..ix + 1, items);
-        }
-        kinds.extend(tail);
-        let items = kinds
-            .into_iter()
-            .enumerate()
-            .map(|(id, kind)| {
-                let item = new_history_item(kind, id, role, host.clone(), cwd.clone(), cx);
-                // A header only shows a model the nearest earlier segment
-                // has not already shown.
-                let tag = item.read(cx).segment_model().cloned();
-                if let Some(tag) = tag {
-                    let repeats = prev_segment_model.replace(tag);
-                    item.update(cx, |i, _| {
-                        i.model_repeats = repeats.is_some_and(|prev| prev == *i.model_tag())
-                    });
-                }
-                item
-            })
-            .collect::<Vec<_>>();
-        // A fresh conversation: ids start at 0 and the enumerate above already
-        // assigned them in item order, so the counter continues from the item
-        // count.
-        let next_item_id = items.len();
-        Self {
-            items,
-            next_item_id,
-            turn_started_at: Instant::now(),
-            turn_first_process_ix: None,
-            history_builder: None,
-            recipient,
-        }
-    }
-
-    /// Append a batch of newly loaded history messages to the conversation
-    /// (the streaming preview). Carries the item builder's turn/segment state
-    /// across batches so the result matches a one-shot
-    /// `rebuild_from_display` over the same prefix; the final authoritative
-    /// history lands through `rebuild_from_display` (`HistoryRestored`),
-    /// which drops the builder.
-    pub fn append_history_messages(
-        &mut self,
-        messages: &[Message],
-        usage: &HashMap<String, TokenUsage>,
-        role: &str,
-        ctx: ApplyCtx,
-        cx: &mut App,
-    ) -> ApplyOutcome {
-        if messages.is_empty() {
-            return ApplyOutcome::Unchanged;
-        }
-        // `fork_source` is unused here: this appends streaming history, whose
-        // rows have no durable id yet.
-        let ApplyCtx {
-            host,
-            cwd,
-            fork_source: _,
-        } = ctx;
-        let builder_recipient = self.recipient.clone();
-        let builder = self
-            .history_builder
-            .get_or_insert_with(|| ItemBuilder::new(Some(builder_recipient.clone())));
-        let mut prev_segment_model: Option<crate::model_tag::ModelTag> = None;
-        let mut kinds = Vec::new();
-        builder.extend(messages, usage, &mut kinds);
-        for kind in kinds {
-            let id = self.alloc_id();
-            let item = new_history_item(kind, id, role, host.clone(), cwd.clone(), cx);
-            let tag = item.read(cx).segment_model().cloned();
-            if let Some(tag) = tag {
-                let repeats = prev_segment_model.replace(tag);
-                item.update(cx, |i, _| {
-                    i.model_repeats = repeats.is_some_and(|prev| prev == *i.model_tag())
-                });
-            }
-            self.items.push(item);
-        }
-        ApplyOutcome::Appended
-    }
-
-    /// Rehydrate persisted background-task cards after rebuilding canonical
-    /// messages. Running/Stopping snapshots have already been normalized to
-    /// SessionEnded by `Thread::restore`.
-    pub fn restore_background_tasks(
-        &mut self,
-        snapshots: &[manox_agent::background_task::TaskSnapshot],
-        role: &str,
-        host: ChatHostHandle,
-        cx: &mut App,
-    ) {
-        for snapshot in snapshots {
-            let id = self.alloc_id();
-            self.items.push(cx.new(|_| {
-                MessageItem::new(
-                    ConvItem::BackgroundTask(BackgroundTaskItem {
-                        task_id: snapshot.task_id.clone(),
-                        kind: snapshot.kind,
-                        description: snapshot.description.clone(),
-                        status: snapshot.status,
-                        event_count: snapshot.event_count,
-                        total_bytes: snapshot.total_bytes,
-                        exit_code: snapshot.exit_code,
-                        failure_summary: snapshot.failure_summary.clone(),
-                        created_at: None,
-                        recent_events: Vec::new(),
-                    }),
-                    role.to_string(),
-                    id,
-                    host.clone(),
-                )
-            }));
+impl ConvItem {
+    /// The item's user-bubble text when it is a `User` row (the adoption
+    /// matcher reads this).
+    fn user_text(&self) -> Option<&str> {
+        match self {
+            ConvItem::User { text, .. } => Some(text),
+            _ => None,
         }
     }
 }
 
-/// Construct a `MessageItem` for a rebuilt/history item: full text parse +
-/// finalize for assistant bubbles, persistent reasoning/tool panels for
-/// historical activity segments. Shared by the one-shot
-/// `rebuild_from_display` and the streaming `append_history_messages`.
-fn new_history_item(
+/// Build the `MessageItem` entity for a projected node: full text parse +
+/// persistent mounts, mirroring what a history rebuild used to do, so a row
+/// created live and a row created by a replay are the same object.
+fn new_node_item(
     kind: ConvItem,
-    id: usize,
     role: &str,
-    host: ChatHostHandle,
-    cwd: Option<SharedString>,
+    id: usize,
+    env: &ProjectEnv,
+    entering: bool,
     cx: &mut App,
 ) -> Entity<MessageItem> {
     // A user item carries its OWN turn's model (the wire stamp in its meta),
-    // not the session's current label the rebuild was invoked with — a
-    // reloaded thread's per-turn headers must stay historical.
+    // not the session's current label — per-turn headers stay historical.
     let own_role = match &kind {
-        ConvItem::User { meta: Some(m), .. } if !m.model_id.is_empty() => m.model_id.clone(),
+        ConvItem::User {
+            meta: Some(meta), ..
+        } if !meta.model_id.is_empty() => meta.model_id.clone(),
         _ => role.to_string(),
     };
+    let cwd = env.cwd.map(SharedString::from);
     cx.new(|cx| {
         let text = match &kind {
             ConvItem::Assistant { text, .. } => Some(text.clone()),
             _ => None,
         };
-        let mut item = MessageItem::new(kind, own_role, id, host);
-        // For rebuilt (non-streaming) text items, feed the full snapshot so the
-        // mounted document matches the reloaded history exactly (no further
-        // updates expected).
+        let mut item = MessageItem::new(kind, own_role, id, env.host.clone());
+        if entering {
+            // Live sends only — the entrance rise never plays for rows the
+            // fold synthesized.
+            item = item.entering_now();
+        }
+        // For projected text items, feed the full snapshot so the mounted
+        // document matches the content exactly (a later append rides the
+        // incremental push_str).
         if let Some(text) = text {
             item.update_text(&text, cx);
         }
-        // Mount + finalize persistent markdown for every historical reasoning
-        // round inside a `Thinking` segment, so selection works on reloaded
+        // Mount + finalize persistent markdown for every reasoning round
+        // inside a `Thinking` segment, so selection works on reloaded
         // history (not just live-streamed turns).
         item.rebuild_activity_reasoning(cx);
-        // Mount the persistent `TerminalPanel` for every historical tool call
-        // (activity-segment entries + top-level ToolCall) so reloaded history
-        // renders the terminal-styled body with working selection, not a
-        // per-frame fallback.
+        // Mount the persistent `TerminalPanel` for every tool call (segment
+        // entries + top-level cards) so the terminal-styled body works with
+        // selection from the first frame.
         item.rebuild_tool_panels(cwd, cx);
-        // Mount the persistent paginated `TerminalPanel` for every historical
-        // `Notice` so a reloaded notice folds like its live counterpart
-        // (default `PAGE_SIZE` lines, `+N` load-more) instead of a per-frame
-        // fallback.
+        // Mount the persistent paginated `TerminalPanel` for every `Notice`
+        // so a notice folds like its live counterpart instead of a
+        // per-frame fallback.
         item.ensure_notice_panel(cx);
         item
     })
 }
 
-/// Whether `it` is the item carrying the given tool call: a top-level
-/// `ToolCall` card or an activity segment holding the tool entry.
-fn item_contains_tool(it: &ConvItem, tool_call_id: &str) -> bool {
-    match it {
-        ConvItem::ToolCall(t) => t.id == tool_call_id,
-        ConvItem::Thinking(t) => t.find_entry_index(tool_call_id).is_some(),
-        _ => false,
-    }
+/// Apply one node's content onto an existing row: field-by-field, preserving
+/// the row's interaction state (`collapsed` / `user_toggled`) except where a
+/// derived fold transition fires. Returns whether anything visible changed.
+fn sync_row(item: &Entity<MessageItem>, node: &Node, env: &ProjectEnv, cx: &mut App) -> bool {
+    let cwd = env.cwd.map(SharedString::from);
+    item.update(cx, |item, cx| {
+        match &node.kind {
+            ConvItem::User { text, meta, .. } => {
+                let ConvItem::User {
+                    text: old_text,
+                    meta: old_meta,
+                    ..
+                } = item.kind_mut()
+                else {
+                    return false;
+                };
+                let changed = old_text != text;
+                *old_text = text.clone();
+                if let (Some(old_meta), Some(meta)) = (old_meta, meta) {
+                    // The adopting row keeps its steered marker; the rest of
+                    // the header identity follows the state.
+                    old_meta.timestamp = meta.timestamp;
+                    old_meta.model_id = meta.model_id.clone();
+                }
+                changed
+            }
+            ConvItem::Assistant { .. } => sync_assistant(item, node, cx),
+            ConvItem::Thinking(n) => sync_segment(item, n, cwd, cx),
+            ConvItem::ToolCall(n) => sync_tool_card(item, n, cwd, cx),
+            ConvItem::AgentTask(n) => {
+                let ConvItem::AgentTask(t) = item.kind_mut() else {
+                    return false;
+                };
+                let mut changed = false;
+                if !n.subagent_type.is_empty() {
+                    changed |= set(&mut t.subagent_type, n.subagent_type.clone());
+                }
+                if !n.description.is_empty() {
+                    changed |= set(&mut t.description, n.description.clone());
+                }
+                changed |= set(&mut t.status, n.status);
+                changed |= set(&mut t.is_error, n.is_error);
+                changed |= set(&mut t.run_id, n.run_id.clone());
+                changed
+            }
+            ConvItem::Notice(text) => {
+                let ConvItem::Notice(old) = item.kind_mut() else {
+                    return false;
+                };
+                let changed = old != text;
+                *old = text.clone();
+                if changed {
+                    item.ensure_notice_panel(cx);
+                }
+                changed
+            }
+            ConvItem::Error(text) => {
+                let ConvItem::Error(old) = item.kind_mut() else {
+                    return false;
+                };
+                set(old, text.clone())
+            }
+            ConvItem::TurnProcess { .. } => {
+                // The head is static once minted (secs from a settled
+                // duration); nothing to sync.
+                false
+            }
+        }
+    })
 }
 
-/// Render a persisted note as its live `ConvItem` counterpart, reading the
-/// `text` payload from `data`.
-fn note_to_item(n: &UiNoteRecord) -> ConvItem {
-    let text = n
-        .data
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    match n.kind {
-        UiNoteKind::Error => ConvItem::Error(text),
-        UiNoteKind::Notice => ConvItem::Notice(text),
+fn sync_assistant(
+    item: &mut MessageItem,
+    node: &Node,
+    cx: &mut gpui::Context<MessageItem>,
+) -> bool {
+    let ConvItem::Assistant {
+        text: n_text,
+        streaming,
+        activity_header,
+        token_usage,
+        entry_id,
+        fork_unavailable,
+        ..
+    } = &node.kind
+    else {
+        return false;
+    };
+    let mut changed = false;
+    {
+        let ConvItem::Assistant {
+            text,
+            streaming: old_streaming,
+            activity_header: old_header,
+            token_usage: old_usage,
+            entry_id: old_entry,
+            fork_unavailable: old_unavail,
+            ..
+        } = item.kind_mut()
+        else {
+            return false;
+        };
+        if text != n_text {
+            // Feed the full snapshot; an appended delta rides upstream's
+            // incremental `push_str`, so this is proportional to the delta
+            // and never drops a byte (whitespace included — the fix that
+            // motivated this projection).
+            let full = n_text.clone();
+            *text = full;
+            changed = true;
+        }
+        changed |= set(old_streaming, *streaming);
+        changed |= set(old_header, *activity_header);
+        changed |= set(old_usage, *token_usage);
+        changed |= set(old_entry, entry_id.clone());
+        changed |= set(old_unavail, *fork_unavailable);
+    }
+    if changed {
+        let ConvItem::Assistant { text, .. } = item.kind() else {
+            return changed;
+        };
+        let full = text.clone();
+        item.update_text(&full, cx);
+    }
+    changed
+}
+
+/// Sync one activity segment: match entries by id (reasoning rounds by part
+/// id, tools by call id), append the new ones, and apply the derived fold
+/// transitions that replace the old event-driven heuristics.
+fn sync_segment(
+    item: &mut MessageItem,
+    n: &ThinkingContainer,
+    cwd: Option<SharedString>,
+    cx: &mut gpui::Context<MessageItem>,
+) -> bool {
+    let was_streaming = matches!(item.kind(), ConvItem::Thinking(t) if t.streaming);
+    let mut changed = false;
+    let mut mount_reasoning: Vec<usize> = Vec::new();
+    let mut mount_tool: Vec<usize> = Vec::new();
+    {
+        let ConvItem::Thinking(t) = item.kind_mut() else {
+            return false;
+        };
+        // An entry the node no longer carries leaves the row first: a
+        // re-folded turn (bridge restart re-issuing `turnStarted`, a re-run)
+        // can drop trailing parts, and the live row must match a fresh
+        // projection of the same state — otherwise "live and rebuild are one
+        // function" diverges exactly here. The drop precedes the merge so
+        // the mount indices taken below address the vector the caller will
+        // still see (a stale index would mount the wrong entry's body, or
+        // silently skip the one that changed).
+        let keep: std::collections::HashSet<&str> =
+            n.entries.iter().map(|entry| entry.id()).collect();
+        let before = t.entries.len();
+        t.entries.retain(|entry| keep.contains(entry.id()));
+        changed |= t.entries.len() != before;
+        for entry in n.entries.iter() {
+            let id = entry.id().to_string();
+            match t.find_entry_index(&id) {
+                Some(found) => {
+                    let changed_entry = match (&mut t.entries[found], entry) {
+                        (
+                            ActivityEntry::Reasoning {
+                                text,
+                                streaming,
+                                markdown,
+                                ..
+                            },
+                            ActivityEntry::Reasoning {
+                                text: n_text,
+                                streaming: n_streaming,
+                                ..
+                            },
+                        ) => {
+                            let mut dirty = text != n_text;
+                            if dirty {
+                                *text = n_text.clone();
+                                if markdown.is_some() {
+                                    mount_reasoning.push(found);
+                                }
+                            }
+                            dirty |= set(streaming, *n_streaming);
+                            dirty
+                        }
+                        (ActivityEntry::Tool(old), ActivityEntry::Tool(new)) => {
+                            sync_tool_fields(old, new)
+                        }
+                        _ => false,
+                    };
+                    changed |= changed_entry;
+                    if changed_entry {
+                        if matches!(entry, ActivityEntry::Tool(_)) {
+                            mount_tool.push(found);
+                        } else if !mount_reasoning.contains(&found) {
+                            mount_reasoning.push(found);
+                        }
+                    }
+                }
+                None => {
+                    // A new entry arrives: the entries before it fold (user
+                    // pins win) — the derived replacement for the old
+                    // fold_preceding heuristic. (The insert below reports
+                    // the change for the whole arm.)
+                    for prev in t.entries.iter_mut() {
+                        match prev {
+                            ActivityEntry::Reasoning {
+                                collapsed,
+                                user_toggled,
+                                ..
+                            } if !*user_toggled && !*collapsed => {
+                                *collapsed = true;
+                            }
+                            ActivityEntry::Tool(tool) if !tool.user_toggled && !tool.collapsed => {
+                                tool.collapsed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    match entry {
+                        ActivityEntry::Reasoning {
+                            id,
+                            text,
+                            streaming,
+                            ..
+                        } => {
+                            let at = t.entries.len();
+                            t.entries.push(ActivityEntry::Reasoning {
+                                id: id.clone(),
+                                text: text.clone(),
+                                streaming: *streaming,
+                                collapsed: false,
+                                user_toggled: false,
+                                markdown: None,
+                            });
+                            mount_reasoning.push(at);
+                        }
+                        ActivityEntry::Tool(tool) => {
+                            let at = t.entries.len();
+                            t.entries.push(ActivityEntry::Tool(tool.clone()));
+                            mount_tool.push(at);
+                        }
+                    }
+                    changed = true;
+                }
+            }
+        }
+        // Derived fold transitions replace the old 1s auto-collapse timer:
+        // the settle folds everything unpinned the frame the turn archives.
+        let settle = was_streaming && !n.streaming;
+        if settle {
+            for entry in t.entries.iter_mut() {
+                match entry {
+                    ActivityEntry::Reasoning {
+                        streaming,
+                        collapsed,
+                        user_toggled,
+                        ..
+                    } => {
+                        *streaming = false;
+                        if !*user_toggled && !*collapsed {
+                            *collapsed = true;
+                        }
+                    }
+                    ActivityEntry::Tool(tool) => {
+                        tool.streaming = false;
+                        if matches!(
+                            tool.status,
+                            ToolCallStatus::Success
+                                | ToolCallStatus::Error
+                                | ToolCallStatus::Denied
+                        ) && !tool.user_toggled
+                            && !tool.collapsed
+                        {
+                            tool.collapsed = true;
+                        }
+                    }
+                }
+            }
+            if !t.user_toggled && !t.collapsed {
+                t.collapsed = true;
+            }
+        }
+        // Container bookkeeping follows the node wholesale.
+        t.accepting_entries = n.accepting_entries;
+        t.streaming = n.streaming;
+        if t.frozen_secs.is_none() {
+            t.frozen_secs = n.frozen_secs;
+        }
+    }
+    for eix in mount_reasoning {
+        item.sync_reasoning_entry(eix, cx);
+    }
+    for eix in mount_tool {
+        item.sync_tool_entry_panel(eix, cwd.clone(), cx);
+    }
+    changed
+}
+
+/// Field-level sync of one tool entry's content; the caller mounts the body
+/// when this reports a change.
+fn sync_tool_fields(t: &mut ToolCallItem, n: &ToolCallItem) -> bool {
+    let mut changed = set(&mut t.name, n.name.clone());
+    changed |= set(&mut t.status, n.status);
+    if !n.input.is_null() {
+        changed |= set(&mut t.input, n.input.clone());
+        changed |= set(&mut t.title, n.title.clone());
+    }
+    changed |= set(&mut t.output, n.output.clone());
+    changed |= set(&mut t.is_error, n.is_error);
+    changed |= set(&mut t.streaming, n.streaming);
+    changed
+}
+
+/// Sync a top-level tool card (ask / preview / promoted confirmation). A
+/// completed ask card folds once its answer lands (unless pinned); a
+/// Preview's body is the artifact and never folds.
+fn sync_tool_card(
+    item: &mut MessageItem,
+    n: &ToolCallItem,
+    cwd: Option<SharedString>,
+    cx: &mut gpui::Context<MessageItem>,
+) -> bool {
+    let mut changed;
+    {
+        let ConvItem::ToolCall(t) = item.kind_mut() else {
+            return false;
+        };
+        changed = sync_tool_fields(t, n);
+        if t.cwd.is_none() {
+            t.cwd = cwd.clone();
+        }
+        let settled = matches!(
+            t.status,
+            ToolCallStatus::Success | ToolCallStatus::Error | ToolCallStatus::Denied
+        );
+        if settled && !t.user_toggled && !t.collapsed && t.name != crate::preview::TOOL_NAME {
+            // The ask's answer landed: fold this frame (the derived
+            // replacement for the 1s timer).
+            t.collapsed = true;
+            changed = true;
+        }
+    }
+    if changed {
+        item.sync_tool_call_panel(cwd, cx);
+    }
+    changed
+}
+
+fn set<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        false
+    } else {
+        *slot = value;
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
-    use crate::views::message::build_items;
-    use manox_agent::Message;
-    use manox_agent::language_model::{
-        LanguageModelToolResult, LanguageModelToolUse, MessageContent, Role,
-    };
-    use std::sync::Arc;
+    use crate::transcript::{Overlays, ProjectEnv, project};
+    use ahp_types::actions::StateAction;
+    use ahp_types::state::ChatState;
 
-    #[test]
-    fn background_task_card_keeps_latest_twenty_output_events() {
-        let events = (0..25)
-            .map(|ix| manox_agent::background_task::TaskEvent {
-                task_id: manox_agent::background_task::TaskId("bg-test".into()),
-                kind: manox_agent::background_task::TaskKind::BackgroundBash,
-                owner_goal_id: None,
-                event: manox_agent::background_task::TaskEventKind::Output(format!("event-{ix}")),
-                task_seq: ix,
-                timestamp_ms: ix,
-            })
-            .collect();
-        let output = latest_background_task_output(events);
-        assert_eq!(output.len(), 20);
-        assert_eq!(output.first().map(String::as_str), Some("event-5"));
-        assert_eq!(output.last().map(String::as_str), Some("event-24"));
+    /// An empty fold to fold actions into, exactly as the store holds one.
+    fn empty_chat() -> ChatState {
+        serde_json::from_value(serde_json::json!({
+            "resource": "ahp-chat:/c-test",
+            "title": "test",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [],
+        }))
+        .expect("the empty chat parses")
     }
 
-    /// When assistant text arrives while a live activity segment exists, the
-    /// segment is closed in place (`close_segment_for_text` finalizes entries
-    /// and pins the elapsed timer — dirtying its height cache) and a new
-    /// assistant bubble is appended. The outcome must carry the closed
-    /// segment's index so the caller remeasures it; a bare `Appended` would
-    /// only splice the tail and leave the segment's cached height stale.
-    /// only splice the tail and leave the segment's cached height stale.
-    #[gpui::test]
-    fn agent_text_needs_new_with_live_segment_remeasures_closed_segment(
-        cx: &mut gpui::TestAppContext,
+    fn fold(chat: &mut ChatState, action: &StateAction) {
+        ahp::reducers::apply_action_to_chat(chat, action);
+    }
+
+    fn start(turn: &str, text: &str) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/turnStarted", "turnId": turn,
+            "startedAt": "2026-01-01T00:00:00Z",
+            "message": { "text": text, "origin": { "kind": "user" } },
+        }))
+        .expect("the start action parses")
+    }
+
+    fn open_md(turn: &str, part: &str) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/responsePart", "turnId": turn,
+            "part": { "kind": "markdown", "id": part, "content": "" },
+        }))
+        .expect("the open action parses")
+    }
+
+    fn open_rs(turn: &str, part: &str) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/responsePart", "turnId": turn,
+            "part": { "kind": "reasoning", "id": part, "content": "" },
+        }))
+        .expect("the open action parses")
+    }
+
+    fn delta(turn: &str, part: &str, content: &str) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/delta", "turnId": turn, "partId": part, "content": content,
+        }))
+        .expect("the delta action parses")
+    }
+
+    fn reasoning_delta(turn: &str, part: &str, content: &str) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/reasoning", "turnId": turn, "partId": part, "content": content,
+        }))
+        .expect("the reasoning action parses")
+    }
+
+    fn complete(turn: &str, duration_ms: i64) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/turnComplete", "turnId": turn, "duration": duration_ms,
+        }))
+        .expect("the complete action parses")
+    }
+
+    fn env() -> (
+        ProjectEnv<'static>,
+        std::sync::Arc<dyn crate::host::ChatHost>,
     ) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        let ctx = ApplyCtx {
-            host: host.clone(),
-            cwd: None,
-            fork_source: None,
-        };
-
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                // Open an activity segment by emitting a tool call.
-                let outcome = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Read".into(),
-                        title: "Read file".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert!(matches!(outcome, ApplyOutcome::Appended));
-                assert_eq!(c.items().len(), 1);
-
-                // An assistant text delta with no prior streaming assistant
-                // bubble → `needs_new`. The live segment is closed, then a new
-                // assistant item is appended. The outcome must remeasure the
-                // closed segment (index 0) AND splice the new tail.
-                let outcome = c.apply(
-                    &ThreadEvent::AgentText("hello".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                match outcome {
-                    ApplyOutcome::RemeasureAndAppend { remeasure_ix } => {
-                        assert_eq!(
-                            remeasure_ix, 0,
-                            "remeasure the just-closed activity segment"
-                        );
-                    }
-                    other => panic!(
-                        "expected RemeasureAndAppend after closing a live segment, got {other:?}"
-                    ),
-                }
-                assert_eq!(c.items().len(), 2);
-            });
-        });
-    }
-
-    /// A live-streamed reply has no durable journal row, so its fork control
-    /// is withheld its anchor and disabled with a named reason — through the
-    /// real `AgentText` fold, not a hand-built item: the gate must survive a
-    /// change to the delta arm the same way the row does.
-    #[gpui::test]
-    fn a_streaming_reply_carries_no_anchor_and_names_the_reason(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: Some("session-1".into()),
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.apply(
-                    &ThreadEvent::AgentText("partial".into()),
-                    "model",
-                    None,
-                    ctx,
-                    cx,
-                );
-            });
-        });
-        let (entry_id, gate) = cx.update(|cx| {
-            conversation
-                .read(cx)
-                .items()
-                .iter()
-                .find_map(|item| match item.read(cx).kind() {
-                    ConvItem::Assistant {
-                        entry_id,
-                        fork_unavailable,
-                        ..
-                    } => Some((entry_id.clone(), *fork_unavailable)),
-                    _ => None,
-                })
-                .expect("the delta builds an assistant item")
-        });
-        assert_eq!(
-            entry_id, None,
-            "a streamed row must not carry an anchor — the live delta carries no durable id"
-        );
-        assert_eq!(
-            gate,
-            Some(crate::views::message::ForkUnavailable::NotLanded),
-            "the withheld control must name its reason rather than disappear"
-        );
-    }
-
-    /// The `HistoryProgress` preview batch event must never mutate the
-    /// conversation item list — the workspace owns the append path
-    /// (`append_history_messages`). Pin the `apply` arm so a future change
-    /// to `Appended`/`Cleared` here fails loudly instead of double-rendering.
-    #[gpui::test]
-    fn history_progress_apply_is_unchanged(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        let ctx = ApplyCtx {
-            host,
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let outcome = c.apply(
-                    &ThreadEvent::HistoryProgress,
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert!(matches!(outcome, ApplyOutcome::Unchanged));
-                assert!(c.items().is_empty());
-            });
-        });
-    }
-
-    /// When assistant text arrives with no prior activity segment (a pure-text
-    /// answer, no preceding thinking/tool call), there is nothing to close, so
-    /// the outcome is a plain `Appended` — no remeasure needed.
-    #[gpui::test]
-    fn agent_text_needs_new_without_segment_is_plain_append(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let outcome = c.apply(
-                    &ThreadEvent::AgentText("fresh".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert!(matches!(outcome, ApplyOutcome::Appended));
-                assert_eq!(c.items().len(), 1);
-            });
-        });
-    }
-
-    /// When a trailing `Retry` badge is popped and the following event pushes a
-    /// new tail item with no segment mutation (plain `Appended`), the popped
-    /// retry's slot is reused (count net-0, no splice) and the new item would
-    /// inherit the retry badge's stale `Measured` height. The post-processing
-    /// rewrites `Appended` → `Remeasure(tail)` so the reused slot is
-    /// remeasured on this frame. Pinned because a regression here leaves a
-    /// one-frame vertical overlap until the next event.
-    #[gpui::test]
-    fn popped_retry_then_append_remeasures_reused_tail_slot(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                // Push a trailing Retry badge.
-                let outcome = c.apply(
-                    &ThreadEvent::Retry {
-                        attempt: 1,
-                        max_attempts: 3,
-                        delay_secs: 1,
-                        reason: "503".into(),
-                        detail: None,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert!(matches!(outcome, ApplyOutcome::Appended));
-                assert_eq!(c.items().len(), 1);
-
-                // An AgentText delta with no prior segment: pop_trailing_retry
-                // removes the Retry (count 1→0), then needs_new pushes a new
-                // assistant bubble (count 0→1). Net count unchanged → no
-                // splice. Outcome must be Remeasure(tail=0) so the reused slot
-                // (now the assistant bubble, was the Retry badge) is
-                // remeasured instead of keeping the badge's cached height.
-                let outcome = c.apply(
-                    &ThreadEvent::AgentText("recovered".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                match outcome {
-                    ApplyOutcome::Remeasure(ix) => {
-                        assert_eq!(ix, 0, "remeasure the reused tail slot");
-                    }
-                    other => panic!(
-                        "expected Remeasure(tail) after popped_retry + Appended, got {other:?}"
-                    ),
-                }
-                assert_eq!(c.items().len(), 1);
-            });
-        });
-    }
-
-    /// Build a message with a chosen id (Message::user randomizes it, which
-    /// defeats anchor-based placement tests).
-    fn msg_with_id(id: &str, role: Role, text: &str) -> Message {
-        Message {
-            id: id.to_string(),
-            timestamp: 0,
-            parent_id: None,
-            provenance: if role == Role::User {
-                manox_agent::MessageProvenance::User
-            } else {
-                manox_agent::MessageProvenance::Assistant
+        // Leak the test constants: the env borrows for the call's lifetime,
+        // and each test builds exactly one.
+        let recipient = Box::leak(Box::new(manox_agent::MessageAuthor::Lead));
+        let host: &'static crate::host::ChatHostHandle =
+            Box::leak(Box::new(crate::host::noop_host()));
+        (
+            ProjectEnv {
+                role: "test-model",
+                recipient,
+                host,
+                cwd: None,
+                fork_source: false,
+                promoted_confirmation: None,
             },
-            role,
-            content: vec![MessageContent::Text(text.to_string())],
-            ui: None,
-        }
+            host.clone(),
+        )
     }
 
-    fn note(kind: UiNoteKind, text: &str) -> UiNoteRecord {
-        UiNoteRecord {
-            kind,
-            data: serde_json::json!({ "text": text }),
-        }
+    fn keys_of(nodes: &[Node]) -> Vec<String> {
+        nodes.iter().map(|n| n.key.to_string()).collect()
     }
 
-    fn note_with_tool(kind: UiNoteKind, text: &str, tool_call_id: &str) -> UiNoteRecord {
-        UiNoteRecord {
-            kind,
-            data: serde_json::json!({ "text": text, "tool_call_id": tool_call_id }),
-        }
-    }
+    // ── the projection's pure face: ChatState in, rows out ────────────────
 
-    /// A flat signature of each merged item, in order, for readable assertions.
-    fn signature(items: &[ConvItem]) -> Vec<String> {
-        items
-            .iter()
-            .map(|it| match it {
-                ConvItem::User { text, .. } => format!("U:{text}"),
-                ConvItem::Assistant { text, .. } => format!("A:{text}"),
-                ConvItem::Notice(t) => format!("N:{t}"),
-                ConvItem::Error(t) => format!("E:{t}"),
-                ConvItem::TurnProcess { .. } => "P".to_string(),
-                _ => "?".to_string(),
-            })
-            .collect()
-    }
-
-    /// Rebuild interleaves persisted cards at their session position: a note
-    /// recorded before any message tops the list, an error recorded between
-    /// two turns renders between them — never at the tail.
-    #[gpui::test]
-    fn rebuild_from_display_keeps_notes_at_their_persisted_position(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let display = vec![
-            HistoryEntry::Note(note(UiNoteKind::Notice, "early")),
-            HistoryEntry::Message(msg_with_id("u1", Role::User, "hello")),
-            HistoryEntry::Message(msg_with_id("a1", Role::Assistant, "hi")),
-            HistoryEntry::Note(note(UiNoteKind::Error, "boom")),
-            HistoryEntry::Message(msg_with_id("u2", Role::User, "again")),
-            HistoryEntry::Message(msg_with_id("a2", Role::Assistant, "yo")),
-        ];
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            let conv = ConversationState::rebuild_from_display(
-                &display,
-                &HashMap::new(),
-                "model",
-                manox_agent::MessageAuthor::Lead,
-                false,
-                ctx,
-                cx,
-            );
-            let kinds: Vec<ConvItem> = conv
-                .items()
-                .iter()
-                .map(|e| e.read(cx).kind().clone())
-                .collect();
-            assert_eq!(
-                signature(&kinds),
-                vec!["N:early", "U:hello", "A:hi", "E:boom", "U:again", "A:yo"]
-            );
-        });
-    }
-
-    /// Approval records (notes carrying `tool_call_id`) splice directly after
-    /// the item holding their tool call even when later turns follow; an
-    /// unresolvable tool id degrades to the tail.
-    #[gpui::test]
-    fn rebuild_from_display_splices_tool_anchored_note_after_its_tool_item(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(gpui_component::init);
-        let display = vec![
-            HistoryEntry::Message(msg_with_id("u1", Role::User, "read it")),
-            HistoryEntry::Message(Message::assistant(vec![MessageContent::ToolUse(
-                LanguageModelToolUse {
-                    id: "tu_1".to_string(),
-                    name: Arc::from("Read"),
-                    raw_input: String::new(),
-                    input: serde_json::Value::Null,
-                    is_input_complete: true,
-                    thought_signature: None,
-                },
-            )])),
-            HistoryEntry::Message(Message::user_with_content(vec![
-                MessageContent::ToolResult(LanguageModelToolResult {
-                    tool_use_id: "tu_1".to_string(),
-                    tool_name: Arc::from("Read"),
-                    is_error: false,
-                    content: "ok".to_string(),
-                }),
-            ])),
-            HistoryEntry::Note(note_with_tool(UiNoteKind::Notice, "approved", "tu_1")),
-            HistoryEntry::Message(msg_with_id("u2", Role::User, "again")),
-            HistoryEntry::Note(note_with_tool(UiNoteKind::Notice, "lost", "ghost")),
-        ];
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            let conv = ConversationState::rebuild_from_display(
-                &display,
-                &HashMap::new(),
-                "model",
-                manox_agent::MessageAuthor::Lead,
-                false,
-                ctx,
-                cx,
-            );
-            let kinds: Vec<ConvItem> = conv
-                .items()
-                .iter()
-                .map(|e| e.read(cx).kind().clone())
-                .collect();
-            assert_eq!(
-                signature(&kinds),
-                vec![
-                    "U:read it",
-                    "P",
-                    "?",          // Thinking container carrying tu_1
-                    "N:approved", // tool-anchored → right after its item
-                    "U:again",
-                    "N:lost", // unresolvable tool → tail fallback
-                ]
-            );
-        });
-    }
-
-    /// Several notes anchored to the same tool call keep emit order when
-    /// spliced after their tool item (grouped splice applied in descending
-    /// index order; one-by-one insertion at ix+1 would reverse them).
-    #[gpui::test]
-    fn rebuild_from_display_keeps_emit_order_for_notes_on_same_tool(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let display = vec![
-            HistoryEntry::Message(msg_with_id("u1", Role::User, "run")),
-            HistoryEntry::Message(Message::assistant(vec![MessageContent::ToolUse(
-                LanguageModelToolUse {
-                    id: "tu_1".to_string(),
-                    name: Arc::from("Bash"),
-                    raw_input: String::new(),
-                    input: serde_json::Value::Null,
-                    is_input_complete: true,
-                    thought_signature: None,
-                },
-            )])),
-            HistoryEntry::Message(Message::user_with_content(vec![
-                MessageContent::ToolResult(LanguageModelToolResult {
-                    tool_use_id: "tu_1".to_string(),
-                    tool_name: Arc::from("Bash"),
-                    is_error: false,
-                    content: "ok".to_string(),
-                }),
-            ])),
-            HistoryEntry::Note(note_with_tool(UiNoteKind::Notice, "first", "tu_1")),
-            HistoryEntry::Note(note_with_tool(UiNoteKind::Notice, "second", "tu_1")),
-            HistoryEntry::Message(msg_with_id("u2", Role::User, "next")),
-        ];
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            let conv = ConversationState::rebuild_from_display(
-                &display,
-                &HashMap::new(),
-                "model",
-                manox_agent::MessageAuthor::Lead,
-                false,
-                ctx,
-                cx,
-            );
-            let kinds: Vec<ConvItem> = conv
-                .items()
-                .iter()
-                .map(|e| e.read(cx).kind().clone())
-                .collect();
-            assert_eq!(
-                signature(&kinds),
-                vec![
-                    "U:run", "P", "?", // process head over the Thinking container
-                    "N:first", "N:second", "U:next",
-                ]
-            );
-        });
-    }
-
-    /// A tool_result in a user message must pair back to the ToolUse emitted in the
-    /// preceding assistant message, so a reloaded historical thread shows tool output.
+    /// The bug that motivated the projection: pure-whitespace deltas ride the
+    /// fold's accumulated content byte for byte. Nothing anywhere drops them.
     #[test]
-    fn rebuild_pairs_tool_result_in_user_message() {
-        let messages = vec![
-            Message::user("read the file".to_string()),
-            Message::assistant(vec![
-                MessageContent::Text("let me read it".to_string()),
-                MessageContent::ToolUse(LanguageModelToolUse {
-                    id: "tu_1".to_string(),
-                    name: Arc::from("Read"),
-                    raw_input: String::new(),
-                    input: serde_json::Value::Null,
-                    is_input_complete: true,
-                    thought_signature: None,
-                }),
-            ]),
-            Message::user_with_content(vec![MessageContent::ToolResult(LanguageModelToolResult {
-                tool_use_id: "tu_1".to_string(),
-                tool_name: Arc::from("Read"),
-                is_error: false,
-                content: "file contents here".to_string(),
-            })]),
-        ];
-        let items = build_items(&messages, &std::collections::HashMap::new(), false, None);
-        let tool = find_thinking_entry(&items, "tu_1").expect("tool call entry present");
-        assert_eq!(tool.output, "file contents here");
-        assert_eq!(tool.status, ToolCallStatus::Success);
-        assert!(!tool.is_error);
-        assert!(
-            !items
-                .iter()
-                .any(|i| matches!(i, ConvItem::User { text, .. } if text.is_empty()))
-        );
-    }
-
-    #[test]
-    fn rebuild_pairs_error_tool_result() {
-        let messages = vec![Message::user_with_content(vec![
-            MessageContent::ToolResult(LanguageModelToolResult {
-                tool_use_id: "tu_x".to_string(),
-                tool_name: Arc::from("Bash"),
-                is_error: true,
-                content: "boom".to_string(),
-            }),
-        ])];
-        let items = build_items(&messages, &std::collections::HashMap::new(), false, None);
-        let tool = find_thinking_entry(&items, "tu_x").expect("standalone result entry present");
-        assert_eq!(tool.output, "boom");
-        assert_eq!(tool.status, ToolCallStatus::Error);
-        assert!(tool.is_error);
-        assert_eq!(tool.name, "Bash");
-    }
-
-    /// Locate a tool-call entry by id within any `ThinkingContainer`. Used by
-    /// rebuild tests that assert against batched entries instead of top-level
-    /// `ToolCall` items.
-    fn find_thinking_entry<'a>(items: &'a [ConvItem], id: &str) -> Option<&'a ToolCallItem> {
-        items.iter().find_map(|i| match i {
-            ConvItem::Thinking(t) => t.entries.iter().find_map(|e| match e {
-                ActivityEntry::Tool(tool) if tool.id == id => Some(tool),
-                _ => None,
-            }),
+    fn whitespace_deltas_survive_byte_for_byte() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "hi"));
+        fold(&mut chat, &open_md("t-1", "p-1"));
+        let chunks = ["a", " ", "\n", "  ", "\t\n", "b", "\n\n "];
+        for chunk in chunks {
+            fold(&mut chat, &delta("t-1", "p-1", chunk));
+        }
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let joined: String = chunks.concat();
+        let answer = nodes.iter().find_map(|n| match &n.kind {
+            ConvItem::Assistant { text, .. } => Some(text.clone()),
             _ => None,
-        })
-    }
-
-    #[test]
-    fn rebuild_restores_agent_compact_metadata() {
-        let sub_messages = vec![
-            Message::user("research the foo module".to_string()),
-            Message::assistant(vec![MessageContent::Text("found 3 files".to_string())]),
-        ];
-        let envelope = serde_json::json!({
-            "final": "found 3 files",
-            "messages": sub_messages,
-        })
-        .to_string();
-        let messages = vec![
-            Message::assistant(vec![MessageContent::ToolUse(LanguageModelToolUse {
-                id: "tu_agent".to_string(),
-                name: Arc::from("Explore"),
-                raw_input: String::new(),
-                input: serde_json::json!({
-                    "description": "Inspect foo module",
-                    "prompt": "research foo"
-                }),
-                is_input_complete: true,
-                thought_signature: None,
-            })]),
-            Message::user_with_content(vec![MessageContent::ToolResult(LanguageModelToolResult {
-                tool_use_id: "tu_agent".to_string(),
-                tool_name: Arc::from("Explore"),
-                is_error: false,
-                content: envelope,
-            })]),
-        ];
-        let items = build_items(&messages, &std::collections::HashMap::new(), false, None);
-        let task = items
-            .iter()
-            .find_map(|i| match i {
-                ConvItem::AgentTask(t) if t.id == "tu_agent" => Some(t),
-                _ => None,
-            })
-            .expect("agent task item present");
+        });
         assert_eq!(
-            task.subagent_type, "Explore",
-            "the delegation TYPE is the tool name (dsh-isomorphic runtime)"
+            answer.as_deref(),
+            Some(joined.as_str()),
+            "the projected body is the exact delta concatenation"
         );
-        assert_eq!(task.description, "Inspect foo module");
-        assert_eq!(task.status, ToolCallStatus::Success);
-        assert!(!task.is_error);
     }
 
-    /// Multiple ToolUse blocks in one assistant response (a parallel batch)
-    /// rebuild as a single folded `ThinkingContainer` with one entry per call —
-    /// the live `apply` invariant that all of a response's tools share a batch.
-    /// Text flanking the batch becomes its own `Assistant` item on each side.
+    /// The display shape of one settled exchange: user row, process head
+    /// (from the state's duration), answer — with no tool activity there is
+    /// no segment and the head does not render.
     #[test]
-    fn rebuild_batches_parallel_tools_into_one_container() {
-        let messages = vec![
-            Message::user("go".to_string()),
-            Message::assistant(vec![
-                MessageContent::Text("opening two files".to_string()),
-                MessageContent::ToolUse(LanguageModelToolUse {
-                    id: "tu_a".to_string(),
-                    name: Arc::from("Read"),
-                    raw_input: String::new(),
-                    input: serde_json::Value::Null,
-                    is_input_complete: true,
-                    thought_signature: None,
-                }),
-                MessageContent::ToolUse(LanguageModelToolUse {
-                    id: "tu_b".to_string(),
-                    name: Arc::from("Read"),
-                    raw_input: String::new(),
-                    input: serde_json::Value::Null,
-                    is_input_complete: true,
-                    thought_signature: None,
-                }),
-            ]),
-            Message::user_with_content(vec![
-                MessageContent::ToolResult(LanguageModelToolResult {
-                    tool_use_id: "tu_a".to_string(),
-                    tool_name: Arc::from("Read"),
-                    is_error: false,
-                    content: "a".to_string(),
-                }),
-                MessageContent::ToolResult(LanguageModelToolResult {
-                    tool_use_id: "tu_b".to_string(),
-                    tool_name: Arc::from("Read"),
-                    is_error: false,
-                    content: "b".to_string(),
-                }),
-            ]),
-        ];
-        let items = build_items(&messages, &std::collections::HashMap::new(), false, None);
-        // Exactly one Thinking container, holding both calls in order.
-        let containers: Vec<_> = items
-            .iter()
-            .filter_map(|i| match i {
-                ConvItem::Thinking(t) => Some(t),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(containers.len(), 1, "one batch → one container");
-        let t = containers[0];
-        assert!(!t.streaming);
-        assert!(t.collapsed, "historical container auto-folds");
-        assert_eq!(t.entries.len(), 2);
-        let (ActivityEntry::Tool(e0), ActivityEntry::Tool(e1)) = (&t.entries[0], &t.entries[1])
+    fn a_plain_exchange_has_no_process_head() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "hi"));
+        fold(&mut chat, &open_md("t-1", "p-1"));
+        fold(&mut chat, &delta("t-1", "p-1", "hello"));
+        fold(&mut chat, &complete("t-1", 5_000));
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(
+            keys_of(&nodes),
+            vec!["user:t-1", "md:p-1"],
+            "a segment-free turn renders no process head"
+        );
+    }
+
+    /// A tool loop: reasoning + tool calls fold into ONE segment per
+    /// maximal run, the settled turn earns its process head above it with
+    /// the state's own duration, and the answer carries no model row.
+    #[test]
+    fn a_tool_loop_groups_into_one_segment_with_a_derived_head() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "read it"));
+        fold(&mut chat, &open_rs("t-1", "p-r1"));
+        fold(&mut chat, &reasoning_delta("t-1", "p-r1", "thinking"));
+        let tool_start: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallStart", "turnId": "t-1", "toolCallId": "tc-1",
+            "toolName": "Read", "displayName": "Read",
+            "intention": "Read AGENTS.md",
+        }))
+        .unwrap();
+        fold(&mut chat, &tool_start);
+        fold(&mut chat, &open_md("t-1", "p-1"));
+        fold(&mut chat, &delta("t-1", "p-1", "done"));
+        fold(&mut chat, &complete("t-1", 12_345));
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(
+            keys_of(&nodes),
+            vec!["user:t-1", "tp:t-1", "seg:rs:p-r1", "md:p-1"],
+            "segment = the maximal reasoning/tool run; the head sits above it"
+        );
+        let ConvItem::TurnProcess { secs, .. } = &nodes[1].kind else {
+            panic!("the second row is the process head");
+        };
+        assert_eq!(
+            *secs,
+            Some(12),
+            "the head's seconds come from turn.duration"
+        );
+        let ConvItem::Thinking(t) = &nodes[2].kind else {
+            panic!("the third row is the segment");
+        };
+        assert_eq!(t.entries.len(), 2, "the reasoning round and the tool node");
+        assert!(!t.streaming, "a settled segment is not streaming");
+        assert!(t.collapsed, "a settled segment derives folded");
+        assert_eq!(t.frozen_secs, Some(12), "the elapsed pins on the duration");
+        assert!(!nodes[3].model_repeats);
+        let ConvItem::Assistant {
+            activity_header, ..
+        } = &nodes[3].kind
         else {
-            panic!("expected tool entries");
+            panic!("the last row is the answer");
         };
-        assert_eq!(e0.id, "tu_a");
-        assert_eq!(e0.output, "a");
-        assert_eq!(e1.id, "tu_b");
-        assert_eq!(e1.output, "b");
-        // Prose precedes the container.
-        assert!(matches!(items.first(), Some(ConvItem::User { .. })));
+        assert!(activity_header, "the segment header carries the model");
     }
 
-    /// A still-running thread rebuilds with its trailing assistant bubble marked
-    /// `streaming` so resumed `AgentText` deltas append to it instead of opening
-    /// a second bubble (Bug 2). The completed path stays non-streaming.
+    /// Tool state machine: a completed call carries the state's own result
+    /// text and status; a denied/error completion is `is_error`.
     #[test]
-    fn build_items_trailing_streaming_marks_running_tail() {
-        let messages = vec![
-            Message::user("hello".to_string()),
-            Message::assistant(vec![MessageContent::Text("draft reply".to_string())]),
-        ];
-        let completed = build_items(&messages, &std::collections::HashMap::new(), false, None);
-        match completed.last().unwrap() {
-            ConvItem::Assistant { streaming, .. } => {
-                assert!(!*streaming, "completed tail not streaming")
-            }
-            _ => panic!("trailing item is an assistant bubble"),
+    fn tool_state_lowering_carries_status_and_output() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "x"));
+        let tool_start: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallStart", "turnId": "t-1", "toolCallId": "tc-1",
+            "toolName": "Read", "displayName": "Read", "intention": "Read it",
+        }))
+        .unwrap();
+        fold(&mut chat, &tool_start);
+        let ready: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallReady", "turnId": "t-1", "toolCallId": "tc-1",
+            "invocationMessage": "Read it",
+            "toolInput": "{\"path\": \"a.rs\"}",
+            "confirmed": "not-needed",
+        }))
+        .unwrap();
+        fold(&mut chat, &ready);
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let ConvItem::Thinking(t) = &nodes[1].kind else {
+            panic!("the tool folds into a segment");
+        };
+        let Some(ActivityEntry::Tool(entry)) = t.entries.first() else {
+            panic!("the tool is an entry");
+        };
+        assert_eq!(entry.status, ToolCallStatus::Running);
+        assert_eq!(entry.input["path"], "a.rs");
+        assert!(t.streaming, "the active turn keeps the segment live");
+        assert!(!t.collapsed, "a live segment derives expanded");
+
+        let done: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallComplete", "turnId": "t-1", "toolCallId": "tc-1",
+            "result": {
+                "success": true,
+                "pastTenseMessage": "Read it",
+                "content": [{ "type": "text", "text": "fn main() {}" }],
+            },
+        }))
+        .unwrap();
+        fold(&mut chat, &done);
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let ConvItem::Thinking(t) = &nodes[1].kind else {
+            panic!("still a segment");
+        };
+        let Some(ActivityEntry::Tool(entry)) = t.entries.first() else {
+            panic!("still the tool entry");
+        };
+        assert_eq!(entry.status, ToolCallStatus::Success);
+        assert_eq!(entry.output, "fn main() {}");
+        assert!(!entry.is_error);
+    }
+
+    /// An elicitation part renders the ask card: pending while the response
+    /// is absent, settled once it lands.
+    #[test]
+    fn an_input_request_projects_the_ask_card() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "ask"));
+        let requested: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/inputRequested", "turnId": "t-1",
+            "request": {
+                "id": "q-1",
+                "questions": [{
+                    "kind": "single-select", "id": "q", "title": "Pick",
+                    "message": "Which one?",
+                    "options": [{ "id": "a", "label": "A" }],
+                }],
+            },
+        }))
+        .unwrap();
+        fold(&mut chat, &requested);
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(
+            keys_of(&nodes),
+            vec!["user:t-1", "ir:q-1"],
+            "the ask card is the request part"
+        );
+        let ConvItem::ToolCall(card) = &nodes[1].kind else {
+            panic!("the ask card is a tool card");
+        };
+        assert_eq!(card.status, ToolCallStatus::PendingApproval);
+        assert_eq!(card.input["requestId"], "q-1");
+
+        let completed: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/inputCompleted", "turnId": "t-1", "requestId": "q-1",
+            "response": "accept",
+        }))
+        .unwrap();
+        fold(&mut chat, &completed);
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let ConvItem::ToolCall(card) = &nodes[1].kind else {
+            panic!("still the ask card");
+        };
+        assert_eq!(card.status, ToolCallStatus::Success);
+    }
+
+    /// An ask-SHAPED tool call (the runtime's own clarify call) is a
+    /// top-level card, never a segment entry.
+    #[test]
+    fn an_ask_shaped_tool_call_is_a_top_level_card() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "ask"));
+        let tool_start: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallStart", "turnId": "t-1", "toolCallId": "tc-9",
+            "toolName": "AskUserQuestion", "displayName": "AskUserQuestion",
+            "intention": "Clarify",
+        }))
+        .unwrap();
+        fold(&mut chat, &tool_start);
+        let ready: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallReady", "turnId": "t-1", "toolCallId": "tc-9",
+            "invocationMessage": "Clarify",
+            "toolInput": "{\"questions\": []}",
+        }))
+        .unwrap();
+        fold(&mut chat, &ready);
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(keys_of(&nodes), vec!["user:t-1", "tc:tc-9"]);
+    }
+
+    /// System notifications and error parts render keyed per (turn, index) —
+    /// the part id they do not carry. The error part reaches the state at
+    /// turn-end (the reducer drops Error parts on the wire action and
+    /// attaches them when the turn archives), so the fixture state is
+    /// written directly.
+    #[test]
+    fn notices_and_errors_key_on_turn_and_index() {
+        let chat: ChatState = serde_json::from_value(serde_json::json!({
+            "resource": "ahp-chat:/c-test",
+            "title": "test",
+            "status": 0,
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "turns": [{
+                "id": "t-1",
+                "startedAt": "2026-01-01T00:00:00Z",
+                "message": { "text": "x", "origin": { "kind": "user" } },
+                "responseParts": [
+                    { "kind": "systemNotification", "content": "note" },
+                    { "kind": "error",
+                      "error": { "errorType": "e", "message": "boom" } },
+                ],
+                "state": "error",
+            }],
+        }))
+        .expect("the fixture parses");
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(
+            keys_of(&nodes),
+            vec!["user:t-1", "notice:t-1:1", "err:t-1:2"],
+            "the keys are (turn, 1-based part index)"
+        );
+    }
+
+    /// Adjacent segments of one turn repeat the model only when it changed:
+    /// model_repeats is a pure derivation over the emitted order.
+    #[test]
+    fn model_repeats_is_derived_not_stored() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "x"));
+        for (rs, md) in [("p-r1", "p-m1"), ("p-r2", "p-m2")] {
+            fold(&mut chat, &open_rs("t-1", rs));
+            fold(&mut chat, &reasoning_delta("t-1", rs, "think"));
+            fold(&mut chat, &open_md("t-1", md));
+            fold(&mut chat, &delta("t-1", md, "partial"));
         }
-        let running = build_items(&messages, &std::collections::HashMap::new(), true, None);
-        match running.last().unwrap() {
-            ConvItem::Assistant { streaming, .. } => {
-                assert!(*streaming, "running tail is streaming")
-            }
-            _ => panic!("trailing item is an assistant bubble"),
-        }
-    }
-
-    /// `StopReason::ToolUse` does NOT freeze the activity segment: after a
-    /// ToolUse stop, `accepting_entries` stays true and `streaming` stays
-    /// true so the next model response's tool calls fold into the same
-    /// segment. Only a terminal stop (`EndTurn`) freezes it. This exercises
-    /// the `ThinkingContainer` state transitions that the `Stop` arm drives
-    /// via `finalize_streaming(terminal)` + `recompute_streaming`.
-    #[test]
-    fn tool_use_stop_does_not_freeze_segment() {
-        let mut t = ThinkingContainer::new();
-        // A streaming reasoning round (the model thought before emitting the
-        // tool call) plus the terminal tool entry.
-        t.entries.push(ActivityEntry::Reasoning {
-            id: next_reasoning_entry_id(),
-            text: "round 1".into(),
-            streaming: true,
-            collapsed: false,
-            user_toggled: false,
-            markdown: None,
-        });
-        t.entries.push(ActivityEntry::Tool(ToolCallItem {
-            id: "1".into(),
-            name: "Read".into(),
-            title: String::new(),
-            status: ToolCallStatus::Success,
-            output: String::new(),
-            is_error: false,
-            input: serde_json::Value::Null,
-            streaming: false,
-            collapsed: false,
-            user_toggled: false,
-            panel: None,
-            card: None,
-            cwd: None,
-        }));
-        // All entries terminal, but segment is still accepting (turn in progress).
-        t.recompute_streaming();
-        assert!(t.accepting_entries, "segment still accepting entries");
-        assert!(t.streaming, "segment stays live while accepting entries");
-        assert!(t.frozen_secs.is_none(), "elapsed not pinned mid-turn");
-
-        // Simulate the Stop(ToolUse) path: `finalize_streaming(false)` runs
-        // `finalize_reasoning_rounds` — the round's `streaming` flips off so
-        // the next `AgentThinking` opens a fresh round instead of appending to
-        // this one — but the segment stays open for the next response's tool
-        // calls. (The full `MessageItem::finalize_streaming` needs an entity;
-        // we exercise the segment-level invariant directly.)
-        t.finalize_reasoning_rounds();
-        assert!(
-            t.last_streaming_reasoning_index().is_none(),
-            "reasoning round closed; next AgentThinking starts a fresh round"
-        );
-        assert!(
-            t.accepting_entries,
-            "segment still accepting after ToolUse stop"
-        );
-        assert!(t.streaming, "segment stays live while accepting entries");
-        assert!(t.frozen_secs.is_none(), "elapsed not pinned mid-turn");
-
-        // Now the terminal stop path: finalize_segment freezes.
-        t.finalize_segment();
-        t.recompute_streaming();
-        assert!(!t.accepting_entries, "segment closed on terminal stop");
-        assert!(!t.streaming, "segment frozen on terminal stop");
-        assert!(t.frozen_secs.is_some(), "elapsed pinned on terminal stop");
-    }
-    /// `close_for_text` stops accepting entries (so subsequent
-    /// `AgentThinking` opens a fresh segment), finalizes any still-streaming
-    /// reasoning rounds (idempotent with `finalize_reasoning_rounds`, which a
-    /// mid-turn `Stop(ToolUse)` already ran), and pins the elapsed timer — but
-    /// does NOT auto-collapse (mid-turn, the user may be inspecting the tree).
-    /// This is the live-path mirror of `build_items`'s `close_segment` on
-    /// `MessageContent::Text` (issue #216).
-    #[test]
-    fn close_for_text_stops_accepting_entries() {
-        let mut t = ThinkingContainer::new();
-        t.entries.push(ActivityEntry::Reasoning {
-            id: next_reasoning_entry_id(),
-            text: "round 1".into(),
-            streaming: true, // still-live if finalize_reasoning_rounds was skipped
-            collapsed: false,
-            user_toggled: false,
-            markdown: None,
-        });
-        t.entries.push(ActivityEntry::Tool(ToolCallItem {
-            id: "1".into(),
-            name: "Read".into(),
-            title: String::new(),
-            status: ToolCallStatus::Success,
-            output: String::new(),
-            is_error: false,
-            input: serde_json::Value::Null,
-            streaming: false,
-            collapsed: false,
-            user_toggled: false,
-            panel: None,
-            card: None,
-            cwd: None,
-        }));
-        t.recompute_streaming();
-        assert!(t.accepting_entries);
-        assert!(t.streaming, "segment live while reasoning streaming");
-
-        t.close_for_text();
-        assert!(!t.accepting_entries, "segment closed for text");
-        assert!(!t.streaming, "segment not streaming after close");
-        assert!(t.frozen_secs.is_some(), "elapsed pinned");
-        // Reasoning entry finalized → last_streaming_reasoning_index returns None.
-        assert!(
-            t.last_streaming_reasoning_index().is_none(),
-            "reasoning finalized, new round would start"
-        );
-    }
-
-    /// `finalize_reasoning_rounds` (the segment-level half of a mid-turn
-    /// `Stop(ToolUse)`) flips every streaming reasoning round's `streaming`
-    /// flag off so the next `AgentThinking` opens a fresh round, WITHOUT
-    /// closing the segment — `accepting_entries` stays true, `streaming` stays
-    /// true, and the elapsed timer stays unpinned.
-    #[test]
-    fn finalize_reasoning_rounds_closes_round_keeps_segment_open() {
-        let mut t = ThinkingContainer::new();
-        t.entries.push(ActivityEntry::Reasoning {
-            id: next_reasoning_entry_id(),
-            text: "round 1".into(),
-            streaming: true,
-            collapsed: false,
-            user_toggled: false,
-            markdown: None,
-        });
-        t.entries.push(ActivityEntry::Tool(ToolCallItem {
-            id: "1".into(),
-            name: "Read".into(),
-            title: String::new(),
-            status: ToolCallStatus::Success,
-            output: String::new(),
-            is_error: false,
-            input: serde_json::Value::Null,
-            streaming: false,
-            collapsed: false,
-            user_toggled: false,
-            panel: None,
-            card: None,
-            cwd: None,
-        }));
-        t.recompute_streaming();
-        assert!(t.streaming, "segment live while reasoning streaming");
-
-        t.finalize_reasoning_rounds();
-
-        // The reasoning round is closed: no streaming round remains, so the
-        // next AgentThinking starts a fresh round instead of appending here.
-        assert!(
-            t.last_streaming_reasoning_index().is_none(),
-            "streaming round finalized"
-        );
-        match &t.entries[0] {
-            ActivityEntry::Reasoning { streaming, .. } => {
-                assert!(!*streaming, "round's streaming flag flipped off");
-            }
-            _ => panic!("first entry is not reasoning"),
-        }
-        // The segment itself stays open for the next model response's tool
-        // calls: accepting_entries/streaming stay true, elapsed not pinned.
-        assert!(t.accepting_entries, "segment still accepting entries");
-        assert!(t.streaming, "segment stays live while accepting entries");
-        assert!(t.frozen_secs.is_none(), "elapsed not pinned mid-turn");
-
-        // Idempotent: a second call is a no-op.
-        t.finalize_reasoning_rounds();
-        assert!(t.accepting_entries);
-        assert!(t.streaming);
-        assert!(t.frozen_secs.is_none());
-    }
-
-    /// `last_streaming_reasoning_index` returns the index of the last streaming
-    /// reasoning entry, or `None` when no reasoning is active.
-    #[test]
-    fn last_streaming_reasoning_index_finds_active_round() {
-        let mut t = ThinkingContainer::new();
-        assert!(t.last_streaming_reasoning_index().is_none());
-
-        // Push a non-streaming reasoning entry.
-        t.entries.push(ActivityEntry::Reasoning {
-            id: next_reasoning_entry_id(),
-            text: "done".into(),
-            streaming: false,
-            collapsed: true,
-            user_toggled: false,
-            markdown: None,
-        });
-        assert!(t.last_streaming_reasoning_index().is_none());
-
-        // Push a streaming reasoning entry.
-        t.entries.push(ActivityEntry::Reasoning {
-            id: next_reasoning_entry_id(),
-            text: "active".into(),
-            streaming: true,
-            collapsed: false,
-            user_toggled: false,
-            markdown: None,
-        });
-        assert_eq!(t.last_streaming_reasoning_index(), Some(1));
-
-        // A tool entry after it does not affect the search.
-        t.entries.push(ActivityEntry::Tool(ToolCallItem {
-            id: "t1".into(),
-            name: "Bash".into(),
-            title: String::new(),
-            status: ToolCallStatus::Running,
-            output: String::new(),
-            is_error: false,
-            input: serde_json::Value::Null,
-            streaming: true,
-            collapsed: false,
-            user_toggled: false,
-            panel: None,
-            card: None,
-            cwd: None,
-        }));
-        // Still finds the streaming reasoning at index 1.
-        assert_eq!(t.last_streaming_reasoning_index(), Some(1));
-    }
-
-    /// `get_tool_entry_mut` finds tool entries by id and skips reasoning entries.
-    #[test]
-    fn get_tool_entry_mut_skips_reasoning() {
-        let mut t = ThinkingContainer::new();
-        t.entries.push(ActivityEntry::Reasoning {
-            id: next_reasoning_entry_id(),
-            text: "thinking".into(),
-            streaming: false,
-            collapsed: true,
-            user_toggled: false,
-            markdown: None,
-        });
-        t.entries.push(ActivityEntry::Tool(ToolCallItem {
-            id: "tu_1".into(),
-            name: "Read".into(),
-            title: String::new(),
-            status: ToolCallStatus::Success,
-            output: String::new(),
-            is_error: false,
-            input: serde_json::Value::Null,
-            streaming: false,
-            collapsed: false,
-            user_toggled: false,
-            panel: None,
-            card: None,
-            cwd: None,
-        }));
-        assert!(t.get_tool_entry_mut("tu_1").is_some());
-        assert!(t.get_tool_entry_mut("nonexistent").is_none());
-    }
-
-    /// The two id spaces `find_entry_index` resolves are disjoint by
-    /// construction: a reasoning round carries the UI-minted
-    /// `reasoning:{uuid}`, and no wire tool-call id can address it.
-    #[test]
-    fn reasoning_entry_ids_do_not_collide_with_protocol_tool_call_ids() {
-        let minted = next_reasoning_entry_id();
-        let (namespace, suffix) = minted.split_once(':').expect("namespaced id");
-        assert_eq!(namespace, "reasoning");
-        uuid::Uuid::parse_str(suffix).expect("uuid-suffixed mint");
-        assert_ne!(
-            minted,
-            next_reasoning_entry_id(),
-            "each round mints a fresh id"
-        );
-
-        let mut t = ThinkingContainer::new();
-        t.entries.push(ActivityEntry::Reasoning {
-            id: minted.clone(),
-            text: "round".into(),
-            streaming: false,
-            collapsed: true,
-            user_toggled: false,
-            markdown: None,
-        });
-        // A wire id in the counter shape a naive mint would have produced:
-        // it must address the tool entry, never the reasoning round.
-        t.entries.push(ActivityEntry::Tool(ToolCallItem {
-            id: "reasoning-0".into(),
-            name: "Read".into(),
-            title: String::new(),
-            status: ToolCallStatus::Success,
-            output: String::new(),
-            is_error: false,
-            input: serde_json::Value::Null,
-            streaming: false,
-            collapsed: false,
-            user_toggled: false,
-            panel: None,
-            card: None,
-            cwd: None,
-        }));
-        assert_eq!(t.find_entry_index(&minted), Some(0));
-        assert_eq!(t.find_entry_index("reasoning-0"), Some(1));
-        assert_eq!(t.find_entry_index("reasoning-1"), None);
-
-        // The wire-id-driven `item_contains_tool` path is the same lookup: a
-        // segment holding only reasoning rounds reports no tool for any wire
-        // id of the old counter shape.
-        let mut solo = ThinkingContainer::new();
-        solo.entries.push(ActivityEntry::Reasoning {
-            id: next_reasoning_entry_id(),
-            text: "round".into(),
-            streaming: false,
-            collapsed: true,
-            user_toggled: false,
-            markdown: None,
-        });
-        assert!(
-            !item_contains_tool(&ConvItem::Thinking(solo), "reasoning-0"),
-            "a wire id must never read a reasoning round as a tool entry"
-        );
-    }
-
-    /// Joined reasoning text of a segment's reasoning rounds, for ordering
-    /// assertions.
-    fn reasoning_text(t: &ThinkingContainer) -> String {
-        t.entries
+        fold(&mut chat, &complete("t-1", 1_000));
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let repeats: Vec<bool> = nodes
             .iter()
-            .filter_map(|e| match e {
-                ActivityEntry::Reasoning { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("|")
-    }
-
-    fn stale_segment_conv(
-        cx: &mut gpui::TestAppContext,
-    ) -> (gpui::Entity<ConversationState>, ApplyCtx) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        let ctx = ApplyCtx {
-            host: host.clone(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.push_user(
-                    "first".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(1, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                // A turn whose segment was left accepting entries because it
-                // ended without a terminal `Stop` (provider error that only
-                // emitted `Error`, or a stream that closed without
-                // `MessageStop`).
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("old".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        (conversation, ctx)
-    }
-
-    /// A new user message is a hard segment boundary: the next turn's
-    /// thinking must open a fresh segment *below* the bubble, not fold into
-    /// the stale accepting segment sitting above it (which would render above
-    /// the message the user just sent). `find_active_activity_segment` ignores
-    /// segments above the most recent user bubble.
-    #[gpui::test]
-    fn agent_thinking_after_user_message_does_not_fold_into_stale_segment(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (conversation, ctx) = stale_segment_conv(cx);
-        let host = ctx.host.clone();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.push_user(
-                    "second".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(2, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("new".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                // [U(first), T(old), U(second), T(new)]
-                assert_eq!(c.items().len(), 4);
-                let stale = match c.items()[1].read(cx).kind() {
-                    ConvItem::Thinking(t) => reasoning_text(t),
-                    _ => panic!("expected Thinking at index 1"),
-                };
-                assert_eq!(
-                    stale, "old",
-                    "stale segment above the bubble must not absorb the new turn's thinking"
-                );
-                let fresh = match c.items()[3].read(cx).kind() {
-                    ConvItem::Thinking(t) => reasoning_text(t),
-                    _ => panic!("expected Thinking at index 3"),
-                };
-                assert_eq!(
-                    fresh, "new",
-                    "new turn's thinking must open a fresh segment below the user bubble"
-                );
-            });
-        });
-    }
-
-    /// A settled steer is also a user-message boundary: the steered user bubble
-    /// must not have the turn's subsequent thinking fold into the segment above
-    /// it. Mirrors the rebuild path's `close_segment` on a prompt.
-    #[gpui::test]
-    fn agent_thinking_after_steered_user_message_does_not_fold_into_segment_above(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (conversation, ctx) = stale_segment_conv(cx);
-        let host = ctx.host.clone();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let mut meta = UserTurnMeta::new(2, "model".into(), None);
-                meta.steered = true;
-                c.push_user("adjust".into(), Vec::new(), meta, host.clone(), cx);
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("b".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                // [U(first), T(a="old"), U(steer), T(b)]
-                assert_eq!(c.items().len(), 4);
-                let pre = match c.items()[1].read(cx).kind() {
-                    ConvItem::Thinking(t) => reasoning_text(t),
-                    _ => panic!("expected Thinking at index 1"),
-                };
-                assert_eq!(pre, "old");
-                let post = match c.items()[3].read(cx).kind() {
-                    ConvItem::Thinking(t) => reasoning_text(t),
-                    _ => panic!("expected Thinking at index 3"),
-                };
-                assert_eq!(
-                    post, "b",
-                    "post-steer thinking must open a fresh segment below the steer bubble"
-                );
-            });
-        });
-    }
-
-    /// A tool call is the other code path that folds into the active activity
-    /// segment (`find_active_activity_segment`). It must respect the same
-    /// user-message boundary as `AgentThinking`: a `ToolCall` after a new user
-    /// message opens a fresh segment below the bubble instead of folding into
-    /// the stale accepting segment above it.
-    #[gpui::test]
-    fn tool_call_after_user_message_does_not_fold_into_stale_segment(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (conversation, ctx) = stale_segment_conv(cx);
-        let host = ctx.host.clone();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.push_user(
-                    "second".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(2, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_new".into(),
-                        name: "Read".into(),
-                        title: "Read file".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                // [U(first), T(old), U(second), T(tool)]
-                assert_eq!(c.items().len(), 4);
-                // Stale segment kept its reasoning round, gained no tool entry.
-                let stale = match c.items()[1].read(cx).kind() {
-                    ConvItem::Thinking(t) => t,
-                    _ => panic!("expected Thinking at index 1"),
-                };
-                assert_eq!(reasoning_text(stale), "old");
-                assert!(
-                    stale.find_entry_index("tu_new").is_none(),
-                    "stale segment above the bubble must not absorb the new turn's tool call"
-                );
-                // New segment holds the tool call.
-                let fresh = match c.items()[3].read(cx).kind() {
-                    ConvItem::Thinking(t) => t,
-                    _ => panic!("expected Thinking at index 3"),
-                };
-                assert!(
-                    fresh.find_entry_index("tu_new").is_some(),
-                    "new turn's tool call must open a fresh segment below the user bubble"
-                );
-            });
-        });
-    }
-
-    /// `TurnFinished` is the authoritative end-of-turn boundary and the
-    /// backstop for turns that ended without a terminal `Stop` (a provider
-    /// error emits only `Error`; a stream can close without `MessageStop`).
-    /// It must seal any still-accepting segment so the elapsed pins and the
-    /// spinner stops, and report a remeasure so the list's height cache stays
-    /// honest.
-    #[gpui::test]
-    fn turn_finished_seals_stale_accepting_segment(cx: &mut gpui::TestAppContext) {
-        let (conversation, ctx) = stale_segment_conv(cx);
-        let outcome = cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.apply(
-                    &ThreadEvent::TurnFinished {
-                        cancelled: false,
-                        failed: true,
-                        stranded_steer_ids: Vec::new(),
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                )
-            })
-        });
-        assert!(
-            matches!(outcome, ApplyOutcome::RemeasureAll),
-            "sealing a stale segment must remeasure, got {outcome:?}"
+            .filter(|n| matches!(n.kind, ConvItem::Thinking(_)))
+            .map(|n| n.model_repeats)
+            .collect();
+        assert_eq!(
+            repeats,
+            vec![false, true],
+            "the second segment of the same turn repeats the model"
         );
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| match c.items()[1].read(cx).kind() {
-                ConvItem::Thinking(t) => {
-                    assert!(
-                        !t.accepting_entries,
-                        "TurnFinished must seal the stale segment"
-                    );
-                    assert!(!t.streaming);
-                }
-                _ => panic!("expected Thinking at index 1"),
-            });
-        });
     }
 
+    /// Refusal notices render once per server seq, keyed, at the tail.
     #[test]
-    fn agent_task_labels_read_the_real_delegation_shape() {
-        // The runtime's delegation call carries `description` + `prompt` and
-        // takes its TYPE from the tool name; a blank description falls back to
-        // the shared topic derivation.
-        assert!(is_agent_task_call(Some(&serde_json::json!({
-            "description": "",
-            "prompt": "find the auth module"
-        }))));
-        let (subagent_type, description) = agent_task_labels(
-            "Explore",
-            &serde_json::json!({ "description": "", "prompt": "find the auth module" }),
+    fn refusal_notices_survive_re_projection() {
+        let (env, _host) = env();
+        let mut overlays = Overlays {
+            refusals: vec![
+                crate::transcript::RefusalNotice {
+                    seq: 7,
+                    text: "rejected: nope".into(),
+                    turn_id: None,
+                },
+                crate::transcript::RefusalNotice {
+                    seq: 9,
+                    text: "rejected: again".into(),
+                    turn_id: None,
+                },
+            ],
+            ..Overlays::default()
+        };
+        let nodes = project(None, &mut overlays, &env);
+        assert_eq!(keys_of(&nodes), vec!["notice:rej:7", "notice:rej:9"]);
+        // The same table handed over again (any later store notify while the
+        // turn streams) must still render both rows: the seq-keyed identity
+        // keeps them in place rather than letting one pass consume them.
+        let nodes = project(None, &mut overlays, &env);
+        assert_eq!(
+            keys_of(&nodes),
+            vec!["notice:rej:7", "notice:rej:9"],
+            "a refusal row survives re-projection"
         );
-        assert_eq!(subagent_type, "Explore");
-        assert_eq!(description, "find the auth module");
+    }
 
-        let (_, description) = agent_task_labels(
-            "Explore",
-            &serde_json::json!({ "description": "review PR", "prompt": "ignored" }),
+    // ── the reconcile face: gpui entities, in-place updates, adoption ─────
+
+    type ConvEntity = gpui::Entity<ConversationState>;
+
+    fn projected(cx: &mut gpui::App, chat: &ChatState) -> ConvEntity {
+        let (env, _host) = env();
+        let recipient = manox_agent::MessageAuthor::Lead;
+        let mut conversation = ConversationState::new(recipient);
+        let nodes = conversation.stage(Some(chat), &env);
+        conversation.reconcile(nodes, &env, cx);
+        cx.new(|_| conversation)
+    }
+
+    fn resync(conversation: &ConvEntity, chat: &ChatState, cx: &mut gpui::App) -> ProjectionChange {
+        let (env, _host) = env();
+        conversation.update(cx, |c, cx| {
+            let nodes = c.stage(Some(chat), &env);
+            c.reconcile(nodes, &env, cx)
+        })
+    }
+
+    #[gpui::test]
+    fn a_streaming_delta_updates_the_row_in_place(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "hi"));
+        fold(&mut chat, &open_md("t-1", "p-1"));
+        fold(&mut chat, &delta("t-1", "p-1", "hel"));
+        let conversation = cx.update(|cx| projected(cx, &chat));
+        let keys = cx.read(|cx| conversation.read(cx).keys().to_vec());
+        assert_eq!(
+            keys,
+            vec![ItemKey::User("t-1".into()), ItemKey::Answer("p-1".into())]
         );
-        assert_eq!(description, "review PR");
 
-        // The retired Steer envelope and non-delegation inputs stay out.
-        assert!(!is_agent_task_call(Some(&serde_json::json!({
-            "description": "x",
-            "prompt": "y",
-            "to": "member"
-        }))));
-        assert!(!is_agent_task_call(Some(
-            &serde_json::json!({ "path": "/tmp" })
-        )));
-        assert!(!is_agent_task_call(None));
+        fold(&mut chat, &delta("t-1", "p-1", "lo "));
+        fold(&mut chat, &delta("t-1", "p-1", "world"));
+        let change = cx.update(|cx| resync(&conversation, &chat, cx));
+        assert!(!change.count_changed, "the answer row updates in place");
+        let text = cx.read(|cx| conversation.read(cx).items()[1].read(cx).kind().clone());
+        let ConvItem::Assistant { text, .. } = text else {
+            panic!("an answer row");
+        };
+        assert_eq!(text, "hello world");
     }
 
-    /// A live reasoning round opens expanded so the stream plays out
-    /// (vscode-extension parity); restored-history segments mount collapsed.
     #[gpui::test]
-    fn live_reasoning_round_opens_expanded(cx: &mut gpui::TestAppContext) {
+    fn a_settling_turn_folds_the_segment_immediately(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let outcome = c.apply(
-                    &ThreadEvent::AgentThinking("thinking...".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert!(matches!(outcome, ApplyOutcome::Appended));
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                let ActivityEntry::Reasoning {
-                    collapsed,
-                    streaming,
-                    ..
-                } = &t.entries[0]
-                else {
-                    panic!("expected reasoning entry");
-                };
-                assert!(!collapsed, "live reasoning round plays open");
-                assert!(streaming);
-            });
-        });
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "x"));
+        fold(&mut chat, &open_rs("t-1", "p-r1"));
+        fold(&mut chat, &reasoning_delta("t-1", "p-r1", "think"));
+        let conversation = cx.update(|cx| projected(cx, &chat));
+        let streaming = cx.read(
+            |cx| match conversation.read(cx).items()[1].read(cx).kind() {
+                ConvItem::Thinking(t) => t.streaming,
+                _ => panic!("a segment"),
+            },
+        );
+        assert!(streaming, "live while the turn runs");
+
+        fold(&mut chat, &complete("t-1", 4_000));
+        let change = cx.update(|cx| resync(&conversation, &chat, cx));
+        assert!(change.any(), "the settle mutates the rows");
+        let (streaming, collapsed) =
+            cx.read(
+                |cx| match conversation.read(cx).items()[2].read(cx).kind() {
+                    ConvItem::Thinking(t) => (t.streaming, t.collapsed),
+                    _ => panic!("a segment"),
+                },
+            );
+        // The turn landed in `turns`, so the row is now the segment at a new
+        // index (the head inserted above it).
+        assert!(!streaming, "settled");
+        assert!(collapsed, "the derived fold is immediate — no 1s timer");
     }
 
-    /// A live tool entry opens expanded while in flight (Running); the
-    /// restored-history rebuild path still mounts collapsed.
-    /// A tool call arrives as two journal rows: the start row carries the
-    /// arguments and the title derived from them, the settle row carries neither
-    /// (`input: null`, and the bare tool name as its title). Applying both must
-    /// leave the row showing its arguments — otherwise every `Read` / `Grep` /
-    /// `Edit` row degrades to a bare tool name the moment it finishes.
     #[gpui::test]
-    fn a_settled_tool_call_keeps_its_argument_title(cx: &mut gpui::TestAppContext) {
+    fn an_optimistic_bubble_is_adopted_by_its_turn(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Read".into(),
-                        title: "Read src/lib.rs".into(),
-                        status: ToolCallStatus::Running,
-                        input: Some(serde_json::json!({ "path": "src/lib.rs" })),
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                // The settle row, as the wire sends it: no payload, bare name.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Read".into(),
-                        title: "Read".into(),
-                        status: ToolCallStatus::Success,
-                        input: None,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
+        let (env, _host) = env();
+        let conversation = cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead));
+        conversation.update(&mut *cx, |c, cx| {
+            c.push_optimistic_user(
+                None,
+                crate::transcript::OverlayBubbleSeed {
+                    text: "send one".into(),
+                    images: Vec::new(),
+                    meta: UserTurnMeta::new(0, "test-model".into(), None),
+                    turn_id: None,
+                },
+                &env,
+                cx,
+            );
         });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected a thinking segment");
-                };
-                let ActivityEntry::Tool(entry) = &t.entries[0] else {
-                    panic!("expected a tool entry");
-                };
-                assert_eq!(
-                    entry.title, "Read src/lib.rs",
-                    "the settle row must not erase the arguments"
-                );
-                assert_eq!(
-                    entry.input["path"], "src/lib.rs",
-                    "the start row's arguments must survive the settle row"
-                );
-            });
+        let keys = cx.read(|cx| conversation.read(cx).keys().to_vec());
+        assert_eq!(keys, vec![ItemKey::Optimistic(0)]);
+
+        // The turn lands with the exact text: the state row adopts the
+        // bubble's entity (the entrance animation and element ids survive).
+        let item_before = cx.read(|cx| conversation.read(cx).items()[0].clone());
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "send one"));
+        cx.update(|cx| resync(&conversation, &chat, cx));
+        let item_after = cx.read(|cx| conversation.read(cx).items()[0].clone());
+        let keys = cx.read(|cx| conversation.read(cx).keys().to_vec());
+        assert_eq!(keys, vec![ItemKey::User("t-1".into())]);
+        assert_eq!(
+            item_before, item_after,
+            "adoption reuses the bubble's entity"
+        );
+
+        // A second send of the same text parks a fresh bubble. The text
+        // fallback pairs it only with a turn minted AFTER the bubble (a
+        // steer waking its own run), so the earlier turn cannot swallow it.
+        conversation.update(&mut *cx, |c, cx| {
+            c.push_optimistic_user(
+                Some(&chat),
+                crate::transcript::OverlayBubbleSeed {
+                    text: "send one".into(),
+                    images: Vec::new(),
+                    meta: UserTurnMeta::new(1, "test-model".into(), None),
+                    turn_id: None,
+                },
+                &env,
+                cx,
+            );
         });
+        // The turn that adopted the first bubble completes; the next one
+        // starts (a real turn ends before the next begins — an abandoned
+        // active turn is replaced in the fold, not archived).
+        fold(&mut chat, &complete("t-1", 1_000));
+        fold(&mut chat, &start("t-2", "send one"));
+        cx.update(|cx| resync(&conversation, &chat, cx));
+        let keys = cx.read(|cx| conversation.read(cx).keys().to_vec());
+        assert_eq!(
+            keys,
+            vec![ItemKey::User("t-1".into()), ItemKey::User("t-2".into())],
+            "the second send pairs with the turn minted after it, never with t-1"
+        );
     }
 
-    /// A live tool entry folds by default even while running: the title
-    /// row names the call, and only a manual expansion opens the body.
-    #[gpui::test]
-    fn live_tool_entry_folds_by_default(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Bash".into(),
-                        title: "cargo build".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                let ActivityEntry::Tool(entry) = &t.entries[0] else {
-                    panic!("expected tool entry");
-                };
-                assert!(entry.collapsed, "a live tool folds by default");
-                assert!(entry.streaming, "the streaming flag still tracks the run");
-            });
-        });
+    /// A parked call the workspace promotes renders as its decision card and
+    /// nothing else — never the card plus its own segment entry back to back.
+    /// (Review probe `probe_promoted_confirmation_renders_once`.)
+    #[test]
+    fn a_promoted_confirmation_renders_once() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "run it"));
+        let tool: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallStart", "turnId": "t-1", "toolCallId": "tc-1",
+            "toolName": "Bash", "displayName": "Bash", "intention": "rm -rf build",
+        }))
+        .unwrap();
+        fold(&mut chat, &tool);
+        let ask: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallReady", "turnId": "t-1", "toolCallId": "tc-1",
+            "invocationMessage": "rm -rf build",
+        }))
+        .unwrap();
+        fold(&mut chat, &ask);
+        fold(&mut chat, &open_md("t-1", "p-1"));
+        fold(&mut chat, &delta("t-1", "p-1", "done"));
+
+        let (env_plain, _h1) = env();
+        let mut overlays = Overlays::default();
+        let plain = keys_of(&project(Some(&chat), &mut overlays, &env_plain));
+        assert!(
+            plain.iter().any(|k| k == "seg:tc-1"),
+            "unpromoted: the call sits in its segment: {plain:?}"
+        );
+
+        let (mut env_promoted, _h2) = env();
+        env_promoted.promoted_confirmation = Some("tc-1");
+        let mut overlays = Overlays::default();
+        let promoted = keys_of(&project(Some(&chat), &mut overlays, &env_promoted));
+        assert_eq!(
+            promoted.iter().filter(|k| k.as_str() == "tc:tc-1").count(),
+            1,
+            "the card renders once: {promoted:?}"
+        );
+        assert!(
+            !promoted.iter().any(|k| k == "seg:tc-1"),
+            "and not also as its own segment entry: {promoted:?}"
+        );
     }
 
-    /// The result landing does NOT fold the pair (not even after the old
-    /// 1s delay — that trigger is gone): the call and its result stay an
-    /// open pair until the NEXT node arrives.
+    /// A re-sent wording is not swallowed by the archived turn that already
+    /// carried it: the fresh bubble stays on screen until its own turn
+    /// lands. (Review probe `probe_resend_does_not_adopt_the_older_turn`.)
     #[gpui::test]
-    fn the_result_landing_does_not_fold_the_pair(cx: &mut gpui::TestAppContext) {
+    fn a_resend_does_not_adopt_an_older_turn(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
+        let (env, _host) = env();
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "继续"));
+        fold(&mut chat, &open_md("t-1", "p-1"));
+        fold(&mut chat, &delta("t-1", "p-1", "好的"));
+        fold(&mut chat, &complete("t-1", 1_000));
+        let conversation = cx.update(|cx| projected(cx, &chat));
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::User("t-1".into()), ItemKey::Answer("p-1".into())]
+        );
+
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("planning".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Read".into(),
-                        title: "Read a.rs".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
+                c.push_optimistic_user(
+                    Some(&chat),
+                    crate::transcript::OverlayBubbleSeed {
+                        text: "继续".into(),
+                        images: Vec::new(),
+                        meta: UserTurnMeta::new(2_000, "test-model".into(), None),
+                        turn_id: None,
                     },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolResult {
-                        id: "tu_1".into(),
-                        output: "contents".into(),
-                        is_error: false,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
+                    &env,
                     cx,
                 );
             });
         });
-        // The tool folds by default; pin it open the way a click does, then
-        // let the old delayed-collapse window pass — the result landing
-        // never folds a pinned pair.
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![
+                ItemKey::User("t-1".into()),
+                ItemKey::Answer("p-1".into()),
+                ItemKey::Optimistic(0),
+            ],
+            "the fresh send keeps its own row instead of being absorbed by t-1"
+        );
+
+        // Its own turn lands and adopts it.
+        fold(&mut chat, &start("t-2", "继续"));
+        cx.update(|cx| resync(&conversation, &chat, cx));
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![
+                ItemKey::User("t-1".into()),
+                ItemKey::Answer("p-1".into()),
+                ItemKey::User("t-2".into()),
+            ],
+            "the bubble pairs with the turn minted after it"
+        );
+    }
+
+    /// A `/skill`-shaped send: the bubble shows the compact invocation while
+    /// the journal folds the expanded body. The minted turn id pairs them.
+    #[gpui::test]
+    fn an_identity_bubble_adopts_a_turn_with_a_different_body(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (env, _host) = env();
+        let conversation = cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead));
+        let mut chat = empty_chat();
         cx.update(|cx| {
             conversation.update(cx, |c, cx| {
-                if let Some(item) = c.items().first() {
-                    item.update(cx, |item, cx| {
-                        if let ConvItem::Thinking(t) = item.kind_mut()
-                            && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(1)
-                        {
-                            entry.collapsed = false;
-                            entry.user_toggled = true;
-                        }
-                        cx.notify();
-                    });
+                c.push_optimistic_user(
+                    Some(&chat),
+                    crate::transcript::OverlayBubbleSeed {
+                        text: "/skill demo".into(),
+                        images: Vec::new(),
+                        meta: UserTurnMeta::new(0, "test-model".into(), None),
+                        turn_id: Some("t-expanded".into()),
+                    },
+                    &env,
+                    cx,
+                );
+            });
+        });
+        // The host journals the macro's expansion, not the compact form.
+        fold(
+            &mut chat,
+            &start("t-expanded", "# Skill: demo\n\nfull body…"),
+        );
+        cx.update(|cx| resync(&conversation, &chat, cx));
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::User("t-expanded".into())],
+            "identity adoption never looks at the text"
+        );
+    }
+
+    /// A refused submit retires the bubble that turn was minted for, so the
+    /// notice explains something instead of standing beside a phantom row.
+    #[gpui::test]
+    fn a_refusal_retires_the_bubble_it_refused(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (env, _host) = env();
+        let conversation = cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead));
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                c.push_optimistic_user(
+                    None,
+                    crate::transcript::OverlayBubbleSeed {
+                        text: "dropped".into(),
+                        images: Vec::new(),
+                        meta: UserTurnMeta::new(0, "test-model".into(), None),
+                        turn_id: Some("t-refused".into()),
+                    },
+                    &env,
+                    cx,
+                );
+            });
+        });
+        cx.update(|cx| {
+            conversation.update(cx, |c, cx| {
+                c.absorb_refusals(vec![crate::transcript::RefusalNotice {
+                    seq: 7,
+                    text: "rejected: nope".into(),
+                    turn_id: Some("t-refused".into()),
+                }]);
+                c.project(None, &env, cx);
+            });
+        });
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::Notice("rej:7".into())],
+            "the refused bubble leaves; only the notice remains"
+        );
+    }
+
+    /// The host re-keys a turn when it re-folds it (`t-{entry}` instead of the
+    /// client's id). Identity alone would strand the bubble, so the text
+    /// fallback covers id-bearing bubbles too — still only above `minted_turns`.
+    #[gpui::test]
+    fn a_rewritten_turn_id_still_adopts_by_text(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut chat = empty_chat();
+        // An older turn with the very same body: the guard must keep the
+        // fallback off it.
+        fold(&mut chat, &start("t-0", "hello"));
+        fold(&mut chat, &complete("t-0", 1_000));
+        let conversation = cx.update(|cx| projected(cx, &chat));
+        let (env, _host) = env();
+        conversation.update(&mut *cx, |c, cx| {
+            c.push_optimistic_user(
+                Some(&chat),
+                crate::transcript::OverlayBubbleSeed {
+                    text: "hello".into(),
+                    images: Vec::new(),
+                    meta: UserTurnMeta::new(0, "test-model".into(), None),
+                    turn_id: Some("uuid-client".into()),
+                },
+                &env,
+                cx,
+            );
+        });
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::User("t-0".into()), ItemKey::Optimistic(0)],
+            "the older turn must not claim the re-sent text"
+        );
+
+        // The host re-keys the turn it started for our submit.
+        fold(&mut chat, &start("t-7", "hello"));
+        cx.update(|cx| resync(&conversation, &chat, cx));
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::User("t-0".into()), ItemKey::User("t-7".into())],
+            "the rewritten id still adopts the bubble"
+        );
+    }
+
+    /// A re-delivered refusal (the store's table drains, so the same seq is
+    /// recorded again) must not project a second row under the same key.
+    #[gpui::test]
+    fn a_redelivered_refusal_renders_one_row(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation = cx.update(|cx| projected(cx, &empty_chat()));
+        let (env, _host) = env();
+        for _ in 0..2 {
+            conversation.update(&mut *cx, |c, cx| {
+                c.absorb_refusals(vec![crate::transcript::RefusalNotice {
+                    seq: 7,
+                    text: "rejected: nope".into(),
+                    turn_id: None,
+                }]);
+                let nodes = c.stage(None, &env);
+                c.reconcile(nodes, &env, cx);
+            });
+        }
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::Notice("rej:7".into())],
+            "one seq, one row"
+        );
+    }
+
+    #[gpui::test]
+    fn reconcile_reports_the_diff_decisions(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "hi"));
+        let conversation = cx.update(|cx| projected(cx, &chat));
+
+        // Append: count changes, nothing remeasures in place.
+        fold(&mut chat, &open_md("t-1", "p-1"));
+        fold(&mut chat, &delta("t-1", "p-1", "hey"));
+        let change = cx.update(|cx| resync(&conversation, &chat, cx));
+        assert!(change.count_changed);
+        assert!(
+            change.changed.is_empty(),
+            "an append mutates no existing row"
+        );
+        assert!(!change.structural);
+
+        // Content change on the tail: precise remeasure, no count change.
+        fold(&mut chat, &delta("t-1", "p-1", " there"));
+        let change = cx.update(|cx| resync(&conversation, &chat, cx));
+        assert!(!change.count_changed);
+        assert_eq!(change.changed, vec![1], "the answer row remeasures");
+        assert!(!change.structural);
+
+        // No-op fold: nothing at all.
+        let change = cx.update(|cx| resync(&conversation, &chat, cx));
+        assert!(!change.any(), "an idempotent projection is a no-op");
+    }
+
+    #[gpui::test]
+    fn user_toggles_survive_re_projection(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "x"));
+        fold(&mut chat, &open_rs("t-1", "p-r1"));
+        fold(&mut chat, &reasoning_delta("t-1", "p-r1", "think"));
+        let conversation = cx.update(|cx| projected(cx, &chat));
+
+        // The user pins the round open (the render layer's in-place toggle).
+        cx.update(|cx| {
+            let item = conversation.read(cx).items()[1].clone();
+            item.update(cx, |item, _| {
+                if let ConvItem::Thinking(t) = item.kind_mut()
+                    && let Some(ActivityEntry::Reasoning {
+                        collapsed,
+                        user_toggled,
+                        ..
+                    }) = t.entries.first_mut()
+                {
+                    *collapsed = false;
+                    *user_toggled = true;
                 }
             });
         });
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(2000));
-        cx.run_until_parked();
-        cx.read(|cx| {
-            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
-                panic!("expected thinking item");
-            };
-            assert!(
-                matches!(&t.entries[1], ActivityEntry::Tool(t) if !t.collapsed),
-                "the result landing does not fold a pinned pair, even after the delay"
-            );
-        });
-        // The next node (a fresh reasoning round) folds it.
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::Stop(StopReason::ToolUse),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("round 2".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
-                panic!("expected thinking item");
-            };
-            assert!(
-                matches!(&t.entries[1], ActivityEntry::Tool(t) if !t.collapsed),
-                "the next node does not fold a user-pinned pair"
-            );
-            assert!(
-                matches!(
-                    &t.entries[0],
-                    ActivityEntry::Reasoning {
-                        collapsed: true,
+
+        // The settle folds everything unpinned — the pin survives.
+        fold(&mut chat, &complete("t-1", 1_000));
+        cx.update(|cx| resync(&conversation, &chat, cx));
+        let pinned_open = cx.read(
+            |cx| match conversation.read(cx).items()[2].read(cx).kind() {
+                ConvItem::Thinking(t) => match t.entries.first() {
+                    Some(ActivityEntry::Reasoning {
+                        collapsed,
+                        user_toggled,
                         ..
-                    }
-                ),
-                "the first round folds too"
-            );
-            assert!(
-                matches!(
-                    &t.entries[2],
-                    ActivityEntry::Reasoning {
-                        collapsed: false,
-                        ..
-                    }
-                ),
-                "the new round owns the stage"
-            );
-        });
+                    }) => *user_toggled && !*collapsed,
+                    _ => false,
+                },
+                _ => panic!("a segment"),
+            },
+        );
+        assert!(
+            pinned_open,
+            "user_toggled always wins over the derived fold"
+        );
     }
 
-    /// B2-PR-2 live-path fixture: an `AskUserQuestion` top-level card whose
-    /// `ToolResult` event carries the canonical answers JSON deposits that
-    /// string into `ToolCallItem.output` verbatim — the same payload the
-    /// answered card folds through `ask_answer_markdown` (mirror of the
-    /// rebuild path's journal-translate fixture).
-    #[gpui::test]
-    fn ask_tool_result_output_is_deposited_verbatim(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        let canonical = r#"{"answers":[{"id":"a1","selected":["Blue"]}]}"#;
-        let host = ctx.host.clone();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.push_tool_call(
-                    ToolCallItem {
-                        id: "ask1".into(),
-                        name: manox_agent::tools::ASK_USER_QUESTION.into(),
-                        title: "Clarifying question".into(),
-                        status: ToolCallStatus::PendingApproval,
-                        output: String::new(),
-                        is_error: false,
-                        input: serde_json::json!({"questions": []}),
-                        streaming: false,
-                        collapsed: false,
-                        user_toggled: false,
-                        panel: None,
-                        card: None,
-                        cwd: None,
-                    },
-                    "model".into(),
-                    host,
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolResult {
-                        id: "ask1".into(),
-                        output: canonical.into(),
-                        is_error: false,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ix = c.find_tool("ask1", cx).expect("ask tool item present");
-                let ConvItem::ToolCall(entry) = c.items()[ix].read(cx).kind() else {
-                    panic!("expected a tool call item");
-                };
-                assert_eq!(
-                    entry.output, canonical,
-                    "live path deposits the canonical JSON"
-                );
-            });
-        });
-    }
+    // ── the one-shot equivalence reference ─────────────────────────────────
+    //
+    /// The retired dual path (a `HistoryEntry` display lowered by the old
+    /// `ItemBuilder`) reimplemented here at fixture scale, so the projection's
+    /// output can be compared against what a rebuild used to produce. This
+    /// reference dies with the PR that introduced the projection — it exists
+    /// to prove the convergence, then it is dead weight.
+    mod reference {
+        use super::*;
 
-    /// A user-toggle pins the entry: the delayed collapse is skipped and the
-    /// entry stays in the user's chosen state.
-    #[gpui::test]
-    fn user_toggled_entry_skips_auto_collapse(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Bash".into(),
-                        title: "cargo build".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolResult {
-                        id: "tu_1".into(),
-                        output: "built".into(),
-                        is_error: false,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        // Pin the entry open (what a title-row click does: flip + pin).
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.items[0].update(cx, |item, cx| {
-                    if let ConvItem::Thinking(t) = item.kind_mut()
-                        && let Some(ActivityEntry::Tool(entry)) = t.entries.get_mut(0)
-                    {
-                        entry.collapsed = false;
-                        entry.user_toggled = true;
-                    }
-                    cx.notify();
-                });
-            });
-        });
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(1000));
-        cx.run_until_parked();
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                let ActivityEntry::Tool(entry) = &t.entries[0] else {
-                    panic!("expected tool entry");
-                };
-                assert!(!entry.collapsed, "user-pinned entry stays open");
-            });
-        });
-    }
-
-    /// A reasoning round stops streaming at a mid-turn `Stop(ToolUse)` and
-    /// auto-collapses ~1s later — the round plays out before folding.
-    #[gpui::test]
-    fn reasoning_round_auto_collapses_after_tool_use_stop(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("round 1".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::Stop(StopReason::ToolUse),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                let ActivityEntry::Reasoning {
-                    collapsed,
-                    streaming,
-                    ..
-                } = &t.entries[0]
-                else {
-                    panic!("expected reasoning entry");
-                };
-                assert!(!streaming);
-                assert!(
-                    !collapsed,
-                    "round still expanded right after the ToolUse stop"
-                );
-            });
-        });
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(1000));
-        cx.run_until_parked();
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                let ActivityEntry::Reasoning { collapsed, .. } = &t.entries[0] else {
-                    panic!("expected reasoning entry");
-                };
-                assert!(collapsed, "round folds ~1s after it stops streaming");
-            });
-        });
-    }
-
-    /// The newest entry owns the stage during a live stream: the entry
-    /// before it folds the moment the next one arrives, unless the user
-    /// pinned it open (manual expansion is sticky).
-    #[gpui::test]
-    fn a_new_entry_folds_the_preceding_unless_pinned(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("round 1".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                // The tool's arrival folds the reasoning round before it.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Bash".into(),
-                        title: "cargo build".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
-                panic!("segment item");
+        /// The old rebuild's segment rule: tool uses aggregate into one
+        /// segment per turn until a text block closes it.
+        pub(super) fn lower(chat: &ChatState) -> Vec<ConvItem> {
+            let mut items = Vec::new();
+            let turn = chat.turns.first();
+            let Some(turn) = turn else {
+                return items;
             };
-            assert!(
-                matches!(
-                    &t.entries[0],
-                    ActivityEntry::Reasoning {
-                        collapsed: true,
-                        ..
-                    }
-                ),
-                "the round folds when the tool arrives"
-            );
-            assert!(
-                matches!(&t.entries[1], ActivityEntry::Tool(t) if t.collapsed),
-                "the arriving tool folds by default (its title row names it)"
-            );
-        });
-
-        // Pin the round open the way a click does, then start a new round:
-        // the pinned round keeps its stage, the tool folds instead.
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                if let Some(item) = c.items().first() {
-                    item.update(cx, |item, cx| {
-                        if let ConvItem::Thinking(t) = item.kind_mut()
-                            && let ActivityEntry::Reasoning {
-                                collapsed,
-                                user_toggled,
-                                ..
-                            } = &mut t.entries[0]
-                        {
-                            *collapsed = false;
-                            *user_toggled = true;
-                        }
-                        cx.notify();
-                    });
+            items.push(ConvItem::User {
+                text: turn.message.text.clone(),
+                images: Vec::new(),
+                meta: None,
+            });
+            let mut segment: Vec<ActivityEntry> = Vec::new();
+            let close = |items: &mut Vec<ConvItem>, segment: &mut Vec<ActivityEntry>| {
+                if !segment.is_empty() {
+                    let mut container = ThinkingContainer::new();
+                    container.entries = std::mem::take(segment);
+                    container.accepting_entries = false;
+                    container.streaming = false;
+                    container.collapsed = false;
+                    items.push(ConvItem::Thinking(container));
                 }
-                let _ = c.apply(
-                    &ThreadEvent::Stop(StopReason::ToolUse),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("round 2".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
-                panic!("segment item");
             };
-            assert!(
-                matches!(
-                    &t.entries[0],
-                    ActivityEntry::Reasoning {
-                        collapsed: false,
-                        user_toggled: true,
-                        ..
-                    }
-                ),
-                "the pinned round keeps its stage"
-            );
-            assert!(
-                matches!(&t.entries[1], ActivityEntry::Tool(t) if t.collapsed),
-                "the unpinned tool folds for the new round"
-            );
-            assert!(t.entries.len() == 3, "round 2 opened");
-        });
-    }
-
-    /// The status strip's projection: a streaming body reads Replying, the
-    /// trailing segment's live entry names Thinking or the tool's one-line
-    /// summary, and a settled tail reads None.
-    #[gpui::test]
-    fn live_activity_tracks_the_trailing_turn(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.read(|cx| {
-            assert_eq!(conversation.read(cx).live_activity(cx), None);
-        });
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("thinking…".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            assert_eq!(
-                conversation.read(cx).live_activity(cx),
-                Some(LiveActivity::Thinking)
-            );
-        });
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Bash".into(),
-                        title: "cargo build".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            assert_eq!(
-                conversation.read(cx).live_activity(cx),
-                Some(LiveActivity::Tool("cargo build".into()))
-            );
-        });
-        // A streaming reply is the trailing turn's face.
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentText("answer".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            assert_eq!(
-                conversation.read(cx).live_activity(cx),
-                Some(LiveActivity::Replying)
-            );
-        });
-    }
-
-    /// A tool entry folds by default — the title row already names the
-    /// call — and a manual expansion is sticky: neither the result landing
-    /// nor the next node re-folds a user-pinned entry.
-    #[gpui::test]
-    fn a_tool_entry_folds_by_default_and_a_pin_is_sticky(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Read".into(),
-                        title: "Read src/lib.rs".into(),
-                        status: ToolCallStatus::Success,
-                        input: None,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolResult {
-                        id: "tu_1".into(),
-                        output: "file body".into(),
-                        is_error: false,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        let pin = |cx: &mut gpui::TestAppContext| {
-            cx.update(|cx| {
-                conversation.update(cx, |c, cx| {
-                    if let Some(item) = c.items().first() {
-                        item.update(cx, |item, cx| {
-                            if let ConvItem::Thinking(t) = item.kind_mut()
-                                && let Some(ActivityEntry::Tool(entry)) = t.entries.first_mut()
-                            {
-                                entry.collapsed = false;
-                                entry.user_toggled = true;
-                            }
-                            cx.notify();
+            for part in &turn.response_parts {
+                match part {
+                    ahp_types::state::ResponsePart::Markdown(md) if !md.content.is_empty() => {
+                        close(&mut items, &mut segment);
+                        items.push(ConvItem::Assistant {
+                            text: md.content.clone(),
+                            streaming: false,
+                            token_usage: None,
+                            activity_header: false,
+                            entry_id: None,
+                            fork_unavailable: None,
                         });
                     }
-                });
-            });
-        };
-        cx.read(|cx| {
-            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
-                panic!("segment item");
-            };
-            assert!(
-                matches!(&t.entries[0], ActivityEntry::Tool(t) if t.collapsed),
-                "a tool folds by default, whatever its first status"
-            );
-        });
-        // A user pin opens it, and neither the elapsed window nor the next
-        // node re-folds it.
-        pin(cx);
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(2000));
-        cx.run_until_parked();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("round 2".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let ConvItem::Thinking(t) = conversation.read(cx).items()[0].read(cx).kind() else {
-                panic!("segment item");
-            };
-            assert!(
-                matches!(&t.entries[0], ActivityEntry::Tool(t) if !t.collapsed),
-                "a user-pinned entry stays open"
-            );
-        });
-    }
-
-    /// A live ask card survives its tool call's lifecycle events. The card
-    /// row is seeded pending by the live elicitation; the tool's own
-    /// lifecycle advances (ready → running, and the streaming state's
-    /// nameless catch-all) must not rename it into a generic row nor drop
-    /// its pending face — the interactive gate IS `PendingApproval`, and
-    /// only the answer's result settles it.
-    #[gpui::test]
-    fn a_live_ask_card_survives_its_tool_lifecycle_events(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        let ask = manox_agent::tools::ASK_USER_QUESTION.to_string();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                // 1. The live elicitation seeds the card row.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "call_1".into(),
-                        name: ask.clone(),
-                        title: "Clarify".into(),
-                        status: ToolCallStatus::PendingApproval,
-                        input: Some(serde_json::json!({"questions": []})),
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                // 2. The lifecycle advance (ready → running).
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "call_1".into(),
-                        name: ask.clone(),
-                        title: "Clarify".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                // 3. The streaming state's advance, historically nameless.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "call_1".into(),
-                        name: String::new(),
-                        title: String::new(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let item = c.items()[0].read(cx);
-            let ConvItem::ToolCall(t) = item.kind() else {
-                panic!("the card row survives as a top-level tool card");
-            };
-            assert_eq!(t.name, ask, "the lifecycle advances must not wipe the name");
-            assert_eq!(t.title, "Clarify", "the argument-derived title stays");
-            assert_eq!(
-                t.status,
-                ToolCallStatus::PendingApproval,
-                "the open card keeps its interactive face"
-            );
-        });
-        // 4. The answer settles it through the result.
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::ToolResult {
-                        id: "call_1".into(),
-                        output: "answered".into(),
-                        is_error: false,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let item = c.items()[0].read(cx);
-            let ConvItem::ToolCall(t) = item.kind() else {
-                panic!("the card row survives as a top-level tool card");
-            };
-            assert_eq!(
-                t.status,
-                ToolCallStatus::Success,
-                "the answer settles the card"
-            );
-            assert_eq!(t.output, "answered");
-        });
-    }
-
-    /// A Preview call is a user-facing artifact: it mints a top-level card
-    /// (no activity segment spawns around it), its lifecycle advances ride
-    /// the ordinary absorb path against that row, and the result's outcome
-    /// metadata line lands in `output` for the renderer.
-    #[gpui::test]
-    fn a_live_preview_call_is_a_top_level_card(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        let preview_name = crate::preview::TOOL_NAME.to_string();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                // 1. The start event seeds the top-level card.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "pc_1".into(),
-                        name: preview_name.clone(),
-                        title: "Preview".into(),
-                        status: ToolCallStatus::Running,
-                        input: Some(serde_json::json!({"path": "docs/a.md"})),
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                // 2. A nameless lifecycle advance rides the absorb path.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "pc_1".into(),
-                        name: String::new(),
-                        title: String::new(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                // 3. The result settles it with the outcome metadata line.
-                let _ = c.apply(
-                    &ThreadEvent::ToolResult {
-                        id: "pc_1".into(),
-                        output: crate::preview::encode_outcome(&crate::preview::PreviewOutcome {
-                            path: "/abs/docs/a.md".into(),
-                            kind: crate::preview::PreviewKind::Markdown,
-                            bytes: 42,
-                        }),
-                        is_error: false,
-                    },
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            assert_eq!(
-                c.items().len(),
-                1,
-                "no parallel activity segment spawns for a preview"
-            );
-            let item = c.items()[0].read(cx);
-            let ConvItem::ToolCall(t) = item.kind() else {
-                panic!("the preview stays a top-level tool card");
-            };
-            assert_eq!(
-                t.name, preview_name,
-                "the nameless advance must not wipe the name"
-            );
-            assert_eq!(
-                t.input,
-                serde_json::json!({"path": "docs/a.md"}),
-                "the argument-derived input stays"
-            );
-            assert_eq!(t.status, ToolCallStatus::Success);
-            let outcome = crate::preview::parse_outcome(&t.output).expect("outcome decodes");
-            assert_eq!(outcome.path, std::path::Path::new("/abs/docs/a.md"));
-            assert_eq!(outcome.kind, crate::preview::PreviewKind::Markdown);
-        });
-    }
-
-    /// The terminal auto-collapse that folds an ordinary tool card ~1s after
-    /// its result never touches a preview card — the rendered body is the
-    /// artifact the user was shown.
-    #[gpui::test]
-    fn a_preview_card_never_auto_collapses(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "pc_1".into(),
-                        name: crate::preview::TOOL_NAME.to_string(),
-                        title: "Preview".into(),
-                        status: ToolCallStatus::Running,
-                        input: Some(serde_json::json!({"path": "a.png"})),
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolResult {
-                        id: "pc_1".into(),
-                        output: crate::preview::encode_outcome(&crate::preview::PreviewOutcome {
-                            path: "/abs/a.png".into(),
-                            kind: crate::preview::PreviewKind::Image,
-                            bytes: 7,
-                        }),
-                        is_error: false,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        // Let the delayed auto-collapse window pass — the preview card must
-        // still be the open artifact.
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(2000));
-        cx.run_until_parked();
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let item = c.items()[0].read(cx);
-            let ConvItem::ToolCall(t) = item.kind() else {
-                panic!("the preview stays a top-level tool card");
-            };
-            assert_eq!(t.status, ToolCallStatus::Success);
-            assert!(
-                !t.collapsed && !t.user_toggled,
-                "a preview artifact never auto-collapses"
-            );
-        });
-    }
-
-    /// A settled turn gains the whole-turn process head above its first
-    /// segment (folded by default); the fold hides the turn's segments —
-    /// a render-layer overlay the reply never joins — and a manual expand
-    /// un-hides them.
-    #[gpui::test]
-    fn a_settled_turn_gains_a_process_head_that_hides_its_segments(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("plan".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::AgentText("answer".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::Stop(StopReason::EndTurn),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            // The head mounts EXPANDED: folding is the reader's call.
-            assert!(matches!(
-                c.items()[0].read(cx).kind(),
-                ConvItem::TurnProcess {
-                    collapsed: false,
-                    ..
-                }
-            ));
-            // The turn's only segment is the answer-facing one: the overlay
-            // never hides it, folded head or not.
-            let seg_ix = c
-                .items()
-                .iter()
-                .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
-                .expect("segment");
-            assert!(!c.hidden_by_turn_process(seg_ix, cx));
-        });
-        // Fold the head: the answer-facing (last) segment stays visible.
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.items[0].update(cx, |item, cx| {
-                    if let ConvItem::TurnProcess {
-                        collapsed,
-                        user_toggled,
-                        ..
-                    } = item.kind_mut()
+                    ahp_types::state::ResponsePart::Reasoning(reasoning)
+                        if !reasoning.content.is_empty() =>
                     {
-                        *collapsed = true;
-                        *user_toggled = true;
+                        segment.push(ActivityEntry::Reasoning {
+                            id: crate::transcript::reasoning_entry_id(&reasoning.id),
+                            text: reasoning.content.clone(),
+                            streaming: false,
+                            collapsed: false,
+                            user_toggled: false,
+                            markdown: None,
+                        });
                     }
-                    cx.notify();
-                });
-            });
-        });
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let seg_ix = c
-                .items()
-                .iter()
-                .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
-                .expect("segment");
-            assert!(
-                !c.hidden_by_turn_process(seg_ix, cx),
-                "the answer-facing segment survives a folded head"
-            );
-        });
-        // A manual expand un-hides.
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.items[0].update(cx, |item, cx| {
-                    if let ConvItem::TurnProcess {
-                        collapsed,
-                        user_toggled,
-                        ..
-                    } = item.kind_mut()
-                    {
-                        *collapsed = false;
-                        *user_toggled = true;
-                    }
-                    cx.notify();
-                });
-            });
-        });
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let seg_ix = c
-                .items()
-                .iter()
-                .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
-                .expect("segment");
-            assert!(!c.hidden_by_turn_process(seg_ix, cx));
-        });
-    }
-
-    /// Under a folded head, every segment of the turn hides EXCEPT the
-    /// last one (the answer-facing reasoning, dsh's answer-anchor rule).
-    #[gpui::test]
-    fn a_folded_head_hides_all_but_the_answer_facing_segment(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                // Two segments split by the reply text.
-                for round in ["one", "two"] {
-                    let _ = c.apply(
-                        &ThreadEvent::AgentThinking(round.into()),
-                        "m",
-                        None,
-                        ctx.clone(),
-                        cx,
-                    );
-                    let _ = c.apply(
-                        &ThreadEvent::AgentText(format!("answer {round}")),
-                        "m",
-                        None,
-                        ctx.clone(),
-                        cx,
-                    );
-                }
-                let _ = c.apply(
-                    &ThreadEvent::Stop(StopReason::EndTurn),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.items[0].update(cx, |item, cx| {
-                    if let ConvItem::TurnProcess {
-                        collapsed,
-                        user_toggled,
-                        ..
-                    } = item.kind_mut()
-                    {
-                        *collapsed = true;
-                        *user_toggled = true;
-                    }
-                    cx.notify();
-                });
-            });
-        });
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let segs: Vec<usize> = c
-                .items()
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
-                .map(|(ix, _)| ix)
-                .collect();
-            assert_eq!(segs.len(), 2);
-            assert!(
-                c.hidden_by_turn_process(segs[0], cx),
-                "an earlier segment hides under the folded head"
-            );
-            assert!(
-                !c.hidden_by_turn_process(segs[1], cx),
-                "the answer-facing segment stays visible"
-            );
-        });
-    }
-
-    /// The process head's fold is scoped to its OWN turn: folding turn
-    /// one's head must not hide turn two's segments (the audit caught a
-    /// cross-turn leak in the first implementation).
-    #[gpui::test]
-    fn a_folded_head_never_reaches_into_a_later_turn(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                // Turn one: one segment. Turn two: TWO segments — its first
-                // one is not the answer-facing (last) segment, so a leaked
-                // fold from turn one would hide it.
-                for (turn, rounds) in [("one", 1), ("two", 2)] {
-                    for round in 0..rounds {
-                        let _ = c.apply(
-                            &ThreadEvent::AgentThinking(format!("round {turn}-{round}")),
-                            "m",
-                            None,
-                            ctx.clone(),
-                            cx,
-                        );
-                        let _ = c.apply(
-                            &ThreadEvent::AgentText(format!("answer {turn}-{round}")),
-                            "m",
-                            None,
-                            ctx.clone(),
-                            cx,
-                        );
-                    }
-                    let _ = c.apply(
-                        &ThreadEvent::Stop(StopReason::EndTurn),
-                        "m",
-                        None,
-                        ctx.clone(),
-                        cx,
-                    );
-                }
-            });
-        });
-        // Fold turn one's head only.
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let heads: Vec<usize> = c
-                    .items()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| matches!(e.read(cx).kind(), ConvItem::TurnProcess { .. }))
-                    .map(|(ix, _)| ix)
-                    .collect();
-                assert_eq!(heads.len(), 2, "each settled turn carries a head");
-                let first = heads[0];
-                c.items[first].update(cx, |item, cx| {
-                    if let ConvItem::TurnProcess { collapsed, .. } = item.kind_mut() {
-                        *collapsed = true;
-                    }
-                    cx.notify();
-                });
-            });
-        });
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let segs: Vec<usize> = c
-                .items()
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
-                .map(|(ix, _)| ix)
-                .collect();
-            assert_eq!(segs.len(), 3, "one segment in turn one, two in turn two");
-            assert!(
-                !c.hidden_by_turn_process(segs[0], cx),
-                "turn one's answer-facing segment stays visible under its own folded head"
-            );
-            assert!(
-                !c.hidden_by_turn_process(segs[1], cx),
-                "turn two's FIRST segment is outside turn one's fold"
-            );
-        });
-    }
-
-    /// A segment's header only shows a model the nearest earlier segment
-    /// has not already shown: repeated segments across a turn's text
-    /// boundaries stay nameless (a turn does not stack its own model).
-    #[gpui::test]
-    fn a_repeated_segment_model_does_not_redisplay(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("one".into()),
-                    "same-model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                // The text boundary closes the segment; the next thinking
-                // opens a second one with the SAME model.
-                let _ = c.apply(
-                    &ThreadEvent::AgentText("answer".into()),
-                    "same-model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("two".into()),
-                    "same-model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let items = conversation.read(cx).items();
-            let thinking: Vec<usize> = items
-                .iter()
-                .enumerate()
-                .filter(|(_, i)| matches!(i.read(cx).kind(), ConvItem::Thinking(_)))
-                .map(|(ix, _)| ix)
-                .collect();
-            assert_eq!(thinking.len(), 2, "the text boundary split the segments");
-            assert!(
-                !items[thinking[0]].read(cx).model_repeats,
-                "the first segment names the model"
-            );
-            assert!(
-                items[thinking[1]].read(cx).model_repeats,
-                "the repeated model does not re-display"
-            );
-        });
-    }
-
-    /// A blank live text delta is not a boundary: no empty assistant bubble,
-    /// no segment close — thinking across it stays one segment.
-    #[gpui::test]
-    fn a_blank_text_delta_is_not_a_boundary(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("round 1".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let outcome = c.apply(
-                    &ThreadEvent::AgentText("   ".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert!(matches!(outcome, ApplyOutcome::Unchanged));
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("round 2".into()),
-                    "m",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.read(|cx| {
-            let items = conversation.read(cx).items();
-            assert_eq!(items.len(), 1, "no assistant bubble for the blank delta");
-            let ConvItem::Thinking(t) = items[0].read(cx).kind() else {
-                panic!("segment item");
-            };
-            assert!(
-                t.entries
-                    .iter()
-                    .all(|e| matches!(e, ActivityEntry::Reasoning { .. })),
-                "the blank delta keeps the segment whole"
-            );
-        });
-    }
-
-    /// A terminal stop schedules the delayed auto-collapse for every expanded
-    /// entry — both the finished reasoning round and the completed tool call.
-    #[gpui::test]
-    fn terminal_stop_auto_collapse_is_delayed(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let _ = c.apply(
-                    &ThreadEvent::AgentThinking("round 1".into()),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Bash".into(),
-                        title: "cargo build".into(),
-                        status: ToolCallStatus::Running,
-                        input: None,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolResult {
-                        id: "tu_1".into(),
-                        output: "built".into(),
-                        is_error: false,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::Stop(StopReason::EndTurn),
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let seg_ix = c
-                    .items()
-                    .iter()
-                    .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
-                    .expect("the turn's segment survives under the head");
-                let ConvItem::Thinking(t) = c.items()[seg_ix].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                // The reasoning round already folded when the tool arrived
-                // (the newest entry owns the stage); the tool entry is the
-                // one still open right after the terminal stop, waiting on
-                // the delayed fold.
-                assert!(
-                    matches!(
-                        &t.entries[0],
-                        ActivityEntry::Reasoning {
+                    ahp_types::state::ResponsePart::ToolCall(call) => {
+                        let state = &call.tool_call;
+                        let (name, output, success) = match state {
+                            ahp_types::state::ToolCallState::Completed(c) => (
+                                c.tool_name.clone(),
+                                crate::transcript::tool_result_text(c.content.as_deref()),
+                                c.success,
+                            ),
+                            ahp_types::state::ToolCallState::Running(r) => {
+                                (r.tool_name.clone(), String::new(), true)
+                            }
+                            _ => (String::new(), String::new(), true),
+                        };
+                        segment.push(ActivityEntry::Tool(ToolCallItem {
+                            id: crate::transcript::tool_call_id_of(state).to_string(),
+                            name,
+                            title: String::new(),
+                            status: if matches!(
+                                state,
+                                ahp_types::state::ToolCallState::Completed(_)
+                            ) {
+                                if success {
+                                    ToolCallStatus::Success
+                                } else {
+                                    ToolCallStatus::Error
+                                }
+                            } else {
+                                ToolCallStatus::Running
+                            },
+                            output,
+                            is_error: !success,
+                            input: serde_json::Value::Null,
+                            streaming: !matches!(
+                                state,
+                                ahp_types::state::ToolCallState::Completed(_)
+                            ),
                             collapsed: true,
-                            ..
-                        }
+                            user_toggled: false,
+                            panel: None,
+                            card: None,
+                            cwd: None,
+                        }));
+                    }
+                    ahp_types::state::ResponsePart::SystemNotification(note) => {
+                        close(&mut items, &mut segment);
+                        items.push(ConvItem::Notice(note.content.as_text().to_string()));
+                    }
+                    _ => {}
+                }
+            }
+            close(&mut items, &mut segment);
+            items
+        }
+
+        /// Structural equality the two vocabularies can share: kind shape,
+        /// order, and content text.
+        pub(super) fn shape(items: &[ConvItem]) -> Vec<String> {
+            items
+                .iter()
+                .map(|item| match item {
+                    ConvItem::User { text, .. } => format!("user:{text}"),
+                    ConvItem::Assistant { text, .. } => format!("answer:{text}"),
+                    ConvItem::Thinking(t) => format!(
+                        "segment:{}",
+                        t.entries
+                            .iter()
+                            .map(|e| match e {
+                                ActivityEntry::Reasoning { text, .. } => {
+                                    format!("rs:{text}")
+                                }
+                                ActivityEntry::Tool(tool) =>
+                                    format!("tc:{}:{}", tool.name, tool.output),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
                     ),
-                    "the round folded when the tool arrived"
-                );
-                assert!(
-                    matches!(&t.entries[1], ActivityEntry::Tool(t) if t.collapsed),
-                    "the tool folds by default through the terminal stop"
-                );
-            });
-        });
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(1000));
-        cx.run_until_parked();
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let seg_ix = c
-                    .items()
-                    .iter()
-                    .position(|e| matches!(e.read(cx).kind(), ConvItem::Thinking(_)))
-                    .expect("the turn's segment survives under the head");
-                let ConvItem::Thinking(t) = c.items()[seg_ix].read(cx).kind() else {
-                    panic!("expected thinking item");
-                };
-                for entry in &t.entries {
-                    let collapsed = match entry {
-                        ActivityEntry::Reasoning { collapsed, .. } => collapsed,
-                        ActivityEntry::Tool(tool) => &tool.collapsed,
-                    };
-                    assert!(collapsed, "entries fold ~1s after the terminal stop");
-                }
-            });
-        });
+                    ConvItem::Notice(text) => format!("notice:{text}"),
+                    _ => "other".into(),
+                })
+                .collect()
+        }
     }
-    /// A `TurnEnd`-anchored notice appends at the list tail (the end of the
-    /// current turn), and item ids stay unique across subsequent appends.
+
+    /// The convergence proof: on history-shaped fixtures the projection and
+    /// the retired rebuild lower to the same structure.
     #[test]
-    fn push_notice_turn_end_appends_with_unique_ids() {
-        let cx = gpui::TestAppContext::single();
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.push_user(
-                    "hello".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(1, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                let ix = c.push_notice("ack".into(), NoticeAnchor::TurnEnd, host.clone(), cx);
-                assert_eq!(ix, 1, "TurnEnd appends after the user bubble");
-                assert_eq!(c.items().len(), 2);
-                assert!(
-                    matches!(c.items().last().unwrap().read(cx).kind(), ConvItem::Notice(t) if t == "ack"),
-                    "notice is the tail item"
-                );
-                // A later append must not collide with the notice's id.
-                c.push_user(
-                    "again".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(2, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                assert_eq!(c.items().len(), 3);
-            });
-        });
-    }
-
-    /// An `After(ix)`-anchored notice is inserted mid-list, right after the
-    /// anchor item, with the list kept dense (indices shift, ids do not).
-    #[test]
-    fn push_notice_after_anchor_inserts_mid_list() {
-        let cx = gpui::TestAppContext::single();
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.push_user(
-                    "u1".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(1, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                c.push_user(
-                    "u2".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(2, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                // Anchor after the first user bubble: the notice lands between
-                // u1 and u2.
-                let ix = c.push_notice("mid".into(), NoticeAnchor::After(0), host.clone(), cx);
-                assert_eq!(ix, 1);
-                let kinds: Vec<&str> = c
-                    .items()
-                    .iter()
-                    .map(|e| match e.read(cx).kind() {
-                        ConvItem::User { text, .. } if text == "u1" => "u1",
-                        ConvItem::User { text, .. } if text == "u2" => "u2",
-                        ConvItem::Notice(t) => {
-                            assert_eq!(t, "mid");
-                            "notice"
-                        }
-                        _ => "?",
-                    })
-                    .collect();
-                assert_eq!(kinds, vec!["u1", "notice", "u2"]);
-                // A post-insert append still works and ids stay unique.
-                let tail = c.push_notice("tail".into(), NoticeAnchor::TurnEnd, host.clone(), cx);
-                assert_eq!(tail, 3);
-                assert_eq!(c.items().len(), 4);
-            });
-        });
-    }
-
-    /// An out-of-range `After` anchor clamps to the list length (the notice
-    /// lands at the tail rather than panicking).
-    #[test]
-    fn push_notice_after_anchor_clamps_out_of_range() {
-        let cx = gpui::TestAppContext::single();
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let ix = c.push_notice("solo".into(), NoticeAnchor::After(99), host, cx);
-                assert_eq!(ix, 0, "empty list clamps to the tail");
-                assert_eq!(c.items().len(), 1);
-            });
-        });
-    }
-
-    /// `notice_anchor_for_tool` resolves a top-level `ToolCall` card (the
-    /// `AskUserQuestion` path) and a tool folded into an activity segment, and
-    /// falls back to `TurnEnd` for an unknown id.
-    #[test]
-    fn notice_anchor_for_tool_resolves_containing_item() {
-        let cx = gpui::TestAppContext::single();
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        let ctx = ApplyCtx {
-            host: host.clone(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.push_user(
-                    "do it".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(1, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                // Ordinary tool folds into an activity segment.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Bash".into(),
-                        title: "run tests".into(),
-                        status: manox_agent::ToolCallStatus::Running,
-                        input: Some(serde_json::json!({"command": "cargo test"})),
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert_eq!(
-                    c.notice_anchor_for_tool("tu_1", cx),
-                    NoticeAnchor::After(1),
-                    "a segment-folded tool anchors after its container"
-                );
-                // AskUserQuestion is a top-level card.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "ask_1".into(),
-                        name: manox_agent::tools::ASK_USER_QUESTION.into(),
-                        title: "clarify".into(),
-                        status: manox_agent::ToolCallStatus::PendingApproval,
-                        input: Some(serde_json::json!({"question": "which?"})),
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let anchor = c.notice_anchor_for_tool("ask_1", cx);
-                assert!(
-                    matches!(anchor, NoticeAnchor::After(ix) if ix == 2),
-                    "top-level tool anchors after its card, got {anchor:?}"
-                );
-                assert_eq!(
-                    c.notice_anchor_for_tool("ghost", cx),
-                    NoticeAnchor::TurnEnd,
-                    "unknown id falls back to the turn end"
-                );
-            });
-        });
-    }
-
-    /// A notice anchored to a tool call lands right after the item carrying
-    /// the tool call; without a resolvable item it lands at the turn end.
-    /// Mirrors the workspace handler's `notice_anchor_for_tool` + anchored
-    /// `push_notice` wiring.
-    #[test]
-    fn notice_anchors_near_its_tool_call() {
-        let cx = gpui::TestAppContext::single();
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        let ctx = ApplyCtx {
-            host: host.clone(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                c.push_user(
-                    "ship it".into(),
-                    Vec::new(),
-                    UserTurnMeta::new(1, "model".into(), None),
-                    host.clone(),
-                    cx,
-                );
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Bash".into(),
-                        title: "deploy".into(),
-                        status: manox_agent::ToolCallStatus::Running,
-                        input: Some(serde_json::json!({"command": "deploy"})),
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                // The notice is anchored next to the tool's container (item 1)
-                // and inserted right after it.
-                let anchor = c.notice_anchor_for_tool("tu_1", cx);
-                let ix = c.push_notice("allowed".into(), anchor, host, cx);
-                assert_eq!(ix, 2);
-                let kinds: Vec<&str> = c
-                    .items()
-                    .iter()
-                    .map(|e| match e.read(cx).kind() {
-                        ConvItem::User { .. } => "user",
-                        ConvItem::Thinking(_) => "segment",
-                        ConvItem::Notice(_) => "notice",
-                        _ => "?",
-                    })
-                    .collect();
-                assert_eq!(kinds, vec!["user", "segment", "notice"]);
-            });
-        });
-    }
-
-    /// The terminal tool-call event carries no arguments (`input: None`): it
-    /// advances the status only — the argument-derived title/input minted by
-    /// the start event stays, while argument-carrying events still redefine
-    /// the display (the rename flow relies on it).
-    #[gpui::test]
-    fn argless_tool_end_event_keeps_title_and_input(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let host = crate::host::noop_host();
-        let ctx = ApplyCtx {
-            host,
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let outcome = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Read".into(),
-                        title: "Read src/main.rs".into(),
-                        status: ToolCallStatus::Running,
-                        input: Some(serde_json::json!({"path": "src/main.rs"})),
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert!(matches!(outcome, ApplyOutcome::Appended));
-
-                let outcome = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Read".into(),
-                        title: "Read".into(),
-                        status: ToolCallStatus::Success,
-                        input: None,
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                assert!(matches!(outcome, ApplyOutcome::Remeasure(0)));
-
-                let tool_entry = |c: &ConversationState, cx: &gpui::App| -> ToolCallItem {
-                    let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                        panic!("expected activity segment");
-                    };
-                    let Some(ActivityEntry::Tool(entry)) = t.entries.first() else {
-                        panic!("expected tool entry");
-                    };
-                    entry.clone()
-                };
-                let entry = tool_entry(c, cx);
-                assert_eq!(entry.title, "Read src/main.rs");
-                assert_eq!(entry.input, serde_json::json!({"path": "src/main.rs"}));
-                assert_eq!(entry.status, ToolCallStatus::Success);
-
-                // An argument-carrying event redefines the display again.
-                let _ = c.apply(
-                    &ThreadEvent::ToolCall {
-                        id: "tu_1".into(),
-                        name: "Read".into(),
-                        title: "Read src/lib.rs".into(),
-                        status: ToolCallStatus::Success,
-                        input: Some(serde_json::json!({"path": "src/lib.rs"})),
-                    },
-                    "model",
-                    None,
-                    ctx.clone(),
-                    cx,
-                );
-                let entry = tool_entry(c, cx);
-                assert_eq!(entry.title, "Read src/lib.rs");
-                assert_eq!(entry.input, serde_json::json!({"path": "src/lib.rs"}));
-            });
-        });
-    }
-
-    /// A tool call interrupts the reasoning round in flight: the live AHP
-    /// stream carries no mid-turn `Stop(ToolUse)`, so the tool call itself is
-    /// the boundary. Without that split every round of a turn's tool loop
-    /// appends to the first one — one merged thinking block above every tool
-    /// call of the turn, in arrival order the tools read as "always last".
-    /// The composite live path, end to end: real AHP actions (two reasoning
-    /// rounds with a tool call between them), folded through the book in
-    /// the pump's exact order (fold first, then derive from the updated
-    /// state), lowered to ThreadEvents and applied — the transcript must
-    /// hold ONE activity segment whose entries strictly interleave
-    /// [reasoning, tool, reasoning, tool], the second round opening fresh
-    /// instead of appending to the first. This pins the whole chain the
-    /// "thinking keeps appending above a stack of tools" report walked.
-    #[gpui::test]
-    fn live_two_round_tool_turn_composes_in_arrival_order(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        use ahp_types::actions::{
-            ChatDeltaAction, ChatReasoningAction, ChatResponsePartAction,
-            ChatToolCallCompleteAction, ChatToolCallReadyAction, ChatToolCallStartAction,
-            ChatTurnCompleteAction, ChatTurnStartedAction, StateAction,
-        };
-        use ahp_types::state::{
-            MarkdownResponsePart, Message, MessageKind, MessageOrigin, ResponsePart,
-            ToolCallResult, ToolInput, ToolResultContent, ToolResultTextContent,
-        };
-
-        let uri = crate::ahp_store::chat_uri("c-1");
-        let turn = "t-1".to_string();
-        let user = Message {
-            text: "two rounds".into(),
-            origin: MessageOrigin {
-                kind: MessageKind::User,
-            },
-            attachments: None,
-            model: None,
-            agent: None,
-            meta: None,
-        };
-        let tool_round = |tool_call_id: &str, intention: &str| {
-            vec![
-                StateAction::ChatToolCallStart(ChatToolCallStartAction {
-                    turn_id: turn.clone(),
-                    tool_call_id: tool_call_id.into(),
-                    meta: None,
-                    tool_name: "Read".into(),
-                    display_name: "Read".into(),
-                    intention: Some(intention.into()),
-                    contributor: None,
-                }),
-                StateAction::ChatToolCallReady(ChatToolCallReadyAction {
-                    turn_id: turn.clone(),
-                    tool_call_id: tool_call_id.into(),
-                    meta: None,
-                    contributor: None,
-                    intention: Some(intention.into()),
-                    invocation_message: ahp_types::StringOrMarkdown::Plain(intention.into()),
-                    tool_input: Some(ToolInput::Inline(r#"{"path":"AGENTS.md"}"#.into())),
-                    confirmation_title: None,
-                    risk_assessment: None,
-                    edits: None,
-                    editable: None,
-                    confirmed: None,
-                    options: None,
-                }),
-            ]
-        };
-        let complete = |tool_call_id: &str| {
-            StateAction::ChatToolCallComplete(ChatToolCallCompleteAction {
-                turn_id: turn.clone(),
-                tool_call_id: tool_call_id.into(),
-                meta: None,
-                result: ToolCallResult {
-                    success: true,
-                    past_tense_message: ahp_types::StringOrMarkdown::Plain("read".into()),
-                    content: Some(vec![ToolResultContent::Text(ToolResultTextContent {
-                        text: "body".into(),
-                    })]),
-                    structured_content: None,
-                    error: None,
-                },
-                requires_result_confirmation: None,
-            })
-        };
-        let actions = vec![
-            StateAction::ChatTurnStarted(ChatTurnStartedAction {
-                turn_id: turn.clone(),
-                started_at: "2026-10-21T00:00:00.000Z".into(),
-                message: user,
-                queued_message_id: None,
-                meta: None,
+    fn the_projection_matches_the_retired_rebuild_on_history_fixtures() {
+        let fixtures: Vec<ChatState> = [
+            // A plain Q&A turn.
+            serde_json::json!({
+                "id": "t-1",
+                "message": { "text": "q1", "origin": { "kind": "user" } },
+                "responseParts": [
+                    { "kind": "markdown", "id": "p-1", "content": "answer one" },
+                ],
+                "state": "complete",
             }),
-            StateAction::ChatReasoning(ChatReasoningAction {
-                turn_id: turn.clone(),
-                part_id: "p-r1".into(),
-                content: "round one thinking".into(),
-                meta: None,
+            // A tool loop: reasoning, two tools, then the reply.
+            serde_json::json!({
+                "id": "t-2",
+                "message": { "text": "q2", "origin": { "kind": "user" } },
+                "responseParts": [
+                    { "kind": "reasoning", "id": "p-r1", "content": "think" },
+                    { "kind": "toolCall", "toolCall": {
+                        "status": "completed", "toolCallId": "tc-1", "toolName": "Read",
+                        "displayName": "Read", "invocationMessage": "Read",
+                        "toolInput": "{}", "success": true,
+                        "pastTenseMessage": "Read", "confirmed": "not-needed",
+                        "content": [{ "type": "text", "text": "file body" }] }},
+                    { "kind": "toolCall", "toolCall": {
+                        "status": "running", "toolCallId": "tc-2", "toolName": "Bash",
+                        "displayName": "Bash", "invocationMessage": "run",
+                        "confirmed": "approved" }},
+                    { "kind": "markdown", "id": "p-m1", "content": "the reply" },
+                ],
+                "state": "complete",
             }),
-        ];
-        let mut actions = actions;
-        actions.extend(tool_round("tc-1", "Read first"));
-        actions.push(complete("tc-1"));
-        actions.push(StateAction::ChatReasoning(ChatReasoningAction {
-            turn_id: turn.clone(),
-            part_id: "p-r2".into(),
-            content: "round two thinking".into(),
-            meta: None,
-        }));
-        actions.extend(tool_round("tc-2", "Read second"));
-        actions.push(complete("tc-2"));
-        actions.push(StateAction::ChatResponsePart(ChatResponsePartAction {
-            turn_id: turn.clone(),
-            part: ResponsePart::Markdown(MarkdownResponsePart {
-                id: "p-m1".into(),
-                content: String::new(),
+            // A turn with a system notification between the parts.
+            serde_json::json!({
+                "id": "t-3",
+                "message": { "text": "q3", "origin": { "kind": "user" } },
+                "responseParts": [
+                    { "kind": "markdown", "id": "p-1", "content": "part one" },
+                    { "kind": "systemNotification", "content": "a note" },
+                    { "kind": "markdown", "id": "p-2", "content": "part two" },
+                ],
+                "state": "complete",
             }),
-            meta: None,
-        }));
-        actions.push(StateAction::ChatDelta(ChatDeltaAction {
-            turn_id: turn.clone(),
-            part_id: "p-m1".into(),
-            content: "done".into(),
-            meta: None,
-        }));
-        actions.push(StateAction::ChatTurnComplete(ChatTurnCompleteAction {
-            turn_id: turn.clone(),
-            duration: 1_000,
-            meta: None,
-        }));
+        ]
+        .into_iter()
+        .map(|turn| {
+            let mut chat = empty_chat();
+            fold(&mut chat, &start("t", "ignored"));
+            // Replace the fold with the fixture turn directly.
+            let _ = &turn;
+            serde_json::from_value::<ChatState>(serde_json::json!({
+                "resource": "ahp-chat:/c-test",
+                "title": "test",
+                "status": 0,
+                "modifiedAt": "2026-01-01T00:00:00Z",
+                "turns": [turn],
+            }))
+            .expect("the fixture turn parses")
+        })
+        .collect();
 
-        let mut book = crate::ahp_store::ChannelBook::default();
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                for action in &actions {
-                    // The pump's exact order: fold first, then derive from
-                    // the updated state, then lower and apply.
-                    book.apply(&uri, action);
-                    let Some(chat) = book.chats.get("c-1") else {
-                        continue;
-                    };
-                    let Some(display) =
-                        crate::chat_fold::ChatEvent::from_action(action, Some(chat))
-                    else {
-                        continue;
-                    };
-                    let Some(event) = crate::chat_fold::to_thread_event(display) else {
-                        continue;
-                    };
-                    let _ = c.apply(&event, "model", None, ctx.clone(), cx);
-                }
-            });
-        });
-
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let segments: Vec<usize> = c
-                    .items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| matches!(item.read(cx).kind(), ConvItem::Thinking(_)))
-                    .map(|(ix, _)| ix)
-                    .collect();
-                assert_eq!(
-                    segments.len(),
-                    1,
-                    "one activity segment carries the whole tool loop"
-                );
-                let ConvItem::Thinking(t) = c.items[segments[0]].read(cx).kind() else {
-                    unreachable!()
-                };
-                let shape: Vec<&str> = t
-                    .entries
-                    .iter()
-                    .map(|e| match e {
-                        ActivityEntry::Reasoning { .. } => "R",
-                        ActivityEntry::Tool(_) => "T",
-                    })
-                    .collect();
-                assert_eq!(
-                    shape,
-                    ["R", "T", "R", "T"],
-                    "rounds and tools strictly interleave in arrival order"
-                );
-                let texts: Vec<&str> = t
-                    .entries
-                    .iter()
-                    .filter_map(|e| match e {
-                        ActivityEntry::Reasoning { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(
-                    texts,
-                    ["round one thinking", "round two thinking"],
-                    "the second round opened fresh, not appended to the first"
-                );
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn live_tool_call_splits_the_reasoning_round_in_flight(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let conversation =
-            cx.update(|cx| cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: crate::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
-        cx.update(|cx| {
-            conversation.update(cx, |c, cx| {
-                let tool = |id: &str, name: &str| ThreadEvent::ToolCall {
-                    id: id.into(),
-                    name: name.into(),
-                    title: name.into(),
-                    status: ToolCallStatus::Running,
-                    input: None,
-                };
-                for event in [
-                    ThreadEvent::AgentThinking("r1".into()),
-                    tool("t1", "Bash"),
-                    ThreadEvent::AgentThinking("r2".into()),
-                    tool("t2", "Grep"),
-                ] {
-                    let _ = c.apply(&event, "model", None, ctx.clone(), cx);
-                }
-            });
-        });
-        cx.update(|cx| {
-            conversation.read_with(cx, |c, cx| {
-                let ConvItem::Thinking(t) = c.items()[0].read(cx).kind() else {
-                    panic!("expected one activity segment");
-                };
-                let shape: Vec<String> = t
-                    .entries
-                    .iter()
-                    .map(|e| match e {
-                        ActivityEntry::Reasoning { text, .. } => format!("reasoning:{text}"),
-                        ActivityEntry::Tool(tool) => format!("tool:{}", tool.name),
-                    })
-                    .collect();
-                assert_eq!(
-                    shape,
-                    ["reasoning:r1", "tool:Bash", "reasoning:r2", "tool:Grep"],
-                    "rounds and tools interleave in arrival order"
-                );
-            });
-        });
+        for chat in &fixtures {
+            let (env, _host) = env();
+            let mut overlays = Overlays::default();
+            let nodes = project(Some(chat), &mut overlays, &env);
+            let projected_shapes: Vec<String> = nodes
+                .iter()
+                .filter(|n| !matches!(n.key, ItemKey::TurnProcess(_)))
+                .map(|n| match &n.kind {
+                    ConvItem::User { text, .. } => format!("user:{text}"),
+                    ConvItem::Assistant { text, .. } => format!("answer:{text}"),
+                    ConvItem::Thinking(t) => format!(
+                        "segment:{}",
+                        t.entries
+                            .iter()
+                            .map(|e| match e {
+                                ActivityEntry::Reasoning { text, .. } => {
+                                    format!("rs:{text}")
+                                }
+                                ActivityEntry::Tool(tool) => {
+                                    format!("tc:{}:{}", tool.name, tool.output)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    ConvItem::Notice(text) => format!("notice:{text}"),
+                    other => format!("other:{other:?}"),
+                })
+                .collect();
+            let reference_shapes = reference::shape(&reference::lower(chat));
+            assert_eq!(
+                projected_shapes, reference_shapes,
+                "the projection converges with the retired rebuild"
+            );
+        }
     }
 }

@@ -1,9 +1,10 @@
-//! Regression: a conversation rebuilt from the pre-snapshot replay fold (the
-//! first journal deltas beat the subscribe answer) froze at that partial
-//! shape — the one-shot `is_empty` rebuild guard could never fire again, so
-//! the transcript stayed truncated (empty but for the stale active turn) and
-//! the composer stuck in the stop/running form. The rebuild watermark heals
-//! the build once the authoritative snapshot lands with more settled turns.
+//! Regression (inverted): a conversation built from the pre-snapshot replay
+//! fold (the first journal deltas beat the subscribe answer) used to freeze
+//! at that partial shape — the one-shot rebuild guard could never fire again,
+//! so the transcript stayed truncated. Under the keyed projection there is
+//! no rebuild at all: the snapshot's turns carry the same part ids the
+//! replay minted, so the sync that follows the snapshot converges the same
+//! rows to the full shape — and a later sync changes nothing.
 //!
 //! Own test binary: the shared harness initializes process-global singletons
 //! (see `tests/common/mod.rs`).
@@ -25,7 +26,7 @@ fn user_message() -> ahp_types::state::Message {
 }
 
 #[gpui::test]
-async fn pre_snapshot_rebuild_heals_when_the_snapshot_lands(cx: &mut TestAppContext) {
+async fn a_pre_snapshot_build_converges_when_the_snapshot_lands(cx: &mut TestAppContext) {
     init_harness(cx);
     let (_window, workspace) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(_window.into(), cx);
@@ -36,9 +37,16 @@ async fn pre_snapshot_rebuild_heals_when_the_snapshot_lands(cx: &mut TestAppCont
     });
 
     // The race, staged: the first replay delta (the stale turn's turnStarted)
-    // folds BEFORE the subscribe snapshot answers. The fold now holds a
-    // displayable chat (an active turn, zero settled turns) — exactly the
-    // shape that fired the old one-shot guard into a premature build.
+    // folds BEFORE the subscribe snapshot answers. The fold holds a
+    // displayable chat (an active turn, zero settled turns).
+    let delta = |turn: &str, part: &str, text: &str| {
+        StateAction::ChatDelta(ahp_types::actions::ChatDeltaAction {
+            turn_id: turn.to_string(),
+            part_id: part.to_string(),
+            content: text.to_string(),
+            meta: None,
+        })
+    };
     store.update(&mut visual.cx, |s, _| {
         s.book.apply(
             &chat_uri("sess-1"),
@@ -50,21 +58,31 @@ async fn pre_snapshot_rebuild_heals_when_the_snapshot_lands(cx: &mut TestAppCont
                 meta: None,
             }),
         );
+        // The replay's first delta opens its own part in place.
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &StateAction::ChatResponsePart(ahp_types::actions::ChatResponsePartAction {
+                turn_id: "turn-1".to_string(),
+                part: ahp_types::state::ResponsePart::Markdown(
+                    ahp_types::state::MarkdownResponsePart {
+                        id: "p-11".to_string(),
+                        content: String::new(),
+                    },
+                ),
+                meta: None,
+            }),
+        );
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &delta("turn-1", "p-11", "first answer"),
+        );
     });
-    let (rebuilt, _) =
-        workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_run_rebuild_guard(cx));
-    assert!(
-        rebuilt,
-        "the first displayable fold builds the conversation"
-    );
-    let (pre_snapshot, built_turns, items) =
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_rebuild_watermark(cx));
-    assert!(pre_snapshot, "the build ran before the snapshot landed");
-    assert_eq!(built_turns, 0, "no settled turns existed at build time");
-    assert!(items > 0, "the active turn lowers to transcript rows");
+    workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_sync_conversation(cx));
+    let early_texts = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_transcript_texts(cx));
+    assert_eq!(early_texts.len(), 1, "the active turn lowered to a row");
 
-    // The snapshot lands with the full replayed history: the watermark must
-    // heal the premature build instead of starving on the non-empty skeleton.
+    // The snapshot lands with the full replayed history: the same sync —
+    // not a rebuild — converges the transcript to the snapshot's shape.
     store.update(&mut visual.cx, |s, _| {
         s.book.apply(
             &chat_uri("sess-1"),
@@ -86,6 +104,23 @@ async fn pre_snapshot_rebuild_heals_when_the_snapshot_lands(cx: &mut TestAppCont
         );
         s.book.apply(
             &chat_uri("sess-1"),
+            &StateAction::ChatResponsePart(ahp_types::actions::ChatResponsePartAction {
+                turn_id: "turn-2".to_string(),
+                part: ahp_types::state::ResponsePart::Markdown(
+                    ahp_types::state::MarkdownResponsePart {
+                        id: "p-21".to_string(),
+                        content: String::new(),
+                    },
+                ),
+                meta: None,
+            }),
+        );
+        s.book.apply(
+            &chat_uri("sess-1"),
+            &delta("turn-2", "p-21", "second answer"),
+        );
+        s.book.apply(
+            &chat_uri("sess-1"),
             &StateAction::ChatTurnComplete(ChatTurnCompleteAction {
                 turn_id: "turn-2".to_string(),
                 duration: 0,
@@ -97,28 +132,25 @@ async fn pre_snapshot_rebuild_heals_when_the_snapshot_lands(cx: &mut TestAppCont
             "the folded chat re-applies as its snapshot"
         );
     });
-    let (rebuilt, _) =
-        workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_run_rebuild_guard(cx));
+    workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_sync_conversation(cx));
+    let settled_texts =
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_transcript_texts(cx));
     assert!(
-        rebuilt,
-        "the snapshot's larger settled-turn count heals the premature build"
+        settled_texts.len() > early_texts.len(),
+        "the snapshot's settled turns land on top of the pre-snapshot rows: {settled_texts:?}"
     );
-    let (pre_snapshot, built_turns, items_after) =
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_rebuild_watermark(cx));
     assert!(
-        !pre_snapshot,
-        "the healing build ran on the landed snapshot"
-    );
-    assert_eq!(built_turns, 2, "the watermark advanced to the snapshot");
-    assert!(
-        items_after > items,
-        "the healed transcript holds more than the stale active turn"
+        settled_texts.iter().any(|t| t.contains("first answer")),
+        "the pre-snapshot row survived the convergence (same key, updated in place)"
     );
 
-    // Settled: no further rebuild churns the conversation once the watermark
-    // matches the fold.
-    let (rebuilt, _) =
-        workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_run_rebuild_guard(cx));
-    assert!(!rebuilt, "a watermark-matched fold does not rebuild again");
+    // Settled: a further sync churns nothing — the projection is idempotent
+    // over an unchanged fold.
+    workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_sync_conversation(cx));
+    let again = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_transcript_texts(cx));
+    assert_eq!(
+        again, settled_texts,
+        "an unchanged fold re-projects identically"
+    );
     manox_agent::thread_store::drop_global_for_test();
 }

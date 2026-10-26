@@ -162,11 +162,8 @@ message-fork-unavailable-mid-turn = Only the last message of a completed turn ca
 
 message-fork-unavailable-not-replayed = This row is not part of the session record
 
-recap-card-title = Context compacted
 
-cache-miss-label = cache miss · { $tokens } tokens
 
-retry-badge = Retrying… { $attempt }/{ $max } · { $secs }s · { $reason }
 
 message-omitted-prefix = …(earlier omitted)
 
@@ -709,25 +706,15 @@ about-version = Version
 
 # Background task status card
 
-background-task-kind-bash = Background Bash
 
-background-task-kind-subagent = Subagent
 
-background-task-status-running = Running
 
-background-task-status-stopping = Stopping
 
-background-task-status-completed = Completed
 
-background-task-status-failed = Failed
 
-background-task-status-timed-out = Timed out
 
-background-task-status-stopped = Stopped
 
-background-task-status-session-ended = Session ended
 
-background-task-stop = Stop
 
 goal-popover-title = Goal
 

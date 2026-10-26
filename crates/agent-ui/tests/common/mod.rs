@@ -329,6 +329,166 @@ pub fn tall_history(turns: usize) -> Vec<HistoryEntry> {
         .collect()
 }
 
+/// `turns` rounds of (question, long answer) as a chat fold — the projection
+/// counterpart of [`tall_history`].
+pub fn tall_chat(turns: usize) -> ahp_types::state::ChatState {
+    let filler = "lorem ipsum ".repeat(40);
+    let turns_json: Vec<serde_json::Value> = (0..turns)
+        .map(|turn| {
+            serde_json::json!({
+                "id": format!("t{turn}"),
+                "startedAt": "2026-01-01T00:00:00Z",
+                "message": { "text": format!("question {turn}"), "origin": { "kind": "user" } },
+                "responseParts": [
+                    { "kind": "markdown", "id": format!("p{turn}"),
+                      "content": format!("{filler} answer {turn}") },
+                ],
+                "state": "complete",
+            })
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "resource": "ahp-chat:/c-fixture",
+        "title": "fixture",
+        "status": 0,
+        "modifiedAt": "2026-01-01T00:00:00Z",
+        "turns": turns_json,
+    }))
+    .expect("the tall chat fixture parses")
+}
+
+/// Lower a display sequence into a chat fold: a user message opens a turn,
+/// and everything after it until the next user message becomes that turn's
+/// response parts (text → markdown, thinking → reasoning, tool use →
+/// toolCall with its result). The geometry-fixture counterpart of the
+/// retired `synth_display`, run in reverse.
+pub fn chat_from_display(display: &[HistoryEntry]) -> ahp_types::state::ChatState {
+    use manox_agent::language_model::MessageContent as C;
+    let mut turns: Vec<serde_json::Value> = Vec::new();
+    let mut part_id = 0usize;
+    for entry in display {
+        let manox_agent::db::HistoryEntry::Message(message) = entry else {
+            continue;
+        };
+        let is_user = message.role == Role::User
+            && message
+                .content
+                .iter()
+                .any(|c| !matches!(c, C::ToolResult(_)));
+        if is_user {
+            let text = message
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    C::Text(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            turns.push(serde_json::json!({
+                "id": format!("t{}", turns.len()),
+                "startedAt": "2026-01-01T00:00:00Z",
+                "message": { "text": text, "origin": { "kind": "user" } },
+                "responseParts": [],
+                "state": "complete",
+            }));
+            continue;
+        }
+        let Some(turn) = turns.last_mut() else {
+            continue;
+        };
+        let parts = turn
+            .as_object_mut()
+            .expect("object")
+            .get_mut("responseParts")
+            .and_then(|p| p.as_array_mut())
+            .expect("parts array");
+        for block in &message.content {
+            match block {
+                C::Text(t) => {
+                    parts.push(serde_json::json!({
+                        "kind": "markdown", "id": format!("p{part_id}"), "content": t,
+                    }));
+                    part_id += 1;
+                }
+                C::Thinking { text, .. } => {
+                    parts.push(serde_json::json!({
+                        "kind": "reasoning", "id": format!("p{part_id}"), "content": text,
+                    }));
+                    part_id += 1;
+                }
+                C::ToolUse(use_block) => {
+                    parts.push(serde_json::json!({
+                        "kind": "toolCall",
+                        "toolCall": {
+                            "status": "completed",
+                            "toolCallId": use_block.id,
+                            "toolName": use_block.name,
+                            "displayName": use_block.name,
+                            "invocationMessage": use_block.name,
+                            "toolInput": use_block.raw_input,
+                            "success": true,
+                            "pastTenseMessage": use_block.name,
+                            "confirmed": "not-needed",
+                        },
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    if turns.is_empty() {
+        turns.push(serde_json::json!({
+            "id": "t0",
+            "startedAt": "2026-01-01T00:00:00Z",
+            "message": { "text": "fixture", "origin": { "kind": "user" } },
+            "responseParts": [],
+            "state": "complete",
+        }));
+    }
+    serde_json::from_value(serde_json::json!({
+        "resource": "ahp-chat:/c-fixture",
+        "title": "fixture",
+        "status": 0,
+        "modifiedAt": "2026-01-01T00:00:00Z",
+        "turns": turns,
+    }))
+    .expect("the display-lowered chat parses")
+}
+
+/// Project a display sequence — the rebuilt-transcript fixture form.
+pub fn conversation_from_display(
+    cx: &mut gpui::App,
+    display: &[HistoryEntry],
+) -> gpui::Entity<agent_ui::conversation::ConversationState> {
+    let chat = chat_from_display(display);
+    conversation_from_chat(cx, &chat)
+}
+
+/// Project a chat fold into a fresh `ConversationState` — the fixture form
+/// of the sync every test shares.
+pub fn conversation_from_chat(
+    cx: &mut gpui::App,
+    chat: &ahp_types::state::ChatState,
+) -> gpui::Entity<agent_ui::conversation::ConversationState> {
+    let recipient = manox_agent::MessageAuthor::Lead;
+    let host = steer_agent_chat_ui::host::noop_host();
+    let env = steer_agent_chat_ui::transcript::ProjectEnv {
+        role: "test-model",
+        recipient: &recipient,
+        host: &host,
+        cwd: None,
+        fork_source: false,
+        promoted_confirmation: None,
+    };
+    cx.new(|cx| {
+        let mut conversation = agent_ui::conversation::ConversationState::new(recipient.clone());
+        let nodes = conversation.stage(Some(chat), &env);
+        conversation.reconcile(nodes, &env, cx);
+        conversation
+    })
+}
+
 /// A real plan file on disk, as `ProposePlan` leaves one.
 pub fn write_plan_file() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();

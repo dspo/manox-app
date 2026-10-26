@@ -705,24 +705,24 @@ impl Workspace {
                 tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
                 Default::default()
             });
-        let (display, usage, built_turns, pre_snapshot) = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                let chat = crate::ahp_store::leaf(&view.book, &sid).chat?;
-                let mut usage = crate::chat_fold::UsageTable::new();
-                let display = crate::chat_fold::synth_display(chat, &mut usage);
-                let pre_snapshot = !view.book.chat_snapshot_landed(&sid);
-                Some((display, usage, chat.turns.len(), pre_snapshot))
-            })
-            .unwrap_or((Vec::new(), Default::default(), 0, false));
-        let background_tasks: Vec<manox_agent::background_task::TaskSnapshot> = Vec::new();
-        let role = self.model_label(cx);
+        // A fresh keyed state re-projects against the fold: the first sync
+        // (right below) materializes whatever the fold holds — a full
+        // snapshot, a pre-snapshot delta skeleton, or nothing — and every
+        // later sync keeps the rows identical to it. There is no separate
+        // rebuild path to run, and no bucket to consume: the projection is
+        // idempotent over the fold, so whatever arrived while parked is
+        // already inside the rows the first pass produces.
         let recipient = self.recipient_author(cx);
-        let _weak = cx.weak_entity();
+        let new_conv = cx.new(|_| ConversationState::new(recipient));
+        self.chat.update(cx, |chat, cx| {
+            chat.conversation = new_conv;
+            cx.notify();
+        });
+        // The reclaim's settle edge: a thread parked WHILE RUNNING that now
+        // shows no active turn settled while parked — the queued cards'
+        // flush and the sidebar refresh ride the same edge the live sync
+        // would have seen. (A thread parked while idle has no edge to run.)
+        let reclaimed_running = self.background_threads.iter().any(|b| b.id == new_id);
         let running = self
             .chat
             .read(cx)
@@ -736,48 +736,30 @@ impl Workspace {
                 tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
                 Default::default()
             });
-        // NOTE: an active turn folded from the journal is NOT auto-cancelled
-        // here even when it predates this process. The `~/.manox` journal is
-        // shared across processes (the cx CLI runs turns against it), so
-        // "older than this process" cannot distinguish a dead turn from one
-        // another process is executing right now — a cancel dispatch here
-        // would kill a live turn in cx. A genuinely dead turn shows the stop
-        // button; cancelling it is one deliberate click, and the cancelled
-        // echo clears the fold.
-        let cwd = thread_cwd(&self.chat.read(cx).thread, &self.chat.read(cx).store, cx);
-        let new_conv = cx.new(|cx| {
-            let mut conversation = ConversationState::rebuild_from_display(
-                &display,
-                &usage,
-                &role,
-                recipient,
-                running,
-                crate::conversation::ApplyCtx {
-                    host: self.chat.read(cx).host.clone(),
-                    cwd,
-                    // These rows are this session's journal replayed, so their
-                    // entry ids are forkable anchors.
-                    fork_source: self.fork_source_session(cx),
-                },
-                cx,
-            );
-            let host = self.chat.read(cx).host.clone();
-            conversation.restore_background_tasks(&background_tasks, &role, host, cx);
-            conversation
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.conversation = new_conv;
-            chat.built_turns = built_turns;
-            chat.rebuilt_pre_snapshot = pre_snapshot;
-            cx.notify();
-        });
-        // The attach rebuilt the conversation from the book, which already
-        // folded every event this session's bucket accumulated while the
-        // thread was parked — consume the bucket (drop it), or the next
-        // notify's live leg replays those deltas onto the rebuilt transcript
-        // (a switch-back renders the parked content twice).
-        if let Some((store, sid)) = self.chat.read(cx).store.clone() {
-            let _ = store.update(cx, |s, _| s.drain_chat_events(&sid));
+        // The sync reads `turn_active` as the running mirror; seeding it
+        // false makes the reclaim a clean rising edge at worst.
+        self.chat.update(cx, |chat, _| chat.turn_active = false);
+        if let Some((store, _)) = self.chat.read(cx).store.clone() {
+            self.sync_conversation(&store, cx);
+        }
+        if reclaimed_running && !running {
+            let cancelled = self
+                .chat
+                .read(cx)
+                .store
+                .as_ref()
+                .and_then(|(store, sid)| {
+                    let view = store.read(cx);
+                    crate::ahp_store::leaf(&view.book, sid).chat
+                })
+                .is_none_or(|chat| {
+                    chat.active_turn.is_none()
+                        && chat
+                            .turns
+                            .last()
+                            .is_some_and(|t| t.state == ahp_types::state::TurnState::Cancelled)
+                });
+            self.settle_follow_ups(cancelled, cx);
         }
         self.observe_conversation(cx);
         // Restore the incoming thread's saved draft, or clear the input if it
@@ -934,10 +916,9 @@ impl Workspace {
         // one; refresh the rail's git stats/branch display for it.
         self.spawn_git_status_refresh(cx);
         // Steer cards stashed across the switch mirror wire state that kept
-        // moving while the thread was away — replay the parked session's
-        // lifecycle events so consumed/steered/settled states settle before
-        // the user sees the strip.
-        self.replay_parked_chat_events(cx);
+        // moving while the thread was away — the consumption receipts the
+        // parked session accumulated drain on the sync above, retiring their
+        // cards before the user sees the strip.
         // A stale attach tail must not steal the main column back: the user
         // may have re-entered an external session (or anything else) while
         // this async attach was landing — the synchronous leave in

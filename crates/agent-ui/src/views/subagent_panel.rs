@@ -1,24 +1,22 @@
 //! The sub-agent drill-down: one child session's transcript, rendered live
 //! from its own AHP chat fold. The panel owns a conversation pipeline
-//! instance fed by the same fold vocabulary the main column applies
-//! (`ChatEvent` → `to_thread_event` → `apply`); the child session is
-//! attached on open, its journal replays through the bucket, and the panel
-//! inherits the child's whole fold the first time it lands — a child that
-//! streamed long before the tab opened (or one that already settled) shows
-//! its full transcript, not just the deltas that follow the open. A worker
+//! instance driven by the same keyed projection the main column applies
+//! (`transcript::project` over the child's folded `ChatState`); the child
+//! session is attached on open and the panel inherits the child's whole
+//! fold the first time it lands — a child that streamed long before the
+//! tab opened (or one that already settled) shows its full transcript, not
+//! just the deltas that follow the open. A worker
 //! chat is read-only (the host stamps the interactivity; the footer states
 //! it).
-
-use std::collections::HashMap;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, ScrollHandle, Subscription, Window, px};
 use gpui_component::{ActiveTheme as _, ElementExt as _, h_flex, v_flex};
 use manox_agent::ToolCallStatus;
 use steer_agent_chat_ui::ahp_store::AhpStore;
-use steer_agent_chat_ui::chat_fold;
+use steer_agent_chat_ui::transcript::ProjectEnv;
 
-use crate::conversation::{ApplyCtx, ConversationState};
+use crate::conversation::ConversationState;
 use crate::i18n;
 use crate::views::subagents::status_indicator;
 
@@ -42,11 +40,6 @@ pub struct SubagentPanel {
     /// run id names the child session — the swarm invariant). `None` when
     /// no store is bound; the panel then stays in its settling phase.
     source: Option<(Entity<AhpStore>, String)>,
-    /// Whether the child's fold has been inherited. The bucket only carries
-    /// deltas from this panel's subscribe on, so the first landed snapshot is
-    /// the one chance to pick up everything that streamed before the open —
-    /// including any delta that raced ahead of the snapshot.
-    fold_inherited: bool,
     _subscription: Option<Subscription>,
     scroll_handle: ScrollHandle,
     stick_to_bottom: bool,
@@ -62,33 +55,15 @@ impl SubagentPanel {
         source: Option<(Entity<AhpStore>, String)>,
         cx: &mut App,
     ) -> Entity<Self> {
-        let ctx = ApplyCtx {
-            host: host.clone(),
-            cwd: None,
-            // The panel's rows are a child session's display — no row here
-            // is a forkable anchor.
-            fork_source: None,
-        };
-        let role_for_conv = role.clone();
-        let label_for_conv = label.clone();
-        let empty_usage: HashMap<String, manox_agent::language_model::TokenUsage> = HashMap::new();
-        let conversation = cx.new(|cx| {
-            ConversationState::rebuild_from_display(
-                &[],
-                &empty_usage,
-                &role_for_conv,
-                manox_agent::MessageAuthor::Agent(label_for_conv),
-                false,
-                ctx.clone(),
-                cx,
-            )
-        });
+        let recipient = manox_agent::MessageAuthor::Agent(label.clone());
+        let conversation = cx.new(|_| ConversationState::new(recipient));
         cx.new(|cx| {
-            // The pump: every store notification drains the child session's
-            // own event bucket through the shared fold vocabulary into this
-            // panel's conversation. The main column's live leg drains only
-            // the foreground session's bucket — the child bucket is this
-            // panel's alone.
+            // The pump: every store notification re-projects the child chat's
+            // fold into this panel's conversation. The main column's sync
+            // projects only the foreground session's fold — the child chat is
+            // this panel's alone, and the keyed diff makes the first landed
+            // snapshot (which carries everything that streamed before the
+            // open) and a single later delta the same cheap pass.
             let subscription = source.as_ref().map(|(store, sid)| {
                 let sid = sid.clone();
                 cx.observe(store, move |this: &mut Self, store, cx| {
@@ -103,7 +78,6 @@ impl SubagentPanel {
                 role,
                 host,
                 source,
-                fold_inherited: false,
                 _subscription: subscription,
                 scroll_handle: ScrollHandle::new(),
                 stick_to_bottom: true,
@@ -111,66 +85,36 @@ impl SubagentPanel {
         })
     }
 
-    /// Drain the child session's event bucket into the panel's conversation,
-    /// and inherit the child's chat fold once it lands: the bucket only
-    /// carries deltas from this panel's subscribe on, so a child that streamed
-    /// before the tab opened (the usual case — the card is clicked after the
-    /// run started, or again after it settled) would otherwise sit on an empty
-    /// transcript forever. The fold holds everything the drained events
-    /// carried, so the wholesale rebuild covers them and nothing doubles; a
-    /// delta that raced ahead of the snapshot opens rows early, so the inherit
-    /// keys on the LANDED flag, not on "the panel is still empty".
+    /// Re-project the child chat's fold into the panel's conversation.
+    /// A child that streamed before the tab opened (the usual case — the
+    /// card is clicked after the run started, or again after it settled)
+    /// shows its whole transcript at the first landed snapshot; a delta that
+    /// raced ahead of the snapshot lands on the same keys and is absorbed.
     fn pump(&mut self, sid: &str, store: &Entity<AhpStore>, cx: &mut Context<Self>) {
-        let events = store.update(cx, |s, _| s.drain_chat_events(sid));
-        let had_events = !events.is_empty();
         let role = self.role.clone();
-        let ctx = ApplyCtx {
-            host: self.host.clone(),
+        let recipient = manox_agent::MessageAuthor::Agent(self.label.clone());
+        let host = self.host.clone();
+        let env = ProjectEnv {
+            role: &role,
+            recipient: &recipient,
+            host: &host,
             cwd: None,
-            fork_source: None,
+            // The panel's rows are a child session's display — no row
+            // here is a forkable anchor.
+            fork_source: false,
+            promoted_confirmation: None,
         };
-        for event in events {
-            let Some(thread_event) = chat_fold::to_thread_event(event) else {
-                continue;
-            };
-            self.conversation.update(cx, |c, cx| {
-                c.apply(&thread_event, &role, None, ctx.clone(), cx);
-            });
-        }
-        let mut inherited = false;
-        let mut landed_now = false;
-        if !self.fold_inherited {
-            let (landed, display, usage, trailing) = {
+        let change = self.conversation.update(cx, |conv, cx| {
+            let nodes = {
                 let view = store.read(cx);
-                let landed = view.book.chat_snapshot_landed(sid);
                 let leaf = crate::ahp_store::leaf(&view.book, sid);
-                let mut usage = crate::chat_fold::UsageTable::new();
-                let display = if landed {
-                    leaf.chat
-                        .map(|chat| crate::chat_fold::synth_display(chat, &mut usage))
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                (landed, display, usage, leaf.running())
+                conv.stage(leaf.chat, &env)
             };
-            if landed {
-                self.fold_inherited = true;
-                landed_now = true;
-                if !display.is_empty() {
-                    let recipient = manox_agent::MessageAuthor::Agent(self.label.clone());
-                    self.conversation.update(cx, |c, cx| {
-                        *c = ConversationState::rebuild_from_display(
-                            &display, &usage, &role, recipient, trailing, ctx, cx,
-                        );
-                    });
-                    inherited = true;
-                }
-            }
-        }
-        // A notification that neither carried values nor resolved the
-        // settling phase has nothing to repaint.
-        if !had_events && !inherited && !landed_now {
+            conv.reconcile(nodes, &env, cx)
+        });
+        // A notification the projection answered with no row change has
+        // nothing to repaint.
+        if !change.any() {
             return;
         }
         // Re-arm tail-follow only while the viewport is still near the
@@ -439,8 +383,45 @@ mod tests {
             "the inherited prompt names the child's agent type"
         );
 
+        // A post-open delta streams into the child chat's ACTIVE turn; the
+        // pump re-projects.
         store.update(cx, |s, _| {
-            s.push_chat_event_for_test(RUN, chat_fold::ChatEvent::AgentText(" streamed".into()));
+            let settled = s
+                .book
+                .chats
+                .get(RUN)
+                .cloned()
+                .expect("the child chat folds");
+            // Move the settled turn into the in-flight slot so the delta has
+            // a target, exactly as a run that is still going looks.
+            let mut active: serde_json::Value =
+                serde_json::to_value(&settled).expect("the chat serializes");
+            let mut turn = active["turns"]
+                .as_array()
+                .and_then(|t| t.first().cloned())
+                .expect("the child's turn is in flight");
+            // The in-flight form stamps its start and drops the settled fields.
+            turn["startedAt"] = serde_json::Value::String("2026-10-21T00:00:03.000Z".into());
+            turn.as_object_mut().expect("object").remove("duration");
+            turn.as_object_mut().expect("object").remove("state");
+            active["turns"] = serde_json::Value::Array(Vec::new());
+            active["activeTurn"] = turn;
+            let mut chat: ahp_types::state::ChatState =
+                serde_json::from_value(active).expect("the in-flight child chat parses");
+            let open: ahp_types::actions::StateAction = serde_json::from_value(serde_json::json!({
+                "type": "chat/responsePart", "turnId": "turn-1",
+                "part": { "kind": "markdown", "id": "p2", "content": "" },
+            }))
+            .expect("the open action parses");
+            let delta: ahp_types::actions::StateAction =
+                serde_json::from_value(serde_json::json!({
+                    "type": "chat/delta", "turnId": "turn-1", "partId": "p2",
+                    "content": " streamed",
+                }))
+                .expect("the delta action parses");
+            ahp::reducers::apply_action_to_chat(&mut chat, &open);
+            ahp::reducers::apply_action_to_chat(&mut chat, &delta);
+            s.book.chats.insert(RUN.into(), chat);
         });
         panel.update(cx, |p, cx| p.diagnostic_pump(cx));
 
@@ -470,8 +451,41 @@ mod tests {
         let store = cx.new(|_| AhpStore::detached());
         let panel = test_panel(store.clone(), cx);
 
+        // A delta wins the race: the fold holds it before the snapshot lands.
         store.update(cx, |s, _| {
-            s.push_chat_event_for_test(RUN, chat_fold::ChatEvent::AgentText("raced".into()));
+            let mut chat = s.book.chats.get(RUN).cloned().unwrap_or_else(|| {
+                serde_json::from_value(serde_json::json!({
+                    "resource": steer_agent_chat_ui::ahp_store::chat_uri(RUN),
+                    "title": "the child's chat",
+                    "status": 0,
+                    "modifiedAt": "2026-10-21T00:00:03.000Z",
+                    "turns": [],
+                    "activeTurn": {
+                        "id": "turn-1",
+                        "startedAt": "2026-10-21T00:00:03.000Z",
+                        "message": { "text": "fix the login redirect", "origin": { "kind": "user" } },
+                        "responseParts": [],
+                    },
+                }))
+                .expect("the racing child chat parses")
+            });
+            let open: ahp_types::actions::StateAction = serde_json::from_value(
+                serde_json::json!({
+                    "type": "chat/responsePart", "turnId": "turn-1",
+                    "part": { "kind": "markdown", "id": "p1", "content": "" },
+                }),
+            )
+            .expect("the open action parses");
+            let delta: ahp_types::actions::StateAction = serde_json::from_value(
+                serde_json::json!({
+                    "type": "chat/delta", "turnId": "turn-1", "partId": "p1",
+                    "content": "raced",
+                }),
+            )
+            .expect("the delta action parses");
+            ahp::reducers::apply_action_to_chat(&mut chat, &open);
+            ahp::reducers::apply_action_to_chat(&mut chat, &delta);
+            s.book.chats.insert(RUN.into(), chat);
         });
         panel.update(cx, |p, cx| p.diagnostic_pump(cx));
         let early = panel.read_with(cx, |p, cx| p.diagnostic_transcript_texts(cx));

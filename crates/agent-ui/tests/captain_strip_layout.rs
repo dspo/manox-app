@@ -64,9 +64,7 @@ async fn a_narrow_card_keeps_the_strips_clock_and_activity(cx: &mut TestAppConte
         s.optimistic_config(SESSION, &model_pick());
         s.book.chats.insert(SESSION.into(), running_chat());
     });
-    let (rebuilt, _) =
-        workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_run_rebuild_guard(cx));
-    assert!(rebuilt, "the running snapshot builds the conversation");
+    workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_sync_conversation(cx));
 
     // Flush the store-observe callbacks now, then let a whole second of local
     // turn time pass: the clock renders only after it ticks.

@@ -23,6 +23,8 @@
 
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
+mod common;
+
 use agent_ui::Workspace;
 use gpui::{AppContext as _, FollowMode, TestAppContext, VisualTestContext, px, size};
 use gpui_component::Theme;
@@ -123,21 +125,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
         .map(manox_agent::db::HistoryEntry::Message)
         .collect();
     let _weak = gpui::WeakEntity::<Workspace>::new_invalid();
-    let conversation = cx.new(|cx| {
-        agent_ui::conversation::ConversationState::rebuild_from_display(
-            &display,
-            &std::collections::HashMap::new(),
-            "deepseek-v4-flash",
-            manox_agent::MessageAuthor::Lead,
-            true,
-            agent_ui::conversation::ApplyCtx {
-                host: steer_agent_chat_ui::host::noop_host(),
-                cwd: None,
-                fork_source: None,
-            },
-            cx,
-        )
-    });
+    let conversation = { cx.update(|cx| common::conversation_from_display(cx, &display)) };
     let item_count = conversation.read_with(cx, |conversation, _cx| conversation.items().len());
     let workspace_cell: Rc<RefCell<Option<gpui::Entity<Workspace>>>> = Rc::new(RefCell::new(None));
     let capture = workspace_cell.clone();
@@ -200,21 +188,7 @@ async fn workspace_overlap_walk_scroll_resize_rebuild(cx: &mut TestAppContext) {
         offset_in_item: px(0.),
     });
     draw(&mut visual);
-    let rebuilt = cx.new(|cx| {
-        agent_ui::conversation::ConversationState::rebuild_from_display(
-            &display,
-            &std::collections::HashMap::new(),
-            "deepseek-v4-flash",
-            manox_agent::MessageAuthor::Lead,
-            true,
-            agent_ui::conversation::ApplyCtx {
-                host: steer_agent_chat_ui::host::noop_host(),
-                cwd: None,
-                fork_source: None,
-            },
-            cx,
-        )
-    });
+    let rebuilt = { cx.update(|cx| common::conversation_from_display(cx, &display)) };
     workspace.update(&mut visual.cx, |workspace, cx| {
         workspace.diagnostic_replace_conversation(rebuilt, cx);
     });

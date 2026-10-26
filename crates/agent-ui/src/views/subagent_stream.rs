@@ -25,8 +25,9 @@ use gpui_component::{
 };
 
 use steer_agent_chat_ui::ahp_store::AhpStore;
-use steer_agent_chat_ui::conversation::{ApplyCtx, ConversationState};
+use steer_agent_chat_ui::conversation::ConversationState;
 use steer_agent_chat_ui::host::ChatHostHandle;
+use steer_agent_chat_ui::transcript::ProjectEnv;
 use steer_agent_chat_ui::views::subagents::CAPTAIN_LABEL;
 
 use crate::i18n;
@@ -61,8 +62,9 @@ impl SubagentStreamView {
         role: String,
         cx: &mut gpui::App,
     ) -> Entity<Self> {
-        let conversation = build_conversation(&store, &chat_id, &label, &role, &host, cx);
-        cx.new(|_| Self {
+        let recipient = manox_agent::MessageAuthor::Agent(label.clone());
+        let conversation = cx.new(|_| ConversationState::new(recipient));
+        let view = cx.new(|_| Self {
             chat_id,
             label,
             role,
@@ -72,7 +74,9 @@ impl SubagentStreamView {
             conversation,
             scroll_handle: gpui::ScrollHandle::new(),
             stick_to_bottom: true,
-        })
+        });
+        view.update(cx, |view, cx| view.refresh(cx));
+        view
     }
 
     /// The page's assistant texts — the child chat's fold as it renders.
@@ -90,53 +94,38 @@ impl SubagentStreamView {
             .collect()
     }
 
-    /// Rebuild the transcript from the child chat's fold. The CALLER decides
-    /// freshness (the workspace holds the fold version it last built from), so
-    /// a rebuild here is unconditional. Tail-follow is the USER's state, not
-    /// the rebuild's: a fresh snapshot must not yank a reader who scrolled
+    /// Re-project the transcript from the child chat's fold — the same keyed
+    /// diff every trigger uses, so a fresh snapshot updates the rows that are
+    /// already mounted instead of rebuilding the page. A pass that changed
+    /// nothing notifies nothing. Tail-follow is the USER's state, not the
+    /// projection's: a fresh snapshot must not yank a reader who scrolled
     /// back up to the bottom.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.store.upgrade() else {
             return;
         };
         let role = self.role.clone();
-        self.conversation =
-            build_conversation(&store, &self.chat_id, &self.label, &role, &self.host, cx);
-        cx.notify();
+        let recipient = manox_agent::MessageAuthor::Agent(self.label.clone());
+        let host = self.host.clone();
+        let chat_id = self.chat_id.clone();
+        let env = ProjectEnv {
+            role: &role,
+            recipient: &recipient,
+            host: &host,
+            cwd: None,
+            // A child chat's rows are a sub-agent's own display, and no
+            // row here is a forkable anchor of the parent conversation.
+            fork_source: false,
+            promoted_confirmation: None,
+        };
+        let change = self.conversation.update(cx, |conv, cx| {
+            let nodes = conv.stage(store.read(cx).book.chats.get(&chat_id), &env);
+            conv.reconcile(nodes, &env, cx)
+        });
+        if change.any() {
+            cx.notify();
+        }
     }
-}
-
-fn build_conversation(
-    store: &Entity<AhpStore>,
-    chat_id: &str,
-    label: &str,
-    role: &str,
-    host: &ChatHostHandle,
-    cx: &mut gpui::App,
-) -> Entity<ConversationState> {
-    let (display, usage) = {
-        let view = store.read(cx);
-        let mut usage = crate::chat_fold::UsageTable::new();
-        let display = view
-            .book
-            .chats
-            .get(chat_id)
-            .map(|chat| crate::chat_fold::synth_display(chat, &mut usage))
-            .unwrap_or_default();
-        (display, usage)
-    };
-    let role = role.to_string();
-    let recipient = manox_agent::MessageAuthor::Agent(label.to_string());
-    let ctx = ApplyCtx {
-        host: host.clone(),
-        cwd: None,
-        // A child chat's rows are a sub-agent's own display, and no row here
-        // is a forkable anchor of the parent conversation.
-        fork_source: None,
-    };
-    cx.new(|cx| {
-        ConversationState::rebuild_from_display(&display, &usage, &role, recipient, false, ctx, cx)
-    })
 }
 
 impl Render for SubagentStreamView {

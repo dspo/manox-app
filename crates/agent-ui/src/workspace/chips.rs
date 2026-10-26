@@ -298,40 +298,13 @@ impl Workspace {
                         )
                     })
             });
-        // The parked call's conversation row, promoted to a top-level card
-        // when the fold has it nested in an activity segment. The promoted
-        // row carries the fold's own name and intention so the decision is
-        // readable; the list count is re-synced — the promotion adds a row
-        // to a virtual list that otherwise never learns about it.
-        let target = live.and_then(|(tool_call_id, tool_name, title, snapshot)| {
-            let conversation = self.chat.read(cx).conversation.clone();
-            if conversation.read(cx).find_tool(&tool_call_id, cx).is_none() {
-                let role = self.model_label(cx);
-                let host = self.chat.read(cx).host.clone();
-                conversation.update(cx, |conversation, cx| {
-                    conversation.push_tool_call(
-                        crate::conversation::ToolCallItem {
-                            id: tool_call_id.clone(),
-                            name: tool_name,
-                            title: title.unwrap_or_default(),
-                            status: manox_agent::ToolCallStatus::PendingApproval,
-                            output: String::new(),
-                            is_error: false,
-                            input: serde_json::Value::Null,
-                            streaming: false,
-                            collapsed: false,
-                            user_toggled: false,
-                            panel: None,
-                            card: None,
-                            cwd: None,
-                        },
-                        role,
-                        host,
-                        cx,
-                    );
-                });
-                self.sync_list_count(cx);
-            }
+        // The parked call's conversation row: the projection renders that
+        // call as the top-level card while the park is open (the sync's
+        // `promoted_confirmation`, in place of its segment entry), so this
+        // path only ATTACHES the decision snapshot to that row — it never
+        // mints or retires rows itself.
+        let target = live.and_then(|(tool_call_id, _, _, snapshot)| {
+            let conversation = self.chat_conversation(cx);
             let ix = conversation.read(cx).find_tool(&tool_call_id, cx)?;
             let item = conversation.read(cx).items().get(ix)?.clone();
             Some((tool_call_id, item, snapshot))
@@ -353,30 +326,6 @@ impl Workspace {
                         cx.notify();
                     }
                 });
-                // A promoted row carries no history of its own: once the
-                // park leaves it while the row is STILL waiting, it is an
-                // empty shell — retire it. (A row that already existed
-                // stays, and a settled row has already flipped its status
-                // on the echo, so neither matches this criterion.)
-                let shell = matches!(
-                    previous.read(cx).kind(),
-                    steer_agent_chat_ui::conversation::ConvItem::ToolCall(t)
-                        if t.status == manox_agent::ToolCallStatus::PendingApproval
-                );
-                if shell {
-                    let row_id = match previous.read(cx).kind() {
-                        steer_agent_chat_ui::conversation::ConvItem::ToolCall(t) => t.id.clone(),
-                        _ => unreachable!("shell checked above"),
-                    };
-                    let un_parked = next.as_ref().is_none_or(|(id, _, _)| id != &row_id);
-                    if un_parked {
-                        let conversation = self.chat.read(cx).conversation.clone();
-                        conversation.update(cx, |conversation, cx| {
-                            conversation.remove_tool(&row_id, cx);
-                        });
-                        self.sync_list_count(cx);
-                    }
-                }
             }
         }
         if let Some((_, item, snapshot)) = next {

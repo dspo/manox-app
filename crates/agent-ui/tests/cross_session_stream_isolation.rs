@@ -81,7 +81,7 @@ fn seed_session(store: &gpui::Entity<AhpStore>, sid: &str, cid: &str, cx: &mut T
 }
 
 fn transcript_items(workspace: &gpui::Entity<agent_ui::Workspace>, cx: &TestAppContext) -> usize {
-    workspace.read_with(cx, |ws, cx| ws.diagnostic_rebuild_watermark(cx).2)
+    workspace.read_with(cx, |ws, cx| ws.diagnostic_list_state(cx).item_count())
 }
 
 #[gpui::test]
@@ -98,7 +98,7 @@ async fn a_parked_sessions_stream_never_paints_the_bound_transcript(cx: &mut Tes
     seed_session(&store, "s-2", "c-2", &mut visual.cx);
 
     // The parked session (s-2) streams a turn while s-1 is the bound
-    // foreground. Its events must land in ITS bucket, and the bound
+    // foreground. The turn must land in ITS chat's fold, and the bound
     // transcript must not move.
     store.update(&mut visual.cx, |s, cx| {
         s.diagnostic_route_event(envelope(chat_uri("c-2"), turn_started("turn-2")), cx);
@@ -109,18 +109,19 @@ async fn a_parked_sessions_stream_never_paints_the_bound_transcript(cx: &mut Tes
         0,
         "a parked session's turn must not paint the bound transcript"
     );
-    assert_eq!(
-        store
-            .update(&mut visual.cx, |s, _| s.drain_chat_events("s-2"))
-            .len(),
-        1,
-        "the parked event routes to its own session's bucket"
+    assert!(
+        store.update(&mut visual.cx, |s, _| {
+            s.book
+                .chats
+                .get("c-2")
+                .map(|chat| chat.turns.len() + usize::from(chat.active_turn.is_some()) > 0)
+                .unwrap_or(false)
+        }),
+        "the parked turn routes to its own session's fold"
     );
     assert!(
-        store
-            .update(&mut visual.cx, |s, _| s.drain_chat_events("s-1"))
-            .is_empty(),
-        "the bound session's bucket holds nothing of the parked stream"
+        store.update(&mut visual.cx, |s, _| s.book.chats.get("c-1").is_none()),
+        "the bound session's fold holds nothing of the parked stream"
     );
 
     // The bound session's own first displayable fold builds the transcript
@@ -132,9 +133,8 @@ async fn a_parked_sessions_stream_never_paints_the_bound_transcript(cx: &mut Tes
     let items = transcript_items(&workspace, &visual.cx);
     assert!(items > 0, "the bound session's content lands");
 
-    // The live leg: the bound session's settlement drains its bucket onto
-    // the transcript; the parked session's only accumulates in its own
-    // bucket.
+    // The live leg: the bound session's settlement advances its own fold
+    // onto the transcript; the parked session's stays in its own fold.
     store.update(&mut visual.cx, |s, cx| {
         s.diagnostic_route_event(envelope(chat_uri("c-1"), turn_complete("turn-1")), cx);
         s.diagnostic_route_event(envelope(chat_uri("c-2"), turn_complete("turn-2")), cx);
@@ -146,13 +146,17 @@ async fn a_parked_sessions_stream_never_paints_the_bound_transcript(cx: &mut Tes
         "a parked settlement must not add transcript rows"
     );
     assert!(
-        store
-            .update(&mut visual.cx, |s, _| s.drain_chat_events("s-1"))
-            .is_empty(),
-        "the live leg consumed the bound session's bucket"
+        store.update(&mut visual.cx, |s, _| {
+            s.book
+                .chats
+                .get("c-1")
+                .map(|chat| {
+                    chat.turns
+                        .first()
+                        .is_some_and(|t| t.state == ahp_types::state::TurnState::Complete)
+                })
+                .unwrap_or(false)
+        }),
+        "the bound session's fold carries its own settlement"
     );
-    // Step 1's assertions already drained the parked bucket once, so only
-    // the settlement accumulates here — unconsumed by the bound transcript.
-    let parked = store.update(&mut visual.cx, |s, _| s.drain_chat_events("s-2"));
-    assert_eq!(parked.len(), 1, "the parked bucket accumulates unconsumed");
 }
