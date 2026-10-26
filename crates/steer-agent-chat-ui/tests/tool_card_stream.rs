@@ -7,10 +7,18 @@
 //! trigger could not be pinned offscreen (see
 //! `.agents/skills/gpui-kit-follow/references/upstream-bugs.md`); these tests
 //! instead guard the structural exposure end to end: the production
-//! `ConversationState` -> `MessageItem` -> ai-elements card assembly, driven
-//! frame by frame through the open reveal with text that changes
-//! discontinuously (stream batching, the live-tail head drop past 24 KiB, a
-//! settle-time truncation past `LINE_CAP`, and a retry rewrite).
+//! `ChatState` fold → `ConversationState::project` → `MessageItem` →
+//! ai-elements card assembly, driven frame by frame through the open reveal
+//! with text that changes discontinuously (stream batching, the live-tail head
+//! drop past 24 KiB, a settle-time truncation past `LINE_CAP`, and a retry
+//! rewrite).
+//!
+//! The projection lowers a fresh `ToolCallItem` every pass; the reconcile
+//! mutates the materialized entry in place and `sync_tool_fields` deliberately
+//! does not copy `stream`, so the snapshot — like `panel`/`card`/`cwd` — is
+//! carried across passes. The recorded-fixture test pins that with
+//! `generation() == 0`: a per-pass reset would restart the published text or
+//! move the generation.
 //!
 //! Offscreen animation frames only arrive through `Window::simulate_next_frame`
 //! (AGENTS.md "出 UI 图"); the fake scheduler clock is advanced between chunks
@@ -18,15 +26,16 @@
 
 use std::time::Duration;
 
+use ahp_types::actions::StateAction;
+use ahp_types::state::ChatState;
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
     TestAppContext, VisualTestContext, Window, div, px, size,
 };
-use manox_agent::{MessageAuthor, ThreadEvent, ToolCallStatus};
-use steer_agent_chat_ui::conversation::{
-    ActivityEntry, ApplyCtx, ConvItem, ConversationState, ToolCallItem,
-};
-use steer_agent_chat_ui::host::noop_host;
+use manox_agent::MessageAuthor;
+use steer_agent_chat_ui::conversation::{ActivityEntry, ConvItem, ConversationState, ToolCallItem};
+use steer_agent_chat_ui::host::{ChatHostHandle, noop_host};
+use steer_agent_chat_ui::transcript::ProjectEnv;
 use steer_agent_chat_ui::views::message::MessageItem;
 use steer_agent_chat_ui::views::tool_stream::PUBLISH_CAP;
 
@@ -61,52 +70,83 @@ fn pump(visual: &mut VisualTestContext, frames: usize) {
     }
 }
 
-fn apply(cx: &mut TestAppContext, conversation: &Entity<ConversationState>, event: ThreadEvent) {
-    let ctx = ApplyCtx {
-        host: noop_host(),
+// --- the AHP fold ------------------------------------------------------------
+
+fn empty_chat() -> ChatState {
+    serde_json::from_value(serde_json::json!({
+        "resource": "ahp-chat:/c-test",
+        "title": "test",
+        "status": 0,
+        "modifiedAt": "2026-01-01T00:00:00Z",
+        "turns": [],
+    }))
+    .expect("the empty chat parses")
+}
+
+fn action(value: serde_json::Value) -> StateAction {
+    serde_json::from_value(value).expect("the action parses")
+}
+
+fn fold(chat: &mut ChatState, action: &StateAction) {
+    ahp::reducers::apply_action_to_chat(chat, action);
+}
+
+fn turn_started(command: &str) -> StateAction {
+    action(serde_json::json!({
+        "type": "chat/turnStarted", "turnId": "t-1",
+        "startedAt": "2026-01-01T00:00:00Z",
+        "message": { "text": command, "origin": { "kind": "user" } },
+    }))
+}
+
+fn tool_started(command: &str) -> StateAction {
+    action(serde_json::json!({
+        "type": "chat/toolCallStart", "turnId": "t-1", "toolCallId": "tc-1",
+        "toolName": "Bash", "displayName": "Bash",
+        "intention": format!("$ {command}"),
+    }))
+}
+
+fn tool_ready(command: &str) -> StateAction {
+    action(serde_json::json!({
+        "type": "chat/toolCallReady", "turnId": "t-1", "toolCallId": "tc-1",
+        "invocationMessage": format!("$ {command}"),
+        "toolInput": serde_json::json!({ "command": command }).to_string(),
+        "confirmed": "not-needed",
+    }))
+}
+
+fn tool_content(text: &str) -> StateAction {
+    action(serde_json::json!({
+        "type": "chat/toolCallContentChanged", "turnId": "t-1", "toolCallId": "tc-1",
+        "content": [{ "type": "text", "text": text }],
+    }))
+}
+
+fn tool_completed(text: &str) -> StateAction {
+    action(serde_json::json!({
+        "type": "chat/toolCallComplete", "turnId": "t-1", "toolCallId": "tc-1",
+        "result": {
+            "success": true,
+            "pastTenseMessage": "Ran the command",
+            "content": [{ "type": "text", "text": text }],
+        },
+    }))
+}
+
+/// The projection's borrowed environment. The test constants are leaked: the
+/// env borrows for the whole case and each test builds one.
+fn env() -> ProjectEnv<'static> {
+    let recipient: &'static MessageAuthor = Box::leak(Box::new(MessageAuthor::Lead));
+    let host: &'static ChatHostHandle = Box::leak(Box::new(noop_host()));
+    ProjectEnv {
+        role: "test-model",
+        recipient,
+        host,
         cwd: None,
-        fork_source: None,
-    };
-    cx.update(|cx| {
-        conversation.update(cx, |conversation, cx| {
-            let _ = conversation.apply(&event, "test-model", None, ctx, cx);
-        });
-    });
-}
-
-fn tool_call(id: &str, name: &str, command: &str) -> ThreadEvent {
-    ThreadEvent::ToolCall {
-        id: id.into(),
-        name: name.into(),
-        title: format!("{name} {command}"),
-        status: ToolCallStatus::Running,
-        input: Some(serde_json::json!({ "command": command })),
+        fork_source: false,
+        promoted_confirmation: None,
     }
-}
-
-/// Mount a fresh conversation with one running Bash card and open its window.
-fn mount_bash_card(
-    cx: &mut TestAppContext,
-    id: &str,
-) -> (Entity<ConversationState>, VisualTestContext) {
-    cx.update(|cx| {
-        // The content battery mounts several cards in one test; `init` is
-        // only safe to run once per app.
-        if !cx.has_global::<gpui_component::Theme>() {
-            gpui_component::init(cx);
-        }
-    });
-    let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
-    apply(cx, &conversation, tool_call(id, "Bash", "rg -n 中文 ."));
-    let rows = cx.update(|cx| conversation.read(cx).items().to_vec());
-    assert_eq!(rows.len(), 1, "the tool call folds into one activity row");
-
-    let window = cx.open_window(size(px(760.), px(720.)), move |_, _| Mount { rows });
-    cx.run_until_parked();
-    let mut visual = VisualTestContext::from_window(window.into(), cx);
-    // Let the card mount and start its open reveal.
-    pump(&mut visual, 2);
-    (conversation, visual)
 }
 
 /// Byte chunks that never split a character.
@@ -124,46 +164,85 @@ fn chunks(text: &str, size: usize) -> Vec<String> {
     out
 }
 
-/// Stream `text` as live output chunks while pumping frames.
-fn stream(
-    cx: &mut TestAppContext,
-    visual: &mut VisualTestContext,
-    conversation: &Entity<ConversationState>,
-    id: &str,
-    text: &str,
-) {
-    for chunk in chunks(text, 700) {
-        apply(
-            cx,
-            conversation,
-            ThreadEvent::ToolOutput {
-                id: id.into(),
-                chunk,
-            },
-        );
-        // The publish tick is driven by the (fake) scheduler clock.
-        cx.executor().advance_clock(Duration::from_millis(120));
-        pump(visual, 2);
+// --- the production assembly -------------------------------------------------
+
+struct Case {
+    chat: ChatState,
+    conversation: Entity<ConversationState>,
+    visual: VisualTestContext,
+}
+
+impl Case {
+    fn project(&mut self, cx: &mut TestAppContext) {
+        let env = env();
+        let chat = &self.chat;
+        cx.update(|cx| {
+            self.conversation.update(cx, |conversation, cx| {
+                let _ = conversation.project(Some(chat), &env, cx);
+            });
+        });
+    }
+
+    fn row(&mut self, cx: &mut TestAppContext) -> ToolCallItem {
+        let conversation = self.conversation.clone();
+        tool_entry(&conversation, cx)
     }
 }
 
-fn settle(
-    cx: &mut TestAppContext,
-    visual: &mut VisualTestContext,
-    conversation: &Entity<ConversationState>,
-    id: &str,
-    output: &str,
-) {
-    apply(
-        cx,
+/// Mount a fresh conversation with one running Bash card and open its window.
+fn mount_bash_card(cx: &mut TestAppContext, command: &str) -> Case {
+    cx.update(|cx| {
+        if !cx.has_global::<gpui_component::Theme>() {
+            gpui_component::init(cx);
+        }
+    });
+
+    let mut chat = empty_chat();
+    fold(&mut chat, &turn_started(command));
+    fold(&mut chat, &tool_started(command));
+    fold(&mut chat, &tool_ready(command));
+
+    let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
+    let env = env();
+    cx.update(|cx| {
+        conversation.update(cx, |conversation, cx| {
+            let _ = conversation.project(Some(&chat), &env, cx);
+        });
+    });
+    let rows = cx.update(|cx| conversation.read(cx).items().to_vec());
+    assert_eq!(rows.len(), 2, "the user row and the activity segment");
+
+    let window = cx.open_window(size(px(760.), px(720.)), move |_, _| Mount { rows });
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    // Let the card mount and start its open reveal.
+    pump(&mut visual, 2);
+    Case {
+        chat,
         conversation,
-        ThreadEvent::ToolResult {
-            id: id.into(),
-            output: output.into(),
-            is_error: false,
-        },
-    );
-    pump(visual, 20);
+        visual,
+    }
+}
+
+/// Stream `text` as live partial content, projecting after each chunk.
+fn stream(cx: &mut TestAppContext, case: &mut Case, text: &str) {
+    let mut fed = String::new();
+    for chunk in chunks(text, 700) {
+        fed.push_str(&chunk);
+        fold(&mut case.chat, &tool_content(&fed));
+        case.project(cx);
+        // The publish tick is driven by the (fake) scheduler clock.
+        cx.executor().advance_clock(Duration::from_millis(120));
+        pump(&mut case.visual, 2);
+    }
+}
+
+/// Settle the tool call with its canonical result; the turn stays active, as
+/// in production (the tool result lands mid-turn).
+fn settle(cx: &mut TestAppContext, case: &mut Case, output: &str) {
+    fold(&mut case.chat, &tool_completed(output));
+    case.project(cx);
+    pump(&mut case.visual, 20);
 }
 
 fn tool_entry(conversation: &Entity<ConversationState>, cx: &mut TestAppContext) -> ToolCallItem {
@@ -185,45 +264,47 @@ fn tool_entry(conversation: &Entity<ConversationState>, cx: &mut TestAppContext)
 }
 
 fn assert_card_paints(visual: &mut VisualTestContext) {
-    let bounds = visual
-        .debug_bounds("message-overflow-activity-entry-0-0")
-        .expect("the tool card row paints");
-    assert!(
-        bounds.size.height > px(8.),
-        "the card has real height: {bounds:?}"
-    );
+    // The row's opaque MessageItem id keys the selector; the user row owns 0,
+    // the activity segment is the row after it.
+    for selector in [
+        "message-overflow-activity-entry-0-0",
+        "message-overflow-activity-entry-1-0",
+        "message-overflow-activity-entry-2-0",
+        "message-overflow-activity-entry-3-0",
+    ] {
+        if let Some(bounds) = visual.debug_bounds(selector) {
+            assert!(
+                bounds.size.height > px(8.),
+                "the card has real height: {bounds:?}"
+            );
+            return;
+        }
+    }
+    panic!("the tool card row paints");
 }
 
+// --- tests -------------------------------------------------------------------
+
 /// The recorded production fixture: live chunks through the open reveal, then
-/// the canonical result. Under the publish cap this stays append-only, so no
+/// the canonical result. Under the publish cap this stays append-only across
+/// every projection pass, so the carried snapshot never resets and no
 /// document generation is burnt.
 #[gpui::test]
 async fn the_recorded_bash_output_streams_through_an_open_card(cx: &mut TestAppContext) {
-    let (conversation, mut visual) = mount_bash_card(cx, "toolu_d255c1cb2f9f4c44b1b2ff9a");
-    stream(
-        cx,
-        &mut visual,
-        &conversation,
-        "toolu_d255c1cb2f9f4c44b1b2ff9a",
-        CRASH_BASH_OUTPUT,
-    );
-    settle(
-        cx,
-        &mut visual,
-        &conversation,
-        "toolu_d255c1cb2f9f4c44b1b2ff9a",
-        CRASH_BASH_OUTPUT,
-    );
+    let mut case = mount_bash_card(cx, "rg -n 中文 .");
+    stream(cx, &mut case, CRASH_BASH_OUTPUT);
+    settle(cx, &mut case, CRASH_BASH_OUTPUT);
 
-    let entry = tool_entry(&conversation, cx);
+    let entry = case.row(cx);
     assert_eq!(entry.output, CRASH_BASH_OUTPUT);
     assert_eq!(entry.stream.published(), CRASH_BASH_OUTPUT);
     assert_eq!(
         entry.stream.generation(),
         0,
-        "below the cap the body extends in place; no replace is needed"
+        "below the cap the body extends in place across projection passes; \
+         a per-pass snapshot reset would move the generation"
     );
-    assert_card_paints(&mut visual);
+    assert_card_paints(&mut case.visual);
 }
 
 /// A settled body past `LINE_CAP` (400 lines): the card keeps the first 400
@@ -236,11 +317,11 @@ async fn an_output_past_line_cap_settles_truncated(cx: &mut TestAppContext) {
         .collect();
     assert!(full.lines().count() > 400);
 
-    let (conversation, mut visual) = mount_bash_card(cx, "toolu-long");
-    stream(cx, &mut visual, &conversation, "toolu-long", &full);
-    settle(cx, &mut visual, &conversation, "toolu-long", &full);
+    let mut case = mount_bash_card(cx, "rg -n 中文 .");
+    stream(cx, &mut case, &full);
+    settle(cx, &mut case, &full);
 
-    let entry = tool_entry(&conversation, cx);
+    let entry = case.row(cx);
     assert_eq!(entry.output, full, "the entry keeps the full text");
     assert_eq!(entry.stream.published(), full);
 
@@ -250,7 +331,7 @@ async fn an_output_past_line_cap_settles_truncated(cx: &mut TestAppContext) {
     let expected: Vec<&str> = full.lines().take(400).collect();
     assert_eq!(rendered.len(), 400);
     assert_eq!(rendered, expected);
-    assert_card_paints(&mut visual);
+    assert_card_paints(&mut case.visual);
 }
 
 /// Output past the snapshot cap forces the live-tail window and then a settle
@@ -263,12 +344,12 @@ async fn a_live_tail_head_drop_settles_into_a_fresh_generation(cx: &mut TestAppC
         full.push_str("output line with 中文 and `backticks`\n");
     }
 
-    let (conversation, mut visual) = mount_bash_card(cx, "toolu-window");
-    stream(cx, &mut visual, &conversation, "toolu-window", &full);
+    let mut case = mount_bash_card(cx, "rg -n 中文 .");
+    stream(cx, &mut case, &full);
 
     // The window reset happened while streaming (the published text is the
     // capped live tail, not the whole source).
-    let streaming = tool_entry(&conversation, cx);
+    let streaming = case.row(cx);
     assert!(streaming.stream.published().len() <= full.len());
     assert!(
         streaming.stream.generation() >= 1,
@@ -276,9 +357,9 @@ async fn a_live_tail_head_drop_settles_into_a_fresh_generation(cx: &mut TestAppC
     );
 
     let before_settle = streaming.stream.generation();
-    settle(cx, &mut visual, &conversation, "toolu-window", &full);
+    settle(cx, &mut case, &full);
 
-    let entry = tool_entry(&conversation, cx);
+    let entry = case.row(cx);
     assert_eq!(
         entry.stream.published(),
         full,
@@ -288,33 +369,27 @@ async fn a_live_tail_head_drop_settles_into_a_fresh_generation(cx: &mut TestAppC
         entry.stream.generation() > before_settle,
         "settling from a tail window is a replace, not an extension"
     );
-    assert_card_paints(&mut visual);
+    assert_card_paints(&mut case.visual);
 }
 
 /// A retry/rewrite lands a completely different text. The settle flush
 /// replaces the body and advances the generation.
 #[gpui::test]
 async fn a_retry_rewrite_replaces_the_body(cx: &mut TestAppContext) {
-    let (conversation, mut visual) = mount_bash_card(cx, "toolu-retry");
-    stream(
-        cx,
-        &mut visual,
-        &conversation,
-        "toolu-retry",
-        "first attempt: partial 中文 output\n",
-    );
+    let mut case = mount_bash_card(cx, "rg -n 中文 .");
+    stream(cx, &mut case, "first attempt: partial 中文 output\n");
 
     let canonical = "different canonical result\n第二行：完全不同的文本\n";
-    settle(cx, &mut visual, &conversation, "toolu-retry", canonical);
+    settle(cx, &mut case, canonical);
 
-    let entry = tool_entry(&conversation, cx);
+    let entry = case.row(cx);
     assert_eq!(entry.output, canonical);
     assert_eq!(entry.stream.published(), canonical);
     assert!(
         entry.stream.generation() >= 1,
         "a non-append rewrite must mint a new generation"
     );
-    assert_card_paints(&mut visual);
+    assert_card_paints(&mut case.visual);
 }
 
 /// A burst that ends the call's output, followed by a quiet command: the last
@@ -323,46 +398,38 @@ async fn a_retry_rewrite_replaces_the_body(cx: &mut TestAppContext) {
 /// the deferred tail without waiting for the settle.
 #[gpui::test]
 async fn a_quiet_tail_catches_up_on_the_next_render(cx: &mut TestAppContext) {
-    let (conversation, mut visual) = mount_bash_card(cx, "toolu-quiet");
+    let mut case = mount_bash_card(cx, "rg -n 中文 .");
     // Let the mount's reveal hold expire so this exercises the tick path.
     cx.executor().advance_clock(Duration::from_millis(450));
-    pump(&mut visual, 1);
+    pump(&mut case.visual, 1);
 
-    apply(
-        cx,
-        &conversation,
-        ThreadEvent::ToolOutput {
-            id: "toolu-quiet".into(),
-            chunk: "first burst line\n".into(),
-        },
-    );
-    pump(&mut visual, 1);
+    fold(&mut case.chat, &tool_content("first burst line\n"));
+    case.project(cx);
+    pump(&mut case.visual, 1);
     assert_eq!(
-        tool_entry(&conversation, cx).stream.published(),
-        "first burst line\n"
+        case.row(cx).stream.published(),
+        "first burst line\n",
+        "the first text publishes immediately"
     );
 
     // The rest of the burst arrives inside the tick; then the command goes
     // quiet — no settle, no further chunk.
-    apply(
-        cx,
-        &conversation,
-        ThreadEvent::ToolOutput {
-            id: "toolu-quiet".into(),
-            chunk: "second burst line\n".into(),
-        },
+    fold(
+        &mut case.chat,
+        &tool_content("first burst line\nsecond burst line\n"),
     );
+    case.project(cx);
     cx.executor().advance_clock(Duration::from_millis(120));
-    pump(&mut visual, 2);
+    pump(&mut case.visual, 2);
 
-    let entry = tool_entry(&conversation, cx);
+    let entry = case.row(cx);
     assert_eq!(entry.output, "first burst line\nsecond burst line\n");
     assert_eq!(
         entry.stream.published(),
         entry.output,
         "a render pass publishes the tail the tick deferred"
     );
-    assert_card_paints(&mut visual);
+    assert_card_paints(&mut case.visual);
 }
 
 /// A burst that arrives entirely inside the card's open reveal, then silence.
@@ -370,39 +437,35 @@ async fn a_quiet_tail_catches_up_on_the_next_render(cx: &mut TestAppContext) {
 /// land the deferred text (no new chunk, no settle).
 #[gpui::test]
 async fn a_burst_inside_the_open_reveal_lands_after_the_hold(cx: &mut TestAppContext) {
-    let (conversation, mut visual) = mount_bash_card(cx, "toolu-reveal");
+    let mut case = mount_bash_card(cx, "rg -n 中文 .");
     // The mount's render set the reveal hold at the current clock; feed the
     // burst without advancing it, so every chunk lands inside the hold.
     let burst = "line one\nline two\nline three\n";
-    for chunk in ["line one\n", "line two\n", "line three\n"] {
-        apply(
-            cx,
-            &conversation,
-            ThreadEvent::ToolOutput {
-                id: "toolu-reveal".into(),
-                chunk: chunk.into(),
-            },
-        );
-    }
-    pump(&mut visual, 1);
+    fold(&mut case.chat, &tool_content("line one\n"));
+    case.project(cx);
+    fold(&mut case.chat, &tool_content("line one\nline two\n"));
+    case.project(cx);
+    fold(&mut case.chat, &tool_content(burst));
+    case.project(cx);
+    pump(&mut case.visual, 1);
     assert_eq!(
-        tool_entry(&conversation, cx).stream.published(),
+        case.row(cx).stream.published(),
         "line one\n",
         "the hold suppresses the deferred chunks"
     );
 
     // Silence: no further chunk. Only the clock moves past the hold.
     cx.executor().advance_clock(Duration::from_millis(450));
-    pump(&mut visual, 2);
+    pump(&mut case.visual, 2);
 
-    let entry = tool_entry(&conversation, cx);
+    let entry = case.row(cx);
     assert_eq!(entry.output, burst);
     assert_eq!(
         entry.stream.published(),
         burst,
         "the hold releases on a later render pass and the deferred text lands"
     );
-    assert_card_paints(&mut visual);
+    assert_card_paints(&mut case.visual);
 }
 
 /// The hostile content classes harvested from the exploratory sweep: CRLF,
@@ -423,14 +486,13 @@ async fn hostile_content_streams_through_the_card(cx: &mut TestAppContext) {
         "pub fn long_line() { pub fn long_line() { pub fn long_line() { pub fn long_line() { pub fn long_line() {}\n",
     ];
 
-    for (ix, content) in cases.iter().enumerate() {
-        let id = format!("toolu-hostile-{ix}");
-        let (conversation, mut visual) = mount_bash_card(cx, &id);
-        stream(cx, &mut visual, &conversation, &id, content);
-        settle(cx, &mut visual, &conversation, &id, content);
+    for content in cases {
+        let mut case = mount_bash_card(cx, "rg -n 中文 .");
+        stream(cx, &mut case, content);
+        settle(cx, &mut case, content);
 
-        let entry = tool_entry(&conversation, cx);
-        assert_eq!(entry.stream.published(), *content, "case {ix}");
-        assert_card_paints(&mut visual);
+        let entry = case.row(cx);
+        assert_eq!(entry.stream.published(), *content);
+        assert_card_paints(&mut case.visual);
     }
 }

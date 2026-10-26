@@ -109,8 +109,8 @@ pub fn ensure_tool_card(
         entry.stream.observe(&entry.output, now);
     } else {
         // A settled entry's body is authoritative and static; seed the
-        // snapshot here so restored history (which never sees a `ToolResult`
-        // event) renders the full output. A no-op once the two agree.
+        // snapshot here so a restored/history projection renders the full
+        // output. A no-op once the two agree.
         entry.stream.flush(&entry.output);
     }
     let (status, open) = (
