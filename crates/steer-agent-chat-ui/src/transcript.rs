@@ -920,6 +920,9 @@ pub fn tool_entry_item(id: &str, call: &ToolCallState, active_turn: bool) -> Too
         panel: None,
         card: None,
         cwd: None,
+        // The reconcile carries the materialized entry's snapshot forward;
+        // a fresh lowering only seeds the initial empty one.
+        stream: Default::default(),
     }
 }
 
@@ -961,6 +964,7 @@ pub fn ask_card_item(request: &ahp_types::state::InputRequestResponsePart) -> To
         panel: None,
         card: None,
         cwd: None,
+        stream: Default::default(),
     }
 }
 

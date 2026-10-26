@@ -345,7 +345,13 @@ impl RenderOnce for ShellView {
             .child(
                 TextView::markdown((self.id.clone(), "doc"), fenced(&doc))
                     .style(style)
-                    .code_block_highlighter(move |_block| runs.as_ref().clone()),
+                    // The core tiles runs over the parsed code; clamping at
+                    // the boundary keeps that tiling valid even if the parse
+                    // and the runs were produced against slightly different
+                    // text (see `text_runs`).
+                    .code_block_highlighter(move |block| {
+                        crate::text_runs::clamp_runs(runs.as_ref().clone(), &block.code())
+                    }),
             )
             .child(
                 h_flex()

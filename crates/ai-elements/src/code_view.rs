@@ -531,7 +531,11 @@ impl RenderOnce for CodeView {
         let runs = Arc::new(runs);
         TextView::markdown(self.id, fenced(&text))
             .style(code_style(theme))
-            .code_block_highlighter(move |_block| runs.as_ref().clone())
+            // The core tiles runs over the parsed code; clamping at the
+            // boundary keeps that tiling valid (see `text_runs`).
+            .code_block_highlighter(move |block| {
+                crate::text_runs::clamp_runs(runs.as_ref().clone(), &block.code())
+            })
     }
 }
 

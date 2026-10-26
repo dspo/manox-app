@@ -18,7 +18,7 @@ description: manox-app 的 gpui-kit 版本跟进方法论——评估新发布�
 ### 必须跟进（不跟进即损害）
 
 1. **发生 breaking**：升级落点凡含 breaking，必须全额消费——编译不过是最强信号。不留半吊子迁移，不新加 `#[allow]` 或禁用 feature 绕过。
-2. **撞到上游已修复的 bug**：崩溃、渲染回归、交互异常，先在 release notes / changelog 确认修复点再升级（先例：element-arena gpui#60295 的 SIGABRT 修复是本仓上 gpui-pre ≥0.3.4 的原因）。
+2. **撞到上游已修复的 bug**：崩溃、渲染回归、交互异常，先在 release notes / changelog 确认修复点再升级（先例：element-arena gpui#60295 的 SIGABRT 修复是本仓上 gpui-pre ≥0.3.4 的原因）。未修的同族 bug、我们的缓解与每次 bump 的复核/销账动作见 `references/upstream-bugs.md`。
 3. **平台演进使旧快照失效**：macOS 大版本、Metal、输入法行为变化。离屏截图与真机往往先暴露。
 4. **生态收敛压力**：工具链升级或其它依赖把同族 crate 拉成多版本时，必须归一到单一版本（`cargo tree -d | grep -i gpui` 验证）。
 5. **安全修复**。

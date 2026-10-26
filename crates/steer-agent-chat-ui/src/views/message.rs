@@ -3305,6 +3305,7 @@ mod tests {
                 panel: None,
                 card: None,
                 cwd: None,
+                stream: Default::default(),
             }));
             cx.new(|_| {
                 MessageItem::new(
@@ -3499,6 +3500,7 @@ mod tests {
                         panel: None,
                         card: None,
                         cwd: None,
+                        stream: Default::default(),
                     }),
                     "model".into(),
                     0,
@@ -3733,6 +3735,7 @@ mod tests {
                 panel: None,
                 card: None,
                 cwd: None,
+                stream: Default::default(),
             }));
             thinking.entries.push(ActivityEntry::Tool(ToolCallItem {
                 id: "tool-long-streaming-output".into(),
@@ -3748,6 +3751,7 @@ mod tests {
                 panel: None,
                 card: None,
                 cwd: None,
+                stream: Default::default(),
             }));
 
             let thinking_item = ConvItem::Thinking(thinking);
@@ -3942,6 +3946,7 @@ mod tests {
                 panel: None,
                 card: None,
                 cwd: None,
+                stream: Default::default(),
             })
         };
         let outcome = |path: &str, kind: crate::preview::PreviewKind, bytes: u64| {
@@ -4070,6 +4075,7 @@ body", cx);
                 panel: None,
                 card: None,
                 cwd: None,
+                stream: Default::default(),
             })
         };
         let mut t = ThinkingContainer::new();
@@ -4121,6 +4127,7 @@ body", cx);
                 panel: None,
                 card: None,
                 cwd: None,
+                stream: Default::default(),
             })
         };
         let mut t = ThinkingContainer::new();

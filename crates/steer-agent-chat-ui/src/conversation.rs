@@ -19,6 +19,7 @@ use manox_agent::thread::ToolCallStatus;
 
 use crate::transcript::{ItemKey, Node, Overlays, ProjectEnv};
 use crate::views::message::MessageItem;
+use crate::views::tool_stream::ToolStreamSnapshot;
 
 /// A decoded image attached to a user message, kept only for UI preview. The
 /// canonical bytes live in the submitted turn's content; this holds a gpui
@@ -164,6 +165,15 @@ pub struct ToolCallItem {
     /// The working directory snapshot the card's shell context renders —
     /// captured at sync time, the same moment the panel path takes its own.
     pub cwd: Option<SharedString>,
+    /// The batched, append-only text the card body renders while the call
+    /// streams. `output` stays the authority (copy, diff tabs, lengths); this
+    /// snapshot only smooths what reaches the rich-text core (see
+    /// [`crate::views::tool_stream`]). The projection lowers a fresh
+    /// `ToolCallItem` per pass, but the reconcile mutates the materialized
+    /// entry in place and `sync_tool_fields` deliberately does not copy this
+    /// field — so the snapshot survives projection passes. Boxed to keep the
+    /// activity-entry enum from carrying it inline in every variant.
+    pub stream: Box<ToolStreamSnapshot>,
 }
 
 /// An entry within a `ThinkingContainer`'s activity segment. A segment mixes
@@ -2185,6 +2195,7 @@ mod tests {
                             panel: None,
                             card: None,
                             cwd: None,
+                            stream: Default::default(),
                         }));
                     }
                     ahp_types::state::ResponsePart::SystemNotification(note) => {

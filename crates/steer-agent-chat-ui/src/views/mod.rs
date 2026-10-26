@@ -7,6 +7,7 @@ pub mod message;
 pub mod popup_menu;
 pub mod subagents;
 pub mod tool_cards;
+pub mod tool_stream;
 pub mod turn_navigator;
 pub mod turn_rail;
 

@@ -905,6 +905,7 @@ impl ChatPreview {
                 panel: None,
                 card: None,
                 cwd: None,
+                stream: Default::default(),
             }),
             "",
             cx,

@@ -13,6 +13,7 @@
 //! caller rather than reading them from a session.
 
 mod animation;
+mod text_runs;
 
 pub mod ask;
 pub mod code_view;
