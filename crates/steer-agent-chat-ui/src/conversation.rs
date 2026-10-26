@@ -621,15 +621,21 @@ impl ConversationState {
     /// A refusal naming a turn retires the optimistic bubble that turn was
     /// minted for — the row never had content behind it, and leaving it
     /// would strand a phantom message beside the notice explaining it.
+    ///
+    /// A `server_seq` already on the table is dropped here: the store's table
+    /// drains, so a re-delivered envelope is recorded again, and the rows are
+    /// keyed by that seq — two copies would project two rows under one key.
     pub fn absorb_refusals(&mut self, refusals: Vec<crate::transcript::RefusalNotice>) {
-        for refusal in &refusals {
+        for refusal in refusals {
             if let Some(turn_id) = refusal.turn_id.as_deref() {
                 self.overlays
                     .bubbles
                     .retain(|bubble| bubble.turn_id.as_deref() != Some(turn_id));
             }
+            if !self.overlays.refusals.iter().any(|r| r.seq == refusal.seq) {
+                self.overlays.refusals.push(refusal);
+            }
         }
-        self.overlays.refusals.extend(refusals);
         let cap = 128;
         let excess = self.overlays.refusals.len().saturating_sub(cap);
         self.overlays.refusals.drain(..excess);
@@ -981,6 +987,19 @@ fn sync_segment(
         let ConvItem::Thinking(t) = item.kind_mut() else {
             return false;
         };
+        // An entry the node no longer carries leaves the row first: a
+        // re-folded turn (bridge restart re-issuing `turnStarted`, a re-run)
+        // can drop trailing parts, and the live row must match a fresh
+        // projection of the same state — otherwise "live and rebuild are one
+        // function" diverges exactly here. The drop precedes the merge so
+        // the mount indices taken below address the vector the caller will
+        // still see (a stale index would mount the wrong entry's body, or
+        // silently skip the one that changed).
+        let keep: std::collections::HashSet<&str> =
+            n.entries.iter().map(|entry| entry.id()).collect();
+        let before = t.entries.len();
+        t.entries.retain(|entry| keep.contains(entry.id()));
+        changed |= t.entries.len() != before;
         for entry in n.entries.iter() {
             let id = entry.id().to_string();
             match t.find_entry_index(&id) {
@@ -1107,16 +1126,6 @@ fn sync_segment(
                 t.collapsed = true;
             }
         }
-        // An entry the node no longer carries leaves the row: a re-folded
-        // turn (bridge restart re-issuing `turnStarted`, a re-run) can drop
-        // trailing parts, and the live row must match a fresh projection of
-        // the same state — otherwise "live and rebuild are one function"
-        // diverges exactly here.
-        let keep: std::collections::HashSet<&str> =
-            n.entries.iter().map(|entry| entry.id()).collect();
-        let before = t.entries.len();
-        t.entries.retain(|entry| keep.contains(entry.id()));
-        changed |= t.entries.len() != before;
         // Container bookkeeping follows the node wholesale.
         t.accepting_entries = n.accepting_entries;
         t.streaming = n.streaming;
@@ -1928,6 +1937,73 @@ mod tests {
             cx.read(|cx| conversation.read(cx).keys().to_vec()),
             vec![ItemKey::Notice("rej:7".into())],
             "the refused bubble leaves; only the notice remains"
+        );
+    }
+
+    /// The host re-keys a turn when it re-folds it (`t-{entry}` instead of the
+    /// client's id). Identity alone would strand the bubble, so the text
+    /// fallback covers id-bearing bubbles too — still only above `minted_turns`.
+    #[gpui::test]
+    fn a_rewritten_turn_id_still_adopts_by_text(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut chat = empty_chat();
+        // An older turn with the very same body: the guard must keep the
+        // fallback off it.
+        fold(&mut chat, &start("t-0", "hello"));
+        fold(&mut chat, &complete("t-0", 1_000));
+        let conversation = cx.update(|cx| projected(cx, &chat));
+        let (env, _host) = env();
+        conversation.update(&mut *cx, |c, cx| {
+            c.push_optimistic_user(
+                Some(&chat),
+                crate::transcript::OverlayBubbleSeed {
+                    text: "hello".into(),
+                    images: Vec::new(),
+                    meta: UserTurnMeta::new(0, "test-model".into(), None),
+                    turn_id: Some("uuid-client".into()),
+                },
+                &env,
+                cx,
+            );
+        });
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::User("t-0".into()), ItemKey::Optimistic(0)],
+            "the older turn must not claim the re-sent text"
+        );
+
+        // The host re-keys the turn it started for our submit.
+        fold(&mut chat, &start("t-7", "hello"));
+        cx.update(|cx| resync(&conversation, &chat, cx));
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::User("t-0".into()), ItemKey::User("t-7".into())],
+            "the rewritten id still adopts the bubble"
+        );
+    }
+
+    /// A re-delivered refusal (the store's table drains, so the same seq is
+    /// recorded again) must not project a second row under the same key.
+    #[gpui::test]
+    fn a_redelivered_refusal_renders_one_row(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let conversation = cx.update(|cx| projected(cx, &empty_chat()));
+        let (env, _host) = env();
+        for _ in 0..2 {
+            conversation.update(&mut *cx, |c, cx| {
+                c.absorb_refusals(vec![crate::transcript::RefusalNotice {
+                    seq: 7,
+                    text: "rejected: nope".into(),
+                    turn_id: None,
+                }]);
+                let nodes = c.stage(None, &env);
+                c.reconcile(nodes, &env, cx);
+            });
+        }
+        assert_eq!(
+            cx.read(|cx| conversation.read(cx).keys().to_vec()),
+            vec![ItemKey::Notice("rej:7".into())],
+            "one seq, one row"
         );
     }
 

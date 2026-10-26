@@ -263,10 +263,16 @@ pub fn project(chat: Option<&ChatState>, overlays: &mut Overlays, env: &ProjectE
 /// `chat/turnStarted` carries it verbatim, so the turn that lands IS the
 /// bubble — text plays no part (a `/skill` bubble keeps its compact
 /// invocation while the journal folds the expanded body; the ids still
-/// match). Text is the fallback for turns that did not exist when the bubble
-/// was minted (a steer waking its own run), never for an older turn: pairing
-/// re-sent text with the turn that already carried it swallowed the fresh
-/// bubble and stamped `steered` on a turn that never was one.
+/// match).
+///
+/// Text is the fallback for a turn that did not exist when the bubble was
+/// minted, never for an older one: pairing re-sent text with the turn that
+/// already carried it swallowed the fresh bubble and stamped `steered` on a
+/// turn that never was one. The `minted_turns` guard is the whole of that
+/// rule, so an id-bearing bubble keeps the fallback too — the host re-keys a
+/// turn when it re-folds it (`t-{entry}` instead of the client's id), and
+/// identity alone would then strand the bubble on screen forever with
+/// nothing to retire it.
 fn adopt_bubbles(chat: &ChatState, overlays: &mut Overlays, nodes: &mut [Node]) {
     if overlays.bubbles.is_empty() {
         return;
@@ -294,7 +300,6 @@ fn adopt_bubbles(chat: &ChatState, overlays: &mut Overlays, nodes: &mut [Node]) 
                     .enumerate()
                     .position(|(ix, bubble)| {
                         !paired.contains(&ix)
-                            && bubble.turn_id.is_none()
                             && bubble.minted_turns <= turn_ix
                             && bubble.text == turn.message.text
                     })
