@@ -17,9 +17,8 @@
 
 mod common;
 
-use agent_ui::conversation::{ApplyCtx, ConversationState};
-use common::{init_harness, open_workspace, tall_history};
-use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, px};
+use common::{conversation_from_chat, init_harness, open_workspace, tall_chat};
+use gpui::{Modifiers, TestAppContext, VisualTestContext, px};
 
 #[gpui::test]
 async fn turn_rail_marks_render_and_a_click_lands_on_the_turn(cx: &mut TestAppContext) {
@@ -27,21 +26,10 @@ async fn turn_rail_marks_render_and_a_click_lands_on_the_turn(cx: &mut TestAppCo
     let (window, workspace) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
 
-    let conversation = cx.new(|cx| {
-        ConversationState::rebuild_from_display(
-            &tall_history(30),
-            &std::collections::HashMap::new(),
-            "test-model",
-            manox_agent::MessageAuthor::Lead,
-            true,
-            ApplyCtx {
-                host: steer_agent_chat_ui::host::noop_host(),
-                cwd: None,
-                fork_source: None,
-            },
-            cx,
-        )
-    });
+    let conversation = {
+        let chat = tall_chat(30);
+        cx.update(|cx| conversation_from_chat(cx, &chat))
+    };
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_replace_conversation(conversation, cx);
     });

@@ -10,9 +10,7 @@ pub use chat_host::WorkspaceChatHost;
 // The chat foundation now lives in steer-agent-chat-ui (Phase 2); these
 // re-exports keep every `crate::…` path inside agent-ui (and the tests)
 // resolving unchanged.
-pub use steer_agent_chat_ui::{
-    ahp_store, chat_fold, cockpit, conversation, git_status, overlap_diag,
-};
+pub use steer_agent_chat_ui::{ahp_store, cockpit, conversation, git_status, overlap_diag};
 pub mod browser_host;
 pub mod chatgpt_app;
 pub mod chrome_assembly;

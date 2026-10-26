@@ -28,14 +28,14 @@ mod macos {
     use std::sync::Arc;
 
     use agent_ui::assets::ExtrasAssetSource;
-    use agent_ui::conversation::{ApplyCtx, ConversationState};
+    use agent_ui::conversation::{ConvItem, ConversationState};
     use agent_ui::views::message::MessageItem;
     use gpui::{
         AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _,
         VisualTestAppContext, Window, div, px, size,
     };
     use gpui_component::Root;
-    use manox_agent::{MessageAuthor, ThreadEvent};
+    use manox_agent::MessageAuthor;
 
     const MODEL: &str = "bigmodel-anthropic/glm-5.3";
 
@@ -98,17 +98,61 @@ mod macos {
         });
 
         let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
-        let ctx = ApplyCtx {
-            host: steer_agent_chat_ui::host::noop_host(),
-            cwd: None,
-            fork_source: None,
-        };
         cx.update(|cx| {
+            // The same fold the live stream runs: one markdown part carrying
+            // the whole message, applied through the published reducer.
+            let mut chat: ahp_types::state::ChatState = serde_json::from_value(serde_json::json!({
+                "resource": "ahp-chat:/c-shot",
+                "title": "shot",
+                "status": 0,
+                "modifiedAt": "2026-01-01T00:00:00Z",
+                "turns": [],
+            }))
+            .expect("the empty chat parses");
+            let start: ahp_types::actions::StateAction =
+                serde_json::from_value(serde_json::json!({
+                    "type": "chat/turnStarted", "turnId": "t-1",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "message": { "text": "shot", "origin": { "kind": "user" } },
+                }))
+                .expect("the start action parses");
+            let open: ahp_types::actions::StateAction = serde_json::from_value(serde_json::json!({
+                "type": "chat/responsePart", "turnId": "t-1",
+                "part": { "kind": "markdown", "id": "p-1", "content": "" },
+            }))
+            .expect("the open action parses");
+            let delta: ahp_types::actions::StateAction =
+                serde_json::from_value(serde_json::json!({
+                    "type": "chat/delta", "turnId": "t-1", "partId": "p-1",
+                    "content": message(),
+                }))
+                .expect("the delta action parses");
+            ahp::reducers::apply_action_to_chat(&mut chat, &start);
+            ahp::reducers::apply_action_to_chat(&mut chat, &open);
+            ahp::reducers::apply_action_to_chat(&mut chat, &delta);
+            let host = steer_agent_chat_ui::host::noop_host();
+            let env = steer_agent_chat_ui::transcript::ProjectEnv {
+                role: MODEL,
+                recipient: &MessageAuthor::Lead,
+                host: &host,
+                cwd: None,
+                fork_source: false,
+                promoted_confirmation: None,
+            };
             conversation.update(cx, |c, cx| {
-                let _ = c.apply(&ThreadEvent::AgentText(message()), MODEL, None, ctx, cx);
+                let nodes = c.stage(Some(&chat), &env);
+                c.reconcile(nodes, &env, cx);
             });
         });
-        let rows = cx.update(|cx| conversation.read(cx).items().to_vec());
+        let rows: Vec<Entity<MessageItem>> = cx.update(|cx| {
+            conversation
+                .read(cx)
+                .items()
+                .iter()
+                .filter(|item| matches!(item.read(cx).kind(), ConvItem::Assistant { .. }))
+                .cloned()
+                .collect()
+        });
 
         let handle = cx
             .open_offscreen_window(size(px(1000.), px(1400.)), move |window, cx| {

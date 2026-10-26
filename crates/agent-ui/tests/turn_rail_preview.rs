@@ -15,9 +15,8 @@
 
 mod common;
 
-use agent_ui::conversation::{ApplyCtx, ConversationState};
-use common::{init_harness, open_workspace, tall_history};
-use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
+use common::{conversation_from_chat, init_harness, open_workspace, tall_chat};
+use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
 #[gpui::test]
 async fn preview_tracks_the_hovered_mark_when_the_ladder_scrolls(cx: &mut TestAppContext) {
@@ -25,27 +24,18 @@ async fn preview_tracks_the_hovered_mark_when_the_ladder_scrolls(cx: &mut TestAp
     let (window, workspace) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
 
-    let conversation = cx.new(|cx| {
-        ConversationState::rebuild_from_display(
-            &tall_history(60),
-            &std::collections::HashMap::new(),
-            "test-model",
-            manox_agent::MessageAuthor::Lead,
-            true,
-            ApplyCtx {
-                host: steer_agent_chat_ui::host::noop_host(),
-                cwd: None,
-                fork_source: None,
-            },
-            cx,
-        )
-    });
+    let conversation = {
+        let chat = tall_chat(60);
+        cx.update(|cx| conversation_from_chat(cx, &chat))
+    };
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_replace_conversation(conversation, cx);
     });
     visual.refresh().unwrap();
 
-    // Turn 39 anchors at item 78. Tail-follow puts active on the newest
+    // Turn 39 anchors at item 78 (two rows per turn in this fixture: user
+    // bubble + answer — the turns carry no tool activity, so no process head).
+    // Tail-follow puts active on the newest
     // turn, so the ladder is scrolled to its tail (offset.y ≈ -180) and
     // mark 39 sits mid-ladder, on screen.
     let mark = visual
@@ -73,21 +63,10 @@ async fn preview_tracks_the_hovered_mark_when_the_ladder_scrolls(cx: &mut TestAp
     // state: the stale hover must not survive the switch (no preview card
     // for a pointer that is not on the rail, and no stale guard feeding
     // `&turns[ix]`).
-    let short = cx.new(|cx| {
-        ConversationState::rebuild_from_display(
-            &tall_history(1),
-            &std::collections::HashMap::new(),
-            "test-model",
-            manox_agent::MessageAuthor::Lead,
-            true,
-            ApplyCtx {
-                host: steer_agent_chat_ui::host::noop_host(),
-                cwd: None,
-                fork_source: None,
-            },
-            cx,
-        )
-    });
+    let short = {
+        let chat = tall_chat(1);
+        cx.update(|cx| conversation_from_chat(cx, &chat))
+    };
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_replace_conversation(short, cx);
     });

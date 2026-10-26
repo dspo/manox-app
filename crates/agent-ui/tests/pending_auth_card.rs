@@ -13,8 +13,9 @@
 mod common;
 
 use common::{init_harness, open_workspace};
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 use manox_agent::PermissionDecision;
+use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
 
 #[gpui::test]
 async fn confirmation_park_surfaces_as_the_conversation_card(cx: &mut TestAppContext) {
@@ -25,13 +26,75 @@ async fn confirmation_park_surfaces_as_the_conversation_card(cx: &mut TestAppCon
     let before = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_confirmation(cx));
     assert!(before.is_none(), "no pending card before the seed");
 
+    // The parked call exists the production way: a tool-call part parked in
+    // `pending-confirmation` on the fold. The workspace-side seed arms the
+    // pending state (the diagnostic stand-in for the session channel's
+    // input-needed entry); the sync projects the promoted card from the part.
+    let store = cx.new(|_| AhpStore::detached());
+    store.update(&mut visual.cx, |s, _| {
+        s.diagnostic_seed_session_for_chat("sess-1", "sess-1")
+    });
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store.clone(), "sess-1", cx);
+    });
+    store.update(&mut visual.cx, |s, _| {
+        let mut route = |action: ahp_types::actions::StateAction| {
+            s.book.apply(&chat_uri("sess-1"), &action);
+        };
+        route(ahp_types::actions::StateAction::ChatTurnStarted(
+            ahp_types::actions::ChatTurnStartedAction {
+                turn_id: "turn-1".to_string(),
+                started_at: "2026-09-30T00:00:00Z".to_string(),
+                message: serde_json::from_value(serde_json::json!({
+                    "text": "edit it", "origin": { "kind": "user" },
+                }))
+                .expect("a user message parses"),
+                queued_message_id: None,
+                meta: None,
+            },
+        ));
+        route(ahp_types::actions::StateAction::ChatToolCallStart(
+            ahp_types::actions::ChatToolCallStartAction {
+                turn_id: "turn-1".to_string(),
+                tool_call_id: "call_1".to_string(),
+                meta: None,
+                tool_name: "Bash".to_string(),
+                display_name: "Bash".to_string(),
+                intention: Some("Run the build".to_string()),
+                contributor: None,
+            },
+        ));
+        route(ahp_types::actions::StateAction::ChatToolCallReady(
+            ahp_types::actions::ChatToolCallReadyAction {
+                turn_id: "turn-1".to_string(),
+                tool_call_id: "call_1".to_string(),
+                meta: None,
+                contributor: None,
+                intention: None,
+                invocation_message: "Run the build".into(),
+                tool_input: Some(ahp_types::state::ToolInput::Inline(
+                    "{\"command\": \"cargo build\"}".to_string(),
+                )),
+                confirmation_title: None,
+                risk_assessment: None,
+                edits: None,
+                editable: None,
+                options: None,
+                confirmed: None,
+            },
+        ));
+    });
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_seed_pending_confirmation("call_1", "call_1", cx);
     });
 
-    // The render loop runs the sync every frame: the seed alone surfaces
-    // nothing, the next frame promotes the row and budgets the decision
-    // snapshot onto it.
+    // The store observe arms the park (the live ask edge) and then projects:
+    // the parked call surfaces as the top-level confirmation card in the same
+    // pass. The test drives the two diagnostics directly.
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_sync_live_ask(cx);
+        ws.diagnostic_sync_conversation(cx);
+    });
     visual.cx.run_until_parked();
     let pending = workspace
         .read_with(&visual.cx, |ws, cx| ws.diagnostic_pending_confirmation(cx))

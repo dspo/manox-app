@@ -71,15 +71,12 @@ async fn the_transcript_band_gives_the_message_list_real_height(cx: &mut TestApp
             ahp_types::state::SnapshotState::Chat(Box::new(chat)),
         ));
     });
-    let (rebuilt, _) =
-        workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_run_rebuild_guard(cx));
-    assert!(rebuilt, "the snapshot build fires the rebuild guard");
-    let (_, built_turns, items) =
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_rebuild_watermark(cx));
-    assert_eq!(built_turns, 3, "three settled turns built");
+    workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_sync_conversation(cx));
+    let items = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_transcript_texts(cx));
     assert!(
-        items >= 3,
-        "the transcript holds the built rows, got {items}"
+        items.len() >= 3,
+        "the three settled turns built their rows, got {:?}",
+        items
     );
 
     // Paint three frames (the draw-probe warmup the geometry tests use).

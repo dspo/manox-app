@@ -6,13 +6,13 @@
 //! are the selectors the rendered pieces carry
 //! (`steer_components::markdown::math_block`).
 
-use agent_ui::conversation::{ApplyCtx, ConversationState};
+use agent_ui::conversation::ConversationState;
 use agent_ui::views::message::MessageItem;
 use gpui::{
     AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
     VisualTestContext, Window, div, px, size,
 };
-use manox_agent::{MessageAuthor, ThreadEvent};
+use manox_agent::MessageAuthor;
 
 const MODEL: &str = "bigmodel-anthropic/glm-5.3";
 
@@ -39,24 +39,29 @@ fn paint_chunks(cx: &mut TestAppContext, chunks: &[&str]) -> VisualTestContext {
     cx.update(gpui_component::init);
     let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
     cx.update(|cx| {
-        conversation.update(cx, |c, cx| {
-            for chunk in chunks {
-                let ctx = ApplyCtx {
-                    host: steer_agent_chat_ui::host::noop_host(),
-                    cwd: None,
-                    fork_source: None,
-                };
-                let _ = c.apply(
-                    &ThreadEvent::AgentText(chunk.to_string()),
-                    MODEL,
-                    None,
-                    ctx,
-                    cx,
-                );
-            }
-        });
+        let mut fold = Fold::new();
+        fold.start_turn();
+        for chunk in chunks {
+            fold.delta("p-1", chunk);
+        }
+        project_fold(cx, &conversation, &mut fold);
     });
-    let rows = cx.update(|cx| conversation.read(cx).items().to_vec());
+    // The projection renders the turn's user row too; the probe paints the
+    // assistant bubble.
+    let rows = cx.update(|cx| {
+        conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.read(cx).kind(),
+                    agent_ui::conversation::ConvItem::Assistant { .. }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    });
     assert_eq!(rows.len(), 1, "one assistant bubble");
 
     let window = cx.open_window(size(px(760.), px(600.)), move |_, _| RowProbe {
@@ -64,13 +69,12 @@ fn paint_chunks(cx: &mut TestAppContext, chunks: &[&str]) -> VisualTestContext {
     });
     cx.run_until_parked();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
-    for _ in 0..2 {
+    for _ in 0..4 {
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     visual
 }
-
 #[gpui::test]
 async fn a_fenced_display_equation_paints_as_its_formula(cx: &mut TestAppContext) {
     let mut visual = paint_message(
@@ -172,7 +176,7 @@ async fn an_inline_equation_paints_on_the_line(cx: &mut TestAppContext) {
         "the run paints the formula, not an empty box: {run:?}"
     );
     let body = visual
-        .debug_bounds("message-item-body-0")
+        .debug_bounds("message-item-body-1")
         .expect("the body still paints as text");
     assert!(
         body.size.height > px(8.),
@@ -191,7 +195,7 @@ async fn currency_stays_prose(cx: &mut TestAppContext) {
         "currency is never typeset as a formula"
     );
     let body = visual
-        .debug_bounds("message-item-body-0")
+        .debug_bounds("message-item-body-1")
         .expect("the body still paints as text");
     assert!(body.size.height > px(8.), "the body has real height");
 }
@@ -208,7 +212,7 @@ async fn an_untypeset_equation_stays_literal(cx: &mut TestAppContext) {
         "an untypeset equation never becomes an image"
     );
     let body = visual
-        .debug_bounds("message-item-body-0")
+        .debug_bounds("message-item-body-1")
         .expect("the body still paints as text");
     assert!(
         body.size.height > px(8.),
@@ -228,4 +232,107 @@ async fn an_untypeset_inline_stays_literal(cx: &mut TestAppContext) {
         visual.debug_bounds(BLOCK_SELECTOR).is_none(),
         "nor does it become a block"
     );
+}
+
+/// The live fold, driven exactly as the store drives it: StateActions folded
+/// through the published reducers, then projected. The synthesized delta
+/// sequences here are fixtures — no real session journal rides this file.
+struct Fold {
+    chat: ahp_types::state::ChatState,
+}
+
+const TURN: &str = "t-1";
+
+impl Fold {
+    fn new() -> Self {
+        Self {
+            chat: serde_json::from_value(serde_json::json!({
+                "resource": "ahp-chat:/c-probe",
+                "title": "probe",
+                "status": 0,
+                "modifiedAt": "2026-01-01T00:00:00Z",
+                "turns": [],
+            }))
+            .expect("the empty chat parses"),
+        }
+    }
+
+    fn apply(&mut self, action: &ahp_types::actions::StateAction) {
+        ahp::reducers::apply_action_to_chat(&mut self.chat, action);
+    }
+
+    fn start_turn(&mut self) {
+        let message: ahp_types::state::Message = serde_json::from_value(serde_json::json!({
+            "text": "probe", "origin": { "kind": "user" },
+        }))
+        .expect("the opening message parses");
+        self.apply(&ahp_types::actions::StateAction::ChatTurnStarted(
+            ahp_types::actions::ChatTurnStartedAction {
+                turn_id: TURN.into(),
+                started_at: "2026-01-01T00:00:00Z".into(),
+                message,
+                queued_message_id: None,
+                meta: None,
+            },
+        ));
+    }
+
+    fn open_part(&mut self, part: &str, reasoning: bool) {
+        let exists = self.chat.active_turn.as_ref().is_some_and(|turn| {
+            turn.response_parts.iter().any(|p| match p {
+                ahp_types::state::ResponsePart::Markdown(md) => !reasoning && md.id == part,
+                ahp_types::state::ResponsePart::Reasoning(rs) => reasoning && rs.id == part,
+                _ => false,
+            })
+        });
+        if exists {
+            return;
+        }
+        let part_value = if reasoning {
+            serde_json::json!({ "kind": "reasoning", "id": part, "content": "" })
+        } else {
+            serde_json::json!({ "kind": "markdown", "id": part, "content": "" })
+        };
+        let action: ahp_types::actions::StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/responsePart", "turnId": TURN, "part": part_value,
+        }))
+        .expect("the responsePart action parses");
+        self.apply(&action);
+    }
+
+    /// Open the markdown part (once) and append a delta — the wire's
+    /// responsePart-then-delta shape.
+    fn delta(&mut self, part: &str, text: &str) {
+        self.open_part(part, false);
+        self.apply(&ahp_types::actions::StateAction::ChatDelta(
+            ahp_types::actions::ChatDeltaAction {
+                turn_id: TURN.into(),
+                part_id: part.into(),
+                content: text.into(),
+                meta: None,
+            },
+        ));
+    }
+}
+
+/// Project the fold into the conversation — the same stage/reconcile split
+/// the workspace sync runs.
+fn project_fold(
+    cx: &mut gpui::App,
+    conversation: &gpui::Entity<ConversationState>,
+    fold: &mut Fold,
+) {
+    let host = steer_agent_chat_ui::host::noop_host();
+    let env = steer_agent_chat_ui::transcript::ProjectEnv {
+        role: MODEL,
+        recipient: &manox_agent::MessageAuthor::Lead,
+        host: &host,
+        cwd: None,
+        fork_source: false,
+        promoted_confirmation: None,
+    };
+    conversation.update(cx, |c, cx| {
+        let nodes = c.stage(Some(&fold.chat), &env);
+        c.reconcile(nodes, &env, cx);
+    });
 }

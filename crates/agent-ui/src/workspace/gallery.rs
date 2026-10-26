@@ -77,44 +77,14 @@ fn install_scene(ws: &mut Workspace, cx: &mut Context<Workspace>) {
         cc.notify();
     });
     set_running(ws, true, cx);
-    seed_transcript(ws, cx);
+    // The fabricated chat IS the transcript fixture; the projection renders
+    // it (the settled exchange plus the in-flight turn) the same way it
+    // renders any fold.
+    if let Some((store, _)) = ws.chat.read(cx).store.clone() {
+        ws.sync_conversation(&store, cx);
+    }
     preset_queue(ws, cx);
     tracing::info!(session_id = %sid, "gallery scene installed");
-}
-
-/// One finished exchange through the REAL apply path, so the transcript
-/// rows are exactly what a settled turn renders.
-fn seed_transcript(ws: &mut Workspace, cx: &mut Context<Workspace>) {
-    let role = ws.model_label(cx);
-    let meta = ws.user_turn_meta(cx);
-    let host = ws.chat.read(cx).host.clone();
-    let cwd = thread_cwd(&ws.chat.read(cx).thread, &ws.chat.read(cx).store, cx);
-    let text = "帮我梳理这个仓库的构建脚本".to_string();
-    ws.chat_conversation(cx).update(cx, |c, cx| {
-        c.push_user(text, Vec::new(), meta, host.clone(), cx);
-        let ctx = crate::conversation::ApplyCtx {
-            host: host.clone(),
-            cwd: cwd.clone(),
-            fork_source: None,
-        };
-        c.apply(&manox_agent::ThreadEvent::TurnStarted, &role, None, ctx, cx);
-        let ctx = crate::conversation::ApplyCtx {
-            host,
-            cwd,
-            fork_source: None,
-        };
-        c.apply(
-            &manox_agent::ThreadEvent::AgentText(
-                "构建脚本在 `script/` 下，入口是 `check.sh`。".to_string(),
-            ),
-            &role,
-            None,
-            ctx,
-            cx,
-        );
-    });
-    ws.sync_list_count(cx);
-    ws.follow_message_tail(cx);
 }
 
 /// Fabricate (or clear) the active turn in the detached book — the same
@@ -126,10 +96,16 @@ fn set_running(ws: &mut Workspace, on: bool, cx: &mut Context<Workspace>) {
     store.update(cx, |store, _| {
         store.diagnostic_set_chat(&sid, fabricated_chat(&sid, on));
     });
+    // The mirror tracks the fabricated fold; the projection re-renders the
+    // transcript for it. (The gallery drives the edges itself via the
+    // settle verbs, so no edge detection runs here.)
     ws.chat.update(cx, |chat, cc| {
         chat.turn_active = on;
         cc.notify();
     });
+    if let Some((store, _)) = ws.chat.read(cx).store.clone() {
+        ws.sync_conversation(&store, cx);
+    }
     if on {
         ws.spawn_thinking_ticker(cx);
     }
@@ -220,9 +196,13 @@ impl Workspace {
         self.settle_follow_ups(cancelled, cx);
     }
 
-    /// Replay the parked bucket (the re-attach reconcile path).
+    /// Re-run the transcript sync — the re-attach reconcile path: whatever
+    /// accumulated while parked (fold growth, consumption receipts) lands
+    /// through the same keyed projection.
     pub fn gallery_replay_parked(&mut self, cx: &mut Context<Self>) {
-        self.replay_parked_chat_events(cx);
+        if let Some((store, _)) = self.chat.read(cx).store.clone() {
+            self.sync_conversation(&store, cx);
+        }
     }
 
     /// Route one raw wire envelope through the store's production dispatch
@@ -256,19 +236,14 @@ impl Workspace {
         });
     }
 
-    /// Inject a wire consumption receipt into the store's event bucket, as
-    /// the backend's injection echo would land while the thread is parked.
+    /// Inject a wire consumption receipt into the store's table, as the
+    /// backend's injection echo would land while the thread is parked.
     pub fn gallery_inject_steer_consumed(&mut self, message_id: &str, cx: &mut Context<Self>) {
         let Some((store, sid)) = self.chat.read(cx).store.clone() else {
             return;
         };
         store.update(cx, |store, _| {
-            store.push_chat_event_for_test(
-                &sid,
-                crate::chat_fold::ChatEvent::SteerConsumed {
-                    message_id: message_id.to_string(),
-                },
-            );
+            store.diagnostic_inject_steer_receipt(&sid, message_id.to_string(), None);
         });
     }
 
@@ -361,9 +336,10 @@ impl Workspace {
 
     /// Inject a parked turn-start whose opening row IS a steer: the
     /// idle-steer wake path's receipt. `steer_id` is the id the row threads
-    /// (`None` when the host threads none); `opening_text` is the row's text
-    /// fallback (`None` for an empty row). The retire matches by id first,
-    /// then by text.
+    /// (`None` when the host threads none — the receipt then carries only
+    /// the text fallback, under an id no card matches); `opening_text` is
+    /// the row's text fallback (`None` for an empty row). The retire matches
+    /// by id first, then by text.
     pub fn gallery_inject_parked_turn_start(
         &mut self,
         steer_id: Option<&str>,
@@ -374,13 +350,18 @@ impl Workspace {
             return;
         };
         store.update(cx, |store, _| {
-            store.push_chat_event_for_test(
-                &sid,
-                crate::chat_fold::ChatEvent::TurnStarted {
-                    steer_id: steer_id.map(str::to_string),
-                    opening_text: opening_text.map(str::to_string),
-                },
-            );
+            // A turn start gains its active turn (the running edge the sync
+            // detects). A wake — a start CARRYING the pending id — also
+            // receipts the card; a start with no pending id is never a wake,
+            // so it must not retire anything by text.
+            store.diagnostic_set_chat(&sid, fabricated_chat(&sid, true));
+            if let Some(steer_id) = steer_id {
+                store.diagnostic_inject_steer_receipt(
+                    &sid,
+                    steer_id.to_string(),
+                    opening_text.map(str::to_string),
+                );
+            }
         });
     }
 
