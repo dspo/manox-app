@@ -77,14 +77,14 @@ impl ToolStreamSnapshot {
     /// Observe the source's current text. The first non-empty text publishes
     /// immediately so a card never starts blank for a tick; afterwards an
     /// append is coalesced to one publish per [`PUBLISH_TICK`] and suppressed
-    /// during a reveal hold. A non-append change always publishes at once.
+    /// during a reveal hold. A non-append change publishes at once unless the
+    /// derived (windowed) text is unchanged.
     pub fn observe(&mut self, source: &str, now: Instant) -> Publish {
         if source == self.published {
             return Publish::None;
         }
         if !self.is_append(source) {
-            self.replace(source, now);
-            return Publish::Replaced;
+            return self.replace(source, now);
         }
         let first = self.published.is_empty();
         if source.len() > PUBLISH_CAP
@@ -150,17 +150,24 @@ impl ToolStreamSnapshot {
 
     /// A non-append change: publish immediately, from the live tail when the
     /// text outgrows the streaming cap.
-    fn replace(&mut self, source: &str, now: Instant) {
+    fn replace(&mut self, source: &str, now: Instant) -> Publish {
+        let windowed = source.len() > PUBLISH_CAP;
+        let next = if windowed {
+            live_tail(source)
+        } else {
+            source.to_string()
+        };
+        // The derived window can be identical while the source grew in a
+        // region the tail already covered. Nothing to paint, and repainting
+        // would mint a fresh document state for the same text.
+        if next == self.published {
+            return Publish::None;
+        }
         self.generation += 1;
         self.last_publish = Some(now);
-        if source.len() > PUBLISH_CAP {
-            self.reset_mark = source.len();
-            self.published = live_tail(source);
-        } else {
-            self.reset_mark = 0;
-            self.published.clear();
-            self.published.push_str(source);
-        }
+        self.reset_mark = if windowed { source.len() } else { 0 };
+        self.published = next;
+        Publish::Replaced
     }
 
     /// Reset the append window to the source's live tail.
@@ -279,6 +286,20 @@ mod tests {
         assert_eq!(snapshot.observe(&longer, at(200)), Publish::Replaced);
         assert_eq!(snapshot.published(), live_tail(&longer));
         assert_eq!(snapshot.generation(), 2);
+    }
+
+    /// Render passes re-observe the same source after a windowed replace; the
+    /// derived tail is unchanged, so no parse is burnt and no generation moves.
+    #[test]
+    fn an_unchanged_windowed_source_does_not_replace_again() {
+        let long = "line of output\n".repeat(PUBLISH_CAP / 8);
+        let mut snapshot = ToolStreamSnapshot::default();
+        assert_eq!(snapshot.observe(&long, at(0)), Publish::Replaced);
+        let generation = snapshot.generation();
+
+        assert_eq!(snapshot.observe(&long, at(200)), Publish::None);
+        assert_eq!(snapshot.generation(), generation);
+        assert_eq!(snapshot.published(), live_tail(&long));
     }
 
     #[test]

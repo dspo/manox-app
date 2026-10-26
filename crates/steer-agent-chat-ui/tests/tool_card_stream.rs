@@ -317,6 +317,94 @@ async fn a_retry_rewrite_replaces_the_body(cx: &mut TestAppContext) {
     assert_card_paints(&mut visual);
 }
 
+/// A burst that ends the call's output, followed by a quiet command: the last
+/// chunks land inside the publish tick and no further chunk arrives. Render
+/// passes are the card's only clock after that, so the next frame must publish
+/// the deferred tail without waiting for the settle.
+#[gpui::test]
+async fn a_quiet_tail_catches_up_on_the_next_render(cx: &mut TestAppContext) {
+    let (conversation, mut visual) = mount_bash_card(cx, "toolu-quiet");
+    // Let the mount's reveal hold expire so this exercises the tick path.
+    cx.executor().advance_clock(Duration::from_millis(450));
+    pump(&mut visual, 1);
+
+    apply(
+        cx,
+        &conversation,
+        ThreadEvent::ToolOutput {
+            id: "toolu-quiet".into(),
+            chunk: "first burst line\n".into(),
+        },
+    );
+    pump(&mut visual, 1);
+    assert_eq!(
+        tool_entry(&conversation, cx).stream.published(),
+        "first burst line\n"
+    );
+
+    // The rest of the burst arrives inside the tick; then the command goes
+    // quiet — no settle, no further chunk.
+    apply(
+        cx,
+        &conversation,
+        ThreadEvent::ToolOutput {
+            id: "toolu-quiet".into(),
+            chunk: "second burst line\n".into(),
+        },
+    );
+    cx.executor().advance_clock(Duration::from_millis(120));
+    pump(&mut visual, 2);
+
+    let entry = tool_entry(&conversation, cx);
+    assert_eq!(entry.output, "first burst line\nsecond burst line\n");
+    assert_eq!(
+        entry.stream.published(),
+        entry.output,
+        "a render pass publishes the tail the tick deferred"
+    );
+    assert_card_paints(&mut visual);
+}
+
+/// A burst that arrives entirely inside the card's open reveal, then silence.
+/// The hold suppresses tick publishes, but once it expires a render pass must
+/// land the deferred text (no new chunk, no settle).
+#[gpui::test]
+async fn a_burst_inside_the_open_reveal_lands_after_the_hold(cx: &mut TestAppContext) {
+    let (conversation, mut visual) = mount_bash_card(cx, "toolu-reveal");
+    // The mount's render set the reveal hold at the current clock; feed the
+    // burst without advancing it, so every chunk lands inside the hold.
+    let burst = "line one\nline two\nline three\n";
+    for chunk in ["line one\n", "line two\n", "line three\n"] {
+        apply(
+            cx,
+            &conversation,
+            ThreadEvent::ToolOutput {
+                id: "toolu-reveal".into(),
+                chunk: chunk.into(),
+            },
+        );
+    }
+    pump(&mut visual, 1);
+    assert_eq!(
+        tool_entry(&conversation, cx).stream.published(),
+        "line one\n",
+        "the hold suppresses the deferred chunks"
+    );
+
+    // Silence: no further chunk. Only the clock moves past the hold.
+    cx.executor().advance_clock(Duration::from_millis(450));
+    pump(&mut visual, 2);
+
+    let entry = tool_entry(&conversation, cx);
+    assert_eq!(entry.output, burst);
+    assert_eq!(
+        entry.stream.published(),
+        burst,
+        "the hold releases on a later render pass and the deferred text lands"
+    );
+    assert_card_paints(&mut visual);
+}
+
 /// The hostile content classes harvested from the exploratory sweep: CRLF,
 /// lone CR, ANSI escapes, backtick-fence boundaries, CJK, emoji, and a line
 /// wider than the card. Each streams through the open reveal and settles.

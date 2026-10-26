@@ -100,10 +100,17 @@ pub fn ensure_tool_card(
         entry.card = Some(state);
     }
     let state = entry.card.clone()?;
-    // A settled entry's body is authoritative and static; seed the snapshot
-    // here so restored history (which never sees a `ToolResult` event) renders
-    // the full output. A no-op once the two agree.
-    if !entry.streaming {
+    let now = cx.background_executor().now();
+    if entry.streaming {
+        // Render passes are the only clock the card gets after a burst ends:
+        // publish the tail the tick or a reveal hold deferred. The rules are
+        // unchanged — an unchanged text is a no-op, appends still wait for the
+        // tick and for the hold to expire.
+        entry.stream.observe(&entry.output, now);
+    } else {
+        // A settled entry's body is authoritative and static; seed the
+        // snapshot here so restored history (which never sees a `ToolResult`
+        // event) renders the full output. A no-op once the two agree.
         entry.stream.flush(&entry.output);
     }
     let (status, open) = (
@@ -111,7 +118,6 @@ pub fn ensure_tool_card(
         entry.streaming || !entry.collapsed,
     );
     let open_flipped = state.read(cx).is_open() != open;
-    let now = cx.background_executor().now();
     state.update(cx, |state, cx| {
         if state.status() != &status {
             state.set_status(status, cx);
