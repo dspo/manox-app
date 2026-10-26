@@ -263,8 +263,6 @@ impl Workspace {
             }
         };
         land_conversation_row(&sid, project.as_deref(), provider, model_id, access, effort);
-        let config_for_channel = config.clone();
-        let cwd_for_channel = cwd.clone();
         let reply = self.with_foreground_store(cx, |store, _| {
             store.create_session(&sid, cwds, Some(config))
         });
@@ -273,17 +271,16 @@ impl Workspace {
             // A create refused with the protocol's SESSION_ALREADY_EXISTS
             // means the refill named a session the host still carries: the
             // draft is LIVE (the archive-time bit and the host-retired check
-            // keep retired rows out of the refill), and opening it is the
-            // refill's intent — the host's claim table reuses a blank id the
-            // same way. Every other failure (and a store unbound, where no
+            // keep retired rows out of the refill). The host owns that live
+            // session and this create does not touch it — attaching to it is
+            // the refill's intent, the same way the host's claim table reuses
+            // a blank id. Every other failure (and a store unbound, where no
             // create can even ride) lands a visible notification: a
             // user-initiated new session must never die quietly.
-            let mut reopened = false;
             let refusal = match reply {
                 Some(reply) => match reply.recv().await {
                     Ok(Ok(_)) => None,
                     Ok(Err(err)) if err.is_already_exists() => {
-                        reopened = true;
                         tracing::info!(
                             session_id = %sid2,
                             error = %err,
@@ -322,39 +319,9 @@ impl Workspace {
                     tracing::warn!(session_id = %sid2, error = %err, "new-thread attach FAILED")
                 }
             }
-            // A reopened session already carries its channel state — the
-            // durable picks the draft was left with, which the object row
-            // also holds. Re-landing this create's config would fork the
-            // channel from the row (and mutate a live session the host, not
-            // this create, owns).
-            if reopened {
-                return;
-            }
-            // The create intent boots the runtime on the directory and the
-            // config, but the session CHANNEL carries neither until a write
-            // lands one — and every composer surface (project chip, model
-            // chip, Captain strip) reads the channel. Land both through the
-            // same writers the composer's own pickers use, so the thread the
-            // user just created shows where it runs and on which model
-            // instead of asking for the folder a second time.
-            //
-            // v0.6.6 moved the create's cwd/config to the journal
-            // (manox#960), but the host seeds this channel from the journal
-            // HEADER (`seed_working_directories` + the config seat), and a
-            // deferred create has no journal until its first message — so
-            // these writes still own the pre-materialization display. The
-            // app-side deletion of them is recorded as due only once the
-            // host seeds from the create intent/object row instead
-            // (AGENTS.md, manox#904/#905).
-            let _ = ws.update(cx, |this, cx| {
-                this.with_foreground_store(cx, |store, sid| {
-                    store.set_cwd(&sid, &cwd_for_channel);
-                    if !config_for_channel.is_empty() {
-                        store.optimistic_config(&sid, &config_for_channel);
-                        store.set_config(&sid, config_for_channel);
-                    }
-                });
-            });
+            // The session channel needs no client-side fill here: the host
+            // seeds it from the create intent and the object row, and the
+            // journal (once the first turn materializes it) wins over both.
         })
         .detach();
         let _ = window;
