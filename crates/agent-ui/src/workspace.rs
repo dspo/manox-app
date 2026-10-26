@@ -28,19 +28,16 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState, RopeExt, Textarea, TextareaState},
     speech::{SpeechButton, SpeechEvent, SpeechState},
+    tab::{Tab, TabBar},
     v_flex,
 };
 /// `WindowExt::push_notification` + `Notification` are shared: the
 /// ChatGPT.app launch path (#410) reports outcomes under either harness.
 use gpui_component::{WindowExt as _, notification::Notification, tooltip::Tooltip};
-/// The full Lucide catalog (the app registers `AllAssets`): the access-mode
-/// visuals need `Shield`, which the component-compat `IconName` subset lacks.
-use gpui_kit_assets::IconName as AssetIcon;
 use manox_agent::PermissionDecision;
 use manox_agent::thread::AccessMode;
 use manox_agent::thread_engine::BrowserTabId;
 use manox_agent::{Thread, ThreadId};
-use manox_harness::sandbox::NetworkAccess;
 
 use crate::OpenSettings;
 use crate::ToggleTurnNavigator;
@@ -150,161 +147,72 @@ fn ask_input_json(
     })
 }
 
-/// Map an `AccessMode` to the chip's (label, accent color, icon) triple.
-///
-/// Colors are theme tokens, not raw hsla values, so the chip follows the
-/// active theme (light/dark) without bespoke palettes per mode. The Sandbox
-/// accent uses `info` (green) as a "this is the safe default" signal —
-/// staying gray would be visually identical to a disabled state.
-fn mode_chip_visual(mode: AccessMode, theme: &Theme) -> (SharedString, gpui::Hsla, AssetIcon) {
-    match mode {
-        AccessMode::Sandbox => (
-            i18n::t("access-mode-chip-sandbox"),
-            theme.info,
-            AssetIcon::Shield,
-        ),
-        AccessMode::FullAccess => (
-            i18n::t("access-mode-chip-full-access"),
-            theme.danger,
-            AssetIcon::TriangleAlert,
-        ),
-    }
-}
-
-/// Build the popover content for the access chip: two selectable mode rows
-/// (icon + title, check on the right for the active one) plus a network
-/// group beneath — a label row and the two-state `networkAccess` radio
-/// (Off/On) — titles only, no header and no per-mode descriptions. The
-/// whole thing is a plain `v_flex`
-/// so it sizes to its content with no `flex_1` distribution
-/// across items. The chip's dropdown wraps this in a `popover_style` div
-/// for the opaque card chrome — that path doesn't go through `PopupMenu`
-/// at all, sidestepping the per-`ElementItem` `flex_1`/`min_h(26)` wrapper
-/// that was producing both the height-leak bug and the clip-to-26 bug.
-///
-/// Every clickable row routes through `Workspace::apply_access_mode` /
-/// `Workspace::apply_network_access` so the switch + notice + menu close
-/// stay in one place. `theme` is
-/// consumed up front: every value used inside the `'static` row closures is
-/// pre-extracted into owned `SharedString`/`Hsla`/`IconName`, so the
-/// closures don't capture a short-lived theme reference.
-fn build_permission_content(
-    workspace: WeakEntity<Workspace>,
-    current: AccessMode,
-    network: NetworkAccess,
-    cx: &mut gpui::App,
-) -> gpui::Div {
-    let info: gpui::Hsla = cx.theme().info;
-    let danger: gpui::Hsla = cx.theme().danger;
-    let muted: gpui::Hsla = cx.theme().muted_foreground;
-
-    let make_row = |mode: AccessMode,
-                    title: SharedString,
-                    icon: AssetIcon,
-                    accent: gpui::Hsla,
-                    selected: bool| {
-        let ws = workspace.clone();
-        h_flex()
-            .id(("permission-mode-row", mode as usize))
-            .w_full()
-            .items_center()
-            .gap_2()
-            .cursor_pointer()
-            .child(Icon::new(icon).small().text_color(accent))
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_sm()
-                    .text_color(accent)
-                    .child(title),
-            )
-            .when(selected, |el| {
-                el.child(Icon::new(IconName::Check).small().text_color(accent))
-            })
-            .on_click(move |_event, _window, cx| {
-                let _ = ws.update(cx, |this, cx| this.apply_access_mode(mode, cx));
-            })
-    };
-
-    let make_network_row = |access: NetworkAccess,
-                            title: SharedString,
-                            icon: AssetIcon,
-                            accent: gpui::Hsla,
-                            selected: bool| {
-        let ws = workspace.clone();
-        h_flex()
-            .id(("network-access-row", access as usize))
-            .w_full()
-            .items_center()
-            .gap_2()
-            .cursor_pointer()
-            .child(Icon::new(icon).small().text_color(accent))
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_sm()
-                    .text_color(accent)
-                    .child(title),
-            )
-            .when(selected, |el| {
-                el.child(Icon::new(IconName::Check).small().text_color(accent))
-            })
-            .on_click(move |_event, _window, cx| {
-                let _ = ws.update(cx, |this, cx| this.apply_network_access(access, cx));
-            })
-    };
-
-    v_flex()
-        .w_full()
-        .gap_2()
-        .p_2()
-        .child(make_row(
-            AccessMode::Sandbox,
-            i18n::t("access-mode-sandbox-title"),
-            AssetIcon::Shield,
-            info,
-            current == AccessMode::Sandbox,
-        ))
-        .child(make_row(
-            AccessMode::FullAccess,
-            i18n::t("access-mode-full-access-title"),
-            AssetIcon::TriangleAlert,
-            danger,
-            current == AccessMode::FullAccess,
-        ))
-        // The network group's label row: non-interactive header, muted so
-        // the two radio rows below carry the color coding.
+/// Build the composer footer's inline access-mode switch: a two-segment
+/// segmented [`TabBar`] (`access-mode-sandbox-title` / `access-mode-full-access-title`
+/// as plain-text labels) on the component's muted track, its sliding
+/// indicator pill animating between segments — one click reaches either tier,
+/// no popover in between. The selected segment IS the current [`AccessMode`]:
+/// the caller reads it from the fold (§J11) and mirrors it into
+/// `selected_index`, so the control is a pure projection with no local open
+/// state. A click on the inactive segment routes through
+/// `Workspace::apply_access_mode` (write-ahead config write + object-row
+/// mirror + notice); clicking the already-active segment is a no-op — the
+/// notice announces a mode transition, it is not an echo. The no-op guard
+/// reads the mode from the fold AT CLICK TIME: the optimistic flip repaints a
+/// frame later, so a second click landing in that window would otherwise
+/// re-apply the same mode and announce it twice. The bar hugs its intrinsic
+/// width and refuses to shrink (`flex_shrink_0`), so the footer's left chip
+/// group can never squash it.
+fn build_access_switch(workspace: WeakEntity<Workspace>, current: AccessMode) -> gpui::Div {
+    let selected_ix = usize::from(current == AccessMode::FullAccess);
+    h_flex()
+        .flex_shrink_0()
+        .debug_selector(|| "access-switch".to_string())
         .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .child(Icon::new(AssetIcon::Network).small().text_color(muted))
+            TabBar::new("access-switch")
+                .segmented()
+                .small()
+                .selected_index(selected_ix)
+                .on_click(move |ix, _window, cx| {
+                    let mode = if *ix == 1 {
+                        AccessMode::FullAccess
+                    } else {
+                        AccessMode::Sandbox
+                    };
+                    let _ = workspace.update(cx, |this, cx| {
+                        if this.foreground_access_mode(cx) == mode {
+                            return;
+                        }
+                        this.apply_access_mode(mode, cx);
+                    });
+                })
                 .child(
-                    gpui::div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(i18n::t("network-access-label")),
+                    Tab::new()
+                        .label(i18n::t("access-mode-sandbox-title"))
+                        .debug_selector(|| "access-switch-sandbox".to_string()),
+                )
+                .child(
+                    Tab::new()
+                        .label(i18n::t("access-mode-full-access-title"))
+                        .debug_selector(|| "access-switch-full-access".to_string()),
                 ),
         )
-        .child(make_network_row(
-            NetworkAccess::Off,
-            i18n::t("network-access-off-title"),
-            AssetIcon::WifiOff,
-            muted,
-            network == NetworkAccess::Off,
-        ))
-        .child(make_network_row(
-            NetworkAccess::On,
-            i18n::t("network-access-on-title"),
-            AssetIcon::Globe,
-            info,
-            network == NetworkAccess::On,
-        ))
+}
+
+impl Workspace {
+    /// The foreground session's effective [`AccessMode`] read from the fold
+    /// (§J11): the seated value, the host-declared schema default, or the enum
+    /// default — never a local guess. `Sandbox` when no store is bound.
+    fn foreground_access_mode(&self, cx: &gpui::App) -> AccessMode {
+        self.chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(store, sid)| {
+                crate::ahp_store::leaf(&store.read(cx).book, sid).access_mode_or_default()
+            })
+            .unwrap_or_default()
+    }
 }
 mod composer;
 mod external;
@@ -857,7 +765,6 @@ impl Workspace {
                 model_menu_sub: None,
                 send_menu: None,
                 send_menu_sub: None,
-                access_open: false,
                 project_chip_open: false,
                 project_chip_menu: None,
                 project_chip_menu_sub: None,
@@ -2502,14 +2409,6 @@ impl Workspace {
         self.completion_confirm(ix, window, cx);
     }
 
-    /// Close the access-chip dropdown, dropping the menu entity + subscription.
-    fn close_access_menu(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cx| {
-            chat.access_open = false;
-            cx.notify();
-        });
-    }
-
     /// Close the project-chip dropdown.
     fn close_project_chip_menu(&mut self, cx: &mut Context<Self>) {
         self.chat.update(cx, |chat, cx| {
@@ -3185,10 +3084,10 @@ impl Workspace {
         self.send_user_turn(prompt, Vec::new(), behavior, cx);
     }
 
-    /// Switch the thread's `AccessMode`, post a localized notice, and
-    /// close the popover. Centralized so slash command, chip click, and the
+    /// Switch the thread's `AccessMode` and post a localized notice.
+    /// Centralized so slash command, the footer switch's click, and the
     /// settings panel wiring all funnel through one path. The write is
-    /// write-ahead: the chip flips optimistically (the model picker's
+    /// write-ahead: the switch flips optimistically (the model picker's
     /// semantics) and the transcript notice rides the SAME optimistic
     /// value, so the two never disagree; the host's echo confirms
     /// silently, and a refusal always lands a corrective notice that
@@ -3221,30 +3120,6 @@ impl Workspace {
             i18n::t_str("workspace-mode-notice", &[("mode", mode_key)]).to_string(),
             cx,
         );
-        self.close_access_menu(cx);
-        cx.notify();
-    }
-
-    /// Switch the sandbox's `networkAccess` config key (AHP session-mutable,
-    /// wire `off`/`on`) with the same single-funnel shape as
-    /// `apply_access_mode`: write-ahead config write, localized notice,
-    /// menu close. The wire value is the serde (kebab) form so the host's
-    /// schema enum round-trips. No object-row write, unlike the access
-    /// mode: upstream the switch is session-memory state only (a restored
-    /// session starts closed again), so there is no durable pick to mirror.
-    pub(crate) fn apply_network_access(&mut self, access: NetworkAccess, cx: &mut Context<Self>) {
-        let wire = access.wire();
-        self.with_foreground_store(cx, |store, sid| {
-            let mut config = serde_json::Map::new();
-            config.insert("networkAccess".into(), serde_json::json!(wire));
-            store.optimistic_config(&sid, &config);
-            store.set_config(&sid, config);
-        });
-        self.add_info_message(
-            i18n::t_str("network-access-notice", &[("state", wire)]).to_string(),
-            cx,
-        );
-        self.close_access_menu(cx);
         cx.notify();
     }
 }

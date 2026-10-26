@@ -491,38 +491,46 @@ mod tests {
         assert!(full.contains("完全访问"), "got: {full}");
     }
 
-    /// The network-access notice resolves both `off`/`on` variants in both
-    /// locales, and the sandbox access-mode notice reflects the v0.6.5
-    /// network story (off by default, opt-in from the access menu) instead
-    /// of the retired "network not yet confined" claim.
+    /// The access-mode notice pins the always-on network story in both
+    /// locales: the sandbox branch states the network stays on with
+    /// allowlist/approval-gated egress (the retired notice family
+    /// claimed the network was off by default and toggled from the access
+    /// menu), and the fullaccess branch keeps its shape.
     #[test]
-    fn network_access_notice_localized() {
+    fn workspace_mode_notice_pins_the_always_on_network_story() {
         let _g = TEST_LANG_LOCK.lock().unwrap();
         set_lang(Language::En);
-        let off = t_str("network-access-notice", &[("state", "off")]);
-        assert!(off.contains("off"), "got: {off}");
-        let on = t_str("network-access-notice", &[("state", "on")]);
-        assert!(on.contains("allowlist"), "got: {on}");
-        assert!(t("network-access-label").as_str() == "Network");
-        assert!(t("network-access-off-title").as_str() == "Off");
-        assert!(t("network-access-on-title").as_str() == "On");
-        set_lang(Language::ZhCn);
-        let off = t_str("network-access-notice", &[("state", "off")]);
-        assert!(off.contains("已关闭"), "got: {off}");
-        let on = t_str("network-access-notice", &[("state", "on")]);
-        assert!(on.contains("允许清单"), "got: {on}");
-        assert!(t("network-access-label").as_str() == "网络");
-        assert!(t("network-access-off-title").as_str() == "关");
-        assert!(t("network-access-on-title").as_str() == "开");
         let sandbox = t_str("workspace-mode-notice", &[("mode", "sandbox")]);
         assert!(
-            sandbox.contains("网络默认关闭"),
-            "the sandbox notice must carry the v0.6.5 network story: {sandbox}"
+            sandbox.contains("network stays on"),
+            "the sandbox notice must state the always-on network: {sandbox}"
         );
         assert!(
-            !sandbox.contains("网络暂不受限"),
-            "the retired not-yet-confined claim must not resurface: {sandbox}"
+            sandbox.contains("allowlist"),
+            "the sandbox notice must carry the allowlist/approval egress story: {sandbox}"
         );
+        assert!(
+            !sandbox.contains("off by default"),
+            "the retired off-by-default story must not resurface: {sandbox}"
+        );
+        let full = t_str("workspace-mode-notice", &[("mode", "fullaccess")]);
+        assert!(full.contains("Full access"), "got: {full}");
+        set_lang(Language::ZhCn);
+        let sandbox = t_str("workspace-mode-notice", &[("mode", "sandbox")]);
+        assert!(
+            sandbox.contains("网络保持开启"),
+            "the sandbox notice must state the always-on network: {sandbox}"
+        );
+        assert!(
+            sandbox.contains("允许清单"),
+            "the sandbox notice must carry the allowlist/approval egress story: {sandbox}"
+        );
+        assert!(
+            !sandbox.contains("网络默认关闭"),
+            "the retired off-by-default story must not resurface: {sandbox}"
+        );
+        let full = t_str("workspace-mode-notice", &[("mode", "fullaccess")]);
+        assert!(full.contains("完全访问"), "got: {full}");
     }
 
     /// Keys the agent-ui sources reference only through helper return values —

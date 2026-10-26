@@ -1,10 +1,10 @@
 //! The composer + overlay render helpers (U9b cluster 8): the composer
-//! element (and its queued-follow-ups / access-placeholder /
-//! send-button / completion-overlay / attachments / project-chip faces),
-//! the browser-suite toggles, the blank-project family, and the project
-//! registration leg. Split from `workspace.rs` — `super` is the
-//! workspace module; the bare-private methods lift `pub(super)` for the
-//! parent's render face and the `tests` child.
+//! element (and its queued-follow-ups / access-switch / send-button /
+//! completion-overlay / attachments / project-chip faces), the browser-suite
+//! toggles, the blank-project family, and the project registration leg.
+//! Split from `workspace.rs` — `super` is the workspace module; the
+//! bare-private methods lift `pub(super)` for the parent's render face and
+//! the `tests` child.
 
 use super::*;
 use crate::DismissContextBubble;
@@ -235,7 +235,7 @@ impl Workspace {
         let project_chip = self.render_project_chip_pi(theme, cx);
         let goal_chip = self.render_goal_chip(theme, cx);
         let follow_stop_chip = self.render_follow_stop_chip(theme, cx);
-        let access = self.render_access_placeholder(theme, cx);
+        let access = self.render_access_switch(theme, cx);
         let model = self.render_model_selector_pi(theme, cx);
         // Absolute cancel priority: the stop form is driven by the raw
         // running edge alone — a pending ask/approve card never swaps
@@ -440,15 +440,14 @@ impl Workspace {
                     .items_center()
                     .justify_between()
                     .child(
-                        // `min_w_0` lets this group flex-shrink when the row is
-                        // narrow; `overflow_hidden` is deliberately NOT set so
-                        // the chips' popovers (project picker, permission menu)
-                        // can overflow upward. `MIN_WINDOW_W` keeps the row
-                        // wide enough that the chips themselves never overflow.
+                        // The group keeps its intrinsic width: the right
+                        // cluster yields instead (the model face ellipsizes),
+                        // so the chips never paint under the pinned controls.
+                        // `overflow_hidden` is deliberately NOT set so the
+                        // project picker's popover can overflow upward.
                         h_flex()
                             .items_center()
                             .gap_1()
-                            .min_w_0()
                             .child(project_chip)
                             .when_some(goal_chip, |el, chip| el.child(chip))
                             .child(access)
@@ -461,11 +460,20 @@ impl Workspace {
                         h_flex()
                             .items_center()
                             .gap_1()
-                            .flex_shrink_0()
+                            // The cluster yields at narrow widths, but only
+                            // through the model face (the sole truncated
+                            // element); the ring, dictation and send controls
+                            // stay pinned at their natural size.
+                            .min_w_0()
+                            .debug_selector(|| "composer-footer-right".to_string())
                             .child(model)
-                            .when_some(context_ring, |el, ring| el.child(ring))
-                            .children(dictation)
-                            .child(send),
+                            .when_some(context_ring, |el, ring| {
+                                el.child(gpui::div().flex_shrink_0().child(ring))
+                            })
+                            .children(
+                                dictation.map(|button| gpui::div().flex_shrink_0().child(button)),
+                            )
+                            .child(gpui::div().flex_shrink_0().child(send)),
                     ),
             )
             .into_any_element()
@@ -781,114 +789,22 @@ impl Workspace {
         None
     }
 
-    pub(super) fn render_access_placeholder(
-        &mut self,
-        theme: &Theme,
+    /// The composer footer's inline access-mode switch (see
+    /// [`build_access_switch`] for the control's anatomy). This face only
+    /// reads: the seated mode from the fold (§J11), then hands the workspace
+    /// handle to the pure builder.
+    pub(super) fn render_access_switch(
+        &self,
+        _theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Selector read face (§J11): the composer's access chip derives its
-        // access mode and the sandbox network switch from the fold — the
-        // seated value, the declared schema default, or the host/enum
-        // default, never a local guess.
-        let (mode, network) = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                let leaf = crate::ahp_store::leaf(&view.book, sid);
-                (
-                    leaf.access_mode_or_default(),
-                    leaf.network_access_or_default(),
-                )
-            })
-            .unwrap_or_default();
-        let open = self.chat.read(cx).access_open;
-        // Pre-extract chip visuals so the click handler closure doesn't
-        // capture `theme` (which only lives for the method body) — closures
-        // passed to `cx.listener` must be `'static`.
-        let (chip_label, chip_color, chip_icon) = mode_chip_visual(mode, theme);
-        let workspace = cx.entity().downgrade();
-
-        let trigger = h_flex()
-            .id("access-chip")
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .min_w(px(96.))
-            .rounded(theme.radius)
-            .hover(|s| s.bg(theme.accent.opacity(0.08)))
-            .cursor_pointer()
-            .child(Icon::new(chip_icon).xsmall().text_color(chip_color))
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .text_xs()
-                    .text_color(chip_color)
-                    .child(chip_label),
-            )
-            .child(
-                Icon::new(if open {
-                    IconName::ChevronUp
-                } else {
-                    IconName::ChevronDown
-                })
-                .xsmall()
-                .text_color(theme.muted_foreground),
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                if this.chat.read(cx).access_open {
-                    this.close_access_menu(cx);
-                } else {
-                    this.chat.update(cx, |chat, cx| {
-                        chat.access_open = true;
-                        cx.notify();
-                    });
-                }
-                cx.notify();
-            }));
-
-        if !open {
-            return trigger.into_any_element();
-        }
-
-        // The popover is a plain `div` with `popover_style` (opaque card
-        // chrome: bg + border + shadow + rounded). We don't route it through
-        // `PopupMenu` because `PopupMenuItem::element` wraps every row in
-        // `h_flex().flex_1().min_h(26)`, which both leaked vertical space
-        // and — in the single-item case — clipped the v_flex content to
-        // 26px. Doing it ourselves gives a content-sized, opaque popover.
-        //
-        // `w(360)` (not `max_w`) — with `min_w_0` on every text div, the
-        // v_flex's intrinsic min-content is tiny (just icon widths + padding),
-        // so `max_w` alone leaves the popover at ~140px and the subtitles
-        // wrap into single-word lines. A fixed 360px width gives the
-        // subtitles room to wrap at word boundaries.
-        let content = build_permission_content(workspace.clone(), mode, network, cx);
-        gpui::div()
-            .relative()
-            .child(trigger)
-            .child(
-                deferred(
-                    gpui::div()
-                        .id("access-dropdown")
-                        .absolute()
-                        .bottom_full()
-                        .left_0()
-                        .occlude()
-                        .w(gpui::px(360.))
-                        .popover_style(cx)
-                        .child(content)
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.close_access_menu(cx);
-                            cx.notify();
-                        })),
-                )
-                .with_priority(1),
-            )
-            .into_any_element()
+        // Selector read face (§J11): the composer's switch derives its
+        // access mode from the fold — the seated value, the declared schema
+        // default, or the host/enum default, never a local guess. The
+        // network switch is not read here: both tiers run with the network
+        // on (seeded at attach), so the control carries no network segment.
+        let mode = self.foreground_access_mode(cx);
+        build_access_switch(cx.entity().downgrade(), mode).into_any_element()
     }
 
     /// Deactivate a browser tool suite on the bound thread. The chip is
@@ -909,10 +825,12 @@ impl Workspace {
             .with_mut(|t| t.set_browser_suite(suite, false));
     }
 
-    /// One chip-style control in the send cluster — the model/access chips'
-    /// exact anatomy (px_2/py_1, text_xs label, xsmall icon, accent hover):
-    /// the cluster used to be 24px pill buttons whose label size towered
-    /// over the footer's chip row.
+    /// One chip-style control in the send cluster — the footer's shared chip
+    /// anatomy (px_2/py_1, text_sm label, small icon, accent hover). The
+    /// footer's type tier is unified at 14px so these chips match the access
+    /// TabBar (whose `Size::Small` maps to `text_sm`); the cluster used to
+    /// be 24px pill buttons whose label size towered over the footer's chip
+    /// row.
     fn send_cluster_chip(
         id: &'static str,
         spec: SendChipSpec,
@@ -944,9 +862,9 @@ impl Workspace {
                 c.bg(theme.accent.opacity(0.12))
             })
             .when(enabled, |c| c.hover(|h| h.bg(hover)))
-            .child(Icon::from(icon).xsmall().text_color(fg));
+            .child(Icon::from(icon).small().text_color(fg));
         let chip = match label_key {
-            Some(key) => chip.child(gpui::div().text_xs().text_color(fg).child(i18n::t(key))),
+            Some(key) => chip.child(gpui::div().text_sm().text_color(fg).child(i18n::t(key))),
             None => chip,
         };
         let chip = match tooltip_key {
@@ -973,7 +891,7 @@ impl Workspace {
         self.speech
             .read(cx)
             .has_recognizer()
-            .then(|| SpeechButton::new(&self.speech).xsmall().into_any_element())
+            .then(|| SpeechButton::new(&self.speech).small().into_any_element())
     }
 
     /// The composer's action cluster (footer right), dressed exactly like
@@ -1230,7 +1148,7 @@ impl Workspace {
             )))
             .child(
                 gpui::div()
-                    .text_xs()
+                    .text_sm()
                     .text_color(fill_color)
                     .child(SharedString::from(format!("{percent}%"))),
             );
@@ -1537,11 +1455,11 @@ impl Workspace {
             .hover(|s| s.bg(theme.accent.opacity(0.08)))
             .cursor_pointer()
             .when_some(icon.clone(), |el, ic| {
-                el.child(Icon::new(ic).xsmall().text_color(theme.muted_foreground))
+                el.child(Icon::new(ic).small().text_color(theme.muted_foreground))
             })
             .child(
                 gpui::div()
-                    .text_xs()
+                    .text_sm()
                     .text_color(theme.foreground)
                     .child(label),
             )
@@ -1551,7 +1469,7 @@ impl Workspace {
                 } else {
                     IconName::ChevronDown
                 })
-                .xsmall()
+                .small()
                 .text_color(theme.muted_foreground),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
