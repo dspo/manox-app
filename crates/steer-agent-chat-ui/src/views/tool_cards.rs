@@ -100,10 +100,24 @@ pub fn ensure_tool_card(
         entry.card = Some(state);
     }
     let state = entry.card.clone()?;
+    let now = cx.background_executor().now();
+    if entry.streaming {
+        // Render passes are the only clock the card gets after a burst ends:
+        // publish the tail the tick or a reveal hold deferred. The rules are
+        // unchanged — an unchanged text is a no-op, appends still wait for the
+        // tick and for the hold to expire.
+        entry.stream.observe(&entry.output, now);
+    } else {
+        // A settled entry's body is authoritative and static; seed the
+        // snapshot here so a restored/history projection renders the full
+        // output. A no-op once the two agree.
+        entry.stream.flush(&entry.output);
+    }
     let (status, open) = (
         card_status(entry.status),
         entry.streaming || !entry.collapsed,
     );
+    let open_flipped = state.read(cx).is_open() != open;
     state.update(cx, |state, cx| {
         if state.status() != &status {
             state.set_status(status, cx);
@@ -112,6 +126,12 @@ pub fn ensure_tool_card(
             state.set_open(open, cx);
         }
     });
+    // The reveal re-lays the body out as root on every animation frame;
+    // holding tick-driven publishes across that window keeps the text stable
+    // while the layout is in motion (replacements still land).
+    if open_flipped {
+        entry.stream.hold_reveal(now);
+    }
     Some(state)
 }
 
@@ -283,15 +303,18 @@ pub(crate) fn status_chip(entry: &ToolCallItem, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The card body per family. Streaming bodies read the live tail; settled
-/// bodies cap at [`LINE_CAP`] lines with a truncation note.
+/// The card body per family, from the snapshot the stream published (settle
+/// flushes the authoritative output). Bodies cap at [`LINE_CAP`] lines with a
+/// truncation note.
+///
+/// The element id carries the snapshot's generation: a replace (retry, the
+/// live-tail head drop, the settle-time truncation) allocates a fresh
+/// `TextViewState`, so the parse and the highlight runs are born from the
+/// same text instead of a committed document from the previous stream.
 fn card_body(family: CardFamily, entry: &ToolCallItem, cwd: Option<SharedString>) -> AnyElement {
-    let id: gpui::ElementId = gpui::ElementId::Name(format!("{}-body", entry.id).into());
-    let output = if entry.streaming {
-        crate::views::message::live_tail(&entry.output)
-    } else {
-        entry.output.clone()
-    };
+    let id: gpui::ElementId =
+        gpui::ElementId::Name(format!("{}-body-g{}", entry.id, entry.stream.generation()).into());
+    let output = entry.stream.published().to_string();
     match family {
         CardFamily::Read => {
             let (lines, truncated) = cap(parse_read_output(&output), LINE_CAP);
@@ -655,6 +678,7 @@ mod tests {
             panel: None,
             card: None,
             cwd: None,
+            stream: Default::default(),
         }
     }
 

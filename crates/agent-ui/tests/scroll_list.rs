@@ -589,6 +589,7 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
             panel: None,
             card: None,
             cwd: None,
+            stream: Default::default(),
         }),
     ];
     vec![
