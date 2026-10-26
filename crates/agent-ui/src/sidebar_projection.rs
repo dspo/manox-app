@@ -67,11 +67,11 @@ impl ThreadRow {
     /// passed open-ask flag; Ask outranks Auth when both faces are open —
     /// a question names what is missing. The wire `Error` bit is
     /// deliberately not read: errors are turn content, never a list
-    /// state. The multiplexer's `merged_row` then overrides every activity
-    /// fact from the live session and chat folds, so the summary bits only
-    /// speak for sessions this client never subscribed. Sub-agent nesting
-    /// (depth/parent) has no summary face yet — flat, until the work
-    /// channel carries the tree.
+    /// state. The multiplexer's `merged_row` then lets a landed live session
+    /// or chat fold outrank the row, so the summary bits speak for sessions
+    /// this client never subscribed AND through a fold's pre-snapshot
+    /// window. Sub-agent nesting (depth/parent) has no summary face yet —
+    /// flat, until the work channel carries the tree.
     pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_ask: bool) -> Self {
         let bits = summary.status;
         let needs_auth = bits & WireStatus::InputNeeded.bits() != 0;

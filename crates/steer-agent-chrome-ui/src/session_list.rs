@@ -473,25 +473,16 @@ fn hover_tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> gpui::
     move |window, cx| gpui_component::tooltip::Tooltip::new(steer_i18n::t(text)).build(window, cx)
 }
 
-/// The status line's Fluent key; Idle maps for enum completeness but idle
-/// rows carry no tooltip at all.
-fn status_key(status: SessionStatus) -> &'static str {
+/// The status line's Fluent key. `None` for Idle: a resting row has nothing
+/// to say, so it carries no tooltip (and the truncation marquee keeps the
+/// hover).
+fn status_key(status: SessionStatus) -> Option<&'static str> {
     match status {
-        SessionStatus::Running => "sidebar-status-running",
-        SessionStatus::Pending(PendingKind::Auth) => "sidebar-status-pending-auth",
-        SessionStatus::Pending(PendingKind::Ask) => "sidebar-status-pending-ask",
-        SessionStatus::Unread => "sidebar-status-unread",
-        SessionStatus::Idle => "sidebar-status-idle",
-    }
-}
-
-/// The row tooltip: the status line, translated only when the tooltip
-/// actually opens — never on the render path.
-fn hover_tooltip_status(
-    status: SessionStatus,
-) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
-    move |window, cx| {
-        gpui_component::tooltip::Tooltip::new(steer_i18n::t(status_key(status))).build(window, cx)
+        SessionStatus::Running => Some("sidebar-status-running"),
+        SessionStatus::Pending(PendingKind::Auth) => Some("sidebar-status-pending-auth"),
+        SessionStatus::Pending(PendingKind::Ask) => Some("sidebar-status-pending-ask"),
+        SessionStatus::Unread => Some("sidebar-status-unread"),
+        SessionStatus::Idle => None,
     }
 }
 
@@ -961,9 +952,13 @@ fn session_row(
             move |entered, w, cx| (on_hover)(&id, *entered, w, cx)
         })
         // Only rows with something to say carry a tooltip — an "idle" on
-        // every resting row is noise and crowds the truncation marquee.
-        .when(data.status != SessionStatus::Idle, |el| {
-            el.tooltip(hover_tooltip_status(data.status))
+        // every resting row is noise and crowds the truncation marquee. The
+        // translation happens when the tooltip opens, never on the render
+        // path.
+        .when_some(status_key(data.status), |el, key| {
+            el.tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(steer_i18n::t(key)).build(window, cx)
+            })
         })
         .when_some(focus.cloned(), |el, fh| {
             el.track_focus(&fh)
@@ -1565,23 +1560,24 @@ mod tests {
     }
 
     /// The status line's key mapping and its zh rendering — the two
-    /// pending kinds share the glyph and split only here. The locale is
-    /// pinned because `init_i18n` alone follows the developer's own
-    /// settings.toml.
+    /// pending kinds share the glyph and split only here, and Idle carries
+    /// no key at all (a resting row has no tooltip). The locale is pinned
+    /// because `init_i18n` alone follows the developer's own settings.toml.
     #[test]
     fn status_tooltip_lines_split_the_pending_kinds() {
         init_i18n();
         steer_i18n::set_ui_language(steer_i18n::Language::ZhCn);
-        assert_eq!(steer_i18n::t(status_key(SessionStatus::Running)), "运行中");
+        let key = |status| status_key(status).expect("only Idle has no tooltip");
+        assert_eq!(steer_i18n::t(key(SessionStatus::Running)), "运行中");
         assert_eq!(
-            steer_i18n::t(status_key(SessionStatus::Pending(PendingKind::Auth))),
+            steer_i18n::t(key(SessionStatus::Pending(PendingKind::Auth))),
             "等待批准"
         );
         assert_eq!(
-            steer_i18n::t(status_key(SessionStatus::Pending(PendingKind::Ask))),
+            steer_i18n::t(key(SessionStatus::Pending(PendingKind::Ask))),
             "等待回答"
         );
-        assert_eq!(steer_i18n::t(status_key(SessionStatus::Unread)), "未读");
-        assert_eq!(steer_i18n::t(status_key(SessionStatus::Idle)), "空闲");
+        assert_eq!(steer_i18n::t(key(SessionStatus::Unread)), "未读");
+        assert_eq!(status_key(SessionStatus::Idle), None);
     }
 }

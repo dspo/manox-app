@@ -82,8 +82,9 @@ pub(crate) fn effective_archived(
 /// ride the next `listSessions` walk, an event only catalogue moves fire —
 /// remains the fallback voice, both for sessions this client never
 /// subscribed and while a fold entry predates its subscribe snapshot: a
-/// positive fold fact always wins, but a fold's silence only does once its
-/// snapshot has landed.
+/// positive fold fact always wins, but a fact's SILENCE only wins once the
+/// channel that would have carried it has landed (the chat channel for
+/// running and Ask, the session queue for Auth).
 pub(crate) fn merged_row(
     book: &steer_agent_chat_ui::ahp_store::ChannelBook,
     summary: &ahp_types::state::SessionSummary,
@@ -95,12 +96,18 @@ pub(crate) fn merged_row(
     let mut row = ThreadRow::from_summary(summary, pinned, pending_ask);
     let auth = leaf.open_tool_confirmation().is_some();
     if let Some(chat) = leaf.chat.as_ref() {
-        let fold_speaks = chat.active_turn.is_some()
-            || pending_ask
-            || auth
-            || book.chat_snapshot_landed(session_id);
-        if fold_speaks {
+        // A landed chat fold owns the running bit; a landed session state
+        // (not the pre-snapshot status-0 placeholder) owns the Auth face's
+        // silence. Positive facts never wait for a snapshot.
+        let chat_landed = book.chat_snapshot_landed(session_id);
+        let session_landed = book
+            .sessions
+            .get(session_id)
+            .is_some_and(|state| state.status != 0);
+        if chat.active_turn.is_some() || chat_landed {
             row.running = chat.active_turn.is_some();
+        }
+        if pending_ask || auth || (chat_landed && session_landed) {
             row.pending = if pending_ask {
                 Some(PendingKind::Ask)
             } else if auth {
@@ -689,6 +696,39 @@ mod row_read_tests {
         assert!(
             !merged_row(&book, &stale, false).running,
             "the landed fold's silence outranks the stale InProgress summary"
+        );
+
+        // The session channel has not landed yet (no state, or the status-0
+        // subscribe placeholder): the Auth face's silence is not a fact, so
+        // the wire's InputNeeded bit holds.
+        let needs_auth = summary(Wire::InputNeeded.bits() | Wire::IsRead.bits());
+        assert_eq!(
+            merged_row(&book, &needs_auth, false).pending,
+            Some(PendingKind::Auth),
+            "an unlanded session queue never dismisses the wire InputNeeded bit"
+        );
+
+        // Landing the session state (no queued request) makes its silence
+        // authoritative, and the same stale summary reads idle.
+        let session: ahp_types::state::SessionState = serde_json::from_value(serde_json::json!({
+            "resource": session_uri("s-1"),
+            "provider": "test",
+            "title": "row",
+            "status": Wire::Idle.bits() | Wire::IsRead.bits(),
+            "modifiedAt": "2026-10-25T00:00:01.000Z",
+            "lifecycle": "ready",
+            "activeClients": [],
+            "chats": [],
+        }))
+        .expect("the landed session snapshot parses");
+        book.apply_snapshot(
+            &session_uri("s-1"),
+            ahp_types::state::SnapshotState::Session(Box::new(session)),
+        );
+        assert_eq!(
+            merged_row(&book, &needs_auth, false).pending,
+            None,
+            "the landed session queue's silence outranks the wire bit"
         );
 
         // The Auth face: the session's input-needed queue holds a tool

@@ -697,7 +697,8 @@ badge, multi-select flags); the note placeholder and the 「推荐」 badge labe
 localized here, and a block's detail element rides its own page. A plan review is
 an ordinary one-question ask whose `detail` (the wire's request-level `message`)
 carries the plan body — the card's
-pending chip (`等待回答`, the sidebar's parked-turn amber question mark) and close control are
+pending chip (`等待回答`, the amber dot of the same awaiting-human family the
+sidebar's parked-turn slot carries) and close control are
 its only chrome.
 
 The interactive half (page, selections, per-question notes) lives in the
@@ -1029,7 +1030,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### SidebarProjection
 
-wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ThreadRow`（multiplexer 权威行，含 §D.5 增量合并）三事实 `running`／`pending`（wire `InputNeeded` 位 = Auth；会话 chat 折叠里有未答的 input request = Ask——turn-final 的 ask 会保持 turn 打开直到答案结算；同开时 Ask 胜）／`unread`（叶子 unread 镜像覆盖 wire 标志）＋派生 `subagents_running` → `derive_status` 阶梯（Pending > Running > Unread > Idle，Running = 自身在跑 ‖ 任一直系成员在跑；wire `Error` 位不再被行消费——错误是 turn 内容，列表永不显示）＋ team 森林（leader 保序、member 随后、孤儿拍平；**member 不再缩进**，leader chevron 是唯一嵌套标记；leader 的成员运行数聚合在此填充，member 的 unread 不上浮）＋ `updated_at`/`archived`/tag/pinned 原样透传 ＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
+wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ThreadRow`（multiplexer 权威行，含 §D.5 增量合并）三事实 `running`（chat fold 的 active turn；未订阅会话回退 wire `InProgress`）／`pending`（会话 chat 折叠里有未答的 input request = Ask——turn-final 的 ask 会保持 turn 打开直到答案结算；会话 input-needed 队列 = Auth；同开时 Ask 胜。fold 的沉默须待承载它的通道快照落地才生效——chat 通道管 running/Ask，session 队列管 Auth，wire 位是快照落地前的回退）／`unread`（叶子 unread 镜像覆盖 wire 标志，status-0 占位退让 summary）→ `derive_status` 阶梯（Pending > Running > Unread > Idle；wire `Error` 位不再被行消费——错误是 turn 内容，列表永不显示）＋ team 森林（leader 保序、member 随后、孤儿拍平；**member 不再缩进**，leader chevron 是唯一嵌套标记；member 的 unread 不上浮；成员运行数尚未聚合——team tree 无 wire face，成员行恒平铺）＋ `updated_at`/`archived`/tag/pinned 原样透传 ＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
 
 > Source: `crates/agent-ui/src/sidebar_projection.rs`
 

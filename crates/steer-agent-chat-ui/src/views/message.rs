@@ -2769,14 +2769,16 @@ fn render_ask_form_card(
         // The card's identity is the tool that raised it — the same voice the
         // other tool cards use. The question's own header rides the form.
         .name(manox_agent::tools::ASK_USER_QUESTION)
-        // The parked turn's own signal, the gallery's pending chip: the dot the
-        // sidebar uses for a turn waiting on a human, plus the label.
+        // The parked turn's own signal, the gallery's pending chip: the same
+        // amber family the sidebar's parked-turn slot carries (one fact, one
+        // colour — the card is the transcription's face of that state), plus
+        // the label.
         .status(
             h_flex()
                 .gap_1p5()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(gpui::div().size(px(6.)).rounded_full().bg(theme.blue))
+                .child(gpui::div().size(px(6.)).rounded_full().bg(theme.yellow))
                 .child(i18n::t("workspace-ask-waiting")),
         )
         .blocks(blocks)
