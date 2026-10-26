@@ -109,10 +109,16 @@ impl Workspace {
     /// local `Thread` and then attaches the AgentServer session to the same
     /// id (two `Thread::new_*` calls on one id, both racing to materialize the
     /// session file). It now sends the §D.2 `CreateSession` intent (the full
-    /// `{cwd, project?, initial_model?}` so the server owns creation) and,
+    /// `{workingDirectories, project?, config}` so the server owns creation
+    /// and adopts the config as the session's seed) and,
     /// when the server's `{session_id}` receipt lands, binds a detached
     /// rendering mirror to that server-minted id and opens the follow stream.
     /// Creation happens exactly once — on the server.
+    ///
+    /// The channel state the composer surfaces read (project chip, model
+    /// chip, Captain strip) folds from the host: the create intent's config
+    /// and working directories land as the host's durable rows, and no
+    /// client write lands them after the create.
     ///
     /// Returns the client-minted session id: the attach lands asynchronously,
     /// so a caller that must address the fresh thread (e.g. `/exit`'s closing
@@ -262,9 +268,9 @@ impl Workspace {
                 (provider, model_id, access.as_deref(), effort_str.as_deref())
             }
         };
+        // The object row is the belonging authority: the host resolves the
+        // session's project from it, and the sidebar groups by the same row.
         land_conversation_row(&sid, project.as_deref(), provider, model_id, access, effort);
-        let config_for_channel = config.clone();
-        let cwd_for_channel = cwd.clone();
         let reply = self.with_foreground_store(cx, |store, _| {
             store.create_session(&sid, cwds, Some(config))
         });
@@ -278,12 +284,14 @@ impl Workspace {
             // same way. Every other failure (and a store unbound, where no
             // create can even ride) lands a visible notification: a
             // user-initiated new session must never die quietly.
-            let mut reopened = false;
             let refusal = match reply {
                 Some(reply) => match reply.recv().await {
                     Ok(Ok(_)) => None,
+                    // A reopened session already carries its channel state —
+                    // the durable picks the draft was left with, which the
+                    // object row also holds. The host owns that live session,
+                    // so this create leaves it untouched.
                     Ok(Err(err)) if err.is_already_exists() => {
-                        reopened = true;
                         tracing::info!(
                             session_id = %sid2,
                             error = %err,
@@ -322,30 +330,6 @@ impl Workspace {
                     tracing::warn!(session_id = %sid2, error = %err, "new-thread attach FAILED")
                 }
             }
-            // A reopened session already carries its channel state — the
-            // durable picks the draft was left with, which the object row
-            // also holds. Re-landing this create's config would fork the
-            // channel from the row (and mutate a live session the host, not
-            // this create, owns).
-            if reopened {
-                return;
-            }
-            // The create intent boots the runtime on the directory and the
-            // config, but the session CHANNEL carries neither until a write
-            // lands one — and every composer surface (project chip, model
-            // chip, Captain strip) reads the channel. Land both through the
-            // same writers the composer's own pickers use, so the thread the
-            // user just created shows where it runs and on which model
-            // instead of asking for the folder a second time.
-            let _ = ws.update(cx, |this, cx| {
-                this.with_foreground_store(cx, |store, sid| {
-                    store.set_cwd(&sid, &cwd_for_channel);
-                    if !config_for_channel.is_empty() {
-                        store.optimistic_config(&sid, &config_for_channel);
-                        store.set_config(&sid, config_for_channel);
-                    }
-                });
-            });
         })
         .detach();
         let _ = window;

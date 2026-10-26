@@ -1003,6 +1003,42 @@ impl Workspace {
         })
     }
 
+    /// The foreground leaf's seated access mode. Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_foreground_access(&self, cx: &App) -> Option<String> {
+        self.chat.read(cx).store.as_ref().and_then(|(store, sid)| {
+            crate::ahp_store::leaf(&store.read(cx).book, sid)
+                .access_mode()
+                .map(str::to_string)
+        })
+    }
+
+    /// The foreground leaf's seated reasoning effort. Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_foreground_effort(&self, cx: &App) -> Option<String> {
+        self.chat.read(cx).store.as_ref().and_then(|(store, sid)| {
+            crate::ahp_store::leaf(&store.read(cx).book, sid)
+                .reasoning_effort()
+                .map(str::to_string)
+        })
+    }
+
+    /// Seat config keys on the foreground session — the composer pickers'
+    /// write face. The new-thread inheritance test seeds model/access/effort
+    /// here and then proves the child's seats come from the create intent,
+    /// not from a post-create client write.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_seat_foreground_config(
+        &mut self,
+        config: serde_json::Map<String, serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_foreground_store(cx, |store, sid| {
+            store.optimistic_config(&sid, &config);
+            store.set_config(&sid, config);
+        });
+    }
+
     /// The label the Captain strip resolves its model identity from
     /// (`Workspace::model_label`): canonical `{provider}/{model}` when the
     /// session channel carries a model, the registry default otherwise.
