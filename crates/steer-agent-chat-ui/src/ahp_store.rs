@@ -2949,34 +2949,6 @@ impl<'a> LeafView<'a> {
         manox_agent::thread::AccessMode::from_wire(&wire).unwrap_or_default()
     }
 
-    /// The session's effective sandbox network switch: the folded value,
-    /// else the host-declared schema default, else the enum default
-    /// (`Off`) — the same fallback chain as `access_mode_or_default`. A
-    /// folded value outside the `off`/`on` vocabulary parses to the
-    /// default.
-    pub fn network_access_or_default(&self) -> manox_harness::sandbox::NetworkAccess {
-        let wire = self
-            .session
-            .and_then(|s| s.config.as_ref())
-            .and_then(|c| c.values.get(config_keys::NETWORK_ACCESS))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                self.session
-                    .and_then(|s| s.config.as_ref())
-                    .and_then(|c| c.schema.properties.get(config_keys::NETWORK_ACCESS))
-                    .and_then(|prop| prop.default.as_ref())
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| {
-                manox_harness::sandbox::NetworkAccess::default()
-                    .wire()
-                    .to_string()
-            });
-        manox_harness::sandbox::NetworkAccess::from_wire(&wire).unwrap_or_default()
-    }
-
     /// The most recent request's token usage: the in-flight turn's report
     /// while streaming, else the last completed turn's (the `chat/usage`
     /// action rides the channel, so this replays on attach). Cache-write
@@ -5237,102 +5209,6 @@ mod tests {
         assert_eq!(
             leaf(&book, "s-1").access_mode_or_default(),
             AccessMode::FullAccess,
-            "the seated value outranks the schema default"
-        );
-    }
-
-    #[test]
-    fn network_access_defaults_follow_the_seated_value_then_schema_then_default() {
-        use ahp_types::state::{SessionConfigPropertySchema, SessionConfigState};
-        use manox_harness::sandbox::NetworkAccess;
-        use serde_json::json;
-
-        let mut book = ChannelBook::default();
-        // A seat-less session starts closed: `networkAccess` is
-        // session-memory state and the enum default is `Off`.
-        assert_eq!(
-            leaf(&book, "s-1").network_access_or_default(),
-            NetworkAccess::Off
-        );
-        // A wire string outside the closed `off`/`on` vocabulary lands on
-        // the default.
-        {
-            let state = book
-                .sessions
-                .entry("s-1".to_string())
-                .or_insert_with(|| empty_session(&session_uri("s-1")));
-            let mut config = SessionConfigState {
-                schema: ahp_types::state::SessionConfigSchema {
-                    r#type: "object".to_string(),
-                    properties: std::collections::HashMap::new(),
-                    required: None,
-                },
-                values: serde_json::Map::new(),
-            };
-            config
-                .values
-                .insert(config_keys::NETWORK_ACCESS.to_string(), json!("maybe"));
-            state.config = Some(config);
-        }
-        assert_eq!(
-            leaf(&book, "s-1").network_access_or_default(),
-            NetworkAccess::Off,
-            "an out-of-vocabulary wire string lands on the default"
-        );
-
-        {
-            let state = book
-                .sessions
-                .entry("s-1".to_string())
-                .or_insert_with(|| empty_session(&session_uri("s-1")));
-            let mut schema_properties = std::collections::HashMap::new();
-            schema_properties.insert(
-                config_keys::NETWORK_ACCESS.to_string(),
-                SessionConfigPropertySchema {
-                    r#type: "string".to_string(),
-                    title: "Network access".to_string(),
-                    description: None,
-                    default: Some(json!("off")),
-                    r#enum: None,
-                    enum_labels: None,
-                    enum_descriptions: None,
-                    read_only: None,
-                    items: None,
-                    min_items: None,
-                    max_items: None,
-                    properties: None,
-                    required: None,
-                    additional_properties: None,
-                    enum_dynamic: None,
-                    session_mutable: Some(true),
-                },
-            );
-            state.config = Some(SessionConfigState {
-                schema: ahp_types::state::SessionConfigSchema {
-                    r#type: "object".to_string(),
-                    properties: schema_properties,
-                    required: None,
-                },
-                values: serde_json::Map::new(),
-            });
-        }
-        assert_eq!(
-            leaf(&book, "s-1").network_access_or_default(),
-            NetworkAccess::Off,
-            "the host-declared schema default is the seat-less truth"
-        );
-
-        book.sessions
-            .get_mut("s-1")
-            .unwrap()
-            .config
-            .as_mut()
-            .unwrap()
-            .values
-            .insert(config_keys::NETWORK_ACCESS.to_string(), json!("on"));
-        assert_eq!(
-            leaf(&book, "s-1").network_access_or_default(),
-            NetworkAccess::On,
             "the seated value outranks the schema default"
         );
     }

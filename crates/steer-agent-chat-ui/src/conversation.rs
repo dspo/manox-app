@@ -1865,8 +1865,10 @@ impl ConversationState {
                 ApplyOutcome::Unchanged
             }
             ThreadEvent::NetworkAccessChanged { .. } => {
-                // UI state (the access menu's network radio) handled by
-                // `Workspace`; not a conversation item.
+                // Not a conversation item. The app's network policy is
+                // always-on: the app re-seeds `networkAccess=on` on every
+                // attach (the key is session-memory state), so the echo
+                // drives no UI.
                 ApplyOutcome::Unchanged
             }
             ThreadEvent::BrowserSuitesChanged { .. } => {

@@ -592,6 +592,18 @@ impl Workspace {
                 cc.notify();
             });
         }
+        // The app's network policy is "both access tiers run with the network
+        // on", but `networkAccess` is session-memory state upstream (a
+        // restored session comes back closed), so every attach re-seeds the
+        // key idempotently. This point is the convergence of the
+        // new-create / reopen / background-reclaim paths, and the request
+        // queues after this attach's `OpenSession`, so the seed is ordered
+        // safely behind the session it addresses.
+        self.with_foreground_store(cx, |store, sid| {
+            let mut config = serde_json::Map::new();
+            config.insert("networkAccess".into(), serde_json::json!("on"));
+            store.set_config(&sid, config);
+        });
         // History-loading gate (only for attaches that expect a history):
         // the landing mirror renders empty until the fold's chat snapshot
         // arrives, so a reopen whose leaf has no chat channel yet swaps the

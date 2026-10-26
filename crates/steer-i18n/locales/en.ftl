@@ -463,23 +463,10 @@ access-mode-sandbox-title = Sandbox access
 
 access-mode-full-access-title = Full access
 
-access-mode-chip-sandbox = Sandbox access
 
-access-mode-chip-full-access = Full access
-
-network-access-label = Network
-
-network-access-off-title = Off
-
-network-access-on-title = On
-
-network-access-notice = { $state ->
-    [off] Sandbox network is off: confined bash no longer reaches the network.
-   *[on] Sandbox network is on: subject to the domain allowlist and approvals; direct when no allowlist is configured.
-}
 
 workspace-mode-notice = { $mode ->
-    [sandbox] Sandbox access: file writes are fenced; the network is off by default and can be enabled from the access menu (subject to the domain allowlist and approvals once on).
+    [sandbox] Sandbox access: file writes are fenced; the network stays on — sandbox egress is subject to the domain allowlist and approvals (direct when no allowlist is configured).
    *[fullaccess] Full access: no sandbox; bash runs unsandboxed, fs mutations are unfenced.
 }
 

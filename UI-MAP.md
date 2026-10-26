@@ -53,7 +53,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 会话主路径（流式文本 / thinking / 工具卡片 / cancel / steer） | ✅ | `pi_backend::session` + `adapt`；空闲 `prompt()`，运行中 `steer()` |
 | 会话持久化与重启恢复 | ✅ | pi jsonl + `session_meta` sidecar |
 | 转录渲染（MessageList / ToolCallCard / RetryBadge / ErrorMessage） | ✅ | 共享渲染管线 |
-| 权限门控（AccessMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 两档都运行（sandbox 档 ride seatbelt profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`require_escalated`+`justification` 升级往返经 `ToolCallAuthorization`；AccessChip 切 Sandbox/FullAccess，切换热生效（下一次工具调用即按新模式裁决），chip 乐观即时刷新、宿主拒绝时回滚并出纠错 notice（写前对账，`LeafView::access_mode_or_default`：座位值 → 宿主声明 schema 默认 → 宿主默认，旧三档持久串一律落默认 Sandbox）；同一菜单的「网络」组切 sandbox 档 `networkAccess`（默认关、会话内存态，`LeafView::network_access_or_default` 同回退链；开启后无 allowlist 直连、有 allowlist 走受管代理 + 域名确认卡） |
+| 权限门控（AccessMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 两档都运行（sandbox 档 ride seatbelt profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`require_escalated`+`justification` 升级往返经 `ToolCallAuthorization`；AccessSwitch（composer 底栏内联 segmented TabBar）切 Sandbox/FullAccess，切换热生效（下一次工具调用即按新模式裁决），开关乐观即时刷新、宿主拒绝时回滚并出纠错 notice（写前对账，`LeafView::access_mode_or_default`：座位值 → 宿主声明 schema 默认 → 宿主默认，旧三档持久串一律落默认 Sandbox）；两档网络恒开——无用户面网络开关，app 在每次 attach 播种 `networkAccess=on`（AHP 会话内存态，恢复即关故须重播种；沙箱出网无 allowlist 直连、有 allowlist 走受管代理 + 域名确认卡） |
 | Slash commands | ✅ 部分 | `/compact`、`/exit`(`/quit`)、`/new`(`/clear` `/archive`)、`/goal`、`/mode`（`/plan` 是上游内置 skill：裸文本直通 runtime 的 skill 分发，非本地命令）；markdown/skill 适配器经共享 registry。`/exit` 走全量停机序列（`workspace/exit.rs`）：停子代理 → cancel 当前 turn → 关右栏终端/TUI agent 页签与底 dock 终端（PTY drop 即进程树终止）→ 关集成浏览器 → 强制归档（绕过 idle 门禁）→ 落新会话，每步以 info 卡播报；turn 运行中同样可发 |
 | 模型选择器 | ✅ | pi `ProviderRegistry`，按 provider 显示名分组；写前对账：乐观写入 → 宿主 echo 确认（撤销史销账）/ `rejectionReason` 回滚 + 纠错 notice |
 | 项目（composer chip / 侧栏文件夹 / 绑定新会话） | ✅ | 宿主 workspace registry（`ClientCall::Workspace` + `HostEvent::WorkspaceUpdate` 状态流），客户端不再写 threads.db `projects` 表 |
@@ -114,7 +114,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Footer / Composer
 
-- [Footer](#footer) · [CaptainStatusStrip](#captainstatusstrip) · [Composer](#composer) · [DeliveryErrorStrip](#deliveryerrorstrip) · [QueuedFollowUps](#queuedfollowups) · [ComposerDivider](#composerdivider) · [AttachmentChips](#attachmentchips) · [AttachmentChip](#attachmentchip) · [BrowserSuiteChip](#browsersuitechip) · [ComposerInputRow](#composerinputrow) · [InputField](#inputfield) · [SendCluster](#sendcluster) · [ModelChip](#modelchip) · [ContextUsagePill](#contextusagepill) · [DictationButton](#dictationbutton) · [AccessChip](#accesschip) · [ProjectChip](#projectchip) · [FollowStopProjection](#followstapprojection)
+- [Footer](#footer) · [CaptainStatusStrip](#captainstatusstrip) · [Composer](#composer) · [DeliveryErrorStrip](#deliveryerrorstrip) · [QueuedFollowUps](#queuedfollowups) · [ComposerDivider](#composerdivider) · [AttachmentChips](#attachmentchips) · [AttachmentChip](#attachmentchip) · [BrowserSuiteChip](#browsersuitechip) · [ComposerInputRow](#composerinputrow) · [InputField](#inputfield) · [SendCluster](#sendcluster) · [ModelChip](#modelchip) · [ContextUsagePill](#contextusagepill) · [DictationButton](#dictationbutton) · [AccessSwitch](#accessswitch) · [ProjectChip](#projectchip) · [FollowStopProjection](#followstapprojection)
 
 ### AskDrawer
 
@@ -122,7 +122,7 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 
 ### Popups & Dropdowns
 
-- [CompletionPopover](#completionpopover) · [ModelMenu](#modelmenu) · [AccessMenu](#accessmenu) · [ProjectMenu](#projectmenu)
+- [CompletionPopover](#completionpopover) · [ModelMenu](#modelmenu) · [ProjectMenu](#projectmenu)
 
 ### Overlays
 
@@ -648,11 +648,11 @@ Push-to-talk dictation entry in the footer's right control cluster, between [Con
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_dictation_button`); state + landing: `crates/agent-ui/src/workspace.rs` (`speech`, `land_dictation`, the `SpeechEvent` subscription in `Workspace::new`)
 
-#### AccessChip
+#### AccessSwitch
 
-Dropdown chip showing [AccessMode](#access-modes) → [AccessMenu](#accessmenu) popup.
+Inline two-segment [AccessMode](#access-modes) switch in the footer's left control group — the segmented variant of gpui-component `TabBar`: the two tiers (`access-mode-sandbox-title` / `access-mode-full-access-title`, plain-text labels, no icons) sit on a muted track and the sliding indicator pill animates between segments (the component's own animation), so either tier is one click away — no popover, no second step. The selected segment IS the current mode, read from the fold (§J11 `access_mode_or_default`) into `selected_index` — a pure projection with no local open state. Clicks on the inactive segment route through `Workspace::apply_access_mode` (write-ahead config write + object-row mirror + localized notice; optimistic flip, echo confirms / refusal rolls back); clicking the already-active segment is a no-op — the notice announces a transition, not an echo. `flex_shrink_0` keeps the left group's contraction from ever squashing it.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace.rs` (`build_access_switch`), `crates/agent-ui/src/workspace/composer_render.rs` (`render_access_switch`)
 
 #### ProjectChip
 
@@ -778,12 +778,6 @@ Trigger: typing `/` (slash commands) or `@` (skills + subagents) at the caret in
 Trigger: [ModelChip](#modelchip). Model selector dropdown: provider submenus for the model list, then a Reasoning effort block (High / Max, current effort checked) under a separator.
 
 > Source: `crates/agent-ui/src/workspace/chips.rs`
-
-#### AccessMenu
-
-Trigger: [AccessChip](#accesschip). [AccessMode](#access-modes) selector: two title-only rows — Sandbox access / Full access, check on the current one — plus a network group beneath: a muted non-interactive 网络/Network label row and the two-state `networkAccess` radio (关/Off — wifi-off, muted; 开/On — globe, info), check on the active one. No header row, no "Learn more", no per-mode descriptions. Clicks route through `Workspace::apply_access_mode` / `apply_network_access`: write-ahead config write (`accessMode` / `networkAccess`, the latter session-memory only), localized notice, menu close.
-
-> Source: `crates/agent-ui/src/workspace.rs` (`build_permission_content`)
 
 #### ProjectMenu
 
@@ -1201,15 +1195,15 @@ Hover tooltip.
 
 ## 8. Access Modes
 
-Two file-effect tiers drive the seatbelt profile (bash) and the fs write fence; a denied call carries a `[sandbox: …]` marker and a `require_escalated`+`justification` escalation path through the `ToolCallAuthorization` card. Switching is hot: a mid-turn switch governs the very next tool call, and the chip flips optimistically on click (`/mode` also dispatches immediately mid-turn).
+Two file-effect tiers drive the seatbelt profile (bash) and the fs write fence; a denied call carries a `[sandbox: …]` marker and a `require_escalated`+`justification` escalation path through the `ToolCallAuthorization` card. Switching is hot: a mid-turn switch governs the very next tool call, and the [AccessSwitch](#accessswitch) flips optimistically on click (`/mode` also dispatches immediately mid-turn). The tier colors below also tint the user turn frame at send time.
 
 #### Sandbox access
 
-Green (shield) — file writes fenced to the workspace, the manox home (~/.manox), and temp areas; bash rides the seatbelt profile (default). Sandbox network is off by default (`networkAccess` config, AHP session-mutable, memory-only — a restored session starts closed again); the [AccessMenu](#accessmenu) network group flips it on (direct when no allowlist, through the host's managed proxy + domain confirm cards when `~/.manox/settings.toml [sandbox.network] allow` is configured).
+Green — file writes fenced to the workspace, the manox home (~/.manox), and temp areas; bash rides the seatbelt profile (default). The network is always on: there is no user-facing network switch — the app seeds the `networkAccess` config (`on`, AHP session-mutable, memory-only — a restored session comes back closed, so every attach re-seeds it idempotently); sandbox egress runs direct when no allowlist is configured, and through the host's managed proxy + domain confirm cards when `~/.manox/settings.toml [sandbox.network] allow` is configured.
 
 #### Full access
 
-Red (triangle alert) — no sandbox; bash unsandboxed, fs mutations unfenced.
+Red — no sandbox; bash unsandboxed, fs mutations unfenced.
 ---
 
 ## 9. Tool Call Statuses

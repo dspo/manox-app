@@ -1,10 +1,10 @@
 //! The composer + overlay render helpers (U9b cluster 8): the composer
-//! element (and its queued-follow-ups / access-placeholder /
-//! send-button / completion-overlay / attachments / project-chip faces),
-//! the browser-suite toggles, the blank-project family, and the project
-//! registration leg. Split from `workspace.rs` — `super` is the
-//! workspace module; the bare-private methods lift `pub(super)` for the
-//! parent's render face and the `tests` child.
+//! element (and its queued-follow-ups / access-switch / send-button /
+//! completion-overlay / attachments / project-chip faces), the browser-suite
+//! toggles, the blank-project family, and the project registration leg.
+//! Split from `workspace.rs` — `super` is the workspace module; the
+//! bare-private methods lift `pub(super)` for the parent's render face and
+//! the `tests` child.
 
 use super::*;
 use crate::DismissContextBubble;
@@ -235,7 +235,7 @@ impl Workspace {
         let project_chip = self.render_project_chip_pi(theme, cx);
         let goal_chip = self.render_goal_chip(theme, cx);
         let follow_stop_chip = self.render_follow_stop_chip(theme, cx);
-        let access = self.render_access_placeholder(theme, cx);
+        let access = self.render_access_switch(theme, cx);
         let model = self.render_model_selector_pi(theme, cx);
         // Absolute cancel priority: the stop form is driven by the raw
         // running edge alone — a pending ask/approve card never swaps
@@ -442,9 +442,9 @@ impl Workspace {
                     .child(
                         // `min_w_0` lets this group flex-shrink when the row is
                         // narrow; `overflow_hidden` is deliberately NOT set so
-                        // the chips' popovers (project picker, permission menu)
-                        // can overflow upward. `MIN_WINDOW_W` keeps the row
-                        // wide enough that the chips themselves never overflow.
+                        // the project picker's popover can overflow upward.
+                        // `MIN_WINDOW_W` keeps the row wide enough that the
+                        // chips themselves never overflow.
                         h_flex()
                             .items_center()
                             .gap_1()
@@ -781,114 +781,31 @@ impl Workspace {
         None
     }
 
-    pub(super) fn render_access_placeholder(
-        &mut self,
-        theme: &Theme,
+    /// The composer footer's inline access-mode switch (see
+    /// [`build_access_switch`] for the control's anatomy). This face only
+    /// reads: the seated mode from the fold (§J11), then hands the workspace
+    /// handle to the pure builder.
+    pub(super) fn render_access_switch(
+        &self,
+        _theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Selector read face (§J11): the composer's access chip derives its
-        // access mode and the sandbox network switch from the fold — the
-        // seated value, the declared schema default, or the host/enum
-        // default, never a local guess.
-        let (mode, network) = self
+        // Selector read face (§J11): the composer's switch derives its
+        // access mode from the fold — the seated value, the declared schema
+        // default, or the host/enum default, never a local guess. The
+        // network switch is not read here: both tiers run with the network
+        // on (seeded at attach), so the control carries no network segment.
+        let mode = self
             .chat
             .read(cx)
             .store
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                let leaf = crate::ahp_store::leaf(&view.book, sid);
-                (
-                    leaf.access_mode_or_default(),
-                    leaf.network_access_or_default(),
-                )
+                crate::ahp_store::leaf(&view.book, sid).access_mode_or_default()
             })
             .unwrap_or_default();
-        let open = self.chat.read(cx).access_open;
-        // Pre-extract chip visuals so the click handler closure doesn't
-        // capture `theme` (which only lives for the method body) — closures
-        // passed to `cx.listener` must be `'static`.
-        let (chip_label, chip_color, chip_icon) = mode_chip_visual(mode, theme);
-        let workspace = cx.entity().downgrade();
-
-        let trigger = h_flex()
-            .id("access-chip")
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .min_w(px(96.))
-            .rounded(theme.radius)
-            .hover(|s| s.bg(theme.accent.opacity(0.08)))
-            .cursor_pointer()
-            .child(Icon::new(chip_icon).xsmall().text_color(chip_color))
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .text_xs()
-                    .text_color(chip_color)
-                    .child(chip_label),
-            )
-            .child(
-                Icon::new(if open {
-                    IconName::ChevronUp
-                } else {
-                    IconName::ChevronDown
-                })
-                .xsmall()
-                .text_color(theme.muted_foreground),
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                if this.chat.read(cx).access_open {
-                    this.close_access_menu(cx);
-                } else {
-                    this.chat.update(cx, |chat, cx| {
-                        chat.access_open = true;
-                        cx.notify();
-                    });
-                }
-                cx.notify();
-            }));
-
-        if !open {
-            return trigger.into_any_element();
-        }
-
-        // The popover is a plain `div` with `popover_style` (opaque card
-        // chrome: bg + border + shadow + rounded). We don't route it through
-        // `PopupMenu` because `PopupMenuItem::element` wraps every row in
-        // `h_flex().flex_1().min_h(26)`, which both leaked vertical space
-        // and — in the single-item case — clipped the v_flex content to
-        // 26px. Doing it ourselves gives a content-sized, opaque popover.
-        //
-        // `w(360)` (not `max_w`) — with `min_w_0` on every text div, the
-        // v_flex's intrinsic min-content is tiny (just icon widths + padding),
-        // so `max_w` alone leaves the popover at ~140px and the subtitles
-        // wrap into single-word lines. A fixed 360px width gives the
-        // subtitles room to wrap at word boundaries.
-        let content = build_permission_content(workspace.clone(), mode, network, cx);
-        gpui::div()
-            .relative()
-            .child(trigger)
-            .child(
-                deferred(
-                    gpui::div()
-                        .id("access-dropdown")
-                        .absolute()
-                        .bottom_full()
-                        .left_0()
-                        .occlude()
-                        .w(gpui::px(360.))
-                        .popover_style(cx)
-                        .child(content)
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.close_access_menu(cx);
-                            cx.notify();
-                        })),
-                )
-                .with_priority(1),
-            )
-            .into_any_element()
+        build_access_switch(cx.entity().downgrade(), mode, cx).into_any_element()
     }
 
     /// Deactivate a browser tool suite on the bound thread. The chip is

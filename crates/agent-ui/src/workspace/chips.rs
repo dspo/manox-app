@@ -703,9 +703,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Wire api string → text color for the pi composer model label and the
-    /// context rail's per-model usage rows. Tinted directly from theme tokens
-    /// (matching `mode_chip_visual` and the settings panel) so both surfaces
     /// The foreground session's model identity from the `model` projection:
     /// the canonical `{provider, modelId}` wire identity (L8) — never a full
     /// `Model` blob. Deserializing the projection into `Model` (an earlier
