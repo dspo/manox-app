@@ -795,25 +795,25 @@ impl Workspace {
                 let model_color = color_name.scale(500);
                 let dot = || {
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                 };
                 vec![
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.foreground)
                         .child(prov_display.clone())
                         .into_any_element(),
                     dot().into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(model_color)
                         .child(m.name.clone())
                         .into_any_element(),
                     dot().into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(effort.wire_value().to_string())
                         .into_any_element(),
@@ -825,27 +825,27 @@ impl Workspace {
                 // of "no model".
                 vec![
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.foreground)
                         .child(provider.clone())
                         .into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                         .into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(id.clone())
                         .into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                         .into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(effort.wire_value().to_string())
                         .into_any_element(),
@@ -853,7 +853,7 @@ impl Workspace {
             } else {
                 vec![
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.foreground)
                         .child(i18n::t("workspace-no-model").to_string())
                         .into_any_element(),
@@ -865,7 +865,7 @@ impl Workspace {
                 } else {
                     IconName::ChevronDown
                 })
-                .xsmall()
+                .small()
                 .text_color(theme.muted_foreground),
             )
             .on_click(cx.listener(|this, _, window, cx| {
@@ -1300,7 +1300,7 @@ impl Workspace {
             .cursor_pointer()
             .child(
                 gpui::div()
-                    .text_xs()
+                    .text_sm()
                     .text_color(theme.accent_foreground)
                     .child(label),
             )
@@ -1310,7 +1310,7 @@ impl Workspace {
                 } else {
                     IconName::ChevronDown
                 })
-                .xsmall()
+                .small()
                 .text_color(muted),
             );
 

@@ -826,10 +826,12 @@ impl Workspace {
             .with_mut(|t| t.set_browser_suite(suite, false));
     }
 
-    /// One chip-style control in the send cluster — the model/access chips'
-    /// exact anatomy (px_2/py_1, text_xs label, xsmall icon, accent hover):
-    /// the cluster used to be 24px pill buttons whose label size towered
-    /// over the footer's chip row.
+    /// One chip-style control in the send cluster — the footer's shared chip
+    /// anatomy (px_2/py_1, text_sm label, small icon, accent hover). The
+    /// footer's type tier is unified at 14px so these chips match the access
+    /// TabBar (whose `Size::Small` maps to `text_sm`); the cluster used to
+    /// be 24px pill buttons whose label size towered over the footer's chip
+    /// row.
     fn send_cluster_chip(
         id: &'static str,
         spec: SendChipSpec,
@@ -861,9 +863,9 @@ impl Workspace {
                 c.bg(theme.accent.opacity(0.12))
             })
             .when(enabled, |c| c.hover(|h| h.bg(hover)))
-            .child(Icon::from(icon).xsmall().text_color(fg));
+            .child(Icon::from(icon).small().text_color(fg));
         let chip = match label_key {
-            Some(key) => chip.child(gpui::div().text_xs().text_color(fg).child(i18n::t(key))),
+            Some(key) => chip.child(gpui::div().text_sm().text_color(fg).child(i18n::t(key))),
             None => chip,
         };
         let chip = match tooltip_key {
@@ -890,7 +892,7 @@ impl Workspace {
         self.speech
             .read(cx)
             .has_recognizer()
-            .then(|| SpeechButton::new(&self.speech).xsmall().into_any_element())
+            .then(|| SpeechButton::new(&self.speech).small().into_any_element())
     }
 
     /// The composer's action cluster (footer right), dressed exactly like
@@ -1147,7 +1149,7 @@ impl Workspace {
             )))
             .child(
                 gpui::div()
-                    .text_xs()
+                    .text_sm()
                     .text_color(fill_color)
                     .child(SharedString::from(format!("{percent}%"))),
             );
@@ -1454,11 +1456,11 @@ impl Workspace {
             .hover(|s| s.bg(theme.accent.opacity(0.08)))
             .cursor_pointer()
             .when_some(icon.clone(), |el, ic| {
-                el.child(Icon::new(ic).xsmall().text_color(theme.muted_foreground))
+                el.child(Icon::new(ic).small().text_color(theme.muted_foreground))
             })
             .child(
                 gpui::div()
-                    .text_xs()
+                    .text_sm()
                     .text_color(theme.foreground)
                     .child(label),
             )
@@ -1468,7 +1470,7 @@ impl Workspace {
                 } else {
                     IconName::ChevronDown
                 })
-                .xsmall()
+                .small()
                 .text_color(theme.muted_foreground),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
