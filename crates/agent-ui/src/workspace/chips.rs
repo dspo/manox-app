@@ -787,6 +787,10 @@ impl Workspace {
             .gap_1()
             .px_2()
             .py_1()
+            // The model face is the footer's only variable-width label: the
+            // chip yields (and ellipsizes) before the row overflows at narrow
+            // windows, while the send cluster stays pinned.
+            .min_w_0()
             .rounded(theme.radius)
             .hover(|s| s.bg(theme.accent.opacity(0.08)))
             .cursor_pointer()
@@ -795,24 +799,29 @@ impl Workspace {
                 let model_color = color_name.scale(500);
                 let dot = || {
                     gpui::div()
+                        .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                 };
                 vec![
                     gpui::div()
+                        .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.foreground)
                         .child(prov_display.clone())
                         .into_any_element(),
                     dot().into_any_element(),
                     gpui::div()
+                        .min_w_0()
+                        .truncate()
                         .text_sm()
                         .text_color(model_color)
                         .child(m.name.clone())
                         .into_any_element(),
                     dot().into_any_element(),
                     gpui::div()
+                        .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(effort.wire_value().to_string())
@@ -825,26 +834,32 @@ impl Workspace {
                 // of "no model".
                 vec![
                     gpui::div()
+                        .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.foreground)
                         .child(provider.clone())
                         .into_any_element(),
                     gpui::div()
+                        .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                         .into_any_element(),
                     gpui::div()
+                        .min_w_0()
+                        .truncate()
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(id.clone())
                         .into_any_element(),
                     gpui::div()
+                        .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                         .into_any_element(),
                     gpui::div()
+                        .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(effort.wire_value().to_string())

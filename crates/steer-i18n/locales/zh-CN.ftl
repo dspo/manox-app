@@ -449,8 +449,6 @@ access-mode-sandbox-title = 沙箱访问
 
 access-mode-full-access-title = 完全访问
 
-
-
 workspace-mode-notice = { $mode ->
     [sandbox] 沙箱访问：文件写入受围栏约束；网络保持开启，沙箱出网受域名允许清单与审批约束（未配置清单时直连）。
    *[fullaccess] 完全访问：无沙箱；bash 不受限运行，文件变更不受约束。

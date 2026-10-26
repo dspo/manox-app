@@ -157,38 +157,62 @@ fn ask_input_json(
 /// state. A click on the inactive segment routes through
 /// `Workspace::apply_access_mode` (write-ahead config write + object-row
 /// mirror + notice); clicking the already-active segment is a no-op — the
-/// notice announces a mode transition, it is not an echo. The bar hugs its
-/// intrinsic width and refuses to shrink (`flex_shrink_0`), so the footer's
-/// left chip group can never squash it.
-fn build_access_switch(
-    workspace: WeakEntity<Workspace>,
-    current: AccessMode,
-    _cx: &mut gpui::App,
-) -> gpui::Div {
-    let selected_ix = if current == AccessMode::FullAccess {
-        1
-    } else {
-        0
-    };
-    h_flex().flex_shrink_0().child(
-        TabBar::new("access-switch")
-            .segmented()
-            .small()
-            .selected_index(selected_ix)
-            .on_click(move |ix, _window, cx| {
-                if *ix == selected_ix {
-                    return;
-                }
-                let mode = if *ix == 1 {
-                    AccessMode::FullAccess
-                } else {
-                    AccessMode::Sandbox
-                };
-                let _ = workspace.update(cx, |this, cx| this.apply_access_mode(mode, cx));
+/// notice announces a mode transition, it is not an echo. The no-op guard
+/// reads the mode from the fold AT CLICK TIME: the optimistic flip repaints a
+/// frame later, so a second click landing in that window would otherwise
+/// re-apply the same mode and announce it twice. The bar hugs its intrinsic
+/// width and refuses to shrink (`flex_shrink_0`), so the footer's left chip
+/// group can never squash it.
+fn build_access_switch(workspace: WeakEntity<Workspace>, current: AccessMode) -> gpui::Div {
+    let selected_ix = usize::from(current == AccessMode::FullAccess);
+    h_flex()
+        .flex_shrink_0()
+        .debug_selector(|| "access-switch".to_string())
+        .child(
+            TabBar::new("access-switch")
+                .segmented()
+                .small()
+                .selected_index(selected_ix)
+                .on_click(move |ix, _window, cx| {
+                    let mode = if *ix == 1 {
+                        AccessMode::FullAccess
+                    } else {
+                        AccessMode::Sandbox
+                    };
+                    let _ = workspace.update(cx, |this, cx| {
+                        if this.foreground_access_mode(cx) == mode {
+                            return;
+                        }
+                        this.apply_access_mode(mode, cx);
+                    });
+                })
+                .child(
+                    Tab::new()
+                        .label(i18n::t("access-mode-sandbox-title"))
+                        .debug_selector(|| "access-switch-sandbox".to_string()),
+                )
+                .child(
+                    Tab::new()
+                        .label(i18n::t("access-mode-full-access-title"))
+                        .debug_selector(|| "access-switch-full-access".to_string()),
+                ),
+        )
+}
+
+impl Workspace {
+    /// The foreground session's effective [`AccessMode`] read from the fold
+    /// (§J11): the seated value, the host-declared schema default, or the enum
+    /// default — never a local guess. `Sandbox` when no store is bound.
+    fn foreground_access_mode(&self, cx: &gpui::App) -> AccessMode {
+        self.chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(store, sid)| {
+                crate::ahp_store::leaf(&store.read(cx).book, sid).access_mode_or_default()
             })
-            .child(Tab::new().label(i18n::t("access-mode-sandbox-title")))
-            .child(Tab::new().label(i18n::t("access-mode-full-access-title"))),
-    )
+            .unwrap_or_default()
+    }
 }
 mod composer;
 mod external;

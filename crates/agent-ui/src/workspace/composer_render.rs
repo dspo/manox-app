@@ -440,15 +440,14 @@ impl Workspace {
                     .items_center()
                     .justify_between()
                     .child(
-                        // `min_w_0` lets this group flex-shrink when the row is
-                        // narrow; `overflow_hidden` is deliberately NOT set so
-                        // the project picker's popover can overflow upward.
-                        // `MIN_WINDOW_W` keeps the row wide enough that the
-                        // chips themselves never overflow.
+                        // The group keeps its intrinsic width: the right
+                        // cluster yields instead (the model face ellipsizes),
+                        // so the chips never paint under the pinned controls.
+                        // `overflow_hidden` is deliberately NOT set so the
+                        // project picker's popover can overflow upward.
                         h_flex()
                             .items_center()
                             .gap_1()
-                            .min_w_0()
                             .child(project_chip)
                             .when_some(goal_chip, |el, chip| el.child(chip))
                             .child(access)
@@ -461,11 +460,20 @@ impl Workspace {
                         h_flex()
                             .items_center()
                             .gap_1()
-                            .flex_shrink_0()
+                            // The cluster yields at narrow widths, but only
+                            // through the model face (the sole truncated
+                            // element); the ring, dictation and send controls
+                            // stay pinned at their natural size.
+                            .min_w_0()
+                            .debug_selector(|| "composer-footer-right".to_string())
                             .child(model)
-                            .when_some(context_ring, |el, ring| el.child(ring))
-                            .children(dictation)
-                            .child(send),
+                            .when_some(context_ring, |el, ring| {
+                                el.child(gpui::div().flex_shrink_0().child(ring))
+                            })
+                            .children(
+                                dictation.map(|button| gpui::div().flex_shrink_0().child(button)),
+                            )
+                            .child(gpui::div().flex_shrink_0().child(send)),
                     ),
             )
             .into_any_element()
@@ -795,17 +803,8 @@ impl Workspace {
         // default, or the host/enum default, never a local guess. The
         // network switch is not read here: both tiers run with the network
         // on (seeded at attach), so the control carries no network segment.
-        let mode = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).access_mode_or_default()
-            })
-            .unwrap_or_default();
-        build_access_switch(cx.entity().downgrade(), mode, cx).into_any_element()
+        let mode = self.foreground_access_mode(cx);
+        build_access_switch(cx.entity().downgrade(), mode).into_any_element()
     }
 
     /// Deactivate a browser tool suite on the bound thread. The chip is

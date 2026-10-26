@@ -463,8 +463,6 @@ access-mode-sandbox-title = Sandbox access
 
 access-mode-full-access-title = Full access
 
-
-
 workspace-mode-notice = { $mode ->
     [sandbox] Sandbox access: file writes are fenced; the network stays on — sandbox egress is subject to the domain allowlist and approvals (direct when no allowlist is configured).
    *[fullaccess] Full access: no sandbox; bash runs unsandboxed, fs mutations are unfenced.

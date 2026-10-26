@@ -2459,13 +2459,28 @@ impl AhpStore {
         self.dispatch(chat_uri(chat_id), action);
     }
 
-    /// Merge session config keys (model / reasoningEffort / accessMode).
+    /// Merge session config keys (model / reasoningEffort / accessMode /
+    /// networkAccess).
     pub fn set_config(&mut self, session_id: &str, config: serde_json::Map<String, Value>) {
         let action = StateAction::SessionConfigChanged(SessionConfigChangedAction {
             config,
             replace: None,
         });
         self.dispatch(session_uri(session_id), action);
+    }
+
+    /// Re-seed the sandbox's `networkAccess` switch to `on`. The app's policy
+    /// is network-on for both access tiers, but the key is session-memory
+    /// state upstream (a restored session comes back closed), so every attach
+    /// re-writes it. No optimistic write: nothing reads the value back while
+    /// the control has no user-facing face.
+    pub fn seed_network_access_on(&mut self, session_id: &str) {
+        let mut config = serde_json::Map::new();
+        config.insert(
+            config_keys::NETWORK_ACCESS.to_string(),
+            Value::String(manox_harness::sandbox::NetworkAccess::On.wire().to_string()),
+        );
+        self.set_config(session_id, config);
     }
 
     /// Rename the session.
