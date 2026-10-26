@@ -65,8 +65,8 @@ runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题
 上游 PR 的 body 或 commit message 点名 dspo/manox-app 需要伴随改动的（「Companion change required in dspo/manox-app」及同类表述），其消费义务落在把锁推进到该发布的那个本仓 PR：**同一 PR 内完成订阅/换道/接线，或在 Assumptions 里显式申报滞留原因**——静默不消费等于上游白修（桌面端撞不到修复）。台账只列**未结清**义务（销账即删行；历史销账记录走 git 历史与 PR 描述，不驻留本文件，禁止「本 PR」类随时腐烂的指代）：
 
 - dspo/manox#840（interaction park 跨 restore 结算）：纯宿主侧，app 零动作（挂此备忘至上游确认无客户端义务）
-- dspo/manox#904（createSession 丢弃 `CreateSessionParams.config`）：app 侧已用 `Workspace::start_new_thread` 之后的 `session/configChanged`（`set_config`）补偿，#159 已合入；上游把 create 意图接上后应删掉该补偿写入。
-- dspo/manox#905（新建 session 的 channel seed 不带工作目录）：app 侧已用同处的 `session/workingDirectorySet`（`set_cwd`）补偿，#159 已合入；上游把 seed 补上后应删掉该补偿写入。
+- dspo/manox#904（createSession 丢弃 `CreateSessionParams.config`）：manox v0.6.6（#960）已把 create 的 config 落进 journal，但宿主仍从 journal **header/行**播种 channel，deferred create 在首条消息前没有 journal——`set_config` 显示写入保留（`attach.rs` 已标注释）。上游改为「从 create 意图/对象行播种 channel」后删除。
+- dspo/manox#905（新建 session 的 channel seed 不带工作目录）：同上，`seed_working_directories` 仍读 journal header，`set_cwd` 显示写入保留；v0.6.6 只修了 journal 权威、未修预物化 seed。上游补 seed 后删除。
 
 ## 构建与开发命令
 

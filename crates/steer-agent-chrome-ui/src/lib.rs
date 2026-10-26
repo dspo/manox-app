@@ -26,15 +26,12 @@
 //! cargo run -p steer-agent-chrome-ui --example shell
 //! ```
 //!
-//! Known gaps at this stage: the
-//! session-row props model still carries the replica's three-state status
-//! (the manox five-state semantics extend it at the assembly stage);
-//! per-session right-pane tab sets are not yet modeled; the sidebar's fixed
-//! rows (Automations / Chats) and the Customizations block are decorative —
-//! dimmed with an unimplemented tooltip until real surfaces exist.
-//!
-//! All chrome text resolves through `steer-i18n` (`chrome-*` keys, zh-CN
-//! primary / en fallback) — chrome copy is app chrome by definition.
+//! Known gaps at this stage: per-session right-pane tab sets are not yet
+//! modeled; the sidebar's fixed rows (Automations / Chats) and the
+//! Customizations block are decorative — dimmed with an unimplemented
+//! tooltip until real surfaces exist. All chrome text resolves through
+//! `steer-i18n` (`chrome-*` keys, zh-CN primary / en fallback) — chrome
+//! copy is app chrome by definition.
 
 pub mod divider;
 pub mod main_surface;
@@ -50,7 +47,8 @@ pub use main_surface::{MainSurface, MainSurfaceHandle};
 pub use panel::PanelSurface;
 pub use right_pane::{RightPane, TabStore, ToolTab, ToolTabFactory};
 pub use session_list::{
-    CustomizationRow, FixedRow, SessionGroup, SessionList, SessionRowData, SessionStatus,
+    CustomizationRow, FixedRow, PendingKind, SessionGroup, SessionList, SessionRowData,
+    SessionStatus,
 };
 pub use shell::{HostHooks, SessionRow, Shell, ShellConfig};
 pub use theme::{icons, register_fonts};

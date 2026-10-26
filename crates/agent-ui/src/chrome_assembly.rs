@@ -3,8 +3,8 @@
 //! mounts:
 //!
 //! - the session list fed by the REAL multiplexer (the server wire rows
-//!   projected through `sidebar_projection` — five states, team forest,
-//!   tags, project grouping);
+//!   projected through `sidebar_projection` — the status ladder, team
+//!   forest, tags, project grouping);
 //! - pin/archive hooks routed through the thread store (the next list
 //!   snapshot reconciles);
 //! - the right-pane tool registry and bottom dock (the integrated-terminal

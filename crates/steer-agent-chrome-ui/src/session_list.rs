@@ -19,9 +19,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::theme::{
-    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, BORDER, CARD_BG, CARD_BORDER, ERR_RED, FG, FG_DIM,
-    FG_FAINT, FG_STRONG, FONT_UI, IconAsset, LIST_HOVER, SHELL_BG, icon, icons,
+    ACCENT, BADGE_BLUE_BG, BADGE_BLUE_FG, BORDER, CARD_BG, CARD_BORDER, FG, FG_DIM, FG_FAINT,
+    FG_STRONG, FONT_UI, IconAsset, LIST_HOVER, SHELL_BG, SUCCESS_GREEN, WARN_AMBER, icon, icons,
 };
+use ai_elements::{PixelSpinner, PixelSpinnerVariant};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnimationExt, App, ClickEvent, Entity, FocusHandle, FontWeight, Hsla, InteractiveElement,
@@ -96,8 +97,8 @@ pub struct SessionRowData {
     pub status: SessionStatus,
     /// What the row IS — the leading slot's glyph and the row menu's
     /// semantics ride this (the legacy sidebar's RowIcon/RowKind pair,
-    /// unified: threads show the five-state machine, live non-thread
-    /// sessions show their brand mark and close instead of archive).
+    /// unified: threads show the status slot, live non-thread sessions show
+    /// their brand mark and close instead of archive).
     pub kind: SessionRowKind,
     pub pinned: bool,
     /// The store-partition flag behind the menu's archive/unarchive toggle.
@@ -113,18 +114,28 @@ pub struct SessionRowData {
     pub team_leader: bool,
 }
 
-/// The row's five-state machine (parity with the agent-ui sidebar). States
-/// where a turn stopped and waits for a human (`PendingAuth`/`PendingAsk`)
-/// render the filled blue dot; `Unread` the hollow one; `Running` the pixel
-/// grid; `Errored` the danger triangle; `Idle` the empty slot.
+/// The row's primary status, one glyph in the 16px slot: `Pending` the
+/// amber pixel question mark (every kind shares the glyph — the tooltip
+/// copy carries the difference), `Running` the pixel grid, `Unread` the
+/// filled green completion dot, `Idle` the empty slot. A stopped turn's
+/// error is never a list state: it renders as turn-level content inside
+/// the session.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SessionStatus {
-    Idle,
     Running,
+    Pending(PendingKind),
     Unread,
-    PendingAuth,
-    PendingAsk,
-    Errored,
+    Idle,
+}
+
+/// What a parked turn waits on. The slot renders one glyph for every kind;
+/// only the tooltip copy branches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingKind {
+    /// A tool/permission approval awaiting the user.
+    Auth,
+    /// An unanswered question awaiting the user.
+    Ask,
 }
 
 /// What a session row is: the legacy sidebar's unified item abstraction —
@@ -133,12 +144,12 @@ pub enum SessionStatus {
 /// semantics branch on this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SessionRowKind {
-    /// A manox thread: the five-state status glyph leads; the row menu is
-    /// the thread's (pin / archive / tag / copy id).
+    /// A manox thread: the status slot leads; the row menu is the
+    /// thread's (pin / archive / tag / copy id).
     #[default]
     Thread,
-    /// A live non-thread session: its brand mark leads (the five-state
-    /// machine does not apply to a PTY); the row menu closes the session.
+    /// A live non-thread session: its brand mark leads (the status ladder
+    /// does not apply to a PTY); the row menu closes the session.
     /// `icon` is the host-supplied brand asset path.
     External { icon: IconAsset },
 }
@@ -213,29 +224,10 @@ const MARQUEE_PAUSE: f32 = 0.6;
 const MARQUEE_GAP: f32 = 24.;
 const MARQUEE_FADE_W: f32 = 14.;
 
-/// The running pixel grid: a 2×3 dot matrix, 2px dots, 2px gaps, one
-/// 1820ms stepped cycle; the long/short variants stretch or shrink the
-/// middle hold so the cascade reads as a wave.
-const PIXEL_GRID_MS: f32 = 1820.;
-/// Per-dot keyframe variants: dots 1-4 the standard cycle, dot 5 long, dot 6
-/// short (delays in ms — the calibration's values).
-const PIXEL_DOTS: [(f32, SpinVariant); 6] = [
-    (520., SpinVariant::Cycle),
-    (650., SpinVariant::Cycle),
-    (260., SpinVariant::Cycle),
-    (390., SpinVariant::Cycle),
-    (0., SpinVariant::Long),
-    (130., SpinVariant::Short),
-];
-
-/// Which keyframe set a pixel-grid dot follows (the long/short variants
-/// stretch or shrink the middle hold so the cascade reads as a wave).
-#[derive(Clone, Copy)]
-enum SpinVariant {
-    Cycle,
-    Long,
-    Short,
-}
+/// The pending question mark on the grid's dot-matrix language: 2px dots
+/// at a 3px pitch (col, row) — the arc, the shoulder, the hook, the empty
+/// separator row, the detached dot; 8px wide x 14px tall in the 16px slot.
+const QUEST_DOTS: [(f32, f32); 6] = [(0., 0.), (1., 0.), (2., 0.), (2., 1.), (1., 2.), (1., 4.)];
 
 /// SessionList: props-driven; interactions surface through callbacks, never
 /// through global state.
@@ -479,6 +471,19 @@ fn selection_bar(
 /// A localized hover tooltip view (gpui-component Tooltip over the Root).
 fn hover_tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
     move |window, cx| gpui_component::tooltip::Tooltip::new(steer_i18n::t(text)).build(window, cx)
+}
+
+/// The status line's Fluent key. `None` for Idle: a resting row has nothing
+/// to say, so it carries no tooltip (and the truncation marquee keeps the
+/// hover).
+fn status_key(status: SessionStatus) -> Option<&'static str> {
+    match status {
+        SessionStatus::Running => Some("sidebar-status-running"),
+        SessionStatus::Pending(PendingKind::Auth) => Some("sidebar-status-pending-auth"),
+        SessionStatus::Pending(PendingKind::Ask) => Some("sidebar-status-pending-ask"),
+        SessionStatus::Unread => Some("sidebar-status-unread"),
+        SessionStatus::Idle => None,
+    }
 }
 
 /// Header: the Sessions title + New button (⌘N kbd chip) + sort/search.
@@ -946,6 +951,15 @@ fn session_row(
             let id = data.id.clone();
             move |entered, w, cx| (on_hover)(&id, *entered, w, cx)
         })
+        // Only rows with something to say carry a tooltip — an "idle" on
+        // every resting row is noise and crowds the truncation marquee. The
+        // translation happens when the tooltip opens, never on the render
+        // path.
+        .when_some(status_key(data.status), |el, key| {
+            el.tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(steer_i18n::t(key)).build(window, cx)
+            })
+        })
         .when_some(focus.cloned(), |el, fh| {
             el.track_focus(&fh)
                 .focus_visible(|style| style.border(px(1.5)).border_color(ACCENT))
@@ -1001,16 +1015,14 @@ fn session_row(
                         .items_center()
                         .justify_center()
                         // The leading slot branches on the row kind: threads
-                        // run the five-state machine; a live non-thread
+                        // run the status ladder; a live non-thread
                         // session wears its brand mark (the legacy
                         // RowIcon::External slot).
                         .child(match data.kind {
                             SessionRowKind::Thread if selectable => {
                                 check_slot(checked).into_any_element()
                             }
-                            SessionRowKind::Thread => {
-                                status_slot(&data.id, data.status).into_any_element()
-                            }
+                            SessionRowKind::Thread => status_slot(data.status).into_any_element(),
                             SessionRowKind::External { icon: brand } => div()
                                 .text_color(FG_FAINT)
                                 .child(icon(brand, 14.))
@@ -1178,31 +1190,50 @@ fn check_slot(checked: bool) -> impl IntoElement {
     })
 }
 
-/// The 16px status slot's content, one glyph per five-state: parked turns
-/// (`PendingAuth`/`PendingAsk`) the filled 8px blue dot, `Unread` the hollow
-/// 6.5px one (distinct semantics, same blue), `Running` the pixel grid,
-/// `Errored` the danger triangle, `Idle` nothing.
-fn status_slot(id: &str, status: SessionStatus) -> impl IntoElement {
+/// The 16px status slot's content, one glyph per state: `Pending` the
+/// amber pixel question mark, `Running` the shared PixelSpinner (the
+/// conversation strip's own glyph, phase-locked so every running row
+/// hops on the same beat), `Unread` the filled green completion dot,
+/// `Idle` nothing.
+fn status_slot(status: SessionStatus) -> impl IntoElement {
     match status {
-        SessionStatus::Errored => div()
-            .flex()
-            .text_color(ERR_RED)
-            .child(icon(icons::WARNING, 11.))
+        SessionStatus::Pending(_) => pending_mark().into_any_element(),
+        SessionStatus::Running => PixelSpinner::new()
+            .variant(PixelSpinnerVariant::Grid)
+            .color(ACCENT.into())
+            .synced()
+            // 30fps catches every hop of the native cadence (~34ms per
+            // stop); a fleet of running rows repaints a bounded number
+            // of frames, not vsync.
+            .max_fps(30.)
             .into_any_element(),
-        SessionStatus::PendingAuth | SessionStatus::PendingAsk => div()
-            .size(px(8.))
-            .rounded_full()
-            .bg(BADGE_BLUE_BG)
-            .into_any_element(),
-        SessionStatus::Running => pixel_grid(id).into_any_element(),
         SessionStatus::Unread => div()
             .size(px(6.5))
             .rounded_full()
-            .border(px(1.5))
-            .border_color(BADGE_BLUE_BG)
+            .bg(SUCCESS_GREEN)
             .into_any_element(),
         SessionStatus::Idle => div().into_any_element(),
     }
+}
+
+/// The pending glyph: 2px dots on the pixel grid's dot-matrix language —
+/// top arc, right shoulder, hook back to centre, and the detached dot the
+/// question mark needs to read as one (the empty row above it is the
+/// separator). Static: a parked turn waits, it does not churn. Both
+/// pending kinds share this mark; only the tooltip copy distinguishes them.
+fn pending_mark() -> impl IntoElement {
+    div()
+        .size(px(16.))
+        .relative()
+        .children(QUEST_DOTS.iter().map(|&(col, row)| {
+            div()
+                .absolute()
+                .left(px(4. + col * 3.))
+                .top(px(1. + row * 3.))
+                .size(px(2.))
+                .rounded_full()
+                .bg(WARN_AMBER)
+        }))
 }
 
 /// The title flattened to one rendering line: every hard line break
@@ -1383,73 +1414,6 @@ fn natural_title_width(window: &Window, text: &str, weight: FontWeight) -> Pixel
         .unwrap_or(px(0.))
 }
 
-/// The running pixel grid: 2×3 dots inside a 16×16 clipped container. The
-/// timeline is quantized into six discrete steps, each dot's phase shifted
-/// by its delay; the container clips the fall.
-fn pixel_grid(id: &str) -> impl IntoElement {
-    div()
-        .size(px(16.))
-        .relative()
-        .overflow_hidden()
-        .with_animation(
-            SharedString::from(format!("pxgrid-{id}")),
-            gpui::Animation::new(Duration::from_millis(PIXEL_GRID_MS as u64))
-                .repeat()
-                // The cycle renders six discrete steps of ~303ms each, so 12fps
-                // samples every step ~4x with identical pixels between. The
-                // grid sits on every running session's row; unthrottled it
-                // would repaint the whole window at the display's refresh rate
-                // for as long as any session runs.
-                .with_max_fps(12.),
-            |el, t| {
-                let q_ms = (t * 6.).floor().min(5.) / 5. * PIXEL_GRID_MS;
-                el.children(PIXEL_DOTS.iter().enumerate().map(|(i, (delay, variant))| {
-                    let (col, row) = ((i % 2) as f32, (i / 2) as f32);
-                    let local = if q_ms < *delay {
-                        0.
-                    } else {
-                        (q_ms - delay) % PIXEL_GRID_MS
-                    };
-                    let (dy, alpha) = spin_phase(local / PIXEL_GRID_MS, *variant);
-                    div()
-                        .absolute()
-                        .left(px(5. + col * 4.))
-                        .top(px(3. + row * 4. + dy))
-                        .size(px(2.))
-                        .rounded_full()
-                        .bg(accent_alpha(alpha))
-                }))
-            },
-        )
-}
-
-/// One dot's keyframes: rise from -4px (invisible), hold at 0 (opaque), fall
-/// to +7px fading out. The long/short variants stretch or shrink the hold so
-/// the cascade reads as a wave.
-fn spin_phase(u: f32, variant: SpinVariant) -> (f32, f32) {
-    let (hold, fall) = match variant {
-        SpinVariant::Cycle => (0.5714, 0.6648),
-        SpinVariant::Long => (0.6429, 0.7363),
-        SpinVariant::Short => (0.50, 0.5934),
-    };
-    if u < 0.0934 {
-        (-4., 0.)
-    } else if u < hold {
-        (0., 1.)
-    } else if u < fall {
-        let f = (u - hold) / (fall - hold);
-        (7. * f, 1. - f)
-    } else {
-        (7., 0.)
-    }
-}
-
-fn accent_alpha(a: f32) -> Hsla {
-    let mut c: Hsla = ACCENT.into();
-    c.a = a;
-    c
-}
-
 fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1593,5 +1557,27 @@ mod tests {
         assert_eq!(single_line_title("a \n b"), "a b");
         assert_eq!(single_line_title("\n  a  "), "a");
         assert_eq!(single_line_title("no breaks"), "no breaks");
+    }
+
+    /// The status line's key mapping and its zh rendering — the two
+    /// pending kinds share the glyph and split only here, and Idle carries
+    /// no key at all (a resting row has no tooltip). The locale is pinned
+    /// because `init_i18n` alone follows the developer's own settings.toml.
+    #[test]
+    fn status_tooltip_lines_split_the_pending_kinds() {
+        init_i18n();
+        steer_i18n::set_ui_language(steer_i18n::Language::ZhCn);
+        let key = |status| status_key(status).expect("only Idle has no tooltip");
+        assert_eq!(steer_i18n::t(key(SessionStatus::Running)), "运行中");
+        assert_eq!(
+            steer_i18n::t(key(SessionStatus::Pending(PendingKind::Auth))),
+            "等待批准"
+        );
+        assert_eq!(
+            steer_i18n::t(key(SessionStatus::Pending(PendingKind::Ask))),
+            "等待回答"
+        );
+        assert_eq!(steer_i18n::t(key(SessionStatus::Unread)), "未读");
+        assert_eq!(status_key(SessionStatus::Idle), None);
     }
 }

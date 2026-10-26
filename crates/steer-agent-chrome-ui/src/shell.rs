@@ -1450,7 +1450,7 @@ impl Shell {
 
     /// Detach the live panel view WITHOUT teardown — the host takes
     /// ownership (per-thread dock stashing: the view keeps running and is
-    /// re-installed on switch-back). `None` when the slot is empty/errored.
+    /// re-installed on switch-back). `None` when the slot is empty.
     pub fn take_panel_view(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyView> {
         let slot = self.panel.as_mut()?;
         let view = slot.view.take();

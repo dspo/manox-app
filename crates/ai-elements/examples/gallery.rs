@@ -1654,13 +1654,14 @@ fn options_of(qix: usize) -> Vec<SharedString> {
         .collect()
 }
 
-/// The ask header's waiting chip: the pending-auth blue dot the sidebar
-/// already uses, plus the label.
+/// The ask header's waiting chip: the amber awaiting-human tone the
+/// sidebar's parked-turn slot carries (the component theme's yellow, the
+/// same family the ask card uses), plus the label.
 fn ask_waiting_chip() -> AnyElement {
-    let blue: gpui::Hsla = gpui::rgb(0x3794ff).into();
+    let amber: gpui::Hsla = gpui::rgb(0xca8a04).into();
     h_flex()
         .gap_1p5()
-        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(blue))
+        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(amber))
         .child(div().text_xs().child("waiting for your answer"))
         .into_any_element()
 }

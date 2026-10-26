@@ -5,10 +5,15 @@
 //! the multiplexer's notify, exactly like the agent-ui sidebar's
 //! own `SidebarThreadItem::from_wire`, whose semantics this mirrors:
 //!
-//! - five-state machine: `errored` (danger triangle) → `pending_auth` /
-//!   `pending_ask` (filled blue dot) → `running` (pixel grid) → the
-//!   client-owned unread mirror (hollow dot) → idle; the leaf's unread
-//!   mirror wins over the deprecated wire flag (GW5);
+//! - a row stores three facts: `running` (the chat fold's active turn,
+//!   the summary's InProgress bit as the never-subscribed fallback),
+//!   `pending` (a turn parked on a human — the chat's open ask or the
+//!   session's input-needed queue, Ask winning when both light), `unread`
+//!   (the client-owned mirror wins over the deprecated wire flag, GW5);
+//! - the display status is never stored — [`derive_status`] folds the
+//!   ladder Pending > Running > Unread > Idle. Errors are not a list
+//!   state: the wire `Error` bit stays on the fold but no row consumes it
+//!   (a turn's failure renders in the transcript);
 //! - team forest: `parent_id`/`depth` rows nest under their leader
 //!   (recency-ordered leaders, members trailing), rows whose parent is
 //!   missing or archived flatten to top-level; rows never indent — the
@@ -20,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 
 use ahp_types::state::{SessionStatus as WireStatus, SessionSummary};
 use steer_agent_chrome_ui::session_list::{
-    SessionGroup, SessionRowData, SessionRowKind, SessionStatus,
+    PendingKind, SessionGroup, SessionRowData, SessionRowKind, SessionStatus,
 };
 
 /// One sidebar row: the fields the chrome list renders, derived from a
@@ -30,11 +35,13 @@ use steer_agent_chrome_ui::session_list::{
 pub struct ThreadRow {
     pub id: String,
     pub title: String,
+    /// Whether this row's own turn is running.
     pub running: bool,
+    /// A turn parked on a human: an open ask or a queued tool
+    /// confirmation.
+    pub pending: Option<PendingKind>,
+    /// The unread mirror — the completion reminder.
     pub unread: bool,
-    pub errored: bool,
-    pub pending_auth: bool,
-    pub pending_ask: bool,
     pub pinned: bool,
     pub parent_id: Option<String>,
     pub depth: i32,
@@ -55,22 +62,32 @@ pub struct ThreadRow {
 }
 
 impl ThreadRow {
-    /// Derive a row from the AHP summary and its extension state. The
-    /// five-state inputs are bit tests over the summary's status set; a
-    /// pending ask is the live fold's open input request (the turn stays
-    /// open until the answer settles). Sub-agent nesting (depth/parent) has
-    /// no summary face yet — flat, until the work channel carries the tree.
+    /// Derive a row's FALLBACK facts from the AHP summary and its
+    /// extension state — bit tests over the summary's status set plus the
+    /// passed open-ask flag; Ask outranks Auth when both faces are open —
+    /// a question names what is missing. The wire `Error` bit is
+    /// deliberately not read: errors are turn content, never a list
+    /// state. The multiplexer's `merged_row` then lets a landed live session
+    /// or chat fold outrank the row, so the summary bits speak for sessions
+    /// this client never subscribed AND through a fold's pre-snapshot
+    /// window. Sub-agent nesting (depth/parent) has no summary face yet —
+    /// flat, until the work channel carries the tree.
     pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_ask: bool) -> Self {
         let bits = summary.status;
+        let needs_auth = bits & WireStatus::InputNeeded.bits() != 0;
         Self {
             id: crate::ahp_store::id_of(&summary.resource).to_string(),
             title: summary.title.clone(),
             running: bits & WireStatus::InProgress.bits() != 0,
+            pending: if pending_ask {
+                Some(PendingKind::Ask)
+            } else if needs_auth {
+                Some(PendingKind::Auth)
+            } else {
+                None
+            },
             unread: bits & WireStatus::IsRead.bits() == 0,
-            errored: bits & WireStatus::Error.bits() != 0,
             archived: bits & WireStatus::IsArchived.bits() != 0,
-            pending_auth: bits & WireStatus::InputNeeded.bits() != 0,
-            pending_ask,
             pinned,
             parent_id: None,
             depth: 0,
@@ -99,11 +116,12 @@ impl ThreadRow {
     }
 }
 
-/// Project one wire row: the row's own wire flag is the single unread
-/// source (the official IsRead bit folded from the protocol). The time
-/// stamp and the host rank ride separately — the stamp is a real unix
-/// time the chrome's recency buckets decode, the rank its order key; a
-/// team's members are re-stamped to their leader's by [`project_forest`].
+/// Project one wire row through [`derive_status`]. The row's own wire flag
+/// is the single unread source (the official IsRead bit folded from the
+/// protocol). The time stamp and the host rank ride separately — the stamp
+/// is a real unix time the chrome's recency buckets decode, the rank its
+/// order key; a team's members are re-stamped to their leader's by
+/// [`project_forest`].
 pub fn project_row(item: &ThreadRow) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),
@@ -112,7 +130,7 @@ pub fn project_row(item: &ThreadRow) -> SessionRowData {
         updated_at: item.updated_at,
         sort_stamp: item.updated_at,
         rank: item.rank,
-        status: five_state(item),
+        status: derive_status(item),
         kind: SessionRowKind::Thread,
         pinned: item.pinned,
         archived: item.archived,
@@ -121,20 +139,14 @@ pub fn project_row(item: &ThreadRow) -> SessionRowData {
     }
 }
 
-/// The five-state machine over a wire row.
-pub fn five_state(item: &ThreadRow) -> SessionStatus {
-    if item.errored {
-        SessionStatus::Errored
-    } else if item.pending_auth {
-        SessionStatus::PendingAuth
-    } else if item.pending_ask {
-        SessionStatus::PendingAsk
-    } else if item.running {
-        SessionStatus::Running
-    } else if item.unread {
-        SessionStatus::Unread
-    } else {
-        SessionStatus::Idle
+/// The display ladder over the stored facts: Pending > Running > Unread >
+/// Idle.
+pub fn derive_status(item: &ThreadRow) -> SessionStatus {
+    match item.pending {
+        Some(kind) => SessionStatus::Pending(kind),
+        None if item.running => SessionStatus::Running,
+        None if item.unread => SessionStatus::Unread,
+        None => SessionStatus::Idle,
     }
 }
 
@@ -152,11 +164,11 @@ pub fn project_forest(rows: &[ThreadRow]) -> Vec<SessionRowData> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         if row.depth == 0 {
-            let mut leader = project_row(row);
             let members: Vec<&ThreadRow> = rows
                 .iter()
                 .filter(|r| r.depth > 0 && r.parent_id.as_deref() == Some(row.id.as_str()))
                 .collect();
+            let mut leader = project_row(row);
             leader.team_leader = !members.is_empty();
             let unit_stamp = leader.sort_stamp;
             let unit_rank = leader.rank;
@@ -280,10 +292,8 @@ mod tests {
             id: id.into(),
             title: format!("row {id}"),
             running: false,
+            pending: None,
             unread: false,
-            errored: false,
-            pending_auth: false,
-            pending_ask: false,
             pinned: false,
             archived: false,
             rank: 0,
@@ -296,24 +306,49 @@ mod tests {
     }
 
     #[test]
-    fn five_state_priority_order() {
+    fn derive_status_priority_order() {
         let mut r = row("s", 0, None);
-        assert_eq!(five_state(&r), SessionStatus::Idle);
+        assert_eq!(derive_status(&r), SessionStatus::Idle);
         r.unread = true;
-        assert_eq!(five_state(&r), SessionStatus::Unread);
+        assert_eq!(derive_status(&r), SessionStatus::Unread);
         r.running = true;
-        assert_eq!(five_state(&r), SessionStatus::Running);
-        r.pending_ask = true;
-        assert_eq!(five_state(&r), SessionStatus::PendingAsk);
-        r.pending_auth = true;
-        assert_eq!(five_state(&r), SessionStatus::PendingAuth);
-        r.errored = true;
-        assert_eq!(five_state(&r), SessionStatus::Errored);
-        r.errored = false;
-        r.pending_auth = false;
-        r.pending_ask = false;
+        assert_eq!(derive_status(&r), SessionStatus::Running);
+        r.pending = Some(PendingKind::Ask);
+        assert_eq!(derive_status(&r), SessionStatus::Pending(PendingKind::Ask));
+        r.pending = Some(PendingKind::Auth);
+        assert_eq!(derive_status(&r), SessionStatus::Pending(PendingKind::Auth));
+        r.pending = None;
         r.running = false;
-        assert_eq!(five_state(&r), SessionStatus::Unread);
+        assert_eq!(derive_status(&r), SessionStatus::Unread);
+        r.pending = Some(PendingKind::Auth);
+        assert_eq!(derive_status(&r), SessionStatus::Pending(PendingKind::Auth));
+    }
+
+    /// The pending merge: the wire `InputNeeded` bit alone is Auth, the live
+    /// fold's open ask is Ask, Ask wins when both faces are open, and the
+    /// wire `Error` bit is consumed by nothing — a row carrying only Error
+    /// (and a read flag) still derives Idle.
+    #[test]
+    fn pending_merge_prefers_ask_and_error_is_not_a_state() {
+        let summary = |status: u32| -> SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": "ahp-session:/s-1",
+                "provider": "test",
+                "title": "row",
+                "status": status,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            }))
+            .expect("a summary parses")
+        };
+        let both = WireStatus::InputNeeded.bits() | WireStatus::Error.bits();
+        let r = ThreadRow::from_summary(&summary(both), false, true);
+        assert_eq!(r.pending, Some(PendingKind::Ask));
+        let r = ThreadRow::from_summary(&summary(both), false, false);
+        assert_eq!(r.pending, Some(PendingKind::Auth));
+        let read_error = WireStatus::Error.bits() | WireStatus::IsRead.bits();
+        let r = ThreadRow::from_summary(&summary(read_error), false, false);
+        assert_eq!(derive_status(&r), SessionStatus::Idle);
     }
 
     #[test]
@@ -356,6 +391,8 @@ mod tests {
         assert_eq!(out[2].sort_stamp, 0);
         assert_eq!(out[2].rank, 2);
         assert_eq!(out[3].rank, 9);
+        // The leader's own facts name the leader's own rung.
+        assert_eq!(out[0].status, SessionStatus::Idle);
     }
 
     #[test]

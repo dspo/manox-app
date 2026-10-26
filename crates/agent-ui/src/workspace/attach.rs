@@ -337,6 +337,15 @@ impl Workspace {
             // same writers the composer's own pickers use, so the thread the
             // user just created shows where it runs and on which model
             // instead of asking for the folder a second time.
+            //
+            // v0.6.6 moved the create's cwd/config to the journal
+            // (manox#960), but the host seeds this channel from the journal
+            // HEADER (`seed_working_directories` + the config seat), and a
+            // deferred create has no journal until its first message — so
+            // these writes still own the pre-materialization display. The
+            // app-side deletion of them is recorded as due only once the
+            // host seeds from the create intent/object row instead
+            // (AGENTS.md, manox#904/#905).
             let _ = ws.update(cx, |this, cx| {
                 this.with_foreground_store(cx, |store, sid| {
                     store.set_cwd(&sid, &cwd_for_channel);
@@ -623,7 +632,7 @@ impl Workspace {
             cx.notify();
         });
         // GW5: focus follows the attach on BOTH legs — the newly attached
-        // session's leaf goes active (clearing its unread/errored mirrors) and
+        // session's leaf goes active (clearing its unread mirror) and
         // the outgoing one inert. The reclaimed leg skips the `open_or_create`
         // branch, so keeping this inside it stranded the multiplexer's focus
         // on the thread just left: the thread being viewed kept raising
