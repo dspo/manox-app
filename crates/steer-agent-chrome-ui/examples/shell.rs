@@ -3,7 +3,7 @@
 //!
 //! What the host supplies here:
 //! - session rows from the real `~/.manox` thread store (project grouping,
-//!   pinned/unread/errored state, recency order, live refresh pump);
+//!   pinned/unread state, recency order, live refresh pump);
 //! - tool-tab kinds for the right pane (an integrated browser, the user's
 //!   shell, and three CLI-agent terminals);
 //! - a PTY terminal as the bottom-dock surface;
@@ -327,12 +327,11 @@ fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
     .detach();
 }
 
-/// The thread-store five-state mapping (the two multiplexer-owned pending
-/// states surface with the real projection at assembly time).
-fn five_state(errored: bool, running: bool, unread: bool) -> SessionStatus {
-    if errored {
-        SessionStatus::Errored
-    } else if running {
+/// The thread-store status mapping (the two pending kinds surface with the
+/// real projection at assembly time; an errored turn is never a list state,
+/// so the store's error flag rides no row glyph).
+fn status_of(running: bool, unread: bool) -> SessionStatus {
+    if running {
         SessionStatus::Running
     } else if unread {
         SessionStatus::Unread
@@ -364,7 +363,7 @@ fn load_rows() -> Vec<SessionRow> {
             workspace: project_label(&t.project),
             project: (!t.project.is_empty()).then(|| t.project.clone()),
             kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
-            status: five_state(t.errored, running, t.has_unread),
+            status: status_of(running, t.has_unread),
             tag: None,
             team_leader: false,
             updated_at: t.updated_at,

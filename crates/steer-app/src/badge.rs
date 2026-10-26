@@ -1,10 +1,10 @@
 //! Dock badge — the count on the app's Dock icon (macOS).
 //!
 //! The number is the sessions currently owing the user attention (`Workspace::attention_count`):
-//! a parked ask / tool-approval card, a plan review awaiting a verdict, an
-//! errored thread, or an unseen settle on a non-focused thread. It drops the
-//! same way the sidebar's attention marks do — the user answers the card,
-//! rules on the plan, or focuses the thread.
+//! a parked ask / tool-approval card, a plan review awaiting a verdict, or
+//! an unseen settle on a non-focused thread. It drops the same way the
+//! sidebar's attention marks do — the user answers the card, rules on the
+//! plan, or focuses the thread.
 //!
 //! The count is not pushed from any single state edge: the client-owned
 //! unread mirror rises through paths that only notify the leaf entity, so a

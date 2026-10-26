@@ -98,6 +98,21 @@ sidebar-time-weeks = { $count ->
    *[other] {$count} weeks ago
 }
 
+### session_list.rs — the status-slot row tooltip (the status array:
+### the primary rung line, then the sub-agent count line while a leader's
+### members run). Pending approval and pending answer share the amber
+### question-mark glyph; only this copy distinguishes them.
+
+sidebar-status-running = Running
+
+sidebar-status-pending-auth = Waiting for approval
+
+sidebar-status-pending-ask = Waiting for answer
+
+sidebar-status-unread = Unread
+
+sidebar-status-idle = Idle
+
 ### message.rs
 
 message-reasoning = Reasoning

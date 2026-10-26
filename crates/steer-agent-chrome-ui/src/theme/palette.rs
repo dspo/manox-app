@@ -71,6 +71,12 @@ pub const OK_GREEN: Rgba = c(0x1A7F37); // additions
 pub const WARN_ORANGE: Rgba = c(0x9A6700); // modifications / warnings
 pub const ERR_RED: Rgba = c(0xCF222E); // deletions / errors
 pub const SPINNER_BLUE: Rgba = c(0x0069CC);
+// Sidebar status-slot colors: the pending interaction's amber (editorWarning
+// foreground) and the completion reminder's green (statusPassed bracket, one
+// step brighter than the additions green so a 6.5px dot holds on the light
+// shell background).
+pub const WARN_AMBER: Rgba = c(0xBF8803);
+pub const SUCCESS_GREEN: Rgba = c(0x2DA44E);
 
 // badges
 pub const BADGE_BLUE_BG: Rgba = c(0x0069CC);

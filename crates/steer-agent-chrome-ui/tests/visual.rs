@@ -225,57 +225,61 @@ mod macos {
     }
 
     /// Static session snapshot from the real store, seeded before the first
-    /// render (the pump-less harness never gets a second push).
+    /// render (the pump-less harness never gets a second push). The status
+    /// mapping mirrors the host ladder for the faces the legacy store
+    /// carries — running wins over unread wins over idle. `Pending` has no
+    /// store face (it lives on the live fold), so the second row is
+    /// synthesized to keep the amber question mark in the shot.
     fn snapshot_rows() -> Vec<SessionRow> {
         let store = manox_agent::thread_store::global();
-        store
-            .read(|st| {
-                st.summaries()
-                    .iter()
-                    .filter(|t| !t.archived && t.depth == 0)
-                    .map(|t| (t.clone(), st.is_running(&t.id)))
-                    .collect::<Vec<_>>()
-            })
-            .into_iter()
-            .enumerate()
-            .map(|(ix, (t, running))| SessionRow {
-                id: t.id.clone(),
-                short_id: "abcd1234".into(),
-                title: t
-                    .title_override
-                    .clone()
-                    .or_else(|| t.title.clone())
-                    .unwrap_or_else(|| t.summary.clone()),
-                workspace: t
-                    .project
-                    .rsplit('/')
-                    .next()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("Chats")
-                    .to_string(),
-                project: (!t.project.is_empty()).then(|| t.project.clone()),
-                kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
-                status: if t.errored {
-                    SessionStatus::Errored
-                } else if running {
-                    SessionStatus::Running
-                } else if t.has_unread {
-                    SessionStatus::Unread
-                } else {
-                    SessionStatus::Idle
-                },
-                tag: None,
-                team_leader: false,
-                updated_at: t.updated_at,
-                // Team rows are filtered out above, so every row is its own
-                // sort unit (production stamping lives in project_forest).
-                sort_stamp: t.updated_at,
-                rank: ix as i64,
-                pinned: t.pinned,
-                archived: t.archived,
-            })
-            .take(12)
-            .collect()
+        let mut rows: Vec<SessionRow> = store.read(|st| {
+            st.summaries()
+                .iter()
+                .filter(|t| !t.archived && t.depth == 0)
+                .enumerate()
+                .take(12)
+                .map(|(ix, t)| SessionRow {
+                    id: t.id.clone(),
+                    short_id: "abcd1234".into(),
+                    title: t
+                        .title_override
+                        .clone()
+                        .or_else(|| t.title.clone())
+                        .unwrap_or_else(|| t.summary.clone()),
+                    workspace: t
+                        .project
+                        .rsplit('/')
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Chats")
+                        .to_string(),
+                    project: (!t.project.is_empty()).then(|| t.project.clone()),
+                    kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
+                    status: if st.is_running(&t.id) {
+                        SessionStatus::Running
+                    } else if t.has_unread {
+                        SessionStatus::Unread
+                    } else {
+                        SessionStatus::Idle
+                    },
+                    tag: None,
+                    team_leader: false,
+                    updated_at: t.updated_at,
+                    sort_stamp: t.updated_at,
+                    rank: ix as i64,
+                    pinned: t.pinned,
+                    archived: t.archived,
+                })
+                .collect()
+        });
+
+        // The synthetic pending row: an ask parked on the user, the one
+        // rung the legacy store snapshot can never produce.
+        if let Some(row) = rows.get_mut(1) {
+            row.status =
+                SessionStatus::Pending(steer_agent_chrome_ui::session_list::PendingKind::Ask);
+        }
+        rows
     }
 
     // ── main-surface seat ─────────────────────────────────────────────────────

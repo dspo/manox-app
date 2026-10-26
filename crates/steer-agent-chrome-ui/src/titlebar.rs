@@ -17,7 +17,8 @@ use crate::primitives::{IconButtonState, icon_button};
 use crate::session_list::{SessionStatus, single_line_title};
 use crate::shell::Shell;
 use crate::theme::{
-    ACCENT, BORDER, CARD_BG, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, icon, icons,
+    ACCENT, BORDER, CARD_BG, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, SUCCESS_GREEN, icon,
+    icons,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -431,7 +432,8 @@ fn search_box(shell: &Shell, _cx: &mut Context<Shell>) -> AnyElement {
         .into_any_element()
 }
 
-/// One candidate row: title + unread dot | workspace.
+/// One candidate row: title + unread dot (the slot's green completion
+/// marker — one fact, one color) | workspace.
 #[allow(clippy::too_many_arguments)]
 fn row(
     id: &String,
@@ -459,7 +461,7 @@ fn row(
                 .rounded_full()
                 .map(|el| {
                     if unread {
-                        el.bg(ACCENT)
+                        el.bg(SUCCESS_GREEN)
                     } else {
                         el.bg(rgba(0x00000000))
                     }

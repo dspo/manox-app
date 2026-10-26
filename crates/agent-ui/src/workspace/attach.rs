@@ -615,7 +615,7 @@ impl Workspace {
             cx.notify();
         });
         // GW5: focus follows the attach on BOTH legs — the newly attached
-        // session's leaf goes active (clearing its unread/errored mirrors) and
+        // session's leaf goes active (clearing its unread mirror) and
         // the outgoing one inert. The reclaimed leg skips the `open_or_create`
         // branch, so keeping this inside it stranded the multiplexer's focus
         // on the thread just left: the thread being viewed kept raising

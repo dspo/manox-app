@@ -31,6 +31,9 @@ gpui-kit-assets.workspace = true
 steer-i18n.workspace = true
 # The info line's absolute branch (72h+ → local MM-DD HH:MM stamp).
 chrono.workspace = true
+# The status slot's running glyph is the conversation strip's own
+# PixelSpinner — one implementation, no chrome-side twin.
+ai-elements.workspace = true
 
 [dev-dependencies]
 # Example + visual harness wire real content: the manox thread store for the
@@ -38,7 +41,6 @@ chrono.workspace = true
 # leak into the library's dependency surface — the lib stays data-free.
 manox-agent.workspace = true
 steer-agent-chat-ui.workspace = true
-ai-elements.workspace = true
 manox-terminal.workspace = true
 terminal-ui.workspace = true
 steer-webview.workspace = true

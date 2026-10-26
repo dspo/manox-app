@@ -86,6 +86,20 @@ sidebar-time-days = {$count} 天前
 
 sidebar-time-weeks = {$count} 周前
 
+### session_list.rs（侧栏状态槽位的行 tooltip：主状态一行，队长有成员
+### 运行时再追加子智能体计数一行；等待批准与等待回答共用琥珀像素问号
+### 字形，只有文案区分）
+
+sidebar-status-running = 运行中
+
+sidebar-status-pending-auth = 等待批准
+
+sidebar-status-pending-ask = 等待回答
+
+sidebar-status-unread = 未读
+
+sidebar-status-idle = 空闲
+
 ### message.rs
 
 message-reasoning = 思考

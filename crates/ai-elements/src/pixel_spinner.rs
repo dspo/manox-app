@@ -102,6 +102,11 @@ pub struct PixelSpinner {
     speed: f32,
     smooth: bool,
     sharp: bool,
+    /// Phase-lock every instance to the App-wide clock instead of each
+    /// element's own mount time.
+    synced: bool,
+    /// Render cap in frames per second; `None` runs at display refresh.
+    max_fps: Option<f32>,
 }
 
 impl Default for PixelSpinner {
@@ -119,6 +124,8 @@ impl PixelSpinner {
             speed: 1.,
             smooth: false,
             sharp: false,
+            synced: false,
+            max_fps: None,
         }
     }
 
@@ -130,6 +137,22 @@ impl PixelSpinner {
     /// The dot color; the animation only modulates its alpha.
     pub fn color(mut self, color: Hsla) -> Self {
         self.color = color;
+        self
+    }
+
+    /// Phase-lock the cycle to the clock the whole App shares, so every
+    /// instance — a sidebar of running rows — hops on the same beat no
+    /// matter when its row mounted.
+    pub fn synced(mut self) -> Self {
+        self.synced = true;
+        self
+    }
+
+    /// Cap re-renders per second. The native hop cadence needs ~30fps to
+    /// show every stop; a spinner replicated across many rows (a sidebar)
+    /// passes a cap so the fleet repaints a bounded number of frames.
+    pub fn max_fps(mut self, max_fps: f32) -> Self {
+        self.max_fps = Some(max_fps);
         self
     }
 
@@ -174,7 +197,17 @@ impl RenderOnce for PixelSpinner {
             .overflow_hidden()
             .with_animation(
                 "pixel-spinner",
-                Animation::new(Duration::from_millis(period_ms as u64)).repeat(),
+                {
+                    let mut animation = if self.synced {
+                        Animation::new(Duration::from_millis(period_ms as u64)).repeat_synced()
+                    } else {
+                        Animation::new(Duration::from_millis(period_ms as u64)).repeat()
+                    };
+                    if let Some(max_fps) = self.max_fps {
+                        animation = animation.with_max_fps(max_fps);
+                    }
+                    animation
+                },
                 move |el, t| {
                     // Virtual time advances one NATIVE cycle per (stretched)
                     // animation period — the per-dot phases below normalize

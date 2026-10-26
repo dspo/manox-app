@@ -438,6 +438,31 @@ mod tests {
         assert_eq!(t_count("sidebar-time-minutes", 5).as_str(), "5 分钟前");
     }
 
+    /// The sidebar row tooltip's status line: every rung resolves in both
+    /// locales with the product's exact copy.
+    #[test]
+    fn sidebar_status_lines_resolve_in_both_locales() {
+        let _g = TEST_LANG_LOCK.lock().unwrap();
+        set_lang(Language::ZhCn);
+        assert_eq!(t("sidebar-status-running").as_str(), "运行中");
+        assert_eq!(t("sidebar-status-pending-auth").as_str(), "等待批准");
+        assert_eq!(t("sidebar-status-pending-ask").as_str(), "等待回答");
+        assert_eq!(t("sidebar-status-unread").as_str(), "未读");
+        assert_eq!(t("sidebar-status-idle").as_str(), "空闲");
+        set_lang(Language::En);
+        assert_eq!(t("sidebar-status-running").as_str(), "Running");
+        assert_eq!(
+            t("sidebar-status-pending-auth").as_str(),
+            "Waiting for approval"
+        );
+        assert_eq!(
+            t("sidebar-status-pending-ask").as_str(),
+            "Waiting for answer"
+        );
+        assert_eq!(t("sidebar-status-unread").as_str(), "Unread");
+        assert_eq!(t("sidebar-status-idle").as_str(), "Idle");
+    }
+
     #[test]
     fn string_arg_interpolation() {
         let _g = TEST_LANG_LOCK.lock().unwrap();

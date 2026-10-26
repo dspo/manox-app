@@ -16,7 +16,7 @@ use gpui::{App, Context, Entity};
 use steer_agent_chat_ui::ahp_store::{
     AhpStore, CLIENT_ID, chat_uri, plan_uri, session_uri, thread_uri, work_uri,
 };
-
+use steer_agent_chrome_ui::session_list::PendingKind;
 /// The per-app multiplexer: store handle plus attach/focus bookkeeping.
 pub struct SessionMultiplexer {
     pub(crate) store: Entity<AhpStore>,
@@ -72,6 +72,55 @@ pub(crate) fn effective_archived(
         }
         _ => summary.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0,
     }
+}
+
+/// The ONE sidebar row status merge: the live folds outrank the summary
+/// row. Turn start and end broadcast on the chat channel the moment they
+/// happen, so a chat fold's `active_turn` is the running fact and its
+/// unanswered input request the Ask face; the input-needed queue on the
+/// session state is the Auth face. The summary row — whose activity bits
+/// ride the next `listSessions` walk, an event only catalogue moves fire —
+/// remains the fallback voice, both for sessions this client never
+/// subscribed and while a fold entry predates its subscribe snapshot: a
+/// positive fold fact always wins, but a fold's silence only does once its
+/// snapshot has landed.
+pub(crate) fn merged_row(
+    book: &steer_agent_chat_ui::ahp_store::ChannelBook,
+    summary: &ahp_types::state::SessionSummary,
+    pinned: bool,
+) -> ThreadRow {
+    let session_id = steer_agent_chat_ui::ahp_store::id_of(&summary.resource);
+    let leaf = crate::ahp_store::leaf(book, session_id);
+    let pending_ask = leaf.open_chat_input().is_some();
+    let mut row = ThreadRow::from_summary(summary, pinned, pending_ask);
+    let auth = leaf.open_tool_confirmation().is_some();
+    if let Some(chat) = leaf.chat.as_ref() {
+        let fold_speaks = chat.active_turn.is_some()
+            || pending_ask
+            || auth
+            || book.chat_snapshot_landed(session_id);
+        if fold_speaks {
+            row.running = chat.active_turn.is_some();
+            row.pending = if pending_ask {
+                Some(PendingKind::Ask)
+            } else if auth {
+                Some(PendingKind::Auth)
+            } else {
+                None
+            };
+        }
+    }
+    // The unread read is fold-first for the same reason: the official
+    // `session/isReadChanged` echoes land on the session state the moment
+    // they happen, while the summary row trails the host's next refresh. A
+    // zero-status entry is the pre-snapshot placeholder — it carries no
+    // read fact and defers to the summary.
+    if let Some(state) = book.sessions.get(session_id)
+        && state.status != 0
+    {
+        row.unread = state.status & ahp_types::state::SessionStatus::IsRead.bits() == 0;
+    }
+    row
 }
 
 impl SessionMultiplexer {
@@ -290,21 +339,7 @@ impl SessionMultiplexer {
                 }
                 // The row pin read: see `ext_and_meta_pinned`.
                 let pinned = ext_and_meta_pinned(book, Some(summary), &thread_uri(sid));
-                // A pending ask is fold-visible on the chat's open input
-                // request (the turn-final card holds its turn open until the
-                // answer settles) — any unanswered question lights the dot.
-                let pending_ask = crate::ahp_store::leaf(book, sid)
-                    .open_chat_input()
-                    .is_some();
-                let mut row = ThreadRow::from_summary(summary, pinned, pending_ask);
-                // The live fold wins over the summary row for the unread
-                // bit (the pin-read pattern): the official
-                // `session/isReadChanged` echoes land on the session state
-                // the moment they happen, while the summary row trails the
-                // host's next list refresh.
-                if let Some(state) = book.sessions.get(sid) {
-                    row.unread = state.status & ahp_types::state::SessionStatus::IsRead.bits() == 0;
-                }
+                let mut row = merged_row(book, summary, pinned);
                 // The host's project field trails a brand-new session (its
                 // store row lands with the first persistence), but the fold's
                 // effective cwd is already live — and it is exactly what the
@@ -413,7 +448,7 @@ impl SessionMultiplexer {
 }
 
 #[cfg(test)]
-mod pin_read_tests {
+mod row_read_tests {
     use super::*;
     use steer_agent_chat_ui::ahp_store::ChannelBook;
 
@@ -557,6 +592,151 @@ mod pin_read_tests {
         assert!(
             !effective_archived(&book, "s-1", &archived_summary),
             "the cleared echo bit revives the row without a refetch"
+        );
+    }
+
+    /// The live folds are the row's activity source; the summary row's
+    /// bits are the fallback, both for never-subscribed sessions and
+    /// through the placeholder window before a fold's subscribe snapshot
+    /// lands. Every transition is driven through the real reducers or the
+    /// subscribe-snapshot path — the same envelopes the channels deliver.
+    #[test]
+    fn the_row_reads_activity_from_the_live_folds() {
+        use ahp_types::StateAction;
+        use ahp_types::actions::{
+            ChatInputRequestedAction, ChatTurnCompleteAction, ChatTurnStartedAction,
+            SessionInputNeededSetAction,
+        };
+        use ahp_types::state::{
+            ChatInputRequest, SessionStatus as Wire, SessionToolConfirmationRequest,
+        };
+        use steer_agent_chrome_ui::session_list::PendingKind;
+
+        fn summary(status: u32) -> ahp_types::state::SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": "ahp-session:/s-1",
+                "provider": "test",
+                "title": "row",
+                "status": status,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            }))
+            .expect("a summary parses")
+        }
+
+        fn turn(id: &str) -> StateAction {
+            StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: id.into(),
+                started_at: "2026-10-25T00:00:00.000Z".into(),
+                message: serde_json::from_value(serde_json::json!({
+                    "text": "repaint the sidebar",
+                    "origin": { "kind": "user" },
+                }))
+                .expect("the user message parses"),
+                queued_message_id: None,
+                meta: None,
+            })
+        }
+
+        fn settle(id: &str) -> StateAction {
+            StateAction::ChatTurnComplete(ChatTurnCompleteAction {
+                turn_id: id.into(),
+                duration: 42,
+                meta: None,
+            })
+        }
+
+        // No folds landed: the summary bit is the only voice.
+        let book = steer_agent_chat_ui::ahp_store::ChannelBook::default();
+        assert!(merged_row(&book, &summary(Wire::InProgress.bits()), false).running);
+
+        let mut book = steer_agent_chat_ui::ahp_store::ChannelBook::default();
+        let chat = chat_uri("s-1");
+        book.apply(&chat, &turn("t-1"));
+
+        // An active turn lights the grid with no list refresh behind it —
+        // the summary still says idle.
+        let idle = summary(Wire::Idle.bits() | Wire::IsRead.bits());
+        assert!(
+            merged_row(&book, &idle, false).running,
+            "the chat fold's active turn outranks the stale summary"
+        );
+
+        // The placeholder window: the fold settled but its subscribe
+        // snapshot has not landed, so its silence is not yet a fact — the
+        // summary's stale InProgress holds.
+        book.apply(&chat, &settle("t-1"));
+        let stale = summary(Wire::InProgress.bits() | Wire::IsRead.bits());
+        assert!(
+            merged_row(&book, &stale, false).running,
+            "an unlanded fold's silence never dismisses the wire bit"
+        );
+
+        // The snapshot lands: the fold's silence becomes authoritative and
+        // the same stale summary reads settled.
+        let landed: ahp_types::state::ChatState = serde_json::from_value(serde_json::json!({
+            "resource": chat,
+            "title": "row",
+            "status": 0,
+            "modifiedAt": "2026-10-25T00:00:01.000Z",
+            "turns": [],
+        }))
+        .expect("the landed chat snapshot parses");
+        book.apply_snapshot(
+            &chat,
+            ahp_types::state::SnapshotState::Chat(Box::new(landed)),
+        );
+        assert!(
+            !merged_row(&book, &stale, false).running,
+            "the landed fold's silence outranks the stale InProgress summary"
+        );
+
+        // The Auth face: the session's input-needed queue holds a tool
+        // confirmation the summary's bits never saw.
+        let confirmation = ahp_types::state::SessionInputRequest::ToolConfirmation(
+            SessionToolConfirmationRequest {
+                id: "conf-1".into(),
+                chat: chat.clone(),
+                turn_id: "t-1".into(),
+                tool_call: serde_json::from_value(serde_json::json!({
+                    "status": "pending-confirmation",
+                    "id": "call-1",
+                    "toolName": "Edit",
+                    "arguments": {},
+                }))
+                .expect("the confirmation state parses"),
+            },
+        );
+        book.apply(
+            &session_uri("s-1"),
+            &StateAction::SessionInputNeededSet(Box::new(SessionInputNeededSetAction {
+                request: confirmation,
+            })),
+        );
+        assert_eq!(
+            merged_row(&book, &idle, false).pending,
+            Some(PendingKind::Auth)
+        );
+
+        // The Ask face outranks Auth: the chat's unanswered input request
+        // names what is missing. An ask rides an active turn, so a second
+        // turn carries it.
+        book.apply(&chat, &turn("t-2"));
+        book.apply(
+            &chat,
+            &StateAction::ChatInputRequested(ChatInputRequestedAction {
+                request: ChatInputRequest {
+                    id: "ask-1".into(),
+                    message: Some("AskUserQuestion".into()),
+                    url: None,
+                    questions: None,
+                    answers: None,
+                },
+            }),
+        );
+        assert_eq!(
+            merged_row(&book, &idle, false).pending,
+            Some(PendingKind::Ask)
         );
     }
 }
