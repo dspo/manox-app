@@ -9,8 +9,10 @@
 //!
 //! This drives the `gpui-base` `TextView` directly (same crates.io train as
 //! `gpui-component`, exact-pinned): the component wrapper folds onto the theme
-//! but exposes neither the per-instance code-block highlighter nor heading
-//! weights, and both are load-bearing here.
+//! but pins its own heading weights, and the app's heading ladder is
+//! load-bearing here. The code-block highlighter is installed once as the
+//! app-wide `TextViewDefaults` highlighter ([`install_code_highlighter`]),
+//! never per document — see that function for why.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,9 +22,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement,
-    Pixels, SharedString, Styled as _, WeakEntity, Window, hsla, rems,
+    AnyElement, App, DispatchPhase, ElementId, Entity, FontStyle, FontWeight, HighlightStyle, Hsla,
+    IntoElement, MouseMoveEvent, Pixels, SharedString, Styled as _, WeakEntity, Window, hsla, rems,
 };
+use gpui_base::TextSelection;
 use gpui_base::TextView;
 use gpui_base::text::{CodeBlock, TableData, TextViewMotion, TextViewState};
 use gpui_component::Theme;
@@ -73,6 +76,49 @@ pub fn chrome_style(theme: &Theme) -> gpui_base::TextViewStyle {
 /// inline text on the message card, not a filled code panel.
 pub fn panel_style(theme: &Theme) -> gpui_base::TextViewStyle {
     message_style(theme).with_code_background(hsla(0., 0., 0., 0.))
+}
+
+/// End a text-selection drag as soon as the pointer moves with no button
+/// held. Register once per frame from a view that paints whenever selectable
+/// markdown is visible.
+///
+/// Why: the gesture arms on every left `mouse_down` — including the one that
+/// opens a popup menu — and ends on `mouse_up`. A menu item's click handler
+/// stops propagation, so the window-level selection engine never sees that
+/// `mouse_up`; its move handler extends the selection while the gesture is
+/// armed without checking whether a button is still down, and the pointer's
+/// next travel across the transcript selects whatever it crosses. `end` is the
+/// gesture's own normal exit (it keeps a selection that hit text) and is a
+/// no-op while idle; a real drag always holds the left button, so it never
+/// trips this.
+pub fn install_selection_drag_guard(window: &mut Window) {
+    window.on_mouse_event(
+        |event: &MouseMoveEvent, _: DispatchPhase, window: &mut Window, cx: &mut App| {
+            if event.pressed_button.is_none() {
+                TextSelection::end(window, cx);
+            }
+        },
+    );
+}
+
+/// Install this crate's code-block highlighter as the application-wide
+/// `TextViewDefaults` highlighter.
+///
+/// Call after `gpui_component::init` and after every
+/// `gpui_component::Theme::change` / `Theme::update` — both end in
+/// `Theme::sync_base`, which reinstalls Component's own defaults.
+///
+/// Documents take the highlighter from here and never pass one per view:
+/// gpui-base compares the resolved highlighter by `Arc` identity and treats a
+/// different one as a reflow that must preserve the selection. An element is
+/// rebuilt every frame, so a per-view closure is a new `Arc` every frame; that
+/// keeps the selection-preserving reflow armed forever, and the document ends
+/// up with no selection at all (a drag paints nothing and copies nothing).
+pub fn install_code_highlighter(cx: &mut App) {
+    let theme = Theme::global(cx).clone();
+    gpui_base::TextViewDefaults::global(cx)
+        .with_code_block_highlighter(steer_code_highlighter(&theme))
+        .install(cx);
 }
 
 // --- document constructors ----------------------------------------------------
@@ -165,10 +211,7 @@ pub fn message_document(
 ) -> TextView {
     let style = message_style(theme);
     svg_block::with_diagram_blocks(
-        TextView::new(state)
-            .style(style.clone())
-            .code_block_highlighter(steer_code_highlighter(theme))
-            .text_size(body),
+        TextView::new(state).style(style.clone()).text_size(body),
         svg_block::FaceStyle {
             style,
             size: Some(body),
@@ -188,10 +231,7 @@ pub fn reasoning_document(
 ) -> TextView {
     let style = message_style(theme).with_foreground(theme.muted_foreground);
     svg_block::with_diagram_blocks(
-        TextView::new(state)
-            .style(style.clone())
-            .code_block_highlighter(steer_code_highlighter(theme))
-            .text_size(body),
+        TextView::new(state).style(style.clone()).text_size(body),
         svg_block::FaceStyle {
             style,
             size: Some(body),
@@ -209,9 +249,7 @@ pub fn static_document(
     cx: &App,
 ) -> TextView {
     svg_block::with_diagram_blocks(
-        TextView::markdown(id, linkify_markdown(text.into().as_ref()))
-            .style(chrome_style(theme))
-            .code_block_highlighter(steer_code_highlighter(theme)),
+        TextView::markdown(id, linkify_markdown(text.into().as_ref())).style(chrome_style(theme)),
         svg_block::FaceStyle {
             style: chrome_style(theme),
             size: None,
@@ -220,15 +258,51 @@ pub fn static_document(
     )
 }
 
+/// A code-block highlighter that can be handed to a document every frame.
+///
+/// Identity is load-bearing: gpui-base reuses a code block's highlights only
+/// while the highlighter is the same `Arc`, and a different one re-arms the
+/// selection-preserving reflow path — see [`install_code_highlighter`]. Cache
+/// one per distinct run set instead of rebuilding it per render.
+pub type CodeHighlighter =
+    Arc<dyn Fn(&CodeBlock) -> Vec<(Range<usize>, HighlightStyle)> + Send + Sync>;
+
+/// The terminal-panel body's highlight runs: a muted-italic base over the whole
+/// text, with the caller's runs layered on top so unpainted ranges read as
+/// secondary text.
+pub fn panel_styled_runs(
+    text: &str,
+    runs: Vec<(Range<usize>, HighlightStyle)>,
+    theme: &Theme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut styled = Vec::with_capacity(runs.len() + 1);
+    styled.push((
+        0..text.len(),
+        HighlightStyle {
+            color: Some(theme.muted_foreground),
+            font_style: Some(FontStyle::Italic),
+            ..Default::default()
+        },
+    ));
+    styled.extend(runs);
+    styled
+}
+
+/// The highlighter for one panel body's styled runs.
+pub fn panel_highlighter(styled: Vec<(Range<usize>, HighlightStyle)>) -> CodeHighlighter {
+    Arc::new(move |block: &CodeBlock| clamp_runs(layer_runs(styled.clone()), &block.code()))
+}
+
 /// A per-frame document rendering raw text verbatim inside one `ansi` fence —
-/// the terminal-panel body host. `runs` are byte ranges into `text`; a base
-/// muted-italic run is prepended so unpainted ranges read as secondary text,
-/// mirroring the panel's old ambient styling. The motion argument carries the
-/// streaming fade policy (default motion when not streaming).
+/// the terminal-panel body host. `text` is the composed source and
+/// `highlighter` carries its runs ([`panel_styled_runs`] +
+/// [`panel_highlighter`], cached by the panel so the `Arc` survives frames).
+/// The motion argument carries the streaming fade policy (default motion when
+/// not streaming).
 pub fn panel_document(
     id: impl Into<ElementId>,
     text: &str,
-    runs: Vec<(Range<usize>, HighlightStyle)>,
+    highlighter: CodeHighlighter,
     theme: &Theme,
     motion: TextViewMotion,
 ) -> TextView {
@@ -242,23 +316,10 @@ pub fn panel_document(
     }
     source.push_str(&fence);
 
-    let mut styled = Vec::with_capacity(runs.len() + 1);
-    styled.push((
-        0..text.len(),
-        HighlightStyle {
-            color: Some(theme.muted_foreground),
-            font_style: Some(FontStyle::Italic),
-            ..Default::default()
-        },
-    ));
-    styled.extend(runs);
-
     TextView::markdown(id, source)
         .style(panel_style(theme))
         .motion(motion)
-        .code_block_highlighter(move |block: &CodeBlock| {
-            clamp_runs(layer_runs(styled.clone()), &block.code())
-        })
+        .shared_code_block_highlighter(highlighter)
 }
 
 /// The streaming fade policy measured upstream from claude.ai (~6-word chunks,

@@ -1095,10 +1095,17 @@ fn render_user(
             copy,
         ))
         .child(
+            // No row-level overflow clipping on the body wrapper: gpui builds a
+            // hidden-overflow content mask from the element's own rect (a
+            // single-axis hidden counts too), and the window selection engine
+            // uses the anchor participant's content mask as its auto-scroll
+            // viewport. Clipping to the bubble would collapse that viewport to
+            // one row, so a drag near its edge synthesizes wheel scrolls and
+            // the column runs away. The transcript viewport belongs to
+            // `gpui::list` (and the band's `overflow_hidden`).
             v_flex()
                 .w_full()
                 .min_w_0()
-                .overflow_hidden()
                 .gap_2()
                 .text_base()
                 .text_color(theme.foreground)
@@ -1235,16 +1242,14 @@ pub fn render_assistant(
     }
     // The action row sits under the body (never overlaid on it), matching the
     // reference web layout: copy / fork / usage / elapsed / clock.
-    col.child(
-        gpui::div()
-            .relative()
-            .w_full()
-            .min_w_0()
-            .overflow_x_hidden()
-            .child(body_el),
-    )
-    .child(assistant_action_row(ix, &group, text, actions, copy))
-    .into_any_element()
+    // Same contract as the user body: any hidden overflow here (even x-only)
+    // would mint a content mask equal to this row's rect, and the selection
+    // engine would use it as the auto-scroll viewport — dragging the reply
+    // would scroll the list instead of selecting. Clipping stays with
+    // `gpui::list` and the transcript band.
+    col.child(gpui::div().relative().w_full().min_w_0().child(body_el))
+        .child(assistant_action_row(ix, &group, text, actions, copy))
+        .into_any_element()
 }
 
 /// The assistant reply's action row: copy then fork, rendered beneath the body
@@ -1995,7 +2000,8 @@ fn reasoning_step(
                 .id(("reasoning-body", eix))
                 .w_full()
                 .min_w_0()
-                .overflow_x_hidden()
+                // No row-level clip — see `render_user`: a hidden-overflow mask
+                // collapses the selection engine's auto-scroll viewport.
                 .py_1()
                 .debug_selector(move || format!("message-overflow-activity-entry-body-{cix}-{eix}"))
                 .child(body),
@@ -2465,7 +2471,9 @@ pub fn render_preview_card(
         .border_1()
         .border_color(theme.border)
         .rounded(theme.radius)
-        .overflow_hidden()
+        // No row-level clip — see `render_user`: the card hosts a selectable
+        // markdown body, and a hidden-overflow mask collapses the selection
+        // engine's auto-scroll viewport to the card.
         .child(
             h_flex()
                 .id(("preview-header", ix))
@@ -2664,7 +2672,9 @@ pub fn render_tool_call(
         .border_1()
         .border_color(theme.border)
         .rounded(theme.radius)
-        .overflow_hidden()
+        // No row-level clip — see `render_user`: the card hosts the
+        // selectable terminal-panel body, and a hidden-overflow mask collapses
+        // the selection engine's auto-scroll viewport to the card.
         .child(
             h_flex()
                 .id(("tool-header", ix))

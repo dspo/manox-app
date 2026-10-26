@@ -983,6 +983,7 @@ impl Workspace {
                 last_declined_ask: None,
                 plan_chat_subscribed: None,
                 context_rail,
+                transcript_press: Default::default(),
             }),
         };
         let (thread_events, store_changes) = ws.subscribe_thread(cx);
