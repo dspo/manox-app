@@ -16,9 +16,11 @@
 //! The projection lowers a fresh `ToolCallItem` every pass; the reconcile
 //! mutates the materialized entry in place and `sync_tool_fields` deliberately
 //! does not copy `stream`, so the snapshot — like `panel`/`card`/`cwd` — is
-//! carried across passes. The recorded-fixture test pins that with
-//! `generation() == 0`: a per-pass reset would restart the published text or
-//! move the generation.
+//! carried across passes. Only a mid-stream observation can pin that: a reset
+//! snapshot publishes the whole text at once, while a carried one is still
+//! throttled by the publish tick (see
+//! `a_carried_snapshot_is_throttled_mid_stream`). End-state assertions cannot
+//! tell the two apart.
 //!
 //! Offscreen animation frames only arrive through `Window::simulate_next_frame`
 //! (AGENTS.md "出 UI 图"); the fake scheduler clock is advanced between chunks
@@ -286,9 +288,9 @@ fn assert_card_paints(visual: &mut VisualTestContext) {
 // --- tests -------------------------------------------------------------------
 
 /// The recorded production fixture: live chunks through the open reveal, then
-/// the canonical result. Under the publish cap this stays append-only across
-/// every projection pass, so the carried snapshot never resets and no
-/// document generation is burnt.
+/// the canonical result. Under the publish cap the end state is one append-only
+/// body at generation 0; the carry across projection passes is pinned mid-stream
+/// by [`a_carried_snapshot_is_throttled_mid_stream`].
 #[gpui::test]
 async fn the_recorded_bash_output_streams_through_an_open_card(cx: &mut TestAppContext) {
     let mut case = mount_bash_card(cx, "rg -n 中文 .");
@@ -301,9 +303,51 @@ async fn the_recorded_bash_output_streams_through_an_open_card(cx: &mut TestAppC
     assert_eq!(
         entry.stream.generation(),
         0,
-        "below the cap the body extends in place across projection passes; \
-         a per-pass snapshot reset would move the generation"
+        "below the cap no replace is needed; the end state is one append-only body"
     );
+    assert_card_paints(&mut case.visual);
+}
+
+/// The snapshot is carried across projection passes, not rebuilt per pass. A
+/// carried snapshot is throttled by `PUBLISH_TICK`: right after a chunk lands
+/// and a frame renders inside the tick, the published text is a strict,
+/// non-empty prefix of the output. A snapshot lowered fresh each pass would
+/// start empty, take the immediate first-publish branch, and publish the whole
+/// text at once — the same end state, but never an interior prefix.
+#[gpui::test]
+async fn a_carried_snapshot_is_throttled_mid_stream(cx: &mut TestAppContext) {
+    let mut case = mount_bash_card(cx, "rg -n 中文 .");
+    // Let the mount's reveal hold expire so only the tick gates the publish.
+    cx.executor().advance_clock(Duration::from_millis(450));
+    pump(&mut case.visual, 1);
+
+    fold(&mut case.chat, &tool_content("line one\n"));
+    case.project(cx);
+    pump(&mut case.visual, 1);
+
+    // The next chunk arrives inside the tick. Project and render once WITHOUT
+    // moving the clock: a carried snapshot keeps the tail for the next tick.
+    fold(&mut case.chat, &tool_content("line one\nline two\n"));
+    case.project(cx);
+    pump(&mut case.visual, 1);
+
+    let entry = case.row(cx);
+    assert_eq!(entry.output, "line one\nline two\n");
+    assert!(
+        !entry.stream.published().is_empty() && entry.stream.published().len() < entry.output.len(),
+        "a carried snapshot publishes a strict prefix inside the tick, got {:?}",
+        entry.stream.published()
+    );
+    assert!(
+        entry.output.starts_with(entry.stream.published()),
+        "the published text is a prefix of the live output"
+    );
+
+    // Past the tick, the same render path publishes the deferred tail.
+    cx.executor().advance_clock(Duration::from_millis(120));
+    pump(&mut case.visual, 1);
+    let entry = case.row(cx);
+    assert_eq!(entry.stream.published(), entry.output);
     assert_card_paints(&mut case.visual);
 }
 
