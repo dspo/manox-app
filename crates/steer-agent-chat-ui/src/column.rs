@@ -393,8 +393,6 @@ pub struct ChatColumn {
     /// like the project chip's menu.
     pub send_menu: Option<Entity<PopupMenu>>,
     pub send_menu_sub: Option<Subscription>,
-    /// Access-chip dropdown (permission modes). Mirrors the model selector pattern.
-    pub access_open: bool,
     /// Project-chip dropdown (recent projects + new project submenu).
     pub project_chip_open: bool,
     pub project_chip_menu: Option<Entity<PopupMenu>>,

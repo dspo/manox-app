@@ -592,6 +592,14 @@ impl Workspace {
                 cc.notify();
             });
         }
+        // The app's network policy is "both access tiers run with the network
+        // on", but `networkAccess` is session-memory state upstream (a
+        // restored session comes back closed), so every attach re-seeds the
+        // key idempotently. This point is the convergence of the new-create /
+        // reopen / background-reclaim paths. The seed is a plain config write:
+        // the host cold-opens the session before applying it (`ensure_live`),
+        // so it does not depend on this attach's subscribe landing first.
+        self.with_foreground_store(cx, |store, sid| store.seed_network_access_on(&sid));
         // History-loading gate (only for attaches that expect a history):
         // the landing mirror renders empty until the fold's chat snapshot
         // arrives, so a reopen whose leaf has no chat channel yet swaps the

@@ -449,23 +449,8 @@ access-mode-sandbox-title = 沙箱访问
 
 access-mode-full-access-title = 完全访问
 
-access-mode-chip-sandbox = 沙箱访问
-
-access-mode-chip-full-access = 完全访问
-
-network-access-label = 网络
-
-network-access-off-title = 关
-
-network-access-on-title = 开
-
-network-access-notice = { $state ->
-    [off] 沙箱网络已关闭：受限 bash 不再出网。
-   *[on] 沙箱网络已开启：受域名允许清单与审批约束；未配置清单时直连。
-}
-
 workspace-mode-notice = { $mode ->
-    [sandbox] 沙箱访问：文件写围栏；网络默认关闭，可在访问菜单开启（开启后受域名允许清单与审批约束）。
+    [sandbox] 沙箱访问：文件写入受围栏约束；网络保持开启，沙箱出网受域名允许清单与审批约束（未配置清单时直连）。
    *[fullaccess] 完全访问：无沙箱；bash 不受限运行，文件变更不受约束。
 }
 

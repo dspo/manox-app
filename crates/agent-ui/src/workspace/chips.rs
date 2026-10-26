@@ -703,9 +703,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Wire api string → text color for the pi composer model label and the
-    /// context rail's per-model usage rows. Tinted directly from theme tokens
-    /// (matching `mode_chip_visual` and the settings panel) so both surfaces
     /// The foreground session's model identity from the `model` projection:
     /// the canonical `{provider, modelId}` wire identity (L8) — never a full
     /// `Model` blob. Deserializing the projection into `Model` (an earlier
@@ -790,6 +787,10 @@ impl Workspace {
             .gap_1()
             .px_2()
             .py_1()
+            // The model face is the footer's only variable-width label: the
+            // chip yields (and ellipsizes) before the row overflows at narrow
+            // windows, while the send cluster stays pinned.
+            .min_w_0()
             .rounded(theme.radius)
             .hover(|s| s.bg(theme.accent.opacity(0.08)))
             .cursor_pointer()
@@ -798,25 +799,30 @@ impl Workspace {
                 let model_color = color_name.scale(500);
                 let dot = || {
                     gpui::div()
-                        .text_xs()
+                        .flex_shrink_0()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                 };
                 vec![
                     gpui::div()
-                        .text_xs()
+                        .flex_shrink_0()
+                        .text_sm()
                         .text_color(theme.foreground)
                         .child(prov_display.clone())
                         .into_any_element(),
                     dot().into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
                         .text_color(model_color)
                         .child(m.name.clone())
                         .into_any_element(),
                     dot().into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .flex_shrink_0()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(effort.wire_value().to_string())
                         .into_any_element(),
@@ -828,27 +834,33 @@ impl Workspace {
                 // of "no model".
                 vec![
                     gpui::div()
-                        .text_xs()
+                        .flex_shrink_0()
+                        .text_sm()
                         .text_color(theme.foreground)
                         .child(provider.clone())
                         .into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .flex_shrink_0()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                         .into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(id.clone())
                         .into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .flex_shrink_0()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("·")
                         .into_any_element(),
                     gpui::div()
-                        .text_xs()
+                        .flex_shrink_0()
+                        .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(effort.wire_value().to_string())
                         .into_any_element(),
@@ -856,7 +868,7 @@ impl Workspace {
             } else {
                 vec![
                     gpui::div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(theme.foreground)
                         .child(i18n::t("workspace-no-model").to_string())
                         .into_any_element(),
@@ -868,7 +880,7 @@ impl Workspace {
                 } else {
                     IconName::ChevronDown
                 })
-                .xsmall()
+                .small()
                 .text_color(theme.muted_foreground),
             )
             .on_click(cx.listener(|this, _, window, cx| {
@@ -1303,7 +1315,7 @@ impl Workspace {
             .cursor_pointer()
             .child(
                 gpui::div()
-                    .text_xs()
+                    .text_sm()
                     .text_color(theme.accent_foreground)
                     .child(label),
             )
@@ -1313,7 +1325,7 @@ impl Workspace {
                 } else {
                     IconName::ChevronDown
                 })
-                .xsmall()
+                .small()
                 .text_color(muted),
             );
 
