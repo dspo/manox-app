@@ -30,21 +30,21 @@ publish = false
 [workspace.dependencies]
 # Agent runtime from dspo/manox, consumed via git tags; the CxSessionSource
 # bridge (SessionHandle → PtySource) stays in this repo's steer-ext-agents.
-manox-agent = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
-manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
-manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
-manox-providers = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
-supervisor = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
-manox-terminal = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
-hyperlinks = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
+manox-agent = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
+manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
+manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
+manox-providers = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
+supervisor = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
+manox-terminal = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
+hyperlinks = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
 
 # AHP is the v3 interaction protocol; the app is a pure AHP client (official
 # SDK + the manox extension-channel and in-proc runtime crates). Exact-pinned
 # to match the upstream workspace.
 ahp = "=1.0.0"
 ahp-types = "=1.0.0"
-manox-ahp = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
-manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.6.7" }
+manox-ahp = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
+manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.6.8" }
 
 agent-ui = { path = "crates/agent-ui" }
 steer-app = { path = "crates/steer-app" }
