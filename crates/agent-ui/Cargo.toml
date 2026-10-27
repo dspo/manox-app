@@ -20,6 +20,12 @@ harness = false
 name = "visual_inline_svg"
 harness = false
 
+# Visual acceptance for the Settings floating overlay (same offscreen-render
+# constraints as visual_bubble).
+[[test]]
+name = "visual_settings"
+harness = false
+
 [features]
 default = []
 # Exposes the `Workspace::diagnostic_*` hooks and the full-workspace overlap
