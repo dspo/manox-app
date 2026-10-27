@@ -310,9 +310,9 @@ impl Default for ThinkingContainer {
 }
 
 /// A sub-agent (`agent` tool) invocation. Displayed as a single-line clickable
-/// item in the parent message flow. The full child conversation is not
-/// observable today (the observation panel was retired with the manox
-/// harness).
+/// item in the parent message flow; the click opens the child's own
+/// conversation (right-pane drill-down tab, or the main-column stream page),
+/// where the full child transcript renders through the shared pipeline.
 #[derive(Debug, Clone)]
 pub struct AgentTaskItem {
     pub id: String,

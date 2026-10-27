@@ -7,18 +7,18 @@
 //! child's transcript (the parent's chat carries the run's status, never the
 //! child's text).
 //!
-//! The page is a read-only view of a child chat: it inherits the child's
-//! transcript from the CHAT FOLD when it opens, and keeps re-inheriting it —
-//! the host serves a child chat SNAPSHOT-ONLY (the child's journal is folded
-//! into the child's own channel and is never bridged to the parent), so the
-//! workspace re-subscribes that channel on a bounded poll and rebuilds this
-//! page whenever the child's fold version moved (see
-//! `agent_ui::workspace::subagent_stream` for the polling half). No composer: a
-//! child run is driven by the parent's dispatch, not by the person watching it.
+//! The page is a read-only view of a child chat that rides the child's OWN
+//! channel: the host bridges a running child's journal into its chat channel,
+//! so the one subscribe on open delivers the folded history AND the live
+//! deltas. The page owns a store observer and re-projects from the fold on
+//! every notify — the same keyed diff every surface uses, so a landed
+//! snapshot and a single streaming delta take one path and a pass that
+//! changed nothing notifies nothing. No composer: a child run is driven by
+//! the parent's dispatch, not by the person watching it.
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme, h_flex, v_flex,
@@ -44,10 +44,14 @@ pub struct SubagentStreamView {
     /// The run's task label — the header's topic (the wire's background-work
     /// label stands in when no separate activity was carried).
     activity: Option<String>,
-    /// The chat fold's client (the process-singleton AHP store).
-    store: gpui::WeakEntity<AhpStore>,
+    /// The chat fold's client (the process-singleton AHP store). Held strong:
+    /// the page's observer is its live leg, and the singleton outlives pages.
+    store: Entity<AhpStore>,
     host: ChatHostHandle,
     conversation: Entity<ConversationState>,
+    /// The live leg: every store notify re-projects the child's fold (a chat
+    /// delta, a landed snapshot, the parent's work ticks — all one path).
+    _store_watcher: Subscription,
     scroll_handle: gpui::ScrollHandle,
     stick_to_bottom: bool,
 }
@@ -64,19 +68,21 @@ impl SubagentStreamView {
     ) -> Entity<Self> {
         let recipient = manox_agent::MessageAuthor::Agent(label.clone());
         let conversation = cx.new(|_| ConversationState::new(recipient));
-        let view = cx.new(|_| Self {
-            chat_id,
-            label,
-            role,
-            activity,
-            store: store.downgrade(),
-            host,
-            conversation,
-            scroll_handle: gpui::ScrollHandle::new(),
-            stick_to_bottom: true,
-        });
-        view.update(cx, |view, cx| view.refresh(cx));
-        view
+        cx.new(|cx| {
+            let _store_watcher = cx.observe(&store, |this: &mut Self, _, cx| this.refresh(cx));
+            Self {
+                chat_id,
+                label,
+                role,
+                activity,
+                store,
+                host,
+                conversation,
+                _store_watcher,
+                scroll_handle: gpui::ScrollHandle::new(),
+                stick_to_bottom: true,
+            }
+        })
     }
 
     /// The page's assistant texts — the child chat's fold as it renders.
@@ -94,16 +100,34 @@ impl SubagentStreamView {
             .collect()
     }
 
+    /// The page's row kinds in order — the diagnostic face the projection
+    /// tests read: a child fold's reasoning and tool parts must land as
+    /// `thinking` / `tool` rows exactly as the Captain's do.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn item_kinds(&self, cx: &gpui::App) -> Vec<&'static str> {
+        self.conversation
+            .read(cx)
+            .items()
+            .iter()
+            .map(|item| match item.read(cx).kind() {
+                crate::conversation::ConvItem::User { .. } => "user",
+                crate::conversation::ConvItem::Assistant { .. } => "assistant",
+                crate::conversation::ConvItem::Thinking(_) => "thinking",
+                crate::conversation::ConvItem::ToolCall(_) => "tool",
+                crate::conversation::ConvItem::AgentTask(_) => "task",
+                _ => "other",
+            })
+            .collect()
+    }
+
     /// Re-project the transcript from the child chat's fold — the same keyed
-    /// diff every trigger uses, so a fresh snapshot updates the rows that are
-    /// already mounted instead of rebuilding the page. A pass that changed
-    /// nothing notifies nothing. Tail-follow is the USER's state, not the
-    /// projection's: a fresh snapshot must not yank a reader who scrolled
-    /// back up to the bottom.
+    /// diff every trigger uses, so a landed snapshot updates the rows that
+    /// are already mounted instead of rebuilding the page, and a streaming
+    /// delta lands through one more pass of the same path. A pass that
+    /// changed nothing notifies nothing. Tail-follow is the USER's state,
+    /// not the projection's: a delta must not yank a reader who scrolled
+    /// back up, and a reader sitting at the bottom rides along.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = self.store.upgrade() else {
-            return;
-        };
         let role = self.role.clone();
         let recipient = manox_agent::MessageAuthor::Agent(self.label.clone());
         let host = self.host.clone();
@@ -119,10 +143,17 @@ impl SubagentStreamView {
             promoted_confirmation: None,
         };
         let change = self.conversation.update(cx, |conv, cx| {
-            let nodes = conv.stage(store.read(cx).book.chats.get(&chat_id), &env);
+            let nodes = conv.stage(self.store.read(cx).book.chats.get(&chat_id), &env);
             conv.reconcile(nodes, &env, cx)
         });
         if change.any() {
+            // Re-arm tail-follow only while the viewport sits near the
+            // bottom; a reader scrolled into history stays put.
+            let off = self.scroll_handle.offset().y;
+            let max = self.scroll_handle.max_offset().y;
+            if (max + off).abs() < gpui::px(20.) {
+                self.stick_to_bottom = true;
+            }
             cx.notify();
         }
     }
@@ -248,7 +279,8 @@ impl Render for SubagentStreamView {
             .on_scroll_wheel(
                 cx.listener(|this, ev: &gpui::ScrollWheelEvent, window, cx| {
                     // An upward wheel breaks tail-follow so the user can read
-                    // back; the next re-subscribe re-arms it.
+                    // back; a pass that finds the viewport back at the bottom
+                    // re-arms it.
                     let dy = ev.delta.pixel_delta(window.line_height()).y;
                     if dy > gpui::Pixels::ZERO {
                         this.stick_to_bottom = false;
