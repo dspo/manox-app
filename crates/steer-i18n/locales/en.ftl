@@ -210,8 +210,6 @@ subagent-panel-final-note = Live transcript is not retained across reloads; show
 
 thinking-tool-result = tool result
 
-thinking-duration = { $count }s
-
 duration-hms = { $h }h { $m }m { $s }s
 duration-ms = { $m }m { $s }s
 duration-s = { $s }s

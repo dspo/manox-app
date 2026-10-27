@@ -1732,7 +1732,7 @@ pub fn render_thinking(
             gpui::div()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child(i18n::t_count("thinking-duration", secs as i64).to_string()),
+                .child(i18n::t_duration(secs as i64)),
         );
     }
     if stats.failed > 0 {
@@ -1824,8 +1824,8 @@ fn render_activity_entry(
 }
 
 /// The whole-turn process head (dsh's TurnProcess row): one tertiary line
-/// above the turn's first segment once the turn settled —「已完成，用时 N
-/// 秒」— whose fold hides the turn's segments (render-layer overlay, the
+/// above the turn's first segment once the turn settled —「已完成，用时
+/// 2分5秒」— whose fold hides the turn's segments (render-layer overlay, the
 /// reply exempt). Live/failed turns never carry one.
 fn render_turn_process(
     secs: Option<i64>,
@@ -1840,7 +1840,7 @@ fn render_turn_process(
         Some(n) => format!(
             "{}{}",
             i18n::t("turn-process-completed"),
-            i18n::t_count("thinking-duration", n)
+            i18n::t_duration(n)
         )
         .into(),
         None => i18n::t("turn-process-completed"),

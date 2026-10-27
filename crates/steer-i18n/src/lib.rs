@@ -235,6 +235,26 @@ pub fn t_str_count(key: &str, args: &[(&str, &str)], count: i64) -> String {
     format(key, Some(&fa))
 }
 
+/// A duration in seconds as localized h/m/s with leading zero units dropped:
+/// `h>0` renders all three, `h=0,m>0` minute plus second, and a sub-minute
+/// duration seconds alone (the second is always shown). Negative input clamps
+/// to zero. This is the single dispatch every app-chrome duration display uses,
+/// so the truncation rule cannot drift between crates.
+pub fn t_duration(secs: i64) -> String {
+    let secs = secs.max(0);
+    let h = (secs / 3600).to_string();
+    let m = ((secs % 3600) / 60).to_string();
+    let s = (secs % 60).to_string();
+    let key = if h != "0" {
+        "duration-hms"
+    } else if m != "0" {
+        "duration-ms"
+    } else {
+        "duration-s"
+    };
+    t_str(key, &[("h", &h), ("m", &m), ("s", &s)])
+}
+
 fn format(key: &str, args: Option<&FluentArgs>) -> String {
     ensure_init();
     L10N.with(|cell| {
@@ -436,6 +456,28 @@ mod tests {
         set_lang(Language::ZhCn);
         assert_eq!(t_count("sidebar-time-minutes", 1).as_str(), "1 分钟前");
         assert_eq!(t_count("sidebar-time-minutes", 5).as_str(), "5 分钟前");
+    }
+
+    /// The one h/m/s dispatch every duration display shares: leading zero units
+    /// drop, the second always shows, and negative input clamps to zero.
+    #[test]
+    fn duration_drops_leading_zero_units() {
+        let _g = TEST_LANG_LOCK.lock().unwrap();
+
+        set_lang(Language::ZhCn);
+        assert_eq!(t_duration(0), "0秒");
+        assert_eq!(t_duration(45), "45秒");
+        assert_eq!(t_duration(125), "2分5秒");
+        assert_eq!(t_duration(7385), "2小时3分5秒");
+        assert_eq!(t_duration(-5), "0秒");
+
+        set_lang(Language::En);
+        assert_eq!(t_duration(0), "0s");
+        assert_eq!(t_duration(45), "45s");
+        assert_eq!(t_duration(125), "2m 5s");
+        assert_eq!(t_duration(7385), "2h 3m 5s");
+
+        set_lang(Language::ZhCn);
     }
 
     /// The sidebar row tooltip's status line: every rung resolves in both

@@ -195,8 +195,6 @@ subagent-panel-final-note = 实时转录不跨重载保留；以下为子代理�
 
 thinking-tool-result = 工具结果
 
-thinking-duration = { $count }秒
-
 duration-hms = { $h }小时{ $m }分{ $s }秒
 duration-ms = { $m }分{ $s }秒
 duration-s = { $s }秒

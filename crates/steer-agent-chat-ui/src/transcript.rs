@@ -609,7 +609,7 @@ fn push_turn(
     }
 
     // The settled turn earns its whole-turn process head above its first
-    // segment — 「已完成，用时 N 秒」 derived from the state's own duration,
+    // segment — 「已完成，用时 2分5秒」 derived from the state's own duration,
     // so the live path shows it the moment the turn archives (the old event
     // fold minted it from a client clock and lost it whenever the Stop
     // event raced the history reload).

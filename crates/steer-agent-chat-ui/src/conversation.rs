@@ -108,7 +108,7 @@ pub enum ConvItem {
     /// flat under a model-name-only header.
     Thinking(ThinkingContainer),
     /// The whole-turn process head (dsh's TurnProcess row): sits ABOVE the
-    /// turn's first segment once the turn settled —「已完成，用时 N 秒」—
+    /// turn's first segment once the turn settled —「已完成，用时 2分5秒」—
     /// derived from the state's own `turn.duration`, so the live path shows
     /// it the moment the turn archives. Folding it hides the turn's segments
     /// (the reply is exempt); `hidden_by_turn_process` resolves that.
