@@ -9,33 +9,15 @@
 //! status, never the child's text — so the click opens that chat as a
 //! read-only page in the main column.
 //!
-//! Refresh has two halves, because the host serves a child chat SNAPSHOT-ONLY
-//! (the child's journal is folded into the child's own channel and is never
-//! bridged to the parent, and the parent's background-work entry is set ONCE
-//! per run — its `latestActivity` never ticks):
-//!
-//! - the FETCH is a bounded poll. While the page owns the main column and its
-//!   run is still live, a 2s timer re-subscribes the child's chat; the run
-//!   leaving the live set earns one last subscribe (its journal ends when the
-//!   run ends, so that snapshot is final) and stops the poll.
-//! - the REBUILD is driven by the child chat's own fold version, compared on
-//!   the store notify the landed snapshot produces. A snapshot that carried
-//!   nothing new neither rebuilds nor churns the page.
+//! Following the run is one subscribe, not a loop: the host bridges a running
+//! child's journal into its own chat channel, so the subscribe on open
+//! delivers the folded history AND the live deltas, and the page re-projects
+//! from the fold on its own store observer (see
+//! `agent_ui::views::subagent_stream`). No composer: a child run is driven by
+//! the parent's dispatch, not by the person watching it.
 
 use super::*;
 use steer_agent_chat_ui::ahp_store::SubagentWorkRow;
-
-/// How often an open page fetches a fresh child-chat snapshot.
-const SUBAGENT_STREAM_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// One poll pass's verdict.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PollStep {
-    /// The run is still live: keep the timer armed.
-    Keep,
-    /// The page is gone, the mode moved on, or the run settled: drop the poll.
-    Stop,
-}
 
 impl Workspace {
     /// The foreground chat's running sub-agents, in host order.
@@ -51,9 +33,9 @@ impl Workspace {
     }
 
     /// Open (or re-open) one running sub-agent's transcript in the main
-    /// column: subscribe the child's chat once for the click-time transcript,
-    /// then poll (see the module note — the host serves a child chat
-    /// snapshot-only, so a re-subscribe is the only way it can advance).
+    /// column: the child chat's channel is the run's live feed, so one
+    /// subscribe arms the page — its own store observer follows the child's
+    /// journal from there (see the module note).
     pub(crate) fn open_subagent_stream(&mut self, row: &SubagentWorkRow, cx: &mut Context<Self>) {
         // The FOREGROUND store owns the fold the block was read from; the
         // child's chat rides the same connection.
@@ -68,14 +50,10 @@ impl Workspace {
             .as_ref()
             .is_some_and(|page| page.id == row.id)
         {
-            // Already on this run: the re-subscribe above is the refresh, and
-            // the poll is re-armed (assigning drops the old task, which
-            // cancels it) — defence in depth: the "page exists ⟺ its mode
-            // owns the column" invariant already routes a re-open through the
-            // create arm.
-            let poll = Self::spawn_subagent_stream_poll(cx, row.id.clone());
+            // Already on this run: the subscribe above is idempotent and the
+            // page's observer is already bound — one projection pass keeps
+            // the page current with whatever landed meanwhile.
             if let Some(page) = self.subagent_stream.as_mut() {
-                page._poll = poll;
                 page.view.update(cx, |view, cx| view.refresh(cx));
             }
             self.view_mode = ViewMode::SubagentStream;
@@ -111,11 +89,9 @@ impl Workspace {
                 this.leave_subagent_stream(cx)
             },
         );
-        let poll = Self::spawn_subagent_stream_poll(cx, row.id.clone());
         self.subagent_stream = Some(SubagentStreamPage {
             id: row.id.clone(),
             view,
-            _poll: poll,
             _sub: sub,
         });
         self.view_mode = ViewMode::SubagentStream;
@@ -124,7 +100,8 @@ impl Workspace {
 
     /// Return the main column to the conversation — the page's back control,
     /// and any thread navigation (the parent thread is still the foreground
-    /// one, so no attach is involved). Dropping the page drops its poll.
+    /// one, so no attach is involved). Dropping the page drops its store
+    /// observer — a page nobody sees follows nothing.
     pub(crate) fn leave_subagent_stream(&mut self, cx: &mut Context<Self>) {
         if matches!(self.view_mode, ViewMode::SubagentStream) {
             self.view_mode = ViewMode::Workspace;
@@ -132,55 +109,5 @@ impl Workspace {
         if self.subagent_stream.take().is_some() {
             cx.notify();
         }
-    }
-
-    /// Re-project the open page from its child chat's fold (the store
-    /// observe's notify — the same one that drives the conversation sync).
-    /// Gated on the MODE, not just the field: a page that no longer owns the
-    /// main column must not keep fetching. The keyed projection is its own
-    /// freshness check — a pass that lands nothing new notifies nothing.
-    pub(crate) fn refresh_subagent_stream(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.view_mode, ViewMode::SubagentStream) {
-            return;
-        }
-        let Some(page) = self.subagent_stream.as_mut() else {
-            return;
-        };
-        page.view.update(cx, |view, cx| view.refresh(cx));
-    }
-
-    /// The page's refresh poll (see the module note). The task lives on the
-    /// page record, so closing the page cancels it.
-    fn spawn_subagent_stream_poll(cx: &mut Context<Self>, id: String) -> gpui::Task<()> {
-        cx.spawn(async move |weak, cx| {
-            loop {
-                // `background_executor().timer()` — never `tokio::time` on the
-                // gpui foreground (that panics: no current tokio runtime).
-                cx.background_executor().timer(SUBAGENT_STREAM_POLL).await;
-                let Some(ws) = weak.upgrade() else {
-                    return;
-                };
-                let step = ws.update(cx, |this, cx| {
-                    let page_is_live = this
-                        .subagent_stream
-                        .as_ref()
-                        .is_some_and(|page| page.id == id)
-                        && matches!(this.view_mode, ViewMode::SubagentStream);
-                    if !page_is_live {
-                        return PollStep::Stop;
-                    }
-                    // Fetch: this subscribe is what delivers a fresh child
-                    // snapshot (the store notify then rebuilds the page).
-                    if let Some((store, _)) = this.chat_store(cx) {
-                        store.update(cx, |s, cx| s.subscribe(crate::ahp_store::chat_uri(&id), cx));
-                    }
-                    let live = this.running_subagents(cx).iter().any(|row| row.id == id);
-                    if live { PollStep::Keep } else { PollStep::Stop }
-                });
-                if step == PollStep::Stop {
-                    return;
-                }
-            }
-        })
     }
 }

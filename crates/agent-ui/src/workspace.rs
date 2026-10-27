@@ -225,15 +225,12 @@ fn composer_key_context(completion_open: bool) -> &'static str {
     }
 }
 
-/// The open sub-agent stream page: the run it renders, the child chat's fold
-/// version it was last built from (a re-subscribe that carried nothing new
-/// must not churn the page), the page entity, the refresh poll (alive while
-/// the page is — dropping the page cancels it), and the page's back
-/// subscription.
+/// The open sub-agent stream page: the run it renders, the page entity (its
+/// own store observer is the live leg — one subscribe on open, no polling),
+/// and the page's back subscription.
 struct SubagentStreamPage {
     id: String,
     view: Entity<crate::views::subagent_stream::SubagentStreamView>,
-    _poll: gpui::Task<()>,
     _sub: Subscription,
 }
 
@@ -1219,6 +1216,17 @@ impl Workspace {
             .unwrap_or_default()
     }
 
+    /// The open page's row kinds in order — the projection tests read them:
+    /// a child fold's reasoning and tool parts must land as the Captain's
+    /// thinking segment (`thinking(reasoning+tool)`), not a second shape.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_subagent_stream_item_kinds(&self, cx: &App) -> Vec<String> {
+        self.subagent_stream
+            .as_ref()
+            .map(|page| page.view.read(cx).item_kinds(cx))
+            .unwrap_or_default()
+    }
+
     /// Fire the page's back control (its real event path).
     #[cfg(feature = "test-support")]
     pub fn diagnostic_subagent_stream_back(&self, cx: &mut Context<Self>) {
@@ -1856,11 +1864,6 @@ impl Workspace {
             // fold now holds, so a first snapshot, a replayed journal and a
             // single streaming delta all take the same keyed diff.
             this.sync_conversation(&store, cx);
-            // The sub-agent page rides the same notify: the parent's
-            // background-work ticks are what say a child run advanced, and a
-            // child chat is served snapshot-only — the re-subscribe this
-            // triggers is the only way its page can follow the run.
-            this.refresh_subagent_stream(cx);
             cx.notify();
         });
         let successor = cx.observe(&store, |this, store, cx| {

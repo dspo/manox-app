@@ -69,7 +69,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 图片附件 | ✅ | 剪贴板粘贴 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
-| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读） |
+| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询 |
 | 退役（plan mode 整体删除，随上游 manox PR #946） | — | `/plan` 为上游内置 skill（规划契约一次性注入，见 §Slash 行）；plan 裁决 = 单问题 ask（`detail`=plan 正文，经 wire 的 `ChatInputRequest.message` 折入），批准/修订即普通答案；rail 的 plan 节（`UpdatePlan`）仍消费执行进度，快照经 sidecar 持久化、compaction 后可恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
@@ -218,11 +218,11 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 #### ViewMode::SubagentStream
 一个运行中子代理的自家 transcript 顶替会话列（[CaptainStatusStrip](#captainstatusstrip) 的子代理行点开；
-见 [SubagentStream](#subagentstream)）。子代理 chat 由宿主以**快照**服务（无 live bridge，且父 chat 的
-background work 条目每 run 只写一次），所以页面靠自己的有界轮询重订阅取新快照、按子 chat 的 fold 版本重建；
+见 [SubagentStream](#subagentstream)）。子代理的 journal 由宿主 bridge 进它自己的 chat 通道，打开即一次
+订阅：折叠历史与 live delta 走同一通道，页面用自己的 store observe 驱动 keyed diff 重投影——没有轮询腿；
 任何离开它的 mode 翻转（点侧栏行 / 新建会话 / 进设置 / **外部会话抢走主列**——项目菜单拉起或侧栏 external 行点击）
-都 drop 该页并停掉轮询；不变量是「页面存在 ⟺ `view_mode == SubagentStream`」（与 `active_external` 同一条规矩），
-闸门与 drop 双保险——漏一个翻转点最多是多一次重建，不会出现看不见的页面在后台轮询。
+都 drop 该页（页面自带 observer，drop 即断跟随）；不变量是「页面存在 ⟺ `view_mode == SubagentStream`」
+（与 `active_external` 同一条规矩）。
 
 ---
 
@@ -522,15 +522,14 @@ read-only by design: a child run is driven by the parent's dispatch, not by the
 watcher (no composer, no chips). Header = back control (`Captain` → the
 conversation) + `{type}({topic})`.
 
-Refresh model: the host serves a child chat as a SNAPSHOT (the child's journal
-is folded into the child's own channel and is never bridged to the parent), so
-the page FETCHES on a bounded poll — while it owns the main column and its run
-is still live, a 2s `background_executor().timer()` re-subscribes the child's
-chat; the run leaving the live set earns one last subscribe (its journal ends
-when the run ends, so that snapshot is final) and stops the poll. Every store
-notify re-projects the child fold through the keyed diff — its own freshness
-check: a pass that lands nothing new notifies nothing, and tail-follow stays
-the user's state (a re-projection does not yank a reader who scrolled back up).
+Live model: the host bridges a running child's journal into its own chat
+channel, so the ONE subscribe on open delivers the folded history AND the live
+deltas. The page owns a store observer and re-projects the child fold through
+the keyed diff on every notify — the same path a landed snapshot and a single
+streaming delta take; a pass that lands nothing new notifies nothing, and
+tail-follow stays the user's state (a re-projection does not yank a reader who
+scrolled back up, and a reader sitting at the bottom rides along). No polling
+leg: what the page shows is the fold, and the fold only moves on host actions.
 
 ##### Composer
 
@@ -875,7 +874,9 @@ chat fold 里——泵在**尚未继承**时按 fold 快照整表重建（`synth
 `AgentTaskItem.run_id` 来自派发信封（前台结果 / promotion 回执 / 后台启动回执都携带 `run_id`）；
 rail agents 段（#165 起直读 `background_work`）展示运行中花名册。live 行的 wire `label` 只作
 话题（`description`）不作类型；类型由父会话的派发 tool call 解析（`ToolResultSubagentContent.agentName`
-或完成回执按 `run_id` 关联到的 call 名），行标题渲染为「Explore(话题)」。
+或完成回执按 `run_id` 关联到的 call 名），行标题渲染为「Explore(话题)」。主列的
+[SubagentStream](#subagentstream) 观察页共享同一 live 源（子会话自己的通道）与同一投影词汇，
+但走自己的腿：fold 进、keyed diff 出，无事件桶。
 
 > Source: `crates/agent-ui/src/views/subagent_panel.rs`, `crates/agent-ui/src/workspace/subagent.rs`
 

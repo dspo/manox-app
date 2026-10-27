@@ -3,11 +3,11 @@
 //! that child's own transcript in the main column (the child chat is the only
 //! carrier of a sub-agent's text — the parent's chat carries the run's status).
 //!
-//! Every tick this test feeds is PRODUCTION-SHAPED: the parent's background-work
-//! entry is byte-identical throughout (the host writes it once per run and never
-//! refreshes it), and only the CHILD's chat grows. What the page must follow is
-//! the child's fold, and what it must fetch it with is its own re-subscribe poll
-//! (a child chat is served snapshot-only), which the queue count below pins.
+//! Every shape this test feeds is PRODUCTION-SHAPED: the parent's
+//! background-work entry is byte-identical throughout (the host writes it once
+//! per run and never refreshes it), and only the CHILD's chat grows. The page
+//! follows the child's fold on its own store observer — one subscribe on
+//! open, no polling — which the queue count below pins.
 #![cfg(feature = "test-support")]
 
 mod common;
@@ -72,24 +72,55 @@ fn child(
     serde_json::from_value(value).expect("the child chat snapshot parses")
 }
 
+fn active_turn(response_parts: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "turns": [],
+        "activeTurn": {
+            "id": "turn-1",
+            "startedAt": "2026-10-15T00:00:01.000Z",
+            "message": { "text": "fix the login redirect", "origin": { "kind": "user" } },
+            "responseParts": response_parts,
+        },
+    })
+}
+
 /// The child mid-run: the answer streams INSIDE the active turn.
 fn child_active(parts: &[&str]) -> ahp_types::state::ChatState {
     child(
         RUN,
         "2026-10-15T00:00:02.000Z",
-        serde_json::json!({
-            "turns": [],
-            "activeTurn": {
-                "id": "turn-1",
-                "startedAt": "2026-10-15T00:00:01.000Z",
-                "message": { "text": "fix the login redirect", "origin": { "kind": "user" } },
-                "responseParts": parts
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, content)| part(&format!("turn-1-p{ix}"), content))
-                    .collect::<Vec<_>>(),
-            },
-        }),
+        active_turn(serde_json::Value::Array(
+            parts
+                .iter()
+                .enumerate()
+                .map(|(ix, content)| part(&format!("turn-1-p{ix}"), content))
+                .collect::<Vec<_>>(),
+        )),
+    )
+}
+
+/// The child mid-run with the non-responding parts the shared pipeline owns:
+/// a reasoning round, a settled tool call, then the answer — the exact shape
+/// a live child's journal carries (v0.6.8's child-channel rows).
+fn child_mixed() -> ahp_types::state::ChatState {
+    child(
+        RUN,
+        "2026-10-15T00:00:02.000Z",
+        active_turn(serde_json::json!([
+            { "kind": "reasoning", "id": "turn-1-r0", "content": "weighing the redirect" },
+            { "kind": "toolCall", "toolCall": {
+                "status": "completed",
+                "toolCallId": "tc-1",
+                "toolName": "Read",
+                "displayName": "Read",
+                "invocationMessage": "Reading",
+                "toolInput": "{}",
+                "success": true,
+                "pastTenseMessage": "Read it",
+                "confirmed": "notNeeded",
+            }},
+            part("turn-1-p0", "the child's answer"),
+        ])),
     )
 }
 
@@ -135,18 +166,11 @@ impl manox_terminal::pty_source::PtySource for FakePty {
     }
 }
 
-/// Let the page's own poll run: the test executor's clock is deterministic, so
-/// time moves explicitly (no real sleeping) and each advance fires at most one
-/// poll tick.
-fn pump(cx: &mut VisualTestContext, by: std::time::Duration) {
-    cx.cx.executor().advance_clock(by);
-    cx.run_until_parked();
-}
-
 /// The block's lines come from the parent chat's live background work, and a
 /// line's click puts THAT child's transcript in the main column (never the
-/// parent's rows); the page then follows the child's own fold, and its back
-/// control returns the conversation.
+/// parent's rows); the page then follows the child's fold on its own store
+/// observer — one subscribe, no poll — and its back control returns the
+/// conversation.
 #[gpui::test]
 async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
     init_harness(cx);
@@ -172,6 +196,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
     assert_eq!(rows[0].label, "Explore");
     assert_eq!(rows[0].activity.as_deref(), Some("fix the login redirect"));
 
+    let before_open = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_open_subagent_stream(RUN, cx);
     });
@@ -179,6 +204,13 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream(cx)),
         Some(RUN.to_string()),
         "the clicked run owns the main column"
+    );
+    // The live leg is ONE subscribe on open — the child's channel carries the
+    // run's journal from there, so nothing ever re-subscribes.
+    assert_eq!(
+        store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes()),
+        before_open + 1,
+        "opening the page subscribes the child chat exactly once"
     );
     let texts = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream_texts(cx));
     assert!(
@@ -194,8 +226,9 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
     );
 
     // The run advances INSIDE its active turn. The parent's background-work
-    // entry is byte-identical — the only shape the real host emits — so the
-    // page must key on the CHILD's fold, which is what this asserts.
+    // entry is byte-identical — the only shape the real host emits — and the
+    // update lands on a plain store notify: the page's own observer is the
+    // live leg, so no clock advance (no poll tick) may be needed.
     store.update(&mut visual.cx, |s, cx| {
         s.book.chats.insert(
             RUN.into(),
@@ -204,13 +237,50 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         s.book.chats.insert("parent-1".into(), parent());
         cx.notify();
     });
-    pump(&mut visual, std::time::Duration::from_millis(50));
+    visual.run_until_parked();
     let texts = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream_texts(cx));
     assert!(
         texts
             .iter()
             .any(|text| text.contains("the child's follow-up")),
-        "a growing ACTIVE turn must reach the page, got {texts:?}"
+        "a growing ACTIVE turn must reach the page on the notify alone, got {texts:?}"
+    );
+
+    // The no-poll pin: idle wall-clock time moves nothing — no re-subscribe,
+    // no fetch leg. What the page shows is the fold, and the fold only moves
+    // on host actions.
+    let idle = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
+    visual
+        .cx
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(10));
+    visual.run_until_parked();
+    assert_eq!(
+        store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes()),
+        idle,
+        "an open page must not poll its child chat"
+    );
+
+    // The child fold's non-responding parts project like the Captain's:
+    // the reasoning round and the settled tool call share ONE activity
+    // segment (`thinking(reasoning+tool)` — the Captain's fold, not a second
+    // shape), and the answer renders as the assistant row that follows it.
+    store.update(&mut visual.cx, |s, cx| {
+        s.book.chats.insert(RUN.into(), child_mixed());
+        cx.notify();
+    });
+    visual.run_until_parked();
+    let kinds = workspace.read_with(&visual.cx, |ws, cx| {
+        ws.diagnostic_subagent_stream_item_kinds(cx)
+    });
+    assert_eq!(
+        kinds,
+        vec![
+            "user".to_string(),
+            "thinking(reasoning+tool)".to_string(),
+            "assistant".to_string(),
+        ],
+        "a mixed child fold renders the Captain's row vocabulary, got {kinds:?}"
     );
 
     // The turn settles: the same content lands in `turns`, plus the final
@@ -227,7 +297,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         s.book.chats.insert("parent-1".into(), parent());
         cx.notify();
     });
-    pump(&mut visual, std::time::Duration::from_millis(50));
+    visual.run_until_parked();
     let texts = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream_texts(cx));
     assert!(
         texts
@@ -236,23 +306,10 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         "the settled turn must reach the page, got {texts:?}"
     );
 
-    // The fetch half: the host serves a child chat snapshot-only, so the page
-    // re-subscribes on its own poll while the run is live (the detached store
-    // queues each subscribe, which is what this counts).
-    let before = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
-    pump(&mut visual, std::time::Duration::from_millis(2_500));
-    let after = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
-    assert!(
-        after > before,
-        "the open page must keep fetching while its run is live ({before} -> {after})"
-    );
-
-    // The invariant candidate the review found broken: the page lives only
-    // while ITS mode owns the column. An external session taking the column
-    // (the project menu's launch, the sidebar's parked-session row, and any
-    // later mode flip) must drop the page — a page nobody sees would keep
-    // polling its child chat, and a re-open that kept it would take the
-    // early-return arm with a dead poll.
+    // The page lives only while ITS mode owns the column. An external session
+    // taking the column (the project menu's launch, the sidebar's
+    // parked-session row, and any later mode flip) must drop the page — its
+    // observer dies with it, so a dropped page follows nothing.
     let any = window.into();
     cx.update_window(any, |_, window, cx| {
         workspace.update(cx, |ws, cx| {
@@ -288,21 +345,29 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         "a launched external session drops the sub-agent page"
     );
 
-    // Park that session and re-open the run: the page comes back WITH a
-    // fetch loop (the defect this pins: the dropped poll never returned).
+    // Park that session and re-open the run: the page comes back live (the
+    // subscribe re-arms, the observer binds, the fold re-projects).
     workspace.update(&mut visual.cx, |ws, _| ws.leave_external_session());
+    let before_reopen = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_open_subagent_stream(RUN, cx);
     });
-    let reopened = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
-    pump(&mut visual, std::time::Duration::from_millis(2_500));
+    visual.run_until_parked();
+    assert_eq!(
+        store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes()),
+        before_reopen + 1,
+        "a re-opened page re-arms the child chat's subscription"
+    );
+    let texts = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream_texts(cx));
     assert!(
-        store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes()) > reopened,
-        "a re-opened page on a live run must still fetch"
+        texts
+            .iter()
+            .any(|text| text.contains("the child's final answer")),
+        "the re-opened page renders the child's settled fold, got {texts:?}"
     );
 
-    // The parked session's own row is the SECOND hand-off site the review
-    // named: its click must drop the page as well.
+    // The parked session's own row is the SECOND hand-off site: its click
+    // must drop the page as well.
     let external_id = workspace
         .read_with(&visual.cx, |ws, _| ws.diagnostic_external_session_ids())
         .into_iter()
@@ -321,34 +386,37 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         None,
         "an external session row's click drops the sub-agent page too"
     );
-    // Back to the page for the remaining phases (the run is still live).
+    // Back to the page for the settle phase.
     workspace.update(&mut visual.cx, |ws, _| ws.leave_external_session());
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_open_subagent_stream(RUN, cx);
     });
+    visual.run_until_parked();
 
-    // Settle: the run leaves the live set, which earns one last fetch (the
-    // child's journal has ended, so that snapshot is final) and then stops the
-    // poll — a page nobody needs to advance must not keep subscribing.
+    // Settle: the run leaves the live set. The page stays — a settled child's
+    // fold is its final transcript — and idle time moves nothing.
     store.update(&mut visual.cx, |s, cx| {
         s.book
             .chats
             .insert("parent-1".into(), parent_after_settle());
         cx.notify();
     });
-    let at_settle = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
-    pump(&mut visual, std::time::Duration::from_millis(5_000));
-    let after_settle = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
+    visual.run_until_parked();
     assert_eq!(
-        after_settle,
-        at_settle + 1,
-        "the settle edge fetches once and stops the poll ({at_settle} -> {after_settle})"
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream(cx)),
+        Some(RUN.to_string()),
+        "a settled run's page stays until the reader leaves"
     );
-    pump(&mut visual, std::time::Duration::from_millis(2_500));
+    let at_settle = store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes());
+    visual
+        .cx
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(10));
+    visual.run_until_parked();
     assert_eq!(
         store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes()),
-        after_settle,
-        "a stopped poll stays stopped"
+        at_settle,
+        "a settled run's page subscribes nothing further"
     );
 
     workspace.update(&mut visual.cx, |ws, cx| {
