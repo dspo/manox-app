@@ -399,8 +399,8 @@ pub struct Workspace {
     /// tab switches; dropped when the tab closes, which detaches the native
     /// view via [`steer_webview::webview::WebView`]'s `Drop`.
     pub(crate) browser_views: BTreeMap<BrowserTabId, Entity<BrowserView>>,
-    /// Top-level view mode. `Settings` replaces the entire window content
-    /// with the SettingsView overlay until the user requests exit.
+    /// Top-level view mode. `Settings` mounts the floating settings overlay
+    /// over the live column until the user requests exit.
     view_mode: ViewMode,
     /// Live external sessions (project-menu launches: CLI agent TUIs and
     /// plain terminals) and the id of the one occupying the main column
@@ -409,9 +409,9 @@ pub struct Workspace {
     /// `external_sessions` + `active_external` pair).
     pub(crate) externals: Vec<external_sessions::ExternalSessionRecord>,
     active_external: Option<String>,
-    /// Set briefly while the Settings overlay is sliding out to the right.
-    /// Keeps `view_mode == Settings` mounted so the exit animation can play
-    /// before the unmount; cleared when the slide-out completes.
+    /// Set briefly while the Settings overlay is fading out. Keeps
+    /// `view_mode == Settings` mounted so the exit animation can play
+    /// before the unmount; cleared when the fade-out completes.
     exiting_settings: bool,
     /// The open sub-agent stream page (the Captain status block's sub-agent
     /// line opens it; `view_mode == SubagentStream` while it owns the main
@@ -432,6 +432,9 @@ pub struct Workspace {
     /// cost when the user never opens Settings.
     settings_view: Option<Entity<SettingsView>>,
     settings_sub: Option<Subscription>,
+    /// Focus anchor for the settings floating overlay: focused on entry so
+    /// Escape reaches the overlay no matter what inside it last held focus.
+    settings_focus: gpui::FocusHandle,
     /// Composer dictation: the speech session behind the mic button. Created
     /// unconditionally — where the platform has no system recognizer (Linux)
     /// or the process lacks the Info.plist usage keys (test binaries; the
@@ -453,6 +456,10 @@ pub struct Workspace {
 enum ViewMode {
     #[default]
     Workspace,
+    /// The floating settings overlay is mounted over the live column (the
+    /// column keeps rendering underneath, dimmed by the mask). Entering
+    /// still parks any external session / sub-agent page that owned the
+    /// column — the overlay is the page while it is up.
     Settings,
     /// A live external session (a launched CLI agent TUI / plain terminal)
     /// renders IN PLACE OF the conversation column — the legacy shell's
@@ -948,6 +955,7 @@ impl Workspace {
             settings_transition_gen: 0,
             settings_view: None,
             settings_sub: None,
+            settings_focus: cx.focus_handle(),
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
@@ -1979,6 +1987,9 @@ impl Workspace {
         // animation to replay from the left edge.
         self.exiting_settings = false;
         self.settings_transition_gen = self.settings_transition_gen.wrapping_add(1);
+        // The overlay owns the keyboard while open: Escape must reach it even
+        // before anything inside the settings surface takes focus.
+        window.focus(&self.settings_focus, cx);
         cx.notify();
     }
 
