@@ -1630,6 +1630,49 @@ mod tests {
         );
     }
 
+    /// The Captain strip's clock counts from the active turn's own `started_at`
+    /// — the host stamps it when the turn (and therefore the user message that
+    /// opened it) was submitted.
+    #[test]
+    fn the_captain_clock_anchors_on_the_active_turns_started_at() {
+        let started_at = (chrono::Utc::now() - chrono::Duration::seconds(90))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let start: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/turnStarted", "turnId": "t-1",
+            "startedAt": started_at,
+            "message": { "text": "hi", "origin": { "kind": "user" } },
+        }))
+        .expect("the start action parses");
+        let mut chat = empty_chat();
+        fold(&mut chat, &start);
+        let (env, _host) = env();
+        let mut conversation = ConversationState::new(manox_agent::MessageAuthor::Lead);
+        let _ = conversation.stage(Some(&chat), &env);
+        assert!(
+            conversation.running_secs().abs_diff(90) <= 1,
+            "the clock counts from the turn's start stamp"
+        );
+    }
+
+    /// An unparseable start stamp must not panic: the clock falls back to the
+    /// instant this client first saw the turn.
+    #[test]
+    fn an_unparseable_start_stamp_falls_back_to_first_sight() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "hi"));
+        chat.active_turn
+            .as_mut()
+            .expect("the turn is in flight")
+            .started_at = "not-a-time".to_string();
+        let (env, _host) = env();
+        let mut conversation = ConversationState::new(manox_agent::MessageAuthor::Lead);
+        let _ = conversation.stage(Some(&chat), &env);
+        assert!(
+            conversation.running_secs() <= 1,
+            "first sight seeds the fallback anchor"
+        );
+    }
+
     // ── the reconcile face: gpui entities, in-place updates, adoption ─────
 
     type ConvEntity = gpui::Entity<ConversationState>;

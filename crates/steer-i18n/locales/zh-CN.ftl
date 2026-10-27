@@ -197,6 +197,10 @@ thinking-tool-result = 工具结果
 
 thinking-duration = { $count }秒
 
+duration-hms = { $h }小时{ $m }分{ $s }秒
+duration-ms = { $m }分{ $s }秒
+duration-s = { $s }秒
+
 activity-failed = { $count } 失败
 
 activity-awaiting-approval = { $count } 待审批

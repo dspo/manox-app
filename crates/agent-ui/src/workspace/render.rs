@@ -638,7 +638,8 @@ impl Workspace {
     }
 
     /// The Captain status block above the composer — the Captain's own row
-    /// (`Captain 正在驾驶{provider}/{model}·{elapsed}·{activity}`) while a turn
+    /// (`Captain 正在驾驶{provider}/{model}·{elapsed}·{activity}`, `{elapsed}`
+    /// localized h/m/s) while a turn
     /// runs, followed by one row per RUNNING sub-agent, each led by a
     /// PixelSpinner flush at the left edge. Every segment is tight (no spacer
     /// between the verb, the model, the clock and the activity). The model
@@ -711,7 +712,7 @@ impl Workspace {
             gpui::div()
                 .flex_shrink_0()
                 .whitespace_nowrap()
-                .child(crate::i18n::t_count("thinking-duration", secs))
+                .child(crate::i18n::t_duration(secs))
         };
         // One tight segment line: name + verb, then the model, the clock and
         // the activity sit flush against each other (no flex gap). Only the

@@ -14,7 +14,7 @@
 //! function is pure over (state, overlays): same inputs, same rows.
 
 use std::collections::HashMap;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use ahp_types::state::{
     ActiveTurn, ChatInputQuestion, ChatState, ReasoningResponsePart, ResponsePart, ToolCallState,
@@ -715,7 +715,7 @@ fn flush_segment(
 fn turn_instant(turn_id: &str, started_at: &Option<String>, overlays: &mut Overlays) -> Instant {
     let epoch = epoch_of(started_at);
     if epoch > 0
-        && let Some(anchor) = instant_epochs_ago(now_unix() - epoch)
+        && let Some(anchor) = instant_epochs_ago(chrono::Utc::now().timestamp() - epoch)
     {
         return anchor;
     }
@@ -731,26 +731,14 @@ pub fn turn_anchor(turn_id: &str, started_at: &str, overlays: &mut Overlays) -> 
     turn_instant(turn_id, &Some(started_at.to_string()), overlays)
 }
 
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// `Instant` standing `ago_secs` in the past; `None` for a nonsensical gap.
+/// `Instant` standing `ago_secs` in the past; `None` for a nonsensical gap
+/// (a stamp ahead of this clock, or a gap beyond the monotonic clock's
+/// representable range).
 fn instant_epochs_ago(ago_secs: i64) -> Option<Instant> {
     if ago_secs < 0 {
         return None;
     }
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|now| now.checked_sub(std::time::Duration::from_secs(ago_secs as u64)))
-        .and_then(|past| {
-            let now = Instant::now();
-            now.checked_sub(past)
-        })
+    Instant::now().checked_sub(std::time::Duration::from_secs(ago_secs as u64))
 }
 
 /// The AHP turn's RFC 3339 `started_at` as epoch seconds; `None`/unparseable

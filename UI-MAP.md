@@ -468,14 +468,17 @@ Captain's own: a [`PixelSpinner`](#meerkat) (grid variant, `ai_elements::PixelSp
 flush at the left = healthy running, then the literal product name `Captain` +
 the localized verb (`steering-verb`：正在驾驶 / is steering), the model via
 [`ModelTag`](#modeltag) (`{provider}/` muted, model tinted by wire api) flush
-against the verb (no spacer: `Captain 正在驾驶百炼/qwen3.8-flash·234秒`), `·`,
+against the verb (no spacer: `Captain 正在驾驶百炼/qwen3.8-flash·3分54秒`), `·`,
 and the activity — 思考中/Thinking while a reasoning round streams,
 正在回复/Replying while the assistant body streams, or the running tool's
 one-line summary (monospace, runtime-provided; newline runs collapse to single
 spaces so a multi-line `bash` body cannot stretch the block — the row's
-`.truncate()` then ellipsizes it on width). The running clock (dsh's「深度探索中
-N 秒」suffix shape) rides the same row from
-`ConversationState::running_secs`. The activity comes
+`.truncate()` then ellipsizes it on width). The running clock counts from
+`ActiveTurn.started_at` — the instant the host stamped the turn, standing in
+for the user message that opened it — read via
+`ConversationState::running_secs` and rendered as localized h/m/s with leading
+zero units dropped (`2小时3分5秒` / `2h 3m 5s`; seconds always shown). The
+activity comes
 from `ConversationState::live_activity` (`LiveActivity`), a read-only
 projection over the trailing item: a streaming assistant body names Replying,
 the trailing segment is scanned back-to-front for a streaming round or an
@@ -500,9 +503,9 @@ receipt naming the run) and stays absent when that call is not in the retained
 fold. The model segment names the
 SESSION's model: a sub-agent run on this harness inherits it unless its own
 definition pins one, and the run's own model has no seat on the parent's
-channel. The row's clock is wall-clock from the entry's `startedAt`. A
-sub-agent row's click opens that child's transcript in the main
-column ([SubagentStream](#subagentstream)). The Captain's own row carries NO
+channel. The row's clock is wall-clock from the entry's `startedAt`, rendered
+in the same h/m/s form. A sub-agent row's click opens that child's transcript
+in the main column ([SubagentStream](#subagentstream)). The Captain's own row carries NO
 click: the block is not on screen while the page owns the column, so the round
 trip back is the page's own back control (no dead affordance here).
 

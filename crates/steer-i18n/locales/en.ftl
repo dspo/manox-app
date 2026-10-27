@@ -212,6 +212,10 @@ thinking-tool-result = tool result
 
 thinking-duration = { $count }s
 
+duration-hms = { $h }h { $m }m { $s }s
+duration-ms = { $m }m { $s }s
+duration-s = { $s }s
+
 activity-failed = { $count } failed
 
 activity-awaiting-approval = { $count } awaiting approval
