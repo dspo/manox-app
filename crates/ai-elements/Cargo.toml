@@ -33,4 +33,4 @@ steer-components.workspace = true
 # The offscreen visual harness (tests/visual.rs) reads back a Metal texture,
 # so it is macOS-only — as is the platform crate it needs.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui-pre-macos = { version = "=0.3.9", features = ["test-support"] }
+gpui-pre-macos = { version = "=0.3.10", features = ["test-support"] }

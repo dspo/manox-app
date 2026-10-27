@@ -22,7 +22,7 @@ use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, Font, FontFeatures,
     FontStyle, FontWeight, InputHandler, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, Styled, Subscription, Task,
+    Render, ScrollDelta, ScrollEvent, ShapedLine, SharedString, Styled, Subscription, Task,
     UTF16Selection, Window, div, point, px, rgba, size,
 };
 use gpui_component::ActiveTheme as _;
@@ -118,10 +118,14 @@ impl TerminalView {
     pub fn new(terminal: Entity<TerminalProxy>, cx: &mut App) -> Entity<Self> {
         let terminal_for_view = terminal.clone();
         let s = manox_terminal::settings::load();
+        // 0.3.10 split Keystroke::parse into a &'static str variant and this
+        // dynamic form; settings strings are runtime input, so they resolve
+        // the `secondary-` alias against the host OS.
+        let os = cx.platform_info().os;
         let skip_shell: Vec<Keystroke> = s
             .commands_to_skip_shell
             .iter()
-            .filter_map(|k| gpui::Keystroke::parse(k).ok())
+            .filter_map(|k| gpui::Keystroke::parse_with_os(k, os).ok())
             .collect();
         let theme_override =
             s.theme
@@ -565,7 +569,7 @@ impl TerminalView {
 
     fn on_scroll_wheel(
         &mut self,
-        ev: &ScrollWheelEvent,
+        ev: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -690,7 +694,7 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_scroll(cx.listener(Self::on_scroll_wheel))
             .child(TerminalElement {
                 terminal: self.terminal.clone(),
                 view: cx.entity(),

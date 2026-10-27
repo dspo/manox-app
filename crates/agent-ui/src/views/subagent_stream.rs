@@ -256,8 +256,8 @@ impl Render for SubagentStreamView {
                 }
                 scroll.scroll_to_bottom();
             })
-            .on_scroll_wheel(
-                cx.listener(|this, ev: &gpui::ScrollWheelEvent, window, cx| {
+            .on_scroll(
+                cx.listener(|this, ev: &gpui::ScrollEvent, window, cx| {
                     // An upward wheel breaks tail-follow so the user can read
                     // back; the next re-subscribe re-arms it.
                     let dy = ev.delta.pixel_delta(window.line_height()).y;
