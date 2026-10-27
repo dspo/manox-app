@@ -30,7 +30,9 @@ use gpui_base::text::TextViewMotion;
 use gpui_component::{Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
 use vte::ansi::{Attr, Color, Handler, NamedColor};
 
-use crate::markdown::text_view::{panel_document, stream_fade_motion};
+use crate::markdown::text_view::{
+    CodeHighlighter, panel_document, panel_highlighter, panel_styled_runs, stream_fade_motion,
+};
 
 /// Lines a finalized panel renders before the "load more" affordance. Streaming
 /// panels ignore the limit and show the whole live output.
@@ -64,6 +66,9 @@ pub enum PanelKind {
 
 /// One tool invocation's shell-like rendering surface. Owned as a persistent
 /// `Entity` by the conversation so the composed output survives re-renders.
+/// A cached body highlighter and the styled runs it was built from.
+type StyledHighlighter = (Vec<(Range<usize>, HighlightStyle)>, CodeHighlighter);
+
 pub struct TerminalPanel {
     kind: PanelKind,
     command: Option<SharedString>,
@@ -78,6 +83,10 @@ pub struct TerminalPanel {
     /// is set; `Plain`/`Diff` carry their own coloring and ignore it).
     lang: Option<String>,
     theme: Theme,
+    /// The body's code-block highlighter, keyed on the styled runs it was built
+    /// from. Cached across frames on purpose: a fresh `Arc` per render re-arms
+    /// gpui-base's selection-preserving reflow and the body cannot be selected.
+    highlighter: Option<StyledHighlighter>,
 }
 
 impl TerminalPanel {
@@ -100,6 +109,7 @@ impl TerminalPanel {
             visible: PAGE_SIZE,
             lang: None,
             theme: theme.clone(),
+            highlighter: None,
         }
     }
 
@@ -396,16 +406,25 @@ impl Render for TerminalPanel {
             }
         }
 
-        // The body is the secondary, italic text (the base run in
-        // `panel_document` paints it so); the prompt-block guidance and command
-        // runs pin their own slant via `styled`, overriding back. Streaming
-        // bodies ride the fade-in motion; settled ones adopt updates at once.
+        // The body is the secondary, italic text (the base run below paints it
+        // so); the prompt-block guidance and command runs pin their own slant
+        // via `runs`, overriding back. Streaming bodies ride the fade-in
+        // motion; settled ones adopt updates at once.
         let motion = if self.streaming {
             stream_fade_motion()
         } else {
             TextViewMotion::default()
         };
-        let doc = panel_document("panel-doc", &s, runs, &self.theme, motion);
+        let styled = panel_styled_runs(&s, runs, &self.theme);
+        let highlighter = match &self.highlighter {
+            Some((cached, arc)) if *cached == styled => arc.clone(),
+            _ => {
+                let arc = panel_highlighter(styled.clone());
+                self.highlighter = Some((styled, arc.clone()));
+                arc
+            }
+        };
+        let doc = panel_document("panel-doc", &s, highlighter, &self.theme, motion);
 
         let mut panel = v_flex()
             .id("terminal-panel")

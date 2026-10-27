@@ -195,6 +195,12 @@ pub fn subagent_panel(address: &str, cx: &App) -> Option<Entity<SubagentPanel>> 
 /// Build the whole chrome window root: multiplexer + shell + the projection
 /// pump. Called from the manox bin on every window open.
 pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
+    // Documents get their code-block highlighter from the app-wide text
+    // defaults, never per view (a per-view closure is a new `Arc` every frame,
+    // which keeps gpui-base's selection-preserving reflow armed and leaves the
+    // document unselectable). Every caller syncs the theme before mounting, so
+    // this lands after `Theme::sync_base` reinstalled Component's defaults.
+    steer_components::markdown::install_code_highlighter(cx);
     // ONE workspace carries the whole data face — its multiplexer feeds both
     // the sidebar projection and the conversation column mounted as the
     // shell's main surface. A re-opened window mounts a fresh shell over the

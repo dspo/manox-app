@@ -34,7 +34,8 @@ pub use linkify::{LinkKind, classify_target, linkify_markdown};
 pub use svg_block::with_diagram_blocks;
 pub use terminal_panel::{GitSummary, PanelKind, TerminalPanel, hashline_text};
 pub use text_view::{
-    ChatDocument, chrome_style, code_copy_actions, message_document, message_style, panel_document,
-    reasoning_document, static_document, steer_code_highlighter, stream_fade_motion,
-    table_copy_actions,
+    ChatDocument, CodeHighlighter, chrome_style, code_copy_actions, install_code_highlighter,
+    install_selection_drag_guard, message_document, message_style, panel_document,
+    panel_highlighter, panel_styled_runs, reasoning_document, static_document,
+    steer_code_highlighter, stream_fade_motion, table_copy_actions,
 };

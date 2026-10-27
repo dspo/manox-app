@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gpui::{Bounds, Entity, FocusHandle, ListState, Pixels, SharedString, Subscription};
+use gpui::{
+    Bounds, Entity, FocusHandle, FollowMode, ListState, Pixels, SharedString, Subscription,
+};
 use gpui_component::input::{InputState, TextareaState};
 use gpui_component::menu::PopupMenu;
 
@@ -313,6 +315,42 @@ fn is_image_path(path: &Path) -> bool {
     )
 }
 
+/// Press bookkeeping for grabbing the transcript: pressing anywhere in the
+/// message list pauses tail-follow (the user is interacting with the current
+/// view, new tail content must not yank the column), and a release that
+/// produced no text selection and did not move the view restores the
+/// press-time follow state so plain clicks keep today's live-reading behavior.
+/// A moved view means the press was a scrollbar/scroll gesture, which already
+/// disengaged follow on its own. Only an actual selection keeps follow paused;
+/// wheeling back to the bottom or the next submit re-arms it regardless
+/// (`pause_following_tail` keeps the list in Tail mode).
+#[derive(Default)]
+pub struct TranscriptPress {
+    had_follow: bool,
+    press_top: Option<(usize, Pixels)>,
+}
+
+impl TranscriptPress {
+    pub fn started(&mut self, list_state: &ListState) {
+        self.had_follow = list_state.is_following_tail();
+        let top = list_state.logical_scroll_top();
+        self.press_top = Some((top.item_ix, top.offset_in_item));
+        list_state.pause_following_tail();
+    }
+
+    pub fn ended(&mut self, list_state: &ListState, has_selection: bool) {
+        let top = list_state.logical_scroll_top();
+        let unmoved = self.press_top.is_some_and(|(item_ix, offset)| {
+            item_ix == top.item_ix && offset == top.offset_in_item
+        });
+        if !has_selection && self.had_follow && unmoved {
+            list_state.set_follow_mode(FollowMode::Tail);
+        }
+        self.had_follow = false;
+        self.press_top = None;
+    }
+}
+
 pub struct ChatColumn {
     /// The port the moved chat views call through (see `host.rs` in
     /// steer-agent-chat-ui and agent-ui's `WorkspaceChatHost`).
@@ -581,6 +619,9 @@ pub struct ChatColumn {
     /// directly on `Workspace`, plus strong handles to the active thread and conversation
     /// it renders against. Writes flow through `self.context_rail.update`.
     pub context_rail: Entity<crate::views::context_rail::ContextRail>,
+    /// Press/release bookkeeping for grabbing the transcript (see
+    /// [`TranscriptPress`]).
+    pub transcript_press: TranscriptPress,
 }
 
 // ── ask-family state operations ────────────────────────────────────────────
@@ -829,5 +870,76 @@ mod tests {
             item("f-1", FollowUpState::Failed),
         ]);
         assert_eq!(steer_group_insert_index(&no_queue), 2);
+    }
+
+    fn armed_list() -> ListState {
+        let state = ListState::new(0, gpui::ListAlignment::Bottom, gpui::px(0.));
+        state.set_follow_mode(FollowMode::Tail);
+        state
+    }
+
+    #[test]
+    fn a_grabbing_press_pauses_tail_follow() {
+        let state = armed_list();
+        assert!(state.is_following_tail(), "armed at the tail");
+
+        let mut press = TranscriptPress::default();
+        press.started(&state);
+        assert!(!state.is_following_tail(), "the grab pauses tail-follow");
+
+        press.ended(&state, false);
+        assert!(
+            state.is_following_tail(),
+            "a clean click restores the press-time follow state"
+        );
+    }
+
+    #[test]
+    fn a_real_selection_keeps_follow_paused() {
+        let state = armed_list();
+        let mut press = TranscriptPress::default();
+        press.started(&state);
+        press.ended(&state, true);
+        assert!(
+            !state.is_following_tail(),
+            "a selection holds the column where the user dragged it"
+        );
+
+        // The next grab starts from the paused state: releasing cleanly must
+        // not arm a follow the user never had.
+        press.started(&state);
+        press.ended(&state, false);
+        assert!(!state.is_following_tail(), "no accidental re-arm");
+    }
+
+    #[test]
+    fn a_grab_while_not_following_stays_unarmed() {
+        let state = ListState::new(0, gpui::ListAlignment::Bottom, gpui::px(0.));
+        assert!(!state.is_following_tail());
+
+        let mut press = TranscriptPress::default();
+        press.started(&state);
+        press.ended(&state, false);
+        assert!(!state.is_following_tail(), "a clean click does not arm");
+    }
+
+    #[test]
+    fn a_press_that_moved_the_view_does_not_re_arm_follow() {
+        // A scrollbar drag begins as a press in the list band; it already
+        // disengaged follow through the scroll path, so the release must not
+        // pin the column back to the tail.
+        let state = ListState::new(3, gpui::ListAlignment::Bottom, gpui::px(0.));
+        state.set_follow_mode(FollowMode::Tail);
+        let mut press = TranscriptPress::default();
+        press.started(&state);
+        state.scroll_to(gpui::ListOffset {
+            item_ix: 1,
+            offset_in_item: gpui::px(8.),
+        });
+        press.ended(&state, false);
+        assert!(
+            !state.is_following_tail(),
+            "a view that moved stays where the gesture left it"
+        );
     }
 }

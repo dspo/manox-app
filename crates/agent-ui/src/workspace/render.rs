@@ -487,6 +487,8 @@ impl Workspace {
                         let list_state = self.chat.read(cx).list_state.clone();
                         let bounce_state = self.chat.read(cx).list_state.clone();
                         let chat_for_bounce = self.chat.clone();
+                        let chat_for_press = self.chat.clone();
+                        let chat_for_release = self.chat.clone();
                         let width_state = self.chat.read(cx).list_state.clone();
                         let message_list_width = self.chat.read(cx).message_list_width.clone();
                         let diag_state = self.chat.read(cx).list_state.clone();
@@ -524,6 +526,35 @@ impl Workspace {
                                 .font_family(mono_family.clone())
                                 .font_weight(gpui::FontWeight::LIGHT)
                                 .child(list_el)
+                                // Grabbing the transcript pauses tail-follow
+                                // so the next streamed chunk cannot yank the
+                                // column away mid-drag. A release that produced
+                                // no text selection and left the view where the
+                                // press found it restores the press-time follow
+                                // state (plain clicks keep live-reading); a real
+                                // selection or a moved view (scrollbar drag)
+                                // stays paused until the user wheels back to the
+                                // bottom or submits — the pause keeps Tail mode,
+                                // so both re-arm it.
+                                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                                    chat_for_press.update(cx, |chat, cx| {
+                                        chat.transcript_press.started(&chat.list_state);
+                                        cx.notify();
+                                    });
+                                })
+                                .on_mouse_up(gpui::MouseButton::Left, move |_, window, cx| {
+                                    // The bubble-phase handler runs before the
+                                    // engine's window-level mouse-up, but the
+                                    // selection snapshot is already readable.
+                                    let has_selection =
+                                        !gpui_base::TextSelection::selected_text(window, cx)
+                                            .is_empty();
+                                    chat_for_release.update(cx, |chat, cx| {
+                                        chat.transcript_press
+                                            .ended(&chat.list_state, has_selection);
+                                        cx.notify();
+                                    });
+                                })
                                 .on_prepaint(move |bounds, window, _app| {
                                     if message_list_width.update(bounds.size.width, &width_state) {
                                         window.refresh();
@@ -580,6 +611,24 @@ impl Workspace {
             .flex()
             .child(conversation_column)
             .children(turn_navigator_overlay)
+            // A zero-size canvas is the paint-phase hook this registration
+            // needs (window listeners may only be installed while painting).
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    |_, _, window, _| {
+                        // A popup menu's click stops propagation, so the
+                        // selection engine never sees the mouse-up that would
+                        // end the drag its mouse-down armed; without the guard
+                        // the pointer's next button-less travel across the
+                        // transcript selects whatever it crosses.
+                        steer_components::markdown::install_selection_drag_guard(window);
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0(),
+            )
             .on_prepaint(move |bounds, window, _app| {
                 if card_width.set(bounds.size.width) {
                     window.refresh();

@@ -43,8 +43,6 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Sizable as _, Theme};
 use gpui_kit_assets::IconName;
 
-use crate::markdown::text_view::steer_code_highlighter;
-
 /// Custom block name for one rasterized fence. Renderers are registered by
 /// name, so this string is the whole contract between the two halves below.
 const BLOCK_NAME: &str = "svg";
@@ -337,7 +335,7 @@ fn svg_element(
         .min_w_0()
         .child(match showing {
             Face::Image => image_face(raster, name),
-            Face::Code => code_face(node, key, name, code, cx),
+            Face::Code => code_face(node, key, name, code),
         })
         .child(
             div()
@@ -396,16 +394,9 @@ fn image_face(raster: &Arc<RenderImage>, name: &'static str) -> AnyElement {
 /// The fence as its own code block: the surface's markdown stack over the
 /// source. No diagram block is registered on this document — the fence would
 /// rasterize again, and that one again.
-fn code_face(
-    node: &MarkdownNode,
-    key: u64,
-    name: &'static str,
-    code: &FaceStyle,
-    cx: &mut App,
-) -> AnyElement {
+fn code_face(node: &MarkdownNode, key: u64, name: &'static str, code: &FaceStyle) -> AnyElement {
     let mut view = TextView::markdown(("markdown-svg-code", key), node.as_markdown().to_string())
-        .style(code.style.clone())
-        .code_block_highlighter(steer_code_highlighter(Theme::global(cx)));
+        .style(code.style.clone());
     if let Some(size) = code.size {
         view = view.text_size(size);
     }
