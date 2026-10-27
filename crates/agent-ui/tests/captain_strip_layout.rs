@@ -23,6 +23,11 @@ const SESSION: &str = "sess-captain-strip";
 const MODEL: &str = "openrouter/anthropic/claude-sonnet-4-5";
 
 fn running_chat() -> ahp_types::state::ChatState {
+    // The strip anchors its clock on this stamp, so a turn that started five
+    // seconds ago is already past the `elapsed > 0` guard: the clock paints on
+    // the first frame, with no ticker wait.
+    let started_at = (chrono::Utc::now() - chrono::Duration::seconds(5))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     serde_json::from_value(serde_json::json!({
         "resource": chat_uri(SESSION),
         "title": "captain strip layout",
@@ -31,7 +36,7 @@ fn running_chat() -> ahp_types::state::ChatState {
         "turns": [],
         "activeTurn": {
             "id": "turn-1",
-            "startedAt": "2026-10-23T00:00:00.000Z",
+            "startedAt": started_at,
             "message": { "text": "repaint the strip", "origin": { "kind": "user" } },
             "responseParts": [
                 { "kind": "markdown", "id": "turn-1-p0", "content": "working on it" }
@@ -66,10 +71,9 @@ async fn a_narrow_card_keeps_the_strips_clock_and_activity(cx: &mut TestAppConte
     });
     workspace.update(&mut visual.cx, |ws, cx| ws.diagnostic_sync_conversation(cx));
 
-    // Flush the store-observe callbacks now, then let a whole second of local
-    // turn time pass: the clock renders only after it ticks.
+    // Flush the store-observe callbacks, then draw: the clock is already live
+    // (the turn started five seconds ago), so no ticker wait is needed.
     visual.run_until_parked();
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
     for _ in 0..3 {
         visual.update(|window, cx| window.draw(cx).clear(cx));
         visual.run_until_parked();

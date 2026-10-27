@@ -108,7 +108,7 @@ pub enum ConvItem {
     /// flat under a model-name-only header.
     Thinking(ThinkingContainer),
     /// The whole-turn process head (dsh's TurnProcess row): sits ABOVE the
-    /// turn's first segment once the turn settled —「已完成，用时 N 秒」—
+    /// turn's first segment once the turn settled —「已完成，用时 2分5秒」—
     /// derived from the state's own `turn.duration`, so the live path shows
     /// it the moment the turn archives. Folding it hides the turn's segments
     /// (the reply is exempt); `hidden_by_turn_process` resolves that.
@@ -251,8 +251,8 @@ pub struct ThinkingContainer {
     /// individual entry is currently live.
     pub accepting_entries: bool,
     /// True while the segment is live (turn running) OR any entry is still
-    /// streaming / non-terminal. Drives the spinner + "Thinking for Xs" label
-    /// vs the frozen "Thought for Xs".
+    /// streaming / non-terminal. Drives the header's spinner and its live
+    /// elapsed (a settled segment renders `frozen_secs` instead).
     pub streaming: bool,
     /// True ⇒ the segment renders its header row alone; false ⇒ every entry
     /// renders under the header. Derived: a settled segment folds unless the
@@ -260,16 +260,17 @@ pub struct ThinkingContainer {
     /// render flat (no cover).
     pub collapsed: bool,
     pub user_toggled: bool,
-    /// When the segment started; the live "for Xs" is
-    /// `started_at.elapsed().as_secs()`, recomputed each render while the
-    /// ticker fires. Anchored on the turn's own `started_at` so the elapsed
-    /// covers the whole turn, not just since the first tool call.
+    /// When the segment started; the live elapsed is
+    /// `started_at.elapsed().as_secs()`, rendered h/m/s and recomputed each
+    /// render while the ticker fires. Anchored on the turn's own `started_at`
+    /// so the elapsed covers the whole turn, not just since the first tool
+    /// call.
     pub started_at: Instant,
     /// The elapsed seconds captured when the segment went terminal. Once set,
-    /// "Thought for Xs" renders this fixed value instead of re-reading
-    /// `started_at` (which would keep growing on every later re-render).
-    /// Derived from the turn's own `duration`; `None` while the turn runs or
-    /// when the fold carried no duration.
+    /// the header renders this fixed value instead of re-reading `started_at`
+    /// (which would keep growing on every later re-render). Derived from the
+    /// turn's own `duration`; `None` while the turn runs or when the fold
+    /// carried no duration.
     pub frozen_secs: Option<u64>,
 }
 
@@ -1627,6 +1628,82 @@ mod tests {
             keys_of(&nodes),
             vec!["notice:rej:7", "notice:rej:9"],
             "a refusal row survives re-projection"
+        );
+    }
+
+    /// The Captain strip's clock counts from the active turn's own `started_at`
+    /// — the host stamps it when the turn (and therefore the user message that
+    /// opened it) was submitted.
+    #[test]
+    fn the_captain_clock_anchors_on_the_active_turns_started_at() {
+        let started_at = (chrono::Utc::now() - chrono::Duration::seconds(90))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let start: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/turnStarted", "turnId": "t-1",
+            "startedAt": started_at,
+            "message": { "text": "hi", "origin": { "kind": "user" } },
+        }))
+        .expect("the start action parses");
+        let mut chat = empty_chat();
+        fold(&mut chat, &start);
+        let (env, _host) = env();
+        let mut conversation = ConversationState::new(manox_agent::MessageAuthor::Lead);
+        let _ = conversation.stage(Some(&chat), &env);
+        assert!(
+            conversation.running_secs().abs_diff(90) <= 1,
+            "the clock counts from the turn's start stamp"
+        );
+    }
+
+    /// The repaired anchor is the segment header's anchor too: the header's
+    /// live elapsed counts from the turn's start stamp rather than from the
+    /// first time this client saw the turn.
+    #[test]
+    fn the_segment_header_counts_from_the_same_turn_start() {
+        let started_at = (chrono::Utc::now() - chrono::Duration::seconds(90))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let start: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/turnStarted", "turnId": "t-1",
+            "startedAt": started_at,
+            "message": { "text": "hi", "origin": { "kind": "user" } },
+        }))
+        .expect("the start action parses");
+        let mut chat = empty_chat();
+        fold(&mut chat, &start);
+        fold(&mut chat, &open_rs("t-1", "p-r1"));
+        fold(&mut chat, &reasoning_delta("t-1", "p-r1", "thinking"));
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let segment = nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                ConvItem::Thinking(t) => Some(t),
+                _ => None,
+            })
+            .expect("the reasoning round forms a live segment");
+        assert!(
+            segment.started_at.elapsed().as_secs().abs_diff(90) <= 1,
+            "the header counts from the turn's start stamp, not first sight"
+        );
+    }
+
+    /// An unparseable start stamp must not panic: the clock falls back to the
+    /// instant this client first saw the turn.
+    #[test]
+    fn an_unparseable_start_stamp_falls_back_to_first_sight() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "hi"));
+        chat.active_turn
+            .as_mut()
+            .expect("the turn is in flight")
+            .started_at = "not-a-time".to_string();
+        let (env, _host) = env();
+        let mut conversation = ConversationState::new(manox_agent::MessageAuthor::Lead);
+        let _ = conversation.stage(Some(&chat), &env);
+        assert!(
+            conversation.running_secs() <= 1,
+            "first sight seeds the fallback anchor"
         );
     }
 

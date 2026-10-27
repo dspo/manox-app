@@ -27,3 +27,9 @@ pub fn t_count(key: &str, count: i64) -> SharedString {
 pub fn t_str_count(key: &str, args: &[(&str, &str)], count: i64) -> SharedString {
     steer_i18n::t_str_count(key, args, count).into()
 }
+
+/// A duration in seconds as localized h/m/s (`steer_i18n::t_duration`), wrapped
+/// for gpui APIs.
+pub fn t_duration(secs: i64) -> SharedString {
+    steer_i18n::t_duration(secs).into()
+}

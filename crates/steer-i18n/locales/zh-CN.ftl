@@ -195,7 +195,11 @@ subagent-panel-final-note = 实时转录不跨重载保留；以下为子代理�
 
 thinking-tool-result = 工具结果
 
-thinking-duration = { $count }秒
+# 共用的 h/m/s 时长格式（`steer_i18n::t_duration`）：Captain 状态行、活动段头、
+# 整轮过程头。前导零单位省略，秒始终显示。
+duration-hms = { $h }小时{ $m }分{ $s }秒
+duration-ms = { $m }分{ $s }秒
+duration-s = { $s }秒
 
 activity-failed = { $count } 失败
 

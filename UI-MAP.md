@@ -356,9 +356,9 @@ Collapsible: chevron + "Reasoning" label + muted italic body, rendered as the ti
 
 One contiguous thinking + tool-call segment within a user turn, rendered as an **ActivityChain** (`views::activity_chain::ActivityChain`, driven by `render_thinking`) — the chain-of-thought look is RETIRED: no marker column, no connector rail, no per-entry chevron. Entries render flush with the column's left edge (the title row and the body each span the full width), and an entry's title row IS its fold affordance (hover wash + click; enter / space once focused — a tab stop like the header row, but with no chevron glyph).
 
-**Header row** (the segment's only chrome): the model identity + rotating chevron + live braille spinner + per-kind counts (`Read×7`, `Edit×6`, `思考×8` via `message-reasoning`) + elapsed (`thinking-duration`) + red `activity-failed` / orange `activity-awaiting-approval` badges, all riding the header's `meta` slots; clicking toggles the whole segment (`collapsed` + sticky `user_toggled`). The model identity renders through [`ModelTag`](#modeltag) — `{provider display}/{model display}` with the model segment tinted by wire api; the registration's `-anthropic`-style suffix never shows as text. **The model shows once per run**: a segment whose nearest earlier segment already carries the same model is stamped `model_repeats` and renders NO model fragment (chevron + counts only; a flat single-entry segment renders no header row at all) — a turn's repeated segments do not stack the same name.
+**Header row** (the segment's only chrome): the model identity + rotating chevron + live braille spinner + per-kind counts (`Read×7`, `Edit×6`, `思考×8` via `message-reasoning`) + elapsed h/m/s (leading zero units dropped, second always shown — `steer_i18n::t_duration`; the span is the whole turn: live counts from the turn's start, settled reads the turn duration) + red `activity-failed` / orange `activity-awaiting-approval` badges, all riding the header's `meta` slots; clicking toggles the whole segment (`collapsed` + sticky `user_toggled`). The model identity renders through [`ModelTag`](#modeltag) — `{provider display}/{model display}` with the model segment tinted by wire api; the registration's `-anthropic`-style suffix never shows as text. **The model shows once per run**: a segment whose nearest earlier segment already carries the same model is stamped `model_repeats` and renders NO model fragment (chevron + counts only; a flat single-entry segment renders no header row at all) — a turn's repeated segments do not stack the same name.
 
-**Whole-turn process head (dsh's TurnProcess row)**: a settled turn with at least one segment gains「已完成，用时 N 秒 ▾」above its first emitted row (its first segment, or a leading delegation/ask card) — derived from the state's own `turn.duration`, so the live path shows it the moment the fold archives the turn (the old event-fold minted it from a client clock and lost it whenever the Stop event raced a history reload). It mounts EXPANDED — folding is the reader's call (a settled turn's process vanishing on arrival read as "tools never render"). Folding hides the turn's SEGMENTS via a render-layer overlay (`hidden_by_turn_process`: the scope is the row's OWN turn — walking backwards, the first turn-scope marker decides: the turn's process head, or the user row that opened it, so an earlier turn's fold never reaches in; only `Thinking` hides — the reply is exempt by construction) **except the turn's LAST segment** (the answer-facing reasoning, dsh's answer-anchor rule). Live/failed turns never carry one.
+**Whole-turn process head (dsh's TurnProcess row)**: a settled turn with at least one segment gains「已完成，用时 2分5秒 ▾」above its first emitted row (its first segment, or a leading delegation/ask card) — the duration renders as the same h/m/s form (leading zero units dropped, second always shown), derived from the state's own `turn.duration`, so the live path shows it the moment the fold archives the turn (the old event-fold minted it from a client clock and lost it whenever the Stop event raced a history reload). It mounts EXPANDED — folding is the reader's call (a settled turn's process vanishing on arrival read as "tools never render"). Folding hides the turn's SEGMENTS via a render-layer overlay (`hidden_by_turn_process`: the scope is the row's OWN turn — walking backwards, the first turn-scope marker decides: the turn's process head, or the user row that opened it, so an earlier turn's fold never reaches in; only `Thinking` hides — the reply is exempt by construction) **except the turn's LAST segment** (the answer-facing reasoning, dsh's answer-anchor rule). Live/failed turns never carry one.
 
 **Row rhythm**: a reply immediately followed by an activity segment tightens its bottom row gap (`tight_gap_after` → `pb_1` instead of `pb_4`): the segment's own header padding breathes, so the generic 16px read as a hole (the reverse direction keeps the air — a reply needs it).
 
@@ -468,14 +468,17 @@ Captain's own: a [`PixelSpinner`](#meerkat) (grid variant, `ai_elements::PixelSp
 flush at the left = healthy running, then the literal product name `Captain` +
 the localized verb (`steering-verb`：正在驾驶 / is steering), the model via
 [`ModelTag`](#modeltag) (`{provider}/` muted, model tinted by wire api) flush
-against the verb (no spacer: `Captain 正在驾驶百炼/qwen3.8-flash·234秒`), `·`,
+against the verb (no spacer: `Captain 正在驾驶百炼/qwen3.8-flash·3分54秒`), `·`,
 and the activity — 思考中/Thinking while a reasoning round streams,
 正在回复/Replying while the assistant body streams, or the running tool's
 one-line summary (monospace, runtime-provided; newline runs collapse to single
 spaces so a multi-line `bash` body cannot stretch the block — the row's
-`.truncate()` then ellipsizes it on width). The running clock (dsh's「深度探索中
-N 秒」suffix shape) rides the same row from
-`ConversationState::running_secs`. The activity comes
+`.truncate()` then ellipsizes it on width). The running clock counts from
+`ActiveTurn.started_at` — the instant the host stamped the turn, standing in
+for the user message that opened it — read via
+`ConversationState::running_secs` and rendered as localized h/m/s with leading
+zero units dropped (`2小时3分5秒` / `2h 3m 5s`; seconds always shown). The
+activity comes
 from `ConversationState::live_activity` (`LiveActivity`), a read-only
 projection over the trailing item: a streaming assistant body names Replying,
 the trailing segment is scanned back-to-front for a streaming round or an
@@ -500,9 +503,9 @@ receipt naming the run) and stays absent when that call is not in the retained
 fold. The model segment names the
 SESSION's model: a sub-agent run on this harness inherits it unless its own
 definition pins one, and the run's own model has no seat on the parent's
-channel. The row's clock is wall-clock from the entry's `startedAt`. A
-sub-agent row's click opens that child's transcript in the main
-column ([SubagentStream](#subagentstream)). The Captain's own row carries NO
+channel. The row's clock is wall-clock from the entry's `startedAt`, rendered
+in the same h/m/s form. A sub-agent row's click opens that child's transcript
+in the main column ([SubagentStream](#subagentstream)). The Captain's own row carries NO
 click: the block is not on screen while the page owns the column, so the round
 trip back is the page's own back control (no dead affordance here).
 
