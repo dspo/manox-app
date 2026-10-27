@@ -832,9 +832,10 @@ pub struct AhpStore {
     /// separate store updates, so the off state between them is observable.
     steer_boundaries: HashSet<String>,
     /// The foreground session id (the multiplexer publishes on focus
-    /// changes): chat activity in any OTHER session rises the official
-    /// unread bit (`session/isReadChanged` — client-owned observation
-    /// state, echoed to every subscriber) instead of a local map.
+    /// changes). Focus DECLARED a view (`isReadChanged(true)`, stamped as
+    /// the derived read rule's viewed input); a settle edge visible in the
+    /// focused session re-declares it. The app never rises the bit — the
+    /// host derives unread from the two stamps.
     focused_session: Option<String>,
     /// Optimistic writes the host has not confirmed yet, oldest first:
     /// (session id, config key, the value the key had before). A rejection
@@ -859,11 +860,6 @@ pub struct AhpStore {
     /// would otherwise re-issue the subscribe and pile host-side
     /// subscriptions. The store never unsubscribes, so the set only grows.
     thread_subs: std::collections::HashSet<String>,
-    /// Sessions with an unread-rise write in flight (issued, the host echo
-    /// not folded yet): the rise fires at most once per read→unread
-    /// transition instead of once per background action while a turn
-    /// streams.
-    pending_unread: std::collections::HashSet<String>,
     /// The submit pipeline's LATCHED failure: a handshake that never landed
     /// or a dispatch that failed to leave. The lazy `Stalled` face (a
     /// pre-connect queue past the budget) is computed on read, never stored.
@@ -916,7 +912,6 @@ impl AhpStore {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -1036,7 +1031,6 @@ impl AhpStore {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -1190,10 +1184,12 @@ impl AhpStore {
             .collect()
     }
 
-    /// Publish the foreground session (the multiplexer's focus call): chat
-    /// activity elsewhere rises the official unread bit, and the newly
-    /// focused session's bit clears through the same protocol (the echo
-    /// lands for every subscriber, this one included).
+    /// Publish the foreground session (the multiplexer's focus call): the
+    /// focus declares a view — the derived read rule's second input, so the
+    /// newly focused session's unread clears host-side (the echo lands for
+    /// every subscriber, this one included). Declaring on every focus is
+    /// the point: the host's stamp is monotone, and GW5 focus is the app's
+    /// whole definition of "looked at" (window visibility is not consulted).
     pub fn set_focused_session(&mut self, session_id: Option<&str>) {
         self.focused_session = session_id.map(str::to_string);
         if let Some(session_id) = session_id {
@@ -1653,12 +1649,6 @@ impl AhpStore {
                     while self.rejections.len() > 32 {
                         self.rejections.pop_front();
                     }
-                    // A refused unread-rise write never dropped the bit,
-                    // so the gate must re-arm — the next background
-                    // action may retry the rise.
-                    if envelope.channel.starts_with("ahp-session:/") {
-                        self.pending_unread.remove(id_of(&envelope.channel));
-                    }
                     if own {
                         // Every own refusal is visible: a config write
                         // rolls its optimistic twin back by VALUE (see
@@ -1758,19 +1748,15 @@ impl AhpStore {
                 self.record_envelope_sidebands(&envelope.channel, &envelope.action, carried_queued);
                 match self.book.apply(&envelope.channel, &envelope.action) {
                     FoldEffect::Changed => {
-                        // The official unread rise (#870's app half):
-                        // visible chat activity in a session that is not the
-                        // foreground clears the IsRead bit through the
-                        // protocol — the host echoes the action to every
-                        // subscriber, so all clients (and this book's live
-                        // fold) see the same dot. The owning session is
-                        // resolved from the chat (a chat id equals its
-                        // session id only in the landing form), and the rise
-                        // fires at most once per read→unread transition: an
-                        // in-flight gate blocks re-fires until the fold
-                        // shows the bit back down (this write's echo, or
-                        // another client's), so one streaming background
-                        // turn dispatches once — not once per action.
+                        // The derived read model: the HOST stamps the settle
+                        // and derives the bit — the app only declares views
+                        // (`set_focused_session`), never rises. One seam
+                        // remains: a turn that settles while its session IS
+                        // focused derived a transient unread at the host the
+                        // instant the turn completed; this settle edge
+                        // re-declares the view. Monotone on the host (max),
+                        // so a redundant dispatch is free — once per turn
+                        // edge is politeness, not correctness.
                         let owning = if let Some(chat_id) = &chat_id {
                             self.book.session_of_chat(chat_id).map(str::to_string)
                         } else if envelope.channel.starts_with("ahp-session:/") {
@@ -1779,23 +1765,14 @@ impl AhpStore {
                             None
                         };
                         if let Some(session_id) = &owning
-                            && self.book.sessions.get(session_id).is_some_and(|state| {
-                                state.status & ahp_types::state::SessionStatus::IsRead.bits() == 0
-                            })
-                        {
-                            self.pending_unread.remove(session_id);
-                        }
-                        if let Some(session_id) = &owning
-                            && self.focused_session.as_deref() != Some(session_id.as_str())
-                            && let Some(session) = self.book.sessions.get(session_id)
-                            && session.status & ahp_types::state::SessionStatus::IsRead.bits() != 0
-                            && self.pending_unread.insert(session_id.clone())
+                            && self.focused_session.as_deref() == Some(session_id.as_str())
+                            && matches!(&envelope.action, StateAction::ChatTurnComplete(_))
                         {
                             self.dispatch(
                                 session_uri(session_id),
                                 StateAction::SessionIsReadChanged(
                                     ahp_types::actions::SessionIsReadChangedAction {
-                                        is_read: false,
+                                        is_read: true,
                                     },
                                 ),
                             );
@@ -1815,12 +1792,6 @@ impl AhpStore {
                         while self.rejections.len() > 32 {
                             self.rejections.pop_front();
                         }
-                        // A refused unread-rise write never dropped the bit,
-                        // so the gate must re-arm — the next background
-                        // action may retry the rise.
-                        if envelope.channel.starts_with("ahp-session:/") {
-                            self.pending_unread.remove(id_of(&envelope.channel));
-                        }
                         // The batch archive dropped its rows at the write and
                         // schedules no walk of its own; a refused batch would
                         // leave them hidden with nothing to re-seed them. Ask
@@ -1836,7 +1807,18 @@ impl AhpStore {
                 }
             }
             ahp::SubscriptionEvent::SessionAdded(params) => {
-                let changed = self.book.seed_summary_at_front(params.summary);
+                // The host announces each id ONCE (its published-map diff):
+                // a first sight seeds at the front (a just-created session
+                // ranks first by recency anyway); a re-announce of an id
+                // this book already holds is an upsert only — re-fronting a
+                // known row would re-rank the sidebar on every host
+                // restart.
+                let id = id_of(&params.summary.resource).to_string();
+                let changed = if self.book.summaries.contains_key(&id) {
+                    self.book.seed_summaries(vec![params.summary])
+                } else {
+                    self.book.seed_summary_at_front(params.summary)
+                };
                 if changed {
                     cx.notify();
                 }
@@ -4065,7 +4047,6 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -5022,7 +5003,6 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
