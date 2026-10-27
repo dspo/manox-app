@@ -567,12 +567,7 @@ impl TerminalView {
         }
     }
 
-    fn on_scroll_wheel(
-        &mut self,
-        ev: &ScrollEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_scroll_wheel(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Negative = scroll up into scrollback history.
         let lines = match ev.delta {
             ScrollDelta::Pixels(p) => -(f32::from(p.y) / 20.) as i32,

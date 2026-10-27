@@ -2187,6 +2187,11 @@ impl Workspace {
     /// first entry; from then on the entity + subscription are reused so the
     /// user's last selection (and any scroll position) survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A mounted gpui-shell host owns the Settings surface; its launcher
+        // replaces the in-app overlay entirely.
+        if crate::run_settings_launcher(window, cx) {
+            return;
+        }
         if self.settings_view.is_none() {
             let settings = cx.new(|cx| SettingsView::new(window, cx));
             let sub = self.subscribe_settings(&settings, window, cx);

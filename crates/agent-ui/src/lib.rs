@@ -24,6 +24,7 @@ pub mod multiplexer;
 pub mod preview_host;
 pub mod project_menu;
 pub mod project_registry;
+pub mod settings_shell;
 pub mod sidebar_projection;
 pub mod slash_command;
 pub mod tool_tabs;
@@ -59,6 +60,33 @@ gpui::actions!(
     ]
 );
 
+/// A gpui-shell host's replacement for the in-app Settings surface: when
+/// installed, ⌘,/Settings… opens the host's script-driven floating dialog
+/// instead of the Workspace overlay. Main-thread only (gpui entities).
+pub type SettingsLauncher = std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
+
+thread_local! {
+    static SETTINGS_LAUNCHER: std::cell::RefCell<Option<SettingsLauncher>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs the gpui-shell Settings launcher (see [`SettingsLauncher`]).
+pub fn set_settings_launcher(launcher: SettingsLauncher) {
+    SETTINGS_LAUNCHER.with(|slot| *slot.borrow_mut() = Some(launcher));
+}
+
+/// Runs the installed Settings launcher, if a gpui-shell host mounted one.
+pub(crate) fn run_settings_launcher(window: &mut gpui::Window, cx: &mut gpui::App) -> bool {
+    SETTINGS_LAUNCHER.with(|slot| {
+        if let Some(launch) = slot.borrow().as_ref() {
+            launch(window, cx);
+            true
+        } else {
+            false
+        }
+    })
+}
+
 /// Keybindings for composer history recall.
 ///
 /// Recall lives on `alt-up` / `alt-down` only: the bare arrows belong to the
@@ -81,12 +109,23 @@ pub fn composer_recall_key_bindings() -> Vec<gpui::KeyBinding> {
 /// `secondary-enter`, and overloading `Enter` for the chord would newline
 /// AND submit. A dedicated action on the composer's own context keeps the
 /// keystroke out of the textarea entirely.
-pub fn composer_send_key_bindings() -> Vec<gpui::KeyBinding> {
-    vec![gpui::KeyBinding::new(
-        "secondary-shift-enter",
-        steer_agent_chat_ui::ComposerSubmitInterrupt,
-        Some("composer > Input"),
-    )]
+pub fn composer_send_key_bindings(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
+    // `secondary-` resolves against the host OS, which 0.3.10's static
+    // `KeyBinding::new` cannot do — the load constructor can.
+    let predicate = gpui::KeyBindingContextPredicate::parse("composer > Input")
+        .expect("composer > Input context parses")
+        .into();
+    vec![
+        gpui::KeyBinding::load(
+            "secondary-shift-enter",
+            Box::new(steer_agent_chat_ui::ComposerSubmitInterrupt),
+            Some(predicate),
+            false,
+            None,
+            cx,
+        )
+        .expect("secondary-shift-enter resolves per host OS"),
+    ]
 }
 
 #[cfg(test)]
@@ -96,10 +135,12 @@ mod tests {
 
     /// `KeyBinding::new` panics on an unparseable context predicate, so
     /// constructing every binding set is a startup crash regression test.
-    #[test]
-    fn key_bindings_parse() {
-        assert_eq!(composer_recall_key_bindings().len(), 2);
-        assert_eq!(composer_send_key_bindings().len(), 1);
-        assert_eq!(turn_navigator_key_bindings().len(), 7);
+    #[gpui::test]
+    fn key_bindings_parse(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert_eq!(composer_recall_key_bindings().len(), 2);
+            assert_eq!(composer_send_key_bindings(cx).len(), 1);
+            assert_eq!(turn_navigator_key_bindings().len(), 7);
+        });
     }
 }

@@ -32,7 +32,7 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
     cx.update(|cx| {
         steer_i18n::init();
         agent_ui::slash_command::init(cx);
-        cx.bind_keys(agent_ui::composer_send_key_bindings());
+        cx.bind_keys(agent_ui::composer_send_key_bindings(cx));
     });
     let (window, ws) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(window.into(), cx);

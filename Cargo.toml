@@ -159,6 +159,10 @@ gpui-kit-assets = { version = "=0.8.1" }
 # the component wrapper exposes neither the per-instance code-block
 # highlighter nor heading weights, and both are hard requirements here.
 gpui-base = "=0.8.1"
+# gpui-shell — the same train's scriptable application runtime (QuickJS +
+# ShellRoot dialog/sheet/toast layers). Hosts the Settings script view as a
+# native floating dialog. `webview` off: steer carries its own webview stack.
+gpui-shell = { version = "=0.8.1", default-features = false, features = ["quickjs", "components"] }
 
 # lyon — pinned to the version already locked so the composer context ring's
 # LineCap::Round is the same copy gpui's StrokeOptions re-exports.

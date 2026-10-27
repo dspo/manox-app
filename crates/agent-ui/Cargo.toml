@@ -54,6 +54,7 @@ uuid.workspace = true
 
 gpui.workspace = true
 gpui-base.workspace = true
+gpui-shell.workspace = true
 gpui-component.workspace = true
 gpui-kit-assets.workspace = true
 # LineCap::Round for the composer context ring's stroked arcs — the type must

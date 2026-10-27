@@ -16,7 +16,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
     Context, FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListOffset,
-    ListState, ParentElement as _, Pixels, Render, ScrollWheelEvent, Styled as _, TestAppContext,
+    ListState, ParentElement as _, Pixels, Render, ScrollEvent, Styled as _, TestAppContext,
     VisualTestContext, Window, WindowHandle, div, list, point, px,
 };
 
@@ -53,11 +53,12 @@ fn render_row(ix: usize, _window: &mut Window, _cx: &mut gpui::App) -> gpui::Any
 }
 
 fn wheel(visual: &mut VisualTestContext, position: gpui::Point<Pixels>, dy: f32) {
-    visual.simulate_event(ScrollWheelEvent {
+    visual.simulate_event(ScrollEvent {
         position,
         delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
         modifiers: Default::default(),
         touch_phase: gpui::TouchPhase::Moved,
+        source: Default::default(),
     });
 }
 

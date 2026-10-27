@@ -4,7 +4,7 @@
 //! (`agent_ui::chrome_assembly`) in the window. Agent logic lives in the
 //! `agent` crate; UI lives in the `agent-ui` crate.
 
-use gpui::{App, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
+use gpui::{App, AppContext as _, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
 use gpui::{WindowBounds, WindowOptions};
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use std::borrow::Cow;
@@ -112,6 +112,11 @@ fn main() {
         agent_ui::slash_command::init(cx);
         manox_terminal::init();
         terminal_ui::init(cx);
+        // gpui-shell host: the settingsNative module, the script runtime,
+        // and the Settings launcher that replaces the in-app overlay — ⌘,/
+        // Settings… open the script-driven floating dialog. After
+        // gpui_component::init (the component catalog assumes it).
+        agent_ui::settings_shell::init(cx);
 
         // Embedded OFL typefaces. Lilex ships only Light/Medium in upright and
         // italic cuts: message body inherits Light, markdown bold/headings and
@@ -245,7 +250,7 @@ fn main() {
         ]);
         cx.bind_keys(agent_ui::turn_navigator_key_bindings());
         cx.bind_keys(agent_ui::composer_recall_key_bindings());
-        cx.bind_keys(agent_ui::composer_send_key_bindings());
+        cx.bind_keys(agent_ui::composer_send_key_bindings(cx));
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
         cx.on_action(|_: &ToggleFullscreen, cx: &mut App| {
             if let Some(handle) = cx.active_window() {
@@ -458,14 +463,17 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             // Must precede the first chrome frame (see register_fonts).
             steer_agent_chrome_ui::register_fonts(cx);
             // The chrome assembly is the window root: its own multiplexer,
-            // projected sidebar, tool tabs, and dock.
+            // projected sidebar, tool tabs, and dock. ShellRoot wraps it so
+            // the window carries gpui-shell's native dialog/sheet/toast
+            // layers (the Settings script dialog lives on them).
             let shell = agent_ui::chrome_assembly::mount(window, cx);
             cx.bind_keys([gpui::KeyBinding::new(
                 "cmd-n",
                 steer_agent_chrome_ui::shell::NewSession,
                 None,
             )]);
-            agent_ui::chrome_assembly::root(shell, window, cx)
+            let shell_root = agent_ui::settings_shell::wrap_root(shell, window, cx);
+            cx.new(|cx| gpui_component::Root::new(shell_root, window, cx))
         })
         .map_err(|e| anyhow::anyhow!("failed to open the main window: {e}"))?;
     agent_ui::dispatch::set_window(handle);

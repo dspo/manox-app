@@ -530,7 +530,7 @@ pub fn launch(app: gpui::Application) {
             steer_i18n::init();
             gpui_component::set_locale(steer_i18n::current().token());
             crate::slash_command::init(cx);
-            cx.bind_keys(crate::composer_send_key_bindings());
+            cx.bind_keys(crate::composer_send_key_bindings(cx));
 
             let options = gpui::WindowOptions {
                 window_min_size: Some(size(px(980.), px(640.))),

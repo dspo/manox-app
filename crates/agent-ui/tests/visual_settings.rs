@@ -1,18 +1,19 @@
-//! Visual acceptance for the Settings floating overlay (harness=false so it
-//! runs on the main thread; MacPlatform requires it for offscreen rendering;
-//! the Metal readback is macOS-only, everything else prints a skip line).
+//! Visual acceptance for the gpui-shell Settings floating dialog (harness=false
+//! so it runs on the main thread; MacPlatform requires it for offscreen
+//! rendering; the Metal readback is macOS-only, everything else prints a skip
+//! line).
 //!
 //! Run with `SETTINGS_SHOT=/tmp/settings.png cargo test -p agent-ui
-//! --features test-support --test visual_settings`. Mounts the REAL
-//! `Workspace` (empty hero column underneath), enters Settings through the
-//! production `enter_settings` path and captures the settled overlay: the
-//! dim mask, the centered rounded card and the upstream settings shell
-//! inside it. Beyond the pixels, the falsifiable assertions are luminance
-//! ones — the card reads bright at the window center while the dimmed
-//! column stays visibly darker at the corners (the 32%-black mask's work).
+//! --features test-support --test visual_settings`. Mounts the REAL wiring the
+//! app uses — `settings_shell::init` (the `settingsNative` HostModule + the
+//! script runtime) and `wrap_root` over a real `Workspace` — then opens the
+//! dialog through the production `open()` path and captures the native
+//! floating dialog: backdrop, focus-trapped card, script-driven settings
+//! pages. Falsifiable assertions: the dialog is mounted on the ShellRoot, and
+//! the pixels show a bright card over a dimmed backdrop.
 //!
-//! Without `SETTINGS_SHOT` the binary prints a skip line and exits green,
-//! so the test-support gate stays quiet in CI runs that only compile it.
+//! Without `SETTINGS_SHOT` the binary prints a skip line and exits green, so
+//! the test-support gate stays quiet in CI runs that only compile it.
 
 #[cfg(any(not(target_os = "macos"), not(feature = "test-support")))]
 fn main() {
@@ -28,7 +29,7 @@ fn main() {
 mod macos {
     use std::sync::Arc;
 
-    use agent_ui::{Workspace, assets::ExtrasAssetSource};
+    use agent_ui::{Workspace, assets::ExtrasAssetSource, settings_shell};
     use gpui::{AppContext as _, VisualTestAppContext, px, size};
 
     pub fn main() {
@@ -47,31 +48,28 @@ mod macos {
             gpui_component::init(cx);
             steer_i18n::init();
             steer_agent_chrome_ui::register_fonts(cx);
+            settings_shell::init(cx);
         });
 
         let handle = cx
             .open_offscreen_window(size(px(1280.), px(820.)), |window, cx| {
                 let workspace = cx.new(|cx| Workspace::new(window, cx));
-                workspace.update(cx, |ws, cx| ws.enter_settings(window, cx));
-                cx.new(|cx| gpui_component::Root::new(workspace, window, cx))
+                let shell_root = settings_shell::wrap_root(workspace, window, cx);
+                cx.new(|cx| gpui_component::Root::new(shell_root, window, cx))
             })
             .expect("offscreen window");
         cx.run_until_parked();
 
-        // Let the font/layout pass settle, then pump the entrance tween to
-        // its settled state: offscreen there is no platform frame loop, and
-        // `request_animation_frame` callbacks fire only through
-        // `simulate_next_frame` — sleeping alone would capture the first
-        // frame (delta=0, the card fully faded out).
-        for _ in 0..3 {
-            cx.update_window(handle.into(), |_view, window, cx| {
-                window.simulate_next_frame(cx);
-            })
-            .expect("window");
-            cx.run_until_parked();
-        }
+        // Open through the production path (the Settings launcher routes
+        // here), then pump the dialog's entrance to its settled state —
+        // offscreen there is no platform frame loop, and animation frames
+        // fire only through `simulate_next_frame`.
+        cx.update_window(handle.into(), |_root, window, cx| {
+            settings_shell::open(window, cx);
+        })
+        .expect("window");
         for _ in 0..40 {
-            cx.update_window(handle.into(), |_view, window, cx| {
+            cx.update_window(handle.into(), |_root, window, cx| {
                 window.simulate_next_frame(cx);
             })
             .expect("window");
@@ -79,15 +77,19 @@ mod macos {
             std::thread::sleep(std::time::Duration::from_millis(12));
         }
 
+        cx.read(|cx| {
+            assert!(
+                settings_shell::dialog_open(cx),
+                "the settings dialog must be mounted on the ShellRoot"
+            );
+        });
+
         let shot = cx
             .capture_screenshot(handle.into())
             .expect("capture screenshot");
 
-        // Geometry through pixels (VisualTestAppContext exposes no
-        // debug_bounds): the card is a bright rounded panel on a dimmed
-        // column, so the window center must be clearly brighter than the
-        // dimmed corners, and the card must not swallow the window — the
-        // corner column stays visible through the 32%-black mask.
+        // Pixels: a bright centered card over a dimmed backdrop (the dialog's
+        // own backdrop + the workspace underneath).
         let luminance = |x: u32, y: u32| -> f32 {
             let p = shot.get_pixel(x, y);
             0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32
@@ -97,11 +99,11 @@ mod macos {
         let corner = (luminance(30, 30) + luminance(w - 30, 30)) / 2.;
         assert!(
             center - corner > 30.,
-            "the floating card must sit bright over a dimmed column: center={center} corner={corner}"
+            "the floating card must sit bright over the dimmed backdrop: center={center} corner={corner}"
         );
         assert!(
-            corner < 200.,
-            "the mask must dim the column underneath: corner={corner}"
+            corner < 210.,
+            "the backdrop must dim what is underneath: corner={corner}"
         );
 
         shot.save(&path).expect("save png");
@@ -110,5 +112,8 @@ mod macos {
             shot.width(),
             shot.height()
         );
+        // Drop the shell host while the thread is alive; TLS-stage drops of
+        // the QuickJS runtime abort the process.
+        settings_shell::teardown();
     }
 }
