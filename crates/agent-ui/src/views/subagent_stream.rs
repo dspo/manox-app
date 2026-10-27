@@ -68,7 +68,7 @@ impl SubagentStreamView {
     ) -> Entity<Self> {
         let recipient = manox_agent::MessageAuthor::Agent(label.clone());
         let conversation = cx.new(|_| ConversationState::new(recipient));
-        cx.new(|cx| {
+        let view = cx.new(|cx| {
             let _store_watcher = cx.observe(&store, |this: &mut Self, _, cx| this.refresh(cx));
             Self {
                 chat_id,
@@ -82,7 +82,12 @@ impl SubagentStreamView {
                 scroll_handle: gpui::ScrollHandle::new(),
                 stick_to_bottom: true,
             }
-        })
+        });
+        // A freshly registered observer fires on the NEXT notify only: the
+        // open-time projection pass is explicit, so the page never paints its
+        // empty state over a fold that already holds the transcript.
+        view.update(cx, |view, cx| view.refresh(cx));
+        view
     }
 
     /// The page's assistant texts — the child chat's fold as it renders.
@@ -101,21 +106,33 @@ impl SubagentStreamView {
     }
 
     /// The page's row kinds in order — the diagnostic face the projection
-    /// tests read: a child fold's reasoning and tool parts must land as
-    /// `thinking` / `tool` rows exactly as the Captain's do.
+    /// tests read. A child fold's reasoning and tool parts must land exactly
+    /// as the Captain's do: a `thinking` activity segment whose entries read
+    /// `thinking(reasoning+tool)`, not a second transcript expression.
     #[cfg(feature = "test-support")]
-    pub(crate) fn item_kinds(&self, cx: &gpui::App) -> Vec<&'static str> {
+    pub(crate) fn item_kinds(&self, cx: &gpui::App) -> Vec<String> {
         self.conversation
             .read(cx)
             .items()
             .iter()
             .map(|item| match item.read(cx).kind() {
-                crate::conversation::ConvItem::User { .. } => "user",
-                crate::conversation::ConvItem::Assistant { .. } => "assistant",
-                crate::conversation::ConvItem::Thinking(_) => "thinking",
-                crate::conversation::ConvItem::ToolCall(_) => "tool",
-                crate::conversation::ConvItem::AgentTask(_) => "task",
-                _ => "other",
+                crate::conversation::ConvItem::User { .. } => "user".to_string(),
+                crate::conversation::ConvItem::Assistant { .. } => "assistant".to_string(),
+                crate::conversation::ConvItem::Thinking(container) => {
+                    let entries = container
+                        .entries
+                        .iter()
+                        .map(|entry| match entry {
+                            crate::conversation::ActivityEntry::Reasoning { .. } => "reasoning",
+                            crate::conversation::ActivityEntry::Tool(_) => "tool",
+                        })
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    format!("thinking({entries})")
+                }
+                crate::conversation::ConvItem::ToolCall(_) => "tool".to_string(),
+                crate::conversation::ConvItem::AgentTask(_) => "task".to_string(),
+                _ => "other".to_string(),
             })
             .collect()
     }

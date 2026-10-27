@@ -237,7 +237,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         s.book.chats.insert("parent-1".into(), parent());
         cx.notify();
     });
-    cx.run_until_parked();
+    visual.run_until_parked();
     let texts = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream_texts(cx));
     assert!(
         texts
@@ -254,7 +254,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         .cx
         .executor()
         .advance_clock(std::time::Duration::from_secs(10));
-    cx.run_until_parked();
+    visual.run_until_parked();
     assert_eq!(
         store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes()),
         idle,
@@ -262,19 +262,24 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
     );
 
     // The child fold's non-responding parts project like the Captain's:
-    // reasoning lands a thinking row, a settled tool call a tool row, and the
-    // answer an assistant row — one pipeline, no page-specific lowering.
+    // the reasoning round and the settled tool call share ONE activity
+    // segment (`thinking(reasoning+tool)` — the Captain's fold, not a second
+    // shape), and the answer renders as the assistant row that follows it.
     store.update(&mut visual.cx, |s, cx| {
         s.book.chats.insert(RUN.into(), child_mixed());
         cx.notify();
     });
-    cx.run_until_parked();
+    visual.run_until_parked();
     let kinds = workspace.read_with(&visual.cx, |ws, cx| {
         ws.diagnostic_subagent_stream_item_kinds(cx)
     });
     assert_eq!(
         kinds,
-        vec!["user", "thinking", "tool", "assistant"],
+        vec![
+            "user".to_string(),
+            "thinking(reasoning+tool)".to_string(),
+            "assistant".to_string(),
+        ],
         "a mixed child fold renders the Captain's row vocabulary, got {kinds:?}"
     );
 
@@ -292,7 +297,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         s.book.chats.insert("parent-1".into(), parent());
         cx.notify();
     });
-    cx.run_until_parked();
+    visual.run_until_parked();
     let texts = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream_texts(cx));
     assert!(
         texts
@@ -347,7 +352,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_open_subagent_stream(RUN, cx);
     });
-    cx.run_until_parked();
+    visual.run_until_parked();
     assert_eq!(
         store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes()),
         before_reopen + 1,
@@ -386,7 +391,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_open_subagent_stream(RUN, cx);
     });
-    cx.run_until_parked();
+    visual.run_until_parked();
 
     // Settle: the run leaves the live set. The page stays — a settled child's
     // fold is its final transcript — and idle time moves nothing.
@@ -396,7 +401,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
             .insert("parent-1".into(), parent_after_settle());
         cx.notify();
     });
-    cx.run_until_parked();
+    visual.run_until_parked();
     assert_eq!(
         workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_subagent_stream(cx)),
         Some(RUN.to_string()),
@@ -407,7 +412,7 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
         .cx
         .executor()
         .advance_clock(std::time::Duration::from_secs(10));
-    cx.run_until_parked();
+    visual.run_until_parked();
     assert_eq!(
         store.read_with(&visual.cx, |s, _| s.diagnostic_queued_subscribes()),
         at_settle,

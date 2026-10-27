@@ -1217,10 +1217,10 @@ impl Workspace {
     }
 
     /// The open page's row kinds in order — the projection tests read them:
-    /// a child fold's reasoning and tool parts must land as thinking / tool
-    /// rows exactly as the Captain's do.
+    /// a child fold's reasoning and tool parts must land as the Captain's
+    /// thinking segment (`thinking(reasoning+tool)`), not a second shape.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_subagent_stream_item_kinds(&self, cx: &App) -> Vec<&'static str> {
+    pub fn diagnostic_subagent_stream_item_kinds(&self, cx: &App) -> Vec<String> {
         self.subagent_stream
             .as_ref()
             .map(|page| page.view.read(cx).item_kinds(cx))
