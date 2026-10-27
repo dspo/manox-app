@@ -210,6 +210,9 @@ subagent-panel-final-note = Live transcript is not retained across reloads; show
 
 thinking-tool-result = tool result
 
+# Shared h/m/s durations (`steer_i18n::t_duration`): the Captain strip, the
+# segment header, and the whole-turn process head. Leading zero units drop;
+# the second always shows.
 duration-hms = { $h }h { $m }m { $s }s
 duration-ms = { $m }m { $s }s
 duration-s = { $s }s

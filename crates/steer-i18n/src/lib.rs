@@ -238,20 +238,22 @@ pub fn t_str_count(key: &str, args: &[(&str, &str)], count: i64) -> String {
 /// A duration in seconds as localized h/m/s with leading zero units dropped:
 /// `h>0` renders all three, `h=0,m>0` minute plus second, and a sub-minute
 /// duration seconds alone (the second is always shown). Negative input clamps
-/// to zero. This is the single dispatch every app-chrome duration display uses,
-/// so the truncation rule cannot drift between crates.
+/// to zero. The transcript's elapsed displays (the segment header and the
+/// whole-turn process head) and the Captain strip share this one dispatch, so
+/// their truncation rule cannot drift. The goal chip keeps its own
+/// `cockpit::format_elapsed` shape (at hour scale it drops seconds).
 pub fn t_duration(secs: i64) -> String {
     let secs = secs.max(0);
-    let h = (secs / 3600).to_string();
-    let m = ((secs % 3600) / 60).to_string();
-    let s = (secs % 60).to_string();
-    let key = if h != "0" {
+    let key = if secs >= 3600 {
         "duration-hms"
-    } else if m != "0" {
+    } else if secs >= 60 {
         "duration-ms"
     } else {
         "duration-s"
     };
+    let h = (secs / 3600).to_string();
+    let m = ((secs % 3600) / 60).to_string();
+    let s = (secs % 60).to_string();
     t_str(key, &[("h", &h), ("m", &m), ("s", &s)])
 }
 
@@ -458,8 +460,8 @@ mod tests {
         assert_eq!(t_count("sidebar-time-minutes", 5).as_str(), "5 分钟前");
     }
 
-    /// The one h/m/s dispatch every duration display shares: leading zero units
-    /// drop, the second always shows, and negative input clamps to zero.
+    /// The shared h/m/s dispatch: leading zero units drop, the second always
+    /// shows (even as a trailing zero), and negative input clamps to zero.
     #[test]
     fn duration_drops_leading_zero_units() {
         let _g = TEST_LANG_LOCK.lock().unwrap();
@@ -467,14 +469,18 @@ mod tests {
         set_lang(Language::ZhCn);
         assert_eq!(t_duration(0), "0秒");
         assert_eq!(t_duration(45), "45秒");
+        assert_eq!(t_duration(60), "1分0秒");
         assert_eq!(t_duration(125), "2分5秒");
+        assert_eq!(t_duration(3600), "1小时0分0秒");
         assert_eq!(t_duration(7385), "2小时3分5秒");
         assert_eq!(t_duration(-5), "0秒");
 
         set_lang(Language::En);
         assert_eq!(t_duration(0), "0s");
         assert_eq!(t_duration(45), "45s");
+        assert_eq!(t_duration(60), "1m 0s");
         assert_eq!(t_duration(125), "2m 5s");
+        assert_eq!(t_duration(3600), "1h 0m 0s");
         assert_eq!(t_duration(7385), "2h 3m 5s");
 
         set_lang(Language::ZhCn);

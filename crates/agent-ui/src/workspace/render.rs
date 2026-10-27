@@ -638,15 +638,15 @@ impl Workspace {
     }
 
     /// The Captain status block above the composer — the Captain's own row
-    /// (`Captain 正在驾驶{provider}/{model}·{elapsed}·{activity}`, `{elapsed}`
-    /// localized h/m/s) while a turn
-    /// runs, followed by one row per RUNNING sub-agent, each led by a
-    /// PixelSpinner flush at the left edge. Every segment is tight (no spacer
-    /// between the verb, the model, the clock and the activity). The model
-    /// segment carries the app's wire-color convention (the registration's
-    /// `-wire` suffix never shows as text), and the block retires once neither
-    /// a turn nor a run is live — the message column carries no per-entry
-    /// status glyphs, this is the one live surface.
+    /// (`Captain 正在驾驶{provider}/{model}·{elapsed}·{activity}`, `{elapsed}` as
+    /// localized h/m/s) while a turn runs, followed by one row per RUNNING
+    /// sub-agent, each led by a PixelSpinner flush at the left edge. Every
+    /// segment is tight (no spacer between the verb, the model, the clock and
+    /// the activity). The model segment carries the app's wire-color
+    /// convention (the registration's `-wire` suffix never shows as text), and
+    /// the block retires once neither a turn nor a run is live — the message
+    /// column carries no per-entry status glyphs, this is the one live
+    /// surface.
     ///
     /// The sub-agent rows are the parent chat's AHP background work (the host
     /// opens a run's entry on its first running tick and removes it when the
