@@ -10,7 +10,7 @@
 // also a cost datum for migrating the full Rust panels.
 
 import { div, View } from "gpui-kit";
-import { Button, Switch, h_flex, v_flex } from "gpui-base";
+import { Switch, h_flex, v_flex } from "gpui-base";
 import { about, getLanguage, listMcp, setLanguage, setMcpEnabled } from "settingsNative";
 
 const BG = "#ffffff";
@@ -66,13 +66,23 @@ export default class SettingsApp extends View {
   }
 
   nav(t) {
+    // Plain interactive divs, not Button: the base-layer Button accepts no
+    // variant methods (`ghost` is a gpui-component catalog method — the run
+    // error that hit the real app first), and a styled div needs nothing
+    // beyond the universal element methods (id/on_click/when/hover).
+    const names = this.english ? ["General", "Integrations", "External Tools"] : PAGES;
     let nav = v_flex().w(180).flex_none().p(8).gap(2).bg(PANEL);
-    PAGES.forEach((label, ix) => {
+    PAGES.forEach((_label, ix) => {
+      const active = this.page === ix;
       nav = nav.child(
-        Button.new(`nav-${ix}`)
-          .ghost()
+        div()
+          .id(`nav-${ix}`)
           .w_full()
-          .justify_flex_start()
+          .py(6)
+          .px(8)
+          .rounded(6.)
+          .when(active, (el) => el.bg("#e8f0fe"))
+          .hover((el) => el.bg(active ? "#dbeafe" : "#f0f0f0"))
           .on_click((_ev, cx2) => {
             this.page = ix;
             cx2.notify();
@@ -80,8 +90,9 @@ export default class SettingsApp extends View {
           .child(
             div()
               .text_size(13.)
-              .text_color(this.page === ix ? ACCENT : FG)
-              .child(this.english ? ["General", "Integrations", "External Tools"][ix] : label),
+              .font_weight(active ? 600 : 400)
+              .text_color(active ? ACCENT : FG)
+              .child(names[ix]),
           ),
       );
     });
