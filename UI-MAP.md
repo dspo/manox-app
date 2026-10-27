@@ -932,12 +932,21 @@ entry，把 `(path, output)` 交给 `ChatHost::open_right_diff` → workspace �
 
 ## 4. ViewMode::Settings
 
-Settings floating overlay over the live column: a 32%-black mask + a centered rounded card
-（`Workspace::render_settings_overlay`，80% 宽 capped 1040px / 80% 高）hosting the upstream
-`gpui_component::setting::Settings` shell (its own sidebar + resizable split + page stack, starting
-at 240px). The column keeps rendering underneath, blocked by the mask. Entrance rises 12px + fades
-over 180ms (keyed by the transition gen); the exit fades over the same 200ms the mode flip waits.
-Escape, the mask and the card's × close button all exit through `SettingsEvent::Exit`.
+Settings 浮窗有两条渲染路径（迁移期原型态；终态见 PR 的迁移方案——脚本路径全面接管后 Rust 路径退役）：
+
+**脚本路径（app 默认，`agent_ui::settings_shell`）**：主窗根包 `gpui_shell::ShellRoot`（原生
+dialog/sheet/toast 层），⌘,经 `Workspace::enter_settings` 的 launcher 钩子转到
+`settings_shell::open` —— 从 `crates/agent-ui/settings-app/`（`main.js`，可用
+`STEER_SETTINGS_APP_DIR` 覆盖）加载 gpui-shell 脚本应用，以 `open_dialog_with`
+（Escape/backdrop 可关、焦点陷阱由 Base dialog 宿主提供）打开 780×540 浮窗。数据全走
+`settingsNative` HostModule（语言读写带实时刷新、MCP 列表/开关真实持久化、about）；脚本零
+直接 IO。脚本组件以 runtime 自动生成的 `gpui-kit.d.ts` 为权威——基础件（Switch 等）从
+`"gpui-base"` 导入，目录件（带 variant 的 Button 等）从 `"gpui-component"`，方法表不同。
+加载失败时 runtime 自己的失败面板在 dialog 内呈现（`open` 里 `try_load` 先行、错误落日志）。
+
+**Rust 回退路径（无宿主时）**：`Workspace::render_settings_overlay` —— 32% 黑遮罩 + 居中圆角卡
+（80% 宽 capped 1040px / 80% 高）内嵌上游 `gpui_component::setting::Settings` 壳；入场 180ms
+上浮+淡入，退出复用 200ms 机制淡出；Esc / 遮罩 / 卡头 × 三出口同走 `SettingsEvent::Exit`。
 
 #### SettingsFloatCard
 
@@ -945,7 +954,8 @@ The floating card: a header row (`settings-float-header`, TITLE_BAR_HEIGHT, titl
 over the upstream settings shell. Hit-testing is sibling-layered like the chrome picker — the mask
 is a full-area click layer BELOW the centering layer, and the card `occlude()`s so clicks inside
 never reach the mask. `Workspace::settings_focus` is focused on entry so Escape reaches the
-overlay. Acceptance face: `crates/agent-ui/tests/visual_settings.rs` (`SETTINGS_SHOT`).
+overlay. Acceptance face: `crates/agent-ui/tests/visual_settings.rs` (`SETTINGS_SHOT`，当前挂的是
+脚本路径全链路).
 
 #### ManagementBackControl
 

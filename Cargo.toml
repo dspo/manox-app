@@ -147,7 +147,7 @@ sysinfo = "0.39"
 
 # GPUI stack: gpui-pre is Longbridge's weekly repackaged snapshot of zed's
 # gpui, exact-pinned against weekly drift; gpui-component is co-released
-# against it (0.8.0 ↔ gpui-pre 0.3.9). Upgrades go through
+# against it (0.8.1 ↔ gpui-pre 0.3.10). Upgrades go through
 # `cargo update -p gpui-pre --precise <ver>`.
 gpui = { package = "gpui-pre", version = "=0.3.10" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }

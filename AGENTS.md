@@ -79,7 +79,7 @@ cargo clippy --all-targets
 cargo fmt --all
 ```
 
-Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
+Rust **1.99.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
 
 ### Release（tag 触发）
 
@@ -118,7 +118,7 @@ CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p steer-agent
 
 ## GPUI 依赖版本锁定
 
-GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再直接依赖 zed-industries/zed**：`gpui`/`gpui_platform` 是 `gpui-pre`/`gpui-pre-platform` 的包名别名——Longbridge 每周从 zed main republish 的快照（`[lib]` 名保留，`use gpui::*` 不变），每个版本自带 zed commit 映射（crate description / `[package.metadata]`）可审计。组件层 `gpui-component` 与资产 `gpui-kit-assets`（原 gpui-component-assets）同线 semver。全部 `=` 精确 pin，防周更快照漂移。
+GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再直接依赖 zed-industries/zed**：`gpui`/`gpui_platform` 是 `gpui-pre`/`gpui-pre-platform` 的包名别名——Longbridge 每周从 zed main republish 的快照（`[lib]` 名保留，`use gpui::*` 不变），每个版本自带 zed commit 映射（crate description / `[package.metadata]`）可审计。组件层 `gpui-component` 与资产 `gpui-kit-assets`（原 gpui-component-assets）同线 semver；`gpui-shell`（同轨的脚本化应用运行时，QuickJS + ShellRoot dialog/sheet/toast，0.8.1 首版、自标 Experimental）承载 Settings 脚本面（见 `agent_ui::settings_shell`，组件选型以 runtime 生成的 `gpui-kit.d.ts` 为权威）。全部 `=` 精确 pin，防周更快照漂移。
 
 升级姿势：`cargo update -p gpui-pre --precise x.y.z`（与组件版本按 gpui-kit lock 对齐）→ 重跑全部门禁；gpui-pre 的 `[[patch.unused]]`/duplicate 用 `cargo tree -d | grep -i gpui` 验证单一版本，`script/check-no-zed-git.sh` 验证 zed 零引用（CI 门禁）。gpui 相关依赖在 debug 下仍需 opt-level=3（`[profile.dev.package] gpui-pre*`）。历史注：旧栈（gpui@zed-1d217ee + gpui-component@longbridge-git）已退役；gpui-pre ≥0.3.4 含上游 gpui#60295 element-arena 修复。
 
