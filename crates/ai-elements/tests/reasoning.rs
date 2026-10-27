@@ -370,7 +370,10 @@ fn clicking_the_trigger_opens_the_block(cx: &mut TestAppContext) {
 /// and a focused element's activation click is synthesized from the pair, so
 /// `simulate_keystrokes` (key-down only) cannot exercise that path.
 fn press(visual: &mut VisualTestContext, key: &str) {
-    let keystroke = Keystroke::parse(key)
+    // 0.3.10 split Keystroke::parse into a &'static str variant and this
+    // dynamic form; test keys are runtime strings.
+    let keystroke = visual
+        .update(|_window, cx| Keystroke::parse_with_os(key, cx.platform_info().os))
         .expect("valid keystroke")
         .with_simulated_ime();
     visual.update(|window, cx| {
