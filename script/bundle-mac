@@ -101,11 +101,14 @@ read_bundle_value() {
 }
 bundle_id=$(read_bundle_value "package.metadata.bundle" "identifier")
 app_name=$(read_bundle_value "package.metadata.bundle" "name")
-# version is workspace-inherited; resolve via cargo metadata
+# version is workspace-inherited; resolve via cargo metadata. The package is
+# steer-app (steer is only the bin name); a failed lookup must abort rather
+# than fall back, or the bundle would ship a silently wrong version.
 app_version=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
     | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
-                   p=[x for x in pkgs if x['name']=='steer']; \
-                   print(p[0]['version'] if p else '0.1.0')")
+                   p=[x for x in pkgs if x['name']=='steer-app']; \
+                   print(p[0]['version'] if p else '')")
+[[ -n "${app_version}" ]] || { echo "Error: cannot resolve the steer-app version from cargo metadata"; exit 1; }
 
 # --- Determine paths ---
 app_path="target/${target_triple}/${target_dir}/${app_name}.app"
