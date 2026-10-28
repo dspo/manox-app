@@ -1775,15 +1775,20 @@ impl AhpStore {
                 self.record_envelope_sidebands(&envelope.channel, &envelope.action, carried_queued);
                 match self.book.apply(&envelope.channel, &envelope.action) {
                     FoldEffect::Changed => {
-                        // The derived read model: the HOST stamps the settle
-                        // and derives the bit — the app only declares views
-                        // (`set_focused_session`), never rises. One seam
-                        // remains: a turn that settles while its session IS
-                        // focused derived a transient unread at the host the
-                        // instant the turn completed; this settle edge
-                        // re-declares the view. Monotone on the host (max),
-                        // so a redundant dispatch is free — once per turn
-                        // edge is politeness, not correctness.
+                        // The derived read model: the HOST stamps the
+                        // settle, derives the bit, and PUBLISHES the flip to
+                        // the session channel — the app never rises. One
+                        // seam remains: a flip to unread in the session this
+                        // window is FOCUSED on means the host thinks there
+                        // is something to see while the user is looking at
+                        // it — re-declare the view at once. Reacting to the
+                        // flip (not to a turn edge) needs no ordering
+                        // contract with the host's stamp, fires only on
+                        // real flips, and also covers flips a peer process
+                        // caused. Our own declaration's echo is
+                        // `is_read: true`, so the pair settles in one round
+                        // trip; the host's stamp is monotone, so a
+                        // redundant declaration is free.
                         let owning = if let Some(chat_id) = &chat_id {
                             self.book.session_of_chat(chat_id).map(str::to_string)
                         } else if envelope.channel.starts_with("ahp-session:/") {
@@ -1793,7 +1798,11 @@ impl AhpStore {
                         };
                         if let Some(session_id) = &owning
                             && self.focused_session.as_deref() == Some(session_id.as_str())
-                            && matches!(&envelope.action, StateAction::ChatTurnComplete(_))
+                            && matches!(
+                                &envelope.action,
+                                StateAction::SessionIsReadChanged(changed)
+                                    if !changed.is_read
+                            )
                         {
                             self.dispatch(
                                 session_uri(session_id),
