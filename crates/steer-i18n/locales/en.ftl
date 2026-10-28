@@ -241,13 +241,21 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = Back to app
 
-settings-nav-title = Settings
+settings-item-agents = Agents
+settings-item-skills = Skills
 
-settings-page-desc-general = Appearance, language and model access.
+settings-origin-builtin = Built-in
+settings-origin-user = User
+settings-origin-plugin = Plugin
 
-settings-page-desc-integrations = Plugin marketplace and MCP servers.
+agents-captain-desc = The lead agent: steers the conversation and dispatches subagents and tools.
 
-settings-page-desc-external-tools = Injection launch settings for ChatGPT.app and VS Code.
+agents-all-tools = all tools
+agents-tools-count = tools
+
+agents-readonly-note = Agents are read-only for now; drop a .md file under ~/.claude/agents/ to register a custom one.
+
+skills-readonly-note = Skills are read-only for now; user skills live under ~/.claude/skills/, plugin skills ship with their plugin.
 
 
 ### views/settings.rs — General panel

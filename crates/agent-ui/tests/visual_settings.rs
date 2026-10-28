@@ -57,8 +57,15 @@ mod macos {
             .open_offscreen_window(size(px(1280.), px(820.)), |window, cx| {
                 let shell = agent_ui::chrome_assembly::mount(window, cx);
                 *capture_shell.borrow_mut() = Some(shell.clone());
+                let page = std::env::var("SETTINGS_PAGE")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
                 if let Some(ws) = agent_ui::dispatch::workspace_global() {
                     ws.update(cx, |ws, cx| ws.enter_settings(window, cx));
+                    if page > 0 {
+                        ws.update(cx, |ws, cx| ws.select_settings_page(page, cx));
+                    }
                 }
                 agent_ui::chrome_assembly::root(shell, window, cx)
             })

@@ -937,25 +937,44 @@ entry，把 `(path, output)` 交给 `ChatHost::open_right_diff` → workspace �
 
 ## 4. ViewMode::Settings
 
-The Settings split layout: Settings reuses the shell's own two-column structure instead of a
-floating surface. On `enter_settings` the chrome sidebar swaps its session list for the injected
-settings nav (`Shell::sidebar_surface` ← `chrome_assembly::enter_settings_layout`,
-`views/settings_nav::SettingsNavView` — back control + page rows, selection on
-`Workspace::settings_nav`), and the main column carries the selected page's detail
-(`Workspace::render_settings_detail`): a TitleBar strip naming the page over the page's group
-stack — the upstream `gpui_component::setting::Settings` shell rendered with a ZERO-width sidebar
-(one instance per page, keyed `settings-detail-{ix}`), so only its group stack/page chrome shows.
-Row order is index-aligned through `views::settings::NAV_KEYS` (the single vocabulary both the nav
-and `build_pages` read). Exiting (`leave_settings` / the nav's back control / any
-`focus_conversation`) restores the session-list sidebar. The upstream shell's own sidebar/search
-retired with this layout.
+The Settings split layout: Settings reuses the shell's own two-column structure. On
+`enter_settings` the chrome sidebar swaps its session list for the injected settings nav
+(`Shell::sidebar_surface` ← `chrome_assembly::enter_settings_layout`,
+`views/settings_nav::SettingsNavView`), and the main column carries the selected page's detail
+(`Workspace::render_settings_detail`).
 
 #### SettingsNavView
 
-The sidebar nav while Settings is open: `management_shell::back_control`（返回应用 →
-`Workspace::leave_settings`）above one row per `NAV_KEYS` page (active row: accent text + wash).
-Clicks write `Workspace::settings_nav` through the process-global workspace; the view observes
-the workspace so selection highlights track.
+A two-level tree after ZCode's settings patterns: the back control (返回应用 →
+`Workspace::leave_settings`) above labeled groups and 30px icon rows (chrome session-row metrics;
+NEUTRAL active wash — `theme.secondary`, never an accent). Top-level leaves ride unindented;
+grouped leaves indent 18px under their label. The flat leaf order IS the page index space
+(`Workspace::settings_nav`) — pinned by `settings::tests::nav_leaf_order_matches_the_page_factory`.
+Tree shape (`views::settings::NAV`): 通用>常规 · 模型 · Agents · 集成>插件/Skills/MCP ·
+外部工具>ChatGPT.app/Visual Studio Code.app, one Lucide icon per leaf.
+
+#### SettingsDetail
+
+No title bar and no page header of its own — the window toolbar is the drag face, and the nav
+tree already says where you are; the detail never repeats it. Each page is the upstream
+`setting::Settings` shell with a zero-width sidebar AND a hidden header
+(`header_style(div().hidden())`), so only the group stack renders, riding a centered 880px
+column with a 16px top inset inside the main card. Pages (`settings::build_page`, read-only
+rosters cached on the view at creation):
+
+- 常规 — the language dropdown (Fill card).
+- 模型 — the provider/model editor panel.
+- Agents — read-only roster: Captain (the lead) + the runtime registry the subagent path itself
+  builds (`register_defaults` + user/plugin discovery via `agent_defs::register_user_and_plugin`),
+  rows carrying origin (内置/用户/插件) · model · tool count.
+- 插件 — the plugin manager view.
+- Skills — read-only roster from `manox_agent::skill::list_skill_records()` (user + plugin, with
+  origin badges).
+- MCP — per-server switches with live registry status.
+- 外部工具 — the ChatGPT.app / VS Code injection panels.
+
+Exiting (`leave_settings` / the nav's back control / any `focus_conversation`) restores the
+session-list sidebar. The upstream shell's own sidebar/search retired with the split layout.
 
 #### ManagementBackControl
 

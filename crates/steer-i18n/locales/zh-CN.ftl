@@ -225,13 +225,21 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = 返回应用
 
-settings-nav-title = 设置
+settings-item-agents = Agents
+settings-item-skills = Skills
 
-settings-page-desc-general = 应用外观与语言、模型接入配置。
+settings-origin-builtin = 内置
+settings-origin-user = 用户
+settings-origin-plugin = 插件
 
-settings-page-desc-integrations = 插件市场与 MCP 服务器连接。
+agents-captain-desc = 主对话 agent：驾驶会话、调度子代理与工具。
 
-settings-page-desc-external-tools = ChatGPT.app 与 VS Code 的注入启动配置。
+agents-all-tools = 全部工具
+agents-tools-count = 个工具
+
+agents-readonly-note = Agents 目前为只读展示；自定义 agent 放在 ~/.claude/agents/ 下的 .md 文件即可被识别。
+
+skills-readonly-note = Skills 目前为只读展示；用户技能位于 ~/.claude/skills/，插件技能随插件安装。
 
 
 ### views/settings.rs — 常规面板

@@ -10,10 +10,11 @@ use std::collections::HashSet;
 
 use gpui::{AnyElement, Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px};
 use gpui_component::{
-    ActiveTheme as _, IconName,
+    ActiveTheme as _,
     group_box::GroupBoxVariant,
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
+use gpui_kit_assets::IconName;
 
 use crate::i18n;
 use manox_agent::settings as user_settings;
@@ -53,6 +54,11 @@ pub struct SettingsView {
     /// on toggle (`manox_agent::settings::set_mcp_disabled`). Seeded from settings
     /// at view creation.
     pub(crate) mcp_disabled: HashSet<String>,
+    /// Read-only Agents roster (lead + preset + discovered defs), collected
+    /// once at view creation — the registry scan must not run per frame.
+    agents: Vec<AgentRow>,
+    /// Read-only Skills roster, collected once at view creation.
+    skills: Vec<SkillRow>,
 }
 
 #[derive(Clone)]
@@ -83,6 +89,8 @@ impl SettingsView {
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
             vscode_panel: vscode::VsCodePanelState::load(window, cx),
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
+            agents: collect_agents(),
+            skills: collect_skills(),
         }
     }
 
@@ -138,10 +146,9 @@ impl SettingsView {
     }
 
     /// One page of the settings detail (the main column's content): the
-    /// upstream `Settings` shell with a zero-width sidebar, so only the
-    /// page's group stack renders. Navigation belongs to the chrome sidebar
-    /// (the injected settings nav), not to this shell. Pages are rebuilt on
-    /// every render so titles track the live locale.
+    /// upstream `Settings` shell with a zero-width sidebar and a HIDDEN page
+    /// header — the nav tree already says where you are, the detail never
+    /// repeats it. Only the page's group stack renders.
     pub(crate) fn render_page(
         &mut self,
         ix: usize,
@@ -149,40 +156,121 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = cx.entity();
-        // build_pages runs while this view holds its update lease, so the
+        // build_page runs while this view holds its update lease, so the
         // state it needs is passed by reference — reaching back through the
         // entity handle here would panic (no reads on an updated entity).
-        let pages = build_pages(&view, &self.mcp_servers, &self.mcp_disabled);
-        let Some(page) = pages.into_iter().nth(ix) else {
-            return div().into_any_element();
-        };
-        // The page's own header, restyled into a ZCode-pattern section
-        // heading: an 18px semibold title over the header's hairline, with
-        // roomier padding than the shell default.
+        let page = build_page(
+            &view,
+            ix,
+            &self.mcp_servers,
+            &self.mcp_disabled,
+            &self.agents,
+            &self.skills,
+        );
         use gpui::Styled as _;
-        let header_style = div()
-            .px_6()
-            .pt_5()
-            .pb_3()
-            .text_size(px(18.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .style()
-            .clone();
+        let hidden_header = div().hidden().style().clone();
         Settings::new(SharedString::from(format!("settings-detail-{ix}")))
             .sidebar_width(px(0.))
             .sidebar_size_range(px(0.)..px(0.))
-            .page(page.header_style(&header_style))
+            .page(page.header_style(&hidden_header))
             .into_any_element()
     }
 }
 
-/// The settings nav order (the chrome sidebar's injected list): index-aligned
-/// with `build_pages`, labels through the same Fluent keys.
-pub(crate) const NAV: [(&str, IconName); 3] = [
-    ("settings-group-general", IconName::Settings),
-    ("settings-group-integrations", IconName::Frame),
-    ("settings-group-external-tools", IconName::Bot),
+/// One selectable page of the settings nav tree.
+pub(crate) struct NavLeaf {
+    /// Fluent key of the leaf's title.
+    pub key: &'static str,
+    /// Lucide icon rendered before the title.
+    pub icon: IconName,
+}
+
+/// The settings nav tree: labeled groups (non-selectable) and selectable
+/// leaves; a leaf may ride at the top level (no group) or indented under
+/// the last group. The flat leaf order IS the page index space
+/// (`Workspace::settings_nav`).
+pub(crate) enum NavEntry {
+    Group(&'static str),
+    Leaf { leaf: NavLeaf, indented: bool },
+}
+
+pub(crate) const NAV: [NavEntry; 11] = [
+    NavEntry::Group("settings-group-general"),
+    NavEntry::Leaf {
+        leaf: NavLeaf {
+            key: "settings-item-general",
+            icon: IconName::SlidersHorizontal,
+        },
+        indented: true,
+    },
+    NavEntry::Leaf {
+        leaf: NavLeaf {
+            key: "settings-item-models",
+            icon: IconName::Boxes,
+        },
+        indented: false,
+    },
+    NavEntry::Leaf {
+        leaf: NavLeaf {
+            key: "settings-item-agents",
+            icon: IconName::Bot,
+        },
+        indented: false,
+    },
+    NavEntry::Group("settings-group-integrations"),
+    NavEntry::Leaf {
+        leaf: NavLeaf {
+            key: "settings-item-plugins",
+            icon: IconName::Puzzle,
+        },
+        indented: true,
+    },
+    NavEntry::Leaf {
+        leaf: NavLeaf {
+            key: "settings-item-skills",
+            icon: IconName::Sparkles,
+        },
+        indented: true,
+    },
+    NavEntry::Leaf {
+        leaf: NavLeaf {
+            key: "settings-item-mcp",
+            icon: IconName::PlugZap,
+        },
+        indented: true,
+    },
+    NavEntry::Group("settings-group-external-tools"),
+    NavEntry::Leaf {
+        leaf: NavLeaf {
+            key: "settings-item-chatgpt-app",
+            icon: IconName::MessageCircle,
+        },
+        indented: true,
+    },
+    NavEntry::Leaf {
+        leaf: NavLeaf {
+            key: "settings-item-vscode-app",
+            icon: IconName::Code,
+        },
+        indented: true,
+    },
 ];
+
+/// The selectable leaves in nav order — the page index space.
+#[cfg(test)]
+pub(crate) fn nav_leaves() -> Vec<(usize, &'static NavLeaf)> {
+    let mut ix = 0;
+    NAV.iter()
+        .filter_map(|entry| match entry {
+            NavEntry::Leaf { leaf, .. } => {
+                let out = (ix, leaf);
+                ix += 1;
+                Some(out)
+            }
+            NavEntry::Group(_) => None,
+        })
+        .collect()
+}
 
 /// A panel renderer expressed as a free function of the view — the element
 /// item runs it at paint time, after the owning render pass has released
@@ -306,81 +394,247 @@ fn mcp_keywords() -> Vec<SharedString> {
 
 /// The three pages of the settings shell, mirroring the previous nav groups:
 /// General (language + Models), Integrations (Plugins + MCP), External Tools.
-fn build_pages(
+/// The page factory for one nav leaf. Leaf order is `nav_leaves()`:
+/// 0 常规 (language) · 1 模型 · 2 Agents · 3 插件 · 4 Skills · 5 MCP ·
+/// 6 ChatGPT.app · 7 VS Code.
+fn build_page(
     view: &Entity<SettingsView>,
+    leaf: usize,
     mcp_servers: &[String],
     mcp_disabled: &HashSet<String>,
-) -> Vec<SettingPage> {
-    let language_group = {
-        let value_view = view.clone();
-        let set_view = view.clone();
-        SettingGroup::new()
-            .title(i18n::t("settings-item-general"))
-            .variant(GroupBoxVariant::Fill)
-            .item(
-                SettingItem::new(
-                    i18n::t("settings-row-ui-language"),
-                    SettingField::dropdown(
-                        // (value, label): the field carries and persists the
-                        // token, the picker displays the fixed endonym.
-                        [i18n::Language::ZhCn, i18n::Language::En]
-                            .into_iter()
-                            .map(|lang| {
-                                (
-                                    SharedString::from(lang.token()),
-                                    SharedString::from(lang.endonym()),
-                                )
-                            })
-                            .collect(),
-                        move |cx| SharedString::from(value_view.read(cx).ui_language.token()),
-                        move |token, cx| {
-                            set_view.update(cx, |this, cx| this.apply_ui_language(token, cx));
-                        },
-                    ),
-                )
-                .description(i18n::t("settings-desc-ui-language"))
-                .keywords(["language", "locale", "语言", "english"]),
+    agents: &[AgentRow],
+    skills: &[SkillRow],
+) -> SettingPage {
+    let title = |key: &str| SettingPage::new(i18n::t(key)).default_open(true);
+    match leaf {
+        // 常规 — language and app-chrome preferences.
+        0 => {
+            let value_view = view.clone();
+            let set_view = view.clone();
+            title("settings-item-general").group(
+                SettingGroup::new().variant(GroupBoxVariant::Fill).item(
+                    SettingItem::new(
+                        i18n::t("settings-row-ui-language"),
+                        SettingField::dropdown(
+                            // (value, label): the field carries and persists the
+                            // token, the picker displays the fixed endonym.
+                            [i18n::Language::ZhCn, i18n::Language::En]
+                                .into_iter()
+                                .map(|lang| {
+                                    (
+                                        SharedString::from(lang.token()),
+                                        SharedString::from(lang.endonym()),
+                                    )
+                                })
+                                .collect(),
+                            move |cx| SharedString::from(value_view.read(cx).ui_language.token()),
+                            move |token, cx| {
+                                set_view.update(cx, |this, cx| this.apply_ui_language(token, cx));
+                            },
+                        ),
+                    )
+                    .description(i18n::t("settings-desc-ui-language"))
+                    .keywords(["language", "locale", "语言", "english"]),
+                ),
             )
-    };
+        }
+        // 模型 — the provider/model editor.
+        1 => title("settings-item-models").group(panel_group(
+            view,
+            "settings-item-models",
+            &["models", "providers", "llm", "api key", "endpoint"],
+            models::render_models,
+        )),
+        // Agents — read-only roster (the lead + preset + discovered defs).
+        2 => title("settings-item-agents").group(agents_group(agents)),
+        // 插件.
+        3 => title("settings-item-plugins").group(panel_group(
+            view,
+            "settings-item-plugins",
+            &["plugins", "marketplace", "extensions", "插件"],
+            |view, _cx| view.plugins.clone().into_any_element(),
+        )),
+        // Skills — read-only registry view.
+        4 => title("settings-item-skills").group(skills_group(skills)),
+        // MCP.
+        5 => title("settings-item-mcp").group(mcp_group(view, mcp_servers, mcp_disabled)),
+        // 外部工具.
+        6 => title("settings-item-chatgpt-app").group(panel_group(
+            view,
+            "settings-item-chatgpt-app",
+            &["chatgpt", "codex", "injection", "external tools"],
+            chatgpt::render_chatgpt_app,
+        )),
+        7 => title("settings-item-vscode-app").group(panel_group(
+            view,
+            "settings-item-vscode-app",
+            &["vscode", "visual studio code", "extension", "inject"],
+            vscode::render_vscode_app,
+        )),
+        _ => title("settings-item-general"),
+    }
+}
 
-    vec![
-        SettingPage::new(i18n::t(NAV[0].0))
-            .description(i18n::t("settings-page-desc-general"))
-            .icon(IconName::Settings)
-            .default_open(true)
-            .group(language_group)
-            .group(panel_group(
-                view,
+/// One read-only roster row for the Agents page.
+struct AgentRow {
+    name: String,
+    description: String,
+    /// Fluent key of the origin badge (内置 / 用户 / 插件).
+    origin: &'static str,
+    /// The def's pinned model, when it has one.
+    model: Option<String>,
+    /// How many tools the def allows (empty def = all tools).
+    tools: usize,
+    all_tools: bool,
+}
+
+/// One read-only row for the Skills page.
+struct SkillRow {
+    name: String,
+    description: String,
+    /// Fluent key of the origin badge.
+    origin: &'static str,
+}
+
+/// The Agents roster, read-only: the lead agent first, then the registry the
+/// runtime itself builds — the built-in presets plus user/plugin discovery,
+/// with user files able to override built-ins by name.
+fn collect_agents() -> Vec<AgentRow> {
+    use manox_harness::core::ext_point_agent::AgentRegistry;
+    let mut rows = vec![AgentRow {
+        name: "Captain".into(),
+        description: i18n::t("agents-captain-desc").to_string(),
+        origin: "settings-origin-builtin",
+        model: None,
+        tools: 0,
+        all_tools: true,
+    }];
+    let mut registry = AgentRegistry::new();
+    manox_harness::ext::subagent::register_defaults(&mut registry);
+    manox_agent::agent_defs::register_user_and_plugin(&mut registry, None);
+    for def in registry.all() {
+        let origin = if def.name.contains('@') {
+            "settings-origin-plugin"
+        } else if def.name == "Explore" || def.name == "Sailor" {
+            "settings-origin-builtin"
+        } else {
+            "settings-origin-user"
+        };
+        rows.push(AgentRow {
+            name: def.name.clone(),
+            description: def.description.clone(),
+            origin,
+            model: def.model.clone(),
+            tools: def.tools.len(),
+            all_tools: def.tools.is_empty(),
+        });
+    }
+    rows
+}
+
+/// The Skills roster, read-only: a fresh scan of user + plugin skills
+/// (`list_skill_records` — the same surface the plugin manager reads).
+fn collect_skills() -> Vec<SkillRow> {
+    manox_agent::skill::list_skill_records()
+        .into_iter()
+        .map(|record| SkillRow {
+            name: record.name,
+            description: record.description,
+            origin: match record.origin {
+                manox_agent::skill::SkillOrigin::Plugin { .. } => "settings-origin-plugin",
+                _ => "settings-origin-user",
+            },
+        })
+        .collect()
+}
+
+/// A muted right-aligned meta line (origin / model / tool count) — the
+/// read-only pages' "control" column.
+fn meta_field(text: SharedString) -> SettingField<SharedString> {
+    SettingField::render(move |_, _, cx| {
+        gpui_component::h_flex()
+            .text_size(px(12.))
+            .text_color(cx.theme().muted_foreground)
+            .child(text.clone())
+            .into_any_element()
+    })
+}
+
+fn agents_group(agents: &[AgentRow]) -> SettingGroup {
+    let mut group = SettingGroup::new().title(i18n::t("settings-item-agents"));
+    for row in agents {
+        let mut meta = i18n::t(row.origin).to_string();
+        if let Some(model) = &row.model {
+            meta.push_str(" · ");
+            meta.push_str(model);
+        } else if row.all_tools {
+            meta.push_str(" · ");
+            meta.push_str(&i18n::t("agents-all-tools"));
+        } else {
+            meta.push_str(&format!(
+                " · {} {}",
+                row.tools,
+                i18n::t("agents-tools-count")
+            ));
+        }
+        group = group.item(
+            SettingItem::new(
+                SharedString::from(row.name.clone()),
+                meta_field(SharedString::from(meta)),
+            )
+            .description(SharedString::from(row.description.clone())),
+        );
+    }
+    group.footer(|_, _| {
+        gpui_component::v_flex().py_2().text_sm().child(
+            gpui::div()
+                .text_color(gpui::rgb(0x737373))
+                .child(i18n::t("agents-readonly-note")),
+        )
+    })
+}
+
+fn skills_group(skills: &[SkillRow]) -> SettingGroup {
+    let mut group = SettingGroup::new().title(i18n::t("settings-item-skills"));
+    for row in skills {
+        group = group.item(
+            SettingItem::new(
+                SharedString::from(row.name.clone()),
+                meta_field(i18n::t(row.origin)),
+            )
+            .description(SharedString::from(row.description.clone())),
+        );
+    }
+    group.footer(|_, _| {
+        gpui_component::v_flex().py_2().text_sm().child(
+            gpui::div()
+                .text_color(gpui::rgb(0x737373))
+                .child(i18n::t("skills-readonly-note")),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nav_leaves;
+
+    /// The flat leaf order IS `build_page`'s match-arm index space; a drift
+    /// here would silently swap pages behind the nav.
+    #[test]
+    fn nav_leaf_order_matches_the_page_factory() {
+        let keys: Vec<&str> = nav_leaves().iter().map(|(_, leaf)| leaf.key).collect();
+        assert_eq!(
+            keys,
+            [
+                "settings-item-general",
                 "settings-item-models",
-                &["models", "providers", "llm", "api key", "endpoint"],
-                models::render_models,
-            )),
-        SettingPage::new(i18n::t(NAV[1].0))
-            .description(i18n::t("settings-page-desc-integrations"))
-            .icon(IconName::Frame)
-            .default_open(true)
-            .group(panel_group(
-                view,
+                "settings-item-agents",
                 "settings-item-plugins",
-                &["plugins", "marketplace", "extensions", "插件"],
-                |view, _cx| view.plugins.clone().into_any_element(),
-            ))
-            .group(mcp_group(view, mcp_servers, mcp_disabled)),
-        SettingPage::new(i18n::t(NAV[2].0))
-            .description(i18n::t("settings-page-desc-external-tools"))
-            .icon(IconName::Bot)
-            .default_open(true)
-            .group(panel_group(
-                view,
+                "settings-item-skills",
+                "settings-item-mcp",
                 "settings-item-chatgpt-app",
-                &["chatgpt", "codex", "injection", "external tools"],
-                chatgpt::render_chatgpt_app,
-            ))
-            .group(panel_group(
-                view,
                 "settings-item-vscode-app",
-                &["vscode", "visual studio code", "extension", "inject"],
-                vscode::render_vscode_app,
-            )),
-    ]
+            ]
+        );
+    }
 }
