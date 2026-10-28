@@ -832,9 +832,10 @@ pub struct AhpStore {
     /// separate store updates, so the off state between them is observable.
     steer_boundaries: HashSet<String>,
     /// The foreground session id (the multiplexer publishes on focus
-    /// changes): chat activity in any OTHER session rises the official
-    /// unread bit (`session/isReadChanged` — client-owned observation
-    /// state, echoed to every subscriber) instead of a local map.
+    /// changes). Focus DECLARED a view (`isReadChanged(true)`, stamped as
+    /// the derived read rule's viewed input); a settle edge visible in the
+    /// focused session re-declares it. The app never rises the bit — the
+    /// host derives unread from the two stamps.
     focused_session: Option<String>,
     /// Optimistic writes the host has not confirmed yet, oldest first:
     /// (session id, config key, the value the key had before). A rejection
@@ -859,11 +860,6 @@ pub struct AhpStore {
     /// would otherwise re-issue the subscribe and pile host-side
     /// subscriptions. The store never unsubscribes, so the set only grows.
     thread_subs: std::collections::HashSet<String>,
-    /// Sessions with an unread-rise write in flight (issued, the host echo
-    /// not folded yet): the rise fires at most once per read→unread
-    /// transition instead of once per background action while a turn
-    /// streams.
-    pending_unread: std::collections::HashSet<String>,
     /// The submit pipeline's LATCHED failure: a handshake that never landed
     /// or a dispatch that failed to leave. The lazy `Stalled` face (a
     /// pre-connect queue past the budget) is computed on read, never stored.
@@ -916,7 +912,6 @@ impl AhpStore {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -1036,7 +1031,6 @@ impl AhpStore {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -1190,10 +1184,12 @@ impl AhpStore {
             .collect()
     }
 
-    /// Publish the foreground session (the multiplexer's focus call): chat
-    /// activity elsewhere rises the official unread bit, and the newly
-    /// focused session's bit clears through the same protocol (the echo
-    /// lands for every subscriber, this one included).
+    /// Publish the foreground session (the multiplexer's focus call): the
+    /// focus declares a view — the derived read rule's second input, so the
+    /// newly focused session's unread clears host-side (the echo lands for
+    /// every subscriber, this one included). Declaring on every focus is
+    /// the point: the host's stamp is monotone, and GW5 focus is the app's
+    /// whole definition of "looked at" (window visibility is not consulted).
     pub fn set_focused_session(&mut self, session_id: Option<&str>) {
         self.focused_session = session_id.map(str::to_string);
         if let Some(session_id) = session_id {
@@ -1630,6 +1626,33 @@ impl AhpStore {
     /// envelope here must re-attach that identity before leaving the store:
     /// the display buckets are keyed by the owning session for exactly that
     /// reason.
+    /// A host-catalogue `sessionAdded`. The host announces each id ONCE
+    /// (its published-map diff): a first sight seeds at the front (a
+    /// just-created session ranks first by recency anyway); a re-announce
+    /// of an id this book already holds is an upsert only — re-fronting a
+    /// known row would re-rank the sidebar on every host restart.
+    fn fold_session_added(&mut self, summary: ahp_types::state::SessionSummary) -> bool {
+        let id = id_of(&summary.resource).to_string();
+        if self.book.summaries.contains_key(&id) {
+            self.book.seed_summaries(vec![summary])
+        } else {
+            self.book.seed_summary_at_front(summary)
+        }
+    }
+
+    /// A host-catalogue `sessionRemoved` — the row left the active
+    /// catalogue (a dispose, a peer's archive): drop the row and its
+    /// folded state. The URI is the SESSION's; `params.channel` is the
+    /// root the notification rode, and keying the removal off it removes
+    /// nothing.
+    fn fold_session_removed(&mut self, session: &ahp_types::common::Uri) -> bool {
+        let removed = self.book.remove_summary(session);
+        if removed {
+            self.book.sessions.remove(id_of(session));
+        }
+        removed
+    }
+
     fn route(&mut self, event: ahp::ClientEvent, cx: &mut gpui::Context<Self>) {
         match event.event {
             ahp::SubscriptionEvent::Action(envelope) => {
@@ -1652,12 +1675,6 @@ impl AhpStore {
                         .push_back(format!("{}: {reason}", envelope.channel));
                     while self.rejections.len() > 32 {
                         self.rejections.pop_front();
-                    }
-                    // A refused unread-rise write never dropped the bit,
-                    // so the gate must re-arm — the next background
-                    // action may retry the rise.
-                    if envelope.channel.starts_with("ahp-session:/") {
-                        self.pending_unread.remove(id_of(&envelope.channel));
                     }
                     if own {
                         // Every own refusal is visible: a config write
@@ -1758,19 +1775,20 @@ impl AhpStore {
                 self.record_envelope_sidebands(&envelope.channel, &envelope.action, carried_queued);
                 match self.book.apply(&envelope.channel, &envelope.action) {
                     FoldEffect::Changed => {
-                        // The official unread rise (#870's app half):
-                        // visible chat activity in a session that is not the
-                        // foreground clears the IsRead bit through the
-                        // protocol — the host echoes the action to every
-                        // subscriber, so all clients (and this book's live
-                        // fold) see the same dot. The owning session is
-                        // resolved from the chat (a chat id equals its
-                        // session id only in the landing form), and the rise
-                        // fires at most once per read→unread transition: an
-                        // in-flight gate blocks re-fires until the fold
-                        // shows the bit back down (this write's echo, or
-                        // another client's), so one streaming background
-                        // turn dispatches once — not once per action.
+                        // The derived read model: the HOST stamps the
+                        // settle, derives the bit, and PUBLISHES the flip to
+                        // the session channel — the app never rises. One
+                        // seam remains: a flip to unread in the session this
+                        // window is FOCUSED on means the host thinks there
+                        // is something to see while the user is looking at
+                        // it — re-declare the view at once. Reacting to the
+                        // flip (not to a turn edge) needs no ordering
+                        // contract with the host's stamp, fires only on
+                        // real flips, and also covers flips a peer process
+                        // caused. Our own declaration's echo is
+                        // `is_read: true`, so the pair settles in one round
+                        // trip; the host's stamp is monotone, so a
+                        // redundant declaration is free.
                         let owning = if let Some(chat_id) = &chat_id {
                             self.book.session_of_chat(chat_id).map(str::to_string)
                         } else if envelope.channel.starts_with("ahp-session:/") {
@@ -1779,23 +1797,18 @@ impl AhpStore {
                             None
                         };
                         if let Some(session_id) = &owning
-                            && self.book.sessions.get(session_id).is_some_and(|state| {
-                                state.status & ahp_types::state::SessionStatus::IsRead.bits() == 0
-                            })
-                        {
-                            self.pending_unread.remove(session_id);
-                        }
-                        if let Some(session_id) = &owning
-                            && self.focused_session.as_deref() != Some(session_id.as_str())
-                            && let Some(session) = self.book.sessions.get(session_id)
-                            && session.status & ahp_types::state::SessionStatus::IsRead.bits() != 0
-                            && self.pending_unread.insert(session_id.clone())
+                            && self.focused_session.as_deref() == Some(session_id.as_str())
+                            && matches!(
+                                &envelope.action,
+                                StateAction::SessionIsReadChanged(changed)
+                                    if !changed.is_read
+                            )
                         {
                             self.dispatch(
                                 session_uri(session_id),
                                 StateAction::SessionIsReadChanged(
                                     ahp_types::actions::SessionIsReadChangedAction {
-                                        is_read: false,
+                                        is_read: true,
                                     },
                                 ),
                             );
@@ -1815,12 +1828,6 @@ impl AhpStore {
                         while self.rejections.len() > 32 {
                             self.rejections.pop_front();
                         }
-                        // A refused unread-rise write never dropped the bit,
-                        // so the gate must re-arm — the next background
-                        // action may retry the rise.
-                        if envelope.channel.starts_with("ahp-session:/") {
-                            self.pending_unread.remove(id_of(&envelope.channel));
-                        }
                         // The batch archive dropped its rows at the write and
                         // schedules no walk of its own; a refused batch would
                         // leave them hidden with nothing to re-seed them. Ask
@@ -1836,8 +1843,7 @@ impl AhpStore {
                 }
             }
             ahp::SubscriptionEvent::SessionAdded(params) => {
-                let changed = self.book.seed_summary_at_front(params.summary);
-                if changed {
+                if self.fold_session_added(params.summary) {
                     cx.notify();
                 }
             }
@@ -1850,10 +1856,10 @@ impl AhpStore {
                 self.refresh_sessions(cx);
             }
             ahp::SubscriptionEvent::SessionRemoved(params) => {
-                let removed = self.book.remove_summary(&params.channel);
-                if removed {
-                    let session_id = id_of(&params.channel).to_string();
-                    self.book.sessions.remove(&session_id);
+                // `session` names the removed row; `channel` is the root the
+                // notification rode — keying off it removed nothing.
+                if self.fold_session_removed(&params.session) {
+                    let session_id = id_of(&params.session).to_string();
                     self.steered_turns.remove(&session_id);
                     self.steer_boundaries.remove(&session_id);
                     cx.notify();
@@ -4065,7 +4071,6 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -5022,7 +5027,6 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
-            pending_unread: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -5031,6 +5035,95 @@ mod tests {
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
+    }
+
+    /// A summary row for the catalogue tests: Idle|IsRead unless said
+    /// otherwise, keyed by session id.
+    fn catalogue_row(id: &str, status: u32) -> ahp_types::state::SessionSummary {
+        serde_json::from_value(serde_json::json!({
+            "provider": "",
+            "resource": session_uri(id),
+            "title": id,
+            "status": status,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "modifiedAt": "2026-01-01T00:00:00Z",
+        }))
+        .expect("the row parses")
+    }
+
+    /// `sessionRemoved` names the SESSION (the `channel` field is the root
+    /// the notification rode): the row and its folded state leave the
+    /// book. Keying the removal off the channel removes nothing — the
+    /// peer-archive signal would be a permanent no-op.
+    #[test]
+    fn a_session_removed_notification_drops_the_row_and_its_fold() {
+        let mut store = test_store();
+        let row = catalogue_row("s-gone", ahp_types::state::SessionStatus::IsRead.bits());
+        assert!(store.fold_session_added(row), "the row lands");
+        store.book.sessions.insert(
+            "s-gone".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri("s-gone"),
+                "provider": "manox",
+                "title": "s-gone",
+                "status": ahp_types::state::SessionStatus::Idle.bits()
+                    | ahp_types::state::SessionStatus::IsRead.bits(),
+                "modifiedAt": "2026-10-09T00:00:00.000Z",
+                "lifecycle": "ready",
+                "activeClients": [],
+                "chats": [],
+            }))
+            .expect("the session state parses"),
+        );
+
+        let removed_uri = manox_ahp::channels::session::uri("s-gone");
+        let removed = store.fold_session_removed(&removed_uri);
+        assert!(removed, "the named session's row is removed");
+        assert!(
+            !store.book.summaries.contains_key("s-gone"),
+            "the catalogue row leaves"
+        );
+        assert!(
+            !store.book.sessions.contains_key("s-gone"),
+            "the folded state leaves with it"
+        );
+        assert!(
+            !store.fold_session_removed(&removed_uri),
+            "a second removal is a no-op, not a panic"
+        );
+    }
+
+    /// The host announces each id once: a re-announce of a KNOWN id is an
+    /// upsert that must not move the row — re-fronting it would re-rank
+    /// the sidebar on every host restart.
+    #[test]
+    fn a_known_id_session_added_upserts_without_re_fronting() {
+        let mut store = test_store();
+        let read = ahp_types::state::SessionStatus::IsRead.bits();
+        assert!(store.fold_session_added(catalogue_row("s-keep", read)));
+        assert!(store.fold_session_added(catalogue_row("s-other", read)));
+
+        // The walk pinned an order; the new row (added later) sits at the
+        // front by first sight.
+        let order = |store: &AhpStore| store.book.summary_order.clone();
+        assert_eq!(order(&store), vec!["s-other", "s-keep",]);
+
+        // The host restarts and re-announces s-keep with a fresh title:
+        // the row updates IN PLACE.
+        let mut renamed = catalogue_row("s-keep", read);
+        renamed.title = "renamed".to_string();
+        renamed.modified_at = "2026-01-02T00:00:00Z".to_string();
+        assert!(store.fold_session_added(renamed), "the upsert lands");
+        assert_eq!(
+            order(&store),
+            vec!["s-other", "s-keep"],
+            "a known id keeps its position"
+        );
+        assert_eq!(
+            store.book.summaries.get("s-keep").expect("row").title,
+            "renamed",
+            "the fields did update"
+        );
     }
 
     fn single_key(values: &[&str]) -> Vec<serde_json::Map<String, Value>> {
