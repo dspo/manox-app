@@ -103,6 +103,8 @@ impl SubagentPanel {
             // here is a forkable anchor.
             fork_source: false,
             promoted_confirmation: None,
+
+            entering_turns: &[],
         };
         let change = self.conversation.update(cx, |conv, cx| {
             let nodes = {

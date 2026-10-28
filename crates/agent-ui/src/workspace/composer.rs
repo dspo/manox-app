@@ -487,16 +487,25 @@ impl Workspace {
     }
 
     /// Retire ONE `SteerPending` card whose steer the wire just consumed:
-    /// the model has it, so the card leaves the queue immediately and its
-    /// `steered` bubble enters the message list — the injection instant, not
-    /// the turn boundary. Returns whether a card actually retired; `false`
-    /// when no card matches the id (a foreign steer from another client, or
-    /// a card an earlier settle already settled).
-    pub(super) fn retire_steer_card(&mut self, message_id: &str, cx: &mut Context<Self>) -> bool {
+    /// the model has it, so the card leaves the queue immediately, and the
+    /// consumption's turn id stamps the fold row's `steered` badge — the
+    /// injection instant, not the turn boundary. The row itself is the
+    /// fold's (the partition — or the wake's opening row — already landed it
+    /// through the same action that produced the receipt); `turn_id: None`
+    /// (a bare removal echo) retires the card but stamps nothing, the
+    /// display already riding the fold. Returns whether a card actually
+    /// retired; `false` when no card matches the id (a foreign steer from
+    /// another client, or a card an earlier settle already settled).
+    pub(super) fn retire_steer_card(
+        &mut self,
+        message_id: &str,
+        turn_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let matched = self.chat.read(cx).queued_follow_ups.iter().position(|item| {
             matches!(&item.state, FollowUpState::SteerPending { message_id: id } if id == message_id)
         });
-        self.retire_matched_steer(matched, cx)
+        self.retire_matched_steer(matched, turn_id, cx)
     }
 
     /// Retire the FIRST `SteerPending` card whose text equals `text` — the
@@ -508,6 +517,7 @@ impl Workspace {
     pub(super) fn retire_steer_card_matching_text(
         &mut self,
         text: &str,
+        turn_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
         let matched = self
@@ -518,7 +528,7 @@ impl Workspace {
             .position(|item| {
                 matches!(&item.state, FollowUpState::SteerPending { .. } if item.turn.text == text)
             });
-        self.retire_matched_steer(matched, cx)
+        self.retire_matched_steer(matched, turn_id, cx)
     }
 
     /// Retire the steer a WOKEN turn belongs to: the opening row's pending
@@ -531,26 +541,38 @@ impl Workspace {
     /// opening row is always stamped), so the fallback never runs there;
     /// the store has already cleared the text for a carried queued
     /// submission. The one remaining ambiguity is another client's message
-    /// with identical wording.
+    /// with identical wording. `turn_id` — the consumption's turn — rides
+    /// whichever retire matched, for the badge stamp.
     pub(super) fn retire_woken_steer(
         &mut self,
         steer_id: Option<&str>,
         opening_text: Option<&str>,
+        turn_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(message_id) = steer_id else {
             return false;
         };
-        if self.retire_steer_card(message_id, cx) {
+        if self.retire_steer_card(message_id, turn_id, cx) {
             return true;
         }
-        opening_text.is_some_and(|text| self.retire_steer_card_matching_text(text, cx))
+        opening_text.is_some_and(|text| self.retire_steer_card_matching_text(text, turn_id, cx))
     }
 
-    /// The shared retire: drop the card at `matched`, push its `steered`
-    /// bubble into the transcript. `false` for a `None` match — a no-op,
-    /// never an error.
-    fn retire_matched_steer(&mut self, matched: Option<usize>, cx: &mut Context<Self>) -> bool {
+    /// The shared retire: drop the card at `matched`, then stamp the fold
+    /// row's `steered` badge through a turn-id-bearing bubble the adoption
+    /// consumes this pass — the bubble is only the badge's vehicle (and the
+    /// entrance ride the `entering_turns` env names); with a turn id the
+    /// adoption pairs it into the row that already carries the text, so it
+    /// never renders at the tail. `false` for a `None` match — a no-op,
+    /// never an error. A `None` turn id (bare removal echo) leaves the
+    /// display entirely to the fold.
+    fn retire_matched_steer(
+        &mut self,
+        matched: Option<usize>,
+        turn_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(idx) = matched else {
             return false;
         };
@@ -565,18 +587,17 @@ impl Workspace {
         }) else {
             return false;
         };
-        let mut meta = item.turn.meta.clone();
-        meta.steered = true;
-        // A steer is injected into the RUNNING turn, so it has no turn id of
-        // its own: it pairs by text, and only with a turn that appears after
-        // this point (an idle steer waking its own run).
-        self.push_optimistic_bubble(
-            item.turn.text.clone(),
-            item.turn.user_images.clone(),
-            meta,
-            None,
-            cx,
-        );
+        if let Some(turn_id) = turn_id {
+            let mut meta = item.turn.meta.clone();
+            meta.steered = true;
+            self.push_optimistic_bubble(
+                item.turn.text.clone(),
+                item.turn.user_images.clone(),
+                meta,
+                Some(turn_id.to_string()),
+                cx,
+            );
+        }
         cx.notify();
         true
     }

@@ -79,13 +79,17 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
         });
     });
 
-    // ── consumption while running: the removal echo retires the card ───────
+    // ── consumption while running: the partition turn-start retires the
+    // card and stamps the fold row ──────────────────────────────────────────
     let steer_id = visual
         .update(|_window, cx| ws.update(cx, |ws, cx| ws.gallery_first_steer_id(cx)))
         .expect("steer card parked");
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
-            ws.gallery_inject_steer_consumed(&steer_id, cx);
+            // The host partitions the transcript on injection: the steer row
+            // opens its own turn, and the partitioning turn-start receipts
+            // the card under the client's pending id.
+            ws.gallery_inject_partition_turn_start(&steer_id, "引导一：先只看失败的测试", cx);
             ws.gallery_replay_parked(cx);
         });
     });
@@ -99,7 +103,11 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
             assert_eq!(
                 ws.gallery_last_user_bubble(cx).as_deref(),
                 Some("引导一：先只看失败的测试"),
-                "the steered bubble lands in the transcript"
+                "the steer row is the fold's, in reading position"
+            );
+            assert!(
+                ws.gallery_last_user_steered(cx),
+                "the fold row carries the steered badge"
             );
         });
     });
@@ -359,8 +367,9 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
         });
     });
 
-    // ── parked replay: consumed-while-away retires AND lands the bubble —
-    // nothing turns Failed on a guess ──────────────────────────────────────
+    // ── parked replay, removal-only edition: consumed-while-away retires
+    // the card and lands nothing — the display rides the fold row the host
+    // already journaled, so a bare removal must not duplicate it ───────────
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
             ws.gallery_set_running(true, cx);
@@ -385,18 +394,22 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
                 !lanes(&snapshot).contains(&"failed"),
                 "no card fails on a guess: {snapshot:?}"
             );
+            assert!(
+                !lanes(&snapshot).contains(&"steer"),
+                "the removal-only receipt retires the card"
+            );
             assert_eq!(
-                ws.gallery_last_user_bubble(cx).as_deref(),
-                Some("引导三：注入消费回执"),
-                "the replayed consumption lands the steered bubble"
+                ws.gallery_user_row_steered("引导三：注入消费回执", cx),
+                None,
+                "a bare removal lands no bubble — the fold row is the display"
             );
         });
     });
 
     // ── parked replay, idle-steer-wake edition: the receipt rides
-    // TurnStarted{steer_id} — the card retires, the bubble lands, AND the
-    // lifecycle event still flips the running edge (M7's swallowed-event
-    // path, end to end) ───────────────────────────────────────────────────
+    // TurnStarted{steer_id} — the card retires, the woken turn's opening row
+    // carries the badge, AND the lifecycle event still flips the running
+    // edge (M7's swallowed-event path, end to end) ─────────────────────────
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
             // The card parks on the RUNNING turn; the turn then settles with
@@ -416,7 +429,7 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
     );
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
-            ws.gallery_inject_parked_turn_start(Some(&steer_id), None, cx);
+            ws.gallery_inject_parked_turn_start(Some(&steer_id), Some("引导四：空闲唤醒"), cx);
             ws.gallery_replay_parked(cx);
         });
     });
@@ -431,9 +444,9 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
                 "the woken steer's card retired"
             );
             assert_eq!(
-                ws.gallery_last_user_bubble(cx).as_deref(),
-                Some("引导四：空闲唤醒"),
-                "the steered bubble lands"
+                ws.gallery_user_row_steered("引导四：空闲唤醒", cx),
+                Some(true),
+                "the woken turn's opening row IS the steer, badged"
             );
         });
     });
@@ -442,8 +455,9 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
     // the instant the injection is confirmed — BEFORE the router broadcasts
     // the accepted pendingMessageSet echo. The removal lands on an EMPTY
     // fold slot (the reducer NoOps); through the REAL route (not a
-    // pre-derived event), the receipt must still retire the card and land
-    // the bubble, and the late echo must strand nothing ────────────────────
+    // pre-derived event), the receipt must still retire the card, land no
+    // duplicate (the fold row is the display), and the late echo must
+    // strand nothing ────────────────────────────────────────────────────────
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
             ws.gallery_set_running(true, cx);
@@ -479,10 +493,10 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
                 "the removal-first receipt retires the card: {:?}",
                 ws.gallery_queue_snapshot(cx)
             );
-            assert_eq!(
-                ws.gallery_last_user_bubble(cx).as_deref(),
-                Some("引导六：回执先于回声"),
-                "the bubble lands on the receipt, not on the echo"
+            assert_ne!(
+                ws.gallery_user_row_steered("引导六：回执先于回声", cx),
+                Some(true),
+                "a bare removal lands no duplicate: the fold row is the display"
             );
         });
     });
@@ -521,9 +535,9 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
                 ws.gallery_queue_snapshot(cx)
             );
             assert_eq!(
-                ws.gallery_last_user_bubble(cx).as_deref(),
-                Some("引导七：唤醒只带文本"),
-                "the steered bubble lands"
+                ws.gallery_user_row_steered("引导七：唤醒只带文本", cx),
+                Some(true),
+                "the text-fallback retire still badges the woken row"
             );
         });
     });
@@ -657,6 +671,78 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
             );
         });
     });
+
+    // ── steer boundary: a mid-run steer's partition lands as TWO envelopes
+    // (the boundary's turnCompleted, then the steer turn's turnStarted), and
+    // the not-running state between them is observable. That off state must
+    // not settle the queue — the run resumes in the very next envelope ─────
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            // Clear the strip the earlier scenarios left parked — the
+            // boundary scene wants a known queue.
+            while !ws.gallery_queue_snapshot(cx).is_empty() {
+                ws.gallery_delete_card(0, cx);
+            }
+            ws.gallery_set_running(true, cx);
+            ws.gallery_submit("排队五：边界后仍要发", SubmitBehavior::Queue, cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            // The boundary's turnCompleted: the fold drops the active turn,
+            // but the completion is flagged as a steer boundary.
+            ws.gallery_route_raw_envelope(turn_boundary(), cx);
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert!(
+                ws.gallery_turn_active(cx),
+                "the steer boundary holds the running mirror across the gap"
+            );
+            assert_eq!(
+                lanes(&ws.gallery_queue_snapshot(cx)),
+                vec!["queued"],
+                "the boundary must not settle the follow-up queue"
+            );
+            // The steer turn's own start restores the fold's running bit.
+            ws.gallery_route_raw_envelope(turn_started(None, "引导十：边界后继续"), cx);
+            ws.gallery_replay_parked(cx);
+            assert!(
+                ws.gallery_turn_active(cx),
+                "the run continues through the partition"
+            );
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            // A real settle (no boundary flag) flushes the queue as usual.
+            ws.gallery_settle(false, cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert!(
+                ws.gallery_queue_snapshot(cx).is_empty(),
+                "the next real settle flushes the queue"
+            );
+        });
+    });
+}
+
+/// A steer-boundary `chat/turnCompleted`: the completion a mid-run
+/// partition stamps with `_meta.x-manox.steerBoundary`.
+fn turn_boundary() -> ahp_types::actions::StateAction {
+    let meta = serde_json::json!({"x-manox": {"steerBoundary": true}})
+        .as_object()
+        .expect("an object literal")
+        .clone();
+    ahp_types::actions::StateAction::ChatTurnComplete(ahp_types::actions::ChatTurnCompleteAction {
+        turn_id: "t-live".to_string(),
+        duration: 1,
+        meta: Some(meta),
+    })
 }
 
 /// The accepted `chat/pendingMessageSet{kind}` echo, wire-shaped.

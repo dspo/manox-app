@@ -137,11 +137,14 @@ pub enum FoldEffect {
 
 /// One steer-consumption receipt: the client-minted id the composer's card
 /// retires by, plus the wake-retire text (an idle steer waking its own run
-/// carries the opening row's text for the `m-{entry}` id-miss fallback).
+/// carries the opening row's text for the `m-{entry}` id-miss fallback), and
+/// the turn id the consumption opened — the identity the retire stamps the
+/// fold row's `steered` badge through and the entrance animation keys on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SteerReceipt {
     pub message_id: String,
     pub wake_text: Option<String>,
+    pub turn_id: Option<String>,
 }
 
 /// A host refusal of one of this client's writes, keyed by the envelope's
@@ -163,10 +166,13 @@ const RECEIPT_TABLE_CAP: usize = 512;
 /// Derive the steer-consumption receipt from one envelope's (channel,
 /// action). Two wire shapes are receipts: a `chat/pendingMessageRemoved
 /// {steering}` (the injection into the running turn is confirmed — the host
-/// publishes it only after the fact), and a `chat/turnStarted` carrying the
-/// pending id as `queuedMessageId` (an idle steer waking its own run; `wake`
-/// names it, with the opening row's text as the retire fallback). `None`
-/// for everything else: a non-chat channel, any other action, a `Queued`
+/// publishes it only after the fact; it names no turn, so the retire cannot
+/// stamp a badge), and a `chat/turnStarted` carrying the pending id as
+/// `queuedMessageId` — the primary shape: a mid-run steer PARTITIONS the
+/// transcript (the injected row opens its own turn), and an idle steer
+/// waking its own run opens the run's turn the same way. Either way the
+/// receipt names the turn the steer text now lives in. `None` for
+/// everything else: a non-chat channel, any other action, a `Queued`
 /// removal (the plain queue is a local surface; its cards retire at the
 /// settle), and a carried queued submission (a plain send whose text rides
 /// `queuedMessageId` — the projection stamps carried rows the same minted
@@ -189,6 +195,7 @@ fn steering_receipt_of(
                 SteerReceipt {
                     message_id: removed.id.clone(),
                     wake_text: None,
+                    turn_id: None,
                 },
             ))
         }
@@ -199,11 +206,28 @@ fn steering_receipt_of(
                 SteerReceipt {
                     wake_text: (!start.message.text.is_empty()).then(|| start.message.text.clone()),
                     message_id,
+                    turn_id: Some(start.turn_id.clone()),
                 },
             ))
         }
         _ => None,
     }
+}
+
+/// Whether one action is a steer-boundary completion: the partition a
+/// mid-run steer makes in the transcript closes the pre-steer turn with
+/// `_meta.x-manox.steerBoundary` — a completion that is NOT the run's
+/// settle edge (the run resumes in the turn the partition opens). A client
+/// that keys run-lifecycle work off a falling running edge must skip this
+/// boundary or it would flush its follow-up queue mid-run.
+fn is_steer_boundary(action: &StateAction) -> bool {
+    matches!(action, StateAction::ChatTurnComplete(complete) if complete
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("x-manox"))
+        .and_then(|meta| meta.get("steerBoundary"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
 }
 
 impl Default for ChannelBook {
@@ -792,6 +816,13 @@ pub struct AhpStore {
     /// events: the composer consults the table on every sync, and a
     /// re-attach's first sync replays whatever accumulated while parked.
     steer_receipts: HashMap<String, VecDeque<SteerReceipt>>,
+    /// Sessions whose latest fold carried a steer-boundary completion (the
+    /// partition a mid-run steer makes), unconsumed. The transcript sync
+    /// takes the flag at a falling running edge and keeps the run alive
+    /// across the boundary — the two envelopes of one partition (the
+    /// boundary's `turnCompleted` and the steer turn's `turnStarted`) are
+    /// separate store updates, so the off state between them is observable.
+    steer_boundaries: HashSet<String>,
     /// The foreground session id (the multiplexer publishes on focus
     /// changes): chat activity in any OTHER session rises the official
     /// unread bit (`session/isReadChanged` — client-owned observation
@@ -869,6 +900,7 @@ impl AhpStore {
             replay_pending: false,
             refusals: HashMap::new(),
             steer_receipts: HashMap::new(),
+            steer_boundaries: HashSet::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -987,6 +1019,7 @@ impl AhpStore {
             replay_pending: false,
             refusals: HashMap::new(),
             steer_receipts: HashMap::new(),
+            steer_boundaries: HashSet::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -1061,12 +1094,14 @@ impl AhpStore {
         session_id: &str,
         message_id: String,
         wake_text: Option<String>,
+        turn_id: Option<String>,
     ) {
         self.record_steer_receipt(
             session_id.to_string(),
             SteerReceipt {
                 message_id,
                 wake_text,
+                turn_id,
             },
         );
     }
@@ -1666,6 +1701,18 @@ impl AhpStore {
                 {
                     self.record_steer_receipt(session_id, receipt);
                 }
+                // A steer-boundary completion is observable BETWEEN store
+                // updates (one envelope per update): the partition's
+                // `turnCompleted` and the steer turn's `turnStarted` arrive
+                // as separate envelopes, and the off state between them must
+                // not read as the run settling. Flag the session; the
+                // transcript sync consumes the flag at the falling edge.
+                if is_steer_boundary(&envelope.action)
+                    && let Some(chat_id) = &chat_id
+                    && let Some(session_id) = self.book.session_of_chat(chat_id).map(str::to_string)
+                {
+                    self.steer_boundaries.insert(session_id);
+                }
                 match self.book.apply(&envelope.channel, &envelope.action) {
                     FoldEffect::Changed => {
                         // The official unread rise (#870's app half):
@@ -1762,7 +1809,9 @@ impl AhpStore {
             ahp::SubscriptionEvent::SessionRemoved(params) => {
                 let removed = self.book.remove_summary(&params.channel);
                 if removed {
-                    self.book.sessions.remove(id_of(&params.channel));
+                    let session_id = id_of(&params.channel).to_string();
+                    self.book.sessions.remove(&session_id);
+                    self.steer_boundaries.remove(&session_id);
                     cx.notify();
                 }
             }
@@ -2306,6 +2355,15 @@ impl AhpStore {
             .remove(session_id)
             .map(Vec::from)
             .unwrap_or_default()
+    }
+
+    /// Take the session's unconsumed steer-boundary flag: the transcript
+    /// sync reads it at a falling running edge and keeps the run alive
+    /// across the mid-run partition it names (see [`Self::drain_steer_receipts`]'
+    /// neighbour receipts — the boundary and the receipts of one partition
+    /// land in the same envelope burst).
+    pub fn take_steer_boundary(&mut self, session_id: &str) -> bool {
+        self.steer_boundaries.remove(session_id)
     }
 
     /// Recent dispatch rejections, oldest first.
@@ -3634,6 +3692,7 @@ mod tests {
             cwd: None,
             fork_source: false,
             promoted_confirmation: None,
+            entering_turns: &[],
         };
         let mut overlays = Overlays::default();
         let nodes = project(Some(chat), &mut overlays, &env);
@@ -3942,6 +4001,7 @@ mod tests {
             replay_pending: false,
             refusals: HashMap::new(),
             steer_receipts: HashMap::new(),
+            steer_boundaries: HashSet::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),
@@ -4826,6 +4886,7 @@ mod tests {
             replay_pending: false,
             refusals: HashMap::new(),
             steer_receipts: HashMap::new(),
+            steer_boundaries: HashSet::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
             pending_writes: Vec::new(),

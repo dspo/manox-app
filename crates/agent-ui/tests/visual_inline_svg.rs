@@ -138,6 +138,8 @@ mod macos {
                 cwd: None,
                 fork_source: false,
                 promoted_confirmation: None,
+
+                entering_turns: &[],
             };
             conversation.update(cx, |c, cx| {
                 let nodes = c.stage(Some(&chat), &env);

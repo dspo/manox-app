@@ -148,6 +148,7 @@ fn env() -> ProjectEnv<'static> {
         cwd: None,
         fork_source: false,
         promoted_confirmation: None,
+        entering_turns: &[],
     }
 }
 

@@ -590,19 +590,29 @@ impl Workspace {
         };
         let was_running = self.chat.read(cx).turn_active;
 
-        // Steer-consumption receipts retire their cards first, so the
-        // `steered` bubbles they push land in the same projection pass.
+        // Steer-consumption receipts retire their cards first, so the badge
+        // they stamp (through a turn-id-bearing bubble the adoption consumes)
+        // and the entrance ride they name land in the same projection pass.
         let receipts = store.update(cx, |s, _| s.drain_steer_receipts(&sid));
+        let mut entering = Vec::<String>::new();
         for receipt in receipts {
-            match receipt.wake_text {
+            let turn_id = receipt.turn_id.as_deref();
+            let retired = match receipt.wake_text {
                 Some(text) => {
-                    self.retire_woken_steer(Some(&receipt.message_id), Some(&text), cx);
+                    self.retire_woken_steer(Some(&receipt.message_id), Some(&text), turn_id, cx)
                 }
-                None => {
-                    self.retire_steer_card(&receipt.message_id, cx);
-                }
+                None => self.retire_steer_card(&receipt.message_id, turn_id, cx),
+            };
+            if retired && let Some(turn) = receipt.turn_id {
+                entering.push(turn);
             }
         }
+        // A mid-run steer's partition lands as TWO envelopes — the boundary's
+        // `turnCompleted` and the steer turn's `turnStarted` — with the
+        // not-running state between them observable. That off state is not a
+        // settle: consume the boundary flag and hold the running mirror up
+        // until the steer turn's own start (the next envelope) restores it.
+        let steer_boundary = store.update(cx, |s, _| s.take_steer_boundary(&sid));
 
         // The projection itself: one keyed diff over the fold. The fold is
         // read inside the conversation update — the diff walks the state,
@@ -626,6 +636,7 @@ impl Workspace {
             cwd: cwd.as_deref(),
             fork_source: fork_source.is_some(),
             promoted_confirmation: promoted.as_deref(),
+            entering_turns: &entering,
         };
         let change = conversation.update(cx, |conv, cx| {
             let refusals = store.update(cx, |s, _| s.drain_refusals(&sid));
@@ -671,7 +682,10 @@ impl Workspace {
         // sync's mirror. The rising edge arms the elapsed tickers; the
         // falling edge settles the follow-up queue (a cancelled settle
         // strands the parked steers) and refreshes the sidebar/git views.
-        if running != was_running {
+        // A steer-boundary completion is the one falling edge that is not a
+        // settle: the partition's `turnCompleted` fired between envelopes,
+        // and the steer turn's `turnStarted` restores the bit next envelope.
+        if running != was_running && !(steer_boundary && !running) {
             self.chat.update(cx, |chat, cx| {
                 chat.turn_active = running;
                 cx.notify();
@@ -722,6 +736,7 @@ impl Workspace {
             cwd: cwd.as_deref(),
             fork_source: fork_source.is_some(),
             promoted_confirmation: promoted.as_deref(),
+            entering_turns: &[],
         };
         conversation.update(cx, |conv, cx| {
             let chat = {

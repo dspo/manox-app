@@ -559,7 +559,14 @@ impl ConversationState {
                         change.structural = true;
                     }
                     let id = self.alloc_id();
-                    let entering = matches!(node.key, ItemKey::Optimistic(_));
+                    let entering = match &node.key {
+                        ItemKey::Optimistic(_) => true,
+                        // A steer's fold row rides the entrance rise the
+                        // receipt names, so the landing reads as the card
+                        // sliding into the transcript.
+                        ItemKey::User(turn) => env.entering_turns.contains(turn),
+                        _ => false,
+                    };
                     let item = new_node_item(node.kind.clone(), &node.role, id, env, entering, cx);
                     self.items.push(item);
                     self.keys.push(node.key.clone());
@@ -1299,6 +1306,7 @@ mod tests {
                 cwd: None,
                 fork_source: false,
                 promoted_confirmation: None,
+                entering_turns: &[],
             },
             host.clone(),
         )

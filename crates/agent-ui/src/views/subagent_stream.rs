@@ -158,6 +158,7 @@ impl SubagentStreamView {
             // row here is a forkable anchor of the parent conversation.
             fork_source: false,
             promoted_confirmation: None,
+            entering_turns: &[],
         };
         let change = self.conversation.update(cx, |conv, cx| {
             let nodes = conv.stage(self.store.read(cx).book.chats.get(&chat_id), &env);

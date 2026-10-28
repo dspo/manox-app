@@ -223,6 +223,12 @@ pub struct ProjectEnv<'a> {
     /// renders as the card INSTEAD of its activity-segment entry, so the
     /// call never appears twice.
     pub promoted_confirmation: Option<&'a str>,
+    /// Turn ids whose user row mounts with the entrance rise this pass —
+    /// the steers whose consumption receipt the sync drained alongside this
+    /// projection. The row is fold-synthesized (the mount gate admits only
+    /// `Optimistic` keys otherwise), so the steer's landing ride would be
+    /// invisible without it; a turn already mounted ignores the flag.
+    pub entering_turns: &'a [String],
 }
 
 /// Project one chat state (or its absence) plus the overlays into the row

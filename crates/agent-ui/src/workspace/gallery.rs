@@ -22,8 +22,16 @@ use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
 use steer_agent_chrome_ui::shell::Shell;
 
 /// The chat fold a fabricated mid-turn scene rides: one completed turn for
-/// scenery plus an active turn only while the scene is "running".
-fn fabricated_chat(chat_id: &str, running: bool) -> ahp_types::state::ChatState {
+/// scenery plus an active turn only while the scene is "running". `active`
+/// swaps the default live turn for one with a caller-chosen id and opening
+/// text — the shape a steer's consumption produces, where the steer text IS
+/// the active turn's opening row (a mid-run partition or a wake's woken
+/// turn).
+fn fabricated_chat(
+    chat_id: &str,
+    running: bool,
+    active: Option<(&str, &str)>,
+) -> ahp_types::state::ChatState {
     let mut value = serde_json::json!({
         "resource": chat_uri(chat_id),
         "title": "send-mode gallery",
@@ -40,10 +48,11 @@ fn fabricated_chat(chat_id: &str, running: bool) -> ahp_types::state::ChatState 
         }],
     });
     if running {
+        let (id, text) = active.unwrap_or(("t-live", "继续，把测试也过一遍"));
         value["activeTurn"] = serde_json::json!({
-            "id": "t-live",
+            "id": id,
             "startedAt": "2026-10-22T00:00:01Z",
-            "message": { "text": "继续，把测试也过一遍", "origin": { "kind": "user" } },
+            "message": { "text": text, "origin": { "kind": "user" } },
             "responseParts": [
                 { "kind": "markdown", "id": "p-2", "content": "正在跑 `cargo test`…" },
             ],
@@ -65,7 +74,7 @@ fn install_scene(ws: &mut Workspace, cx: &mut Context<Workspace>) {
         .map(|(_, sid)| sid.clone())
         .expect("the assembly binds a foreground session");
     let mut store = AhpStore::detached();
-    store.diagnostic_set_chat(&sid, fabricated_chat(&sid, true));
+    store.diagnostic_set_chat(&sid, fabricated_chat(&sid, true, None));
     // A real store's session catalogue owns the chat; bucket routing
     // (`session_of_chat`) resolves through it, so the detached fixture
     // seeds the owning row too.
@@ -94,7 +103,7 @@ fn set_running(ws: &mut Workspace, on: bool, cx: &mut Context<Workspace>) {
         return;
     };
     store.update(cx, |store, _| {
-        store.diagnostic_set_chat(&sid, fabricated_chat(&sid, on));
+        store.diagnostic_set_chat(&sid, fabricated_chat(&sid, on, None));
     });
     // The mirror tracks the fabricated fold; the projection re-renders the
     // transcript for it. (The gallery drives the edges itself via the
@@ -166,7 +175,9 @@ impl Workspace {
                 _ => None,
             });
         if let Some(id) = id {
-            self.retire_steer_card(&id, cx);
+            // The eyeball demo simulates the bare removal shape: the card
+            // leaves the strip, the display stays with the fold.
+            self.retire_steer_card(&id, None, cx);
         }
     }
 
@@ -237,13 +248,15 @@ impl Workspace {
     }
 
     /// Inject a wire consumption receipt into the store's table, as the
-    /// backend's injection echo would land while the thread is parked.
+    /// backend's removal echo would land while the thread is parked. The
+    /// removal names no turn — the retire stamps no badge; the fold row (the
+    /// real host folds it from the same journal) carries the display.
     pub fn gallery_inject_steer_consumed(&mut self, message_id: &str, cx: &mut Context<Self>) {
         let Some((store, sid)) = self.chat.read(cx).store.clone() else {
             return;
         };
         store.update(cx, |store, _| {
-            store.diagnostic_inject_steer_receipt(&sid, message_id.to_string(), None);
+            store.diagnostic_inject_steer_receipt(&sid, message_id.to_string(), None, None);
         });
     }
 
@@ -285,6 +298,44 @@ impl Workspace {
                 _ => None,
             })
             .last()
+    }
+
+    /// Whether the transcript's LAST user row carries the steered badge —
+    /// the retire stamps the fold row through the receipt's turn id.
+    pub fn gallery_last_user_steered(&self, cx: &App) -> bool {
+        self.chat
+            .read(cx)
+            .conversation
+            .read(cx)
+            .items()
+            .iter()
+            .rev()
+            .filter_map(|item| match item.read(cx).kind() {
+                ConvItem::User { meta, .. } => meta.as_ref().map(|m| m.steered),
+                _ => None,
+            })
+            .next()
+            .unwrap_or(false)
+    }
+
+    /// The steered badge on the user row whose text matches, if the row
+    /// exists — the steer display assertion (a detached fixture's early
+    /// submits stay as unadopted tail bubbles, so "last row" is not the
+    /// steer row once the fold grew around them).
+    pub fn gallery_user_row_steered(&self, text: &str, cx: &App) -> Option<bool> {
+        self.chat
+            .read(cx)
+            .conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter_map(|item| match item.read(cx).kind() {
+                ConvItem::User {
+                    text: row, meta, ..
+                } if row.trim() == text => meta.as_ref().map(|m| m.steered),
+                _ => None,
+            })
+            .next_back()
     }
 
     /// What the detached store would have ridden: the parked dispatch tags.
@@ -334,12 +385,13 @@ impl Workspace {
         self.delete_follow_up(idx, cx);
     }
 
-    /// Inject a parked turn-start whose opening row IS a steer: the
-    /// idle-steer wake path's receipt. `steer_id` is the id the row threads
-    /// (`None` when the host threads none — the receipt then carries only
-    /// the text fallback, under an id no card matches); `opening_text` is
-    /// the row's text fallback (`None` for an empty row). The retire matches
-    /// by id first, then by text.
+    /// Inject a parked turn-start whose opening row IS a steer: the wake
+    /// path's receipt. `steer_id` is the id the row threads (`None` when the
+    /// host threads none — the receipt then carries only the text fallback,
+    /// under an id no card matches); `opening_text` is the row's text
+    /// (`None` keeps the default live turn — an empty row). The retire
+    /// matches by id first, then by text; the receipt names the woken turn
+    /// (`t-wake`) so a match stamps the fold row's badge.
     pub fn gallery_inject_parked_turn_start(
         &mut self,
         steer_id: Option<&str>,
@@ -351,17 +403,46 @@ impl Workspace {
         };
         store.update(cx, |store, _| {
             // A turn start gains its active turn (the running edge the sync
-            // detects). A wake — a start CARRYING the pending id — also
-            // receipts the card; a start with no pending id is never a wake,
-            // so it must not retire anything by text.
-            store.diagnostic_set_chat(&sid, fabricated_chat(&sid, true));
+            // detects) — the woken turn opens with the steer text when the
+            // row carries one. A wake — a start CARRYING the pending id —
+            // also receipts the card; a start with no pending id is never a
+            // wake, so it must not retire anything by text.
+            store.diagnostic_set_chat(
+                &sid,
+                fabricated_chat(&sid, true, opening_text.map(|text| ("t-wake", text))),
+            );
             if let Some(steer_id) = steer_id {
                 store.diagnostic_inject_steer_receipt(
                     &sid,
                     steer_id.to_string(),
                     opening_text.map(str::to_string),
+                    Some("t-wake".to_string()),
                 );
             }
+        });
+    }
+
+    /// Inject the mid-run partition: the fold gains a turn whose opening row
+    /// IS the steer (`t-part`), and the partitioning turn-start receipts the
+    /// card under the client's pending id — the shape a consumed mid-run
+    /// steer lands as.
+    pub fn gallery_inject_partition_turn_start(
+        &mut self,
+        steer_id: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            return;
+        };
+        store.update(cx, |store, _| {
+            store.diagnostic_set_chat(&sid, fabricated_chat(&sid, true, Some(("t-part", text))));
+            store.diagnostic_inject_steer_receipt(
+                &sid,
+                steer_id.to_string(),
+                Some(text.to_string()),
+                Some("t-part".to_string()),
+            );
         });
     }
 
