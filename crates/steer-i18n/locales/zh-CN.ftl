@@ -232,7 +232,10 @@ settings-origin-builtin = 内置
 settings-origin-user = 用户
 settings-origin-plugin = 插件
 
-agents-captain-desc = 主对话 agent：驾驶会话、调度子代理与工具。
+agents-captain-desc = 主对话 agent。系统提示词由运行时模板与项目指令、技能清单、用户笔记按会话组装。
+agents-captain-meta = 内置 · 模型随会话
+agents-prompt-preview = 系统提示词
+agents-prompt-note = 由运行时自身渲染的实况预览（稳定基底；项目指令与用户笔记按会话叠加）。
 
 agents-all-tools = 全部工具
 agents-tools-count = 个工具

@@ -248,7 +248,10 @@ settings-origin-builtin = Built-in
 settings-origin-user = User
 settings-origin-plugin = Plugin
 
-agents-captain-desc = The lead agent: steers the conversation and dispatches subagents and tools.
+agents-captain-desc = The lead agent. Its system prompt is assembled per session from the runtime template, project instructions, the skill fold and user notes.
+agents-captain-meta = Built-in · model follows the session
+agents-prompt-preview = System prompt
+agents-prompt-note = A live preview rendered by the runtime itself (the stable base; project instructions and user notes fold in per session).
 
 agents-all-tools = all tools
 agents-tools-count = tools

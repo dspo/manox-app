@@ -964,9 +964,12 @@ rosters cached on the view at creation):
 
 - 常规 — the language dropdown (Fill card).
 - 模型 — the provider/model editor panel.
-- Agents — read-only roster: Captain (the lead) + the runtime registry the subagent path itself
-  builds (`register_defaults` + user/plugin discovery via `agent_defs::register_user_and_plugin`),
-  rows carrying origin (内置/用户/插件) · model · tool count.
+- Agents — read-only roster: the lead's face first — Captain's REAL system prompt rendered by
+  the runtime's own `captain_prompt_builder` (the stable base template: tool preferences,
+  concurrency model, subagent prose, skill fold — a live preview, not a summary), then the
+  runtime registry the subagent path itself builds (`register_defaults` + user/plugin discovery
+  via `agent_defs::register_user_and_plugin`), rows carrying origin (内置/用户/插件) · model ·
+  tool count. The prompt is rendered once at view creation and cached.
 - 插件 — the plugin manager view.
 - Skills — read-only roster from `manox_agent::skill::list_skill_records()` (user + plugin, with
   origin badges).

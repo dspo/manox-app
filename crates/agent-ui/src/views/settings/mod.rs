@@ -59,6 +59,11 @@ pub struct SettingsView {
     agents: Vec<AgentRow>,
     /// Read-only Skills roster, collected once at view creation.
     skills: Vec<SkillRow>,
+    /// The Captain's live system prompt, rendered once at view creation
+    /// through the runtime's own builder (template + skill fold). Read-only
+    /// preview; the per-session assembly (project instructions, user notes,
+    /// active-tool docs) is what a real session adds on top.
+    captain_prompt: String,
 }
 
 #[derive(Clone)]
@@ -91,6 +96,7 @@ impl SettingsView {
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
             agents: collect_agents(),
             skills: collect_skills(),
+            captain_prompt: captain_prompt_preview(),
         }
     }
 
@@ -166,6 +172,7 @@ impl SettingsView {
             &self.mcp_disabled,
             &self.agents,
             &self.skills,
+            &self.captain_prompt,
         );
         use gpui::Styled as _;
         let hidden_header = div().hidden().style().clone();
@@ -404,6 +411,7 @@ fn build_page(
     mcp_disabled: &HashSet<String>,
     agents: &[AgentRow],
     skills: &[SkillRow],
+    captain_prompt: &str,
 ) -> SettingPage {
     let title = |key: &str| SettingPage::new(i18n::t(key)).default_open(true);
     match leaf {
@@ -446,7 +454,7 @@ fn build_page(
             models::render_models,
         )),
         // Agents — read-only roster (the lead + preset + discovered defs).
-        2 => title("settings-item-agents").group(agents_group(agents)),
+        2 => title("settings-item-agents").group(agents_group(agents, captain_prompt)),
         // 插件.
         3 => title("settings-item-plugins").group(panel_group(
             view,
@@ -501,14 +509,7 @@ struct SkillRow {
 /// with user files able to override built-ins by name.
 fn collect_agents() -> Vec<AgentRow> {
     use manox_harness::core::ext_point_agent::AgentRegistry;
-    let mut rows = vec![AgentRow {
-        name: "Captain".into(),
-        description: i18n::t("agents-captain-desc").to_string(),
-        origin: "settings-origin-builtin",
-        model: None,
-        tools: 0,
-        all_tools: true,
-    }];
+    let mut rows = Vec::new();
     let mut registry = AgentRegistry::new();
     manox_harness::ext::subagent::register_defaults(&mut registry);
     manox_agent::agent_defs::register_user_and_plugin(&mut registry, None);
@@ -560,8 +561,71 @@ fn meta_field(text: SharedString) -> SettingField<SharedString> {
     })
 }
 
-fn agents_group(agents: &[AgentRow]) -> SettingGroup {
+/// The Captain's system prompt rendered through the runtime's own builder —
+/// the REAL preset (tool preferences, concurrency model, subagent roster
+/// prose, the skill fold), not a summary of it. The per-session fold
+/// (project instructions, user notes, active-tool docs) rides on top in a
+/// live session; this preview is the stable base.
+fn captain_prompt_preview() -> String {
+    use manox_harness::core::harness::HarnessResources;
+    use manox_harness::ext::prompt::{CaptainConfig, SkillSummary};
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    let skills: Vec<SkillSummary> = manox_agent::skill::list_skill_records()
+        .into_iter()
+        .map(|record| SkillSummary {
+            name: record.name,
+            description: record.description,
+        })
+        .collect();
+    let builder = manox_harness::ext::prompt::captain_prompt_builder(CaptainConfig {
+        cwd: cwd.clone(),
+        today: chrono::Local::now().format("%Y-%m-%d").to_string(),
+        skills,
+        user_notes: None,
+    });
+    builder(&[], &HarnessResources::default(), &cwd)
+}
+
+fn agents_group(agents: &[AgentRow], captain_prompt: &str) -> SettingGroup {
+    // The render closure is 'static; it takes the prompt as owned text.
+    let captain_prompt = captain_prompt.to_string();
     let mut group = SettingGroup::new().title(i18n::t("settings-item-agents"));
+    // The lead agent's face: what it is, plus its REAL system prompt —
+    // rendered by the runtime's own builder, read-only.
+    group = group
+        .item(
+            SettingItem::new("Captain", meta_field(i18n::t("agents-captain-meta")))
+                .description(i18n::t("agents-captain-desc")),
+        )
+        .item(
+            SettingItem::new(
+                i18n::t("agents-prompt-preview"),
+                SettingField::render(move |_, _, cx| {
+                    use gpui::{IntoElement as _, ParentElement as _, Styled as _};
+                    let theme = cx.theme().clone();
+                    let mut lines = gpui_component::v_flex()
+                        .id("captain-prompt-preview")
+                        .max_h(px(280.))
+                        .overflow_y_scroll()
+                        .p_3()
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.secondary)
+                        .text_size(px(12.));
+                    for line in captain_prompt.lines() {
+                        lines = lines.child(
+                            gpui::div()
+                                .font_family("monospace")
+                                .text_color(theme.muted_foreground)
+                                .child(line.to_string()),
+                        );
+                    }
+                    lines.into_any_element()
+                }),
+            )
+            .description(i18n::t("agents-prompt-note")),
+        );
     for row in agents {
         let mut meta = i18n::t(row.origin).to_string();
         if let Some(model) = &row.model {
