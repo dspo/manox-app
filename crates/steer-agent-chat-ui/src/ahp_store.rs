@@ -1626,6 +1626,33 @@ impl AhpStore {
     /// envelope here must re-attach that identity before leaving the store:
     /// the display buckets are keyed by the owning session for exactly that
     /// reason.
+    /// A host-catalogue `sessionAdded`. The host announces each id ONCE
+    /// (its published-map diff): a first sight seeds at the front (a
+    /// just-created session ranks first by recency anyway); a re-announce
+    /// of an id this book already holds is an upsert only — re-fronting a
+    /// known row would re-rank the sidebar on every host restart.
+    fn fold_session_added(&mut self, summary: ahp_types::state::SessionSummary) -> bool {
+        let id = id_of(&summary.resource).to_string();
+        if self.book.summaries.contains_key(&id) {
+            self.book.seed_summaries(vec![summary])
+        } else {
+            self.book.seed_summary_at_front(summary)
+        }
+    }
+
+    /// A host-catalogue `sessionRemoved` — the row left the active
+    /// catalogue (a dispose, a peer's archive): drop the row and its
+    /// folded state. The URI is the SESSION's; `params.channel` is the
+    /// root the notification rode, and keying the removal off it removes
+    /// nothing.
+    fn fold_session_removed(&mut self, session: &ahp_types::common::Uri) -> bool {
+        let removed = self.book.remove_summary(session);
+        if removed {
+            self.book.sessions.remove(id_of(session));
+        }
+        removed
+    }
+
     fn route(&mut self, event: ahp::ClientEvent, cx: &mut gpui::Context<Self>) {
         match event.event {
             ahp::SubscriptionEvent::Action(envelope) => {
@@ -1807,19 +1834,7 @@ impl AhpStore {
                 }
             }
             ahp::SubscriptionEvent::SessionAdded(params) => {
-                // The host announces each id ONCE (its published-map diff):
-                // a first sight seeds at the front (a just-created session
-                // ranks first by recency anyway); a re-announce of an id
-                // this book already holds is an upsert only — re-fronting a
-                // known row would re-rank the sidebar on every host
-                // restart.
-                let id = id_of(&params.summary.resource).to_string();
-                let changed = if self.book.summaries.contains_key(&id) {
-                    self.book.seed_summaries(vec![params.summary])
-                } else {
-                    self.book.seed_summary_at_front(params.summary)
-                };
-                if changed {
+                if self.fold_session_added(params.summary) {
                     cx.notify();
                 }
             }
@@ -1832,10 +1847,10 @@ impl AhpStore {
                 self.refresh_sessions(cx);
             }
             ahp::SubscriptionEvent::SessionRemoved(params) => {
-                let removed = self.book.remove_summary(&params.channel);
-                if removed {
-                    let session_id = id_of(&params.channel).to_string();
-                    self.book.sessions.remove(&session_id);
+                // `session` names the removed row; `channel` is the root the
+                // notification rode — keying off it removed nothing.
+                if self.fold_session_removed(&params.session) {
+                    let session_id = id_of(&params.session).to_string();
                     self.steered_turns.remove(&session_id);
                     self.steer_boundaries.remove(&session_id);
                     cx.notify();
@@ -5011,6 +5026,95 @@ mod tests {
             delivery_signal_tx: None,
             _tasks: Vec::new(),
         }
+    }
+
+    /// A summary row for the catalogue tests: Idle|IsRead unless said
+    /// otherwise, keyed by session id.
+    fn catalogue_row(id: &str, status: u32) -> ahp_types::state::SessionSummary {
+        serde_json::from_value(serde_json::json!({
+            "provider": "",
+            "resource": session_uri(id),
+            "title": id,
+            "status": status,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "modifiedAt": "2026-01-01T00:00:00Z",
+        }))
+        .expect("the row parses")
+    }
+
+    /// `sessionRemoved` names the SESSION (the `channel` field is the root
+    /// the notification rode): the row and its folded state leave the
+    /// book. Keying the removal off the channel removes nothing — the
+    /// peer-archive signal would be a permanent no-op.
+    #[test]
+    fn a_session_removed_notification_drops_the_row_and_its_fold() {
+        let mut store = test_store();
+        let row = catalogue_row("s-gone", ahp_types::state::SessionStatus::IsRead.bits());
+        assert!(store.fold_session_added(row), "the row lands");
+        store.book.sessions.insert(
+            "s-gone".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri("s-gone"),
+                "provider": "manox",
+                "title": "s-gone",
+                "status": ahp_types::state::SessionStatus::Idle.bits()
+                    | ahp_types::state::SessionStatus::IsRead.bits(),
+                "modifiedAt": "2026-10-09T00:00:00.000Z",
+                "lifecycle": "ready",
+                "activeClients": [],
+                "chats": [],
+            }))
+            .expect("the session state parses"),
+        );
+
+        let removed_uri = manox_ahp::channels::session::uri("s-gone");
+        let removed = store.fold_session_removed(&removed_uri);
+        assert!(removed, "the named session's row is removed");
+        assert!(
+            !store.book.summaries.contains_key("s-gone"),
+            "the catalogue row leaves"
+        );
+        assert!(
+            !store.book.sessions.contains_key("s-gone"),
+            "the folded state leaves with it"
+        );
+        assert!(
+            !store.fold_session_removed(&removed_uri),
+            "a second removal is a no-op, not a panic"
+        );
+    }
+
+    /// The host announces each id once: a re-announce of a KNOWN id is an
+    /// upsert that must not move the row — re-fronting it would re-rank
+    /// the sidebar on every host restart.
+    #[test]
+    fn a_known_id_session_added_upserts_without_re_fronting() {
+        let mut store = test_store();
+        let read = ahp_types::state::SessionStatus::IsRead.bits();
+        assert!(store.fold_session_added(catalogue_row("s-keep", read)));
+        assert!(store.fold_session_added(catalogue_row("s-other", read)));
+
+        // The walk pinned an order; the new row (added later) sits at the
+        // front by first sight.
+        let order = |store: &AhpStore| store.book.summary_order.clone();
+        assert_eq!(order(&store), vec!["s-other", "s-keep",]);
+
+        // The host restarts and re-announces s-keep with a fresh title:
+        // the row updates IN PLACE.
+        let mut renamed = catalogue_row("s-keep", read);
+        renamed.title = "renamed".to_string();
+        renamed.modified_at = "2026-01-02T00:00:00Z".to_string();
+        assert!(store.fold_session_added(renamed), "the upsert lands");
+        assert_eq!(
+            order(&store),
+            vec!["s-other", "s-keep"],
+            "a known id keeps its position"
+        );
+        assert_eq!(
+            store.book.summaries.get("s-keep").expect("row").title,
+            "renamed",
+            "the fields did update"
+        );
     }
 
     fn single_key(values: &[&str]) -> Vec<serde_json::Map<String, Value>> {
