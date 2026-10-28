@@ -37,7 +37,7 @@ use gpui::{
 use manox_agent::MessageAuthor;
 use steer_agent_chat_ui::conversation::{ActivityEntry, ConvItem, ConversationState, ToolCallItem};
 use steer_agent_chat_ui::host::{ChatHostHandle, noop_host};
-use steer_agent_chat_ui::transcript::ProjectEnv;
+use steer_agent_chat_ui::transcript::{ProjectEnv, no_steered_turns};
 use steer_agent_chat_ui::views::message::MessageItem;
 use steer_agent_chat_ui::views::tool_stream::PUBLISH_CAP;
 
@@ -148,6 +148,8 @@ fn env() -> ProjectEnv<'static> {
         cwd: None,
         fork_source: false,
         promoted_confirmation: None,
+        entering_turns: &[],
+        steered_turns: no_steered_turns(),
     }
 }
 

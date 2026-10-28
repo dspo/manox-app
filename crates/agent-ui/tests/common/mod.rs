@@ -480,6 +480,8 @@ pub fn conversation_from_chat(
         cwd: None,
         fork_source: false,
         promoted_confirmation: None,
+        entering_turns: &[],
+        steered_turns: steer_agent_chat_ui::transcript::no_steered_turns(),
     };
     cx.new(|cx| {
         let mut conversation = agent_ui::conversation::ConversationState::new(recipient.clone());

@@ -559,7 +559,14 @@ impl ConversationState {
                         change.structural = true;
                     }
                     let id = self.alloc_id();
-                    let entering = matches!(node.key, ItemKey::Optimistic(_));
+                    let entering = match &node.key {
+                        ItemKey::Optimistic(_) => true,
+                        // A steer's fold row rides the entrance rise the
+                        // receipt names, so the landing reads as the card
+                        // sliding into the transcript.
+                        ItemKey::User(turn) => env.entering_turns.contains(turn),
+                        _ => false,
+                    };
                     let item = new_node_item(node.kind.clone(), &node.role, id, env, entering, cx);
                     self.items.push(item);
                     self.keys.push(node.key.clone());
@@ -603,6 +610,7 @@ impl ConversationState {
             images,
             mut meta,
             turn_id,
+            steer_id,
         } = bubble;
         // The header's `to` is whoever owns this conversation, so it is
         // stamped here rather than carried by every caller.
@@ -622,9 +630,40 @@ impl ConversationState {
                 images,
                 meta,
                 turn_id,
+                steer_id,
                 minted_turns,
             });
         self.project(chat, env, cx);
+    }
+
+    /// Upgrade a window bubble to the identity of the turn its steer opened.
+    /// The removal echo mints the bubble before any turn exists (no id); the
+    /// partition's `turnStarted` later names the turn, and this upgrade lets
+    /// [`crate::transcript::project`] pair the bubble by IDENTITY — so the
+    /// window is adopted no matter how late the two receipts drain, and no
+    /// mint-time turn count can strand it.
+    pub fn attach_steer_turn(&mut self, steer_id: &str, turn_id: &str) -> bool {
+        let mut changed = false;
+        for bubble in &mut self.overlays.bubbles {
+            if bubble.steer_id.as_deref() == Some(steer_id) && bubble.turn_id.is_none() {
+                bubble.turn_id = Some(turn_id.to_string());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Drop window bubbles whose steer never opened a fold row: a run that
+    /// aborted before draining the injection retracts the queued steer, so
+    /// no turn-start will ever adopt the bridge. The settle is the last
+    /// chance to retire it — a permanent tail row would report a message the
+    /// model never saw. Returns whether anything was dropped.
+    pub fn drop_unlanded_steer_bubbles(&mut self) -> bool {
+        let before = self.overlays.bubbles.len();
+        self.overlays
+            .bubbles
+            .retain(|bubble| bubble.steer_id.is_none() || bubble.turn_id.is_some());
+        self.overlays.bubbles.len() != before
     }
 
     /// Take the host refusals the store drained for this session into the
@@ -828,8 +867,9 @@ fn new_node_item(
         };
         let mut item = MessageItem::new(kind, own_role, id, env.host.clone());
         if entering {
-            // Live sends only — the entrance rise never plays for rows the
-            // fold synthesized.
+            // Optimistic bubbles, plus the fold rows the sync's receipts
+            // name (`entering_turns`) — a steer's landing rides the entrance
+            // rise even though the row is fold-synthesized.
             item = item.entering_now();
         }
         // For projected text items, feed the full snapshot so the mounted
@@ -870,13 +910,18 @@ fn sync_row(item: &Entity<MessageItem>, node: &Node, env: &ProjectEnv, cx: &mut 
                 else {
                     return false;
                 };
-                let changed = old_text != text;
+                let mut changed = old_text != text;
                 *old_text = text.clone();
                 if let (Some(old_meta), Some(meta)) = (old_meta, meta) {
-                    // The adopting row keeps its steered marker; the rest of
-                    // the header identity follows the state.
+                    // The header identity follows the state, INCLUDING the
+                    // steered badge — a projection fact (the fold names the
+                    // steer rows), so a later projection must be able to
+                    // stamp a row that mounted before its steer was known
+                    // (the removal receipt retires the card a turn ahead of
+                    // the partition on the wire).
                     old_meta.timestamp = meta.timestamp;
                     old_meta.model_id = meta.model_id.clone();
+                    changed |= set(&mut old_meta.steered, meta.steered);
                 }
                 changed
             }
@@ -1216,7 +1261,7 @@ fn set<T: PartialEq>(slot: &mut T, value: T) -> bool {
 mod tests {
 
     use super::*;
-    use crate::transcript::{Overlays, ProjectEnv, project};
+    use crate::transcript::{Overlays, ProjectEnv, no_steered_turns, project};
     use ahp_types::actions::StateAction;
     use ahp_types::state::ChatState;
 
@@ -1299,6 +1344,8 @@ mod tests {
                 cwd: None,
                 fork_source: false,
                 promoted_confirmation: None,
+                entering_turns: &[],
+                steered_turns: no_steered_turns(),
             },
             host.clone(),
         )
@@ -1798,6 +1845,7 @@ mod tests {
                     images: Vec::new(),
                     meta: UserTurnMeta::new(0, "test-model".into(), None),
                     turn_id: None,
+                    steer_id: None,
                 },
                 &env,
                 cx,
@@ -1831,6 +1879,7 @@ mod tests {
                     images: Vec::new(),
                     meta: UserTurnMeta::new(1, "test-model".into(), None),
                     turn_id: None,
+                    steer_id: None,
                 },
                 &env,
                 cx,
@@ -1922,6 +1971,7 @@ mod tests {
                         images: Vec::new(),
                         meta: UserTurnMeta::new(2_000, "test-model".into(), None),
                         turn_id: None,
+                        steer_id: None,
                     },
                     &env,
                     cx,
@@ -1969,6 +2019,7 @@ mod tests {
                         images: Vec::new(),
                         meta: UserTurnMeta::new(0, "test-model".into(), None),
                         turn_id: Some("t-expanded".into()),
+                        steer_id: None,
                     },
                     &env,
                     cx,
@@ -2004,6 +2055,7 @@ mod tests {
                         images: Vec::new(),
                         meta: UserTurnMeta::new(0, "test-model".into(), None),
                         turn_id: Some("t-refused".into()),
+                        steer_id: None,
                     },
                     &env,
                     cx,
@@ -2048,6 +2100,7 @@ mod tests {
                     images: Vec::new(),
                     meta: UserTurnMeta::new(0, "test-model".into(), None),
                     turn_id: Some("uuid-client".into()),
+                    steer_id: None,
                 },
                 &env,
                 cx,

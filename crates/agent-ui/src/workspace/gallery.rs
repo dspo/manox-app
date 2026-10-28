@@ -22,7 +22,10 @@ use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
 use steer_agent_chrome_ui::shell::Shell;
 
 /// The chat fold a fabricated mid-turn scene rides: one completed turn for
-/// scenery plus an active turn only while the scene is "running".
+/// scenery plus an active turn only while the scene is "running". Steer
+/// shapes are NOT fabricated here — their turns land through the real
+/// reducer (routed `chat/turnStarted` envelopes), so the fold, the receipt
+/// bucket and the steered-turn facts all build exactly as they do live.
 fn fabricated_chat(chat_id: &str, running: bool) -> ahp_types::state::ChatState {
     let mut value = serde_json::json!({
         "resource": chat_uri(chat_id),
@@ -166,7 +169,9 @@ impl Workspace {
                 _ => None,
             });
         if let Some(id) = id {
-            self.retire_steer_card(&id, cx);
+            // The eyeball demo simulates the bare removal shape: the card
+            // leaves the strip, the display stays with the fold.
+            self.retire_steer_card(&id, None, cx);
         }
     }
 
@@ -236,15 +241,20 @@ impl Workspace {
         });
     }
 
-    /// Inject a wire consumption receipt into the store's table, as the
-    /// backend's injection echo would land while the thread is parked.
+    /// Route the consumption's `pendingMessageRemoved{steering}` echo,
+    /// wire-shaped: the host publishes it the instant the steer joins the
+    /// kernel's queue — BEFORE any partition exists. The removal names no
+    /// turn: the retire leaves the window bubble behind and stamps nothing.
     pub fn gallery_inject_steer_consumed(&mut self, message_id: &str, cx: &mut Context<Self>) {
-        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
-            return;
-        };
-        store.update(cx, |store, _| {
-            store.diagnostic_inject_steer_receipt(&sid, message_id.to_string(), None);
-        });
+        self.gallery_route_raw_envelope(
+            ahp_types::actions::StateAction::ChatPendingMessageRemoved(
+                ahp_types::actions::ChatPendingMessageRemovedAction {
+                    kind: ahp_types::state::PendingMessageKind::Steering,
+                    id: message_id.to_string(),
+                },
+            ),
+            cx,
+        );
     }
 
     /// Queue strip snapshot: (state name, message id or "", first line).
@@ -285,6 +295,49 @@ impl Workspace {
                 _ => None,
             })
             .last()
+    }
+
+    /// The steered badge on the user row whose text matches, if the row
+    /// exists — the steer display assertion (a detached fixture's early
+    /// submits stay as unadopted tail bubbles, so "last row" is not the
+    /// steer row once the fold grew around them). Both sides trim: the
+    /// fixture's rows and the query strings carry incidental whitespace
+    /// independently.
+    pub fn gallery_user_row_steered(&self, text: &str, cx: &App) -> Option<bool> {
+        let query = text.trim();
+        self.chat
+            .read(cx)
+            .conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter_map(|item| match item.read(cx).kind() {
+                ConvItem::User {
+                    text: row, meta, ..
+                } if row.trim() == query => meta.as_ref().map(|m| m.steered),
+                _ => None,
+            })
+            .next_back()
+    }
+
+    /// How many user rows carry the text — the no-duplicate half of the
+    /// steer display assertion (the window bubble must be ADOPTED by the
+    /// fold row, never sit beside it).
+    pub fn gallery_user_row_count(&self, text: &str, cx: &App) -> usize {
+        let query = text.trim();
+        self.chat
+            .read(cx)
+            .conversation
+            .read(cx)
+            .items()
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.read(cx).kind(),
+                    ConvItem::User { text: row, .. } if row.trim() == query
+                )
+            })
+            .count()
     }
 
     /// What the detached store would have ridden: the parked dispatch tags.
@@ -334,35 +387,120 @@ impl Workspace {
         self.delete_follow_up(idx, cx);
     }
 
-    /// Inject a parked turn-start whose opening row IS a steer: the
-    /// idle-steer wake path's receipt. `steer_id` is the id the row threads
-    /// (`None` when the host threads none — the receipt then carries only
-    /// the text fallback, under an id no card matches); `opening_text` is
-    /// the row's text fallback (`None` for an empty row). The retire matches
-    /// by id first, then by text.
+    /// Land a consumed steer's partition fold AND both consumption receipts
+    /// without notifying, so the caller's next replay drains them in one
+    /// sync — the parked re-attach shape (a background session, or an
+    /// envelope backlog coalesced into one notify). The removal names no
+    /// turn; the turn-start names `t-part`. Regression fixture for the
+    /// window bubble's identity upgrade: the bubble must adopt into the fold
+    /// row even though it was minted after that row already existed.
+    pub fn gallery_inject_parked_consumption(
+        &mut self,
+        steer_id: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            return;
+        };
+        let chat: ahp_types::state::ChatState = serde_json::from_value(serde_json::json!({
+            "resource": chat_uri(&sid),
+            "title": "parked consumption",
+            "status": 0,
+            "modifiedAt": "2026-10-22T00:00:00Z",
+            "turns": [
+                {
+                    "id": "t-1",
+                    "startedAt": "2026-10-22T00:00:00Z",
+                    "message": { "text": "帮我梳理这个仓库的构建脚本", "origin": { "kind": "user" } },
+                    "responseParts": [],
+                    "state": "complete",
+                },
+                {
+                    "id": "t-live",
+                    "startedAt": "2026-10-22T00:00:01Z",
+                    "message": { "text": "继续，把测试也过一遍", "origin": { "kind": "user" } },
+                    "responseParts": [],
+                    "state": "complete",
+                },
+            ],
+            "activeTurn": {
+                "id": "t-part",
+                "startedAt": "2026-10-22T00:00:03Z",
+                "message": { "text": text, "origin": { "kind": "user" } },
+                "responseParts": [],
+            },
+        }))
+        .expect("the parked partition fold parses");
+        store.update(cx, |s, _| {
+            s.diagnostic_set_chat(&sid, chat);
+            s.diagnostic_inject_steer_receipt(&sid, steer_id.to_string(), None, None);
+            s.diagnostic_inject_steer_receipt(
+                &sid,
+                steer_id.to_string(),
+                Some(text.to_string()),
+                Some("t-part".to_string()),
+            );
+        });
+    }
+
+    /// Route a `chat/turnStarted` whose opening row IS a steer, wire-shaped:
+    /// the wake path (and, with a boundary routed ahead of it, the mid-run
+    /// partition). `steer_id` is the id the row threads (`None` when the row
+    /// threads none — the receipt then carries only the text fallback, under
+    /// an id no card matches); `opening_text` is the row's text (`None` for
+    /// an empty row). The envelope takes the REAL route: the reducer folds
+    /// the row, and the sidebands record the receipt and the steered-turn
+    /// fact; the retire matches by id first, then by text.
     pub fn gallery_inject_parked_turn_start(
         &mut self,
         steer_id: Option<&str>,
         opening_text: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
-            return;
-        };
-        store.update(cx, |store, _| {
-            // A turn start gains its active turn (the running edge the sync
-            // detects). A wake — a start CARRYING the pending id — also
-            // receipts the card; a start with no pending id is never a wake,
-            // so it must not retire anything by text.
-            store.diagnostic_set_chat(&sid, fabricated_chat(&sid, true));
-            if let Some(steer_id) = steer_id {
-                store.diagnostic_inject_steer_receipt(
-                    &sid,
-                    steer_id.to_string(),
-                    opening_text.map(str::to_string),
-                );
-            }
-        });
+        self.gallery_route_raw_envelope(
+            ahp_types::actions::StateAction::ChatTurnStarted(
+                ahp_types::actions::ChatTurnStartedAction {
+                    turn_id: "t-wake".to_string(),
+                    started_at: "2026-10-22T00:00:02Z".to_string(),
+                    message: serde_json::from_value(serde_json::json!({
+                        "text": opening_text.unwrap_or(""),
+                        "origin": { "kind": "user" },
+                    }))
+                    .expect("a user message parses"),
+                    queued_message_id: steer_id.map(str::to_string),
+                    meta: None,
+                },
+            ),
+            cx,
+        );
+    }
+
+    /// Route the mid-run partition's turn-start: the steer row opens its own
+    /// turn (`t-part`) under the client's pending id — the envelope that
+    /// lands AFTER the boundary and the removal on the real wire.
+    pub fn gallery_inject_partition_turn_start(
+        &mut self,
+        steer_id: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.gallery_route_raw_envelope(
+            ahp_types::actions::StateAction::ChatTurnStarted(
+                ahp_types::actions::ChatTurnStartedAction {
+                    turn_id: "t-part".to_string(),
+                    started_at: "2026-10-22T00:00:03Z".to_string(),
+                    message: serde_json::from_value(serde_json::json!({
+                        "text": text,
+                        "origin": { "kind": "user" },
+                    }))
+                    .expect("a user message parses"),
+                    queued_message_id: Some(steer_id.to_string()),
+                    meta: None,
+                },
+            ),
+            cx,
+        );
     }
 
     /// The local mirror of the running edge (drives the thinking ticker).

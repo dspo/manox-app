@@ -291,7 +291,14 @@ impl Workspace {
             // texts never match: the minted turn id is what pairs them.
             let submit_text = format!("/{key} {args}");
             if let Some(turn_id) = self.send_submit_v2(submit_text, Vec::new(), cx) {
-                self.push_optimistic_bubble(display_text, Vec::new(), meta, Some(turn_id), cx);
+                self.push_optimistic_bubble(
+                    display_text,
+                    Vec::new(),
+                    meta,
+                    Some(turn_id),
+                    None,
+                    cx,
+                );
             }
         } else {
             let notice_key = match kind {
@@ -481,22 +488,32 @@ impl Workspace {
                 turn.user_images.clone(),
                 turn.meta,
                 Some(turn_id),
+                None,
                 cx,
             );
         }
     }
 
     /// Retire ONE `SteerPending` card whose steer the wire just consumed:
-    /// the model has it, so the card leaves the queue immediately and its
-    /// `steered` bubble enters the message list — the injection instant, not
-    /// the turn boundary. Returns whether a card actually retired; `false`
-    /// when no card matches the id (a foreign steer from another client, or
-    /// a card an earlier settle already settled).
-    pub(super) fn retire_steer_card(&mut self, message_id: &str, cx: &mut Context<Self>) -> bool {
+    /// the model has it, so the card leaves the queue immediately. The
+    /// removal echo (`turn_id: None`) leaves a window bubble behind — the
+    /// partition is still out, and the text must not vanish from the
+    /// transcript; a turn-id-bearing retire means the fold row already
+    /// landed and carries the display. Either way the `steered` badge is a
+    /// projection fact the fold names, not a retire side effect. Returns
+    /// whether a card actually retired; `false` when no card matches the id
+    /// (a foreign steer from another client, or a card an earlier settle
+    /// already settled).
+    pub(super) fn retire_steer_card(
+        &mut self,
+        message_id: &str,
+        turn_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let matched = self.chat.read(cx).queued_follow_ups.iter().position(|item| {
             matches!(&item.state, FollowUpState::SteerPending { message_id: id } if id == message_id)
         });
-        self.retire_matched_steer(matched, cx)
+        self.retire_matched_steer(matched, turn_id, cx)
     }
 
     /// Retire the FIRST `SteerPending` card whose text equals `text` — the
@@ -508,6 +525,7 @@ impl Workspace {
     pub(super) fn retire_steer_card_matching_text(
         &mut self,
         text: &str,
+        turn_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
         let matched = self
@@ -518,7 +536,7 @@ impl Workspace {
             .position(|item| {
                 matches!(&item.state, FollowUpState::SteerPending { .. } if item.turn.text == text)
             });
-        self.retire_matched_steer(matched, cx)
+        self.retire_matched_steer(matched, turn_id, cx)
     }
 
     /// Retire the steer a WOKEN turn belongs to: the opening row's pending
@@ -531,26 +549,41 @@ impl Workspace {
     /// opening row is always stamped), so the fallback never runs there;
     /// the store has already cleared the text for a carried queued
     /// submission. The one remaining ambiguity is another client's message
-    /// with identical wording.
+    /// with identical wording. `turn_id` — the consumption's turn — rides
+    /// whichever retire matched, for the badge stamp.
     pub(super) fn retire_woken_steer(
         &mut self,
         steer_id: Option<&str>,
         opening_text: Option<&str>,
+        turn_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(message_id) = steer_id else {
             return false;
         };
-        if self.retire_steer_card(message_id, cx) {
+        if self.retire_steer_card(message_id, turn_id, cx) {
             return true;
         }
-        opening_text.is_some_and(|text| self.retire_steer_card_matching_text(text, cx))
+        opening_text.is_some_and(|text| self.retire_steer_card_matching_text(text, turn_id, cx))
     }
 
-    /// The shared retire: drop the card at `matched`, push its `steered`
-    /// bubble into the transcript. `false` for a `None` match — a no-op,
-    /// never an error.
-    fn retire_matched_steer(&mut self, matched: Option<usize>, cx: &mut Context<Self>) -> bool {
+    /// The shared retire: drop the card at `matched`. `false` for a `None`
+    /// match — a no-op, never an error.
+    ///
+    /// `turn_id` decides the DISPLAY bridge, and the wire order decides what
+    /// it should be: the removal echo (no turn id) retires the card while
+    /// the partition is still tens of seconds out — the fold has no steer
+    /// row yet — so a WINDOW bubble keeps the text visible until the fold
+    /// row lands and adopts it by text. A turn-id-bearing retire (the
+    /// partitioning turn-start) means the row already exists: no bubble, the
+    /// fold row is the display and the badge is the projection's to stamp.
+    /// Either way the badge is NOT this call's business.
+    fn retire_matched_steer(
+        &mut self,
+        matched: Option<usize>,
+        turn_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(idx) = matched else {
             return false;
         };
@@ -565,18 +598,26 @@ impl Workspace {
         }) else {
             return false;
         };
-        let mut meta = item.turn.meta.clone();
-        meta.steered = true;
-        // A steer is injected into the RUNNING turn, so it has no turn id of
-        // its own: it pairs by text, and only with a turn that appears after
-        // this point (an idle steer waking its own run).
-        self.push_optimistic_bubble(
-            item.turn.text.clone(),
-            item.turn.user_images.clone(),
-            meta,
-            None,
-            cx,
-        );
+        if turn_id.is_none() {
+            // The window bubble carries the steer id: the partition's
+            // turn-start later upgrades it to that turn's identity, so the
+            // fold row adopts this row instead of sitting beside it (the
+            // receipts can drain in one sync on a parked re-attach).
+            let steer_id = match &item.state {
+                FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
+                FollowUpState::Queued | FollowUpState::Failed => None,
+            };
+            let mut meta = item.turn.meta.clone();
+            meta.steered = true;
+            self.push_optimistic_bubble(
+                item.turn.text.clone(),
+                item.turn.user_images.clone(),
+                meta,
+                None,
+                steer_id,
+                cx,
+            );
+        }
         cx.notify();
         true
     }
@@ -593,6 +634,13 @@ impl Workspace {
     /// the queue for the NEXT settle (that turn's own), so two batches never
     /// go back-to-back with the first still running.
     pub(super) fn settle_follow_ups(&mut self, cancelled: bool, cx: &mut Context<Self>) {
+        // A settle is the last chance to retire a window bubble whose steer
+        // never opened a fold row: a run aborted in the removal-to-partition
+        // gap retracts the queued steer, so no turn-start will adopt it.
+        let conversation = self.chat_conversation(cx);
+        if conversation.update(cx, |conv, _| conv.drop_unlanded_steer_bubbles()) {
+            cx.notify();
+        }
         // Settles drain cards by wire timing too — drop any in-flight drag
         // marker (its indices can never address the post-settle queue) and
         // the send menu (the running cluster it floats on just ended).
@@ -696,7 +744,7 @@ impl Workspace {
             return;
         }
         let meta = self.user_turn_meta(cx);
-        self.push_optimistic_bubble(text, Vec::new(), meta, sent, cx);
+        self.push_optimistic_bubble(text, Vec::new(), meta, sent, None, cx);
         cx.notify();
     }
 

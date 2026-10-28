@@ -177,6 +177,12 @@ pub struct OverlayBubble {
     /// `chat/turnStarted` — the adoption identity. `None` for a steer or an
     /// unsent draft, which no turn can claim by identity.
     pub turn_id: Option<String>,
+    /// The client steer id a WINDOW bubble bridges: minted by the removal
+    /// echo (which names no turn), then upgraded to the receipt turn's
+    /// identity by [`crate::conversation::ConversationState::attach_steer_turn`]
+    /// when the partition's turn-start lands. `None` for every ordinary
+    /// submit bubble.
+    pub steer_id: Option<String>,
     /// How many turn rows the fold held when the bubble was minted
     /// (archived turns plus an active one). The text fallback only pairs
     /// with turns that appeared AFTER this point, so a re-sent "继续" can
@@ -192,6 +198,9 @@ pub struct OverlayBubbleSeed {
     pub images: Vec<crate::conversation::UserImage>,
     pub meta: UserTurnMeta,
     pub turn_id: Option<String>,
+    /// The steer id of a window bubble (see [`OverlayBubble::steer_id`]);
+    /// `None` for an ordinary submit.
+    pub steer_id: Option<String>,
 }
 
 /// A host refusal of one of this client's writes.
@@ -223,6 +232,25 @@ pub struct ProjectEnv<'a> {
     /// renders as the card INSTEAD of its activity-segment entry, so the
     /// call never appears twice.
     pub promoted_confirmation: Option<&'a str>,
+    /// Turn ids whose user row mounts with the entrance rise this pass —
+    /// the steers whose consumption receipt the sync drained alongside this
+    /// projection. The row is fold-synthesized (the mount gate admits only
+    /// `Optimistic` keys otherwise), so the steer's landing ride would be
+    /// invisible without it; a turn already mounted ignores the flag.
+    pub entering_turns: &'a [String],
+    /// Turn ids whose opening row IS a steer — the projection facts behind
+    /// the row's `steered` badge. Stamped at projection time (not on the
+    /// card's retire), so the badge survives re-attach replays and the
+    /// removal-before-partition wire order alike.
+    pub steered_turns: &'a std::collections::HashSet<String>,
+}
+
+/// The empty steered set, for projections that cannot carry steers (a
+/// child chat's own display, synthetic fixtures).
+pub fn no_steered_turns() -> &'static std::collections::HashSet<String> {
+    static EMPTY: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(std::collections::HashSet::new)
 }
 
 /// Project one chat state (or its absence) plus the overlays into the row
@@ -383,7 +411,11 @@ fn push_turn(
                 timestamp,
                 model_id: model_id.clone(),
                 access_mode: None,
-                steered: false,
+                // The badge is a projection fact: the fold says which turns
+                // opened on a steer row, so every projection of the row —
+                // first mount, re-projection, re-attach replay — stamps it
+                // identically.
+                steered: env.steered_turns.contains(turn.id),
                 author: None,
                 recipient: Some(env.recipient.clone()),
                 peer: false,
