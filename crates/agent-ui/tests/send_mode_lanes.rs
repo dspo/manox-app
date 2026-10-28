@@ -79,16 +79,41 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
         });
     });
 
-    // ── consumption while running: the partition turn-start retires the
-    // card and stamps the fold row ──────────────────────────────────────────
+    // ── consumption while running: the REAL wire order. The removal retires
+    // the card the instant the steer joins the kernel's queue (a window
+    // bubble keeps the text visible); the boundary + the partitioning
+    // turn-start land much later, adopt the window into the fold row, and
+    // the badge arrives as a projection fact ────────────────────────────────
     let steer_id = visual
         .update(|_window, cx| ws.update(cx, |ws, cx| ws.gallery_first_steer_id(cx)))
         .expect("steer card parked");
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
-            // The host partitions the transcript on injection: the steer row
-            // opens its own turn, and the partitioning turn-start receipts
-            // the card under the client's pending id.
+            // Removal first — the wire's instant echo. No partition exists
+            // yet: the card leaves, the text must NOT vanish.
+            ws.gallery_inject_steer_consumed(&steer_id, cx);
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert_eq!(
+                lanes(&ws.gallery_queue_snapshot(cx)),
+                vec!["queued"],
+                "the removal retires the card"
+            );
+            assert_eq!(
+                ws.gallery_user_row_steered("引导一：先只看失败的测试", cx),
+                Some(true),
+                "the window bubble keeps the steered text visible"
+            );
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            // The partition: the boundary completes the pre-steer turn and
+            // the steer row opens its own turn under the client's id.
+            ws.gallery_route_raw_envelope(turn_boundary(), cx);
             ws.gallery_inject_partition_turn_start(&steer_id, "引导一：先只看失败的测试", cx);
             ws.gallery_replay_parked(cx);
         });
@@ -98,16 +123,18 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
             assert_eq!(
                 lanes(&ws.gallery_queue_snapshot(cx)),
                 vec!["queued"],
-                "the consumed steer card retires"
+                "the partition retires nothing (the card already left)"
             );
             assert_eq!(
-                ws.gallery_last_user_bubble(cx).as_deref(),
-                Some("引导一：先只看失败的测试"),
-                "the steer row is the fold's, in reading position"
+                ws.gallery_user_row_steered("引导一：先只看失败的测试", cx),
+                Some(true),
+                "the fold row carries the steered badge — a projection fact, \
+                 stamped despite the removal landing first"
             );
-            assert!(
-                ws.gallery_last_user_steered(cx),
-                "the fold row carries the steered badge"
+            assert_eq!(
+                ws.gallery_user_row_count("引导一：先只看失败的测试", cx),
+                1,
+                "the window bubble is adopted by the fold row, never beside it"
             );
         });
     });
@@ -368,8 +395,8 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
     });
 
     // ── parked replay, removal-only edition: consumed-while-away retires
-    // the card and lands nothing — the display rides the fold row the host
-    // already journaled, so a bare removal must not duplicate it ───────────
+    // the card and leaves the window bubble — this fixture never lands the
+    // partition, so the window IS the display until then ───────────────────
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
             ws.gallery_set_running(true, cx);
@@ -400,8 +427,8 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
             );
             assert_eq!(
                 ws.gallery_user_row_steered("引导三：注入消费回执", cx),
-                None,
-                "a bare removal lands no bubble — the fold row is the display"
+                Some(true),
+                "the window bubble bridges the removal-to-partition gap"
             );
         });
     });
@@ -493,10 +520,10 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
                 "the removal-first receipt retires the card: {:?}",
                 ws.gallery_queue_snapshot(cx)
             );
-            assert_ne!(
+            assert_eq!(
                 ws.gallery_user_row_steered("引导六：回执先于回声", cx),
                 Some(true),
-                "a bare removal lands no duplicate: the fold row is the display"
+                "the window bubble rides the receipt, not the late echo"
             );
         });
     });

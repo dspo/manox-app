@@ -229,6 +229,19 @@ pub struct ProjectEnv<'a> {
     /// `Optimistic` keys otherwise), so the steer's landing ride would be
     /// invisible without it; a turn already mounted ignores the flag.
     pub entering_turns: &'a [String],
+    /// Turn ids whose opening row IS a steer — the projection facts behind
+    /// the row's `steered` badge. Stamped at projection time (not on the
+    /// card's retire), so the badge survives re-attach replays and the
+    /// removal-before-partition wire order alike.
+    pub steered_turns: &'a std::collections::HashSet<String>,
+}
+
+/// The empty steered set, for projections that cannot carry steers (a
+/// child chat's own display, synthetic fixtures).
+pub fn no_steered_turns() -> &'static std::collections::HashSet<String> {
+    static EMPTY: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(std::collections::HashSet::new)
 }
 
 /// Project one chat state (or its absence) plus the overlays into the row
@@ -389,7 +402,11 @@ fn push_turn(
                 timestamp,
                 model_id: model_id.clone(),
                 access_mode: None,
-                steered: false,
+                // The badge is a projection fact: the fold says which turns
+                // opened on a steer row, so every projection of the row —
+                // first mount, re-projection, re-attach replay — stamps it
+                // identically.
+                steered: env.steered_turns.contains(turn.id),
                 author: None,
                 recipient: Some(env.recipient.clone()),
                 peer: false,

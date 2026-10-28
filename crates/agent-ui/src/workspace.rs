@@ -594,16 +594,24 @@ impl Workspace {
         // they stamp (through a turn-id-bearing bubble the adoption consumes)
         // and the entrance ride they name land in the same projection pass.
         let receipts = store.update(cx, |s, _| s.drain_steer_receipts(&sid));
+        let steered_turns = store.update(cx, |s, _| s.steered_turns(&sid));
         let mut entering = Vec::<String>::new();
         for receipt in receipts {
             let turn_id = receipt.turn_id.as_deref();
-            let retired = match receipt.wake_text {
+            match receipt.wake_text {
                 Some(text) => {
-                    self.retire_woken_steer(Some(&receipt.message_id), Some(&text), turn_id, cx)
+                    self.retire_woken_steer(Some(&receipt.message_id), Some(&text), turn_id, cx);
                 }
-                None => self.retire_steer_card(&receipt.message_id, turn_id, cx),
-            };
-            if retired && let Some(turn) = receipt.turn_id {
+                None => {
+                    self.retire_steer_card(&receipt.message_id, turn_id, cx);
+                }
+            }
+            // The entrance ride follows the RECEIPT's turn, not the card:
+            // the removal precedes the partition on the wire, so the card is
+            // often already retired when the row's turn names itself.
+            if let Some(turn) = receipt.turn_id
+                && !entering.contains(&turn)
+            {
                 entering.push(turn);
             }
         }
@@ -612,6 +620,9 @@ impl Workspace {
         // not-running state between them observable. That off state is not a
         // settle: consume the boundary flag and hold the running mirror up
         // until the steer turn's own start (the next envelope) restores it.
+        // A flag with no steer turn behind it (the run aborted in the gap)
+        // self-heals: the flag is spent on this sync, the next falling edge
+        // settles normally.
         let steer_boundary = store.update(cx, |s, _| s.take_steer_boundary(&sid));
 
         // The projection itself: one keyed diff over the fold. The fold is
@@ -637,6 +648,7 @@ impl Workspace {
             fork_source: fork_source.is_some(),
             promoted_confirmation: promoted.as_deref(),
             entering_turns: &entering,
+            steered_turns: &steered_turns,
         };
         let change = conversation.update(cx, |conv, cx| {
             let refusals = store.update(cx, |s, _| s.drain_refusals(&sid));
@@ -729,6 +741,7 @@ impl Workspace {
             .pending_confirmation
             .as_ref()
             .map(|parked| parked.tool_call_id.clone());
+        let steered_turns = store.update(cx, |s, _| s.steered_turns(&sid));
         let env = steer_agent_chat_ui::transcript::ProjectEnv {
             role: &role,
             recipient: &recipient,
@@ -737,6 +750,7 @@ impl Workspace {
             fork_source: fork_source.is_some(),
             promoted_confirmation: promoted.as_deref(),
             entering_turns: &[],
+            steered_turns: &steered_turns,
         };
         conversation.update(cx, |conv, cx| {
             let chat = {

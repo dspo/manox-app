@@ -816,6 +816,14 @@ pub struct AhpStore {
     /// events: the composer consults the table on every sync, and a
     /// re-attach's first sync replays whatever accumulated while parked.
     steer_receipts: HashMap<String, VecDeque<SteerReceipt>>,
+    /// Turn ids whose opening row IS a steer, keyed by the owning session —
+    /// the projection fact the transcript's `steered` badge reads. A steer
+    /// row is the `turnStarted` that threads a pending id WITHOUT being a
+    /// carried queued submission (a mid-run partition, or a wake's opening
+    /// row); recording it here — not on the card's retire — is what keeps
+    /// the badge surviving re-attach replays and out-of-order receipts: the
+    /// envelopes replay, the set rebuilds, the projection re-stamps.
+    steered_turns: HashMap<String, HashSet<String>>,
     /// Sessions whose latest fold carried a steer-boundary completion (the
     /// partition a mid-run steer makes), unconsumed. The transcript sync
     /// takes the flag at a falling running edge and keeps the run alive
@@ -900,6 +908,7 @@ impl AhpStore {
             replay_pending: false,
             refusals: HashMap::new(),
             steer_receipts: HashMap::new(),
+            steered_turns: HashMap::new(),
             steer_boundaries: HashSet::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
@@ -1019,6 +1028,7 @@ impl AhpStore {
             replay_pending: false,
             refusals: HashMap::new(),
             steer_receipts: HashMap::new(),
+            steered_turns: HashMap::new(),
             steer_boundaries: HashSet::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
@@ -1547,6 +1557,59 @@ impl AhpStore {
         }
     }
 
+    /// Record one envelope's steer sidebands, ahead of the fold's outcome
+    /// gate — the envelope alone decides them, never the fold effect:
+    ///
+    /// - a consumption **receipt** (a steering removal, or a steer row's
+    ///   `turnStarted`) into the owning session's bucket — a removal can
+    ///   reach the Ignored arm when the fold's single steering slot was
+    ///   already evicted, and that NoOp does not disprove the receipt;
+    /// - the **projection fact**: a `turnStarted` threading a pending id
+    ///   that is not a carried queued submission names the turn whose
+    ///   opening row IS the steer — the transcript's `steered` badge reads
+    ///   this set, which is why the badge survives the removal landing
+    ///   first (the wire order), re-attach replays and sync timing alike;
+    /// - the **steer-boundary flag**: the partition's `turnCompleted` and
+    ///   the steer turn's `turnStarted` arrive as separate envelopes, and
+    ///   the off state between them must not read as the run settling.
+    fn record_envelope_sidebands(
+        &mut self,
+        channel: &str,
+        action: &StateAction,
+        carried_queued: bool,
+    ) {
+        let chat_id = if channel.starts_with("ahp-chat:/") {
+            Some(id_of(channel).to_string())
+        } else {
+            None
+        };
+        if let Some((session_owner, receipt)) = steering_receipt_of(channel, action, carried_queued)
+            && let Some(session_id) = self
+                .book
+                .session_of_chat(&session_owner)
+                .map(str::to_string)
+        {
+            self.record_steer_receipt(session_id, receipt);
+        }
+        if let StateAction::ChatTurnStarted(start) = action
+            && !carried_queued
+            && start.queued_message_id.is_some()
+            && let Some(chat_id) = &chat_id
+            && let Some(session_id) = self.book.session_of_chat(chat_id).map(str::to_string)
+        {
+            self.steered_turns
+                .entry(session_id)
+                .or_default()
+                .insert(start.turn_id.clone());
+        }
+        if is_steer_boundary(action)
+            && let Some(chat_id) = &chat_id
+            && let Some(session_id) = self.book.session_of_chat(chat_id).map(str::to_string)
+        {
+            self.steer_boundaries.insert(session_id);
+        }
+    }
+
     /// Record a steer-consumption receipt under its owning session, dropping
     /// the oldest past [`RECEIPT_TABLE_CAP`]. Duplicates (the same removal
     /// re-delivered) retire the first time; a second record is inert.
@@ -1692,27 +1755,7 @@ impl AhpStore {
                 // gate (a removal can reach the Ignored arm when the fold's
                 // single steering slot was already evicted, and that NoOp
                 // does not disprove the receipt).
-                if let Some((session_owner, receipt)) =
-                    steering_receipt_of(&envelope.channel, &envelope.action, carried_queued)
-                    && let Some(session_id) = self
-                        .book
-                        .session_of_chat(&session_owner)
-                        .map(str::to_string)
-                {
-                    self.record_steer_receipt(session_id, receipt);
-                }
-                // A steer-boundary completion is observable BETWEEN store
-                // updates (one envelope per update): the partition's
-                // `turnCompleted` and the steer turn's `turnStarted` arrive
-                // as separate envelopes, and the off state between them must
-                // not read as the run settling. Flag the session; the
-                // transcript sync consumes the flag at the falling edge.
-                if is_steer_boundary(&envelope.action)
-                    && let Some(chat_id) = &chat_id
-                    && let Some(session_id) = self.book.session_of_chat(chat_id).map(str::to_string)
-                {
-                    self.steer_boundaries.insert(session_id);
-                }
+                self.record_envelope_sidebands(&envelope.channel, &envelope.action, carried_queued);
                 match self.book.apply(&envelope.channel, &envelope.action) {
                     FoldEffect::Changed => {
                         // The official unread rise (#870's app half):
@@ -1811,6 +1854,7 @@ impl AhpStore {
                 if removed {
                     let session_id = id_of(&params.channel).to_string();
                     self.book.sessions.remove(&session_id);
+                    self.steered_turns.remove(&session_id);
                     self.steer_boundaries.remove(&session_id);
                     cx.notify();
                 }
@@ -2364,6 +2408,17 @@ impl AhpStore {
     /// land in the same envelope burst).
     pub fn take_steer_boundary(&mut self, session_id: &str) -> bool {
         self.steer_boundaries.remove(session_id)
+    }
+
+    /// The session's steer-row turn ids — the projection facts the
+    /// transcript's `steered` badge reads (see [`Self::take_steer_boundary`]
+    /// for the receipts these ride beside). A clone: the set is a handful of
+    /// ids per session, and the projection borrows it across the fold read.
+    pub fn steered_turns(&self, session_id: &str) -> HashSet<String> {
+        self.steered_turns
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Recent dispatch rejections, oldest first.
@@ -3310,7 +3365,7 @@ fn config_values_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ahp_types::actions::{ChatDeltaAction, SessionTitleChangedAction};
+    use ahp_types::actions::{ChatDeltaAction, ChatTurnCompleteAction, SessionTitleChangedAction};
 
     /// The sub-agent block's read face: the host's background-work subagent
     /// entries project into rows (id + topic + start stamp), every other kind
@@ -3587,7 +3642,7 @@ mod tests {
     #[test]
     fn a_tool_loop_projects_tools_into_one_segment() {
         use crate::conversation::ConvItem;
-        use crate::transcript::{ItemKey, Overlays, ProjectEnv, project};
+        use crate::transcript::{ItemKey, Overlays, ProjectEnv, no_steered_turns, project};
 
         let mut book = ChannelBook::default();
         let uri = chat_uri("c-1");
@@ -3693,6 +3748,7 @@ mod tests {
             fork_source: false,
             promoted_confirmation: None,
             entering_turns: &[],
+            steered_turns: no_steered_turns(),
         };
         let mut overlays = Overlays::default();
         let nodes = project(Some(chat), &mut overlays, &env);
@@ -4001,6 +4057,7 @@ mod tests {
             replay_pending: false,
             refusals: HashMap::new(),
             steer_receipts: HashMap::new(),
+            steered_turns: HashMap::new(),
             steer_boundaries: HashSet::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),
@@ -4510,6 +4567,77 @@ mod tests {
         assert!(store.drain_steer_receipts("s-none").is_empty());
     }
 
+    /// The steer row's turn id is a PROJECTION FACT, recorded from the
+    /// envelope's sidebands alone: a `turnStarted` threading a pending id
+    /// that is not a carried queued submission names the turn whose opening
+    /// row IS the steer. The badge reads this set — which is why it survives
+    /// the removal landing first on the wire and a re-attach's replay.
+    #[test]
+    fn a_steer_turn_started_records_the_projection_fact() {
+        let mut store = test_store();
+        let mut session = empty_session(&session_uri("s-1"));
+        session.default_chat = Some(chat_uri("c-1"));
+        store.book.sessions.insert("s-1".to_string(), session);
+        let started = |turn: &str, queued: Option<&str>| {
+            StateAction::ChatTurnStarted(ChatTurnStartedAction {
+                turn_id: turn.to_string(),
+                started_at: "2026-10-28T00:00:00Z".to_string(),
+                message: user_message("use the fast suite".to_string()),
+                queued_message_id: queued.map(str::to_string),
+                meta: None,
+            })
+        };
+        let channel = chat_uri("c-1");
+
+        // A steer row: the pending id rides, nothing carries it.
+        store.record_envelope_sidebands(&channel, &started("t-steer", Some("steer-1")), false);
+        assert_eq!(
+            store.steered_turns("s-1"),
+            HashSet::from(["t-steer".to_string()]),
+            "the steer row's turn joins the projection fact"
+        );
+
+        // A carried queued submission threads a pending id too — an
+        // ordinary send, not a steer: it must not join the set.
+        store.record_envelope_sidebands(&channel, &started("t-carried", Some("m-q-1")), true);
+        assert_eq!(
+            store.steered_turns("s-1"),
+            HashSet::from(["t-steer".to_string()]),
+            "a carried queued row is not a steer"
+        );
+
+        // An ordinary turn start (no pending id) records nothing either way.
+        store.record_envelope_sidebands(&channel, &started("t-plain", None), false);
+        assert_eq!(store.steered_turns("s-1").len(), 1);
+    }
+
+    /// The steer-boundary meta is the NESTED `_meta.x-manox` shape the host
+    /// stamps (`manox_meta` wraps under `x-manox`); a flat key, a foreign
+    /// wrapper or no meta at all is not a boundary.
+    #[test]
+    fn the_steer_boundary_flag_reads_the_nested_meta_shape() {
+        let complete = |meta: Option<serde_json::Value>| {
+            StateAction::ChatTurnComplete(ChatTurnCompleteAction {
+                turn_id: "t-1".to_string(),
+                duration: 1,
+                meta: meta.and_then(|meta| meta.as_object().cloned()),
+            })
+        };
+        assert!(!is_steer_boundary(&complete(None)));
+        assert!(
+            !is_steer_boundary(&complete(Some(serde_json::json!({
+                "steerBoundary": true
+            })))),
+            "a flat key is not the host's wrapper"
+        );
+        assert!(!is_steer_boundary(&complete(Some(serde_json::json!({
+            "x-manox": {"other": true}
+        })))));
+        assert!(is_steer_boundary(&complete(Some(serde_json::json!({
+            "x-manox": {"steerBoundary": true}
+        })))));
+    }
+
     /// One consumption, exactly one receipt — whichever order the removal
     /// and the Set echo land in. The SET is never a receipt in either order
     /// (the echo carries no display face of its own); the REMOVAL is the one
@@ -4886,6 +5014,7 @@ mod tests {
             replay_pending: false,
             refusals: HashMap::new(),
             steer_receipts: HashMap::new(),
+            steered_turns: HashMap::new(),
             steer_boundaries: HashSet::new(),
             focused_session: None,
             optimistic_undo: Vec::new(),

@@ -487,15 +487,15 @@ impl Workspace {
     }
 
     /// Retire ONE `SteerPending` card whose steer the wire just consumed:
-    /// the model has it, so the card leaves the queue immediately, and the
-    /// consumption's turn id stamps the fold row's `steered` badge — the
-    /// injection instant, not the turn boundary. The row itself is the
-    /// fold's (the partition — or the wake's opening row — already landed it
-    /// through the same action that produced the receipt); `turn_id: None`
-    /// (a bare removal echo) retires the card but stamps nothing, the
-    /// display already riding the fold. Returns whether a card actually
-    /// retired; `false` when no card matches the id (a foreign steer from
-    /// another client, or a card an earlier settle already settled).
+    /// the model has it, so the card leaves the queue immediately. The
+    /// removal echo (`turn_id: None`) leaves a window bubble behind — the
+    /// partition is still out, and the text must not vanish from the
+    /// transcript; a turn-id-bearing retire means the fold row already
+    /// landed and carries the display. Either way the `steered` badge is a
+    /// projection fact the fold names, not a retire side effect. Returns
+    /// whether a card actually retired; `false` when no card matches the id
+    /// (a foreign steer from another client, or a card an earlier settle
+    /// already settled).
     pub(super) fn retire_steer_card(
         &mut self,
         message_id: &str,
@@ -559,14 +559,17 @@ impl Workspace {
         opening_text.is_some_and(|text| self.retire_steer_card_matching_text(text, turn_id, cx))
     }
 
-    /// The shared retire: drop the card at `matched`, then stamp the fold
-    /// row's `steered` badge through a turn-id-bearing bubble the adoption
-    /// consumes this pass — the bubble is only the badge's vehicle (and the
-    /// entrance ride the `entering_turns` env names); with a turn id the
-    /// adoption pairs it into the row that already carries the text, so it
-    /// never renders at the tail. `false` for a `None` match — a no-op,
-    /// never an error. A `None` turn id (bare removal echo) leaves the
-    /// display entirely to the fold.
+    /// The shared retire: drop the card at `matched`. `false` for a `None`
+    /// match — a no-op, never an error.
+    ///
+    /// `turn_id` decides the DISPLAY bridge, and the wire order decides what
+    /// it should be: the removal echo (no turn id) retires the card while
+    /// the partition is still tens of seconds out — the fold has no steer
+    /// row yet — so a WINDOW bubble keeps the text visible until the fold
+    /// row lands and adopts it by text. A turn-id-bearing retire (the
+    /// partitioning turn-start) means the row already exists: no bubble, the
+    /// fold row is the display and the badge is the projection's to stamp.
+    /// Either way the badge is NOT this call's business.
     fn retire_matched_steer(
         &mut self,
         matched: Option<usize>,
@@ -587,14 +590,14 @@ impl Workspace {
         }) else {
             return false;
         };
-        if let Some(turn_id) = turn_id {
+        if turn_id.is_none() {
             let mut meta = item.turn.meta.clone();
             meta.steered = true;
             self.push_optimistic_bubble(
                 item.turn.text.clone(),
                 item.turn.user_images.clone(),
                 meta,
-                Some(turn_id.to_string()),
+                None,
                 cx,
             );
         }

@@ -159,6 +159,7 @@ impl SubagentStreamView {
             fork_source: false,
             promoted_confirmation: None,
             entering_turns: &[],
+            steered_turns: steer_agent_chat_ui::transcript::no_steered_turns(),
         };
         let change = self.conversation.update(cx, |conv, cx| {
             let nodes = conv.stage(self.store.read(cx).book.chats.get(&chat_id), &env);

@@ -835,8 +835,9 @@ fn new_node_item(
         };
         let mut item = MessageItem::new(kind, own_role, id, env.host.clone());
         if entering {
-            // Live sends only — the entrance rise never plays for rows the
-            // fold synthesized.
+            // Optimistic bubbles, plus the fold rows the sync's receipts
+            // name (`entering_turns`) — a steer's landing rides the entrance
+            // rise even though the row is fold-synthesized.
             item = item.entering_now();
         }
         // For projected text items, feed the full snapshot so the mounted
@@ -877,13 +878,18 @@ fn sync_row(item: &Entity<MessageItem>, node: &Node, env: &ProjectEnv, cx: &mut 
                 else {
                     return false;
                 };
-                let changed = old_text != text;
+                let mut changed = old_text != text;
                 *old_text = text.clone();
                 if let (Some(old_meta), Some(meta)) = (old_meta, meta) {
-                    // The adopting row keeps its steered marker; the rest of
-                    // the header identity follows the state.
+                    // The header identity follows the state, INCLUDING the
+                    // steered badge — a projection fact (the fold names the
+                    // steer rows), so a later projection must be able to
+                    // stamp a row that mounted before its steer was known
+                    // (the removal receipt retires the card a turn ahead of
+                    // the partition on the wire).
                     old_meta.timestamp = meta.timestamp;
                     old_meta.model_id = meta.model_id.clone();
+                    changed |= set(&mut old_meta.steered, meta.steered);
                 }
                 changed
             }
@@ -1223,7 +1229,7 @@ fn set<T: PartialEq>(slot: &mut T, value: T) -> bool {
 mod tests {
 
     use super::*;
-    use crate::transcript::{Overlays, ProjectEnv, project};
+    use crate::transcript::{Overlays, ProjectEnv, no_steered_turns, project};
     use ahp_types::actions::StateAction;
     use ahp_types::state::ChatState;
 
@@ -1307,6 +1313,7 @@ mod tests {
                 fork_source: false,
                 promoted_confirmation: None,
                 entering_turns: &[],
+                steered_turns: no_steered_turns(),
             },
             host.clone(),
         )
