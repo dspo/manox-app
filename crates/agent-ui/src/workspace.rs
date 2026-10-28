@@ -596,6 +596,7 @@ impl Workspace {
         let receipts = store.update(cx, |s, _| s.drain_steer_receipts(&sid));
         let steered_turns = store.update(cx, |s, _| s.steered_turns(&sid));
         let mut entering = Vec::<String>::new();
+        let mut steer_turns = Vec::<(String, String)>::new();
         for receipt in receipts {
             let turn_id = receipt.turn_id.as_deref();
             match receipt.wake_text {
@@ -609,11 +610,26 @@ impl Workspace {
             // The entrance ride follows the RECEIPT's turn, not the card:
             // the removal precedes the partition on the wire, so the card is
             // often already retired when the row's turn names itself.
-            if let Some(turn) = receipt.turn_id
-                && !entering.contains(&turn)
-            {
-                entering.push(turn);
+            if let Some(turn) = receipt.turn_id.as_ref() {
+                if !entering.contains(turn) {
+                    entering.push(turn.clone());
+                }
+                steer_turns.push((receipt.message_id.clone(), turn.clone()));
             }
+        }
+        // A window bubble minted by the removal (no turn id) is upgraded to
+        // the identity the partition names, so the projection adopts it even
+        // when both receipts drained in THIS sync — a parked re-attach, or a
+        // backlog that coalesced the two envelopes. Applied after the loop,
+        // so a turn-start processed before its removal still upgrades the
+        // bubble that removal mints later in the same drain.
+        if !steer_turns.is_empty() {
+            let conversation = self.chat_conversation(cx);
+            conversation.update(cx, |conv, _| {
+                for (steer_id, turn_id) in &steer_turns {
+                    conv.attach_steer_turn(steer_id, turn_id);
+                }
+            });
         }
         // A mid-run steer's partition lands as TWO envelopes — the boundary's
         // `turnCompleted` and the steer turn's `turnStarted` — with the
@@ -724,6 +740,7 @@ impl Workspace {
         images: Vec<UserImage>,
         meta: UserTurnMeta,
         turn_id: Option<String>,
+        steer_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some((store, sid)) = self.chat_store(cx) else {
@@ -763,6 +780,7 @@ impl Workspace {
                 images,
                 meta,
                 turn_id,
+                steer_id,
             };
             conv.push_optimistic_user(chat.as_ref(), bubble, &env, cx);
         });

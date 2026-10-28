@@ -387,6 +387,63 @@ impl Workspace {
         self.delete_follow_up(idx, cx);
     }
 
+    /// Land a consumed steer's partition fold AND both consumption receipts
+    /// without notifying, so the caller's next replay drains them in one
+    /// sync — the parked re-attach shape (a background session, or an
+    /// envelope backlog coalesced into one notify). The removal names no
+    /// turn; the turn-start names `t-part`. Regression fixture for the
+    /// window bubble's identity upgrade: the bubble must adopt into the fold
+    /// row even though it was minted after that row already existed.
+    pub fn gallery_inject_parked_consumption(
+        &mut self,
+        steer_id: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            return;
+        };
+        let chat: ahp_types::state::ChatState = serde_json::from_value(serde_json::json!({
+            "resource": chat_uri(&sid),
+            "title": "parked consumption",
+            "status": 0,
+            "modifiedAt": "2026-10-22T00:00:00Z",
+            "turns": [
+                {
+                    "id": "t-1",
+                    "startedAt": "2026-10-22T00:00:00Z",
+                    "message": { "text": "帮我梳理这个仓库的构建脚本", "origin": { "kind": "user" } },
+                    "responseParts": [],
+                    "state": "complete",
+                },
+                {
+                    "id": "t-live",
+                    "startedAt": "2026-10-22T00:00:01Z",
+                    "message": { "text": "继续，把测试也过一遍", "origin": { "kind": "user" } },
+                    "responseParts": [],
+                    "state": "complete",
+                },
+            ],
+            "activeTurn": {
+                "id": "t-part",
+                "startedAt": "2026-10-22T00:00:03Z",
+                "message": { "text": text, "origin": { "kind": "user" } },
+                "responseParts": [],
+            },
+        }))
+        .expect("the parked partition fold parses");
+        store.update(cx, |s, _| {
+            s.diagnostic_set_chat(&sid, chat);
+            s.diagnostic_inject_steer_receipt(&sid, steer_id.to_string(), None, None);
+            s.diagnostic_inject_steer_receipt(
+                &sid,
+                steer_id.to_string(),
+                Some(text.to_string()),
+                Some("t-part".to_string()),
+            );
+        });
+    }
+
     /// Route a `chat/turnStarted` whose opening row IS a steer, wire-shaped:
     /// the wake path (and, with a boundary routed ahead of it, the mid-run
     /// partition). `steer_id` is the id the row threads (`None` when the row

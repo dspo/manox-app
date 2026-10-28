@@ -876,7 +876,9 @@ impl Workspace {
         // leaf keeps reply ids, not the ask payload).
         let store = manox_agent::thread_store_global();
         store.with_mut(|s| {
-            s.set_unread(&id, false);
+            // Attach IS a view: the read rule's second input, stamped
+            // monotone (v0.6.9's derived read replaced the stored bit).
+            s.mark_viewed(&id, chrono::Utc::now().timestamp());
             s.mark_pending_auth(&id, false);
         });
         // The incoming thread's cwd / worktree may differ from the outgoing

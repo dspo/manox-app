@@ -756,6 +756,76 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
             );
         });
     });
+    // ── parked consumption: the removal and the partition both drain in ONE
+    // sync (a background session / coalesced backlog), so the window bubble
+    // is minted after the fold row exists. Its identity upgrade must still
+    // adopt it into the row — never a permanent duplicate.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            while !ws.gallery_queue_snapshot(cx).is_empty() {
+                ws.gallery_delete_card(0, cx);
+            }
+            ws.gallery_set_running(true, cx);
+            ws.gallery_submit("引导十一：同批回执", SubmitBehavior::Steer, cx);
+        });
+    });
+    let steer_id = visual
+        .update(|_window, cx| ws.update(cx, |ws, cx| ws.gallery_first_steer_id(cx)))
+        .expect("eleventh steer parked");
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_inject_parked_consumption(&steer_id, "引导十一：同批回执", cx);
+            ws.gallery_replay_parked(cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert_eq!(
+                ws.gallery_user_row_count("引导十一：同批回执", cx),
+                1,
+                "a same-sync drain adopts the window bubble instead of duplicating"
+            );
+            assert_eq!(
+                ws.gallery_user_row_steered("引导十一：同批回执", cx),
+                Some(true),
+                "the adopted fold row carries the steered badge"
+            );
+        });
+    });
+
+    // ── settle without a partition: a steer the run never drained is
+    // retracted by the host, so no fold row will ever adopt the window
+    // bubble. The settle retires the bridge instead of leaving a phantom.
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            while !ws.gallery_queue_snapshot(cx).is_empty() {
+                ws.gallery_delete_card(0, cx);
+            }
+            ws.gallery_set_running(true, cx);
+            ws.gallery_submit("引导十二：未落分区", SubmitBehavior::Steer, cx);
+        });
+    });
+    let steer_id = visual
+        .update(|_window, cx| ws.update(cx, |ws, cx| ws.gallery_first_steer_id(cx)))
+        .expect("twelfth steer parked");
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_inject_steer_consumed(&steer_id, cx);
+            ws.gallery_replay_parked(cx);
+            assert_eq!(
+                ws.gallery_user_row_count("引导十二：未落分区", cx),
+                1,
+                "the removal leaves the window bubble visible"
+            );
+            ws.gallery_settle(false, cx);
+            ws.gallery_replay_parked(cx);
+            assert_eq!(
+                ws.gallery_user_row_count("引导十二：未落分区", cx),
+                0,
+                "the settle retires a window whose steer never landed"
+            );
+        });
+    });
 }
 
 /// A steer-boundary `chat/turnCompleted`: the completion a mid-run

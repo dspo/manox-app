@@ -177,6 +177,12 @@ pub struct OverlayBubble {
     /// `chat/turnStarted` — the adoption identity. `None` for a steer or an
     /// unsent draft, which no turn can claim by identity.
     pub turn_id: Option<String>,
+    /// The client steer id a WINDOW bubble bridges: minted by the removal
+    /// echo (which names no turn), then upgraded to the receipt turn's
+    /// identity by [`crate::conversation::ConversationState::attach_steer_turn`]
+    /// when the partition's turn-start lands. `None` for every ordinary
+    /// submit bubble.
+    pub steer_id: Option<String>,
     /// How many turn rows the fold held when the bubble was minted
     /// (archived turns plus an active one). The text fallback only pairs
     /// with turns that appeared AFTER this point, so a re-sent "继续" can
@@ -192,6 +198,9 @@ pub struct OverlayBubbleSeed {
     pub images: Vec<crate::conversation::UserImage>,
     pub meta: UserTurnMeta,
     pub turn_id: Option<String>,
+    /// The steer id of a window bubble (see [`OverlayBubble::steer_id`]);
+    /// `None` for an ordinary submit.
+    pub steer_id: Option<String>,
 }
 
 /// A host refusal of one of this client's writes.

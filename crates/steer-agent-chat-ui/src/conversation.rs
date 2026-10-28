@@ -610,6 +610,7 @@ impl ConversationState {
             images,
             mut meta,
             turn_id,
+            steer_id,
         } = bubble;
         // The header's `to` is whoever owns this conversation, so it is
         // stamped here rather than carried by every caller.
@@ -629,9 +630,40 @@ impl ConversationState {
                 images,
                 meta,
                 turn_id,
+                steer_id,
                 minted_turns,
             });
         self.project(chat, env, cx);
+    }
+
+    /// Upgrade a window bubble to the identity of the turn its steer opened.
+    /// The removal echo mints the bubble before any turn exists (no id); the
+    /// partition's `turnStarted` later names the turn, and this upgrade lets
+    /// [`crate::transcript::project`] pair the bubble by IDENTITY — so the
+    /// window is adopted no matter how late the two receipts drain, and no
+    /// mint-time turn count can strand it.
+    pub fn attach_steer_turn(&mut self, steer_id: &str, turn_id: &str) -> bool {
+        let mut changed = false;
+        for bubble in &mut self.overlays.bubbles {
+            if bubble.steer_id.as_deref() == Some(steer_id) && bubble.turn_id.is_none() {
+                bubble.turn_id = Some(turn_id.to_string());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Drop window bubbles whose steer never opened a fold row: a run that
+    /// aborted before draining the injection retracts the queued steer, so
+    /// no turn-start will ever adopt the bridge. The settle is the last
+    /// chance to retire it — a permanent tail row would report a message the
+    /// model never saw. Returns whether anything was dropped.
+    pub fn drop_unlanded_steer_bubbles(&mut self) -> bool {
+        let before = self.overlays.bubbles.len();
+        self.overlays
+            .bubbles
+            .retain(|bubble| bubble.steer_id.is_none() || bubble.turn_id.is_some());
+        self.overlays.bubbles.len() != before
     }
 
     /// Take the host refusals the store drained for this session into the
@@ -1813,6 +1845,7 @@ mod tests {
                     images: Vec::new(),
                     meta: UserTurnMeta::new(0, "test-model".into(), None),
                     turn_id: None,
+                    steer_id: None,
                 },
                 &env,
                 cx,
@@ -1846,6 +1879,7 @@ mod tests {
                     images: Vec::new(),
                     meta: UserTurnMeta::new(1, "test-model".into(), None),
                     turn_id: None,
+                    steer_id: None,
                 },
                 &env,
                 cx,
@@ -1937,6 +1971,7 @@ mod tests {
                         images: Vec::new(),
                         meta: UserTurnMeta::new(2_000, "test-model".into(), None),
                         turn_id: None,
+                        steer_id: None,
                     },
                     &env,
                     cx,
@@ -1984,6 +2019,7 @@ mod tests {
                         images: Vec::new(),
                         meta: UserTurnMeta::new(0, "test-model".into(), None),
                         turn_id: Some("t-expanded".into()),
+                        steer_id: None,
                     },
                     &env,
                     cx,
@@ -2019,6 +2055,7 @@ mod tests {
                         images: Vec::new(),
                         meta: UserTurnMeta::new(0, "test-model".into(), None),
                         turn_id: Some("t-refused".into()),
+                        steer_id: None,
                     },
                     &env,
                     cx,
@@ -2063,6 +2100,7 @@ mod tests {
                     images: Vec::new(),
                     meta: UserTurnMeta::new(0, "test-model".into(), None),
                     turn_id: Some("uuid-client".into()),
+                    steer_id: None,
                 },
                 &env,
                 cx,

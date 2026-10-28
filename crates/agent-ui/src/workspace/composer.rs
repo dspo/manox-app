@@ -291,7 +291,14 @@ impl Workspace {
             // texts never match: the minted turn id is what pairs them.
             let submit_text = format!("/{key} {args}");
             if let Some(turn_id) = self.send_submit_v2(submit_text, Vec::new(), cx) {
-                self.push_optimistic_bubble(display_text, Vec::new(), meta, Some(turn_id), cx);
+                self.push_optimistic_bubble(
+                    display_text,
+                    Vec::new(),
+                    meta,
+                    Some(turn_id),
+                    None,
+                    cx,
+                );
             }
         } else {
             let notice_key = match kind {
@@ -481,6 +488,7 @@ impl Workspace {
                 turn.user_images.clone(),
                 turn.meta,
                 Some(turn_id),
+                None,
                 cx,
             );
         }
@@ -591,6 +599,14 @@ impl Workspace {
             return false;
         };
         if turn_id.is_none() {
+            // The window bubble carries the steer id: the partition's
+            // turn-start later upgrades it to that turn's identity, so the
+            // fold row adopts this row instead of sitting beside it (the
+            // receipts can drain in one sync on a parked re-attach).
+            let steer_id = match &item.state {
+                FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
+                FollowUpState::Queued | FollowUpState::Failed => None,
+            };
             let mut meta = item.turn.meta.clone();
             meta.steered = true;
             self.push_optimistic_bubble(
@@ -598,6 +614,7 @@ impl Workspace {
                 item.turn.user_images.clone(),
                 meta,
                 None,
+                steer_id,
                 cx,
             );
         }
@@ -617,6 +634,13 @@ impl Workspace {
     /// the queue for the NEXT settle (that turn's own), so two batches never
     /// go back-to-back with the first still running.
     pub(super) fn settle_follow_ups(&mut self, cancelled: bool, cx: &mut Context<Self>) {
+        // A settle is the last chance to retire a window bubble whose steer
+        // never opened a fold row: a run aborted in the removal-to-partition
+        // gap retracts the queued steer, so no turn-start will adopt it.
+        let conversation = self.chat_conversation(cx);
+        if conversation.update(cx, |conv, _| conv.drop_unlanded_steer_bubbles()) {
+            cx.notify();
+        }
         // Settles drain cards by wire timing too — drop any in-flight drag
         // marker (its indices can never address the post-settle queue) and
         // the send menu (the running cluster it floats on just ended).
@@ -720,7 +744,7 @@ impl Workspace {
             return;
         }
         let meta = self.user_turn_meta(cx);
-        self.push_optimistic_bubble(text, Vec::new(), meta, sent, cx);
+        self.push_optimistic_bubble(text, Vec::new(), meta, sent, None, cx);
         cx.notify();
     }
 
