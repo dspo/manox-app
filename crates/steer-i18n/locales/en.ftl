@@ -241,6 +241,14 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = Back to app
 
+settings-nav-title = Settings
+
+settings-page-desc-general = Appearance, language and model access.
+
+settings-page-desc-integrations = Plugin marketplace and MCP servers.
+
+settings-page-desc-external-tools = Injection launch settings for ChatGPT.app and VS Code.
+
 
 ### views/settings.rs — General panel
 

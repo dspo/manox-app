@@ -225,6 +225,14 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = 返回应用
 
+settings-nav-title = 设置
+
+settings-page-desc-general = 应用外观与语言、模型接入配置。
+
+settings-page-desc-integrations = 插件市场与 MCP 服务器连接。
+
+settings-page-desc-external-tools = ChatGPT.app 与 VS Code 的注入启动配置。
+
 
 ### views/settings.rs — 常规面板
 

@@ -196,8 +196,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        use gpui::{FontWeight, ParentElement as _, Styled as _, div};
-        use gpui_component::{TITLE_BAR_HEIGHT, TitleBar, h_flex, v_flex};
+        use gpui::{ParentElement as _, Styled as _, div, px};
+        use gpui_component::{TITLE_BAR_HEIGHT, TitleBar, v_flex};
 
         let settings = self
             .settings_view
@@ -205,9 +205,12 @@ impl Workspace {
             .expect("enter_settings must have created the SettingsView")
             .clone();
         let page_ix = self.settings_nav;
-        let nav_keys = crate::views::settings::NAV_KEYS;
-        let title = i18n::t(nav_keys[page_ix.min(nav_keys.len() - 1)]);
         let content = settings.update(cx, |s, cx| s.render_page(page_ix, window, cx));
+        // ZCode-pattern detail: the TitleBar strip is drag-only (the page's
+        // own header carries the title); the page rides a centered,
+        // measure-limited column inside the main card — gutters of card
+        // background on both flanks instead of full-bleed content.
+        const DETAIL_MAX_W: f32 = 880.;
         let root = v_flex()
             .id("settings-detail")
             .size_full()
@@ -220,7 +223,14 @@ impl Workspace {
                     .w_full()
                     .overflow_hidden()
                     .pt(TITLE_BAR_HEIGHT)
-                    .child(content),
+                    .child(
+                        div()
+                            .max_w(px(DETAIL_MAX_W))
+                            .w_full()
+                            .h_full()
+                            .mx_auto()
+                            .child(content),
+                    ),
             )
             .child(
                 div()
@@ -229,16 +239,7 @@ impl Workspace {
                     .left_0()
                     .right_0()
                     .h(TITLE_BAR_HEIGHT)
-                    .child(
-                        TitleBar::new().child(
-                            h_flex().px_4().items_center().child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            ),
-                        ),
-                    ),
+                    .child(TitleBar::new()),
             );
         self.apply_chat_actions(root, window, cx)
     }

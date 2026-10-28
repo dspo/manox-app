@@ -156,20 +156,32 @@ impl SettingsView {
         let Some(page) = pages.into_iter().nth(ix) else {
             return div().into_any_element();
         };
+        // The page's own header, restyled into a ZCode-pattern section
+        // heading: an 18px semibold title over the header's hairline, with
+        // roomier padding than the shell default.
+        use gpui::Styled as _;
+        let header_style = div()
+            .px_6()
+            .pt_5()
+            .pb_3()
+            .text_size(px(18.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .style()
+            .clone();
         Settings::new(SharedString::from(format!("settings-detail-{ix}")))
             .sidebar_width(px(0.))
             .sidebar_size_range(px(0.)..px(0.))
-            .page(page)
+            .page(page.header_style(&header_style))
             .into_any_element()
     }
 }
 
 /// The settings nav order (the chrome sidebar's injected list): index-aligned
 /// with `build_pages`, labels through the same Fluent keys.
-pub(crate) const NAV_KEYS: [&str; 3] = [
-    "settings-group-general",
-    "settings-group-integrations",
-    "settings-group-external-tools",
+pub(crate) const NAV: [(&str, IconName); 3] = [
+    ("settings-group-general", IconName::Settings),
+    ("settings-group-integrations", IconName::Frame),
+    ("settings-group-external-tools", IconName::Bot),
 ];
 
 /// A panel renderer expressed as a free function of the view — the element
@@ -332,7 +344,8 @@ fn build_pages(
     };
 
     vec![
-        SettingPage::new(i18n::t(NAV_KEYS[0]))
+        SettingPage::new(i18n::t(NAV[0].0))
+            .description(i18n::t("settings-page-desc-general"))
             .icon(IconName::Settings)
             .default_open(true)
             .group(language_group)
@@ -342,7 +355,8 @@ fn build_pages(
                 &["models", "providers", "llm", "api key", "endpoint"],
                 models::render_models,
             )),
-        SettingPage::new(i18n::t(NAV_KEYS[1]))
+        SettingPage::new(i18n::t(NAV[1].0))
+            .description(i18n::t("settings-page-desc-integrations"))
             .icon(IconName::Frame)
             .default_open(true)
             .group(panel_group(
@@ -352,7 +366,8 @@ fn build_pages(
                 |view, _cx| view.plugins.clone().into_any_element(),
             ))
             .group(mcp_group(view, mcp_servers, mcp_disabled)),
-        SettingPage::new(i18n::t(NAV_KEYS[2]))
+        SettingPage::new(i18n::t(NAV[2].0))
+            .description(i18n::t("settings-page-desc-external-tools"))
             .icon(IconName::Bot)
             .default_open(true)
             .group(panel_group(
