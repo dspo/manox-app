@@ -44,6 +44,12 @@ impl Render for Workspace {
         // The render pass is the only place a `Window` is in hand, so the
         // composer's blank-project input is maintained here.
         self.ensure_blank_project_input(window, cx);
+        // Settings is the split layout: the chrome sidebar carries the nav
+        // (swapped in by `enter_settings`) and this column carries the
+        // selected page's detail.
+        if matches!(self.view_mode, ViewMode::Settings) {
+            return self.render_settings_detail(window, cx);
+        }
         // An external session (a launched CLI agent TUI / plain terminal)
         // owns the main column the same way — the shell wraps the main
         // column, and terminal/TUI sessions live THERE, not in the right
@@ -72,23 +78,7 @@ impl Render for Workspace {
         self.reconcile_pending_with_projections(cx);
         self.sync_ask_card_snapshots(cx);
         self.sync_confirmation_snapshot(cx);
-        let column = self.render_column(window, cx);
-        // Settings is a floating overlay, not a column swap: the column keeps
-        // rendering underneath, dimmed by the mask, with the settings card
-        // centered on top. Mounted as a later sibling so it paints above the
-        // column and the card's other overlays (entering Settings already
-        // dropped the turn navigator).
-        if matches!(self.view_mode, ViewMode::Settings) {
-            let overlay = self.render_settings_overlay(window, cx);
-            return gpui::div()
-                .id("workspace-with-settings")
-                .size_full()
-                .relative()
-                .child(column)
-                .child(overlay)
-                .into_any_element();
-        }
-        column
+        self.render_column(window, cx)
     }
 }
 
@@ -197,159 +187,60 @@ impl Workspace {
         .into_any_element()
     }
 
-    /// Entrance tween for the settings card: a short rise + fade (the
-    /// live-bubble pattern). The exit is a plain fade over `SLIDE_OUT_MS`,
-    /// matching the exit spawn's unmount delay.
-    const SETTINGS_ENTER_MS: u64 = 180;
-    /// How far the card rises on entrance, in px.
-    const SETTINGS_ENTER_RISE: f32 = 12.;
-
-    /// The Settings floating overlay: a dim mask over the live column with
-    /// the settings surface as a centered, rounded card on top. Escape, the
-    /// mask and the card's close button all exit through the same
-    /// `SettingsEvent::Exit` path, so the exit sequencing (the transition
-    /// gen watermark + the delayed view-mode flip) keeps guarding the close.
-    ///
-    /// Hit-testing is sibling-layered like the chrome picker: the mask is a
-    /// full-area click layer BELOW the centering layer, and the card
-    /// `occlude()`s — clicks inside the card never bubble into the mask
-    /// (they would if the card were its child).
-    fn render_settings_overlay(
+    /// The settings detail (the main column's content while Settings is
+    /// open): the selected page's group stack below a TitleBar strip naming
+    /// the page. Navigation is the chrome sidebar's injected nav — no back
+    /// control here, the nav owns exiting.
+    fn render_settings_detail(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        use gpui::{
-            Animation, AnimationExt as _, FontWeight, InteractiveElement as _, KeyDownEvent,
-            ParentElement as _, Styled as _, div, ease_out_quint, px,
-        };
-        use gpui_component::{TITLE_BAR_HEIGHT, h_flex, v_flex};
+        use gpui::{FontWeight, ParentElement as _, Styled as _, div};
+        use gpui_component::{TITLE_BAR_HEIGHT, TitleBar, h_flex, v_flex};
 
         let settings = self
             .settings_view
             .as_ref()
             .expect("enter_settings must have created the SettingsView")
             .clone();
-        let content = settings.update(cx, |s, cx| s.render(window, cx));
-        let theme = cx.theme().clone();
-
-        let exit = {
-            let settings = settings.clone();
-            move |cx: &mut gpui::App| {
-                settings.update(cx, |_, cx| cx.emit(SettingsEvent::Exit));
-            }
-        };
-        let close_click = {
-            let exit = exit.clone();
-            move |_ev: &gpui::ClickEvent, _window: &mut Window, cx: &mut gpui::App| exit(cx)
-        };
-
-        let header = h_flex()
-            .id("settings-float-header")
-            .h(TITLE_BAR_HEIGHT)
-            .w_full()
-            .px_3()
-            .flex_none()
-            .items_center()
-            .justify_between()
-            .border_b_1()
-            .border_color(theme.border)
+        let page_ix = self.settings_nav;
+        let nav_keys = crate::views::settings::NAV_KEYS;
+        let title = i18n::t(nav_keys[page_ix.min(nav_keys.len() - 1)]);
+        let content = settings.update(cx, |s, cx| s.render_page(page_ix, window, cx));
+        let root = v_flex()
+            .id("settings-detail")
+            .size_full()
+            .min_w_0()
+            .relative()
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(i18n::t("settings-overlay-title")),
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .pt(TITLE_BAR_HEIGHT)
+                    .child(content),
             )
             .child(
-                Button::new("settings-float-close")
-                    .ghost()
-                    .icon(IconName::Close)
-                    .on_click(close_click),
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(TITLE_BAR_HEIGHT)
+                    .child(
+                        TitleBar::new().child(
+                            h_flex().px_4().items_center().child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            ),
+                        ),
+                    ),
             );
-
-        let card = v_flex()
-            .id("settings-float-card")
-            .debug_selector(|| "settings-float-card".into())
-            .occlude()
-            .w_4_5()
-            .max_w(px(1040.))
-            .h_4_5()
-            .min_h(px(460.))
-            .overflow_hidden()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .shadow_lg()
-            .child(header)
-            .child(v_flex().flex_1().min_h_0().child(content));
-
-        // The transition gen keys the animation element so every open and
-        // close restarts the clock instead of resuming a cached delta (the
-        // same discipline the retired slide-in used the gen for).
-        let tween_gen = self.settings_transition_gen;
-        let entering = !self.exiting_settings;
-        let duration = std::time::Duration::from_millis(if entering {
-            Self::SETTINGS_ENTER_MS
-        } else {
-            super::SLIDE_OUT_MS
-        });
-        let card = card.with_animation(
-            ("settings-float-tween", tween_gen as usize),
-            Animation::new(duration).with_easing(ease_out_quint()),
-            move |el, delta| {
-                let opacity = if entering { delta } else { 1. - delta };
-                let rise = if entering {
-                    Self::SETTINGS_ENTER_RISE * (1. - delta)
-                } else {
-                    0.
-                };
-                el.relative().top(px(rise)).opacity(opacity)
-            },
-        );
-
-        div()
-            .id("settings-overlay")
-            .debug_selector(|| "settings-overlay".into())
-            .absolute()
-            .inset_0()
-            .track_focus(&self.settings_focus)
-            .on_key_down(cx.listener({
-                let exit = exit.clone();
-                move |_this, ev: &KeyDownEvent, _window, cx| {
-                    if ev.keystroke.key == "escape" {
-                        exit(cx);
-                        cx.stop_propagation();
-                    }
-                }
-            }))
-            .child(
-                // The mask: the only click-to-exit surface. Its sibling
-                // below stays interactive-looking but unreachable — every
-                // click in the overlay area lands here or inside the card.
-                div()
-                    .id("settings-overlay-mask")
-                    .debug_selector(|| "settings-overlay-mask".into())
-                    .absolute()
-                    .inset_0()
-                    .bg(gpui::black().opacity(0.32))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        if let Some(view) = this.settings_view.as_ref() {
-                            view.update(cx, |_, cx| cx.emit(SettingsEvent::Exit));
-                        }
-                    })),
-            )
-            .child(
-                div()
-                    .id("settings-overlay-center")
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(card),
-            )
-            .into_any_element()
+        self.apply_chat_actions(root, window, cx)
     }
 
     /// The external session's main-column card: the live terminal, full

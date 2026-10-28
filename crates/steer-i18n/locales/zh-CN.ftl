@@ -225,7 +225,6 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = 返回应用
 
-settings-overlay-title = 设置
 
 ### views/settings.rs — 常规面板
 

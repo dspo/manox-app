@@ -241,7 +241,6 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = Back to app
 
-settings-overlay-title = Settings
 
 ### views/settings.rs — General panel
 

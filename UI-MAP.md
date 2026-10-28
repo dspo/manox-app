@@ -25,7 +25,7 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
 | 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
-| Settings | 主区卡上的浮窗 overlay：遮罩 + 居中卡片（`Workspace::render_settings_overlay`）内嵌上游 `gpui_component::setting::Settings` 壳 |
+| Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4） |
 
 共享状态层不变：`agent-ui`（multiplexer / client_store / browser_host / dispatch / 侧栏投影 /
 slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与消息管线）、`terminal-ui`、
@@ -937,20 +937,25 @@ entry，把 `(path, output)` 交给 `ChatHost::open_right_diff` → workspace �
 
 ## 4. ViewMode::Settings
 
-Settings floating overlay over the live column: a 32%-black mask + a centered rounded card
-（`Workspace::render_settings_overlay`，80% 宽 capped 1040px / 80% 高）hosting the upstream
-`gpui_component::setting::Settings` shell (its own sidebar + resizable split + page stack, starting
-at 240px). The column keeps rendering underneath, blocked by the mask. Entrance rises 12px + fades
-over 180ms (keyed by the transition gen); the exit fades over the same 200ms the mode flip waits.
-Escape, the mask and the card's × close button all exit through `SettingsEvent::Exit`.
+The Settings split layout: Settings reuses the shell's own two-column structure instead of a
+floating surface. On `enter_settings` the chrome sidebar swaps its session list for the injected
+settings nav (`Shell::sidebar_surface` ← `chrome_assembly::enter_settings_layout`,
+`views/settings_nav::SettingsNavView` — back control + page rows, selection on
+`Workspace::settings_nav`), and the main column carries the selected page's detail
+(`Workspace::render_settings_detail`): a TitleBar strip naming the page over the page's group
+stack — the upstream `gpui_component::setting::Settings` shell rendered with a ZERO-width sidebar
+(one instance per page, keyed `settings-detail-{ix}`), so only its group stack/page chrome shows.
+Row order is index-aligned through `views::settings::NAV_KEYS` (the single vocabulary both the nav
+and `build_pages` read). Exiting (`leave_settings` / the nav's back control / any
+`focus_conversation`) restores the session-list sidebar. The upstream shell's own sidebar/search
+retired with this layout.
 
-#### SettingsFloatCard
+#### SettingsNavView
 
-The floating card: a header row (`settings-float-header`, TITLE_BAR_HEIGHT, title + ghost × close)
-over the upstream settings shell. Hit-testing is sibling-layered like the chrome picker — the mask
-is a full-area click layer BELOW the centering layer, and the card `occlude()`s so clicks inside
-never reach the mask. `Workspace::settings_focus` is focused on entry so Escape reaches the
-overlay. Acceptance face: `crates/agent-ui/tests/visual_settings.rs` (`SETTINGS_SHOT`).
+The sidebar nav while Settings is open: `management_shell::back_control`（返回应用 →
+`Workspace::leave_settings`）above one row per `NAV_KEYS` page (active row: accent text + wash).
+Clicks write `Workspace::settings_nav` through the process-global workspace; the view observes
+the workspace so selection highlights track.
 
 #### ManagementBackControl
 
@@ -972,7 +977,7 @@ Retired with the floating-overlay rework: the in-card TitleBar strip (and the [M
 
 #### SettingsShell
 
-The upstream `gpui_component::setting::Settings` component, mounted inside the [SettingsFloatCard](#4-viewmodesettings) below the header row. It owns the sidebar (a built-in search input on top of a grouped, collapsible `SidebarMenu`), the resizable split (starts at 240px, draggable) and the per-page group stack (virtualized list + scrollbar). Three pages mirror the former nav groups: **General** (the language group — a `Fill` card whose single row is the UI-language dropdown — plus the Models panel group), **Integrations** (Plugins + MCP), **External Tools** (ChatGPT.app + VS Code). Group titles double as the sidebar's sub-items; clicking one selects the page and scrolls to the group. Search filters groups by item title/description/keywords. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface), each with English keywords so search reaches them. MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself.
+The upstream `gpui_component::setting::Settings` component, rendered per page with a ZERO-width sidebar (its own sidebar/search/split retired with the split layout — navigation belongs to the chrome sidebar). What remains is the per-page group stack (virtualized list + scrollbar). Three pages mirror the nav groups: **General** (the language group — a `Fill` card whose single row is the UI-language dropdown — plus the Models panel group), **Integrations** (Plugins + MCP), **External Tools** (ChatGPT.app + VS Code). Group titles double as the sidebar's sub-items; clicking one selects the page and scrolls to the group. Search filters groups by item title/description/keywords. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface), each with English keywords so search reaches them. MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself.
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
@@ -1083,7 +1088,7 @@ chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操
 
 #### SettingsCard
 
-Settings（`Workspace::render_settings_overlay`）：同一状态机（`ViewMode::Settings` + `SettingsView` 订阅），渲染换位——遮罩 + 居中浮窗卡挂在会话列之上（列持续渲染、被遮罩挡交互）；⌘, 与原生菜单 `Settings…` 经 `apply_chat_actions` 的 `OpenSettings` 处理进入，退出三入口（Esc / 遮罩点击 / 卡头 ×，同走 `SettingsEvent::Exit` → fade 后回会话）。
+Settings（`Workspace::render_settings_detail`）：同一状态机（`ViewMode::Settings` + `SettingsView` 订阅），分栏布局——chrome 侧栏注入设置导航、主列放选中页的 Group 栈；⌘, 与原生菜单 `Settings…` 经 `apply_chat_actions` 的 `OpenSettings` 处理进入，退出走导航的返回应用（`Workspace::leave_settings`，还原会话列表侧栏）。
 
 > Source: `crates/agent-ui/src/workspace/render.rs`, `crates/agent-ui/src/views/settings/mod.rs`
 

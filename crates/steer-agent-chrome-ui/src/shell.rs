@@ -305,6 +305,11 @@ pub struct Shell {
     pub right: Entity<RightPane>,
     /// Sidebar width (invisible-handle drag, 180–460, double-click reset).
     pub sidebar_width: Pixels,
+    /// Host-injected sidebar content. When set, the sidebar slot renders
+    /// this view instead of the session list (the Settings split layout:
+    /// nav in the sidebar, detail in the main card). `None` is the normal
+    /// conversation face.
+    pub sidebar_surface: Option<gpui::AnyView>,
     /// The app brand mark factory (the titlebar avatar slot's content).
     brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
     /// Sidebar grouping mode (the sort button's toggle).
@@ -330,6 +335,11 @@ pub struct Shell {
 }
 
 impl Shell {
+    pub fn set_sidebar_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        self.sidebar_surface = surface;
+        cx.notify();
+    }
+
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let right = cx.new(|_| RightPane::new(config.tool_kinds));
         let panel = config.panel_surface.map(|surface| PanelSlot {
@@ -362,6 +372,7 @@ impl Shell {
             show_sidebar: true,
             show_panel: false,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
+            sidebar_surface: None,
             brand: config.brand,
             grouping: SidebarGrouping::default(),
             sidebar_filter_open: false,
@@ -1720,6 +1731,7 @@ impl Shell {
     fn render_content(&mut self, cx: &mut Context<Shell>) -> gpui::AnyElement {
         let show_sidebar = self.show_sidebar;
         let show_panel = self.show_panel;
+        let sidebar_surface = self.sidebar_surface.clone();
         let right = self.right.clone();
         let right_visible = right.read(cx).visible;
         let main = self.main.view();
@@ -1736,7 +1748,19 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .gap(px(PANE_GAP))
-            .when(show_sidebar, |this| this.child(self.render_sidebar(cx)))
+            .when(show_sidebar, |this| match sidebar_surface {
+                Some(surface) => this.child(
+                    // The injected surface rides the same frame as the
+                    // session list: the shell's width, clipping and edge.
+                    div()
+                        .w(self.sidebar_width)
+                        .h_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .child(surface),
+                ),
+                None => this.child(self.render_sidebar(cx)),
+            })
             .child(
                 div()
                     .flex()

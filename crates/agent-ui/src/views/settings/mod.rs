@@ -25,10 +25,6 @@ mod models;
 mod panels;
 mod vscode;
 
-/// Sidebar width the upstream `Settings` shell starts at; the user can drag
-/// it within the component's built-in range.
-pub(crate) const NAV_WIDTH: gpui::Pixels = px(240.);
-
 pub struct SettingsView {
     /// Plugin/marketplace management view, rendered in the "Plugins" group of
     /// the Integrations page. Owned here rather than as a top-level Workspace
@@ -141,20 +137,40 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// The settings shell — the whole two-column surface below the TitleBar
-    /// strip. Pages are rebuilt on every render so titles track the live
-    /// locale; selection lives in the component's window-keyed state.
-    pub(crate) fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// One page of the settings detail (the main column's content): the
+    /// upstream `Settings` shell with a zero-width sidebar, so only the
+    /// page's group stack renders. Navigation belongs to the chrome sidebar
+    /// (the injected settings nav), not to this shell. Pages are rebuilt on
+    /// every render so titles track the live locale.
+    pub(crate) fn render_page(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let view = cx.entity();
         // build_pages runs while this view holds its update lease, so the
         // state it needs is passed by reference — reaching back through the
         // entity handle here would panic (no reads on an updated entity).
-        Settings::new("settings")
-            .sidebar_width(NAV_WIDTH)
-            .pages(build_pages(&view, &self.mcp_servers, &self.mcp_disabled))
+        let pages = build_pages(&view, &self.mcp_servers, &self.mcp_disabled);
+        let Some(page) = pages.into_iter().nth(ix) else {
+            return div().into_any_element();
+        };
+        Settings::new(SharedString::from(format!("settings-detail-{ix}")))
+            .sidebar_width(px(0.))
+            .sidebar_size_range(px(0.)..px(0.))
+            .page(page)
             .into_any_element()
     }
 }
+
+/// The settings nav order (the chrome sidebar's injected list): index-aligned
+/// with `build_pages`, labels through the same Fluent keys.
+pub(crate) const NAV_KEYS: [&str; 3] = [
+    "settings-group-general",
+    "settings-group-integrations",
+    "settings-group-external-tools",
+];
 
 /// A panel renderer expressed as a free function of the view — the element
 /// item runs it at paint time, after the owning render pass has released
@@ -316,7 +332,7 @@ fn build_pages(
     };
 
     vec![
-        SettingPage::new(i18n::t("settings-group-general"))
+        SettingPage::new(i18n::t(NAV_KEYS[0]))
             .icon(IconName::Settings)
             .default_open(true)
             .group(language_group)
@@ -326,7 +342,7 @@ fn build_pages(
                 &["models", "providers", "llm", "api key", "endpoint"],
                 models::render_models,
             )),
-        SettingPage::new(i18n::t("settings-group-integrations"))
+        SettingPage::new(i18n::t(NAV_KEYS[1]))
             .icon(IconName::Frame)
             .default_open(true)
             .group(panel_group(
@@ -336,7 +352,7 @@ fn build_pages(
                 |view, _cx| view.plugins.clone().into_any_element(),
             ))
             .group(mcp_group(view, mcp_servers, mcp_disabled)),
-        SettingPage::new(i18n::t("settings-group-external-tools"))
+        SettingPage::new(i18n::t(NAV_KEYS[2]))
             .icon(IconName::Bot)
             .default_open(true)
             .group(panel_group(
