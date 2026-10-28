@@ -238,6 +238,9 @@ agents-prompt-preview = 系统提示词
 agents-prompt-note = 由运行时自身渲染的实况预览（稳定基底；项目指令与用户笔记按会话叠加）。
 
 agents-all-tools = 全部工具
+
+agents-group-lead = 主对话
+agents-model-inherit = 继承会话模型
 agents-tools-count = 个工具
 
 agents-readonly-note = Agents 目前为只读展示；自定义 agent 放在 ~/.claude/agents/ 下的 .md 文件即可被识别。

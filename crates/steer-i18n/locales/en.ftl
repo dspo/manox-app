@@ -254,6 +254,9 @@ agents-prompt-preview = System prompt
 agents-prompt-note = A live preview rendered by the runtime itself (the stable base; project instructions and user notes fold in per session).
 
 agents-all-tools = all tools
+
+agents-group-lead = Lead
+agents-model-inherit = follows the session
 agents-tools-count = tools
 
 agents-readonly-note = Agents are read-only for now; drop a .md file under ~/.claude/agents/ to register a custom one.

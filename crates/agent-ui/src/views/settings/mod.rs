@@ -21,6 +21,7 @@ use manox_agent::settings as user_settings;
 
 use crate::views::plugin_manager::PluginManagerView;
 
+mod agents_page;
 mod chatgpt;
 mod models;
 mod panels;
@@ -409,9 +410,9 @@ fn build_page(
     leaf: usize,
     mcp_servers: &[String],
     mcp_disabled: &HashSet<String>,
-    agents: &[AgentRow],
+    _agents: &[AgentRow],
     skills: &[SkillRow],
-    captain_prompt: &str,
+    _captain_prompt: &str,
 ) -> SettingPage {
     let title = |key: &str| SettingPage::new(i18n::t(key)).default_open(true);
     match leaf {
@@ -454,7 +455,12 @@ fn build_page(
             models::render_models,
         )),
         // Agents — read-only roster (the lead + preset + discovered defs).
-        2 => title("settings-item-agents").group(agents_group(agents, captain_prompt)),
+        2 => title("settings-item-agents").group(panel_group(
+            view,
+            "settings-item-agents",
+            &["agents", "subagents", "子代理", "captain"],
+            agents_page::render,
+        )),
         // 插件.
         3 => title("settings-item-plugins").group(panel_group(
             view,
@@ -484,16 +490,16 @@ fn build_page(
 }
 
 /// One read-only roster row for the Agents page.
-struct AgentRow {
-    name: String,
-    description: String,
-    /// Fluent key of the origin badge (内置 / 用户 / 插件).
-    origin: &'static str,
+pub(crate) struct AgentRow {
+    pub name: String,
+    pub description: String,
+    /// Fluent key of the origin group (内置 / 用户 / 插件).
+    pub origin: &'static str,
     /// The def's pinned model, when it has one.
-    model: Option<String>,
+    pub model: Option<String>,
     /// How many tools the def allows (empty def = all tools).
-    tools: usize,
-    all_tools: bool,
+    pub tools: usize,
+    pub all_tools: bool,
 }
 
 /// One read-only row for the Skills page.
@@ -584,78 +590,6 @@ fn captain_prompt_preview() -> String {
         user_notes: None,
     });
     builder(&[], &HarnessResources::default(), &cwd)
-}
-
-fn agents_group(agents: &[AgentRow], captain_prompt: &str) -> SettingGroup {
-    // The render closure is 'static; it takes the prompt as owned text.
-    let captain_prompt = captain_prompt.to_string();
-    let mut group = SettingGroup::new().title(i18n::t("settings-item-agents"));
-    // The lead agent's face: what it is, plus its REAL system prompt —
-    // rendered by the runtime's own builder, read-only.
-    group = group
-        .item(
-            SettingItem::new("Captain", meta_field(i18n::t("agents-captain-meta")))
-                .description(i18n::t("agents-captain-desc")),
-        )
-        .item(
-            SettingItem::new(
-                i18n::t("agents-prompt-preview"),
-                SettingField::render(move |_, _, cx| {
-                    use gpui::{IntoElement as _, ParentElement as _, Styled as _};
-                    let theme = cx.theme().clone();
-                    let mut lines = gpui_component::v_flex()
-                        .id("captain-prompt-preview")
-                        .max_h(px(280.))
-                        .overflow_y_scroll()
-                        .p_3()
-                        .rounded(theme.radius)
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.secondary)
-                        .text_size(px(12.));
-                    for line in captain_prompt.lines() {
-                        lines = lines.child(
-                            gpui::div()
-                                .font_family("monospace")
-                                .text_color(theme.muted_foreground)
-                                .child(line.to_string()),
-                        );
-                    }
-                    lines.into_any_element()
-                }),
-            )
-            .description(i18n::t("agents-prompt-note")),
-        );
-    for row in agents {
-        let mut meta = i18n::t(row.origin).to_string();
-        if let Some(model) = &row.model {
-            meta.push_str(" · ");
-            meta.push_str(model);
-        } else if row.all_tools {
-            meta.push_str(" · ");
-            meta.push_str(&i18n::t("agents-all-tools"));
-        } else {
-            meta.push_str(&format!(
-                " · {} {}",
-                row.tools,
-                i18n::t("agents-tools-count")
-            ));
-        }
-        group = group.item(
-            SettingItem::new(
-                SharedString::from(row.name.clone()),
-                meta_field(SharedString::from(meta)),
-            )
-            .description(SharedString::from(row.description.clone())),
-        );
-    }
-    group.footer(|_, _| {
-        gpui_component::v_flex().py_2().text_sm().child(
-            gpui::div()
-                .text_color(gpui::rgb(0x737373))
-                .child(i18n::t("agents-readonly-note")),
-        )
-    })
 }
 
 fn skills_group(skills: &[SkillRow]) -> SettingGroup {

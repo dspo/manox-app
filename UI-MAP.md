@@ -964,12 +964,15 @@ rosters cached on the view at creation):
 
 - 常规 — the language dropdown (Fill card).
 - 模型 — the provider/model editor panel.
-- Agents — read-only roster: the lead's face first — Captain's REAL system prompt rendered by
-  the runtime's own `captain_prompt_builder` (the stable base template: tool preferences,
-  concurrency model, subagent prose, skill fold — a live preview, not a summary), then the
-  runtime registry the subagent path itself builds (`register_defaults` + user/plugin discovery
-  via `agent_defs::register_user_and_plugin`), rows carrying origin (内置/用户/插件) · model ·
-  tool count. The prompt is rendered once at view creation and cached.
+- Agents — the read-only adaptation of ZCode's SubagentsSection
+  (`views/settings/agents_page.rs`): resource-group headers with counts (主对话 / 内置 / 用户 /
+  插件) above rounded list cards; each row a 36px rounded-square Bot avatar, a name + badge line
+  (model 继承会话模型 unless pinned · tools), and a muted description, rows split by 50%-opacity
+  hairlines. The lead group's card carries Captain's REAL system prompt — rendered by the
+  runtime's own `captain_prompt_builder` (stable base: tool preferences, concurrency model,
+  subagent prose, skill fold) in a scrollable mono block. Subagent rows come from the registry
+  the runtime itself builds (`register_defaults` + user/plugin discovery); empty discovery
+  groups stay hidden. The prompt renders once at view creation and is cached on the view.
 - 插件 — the plugin manager view.
 - Skills — read-only roster from `manox_agent::skill::list_skill_records()` (user + plugin, with
   origin badges).
