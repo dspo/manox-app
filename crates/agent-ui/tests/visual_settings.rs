@@ -66,6 +66,10 @@ mod macos {
                     if page > 0 {
                         ws.update(cx, |ws, cx| ws.select_settings_page(page, cx));
                     }
+                    // SETTINGS_AGENT=<name> drills into that agent's detail.
+                    if let Ok(agent) = std::env::var("SETTINGS_AGENT") {
+                        ws.update(cx, |ws, cx| ws.select_agent(Some(agent), cx));
+                    }
                 }
                 agent_ui::chrome_assembly::root(shell, window, cx)
             })

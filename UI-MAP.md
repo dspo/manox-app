@@ -964,15 +964,16 @@ rosters cached on the view at creation):
 
 - 常规 — the language dropdown (Fill card).
 - 模型 — the provider/model editor panel.
-- Agents — the read-only adaptation of ZCode's SubagentsSection
-  (`views/settings/agents_page.rs`): resource-group headers with counts (主对话 / 内置 / 用户 /
-  插件) above rounded list cards; each row a 36px rounded-square Bot avatar, a name + badge line
-  (model 继承会话模型 unless pinned · tools), and a muted description, rows split by 50%-opacity
-  hairlines. The lead group's card carries Captain's REAL system prompt — rendered by the
-  runtime's own `captain_prompt_builder` (stable base: tool preferences, concurrency model,
-  subagent prose, skill fold) in a scrollable mono block. Subagent rows come from the registry
-  the runtime itself builds (`register_defaults` + user/plugin discovery); empty discovery
-  groups stay hidden. The prompt renders once at view creation and is cached on the view.
+- Agents — the read-only mirror of ZCode's SubagentsSection
+  (`views/settings/agents_page.rs`): a flat list of fixed-height rows pixel-matched to ZCode's
+  `AgentListRow` (36px rounded-square Bot avatar · name + model/tools badges · two-line clamped
+  description, 50%-hairline separators), click → drill-down detail (`Workspace::select_agent`)
+  styled after ZCode's form: 作用域·用户 face top right, then 名称 input / 颜色标记 palette dots /
+  模型 select (继承会话模型 unless pinned) / 描述 box / 可用工具 (select + hint + a 3-column grid
+  of checked disabled checkboxes for custom tool sets) / 系统提示词 (the REAL prompt —
+  `AgentDef.system_prompt`; Captain's via the runtime-rendered `captain_prompt_builder` base).
+  Every write control is present but DISABLED: footer 保存/删除 inert, 取消 walks back.
+  Roster data cached at view creation (registry scans never run per frame).
 - 插件 — the plugin manager view.
 - Skills — read-only roster from `manox_agent::skill::list_skill_records()` (user + plugin, with
   origin badges).

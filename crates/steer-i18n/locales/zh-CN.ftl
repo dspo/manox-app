@@ -233,13 +233,24 @@ settings-origin-user = 用户
 settings-origin-plugin = 插件
 
 agents-captain-desc = 主对话 agent。系统提示词由运行时模板与项目指令、技能清单、用户笔记按会话组装。
+agents-field-name = 名称
+agents-field-color = 颜色标记
+agents-field-model = 模型
+agents-field-desc = 描述
+agents-field-tools = 可用工具
+agents-field-prompt = 系统提示词
+agents-tools-custom = 自定义可用工具
+agents-tools-all-label = 全部可用工具
+agents-tools-hint = 控制该子智能体可以调用的工具范围。
+agents-detail-scope = 作用域
+agents-detail-scope-user = 用户
+agents-save = 保存
+agents-cancel = 取消
+agents-delete = 删除
 agents-captain-meta = 内置 · 模型随会话
-agents-prompt-preview = 系统提示词
-agents-prompt-note = 由运行时自身渲染的实况预览（稳定基底；项目指令与用户笔记按会话叠加）。
 
 agents-all-tools = 全部工具
 
-agents-group-lead = 主对话
 agents-model-inherit = 继承会话模型
 agents-tools-count = 个工具
 

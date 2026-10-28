@@ -65,6 +65,8 @@ pub struct SettingsView {
     /// preview; the per-session assembly (project instructions, user notes,
     /// active-tool docs) is what a real session adds on top.
     captain_prompt: String,
+    /// The drilled-down agent of the Agents page (`None` = the list).
+    pub(crate) selected_agent: Option<String>,
 }
 
 #[derive(Clone)]
@@ -98,6 +100,7 @@ impl SettingsView {
             agents: collect_agents(),
             skills: collect_skills(),
             captain_prompt: captain_prompt_preview(),
+            selected_agent: None,
         }
     }
 
@@ -490,6 +493,7 @@ fn build_page(
 }
 
 /// One read-only roster row for the Agents page.
+#[derive(Clone)]
 pub(crate) struct AgentRow {
     pub name: String,
     pub description: String,
@@ -497,9 +501,11 @@ pub(crate) struct AgentRow {
     pub origin: &'static str,
     /// The def's pinned model, when it has one.
     pub model: Option<String>,
-    /// How many tools the def allows (empty def = all tools).
-    pub tools: usize,
+    /// The def's allowed tool names (empty = all tools).
+    pub tools: Vec<String>,
     pub all_tools: bool,
+    /// The def's system prompt (the manifest body).
+    pub system_prompt: String,
 }
 
 /// One read-only row for the Skills page.
@@ -532,10 +538,14 @@ fn collect_agents() -> Vec<AgentRow> {
             description: def.description.clone(),
             origin,
             model: def.model.clone(),
-            tools: def.tools.len(),
+            tools: def.tools.clone(),
             all_tools: def.tools.is_empty(),
+            system_prompt: def.system_prompt.clone(),
         });
     }
+    // Stable list order: built-ins first, then user files, then plugin
+    // entries — the list reads the same regardless of discovery order.
+    rows.sort_by(|a, b| a.origin.cmp(b.origin).then(a.name.cmp(&b.name)));
     rows
 }
 

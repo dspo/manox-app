@@ -1985,6 +1985,16 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Drills the Agents page into one agent's detail (`None` = the list).
+    pub fn select_agent(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_view.as_ref() {
+            settings.update(cx, |settings, cx| {
+                settings.selected_agent = name;
+                cx.notify();
+            });
+        }
+    }
+
     fn subscribe_settings(
         &self,
         settings: &Entity<SettingsView>,

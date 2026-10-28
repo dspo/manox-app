@@ -249,13 +249,24 @@ settings-origin-user = User
 settings-origin-plugin = Plugin
 
 agents-captain-desc = The lead agent. Its system prompt is assembled per session from the runtime template, project instructions, the skill fold and user notes.
+agents-field-name = Name
+agents-field-color = Color tag
+agents-field-model = Model
+agents-field-desc = Description
+agents-field-tools = Allowed tools
+agents-field-prompt = System prompt
+agents-tools-custom = Custom tools
+agents-tools-all-label = All tools
+agents-tools-hint = Controls which tools this subagent may call.
+agents-detail-scope = Scope
+agents-detail-scope-user = User
+agents-save = Save
+agents-cancel = Cancel
+agents-delete = Delete
 agents-captain-meta = Built-in · model follows the session
-agents-prompt-preview = System prompt
-agents-prompt-note = A live preview rendered by the runtime itself (the stable base; project instructions and user notes fold in per session).
 
 agents-all-tools = all tools
 
-agents-group-lead = Lead
 agents-model-inherit = follows the session
 agents-tools-count = tools
 
