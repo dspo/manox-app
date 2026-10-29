@@ -25,87 +25,33 @@
 //!   any line carries an old number the gutter widens to the old/new pair a
 //!   unified diff shows; removed/added lines carry their tint as a run
 //!   background — the one surface tint the editor allows itself.
+//!
+//! The row model and the kind→color policy are shared with the panel-style
+//! surfaces ([`steer_components::code_surface`]): [`CodeLine`] is that
+//! module's [`CodeRow`], re-exported here under its in-band name. What is
+//! this view's own is the composition — text plus runs, not row divs —
+//! because in-band selection is the feature.
 
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{
-    ElementId, HighlightStyle, Hsla, IntoElement, RenderOnce, SharedString, StyleRefinement, px,
-    rems,
-};
+use gpui::{ElementId, HighlightStyle, Hsla, IntoElement, RenderOnce, StyleRefinement, px, rems};
 use gpui_base::{TextView, TextViewStyle};
 use gpui_component::{ActiveTheme as _, Theme};
+use steer_components::code_surface::{self, CodeRow};
 
-/// A line's role in the editor surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CodeLineKind {
-    Context,
-    Added,
-    Removed,
-    /// The skipped span between disjoint read windows. Carries no numbers.
-    Gap,
-}
+/// A line's role in the editor surface — the shared row model's kind.
+pub use code_surface::CodeRowKind as CodeLineKind;
 
-/// One rendered line: its gutter number(s), its role, and its text.
-///
-/// `old` is the pre-image number a removed/context diff line carries; `new`
-/// is the number the file shows after the edit. Plain file reads use `new`
-/// alone.
-#[derive(Clone, Debug)]
-pub struct CodeLine {
-    pub old: Option<u32>,
-    pub new: Option<u32>,
-    pub kind: CodeLineKind,
-    pub text: SharedString,
-}
+/// One rendered line: its gutter number(s), its role, and its text. The
+/// shared row model ([`CodeRow`]) under its in-band name — every code
+/// surface in the app speaks one row vocabulary.
+pub type CodeLine = CodeRow;
 
-impl CodeLine {
-    pub fn context(number: u32, text: impl Into<SharedString>) -> Self {
-        Self {
-            old: Some(number),
-            new: Some(number),
-            kind: CodeLineKind::Context,
-            text: text.into(),
-        }
-    }
-
-    /// A context line without diff numbers — the plain-read shape.
-    pub fn plain(number: u32, text: impl Into<SharedString>) -> Self {
-        Self {
-            old: None,
-            new: Some(number),
-            kind: CodeLineKind::Context,
-            text: text.into(),
-        }
-    }
-
-    pub fn added(number: u32, text: impl Into<SharedString>) -> Self {
-        Self {
-            old: None,
-            new: Some(number),
-            kind: CodeLineKind::Added,
-            text: text.into(),
-        }
-    }
-
-    pub fn removed(number: u32, text: impl Into<SharedString>) -> Self {
-        Self {
-            old: Some(number),
-            new: None,
-            kind: CodeLineKind::Removed,
-            text: text.into(),
-        }
-    }
-
-    pub fn gap() -> Self {
-        Self {
-            old: None,
-            new: None,
-            kind: CodeLineKind::Gap,
-            text: SharedString::default(),
-        }
-    }
-}
+/// The in-band surface's wash strength for changed rows: the one surface
+/// tint the editor allows itself, deliberately subtler than the panel faces'
+/// 0.15 washes over the same shared accent.
+const ROW_TINT_STRENGTH: f32 = 0.08;
 
 /// Default soft-wrap budget in mono columns. The rich-text core wraps a code
 /// block at its own left edge — under the gutter, which no editor does — so
@@ -354,15 +300,23 @@ fn gutter_cell(number: Option<u32>, width: usize) -> String {
     }
 }
 
+/// The diff marker character a changed kind carries into the gutter column.
+fn marker_of(kind: CodeLineKind) -> &'static str {
+    match kind {
+        CodeLineKind::Added => "+",
+        _ => "-",
+    }
+}
+
 /// The palette the composer needs from the theme.
 struct Palette {
     foreground: Hsla,
     muted: Hsla,
     accent: Hsla,
     info: Hsla,
+    // The tokenizer's string color — row accents live in `row_accent`.
     danger: Hsla,
     warning: Hsla,
-    success: Hsla,
 }
 
 impl Palette {
@@ -374,7 +328,6 @@ impl Palette {
             info: theme.info,
             danger: theme.danger,
             warning: theme.warning,
-            success: theme.success,
         }
     }
 }
@@ -393,16 +346,11 @@ fn tok_color(tok: Tok, p: &Palette) -> Hsla {
 impl CodeView {
     /// Compose the document: one text plus disjoint ascending runs. Pure —
     /// the invariants the rich-text core demands are checkable in a unit
-    /// test without a window.
-    fn compose(&self, p: &Palette) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+    /// test without a window. The gutter width and the row accents come from
+    /// the shared code-surface policy, the tokenizer palette from the theme.
+    fn compose(&self, p: &Palette, theme: &Theme) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
         let dual = self.lines.iter().any(|line| line.old.is_some());
-        let width = self
-            .lines
-            .iter()
-            .filter_map(|line| line.old.or(line.new))
-            .map(|n| n.to_string().len())
-            .max()
-            .unwrap_or(1);
+        let width = code_surface::gutter_digits(&self.lines);
         let indent = " ".repeat(width + usize::from(dual) * (width + 1));
 
         let mut text = String::new();
@@ -419,15 +367,13 @@ impl CodeView {
                 runs.push((start..start + 3, muted));
                 continue;
             }
-            let (marker, marker_color) = match line.kind {
-                CodeLineKind::Added => ("+", p.success),
-                CodeLineKind::Removed => ("-", p.danger),
-                _ => (" ", p.muted),
-            };
-            let tint = match line.kind {
-                CodeLineKind::Added => Some(p.success.opacity(0.08)),
-                CodeLineKind::Removed => Some(p.danger.opacity(0.08)),
-                _ => None,
+            let (marker, marker_color, tint) = match line.kind {
+                CodeLineKind::Added | CodeLineKind::Removed => (
+                    marker_of(line.kind),
+                    code_surface::row_accent(line.kind, theme),
+                    Some(code_surface::row_accent(line.kind, theme).opacity(ROW_TINT_STRENGTH)),
+                ),
+                _ => (" ", p.muted, None),
             };
 
             let line_start = text.len();
@@ -480,6 +426,12 @@ impl CodeView {
                 },
             ));
             let mut cursor = code_start;
+            let accent = match line.kind {
+                CodeLineKind::Added | CodeLineKind::Removed => {
+                    Some(code_surface::row_accent(line.kind, theme))
+                }
+                _ => None,
+            };
             for (cix, chunk) in chunks.iter().enumerate() {
                 if cix > 0 {
                     // Blank gutter cell(s), blank marker, blank separator —
@@ -492,18 +444,13 @@ impl CodeView {
                 }
                 text.push_str(chunk);
                 for (tok, span) in tokenize(chunk) {
-                    let style = match line.kind {
-                        CodeLineKind::Added => HighlightStyle {
-                            color: Some(p.success),
+                    let style = match accent {
+                        Some(accent) => HighlightStyle {
+                            color: Some(accent),
                             background_color: tint,
                             ..Default::default()
                         },
-                        CodeLineKind::Removed => HighlightStyle {
-                            color: Some(p.danger),
-                            background_color: tint,
-                            ..Default::default()
-                        },
-                        _ => HighlightStyle {
+                        None => HighlightStyle {
                             color: Some(tok_color(tok, p)),
                             font_style: (tok == Tok::Comment).then_some(gpui::FontStyle::Italic),
                             background_color: tint,
@@ -523,7 +470,7 @@ impl CodeView {
 impl RenderOnce for CodeView {
     fn render(self, _window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
         let theme = cx.theme();
-        let (text, runs) = self.compose(&Palette::from_theme(theme));
+        let (text, runs) = self.compose(&Palette::from_theme(theme), theme);
 
         // One Arc for every frame: the view is rebuilt per render, and a
         // code block reuses its highlights only while the highlighter is the
@@ -570,6 +517,12 @@ pub(crate) fn fenced(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn palette_theme() -> Theme {
+        // The compose tests exercise run structure, not colors; the default
+        // theme's accent hues are never asserted.
+        Theme::default()
+    }
+
     fn palette() -> Palette {
         Palette {
             foreground: Hsla::default(),
@@ -578,7 +531,6 @@ mod tests {
             info: Hsla::default(),
             danger: Hsla::default(),
             warning: Hsla::default(),
-            success: Hsla::default(),
         }
     }
 
@@ -594,7 +546,7 @@ mod tests {
                 CodeLine::plain(168, "let s = \"long\"; // comment tail"),
             ],
         );
-        let (text, runs) = view.compose(&palette());
+        let (text, runs) = view.compose(&palette(), &palette_theme());
         let mut prev_end = 0usize;
         for (range, _) in &runs {
             assert!(range.start >= prev_end, "runs overlap at {}", range.start);
@@ -614,7 +566,7 @@ mod tests {
     fn compose_wrapped_lines_keep_runs_within_lines() {
         let long: String = "pub fn long_line(&self) -> Option<u32> { ".repeat(6);
         let view = CodeView::new("t", vec![CodeLine::plain(3, long)]);
-        let (text, runs) = view.compose(&palette());
+        let (text, runs) = view.compose(&palette(), &palette_theme());
         assert!(text.lines().count() > 1, "the line must wrap");
         let mut prev_end = 0usize;
         for (range, _) in &runs {
@@ -634,7 +586,7 @@ mod tests {
     fn compose_continuation_prefix_matches_first_row() {
         let long: String = "x".repeat(200);
         let view = CodeView::new("t", vec![CodeLine::plain(1, long)]);
-        let (text, _) = view.compose(&palette());
+        let (text, _) = view.compose(&palette(), &palette_theme());
         let mut rows = text.lines();
         let first = rows.next().unwrap();
         let second = rows.next().unwrap();

@@ -27,6 +27,7 @@ use gpui::{AnyElement, App, Context, Entity, IntoElement, SharedString, Window, 
 use gpui_component::{Icon, Sizable as _, Theme, h_flex};
 use gpui_kit_assets::IconName;
 use manox_agent::ToolCallStatus;
+use steer_components::code_surface::{DiffPart, parse_unified_diff};
 
 /// The card header's click, routed back into the conversation.
 pub type CardToggle = Box<dyn Fn(&mut Window, &mut App)>;
@@ -510,67 +511,35 @@ fn gutterless(line: &str) -> CodeLine {
     }
 }
 
-/// A unified diff into editor lines: `@@` hunks carry both counters, ` ` /
-/// `-` / `+` walk them, and the `---` / `+++` headers drop.
+/// A unified diff into editor lines, via the shared fence-shape parser —
+/// the same one the transcript's split view reads, so the two surfaces
+/// never disagree about what a hunk is. The `[path#TAG]` envelope line the
+/// edit tool prepends drops, `@@` headers drop (the gutter carries the
+/// header's counters implicitly), and text the parser cannot place
+/// degrades to gutter-less rows.
 fn parse_diff(output: &str) -> Vec<CodeLine> {
-    let mut lines = Vec::new();
-    let (mut old, mut new) = (None, None);
-    for line in output.lines() {
-        if lines.is_empty() && line.starts_with('[') && line.ends_with(']') {
-            continue;
-        }
-        if line.starts_with("--- ") || line.starts_with("+++ ") {
-            continue;
-        }
-        if line.starts_with("@@") {
-            old = hunk_start(line, '-');
-            new = hunk_start(line, '+');
-            continue;
-        }
-        match line.as_bytes().first() {
-            Some(b' ') => {
-                // Context lines carry both counters — after edits the old and
-                // new numbers have drifted apart.
-                lines.push(CodeLine {
-                    old,
-                    new,
-                    kind: CodeLineKind::Context,
-                    text: SharedString::from(&line[1..]),
-                });
-                old = old.map(|o| o + 1);
-                new = new.map(|n| n + 1);
-            }
-            Some(b'-') => {
-                if let Some(o) = old {
-                    lines.push(CodeLine::removed(o, &line[1..]));
+    let body = match output.split_once('\n') {
+        Some((first, rest)) if first.starts_with('[') && first.ends_with(']') => rest,
+        _ => output,
+    };
+    match parse_unified_diff(body) {
+        Some(parsed) => parsed
+            .parts
+            .into_iter()
+            .flat_map(|part| match part {
+                // The `---`/`+++` file headers are envelope, not content —
+                // they stay hidden, as they always have here.
+                DiffPart::Meta(meta) if !meta.starts_with("--- ") && !meta.starts_with("+++ ") => {
+                    vec![CodeLine::gutterless(meta)]
                 }
-                old = old.map(|o| o + 1);
-            }
-            Some(b'+') => {
-                if let Some(n) = new {
-                    lines.push(CodeLine::added(n, &line[1..]));
-                }
-                new = new.map(|n| n + 1);
-            }
-            _ => lines.push(CodeLine {
-                old: None,
-                new: None,
-                kind: CodeLineKind::Context,
-                text: SharedString::from(line),
-            }),
-        }
+                DiffPart::Meta(_) => vec![],
+                DiffPart::Hunk { rows, .. } => rows,
+            })
+            .collect(),
+        // Not diff-like at all: every line renders gutter-less, the shape a
+        // failed edit's error prose takes.
+        None => body.lines().map(CodeLine::gutterless).collect(),
     }
-    lines
-}
-
-/// The `-a,b` / `+c,d` side of a `@@` hunk header, as its starting line.
-fn hunk_start(hunk: &str, side: char) -> Option<u32> {
-    let at = hunk.find(side)? + 1;
-    let rest = &hunk[at..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
 }
 
 /// Cap a line vector at `cap`, reporting whether anything was cut.

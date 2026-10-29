@@ -54,10 +54,11 @@ use gpui_component::scroll::{ScrollableMask, Scrollbar};
 use gpui_component::{Sizable as _, Theme, h_flex};
 use gpui_kit_assets::IconName;
 
+use crate::code_surface::{self, DiffPart, MergeSegment, is_conflict};
 use crate::copy_feedback::COPY_FEEDBACK;
 use crate::markdown::diff_view;
 use crate::markdown::svg_block::block_key;
-use crate::markdown::text_view::{DispatchPalette, dispatch_runs, is_conflict};
+use crate::markdown::text_view::{DispatchPalette, dispatch_runs};
 
 /// Custom block name for one editor-style fence. Renderers are registered by
 /// name, so this string is the whole contract between the parser and the
@@ -89,10 +90,10 @@ pub(crate) struct EditorPayload {
 pub(crate) enum FenceShape {
     /// No second face: the flat highlighted panel is the whole story.
     Code,
-    /// A unified diff: hunks of paired rows for the side-by-side view.
-    Diff(Vec<diff_view::DiffPart>),
+    /// A unified diff: hunks of numbered rows for the side-by-side view.
+    Diff(Vec<DiffPart>),
     /// Complete merge-conflict markers: column groups for the merge view.
-    Merge(Vec<diff_view::MergeSegment>),
+    Merge(Vec<MergeSegment>),
 }
 
 /// Turn a fenced code node into an editor block. Every fence becomes one —
@@ -118,14 +119,17 @@ fn code_block_node(body: &str, lang: Option<&str>, fence: &str) -> Option<Markdo
     // route before the `diff` language token, because a conflicted file
     // pasted into a diff fence is a merge view, not a patch.
     let shape = if is_conflict(body) {
-        match parse_conflict_segments(body) {
+        match code_surface::parse_conflict_segments(body) {
             Some(segments) => FenceShape::Merge(segments),
             None => FenceShape::Code,
         }
     } else if lang.is_some_and(|l| l.eq_ignore_ascii_case("diff")) {
-        match parse_unified_diff(body) {
-            Some(parts) => FenceShape::Diff(parts),
-            None => FenceShape::Code,
+        // Only a well-formed diff opens the split view; junk in the fence
+        // (prose, a header mid-write) keeps the flat panel, whose line
+        // coloring tolerates anything.
+        match code_surface::parse_unified_diff(body) {
+            Some(parsed) if parsed.well_formed => FenceShape::Diff(parsed.parts),
+            _ => FenceShape::Code,
         }
     } else {
         FenceShape::Code
@@ -373,272 +377,6 @@ fn copy_control(key: u64, text: String, window: &mut Window, cx: &mut App) -> An
         .into_any_element()
 }
 
-// --- fence shape parsers ---------------------------------------------------------
-
-/// Parse a unified diff into the side-by-side view's parts, or `None` when the
-/// text is not a diff this view can carry — a line with no legal prefix inside
-/// a hunk, a hunk header missing its numbers (the mid-stream shape) — leaving
-/// the fence the flat panel. `\ No newline at end of file` markers are
-/// dropped from the paired view; the flat face and copy keep the text
-/// verbatim.
-pub(crate) fn parse_unified_diff(code: &str) -> Option<Vec<diff_view::DiffPart>> {
-    use diff_view::DiffPart;
-
-    // Drop the trailing empty element a final newline produces, but nothing
-    // else: an empty line inside a hunk is a context line.
-    let mut lines: Vec<&str> = code.split('\n').collect();
-    if lines.last() == Some(&"") {
-        lines.pop();
-    }
-
-    let mut parts: Vec<DiffPart> = Vec::new();
-    let mut hunk: Option<PartialHunk> = None;
-
-    for line in lines {
-        let Some(current) = hunk.as_mut() else {
-            // Before the first hunk: the file metadata, or the hunk header
-            // that opens the paired view.
-            if let Some(rest) = line.strip_prefix("@@ -") {
-                let (old, new) = hunk_starts(rest)?;
-                hunk = Some(PartialHunk::new(line.to_owned(), old, new));
-                continue;
-            }
-            let is_meta = line.is_empty()
-                || line.starts_with("diff --git ")
-                || line.starts_with("index ")
-                || line.starts_with("--- ")
-                || line.starts_with("+++ ")
-                || line.starts_with('\\');
-            if !is_meta {
-                return None;
-            }
-            if !line.is_empty() {
-                parts.push(DiffPart::Meta(line.to_owned()));
-            }
-            continue;
-        };
-        if let Some(rest) = line.strip_prefix("@@ -") {
-            if let Some(finished) = hunk.take() {
-                parts.push(finished.ship());
-            }
-            let (old, new) = hunk_starts(rest)?;
-            hunk = Some(PartialHunk::new(line.to_owned(), old, new));
-            continue;
-        }
-        if !current.line(line) {
-            return None;
-        }
-    }
-    if let Some(current) = hunk {
-        parts.push(current.ship());
-    }
-    // A diff with no hunk at all is metadata only — nothing to pair.
-    (!parts.is_empty()).then_some(parts)
-}
-
-/// The hunk under construction: its header, the rows settled so far, and the
-/// two change runs waiting to be zipped (deletions first — the order Git
-/// writes, and the order the pair view reads).
-struct PartialHunk {
-    header: String,
-    rows: Vec<diff_view::DiffRow>,
-    old_run: Vec<(usize, String)>,
-    new_run: Vec<(usize, String)>,
-    old: usize,
-    new: usize,
-}
-
-impl PartialHunk {
-    fn new(header: String, old: usize, new: usize) -> Self {
-        Self {
-            header,
-            rows: Vec::new(),
-            old_run: Vec::new(),
-            new_run: Vec::new(),
-            old,
-            new,
-        }
-    }
-
-    /// Consume one hunk body line. `false` when the line has no legal prefix
-    /// — the text is not a diff after all.
-    fn line(&mut self, line: &str) -> bool {
-        use diff_view::RowKind;
-        if let Some(text) = line.strip_prefix('-') {
-            self.old_run.push((self.old, text.to_owned()));
-            self.old += 1;
-        } else if let Some(text) = line.strip_prefix('+') {
-            self.new_run.push((self.new, text.to_owned()));
-            self.new += 1;
-        } else {
-            // Context — with Git's leading space, or stripped by a tool that
-            // trims trailing whitespace — settles both runs. A `\ No newline`
-            // note is presentation, not a line: dropped from the pair view.
-            let text = match (line.strip_prefix(' '), line.strip_prefix('\\')) {
-                (Some(text), _) => Some(text),
-                (None, Some(_)) => None,
-                (None, None) => return false,
-            };
-            self.settle_runs();
-            if let Some(text) = text {
-                self.rows.push(diff_view::DiffRow {
-                    old: Some((self.old, text.to_owned())),
-                    new: Some((self.new, text.to_owned())),
-                    kind: RowKind::Context,
-                });
-                self.old += 1;
-                self.new += 1;
-            }
-        }
-        true
-    }
-
-    /// Fold the pending change runs into paired rows: the runs zip in feed
-    /// order and the shorter side pads with `None` cells.
-    fn settle_runs(&mut self) {
-        use diff_view::{DiffRow, RowKind};
-        let pairs = self.old_run.len().max(self.new_run.len());
-        for index in 0..pairs {
-            self.rows.push(DiffRow {
-                old: self.old_run.get(index).cloned(),
-                new: self.new_run.get(index).cloned(),
-                kind: RowKind::Changed,
-            });
-        }
-        self.old_run.clear();
-        self.new_run.clear();
-    }
-
-    fn ship(mut self) -> diff_view::DiffPart {
-        self.settle_runs();
-        diff_view::DiffPart::Hunk {
-            header: self.header,
-            rows: self.rows,
-        }
-    }
-}
-
-/// The `old`/`new` start numbers of a hunk header's fragment — the text
-/// after `@@ -`, which carries or omits the counts: `3,7 +3,7 @@` and the
-/// count-less `1 +1 @@` both parse.
-fn hunk_starts(fragment: &str) -> Option<(usize, usize)> {
-    let (old_part, rest) = fragment.split_once(' ')?;
-    let old = old_part.split(',').next()?.parse().ok()?;
-    let new_part = rest.strip_prefix('+')?;
-    let new_token = new_part.split(' ').next()?;
-    let new = new_token.split(',').next()?.parse().ok()?;
-    Some((old, new))
-}
-
-/// Parse complete merge-conflict markers into the merge view's segments, or
-/// `None` when a conflict never closes (the mid-stream shape) or none exists
-/// — leaving the fence the flat panel.
-pub(crate) fn parse_conflict_segments(code: &str) -> Option<Vec<diff_view::MergeSegment>> {
-    use diff_view::{MergeSegment, MergeSide};
-
-    #[derive(Clone, Copy, PartialEq)]
-    enum Stage {
-        Outside,
-        Ours,
-        Base,
-        Theirs,
-    }
-
-    let mut lines: Vec<&str> = code.split('\n').collect();
-    if lines.last() == Some(&"") {
-        lines.pop();
-    }
-
-    let mut segments: Vec<MergeSegment> = Vec::new();
-    let mut context: Vec<String> = Vec::new();
-    let mut stage = Stage::Outside;
-    let mut ours = MergeSide::default();
-    let mut base = MergeSide::default();
-    let mut theirs = MergeSide::default();
-    let mut conflicts = 0usize;
-
-    for (index, line) in lines.iter().enumerate() {
-        let number = index + 1;
-        match stage {
-            Stage::Outside => {
-                if let Some(label) = line.strip_prefix("<<<<<<<") {
-                    if !context.is_empty() {
-                        segments.push(MergeSegment::Context {
-                            start: number - context.len(),
-                            lines: std::mem::take(&mut context),
-                        });
-                    }
-                    ours.label = non_empty_label(label);
-                    ours.lines.clear();
-                    stage = Stage::Ours;
-                } else if line.starts_with("=======")
-                    || line.starts_with(">>>>>>>")
-                    || line.starts_with("|||||||")
-                {
-                    // A marker with no conflict open: the text is not a
-                    // conflict fence this view can group.
-                    return None;
-                } else {
-                    context.push((*line).to_owned());
-                }
-            }
-            Stage::Ours => {
-                if let Some(label) = line.strip_prefix("|||||||") {
-                    base.label = non_empty_label(label);
-                    stage = Stage::Base;
-                } else if *line == "=======" {
-                    stage = Stage::Theirs;
-                } else {
-                    ours.lines.push((*line).to_owned());
-                }
-            }
-            Stage::Base => {
-                if *line == "=======" {
-                    stage = Stage::Theirs;
-                } else {
-                    base.lines.push((*line).to_owned());
-                }
-            }
-            Stage::Theirs => {
-                if let Some(label) = line.strip_prefix(">>>>>>>") {
-                    theirs.label = non_empty_label(label);
-                    segments.push(MergeSegment::Conflict {
-                        ours: std::mem::take(&mut ours),
-                        base: (stage_has_base(&base)).then(|| std::mem::take(&mut base)),
-                        theirs: std::mem::take(&mut theirs),
-                    });
-                    conflicts += 1;
-                    stage = Stage::Outside;
-                } else {
-                    theirs.lines.push((*line).to_owned());
-                }
-            }
-        }
-    }
-    if stage != Stage::Outside || conflicts == 0 {
-        return None;
-    }
-    if !context.is_empty() {
-        segments.push(MergeSegment::Context {
-            start: lines.len() + 1 - context.len(),
-            lines: context,
-        });
-    }
-    Some(segments)
-}
-
-/// A marker's trailing label, when the line carried one past the markers.
-fn non_empty_label(label: &str) -> Option<String> {
-    let label = label.trim();
-    (!label.is_empty()).then(|| label.to_owned())
-}
-
-/// Whether the base side ever collected a line or a label — an empty,
-/// unlabeled base is the two-way shape.
-fn stage_has_base(base: &diff_view::MergeSide) -> bool {
-    base.label.is_some() || !base.lines.is_empty()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,145 +444,12 @@ mod tests {
             shape("<<<<<<< a\nb\n=======\nc\n>>>>>>> b", "diff"),
             FenceShape::Merge(_)
         ));
-    }
-
-    /// The side-by-side parser: context pairs both sides, change runs zip in
-    /// feed order with the shorter side padded, hunk headers settle as their
-    /// own parts.
-    #[test]
-    fn a_unified_diff_parses_into_paired_rows() {
-        use diff_view::RowKind;
-        let diff = concat!(
-            "--- a/f\n",
-            "+++ b/f\n",
-            "@@ -1,3 +1,3 @@\n",
-            " context\n",
-            "-removed one\n",
-            "-removed two\n",
-            "+added\n",
-            " more\n"
-        );
-        let parts = parse_unified_diff(diff).expect("parses");
-        assert_eq!(parts.len(), 3, "two metadata rows and one hunk");
-        assert!(
-            matches!(&parts[0], diff_view::DiffPart::Meta(m) if m == "--- a/f"),
-            "metadata first"
-        );
-        let diff_view::DiffPart::Hunk { header, rows } = &parts[2] else {
-            panic!("a hunk");
-        };
-        assert!(header.starts_with("@@ -1,3"));
-        assert_eq!(
-            rows.len(),
-            4,
-            "context + a 2-vs-1 changed run (two paired rows) + context"
-        );
-        assert_eq!(rows[0].kind, RowKind::Context);
-        assert_eq!(rows[0].old.as_ref().unwrap().0, 1);
-        assert_eq!(rows[0].new.as_ref().unwrap().0, 1);
-        assert_eq!(rows[1].kind, RowKind::Changed);
-        assert_eq!(
-            rows[1].old.as_ref().unwrap().1,
-            "removed one",
-            "deletions zip first"
-        );
-        assert_eq!(rows[1].new.as_ref().unwrap().1, "added");
-        assert_eq!(
-            rows[2].old.as_ref().unwrap().1,
-            "removed two",
-            "the deletion run continues onto its own row"
-        );
-        assert!(
-            rows[2].new.is_none(),
-            "the shorter side pads with an empty cell"
-        );
-        assert_eq!(rows[2].kind, RowKind::Changed);
-    }
-
-    /// Multiple hunks each pair within themselves; numbering restarts from
-    /// each header's numbers.
-    #[test]
-    fn multiple_hunks_pair_within_themselves() {
-        let diff = "@@ -10,2 +10,2 @@\n-a\n+b\n@@ -40,1 +40,2 @@\n+c\n+d\n";
-        let parts = parse_unified_diff(diff).expect("parses");
-        assert_eq!(parts.len(), 2);
-        let diff_view::DiffPart::Hunk { rows, .. } = &parts[0] else {
-            panic!("a hunk");
-        };
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].old.as_ref().unwrap().0, 10);
-        assert_eq!(rows[0].new.as_ref().unwrap().0, 10);
-        let diff_view::DiffPart::Hunk { rows, .. } = &parts[1] else {
-            panic!("a hunk");
-        };
-        assert_eq!(rows.len(), 2, "an additions-only run pads the old side");
-        assert!(rows.iter().all(|row| row.old.is_none()));
-        assert_eq!(rows[0].new.as_ref().unwrap().0, 40);
-    }
-
-    /// Prose in a diff fence — a line with no legal prefix and no hunk header
-    /// — leaves the fence the flat panel.
-    #[test]
-    fn prose_in_a_diff_fence_falls_back() {
-        assert!(parse_unified_diff("just some thoughts\nabout life").is_none());
-    }
-
-    /// A hunk header cut off mid-stream has no numbers yet: the parser
-    /// declines, and the fence renders flat until the header completes.
-    #[test]
-    fn an_unterminated_hunk_header_falls_back() {
-        assert!(parse_unified_diff("@@ -1,\n-a\n").is_none());
-    }
-
-    /// A three-way conflict: the `|||||||` section parses as the middle
-    /// column, labels ride their markers, context runs number from the fence.
-    #[test]
-    fn a_three_way_conflict_parses_with_its_base() {
-        use diff_view::MergeSegment;
-        let text = concat!(
-            "before\n",
-            "<<<<<<< HEAD\n",
-            "ours\n",
-            "||||||| merged common ancestors\n",
-            "base\n",
-            "=======\n",
-            "theirs\n",
-            ">>>>>>> feature\n"
-        );
-        let segments = parse_conflict_segments(text).expect("parses");
-        assert_eq!(segments.len(), 2);
-        let MergeSegment::Context { start, lines } = &segments[0] else {
-            panic!("context first");
-        };
-        assert_eq!(*start, 1);
-        assert_eq!(lines.len(), 1);
-        let MergeSegment::Conflict { ours, base, theirs } = &segments[1] else {
-            panic!("a conflict");
-        };
-        assert_eq!(ours.label.as_deref(), Some("HEAD"));
-        assert_eq!(ours.lines, vec!["ours"]);
-        assert_eq!(
-            base.as_ref()
-                .expect("three-way carries a base")
-                .label
-                .as_deref(),
-            Some("merged common ancestors")
-        );
-        assert_eq!(theirs.label.as_deref(), Some("feature"));
-    }
-
-    /// The two-way shape — no `|||||||` — parses with no base column, and an
-    /// unterminated conflict declines to the flat panel.
-    #[test]
-    fn a_two_way_conflict_has_no_base_and_unterminated_declines() {
-        let segments =
-            parse_conflict_segments("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n").expect("parses");
-        let diff_view::MergeSegment::Conflict { base, .. } = &segments[0] else {
-            panic!("a conflict");
-        };
-        assert!(base.is_none(), "no section, no column");
-
-        assert!(parse_conflict_segments("<<<<<<< HEAD\na\n").is_none());
+        // A diff fence carrying prose parses but not well-formed: the flat
+        // panel keeps it, because its line coloring tolerates anything.
+        assert!(matches!(
+            shape("just some thoughts\nabout life", "diff"),
+            FenceShape::Code
+        ));
     }
 
     /// A fence whose body ends with blank lines: the renderer trims them for

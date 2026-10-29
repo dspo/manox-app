@@ -32,6 +32,7 @@ use gpui_component::Theme;
 use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use ropey::Rope;
 
+use crate::code_surface::is_conflict;
 use crate::copy_feedback::{CopyFeedbackHost, copy_button};
 use crate::markdown::linkify::{linkify_markdown, pin_reference_definitions};
 use crate::markdown::svg_block;
@@ -680,23 +681,6 @@ fn line_ranges(code: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-/// A fence is a git merge conflict when it carries both the opening and the
-/// closing marker — the pair guards against a stray marker mis-routing a real
-/// code block. Shared with the fence-shape parser ([`super::code_block`]),
-/// which routes on the same classification the flat dispatch uses.
-pub(crate) fn is_conflict(code: &str) -> bool {
-    let mut open = false;
-    let mut close = false;
-    for line in code.lines() {
-        if line.starts_with("<<<<<<<") {
-            open = true;
-        } else if line.starts_with(">>>>>>>") {
-            close = true;
-        }
-    }
-    open && close
-}
-
 /// The accent hue faded into a wash for line backgrounds.
 fn wash(color: Hsla) -> Hsla {
     color.opacity(0.15)
@@ -958,13 +942,6 @@ mod tests {
     fn line_ranges_exclude_terminators() {
         let ranges: Vec<(usize, &str)> = line_ranges("ab\ncd\n").collect();
         assert_eq!(ranges, vec![(0, "ab"), (3, "cd")]);
-    }
-
-    #[test]
-    fn conflict_needs_both_markers() {
-        assert!(is_conflict("<<<<<<< ours\nx\n>>>>>>> theirs"));
-        assert!(!is_conflict("<<<<<<< ours\nx"));
-        assert!(!is_conflict("just a > quote"));
     }
 
     #[test]
