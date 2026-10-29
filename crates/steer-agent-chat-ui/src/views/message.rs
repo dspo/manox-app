@@ -46,9 +46,8 @@ use manox_agent::thread::AccessMode;
 use steer_components::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_button};
 use steer_components::markdown::GitSummary;
 use steer_components::markdown::{
-    ChatDocument, LinkKind, PanelKind, TerminalPanel, classify_target, code_copy_actions,
-    hashline_text, message_document, reasoning_document, static_document, stream_fade_motion,
-    table_copy_actions,
+    ChatDocument, LinkKind, PanelKind, TerminalPanel, classify_target, hashline_text,
+    message_document, reasoning_document, static_document, stream_fade_motion, table_copy_actions,
 };
 
 /// Message body type size: one step below the chrome `text_base` (14px) so
@@ -125,7 +124,6 @@ fn static_body(
     let view = static_document(id, text, theme, cx);
     match owner {
         Some(owner) => view
-            .code_block_actions(code_copy_actions(owner.clone()))
             .table_actions(table_copy_actions(owner))
             .into_any_element(),
         None => view.into_any_element(),
@@ -134,8 +132,10 @@ fn static_body(
 
 /// Chain the interaction layer every user-facing document carries: the link
 /// dispatcher (bare URL → browser, detected path → VS Code), the streaming
-/// motion, and the per-block copy controls wired to the item's copy-feedback
-/// registry when one is available.
+/// motion, and the table copy controls wired to the item's copy-feedback
+/// registry when one is available. Code blocks carry their own copy control
+/// inside the editor block ([`steer_components::markdown`]); nothing is wired
+/// here for them.
 ///
 /// The streaming fade is safe here only because [`ChatDocument::sync`] pins
 /// link-reference-definition lines before the text reaches upstream: without
@@ -169,7 +169,6 @@ fn decorate_document(
         });
     match owner {
         Some(owner) => view
-            .code_block_actions(code_copy_actions(owner.clone()))
             .table_actions(table_copy_actions(owner))
             .into_any_element(),
         None => view.into_any_element(),

@@ -210,7 +210,7 @@ pub fn message_document(
     cx: &App,
 ) -> TextView {
     let style = message_style(theme);
-    svg_block::with_diagram_blocks(
+    svg_block::with_fence_blocks(
         TextView::new(state).style(style.clone()).text_size(body),
         svg_block::FaceStyle {
             style,
@@ -230,7 +230,7 @@ pub fn reasoning_document(
     cx: &App,
 ) -> TextView {
     let style = message_style(theme).with_foreground(theme.muted_foreground);
-    svg_block::with_diagram_blocks(
+    svg_block::with_fence_blocks(
         TextView::new(state).style(style.clone()).text_size(body),
         svg_block::FaceStyle {
             style,
@@ -248,7 +248,7 @@ pub fn static_document(
     theme: &Theme,
     cx: &App,
 ) -> TextView {
-    svg_block::with_diagram_blocks(
+    svg_block::with_fence_blocks(
         TextView::markdown(id, linkify_markdown(text.into().as_ref())).style(chrome_style(theme)),
         svg_block::FaceStyle {
             style: chrome_style(theme),
@@ -402,17 +402,6 @@ fn fence_len(text: &str) -> usize {
 
 // --- copy controls -------------------------------------------------------------
 
-/// The hover copy control for fenced code blocks, wired to a
-/// [`CopyFeedbackHost`] entity. Upstream scopes plain element ids per block,
-/// so one shared id serves every block.
-pub fn code_copy_actions<T: CopyFeedbackHost>(
-    owner: WeakEntity<T>,
-) -> impl Fn(&CodeBlock, &mut Window, &mut App) -> AnyElement + Send + Sync + 'static {
-    move |block: &CodeBlock, _window: &mut Window, cx: &mut App| {
-        copy_control(&owner, block.code().to_string(), cx).into_any_element()
-    }
-}
-
 /// The hover copy control for tables, copying the table's GFM serialization.
 pub fn table_copy_actions<T: CopyFeedbackHost>(
     owner: WeakEntity<T>,
@@ -436,48 +425,99 @@ fn copy_control<T: CopyFeedbackHost>(
 
 // --- code highlight dispatch -----------------------------------------------------
 
-/// The app's code-highlight dispatch. `ansi` fences found in prose parse their
-/// escape sequences (without them the content is plain and unhighlighted);
-/// fences carrying conflict markers classify as conflicts regardless of
-/// language; `diff` fences color per line; everything else highlights through
-/// tree-sitter.
+/// The app's code-block highlighter, handed to documents as the `TextViewDefaults`
+/// highlighter. Code fences in prose render through the editor block
+/// ([`crate::markdown::code_block`]) which calls [`dispatch_runs`] directly;
+/// this closure serves the surfaces that still ride the upstream code block —
+/// terminal panels, the svg block's code face — and exists because those
+/// documents take their highlighter from the defaults.
 ///
-/// The returned closure is rebuilt every frame (the element is rebuilt every
-/// frame), which defeats upstream's per-highlighter cache — the thread-local
-/// tree-sitter cache below is what keeps frozen blocks at zero work per frame,
-/// same as the old renderer.
+/// Identity is load-bearing: gpui-base reuses a code block's highlights only
+/// while the highlighter is the same `Arc` — see [`install_code_highlighter`]
+/// for why it is installed once, never per document.
 pub fn steer_code_highlighter(
     theme: &Theme,
 ) -> impl Fn(&CodeBlock) -> Vec<(Range<usize>, HighlightStyle)> + Send + Sync + 'static {
-    let highlight_theme = theme.highlight_theme.clone();
-    let foreground = theme.foreground;
-    let muted = theme.muted_foreground;
-    let secondary = theme.secondary;
-    let add_fg = theme.success;
-    let del_fg = theme.danger;
+    let palette = DispatchPalette::new(theme);
     move |block: &CodeBlock| {
-        let code = block.code();
         let lang_holder = block.lang();
-        let lang = lang_holder.as_deref().unwrap_or("text");
-        let runs = if lang.eq_ignore_ascii_case("ansi") {
-            ansi_runs(&code)
-        } else if is_conflict(&code) {
-            conflict_runs(&code, foreground, muted, secondary, add_fg, del_fg)
-        } else if lang.eq_ignore_ascii_case("diff") {
-            diff_runs(&code, foreground, muted, secondary, add_fg, del_fg)
-        } else {
-            // An svg fence is markup, and markup is what the registry carries
-            // for it: `svg` itself is unregistered, which would color nothing
-            // and warn on every distinct fence.
-            let lang = if lang.eq_ignore_ascii_case("svg") {
-                "html"
-            } else {
-                lang
-            };
-            tree_sitter_runs(&code, lang, &highlight_theme)
-        };
-        normalize_runs(clamp_runs(runs, &code))
+        dispatch_runs(&block.code(), lang_holder.as_deref(), &palette)
     }
+}
+
+/// The palette one dispatch call reads from the theme: the highlight theme
+/// plus the five flat colors the line-based dispatches tint with. Plain data,
+/// `Send + Sync` — the `TextViewDefaults` closure holds it across threads,
+/// which [`Theme`] itself cannot (its config rides an `Rc`).
+#[derive(Clone)]
+pub(crate) struct DispatchPalette {
+    highlight_theme: Arc<HighlightTheme>,
+    foreground: Hsla,
+    muted: Hsla,
+    secondary: Hsla,
+    add_fg: Hsla,
+    del_fg: Hsla,
+}
+
+impl DispatchPalette {
+    pub(crate) fn new(theme: &Theme) -> Self {
+        Self {
+            highlight_theme: theme.highlight_theme.clone(),
+            foreground: theme.foreground,
+            muted: theme.muted_foreground,
+            secondary: theme.secondary,
+            add_fg: theme.success,
+            del_fg: theme.danger,
+        }
+    }
+}
+
+/// The app's code-highlight dispatch over one block's raw text and language
+/// token. `ansi` fences found in prose parse their escape sequences (without
+/// them the content is plain and unhighlighted); fences carrying conflict
+/// markers classify as conflicts regardless of language; `diff` fences color
+/// per line; everything else highlights through tree-sitter, memoized by the
+/// thread-local cache below — the message list re-renders every dirty frame,
+/// so this cache is what keeps a long conversation from re-highlighting every
+/// completed block on each streaming delta.
+pub(crate) fn dispatch_runs(
+    code: &str,
+    lang: Option<&str>,
+    palette: &DispatchPalette,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let lang = lang.unwrap_or("text");
+    let runs = if lang.eq_ignore_ascii_case("ansi") {
+        ansi_runs(code)
+    } else if is_conflict(code) {
+        conflict_runs(
+            code,
+            palette.foreground,
+            palette.muted,
+            palette.secondary,
+            palette.add_fg,
+            palette.del_fg,
+        )
+    } else if lang.eq_ignore_ascii_case("diff") {
+        diff_runs(
+            code,
+            palette.foreground,
+            palette.muted,
+            palette.secondary,
+            palette.add_fg,
+            palette.del_fg,
+        )
+    } else {
+        // An svg fence is markup, and markup is what the registry carries
+        // for it: `svg` itself is unregistered, which would color nothing
+        // and warn on every distinct fence.
+        let lang = if lang.eq_ignore_ascii_case("svg") {
+            "html"
+        } else {
+            lang
+        };
+        tree_sitter_runs(code, lang, &palette.highlight_theme)
+    };
+    normalize_runs(clamp_runs(runs, code))
 }
 
 /// Sort by start and clip overlaps so the list is always in the one shape

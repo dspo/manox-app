@@ -200,16 +200,18 @@ fn width_box(width: f32) -> SvgSize {
     SvgSize::Size(Size::new(width, width))
 }
 
-/// Register the inline diagram blocks — the ```svg fence and the ```mermaid
-/// fence — on a markdown document. Every markdown surface that shows authored
-/// prose goes through this, so a diagram renders as its image wherever it
-/// appears. Terminal panels are the one exception: their body is a single
-/// `ansi` fence around machine output, so nothing inside it is parsed as a
-/// block of its own.
+/// Register the app's fence blocks on a markdown document — the ```svg and
+/// ```mermaid fences (rasterized diagrams), the math fences, and the editor
+/// code block every remaining fence renders through
+/// ([`super::code_block`]). Every markdown surface that shows authored prose
+/// goes through this, so a fence renders the same way wherever it appears.
+/// Terminal panels are the one exception: their body is a single `ansi` fence
+/// around machine output, so nothing inside it is parsed as a block of its
+/// own.
 ///
-/// `code` is how the surface's own documents are styled: the block's code face
-/// wears it so the revealed fence reads like a code block beside it.
-pub fn with_diagram_blocks(view: TextView, code: FaceStyle, cx: &App) -> TextView {
+/// `code` is how the surface's own documents are styled: the svg block's code
+/// face wears it so the revealed fence reads like a code block beside it.
+pub fn with_fence_blocks(view: TextView, code: FaceStyle, cx: &App) -> TextView {
     let extensions = extensions(cx.svg_renderer(), code);
     view.markdown_extensions(extensions)
 }
@@ -243,9 +245,11 @@ impl Face {
 }
 
 /// The document's Markdown extension registry: the defaults plus the two
-/// diagram fences and LaTeX math ([`super::math_block`]), which typesets to an
-/// SVG document in both its shapes — the display block and the inline run —
-/// and rides this block's raster path from there.
+/// diagram fences, the editor code block ([`super::code_block`], last so the
+/// fences the others own never reach it), and LaTeX math
+/// ([`super::math_block`]), which typesets to an SVG document in both its
+/// shapes — the display block and the inline run — and rides this block's
+/// raster path from there.
 pub(crate) fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExtensions {
     let mermaid_renderer = renderer.clone();
     let mermaid_code = code.clone();
@@ -267,6 +271,10 @@ pub(crate) fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExte
                 window,
                 cx,
             )
+        })
+        .block_parser(super::code_block::code_fence)
+        .block_renderer(super::code_block::BLOCK_NAME, |node, window, cx| {
+            super::code_block::code_element(node, window, cx)
         });
     super::math_block::math_extensions(extensions, math_renderer, math_text_size)
 }
@@ -352,7 +360,7 @@ fn svg_element(
 /// One block's identity inside its document: the source range upstream recorded
 /// for it. Two documents can hand out the same range, but the element ids these
 /// key into are namespaced by the document that renders them.
-fn block_key(node: &MarkdownNode) -> u64 {
+pub(crate) fn block_key(node: &MarkdownNode) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     match node.source_range() {
         Some(range) => range.hash(&mut hasher),
