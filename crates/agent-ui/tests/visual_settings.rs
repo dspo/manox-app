@@ -68,7 +68,18 @@ mod macos {
                     }
                     // SETTINGS_AGENT=<name> drills into that agent's detail.
                     if let Ok(agent) = std::env::var("SETTINGS_AGENT") {
-                        ws.update(cx, |ws, cx| ws.select_agent(Some(agent), cx));
+                        ws.update(cx, |ws, cx| ws.select_agent(Some(agent), window, cx));
+                    }
+                    // SETTINGS_PROMPT_EDIT=1 captures the prompt in editor mode.
+                    if std::env::var("SETTINGS_PROMPT_EDIT").is_ok() {
+                        ws.update(cx, |ws, cx| ws.set_agent_prompt_edit(true, cx));
+                    }
+                    // SETTINGS_PROVIDER=<ix> drills into that provider's detail.
+                    if let Some(ix) = std::env::var("SETTINGS_PROVIDER")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                    {
+                        ws.update(cx, |ws, cx| ws.select_model_provider(ix, cx));
                     }
                 }
                 agent_ui::chrome_assembly::root(shell, window, cx)
@@ -78,6 +89,38 @@ mod macos {
         for _ in 0..5 {
             cx.run_until_parked();
             std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // `SETTINGS_SCROLL=<px>` scrolls the detail down before the capture —
+        // the Agents detail runs past the window, and the default page shows
+        // only its top.
+        if let Some(amount) = std::env::var("SETTINGS_SCROLL")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            cx.update_window(handle.into(), |_root, window, cx| {
+                let position = gpui::point(px(700.), px(400.));
+                window.simulate_mouse_move(position, cx);
+                for _ in 0..20 {
+                    window.dispatch_event(
+                        gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                            position,
+                            delta: gpui::ScrollDelta::Pixels(gpui::point(
+                                px(0.),
+                                px(-amount / 20.),
+                            )),
+                            modifiers: Default::default(),
+                            touch_phase: gpui::TouchPhase::Moved,
+                        }),
+                        cx,
+                    );
+                }
+            })
+            .expect("scroll the detail");
+            for _ in 0..5 {
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
 
         let shell = shell_slot.into_inner().expect("shell captured");

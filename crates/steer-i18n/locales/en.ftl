@@ -255,9 +255,17 @@ agents-field-model = Model
 agents-field-desc = Description
 agents-field-tools = Allowed tools
 agents-field-prompt = System prompt
-agents-tools-custom = Custom tools
-agents-tools-all-label = All tools
 agents-tools-hint = Controls which tools this subagent may call.
+agents-tools-preset-note = Preset built-in tools only; MCP servers, skills and plugin tools are listed elsewhere.
+agents-tools-group-files = Files & search
+agents-tools-group-shell = Shell & runtime
+agents-tools-group-web = Web & browser
+agents-tools-group-interaction = Interaction & planning
+agents-tools-group-tasks = Tasks & goals
+agents-tools-group-host = Host & collaboration
+agents-back = Back to list
+agents-prompt-edit = Edit
+agents-prompt-preview = Preview
 agents-detail-scope = Scope
 agents-detail-scope-user = User
 agents-save = Save
@@ -379,7 +387,19 @@ settings-models-empty = No providers configured yet
 
 settings-models-unnamed = Unnamed provider
 
-settings-models-no-selection = Select a provider on the left to view its models
+settings-models-back = Back to list
+
+settings-models-row-name = Name
+
+settings-models-badge-endpoints = { $count } endpoints
+
+settings-models-badge-models = { $count } models
+
+settings-models-no-endpoints = No endpoints configured
+
+settings-models-delete-hint = Delete provider
+
+settings-models-delete-confirm = Confirm delete
 
 settings-models-load-error-title = Config load failed
 

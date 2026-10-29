@@ -1985,11 +1985,40 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Drills the Agents page into one agent's detail (`None` = the list).
-    pub fn select_agent(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+    /// Flips the Agents detail's prompt display to the source editor or the
+    /// rendered preview.
+    pub fn set_agent_prompt_edit(&mut self, edit: bool, cx: &mut Context<Self>) {
         if let Some(settings) = self.settings_view.as_ref() {
             settings.update(cx, |settings, cx| {
-                settings.selected_agent = name;
+                settings.set_prompt_edit(edit);
+                cx.notify();
+            });
+        }
+    }
+
+    /// Drills the Models page into the provider at list position `ix`.
+    pub fn select_model_provider(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_view.as_ref() {
+            settings.update(cx, |settings, cx| {
+                settings.select_model_provider(ix);
+                cx.notify();
+            });
+        }
+    }
+
+    /// Drills the Agents page into one agent's detail (`None` = the list).
+    pub fn select_agent(
+        &mut self,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self.settings_view.as_ref() {
+            settings.update(cx, |settings, cx| {
+                match name {
+                    Some(name) => settings.open_agent(name, window, cx),
+                    None => settings.close_agent(),
+                }
                 cx.notify();
             });
         }

@@ -8,7 +8,9 @@
 
 use std::collections::HashSet;
 
-use gpui::{AnyElement, Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, Entity, EventEmitter, Hsla, SharedString, Window, div, prelude::*, px, rgb,
+};
 use gpui_component::{
     ActiveTheme as _,
     group_box::GroupBoxVariant,
@@ -67,6 +69,36 @@ pub struct SettingsView {
     captain_prompt: String,
     /// The drilled-down agent of the Agents page (`None` = the list).
     pub(crate) selected_agent: Option<String>,
+    /// The read-only source editor behind the detail's 编辑 mode. Owned here
+    /// so scroll position and selection survive re-renders; its text follows
+    /// the drilled-down agent.
+    pub(crate) prompt_editor: Entity<gpui_component::input::EditorState>,
+    /// How the detail's system prompt renders. A view choice, not a write:
+    /// every drill-down starts from the rendered preview.
+    pub(crate) prompt_view: PromptView,
+}
+
+/// The system prompt's display mode on the Agents detail.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PromptView {
+    /// Rendered markdown.
+    #[default]
+    Preview,
+    /// The read-only source editor (line numbers, soft wrap, scrolling).
+    Edit,
+}
+
+/// The ZCode agent color-tag palette, shared by the Agents and Models item
+/// cards (display only; no def carries a color).
+const ACCENT_DOTS: [&str; 8] = [
+    "#FACC15", "#FB7185", "#FB923C", "#4ADE80", "#22D3EE", "#60A5FA", "#A78BFA", "#F472B6",
+];
+
+/// A stable accent per list position: the thin border marks the item, the
+/// avatar carries the same tint, and nothing paints a background.
+pub(super) fn accent_color(ix: usize) -> Hsla {
+    let hex = ACCENT_DOTS[ix % ACCENT_DOTS.len()];
+    Hsla::from(rgb(u32::from_str_radix(&hex[1..], 16).unwrap_or(0x888888)))
 }
 
 #[derive(Clone)]
@@ -88,6 +120,11 @@ impl SettingsView {
             this.mcp_servers = mcp_server_names();
             cx.notify();
         });
+        let prompt_editor = cx.new(|cx| {
+            let mut state = gpui_component::input::EditorState::new(window, cx);
+            state.set_readonly(true, cx);
+            state
+        });
         Self {
             plugins,
             _plugins_sub,
@@ -101,7 +138,53 @@ impl SettingsView {
             skills: collect_skills(),
             captain_prompt: captain_prompt_preview(),
             selected_agent: None,
+            prompt_editor,
+            prompt_view: PromptView::default(),
         }
+    }
+
+    /// Drill into one agent's detail: load its prompt into the source editor
+    /// and reset the display to the rendered preview.
+    pub(crate) fn open_agent(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let body = self.agent_prompt(&name);
+        self.selected_agent = Some(name);
+        self.prompt_view = PromptView::Preview;
+        self.prompt_editor
+            .update(cx, |state, cx| state.set_value(body, window, cx));
+    }
+
+    /// Return to the Agents list.
+    pub(crate) fn close_agent(&mut self) {
+        self.selected_agent = None;
+        self.prompt_view = PromptView::Preview;
+    }
+
+    /// Drill the Models page into the provider at list position `ix`.
+    pub(crate) fn select_model_provider(&mut self, ix: usize) {
+        self.models_panel.select_at(ix);
+    }
+
+    /// Flip the Agents detail's prompt display (the visual harness captures
+    /// both modes).
+    pub(crate) fn set_prompt_edit(&mut self, edit: bool) {
+        self.prompt_view = if edit {
+            PromptView::Edit
+        } else {
+            PromptView::Preview
+        };
+    }
+
+    /// The system prompt of one roster entry (the lead's runtime-rendered
+    /// base for the Captain).
+    fn agent_prompt(&self, name: &str) -> String {
+        if name == "Captain" {
+            return self.captain_prompt.clone();
+        }
+        self.agents
+            .iter()
+            .find(|row| row.name == name)
+            .map(|row| row.system_prompt.clone())
+            .unwrap_or_default()
     }
 
     /// Persist `ui_language` and apply it live. The field flips only on a
@@ -293,24 +376,28 @@ type PanelRender = fn(&mut SettingsView, &mut Context<SettingsView>) -> AnyEleme
 /// as `SettingItem` rows. `GroupBoxVariant` defaults to `Normal`, so the
 /// panel draws without a group card surface around it. The keywords keep
 /// the panel reachable from the search box (element items match the query
-/// only through keywords); the localized group title rides along so the
-/// panel is findable by its own displayed name in either locale.
+/// only through keywords); the localized group title rides along when there
+/// is one, so the panel stays findable by its own displayed name in either
+/// locale. A `None` title renders the group headless — for pages whose own
+/// chrome (the Agents detail's back row) already says where the user is.
 fn panel_group(
     view: &Entity<SettingsView>,
-    title: &'static str,
+    title: Option<&'static str>,
     keywords: &[&'static str],
     render: PanelRender,
 ) -> SettingGroup {
     let view = view.clone();
-    SettingGroup::new().title(i18n::t(title)).item(
-        SettingItem::render(move |_, _window, cx| view.update(cx, render)).keywords(
-            keywords
-                .iter()
-                .copied()
-                .map(SharedString::from)
-                .chain(std::iter::once(i18n::t(title))),
-        ),
-    )
+    let keywords = keywords
+        .iter()
+        .copied()
+        .map(SharedString::from)
+        .chain(title.map(i18n::t));
+    let mut group = SettingGroup::new();
+    if let Some(title) = title {
+        group = group.title(i18n::t(title));
+    }
+    group
+        .item(SettingItem::render(move |_, _window, cx| view.update(cx, render)).keywords(keywords))
 }
 
 /// The merged-config server names, in stable sorted order (BTreeMap keys).
@@ -450,24 +537,27 @@ fn build_page(
                 ),
             )
         }
-        // 模型 — the provider/model editor.
+        // 模型 — the provider list with a drill-down detail. No group title:
+        // the nav tree names the page and the list/detail own their chrome.
         1 => title("settings-item-models").group(panel_group(
             view,
-            "settings-item-models",
+            None,
             &["models", "providers", "llm", "api key", "endpoint"],
             models::render_models,
         )),
         // Agents — read-only roster (the lead + preset + discovered defs).
+        // No group title: the nav tree already names the page, and the
+        // detail's own top row carries the back control instead.
         2 => title("settings-item-agents").group(panel_group(
             view,
-            "settings-item-agents",
+            None,
             &["agents", "subagents", "子代理", "captain"],
             agents_page::render,
         )),
         // 插件.
         3 => title("settings-item-plugins").group(panel_group(
             view,
-            "settings-item-plugins",
+            Some("settings-item-plugins"),
             &["plugins", "marketplace", "extensions", "插件"],
             |view, _cx| view.plugins.clone().into_any_element(),
         )),
@@ -478,13 +568,13 @@ fn build_page(
         // 外部工具.
         6 => title("settings-item-chatgpt-app").group(panel_group(
             view,
-            "settings-item-chatgpt-app",
+            Some("settings-item-chatgpt-app"),
             &["chatgpt", "codex", "injection", "external tools"],
             chatgpt::render_chatgpt_app,
         )),
         7 => title("settings-item-vscode-app").group(panel_group(
             view,
-            "settings-item-vscode-app",
+            Some("settings-item-vscode-app"),
             &["vscode", "visual studio code", "extension", "inject"],
             vscode::render_vscode_app,
         )),

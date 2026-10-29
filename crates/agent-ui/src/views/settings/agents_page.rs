@@ -1,29 +1,33 @@
 //! The Agents page — the read-only mirror of ZCode's SubagentsSection
-//! (`packages/ui/src/settings/SubagentsSection.tsx`). A flat list of
-//! fixed-height rows, pixel-matched to ZCode's `AgentListRow` (36px avatar,
-//! name + model/tools badges, two-line clamped description); clicking a row
-//! drills down to the form-style detail, every write control present but
-//! DISABLED (read-only end to end).
+//! (`packages/ui/src/settings/SubagentsSection.tsx`). A vertical stack of
+//! fixed-height item cards (one per agent, thin color-coded border, no card
+//! fill); clicking an item drills down to the form-style detail, every write
+//! control present but DISABLED (read-only end to end). The detail's top row
+//! carries the back control; the system prompt flips between its rendered
+//! markdown and the raw source.
 
 use gpui::{
-    AnyElement, Context, Pixels, StatefulInteractiveElement as _, div, prelude::*, px, rgb,
+    AnyElement, Context, Hsla, Pixels, StatefulInteractiveElement as _, div, prelude::*, px, rgb,
 };
-use gpui_component::{ActiveTheme as _, Disableable as _, Icon, Theme, checkbox::Checkbox, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Icon, Theme, checkbox::Checkbox, input::Editor, v_flex,
+};
 use gpui_kit_assets::IconName as AssetIcon;
+use steer_components::markdown::static_document;
 
 use crate::i18n;
-use crate::views::settings::{AgentRow, SettingsView};
+use crate::views::settings::{ACCENT_DOTS, AgentRow, PromptView, SettingsView, accent_color};
 
 /// Row metrics, ZCode-flavored.
 const ROW_H: Pixels = px(78.);
+const ROW_GAP: Pixels = px(10.);
 const AVATAR: Pixels = px(36.);
 const BADGE_H: Pixels = px(20.);
 const FIELD_W: Pixels = px(320.);
-
-/// The ZCode agent color-tag palette (display only; no def carries one).
-const COLOR_DOTS: [&str; 8] = [
-    "#FACC15", "#FB7185", "#FB923C", "#4ADE80", "#22D3EE", "#60A5FA", "#A78BFA", "#F472B6",
-];
+const PROMPT_H: Pixels = px(280.);
+/// One tool column is wide enough for the longest preset name
+/// (`WebExploreScreenshot`).
+const TOOL_COL_W: Pixels = px(190.);
 
 pub(crate) fn render(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> AnyElement {
     let theme = cx.theme().clone();
@@ -47,56 +51,47 @@ fn list(view: &SettingsView, theme: &Theme, cx: &mut Context<SettingsView>) -> A
         all_tools: true,
         system_prompt: view.captain_prompt.clone(),
     };
-    let mut card = v_flex().overflow_hidden();
     let mut items: Vec<AgentRow> = Vec::with_capacity(view.agents.len() + 1);
     items.push(captain);
     items.extend(view.agents.iter().cloned());
     let entity = cx.entity();
+    let mut column = v_flex().w_full().gap(ROW_GAP);
     for (ix, row) in items.iter().enumerate() {
-        if ix > 0 {
-            card = card.child(div().h(px(1.)).w_full().bg(theme.border.opacity(0.5)));
-        }
+        let accent = accent_color(ix);
         let row = row.clone();
         let click_entity = entity.clone();
         let name = row.name.clone();
-        card = card.child(
+        column = column.child(
             div()
                 .id(("agents-row", ix))
-                .h(ROW_H)
+                .min_h(ROW_H)
                 .w_full()
                 .overflow_hidden()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(accent.opacity(0.45))
                 .px_4()
+                .py_3()
                 .flex()
                 .items_center()
                 .gap_3()
-                .hover(|this| this.bg(theme.secondary))
-                .on_click(move |_ev, _window, cx: &mut gpui::App| {
+                .hover(move |this| this.border_color(accent))
+                .on_click(move |_ev, window, cx: &mut gpui::App| {
                     click_entity.update(cx, |view, cx| {
-                        view.selected_agent = Some(name.clone());
+                        view.open_agent(name.clone(), window, cx);
                         cx.notify();
                     });
                 })
-                .child(row_face(theme, &row)),
+                .child(row_face(theme, &row, accent)),
         );
     }
-    v_flex()
-        .w_full()
-        .child(
-            v_flex()
-                .overflow_hidden()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.secondary)
-                .child(card),
-        )
-        .into_any_element()
+    v_flex().w_full().child(column).into_any_element()
 }
 
-/// The row face: avatar · (name + badges) / clamped description — the
+/// The item face: avatar · (name + badges) / clamped description — the
 /// ZCode `AgentListRow` left/mid columns. Write controls are omitted on the
 /// row (nothing here is editable; the detail states that per field).
-fn row_face(theme: &Theme, row: &AgentRow) -> gpui::Div {
+fn row_face(theme: &Theme, row: &AgentRow, accent: Hsla) -> gpui::Div {
     let model = row
         .model
         .clone()
@@ -111,7 +106,7 @@ fn row_face(theme: &Theme, row: &AgentRow) -> gpui::Div {
         .items_center()
         .gap_3()
         .w_full()
-        .child(avatar(theme))
+        .child(avatar(theme, accent))
         .child(
             v_flex()
                 .min_w_0()
@@ -144,7 +139,7 @@ fn row_face(theme: &Theme, row: &AgentRow) -> gpui::Div {
         )
 }
 
-fn avatar(theme: &Theme) -> gpui::Div {
+fn avatar(theme: &Theme, accent: Hsla) -> gpui::Div {
     div()
         .size(AVATAR)
         .flex_none()
@@ -152,12 +147,8 @@ fn avatar(theme: &Theme) -> gpui::Div {
         .items_center()
         .justify_center()
         .rounded(theme.radius_lg)
-        .bg(theme.background)
-        .child(
-            Icon::new(AssetIcon::Bot)
-                .size_4()
-                .text_color(theme.muted_foreground),
-        )
+        .bg(accent.opacity(0.12))
+        .child(Icon::new(AssetIcon::Bot).size_4().text_color(accent))
 }
 
 fn badge(theme: &Theme, text: String) -> gpui::Div {
@@ -170,7 +161,6 @@ fn badge(theme: &Theme, text: String) -> gpui::Div {
         .rounded(theme.radius)
         .border_1()
         .border_color(theme.border)
-        .bg(theme.background)
         .text_size(px(11.))
         .text_color(theme.muted_foreground)
         .child(text)
@@ -257,7 +247,7 @@ fn detail(
 
     // 颜色标记: the palette dots, none selected (no def carries a color).
     let mut dots = div().flex().gap_2().items_center();
-    for hex in COLOR_DOTS {
+    for hex in ACCENT_DOTS {
         dots = dots.child(
             div()
                 .size_4()
@@ -266,38 +256,30 @@ fn detail(
         );
     }
 
-    // 可用工具: select + hint; the 3-column checked grid only for custom sets.
-    let mut tools_section = v_flex().gap_2().child(select_box(
-        theme,
-        if row.all_tools {
-            i18n::t("agents-tools-all-label").to_string()
-        } else {
-            i18n::t("agents-tools-custom").to_string()
-        },
-        false,
-    ));
-    if !row.all_tools {
-        tools_section = tools_section.child(
-            div()
-                .text_size(px(12.))
-                .text_color(theme.muted_foreground)
-                .child(i18n::t("agents-tools-hint")),
-        );
-        let mut grid = v_flex()
-            .gap_2()
-            .p_3()
-            .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.border);
-        for chunk in row.tools.chunks(3) {
-            let mut line = div().flex().gap(px(48.));
+    // 可用工具: the full preset catalog, every box checked, grouped by the
+    // job the tools do. The page is read-only, so this mirrors what the
+    // runtime mounts rather than a per-agent subset; MCP, skill and plugin
+    // tools are a different surface.
+    let mut catalog = v_flex()
+        .gap_4()
+        .p_3()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border);
+    for (ix, (label_key, tools)) in preset_tool_groups().into_iter().enumerate() {
+        if ix > 0 {
+            catalog = catalog.child(div().h(px(1.)).w_full().bg(theme.border.opacity(0.6)));
+        }
+        let mut grid = v_flex().gap_2();
+        for chunk in tools.chunks(3) {
+            let mut line = div().flex().gap(px(24.));
             for tool in chunk {
                 line = line.child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
-                        .w(px(150.))
+                        .w(TOOL_COL_W)
                         .child(
                             Checkbox::new(format!("agents-tool-{tool}"))
                                 .checked(true)
@@ -307,17 +289,69 @@ fn detail(
                             div()
                                 .text_size(px(13.))
                                 .text_color(theme.foreground)
-                                .child(tool.clone()),
+                                .child(*tool),
                         ),
                 );
             }
             grid = grid.child(line);
         }
-        tools_section = tools_section.child(grid);
+        catalog = catalog.child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .child(i18n::t(label_key)),
+                )
+                .child(grid),
+        );
     }
+    let tools_section = v_flex()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(theme.muted_foreground)
+                .child(i18n::t("agents-tools-hint")),
+        )
+        .child(catalog)
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(theme.muted_foreground)
+                .child(i18n::t("agents-tools-preset-note")),
+        );
 
-    // Footer: the write actions, all disabled — 取消 is the way back.
+    // 系统提示词 source/rendered toggle — a view choice, not a write.
+    let prompt_toggle = prompt_toggle(view, theme, cx);
+
+    // Back to the list: the top-left control; the footer 取消 mirrors it.
     let back_entity = cx.entity();
+    let back = div()
+        .id("agents-back")
+        .h(px(30.))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .rounded(theme.radius)
+        .text_size(px(13.))
+        .text_color(theme.foreground)
+        .hover(|this| this.bg(theme.secondary))
+        .on_click(move |_ev, _window, cx: &mut gpui::App| {
+            back_entity.update(cx, |view, cx| {
+                view.close_agent();
+                cx.notify();
+            });
+        })
+        .child(Icon::new(AssetIcon::ArrowLeft).size_4())
+        .child(i18n::t("agents-back"));
+
+    // Footer: the write actions, all disabled — the top control (and 取消)
+    // is the way back.
+    let cancel_entity = cx.entity();
     let mut footer = div().flex().items_center().justify_between().pt_2();
     let mut right = div().flex().items_center().gap_2();
     if !is_lead {
@@ -349,7 +383,7 @@ fn detail(
         )
         .child(
             div()
-                .id("agents-back")
+                .id("agents-cancel")
                 .h(px(32.))
                 .px_3()
                 .flex()
@@ -359,8 +393,8 @@ fn detail(
                 .text_color(theme.foreground)
                 .hover(|this| this.bg(theme.secondary))
                 .on_click(move |_ev, _window, cx: &mut gpui::App| {
-                    back_entity.update(cx, |view, cx| {
-                        view.selected_agent = None;
+                    cancel_entity.update(cx, |view, cx| {
+                        view.close_agent();
                         cx.notify();
                     });
                 })
@@ -368,29 +402,64 @@ fn detail(
         );
     footer = footer.child(right);
 
+    // The prompt body: rendered markdown by default, the read-only source
+    // editor on demand. The editor owns its own scrolling; the preview sits
+    // in the same fixed-height box so switching never jumps the page.
+    let prompt_body = match view.prompt_view {
+        PromptView::Preview => {
+            let id = gpui::ElementId::Name(format!("agents-prompt-{name}").into());
+            div()
+                .id("agents-prompt-preview")
+                .h_full()
+                .w_full()
+                .min_w_0()
+                .overflow_y_scroll()
+                .p_3()
+                .child(static_document(id, body, theme, cx))
+                .into_any_element()
+        }
+        PromptView::Edit => div()
+            .w_full()
+            .overflow_hidden()
+            .child(
+                Editor::new(&view.prompt_editor)
+                    .h(PROMPT_H)
+                    .appearance(false)
+                    .bordered(false)
+                    .readonly(true),
+            )
+            .into_any_element(),
+    };
+
     v_flex()
         .id("agents-detail")
         .w_full()
         .overflow_y_scroll()
         .child(
-            // The scope face (作用域 · 用户), top right — display only.
-            div().flex().justify_end().child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(theme.muted_foreground)
-                            .child(i18n::t("agents-detail-scope")),
-                    )
-                    .child(select_box(
-                        theme,
-                        i18n::t("agents-detail-scope-user").to_string(),
-                        false,
-                    )),
-            ),
+            // Top row: back to the list on the left, the scope face (作用域 ·
+            // 用户) on the right — both display only.
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(back)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(theme.muted_foreground)
+                                .child(i18n::t("agents-detail-scope")),
+                        )
+                        .child(select_box(
+                            theme,
+                            i18n::t("agents-detail-scope-user").to_string(),
+                            false,
+                        )),
+                ),
         )
         .child(
             v_flex()
@@ -442,24 +511,155 @@ fn detail(
                 .child(
                     v_flex()
                         .gap_2()
-                        .child(label(theme, "agents-field-prompt"))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(label(theme, "agents-field-prompt"))
+                                .child(prompt_toggle),
+                        )
                         .child(
                             div()
                                 .id("agents-prompt-box")
-                                .h(px(220.))
+                                .h(PROMPT_H)
+                                .w_full()
                                 .max_w_full()
-                                .overflow_y_scroll()
-                                .p_3()
+                                .overflow_hidden()
                                 .rounded(theme.radius)
                                 .border_1()
                                 .border_color(theme.border)
                                 .bg(theme.background)
-                                .text_size(px(13.))
-                                .text_color(theme.foreground)
-                                .child(body),
+                                .child(prompt_body),
                         ),
                 )
                 .child(footer),
         )
         .into_any_element()
+}
+
+/// The 编辑 / 预览 segmented toggle for the system prompt.
+fn prompt_toggle(view: &SettingsView, theme: &Theme, cx: &mut Context<SettingsView>) -> gpui::Div {
+    let mut segment = div()
+        .flex()
+        .items_center()
+        .h(px(26.))
+        .p(px(2.))
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border);
+    for (mode, key) in [
+        (PromptView::Edit, "agents-prompt-edit"),
+        (PromptView::Preview, "agents-prompt-preview"),
+    ] {
+        let active = view.prompt_view == mode;
+        let entity = cx.entity();
+        segment = segment.child(
+            div()
+                .id(("agents-prompt-view", mode as usize))
+                .h_full()
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded(theme.radius)
+                .text_size(px(12.))
+                .when(active, |this| {
+                    this.bg(theme.secondary).text_color(theme.foreground)
+                })
+                .when(!active, |this| {
+                    this.text_color(theme.muted_foreground)
+                        .hover(|this| this.bg(theme.secondary))
+                })
+                .on_click(move |_ev, _window, cx: &mut gpui::App| {
+                    entity.update(cx, |view, cx| {
+                        if view.prompt_view != mode {
+                            view.prompt_view = mode;
+                            cx.notify();
+                        }
+                    });
+                })
+                .child(i18n::t(key)),
+        );
+    }
+    segment
+}
+
+/// The preset (built-in) tool catalog, grouped by the job the tools do.
+/// Covered: everything the runtime mounts in a main session. Excluded: MCP
+/// servers, skills, embedder/plugin contributions and the per-agent
+/// delegation tools (those are agents, not tools).
+fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
+    use manox_agent::tools::{
+        ASK_USER_QUESTION, BASH, BASH_OUTPUT, CREATE_GOAL, EDIT, GET_GOAL, GLOB, GREP, PY, READ,
+        UPDATE_GOAL, UPDATE_PLAN, WEB_FETCH, WRITE,
+    };
+
+    let mut web = vec![WEB_FETCH];
+    web.extend(manox_agent::engine::BrowserSuite::WebExplore.tool_names());
+    vec![
+        (
+            "agents-tools-group-files",
+            vec![READ, WRITE, EDIT, GREP, GLOB, "Ls"],
+        ),
+        ("agents-tools-group-shell", vec![BASH, BASH_OUTPUT, PY]),
+        ("agents-tools-group-web", web),
+        (
+            "agents-tools-group-interaction",
+            vec![ASK_USER_QUESTION, UPDATE_PLAN],
+        ),
+        (
+            "agents-tools-group-tasks",
+            vec!["TaskList", "TaskStop", GET_GOAL, CREATE_GOAL, UPDATE_GOAL],
+        ),
+        (
+            "agents-tools-group-host",
+            vec![
+                "ClipboardRead",
+                "Open",
+                "Steer",
+                manox_agent::subagent::ListAgentsTool::NAME,
+                manox_agent::subagent::InterruptAgentTool::NAME,
+            ],
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::preset_tool_groups;
+
+    /// The grid claims to list the whole preset set once; a duplicate, a
+    /// dropped core tool or an empty group would silently misstate what the
+    /// agent may call.
+    #[test]
+    fn preset_tool_catalog_is_complete_and_deduplicated() {
+        let groups = preset_tool_groups();
+        let tools: Vec<&str> = groups.iter().flat_map(|(_, tools)| tools.clone()).collect();
+        let unique: HashSet<&str> = tools.iter().copied().collect();
+        assert_eq!(tools.len(), unique.len(), "preset tools must not repeat");
+        for (label, tools) in &groups {
+            assert!(!tools.is_empty(), "tool group {label} is empty");
+        }
+        for name in [
+            "Read",
+            "Write",
+            "Edit",
+            "Grep",
+            "Glob",
+            "Ls",
+            "Bash",
+            "WebFetch",
+            "AskUserQuestion",
+            "UpdatePlan",
+            "ListAgents",
+        ] {
+            assert!(unique.contains(name), "preset catalog is missing {name}");
+        }
+        assert!(
+            !unique.contains("Skill"),
+            "skills are not preset tools (they belong to the skill fold)"
+        );
+    }
 }

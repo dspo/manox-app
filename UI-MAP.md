@@ -963,17 +963,43 @@ column with a 16px top inset inside the main card. Pages (`settings::build_page`
 rosters cached on the view at creation):
 
 - 常规 — the language dropdown (Fill card).
-- 模型 — the provider/model editor panel.
+- 模型 — the provider list with a drill-down detail (`views/settings/models.rs`); the endpoint
+  detail's Wire API dropdown is tinted with the project's dedicated wire-api palette. The list is a
+  vertical stack of provider tiles (10px gaps): no card fill, a thin 1px color-coded border
+  (the shared 8-color accent palette, cycled by position; the avatar carries the same tint),
+  36px `Server` avatar · name + API-key-kind/endpoint-count/model-count badges / the first
+  endpoint URL (or 未配置端点). The dashed 「+ 添加 Provider」 sits at the list end. Click →
+  detail: the top row carries the `ArrowLeft` 返回列表 control on the left and the
+  two-step 「删除 Provider」 control on the right. There is NO nested split — the detail is one
+  scrolling column of four bordered section cards (icon + title + rule), stacked in order:
+  基本信息 (名称 input + API Key kind/value) / 环境变量 (key/value rows with per-row −/+ and
+  添加) / 端点配置 (one bordered endpoint card per wire API: Wire API, URL, 启用的 Agents,
+  GitHub Copilot auth; dashed 添加端点; the Wire API dropdown carries the api's dedicated picker
+  color — Blue Anthropic / Cyan Responses / Amber Completions — on its dot, label and border,
+  resolved through `model_catalog::wire_visual`) / 模型列表 (手动配置 / 自动获取 tabs; inline mode renders
+  one bordered card per model with 模型 ID / 描述 / 上下文窗口 / 最大输出 tokens / Wire API
+  checkboxes / 启用的 Agents / 工具调用 / 图片输入 / 环境变量, plus dashed 添加模型). Editable
+  fields autosave as before; the group renders WITHOUT a title (the nav names the page).
 - Agents — the read-only mirror of ZCode's SubagentsSection
-  (`views/settings/agents_page.rs`): a flat list of fixed-height rows pixel-matched to ZCode's
-  `AgentListRow` (36px rounded-square Bot avatar · name + model/tools badges · two-line clamped
-  description, 50%-hairline separators), click → drill-down detail (`Workspace::select_agent`)
-  styled after ZCode's form: 作用域·用户 face top right, then 名称 input / 颜色标记 palette dots /
-  模型 select (继承会话模型 unless pinned) / 描述 box / 可用工具 (select + hint + a 3-column grid
-  of checked disabled checkboxes for custom tool sets) / 系统提示词 (the REAL prompt —
-  `AgentDef.system_prompt`; Captain's via the runtime-rendered `captain_prompt_builder` base).
-  Every write control is present but DISABLED: footer 保存/删除 inert, 取消 walks back.
-  Roster data cached at view creation (registry scans never run per frame).
+  (`views/settings/agents_page.rs`). The list is a vertical stack of fixed-height item cards
+  (10px gaps): no card fill, a thin 1px color-coded border per item (the shared 8-color accent
+  palette, cycled by position; the avatar carries the same tint), 36px rounded-square Bot
+  avatar · name + model/tools badges · two-line clamped description. The group renders WITHOUT
+  a title — the nav tree already names the page. Click → drill-down detail
+  (`Workspace::select_agent`): the top row carries the `ArrowLeft` 返回列表 control (back to the
+  list) on the left and the 作用域·用户 face on the right; then 名称 input / 颜色标记 palette
+  dots / 模型 select (继承会话模型 unless pinned) / 描述 box / 可用工具 (the FULL preset tool
+  catalog — built-in tools excluding MCP servers, skills, plugin/embedder tools and per-agent
+  delegation entries — grouped into 文件与搜索 / 终端与运行时 / 网络与浏览器 / 交互与计划 /
+  任务与目标 / 宿主与协作, each a 3-column grid of checked disabled checkboxes, with a note
+  that the list is preset-only) / 系统提示词 (the REAL prompt — `AgentDef.system_prompt`;
+  Captain's via the runtime-rendered `captain_prompt_builder` base — with an 编辑 / 预览
+  segmented toggle in its label row). 预览 renders the markdown (`static_document`); 编辑 hosts
+  a read-only `gpui_component::input::Editor` (monospace, line numbers, soft wrap, its own
+  scrolling) fed from the view's owned `EditorState`, reset to 预览 on every drill-down; the
+  mode is a view choice, not a write. Every write control is present but DISABLED: footer
+  保存/删除 inert, 取消 and the top back control walk back. Roster data cached at view creation
+  (registry scans never run per frame).
 - 插件 — the plugin manager view.
 - Skills — read-only roster from `manox_agent::skill::list_skill_records()` (user + plugin, with
   origin badges).
@@ -1009,7 +1035,7 @@ The upstream `gpui_component::setting::Settings` component, rendered per page wi
 
 #### SettingsModelsPanel
 
-Settings → General → Models: two-column form editor for the cx provider config (`~/.manox/cx.providers.config.yaml`). Left column is a tree nav: provider nodes (double-click header renames inline) whose expanded children are the four module names — 基本信息 / 环境变量 / 端点配置 / 模型列表 — and a dashed 「+ 添加 Provider」 button at the list end; clicking a module child selects (provider, module) and the wide right column renders that module's form in a bordered panel: 基本信息 (API Key kind dropdown/value pair), 环境变量 (indented key/value rows with per-row 「-」/「+」), 端点配置 (one card per endpoint) or 模型列表 (one card per model, 手动配置 / 自动获取 tab). Add-item buttons are dashed full-width and sit at the end of their lists. Remove controls are uniform 「-」 buttons with two-step confirmation (first click arms with a danger tint, second deletes); block-level removes (model / endpoint) sit outside the block's right edge, vertically centered; selected tree items use `theme.info` text; form blocks carry no background fill; the 手动配置 / 自动获取 tabs underline the active choice in `theme.info`; double-click provider rename exits on blur, Enter or mouse-down-out and autosaves. Every edit debounces into an autosave: validate, atomically write the whole config back (top-level `agents:` preserved verbatim), then reload the provider registry off the main thread. Autosave is disabled while the file fails to parse. Endpoints are unique per Wire API and displayed as Anthropic Messages / OpenAI Responses / OpenAI Completions; `agents:` filters are badge pickers fed by a dropdown (empty selection = all agents); supports_tools / supports_images echo their effective defaults instead of an unset state.
+Settings → General → Models: the provider config editor (`~/.manox/cx.providers.config.yaml`), shaped as a list → drill-down. The list is a stack of provider tiles (see the 模型 entry above); the detail is one scrolling column of four bordered section cards — 基本信息 (名称 input + API Key kind dropdown/value pair), 环境变量 (key/value rows with per-row 「-」/「+」), 端点配置 (one nested card per endpoint: Wire API, URL, 启用的 Agents, GitHub Copilot auth) and 模型列表 (手动配置 / 自动获取 tabs; one nested card per model with 模型 ID / 描述 / 上下文窗口 / 最大输出 tokens / Wire API checkboxes / 启用的 Agents / 工具调用 / 图片输入 / 环境变量). There is no second split column and no module nav: the provider list replaces the old tree, and the four sections render together. Add-item buttons are dashed full-width and sit at the end of their lists. Remove controls are uniform 「-」 buttons with two-step confirmation (first click arms with a danger tint, second deletes); block-level removes (provider / model / endpoint) sit outside the block's right edge, vertically centered; form blocks carry no background fill; the 手动配置 / 自动获取 tabs underline the active choice in `theme.info`. Every edit debounces into an autosave: validate, atomically write the whole config back (top-level `agents:` preserved verbatim), then reload the provider registry off the main thread. Autosave is disabled while the file fails to parse. Endpoints are unique per Wire API and displayed as Anthropic Messages / OpenAI Responses / OpenAI Completions; `agents:` filters are badge pickers fed by a dropdown (empty selection = all agents); supports_tools / supports_images echo their effective defaults instead of an unset state.
 
 > Source: `crates/agent-ui/src/views/settings/models.rs`
 

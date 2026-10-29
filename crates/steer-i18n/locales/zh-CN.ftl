@@ -239,9 +239,17 @@ agents-field-model = 模型
 agents-field-desc = 描述
 agents-field-tools = 可用工具
 agents-field-prompt = 系统提示词
-agents-tools-custom = 自定义可用工具
-agents-tools-all-label = 全部可用工具
 agents-tools-hint = 控制该子智能体可以调用的工具范围。
+agents-tools-preset-note = 仅列出内置预设工具；MCP 服务器、Skill 与插件提供的工具不在此列出。
+agents-tools-group-files = 文件与搜索
+agents-tools-group-shell = 终端与运行时
+agents-tools-group-web = 网络与浏览器
+agents-tools-group-interaction = 交互与计划
+agents-tools-group-tasks = 任务与目标
+agents-tools-group-host = 宿主与协作
+agents-back = 返回列表
+agents-prompt-edit = 编辑
+agents-prompt-preview = 预览
 agents-detail-scope = 作用域
 agents-detail-scope-user = 用户
 agents-save = 保存
@@ -363,7 +371,19 @@ settings-models-empty = 尚未配置任何 Provider
 
 settings-models-unnamed = 未命名 Provider
 
-settings-models-no-selection = 选择左侧 Provider 查看模型
+settings-models-back = 返回列表
+
+settings-models-row-name = 名称
+
+settings-models-badge-endpoints = { $count } 个端点
+
+settings-models-badge-models = { $count } 个模型
+
+settings-models-no-endpoints = 未配置端点
+
+settings-models-delete-hint = 删除 Provider
+
+settings-models-delete-confirm = 确认删除
 
 settings-models-load-error-title = 配置读取失败
 

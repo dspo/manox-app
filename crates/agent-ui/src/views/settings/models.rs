@@ -1,10 +1,10 @@
-//! Settings → General → Models panel.
+//! Settings → Models panel.
 //!
-//! Two-column form view over the cx providers config
+//! A provider list with a drill-down detail, over the cx providers config
 //! (`~/.manox/cx.providers.config.yaml`, schema: `manox_providers::CxConfig`).
-//! The left column lists provider cards (accordion, double-click header to
-//! rename); the expanded card renders whichever module the right-hand module
-//! nav has selected — 基本信息 / 环境变量 / 端点信息 / 模型列表. Every edit
+//! The list stacks one thin-bordered tile per provider; clicking a tile opens
+//! its detail, which stacks all four sections — 基本信息 / 环境变量 / 端点配置
+//! / 模型列表 — in one scrolling column (no nested split). Every edit
 //! schedules a debounced autosave that validates the form, atomically writes
 //! the whole config back — preserving the top-level `agents:` section
 //! verbatim — and reloads the process-wide provider registry on a background
@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Anchor, AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, Focusable,
+    Anchor, AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity,
     InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::theme::Theme;
 use gpui_component::{
@@ -31,6 +31,7 @@ use gpui_component::{
     notification::Notification,
     v_flex,
 };
+use gpui_kit_assets::IconName as AssetIcon;
 
 use crate::i18n;
 use manox_providers::{
@@ -45,9 +46,9 @@ use super::panels::{
     blur_on_click_out, defer_blur_flush, muted_text, section_card, section_header,
 };
 
-const LABEL_W: f32 = 150.;
-const KEY_W: f32 = 220.;
-const NAV_COL_W: f32 = 230.;
+const LABEL_W: f32 = 168.;
+const KEY_W: f32 = 360.;
+const PROVIDER_ROW_MIN_H: f32 = 76.;
 const AUTOSAVE_DEBOUNCE_MS: u64 = 600;
 const WIRE_APIS: [&str; 3] = ["anthropic", "responses", "completions"];
 
@@ -66,32 +67,6 @@ fn wire_display(wire: &str) -> &str {
 /// covers GitHub Copilot (an empty list means all agents).
 fn agents_include_copilot(agents: &[String]) -> bool {
     agents.is_empty() || agents.iter().any(|a| canonical_agent_id(a) == "copilot")
-}
-
-/// The four modules the right-hand nav offers; the expanded provider card on
-/// the left renders exactly one of them at a time.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ModuleTab {
-    Basic,
-    Env,
-    Endpoints,
-    Models,
-}
-
-const MODULE_TABS: [ModuleTab; 4] = [
-    ModuleTab::Basic,
-    ModuleTab::Env,
-    ModuleTab::Endpoints,
-    ModuleTab::Models,
-];
-
-fn module_label(module: ModuleTab) -> SharedString {
-    match module {
-        ModuleTab::Basic => i18n::t("settings-models-section-basic"),
-        ModuleTab::Env => i18n::t("settings-models-section-env"),
-        ModuleTab::Endpoints => i18n::t("settings-models-section-endpoints"),
-        ModuleTab::Models => i18n::t("settings-models-section-models"),
-    }
 }
 
 fn kind_token(kind: ApiKeySourceKind) -> &'static str {
@@ -148,16 +123,10 @@ pub struct ModelsPanelState {
     /// Candidate agent ids for the tag pickers (built-ins + configured).
     agent_options: Vec<String>,
     providers: Vec<ProviderForm>,
-    /// Provider form id whose card is expanded and whose data fills the form.
+    /// The provider drilled into (`None` = the provider list).
     selected: Option<usize>,
-    /// Provider form ids whose card body is expanded.
-    expanded: HashSet<usize>,
-    /// Provider form ids whose header is in double-click rename mode.
-    renaming: HashSet<usize>,
     /// Delete button armed for two-step confirmation (element id key).
     pending_delete: Option<String>,
-    /// Module currently rendered in the expanded provider card.
-    module: ModuleTab,
     /// Monotonic id source so GPUI element ids stay unique across
     /// add/remove churn.
     next_form_id: usize,
@@ -246,10 +215,7 @@ impl ModelsPanelState {
             agent_options: Vec::new(),
             providers: Vec::new(),
             selected: None,
-            expanded: HashSet::new(),
-            renaming: HashSet::new(),
             pending_delete: None,
-            module: ModuleTab::Basic,
             next_form_id: 1,
             save_generation: 0,
             window_handle: window.window_handle(),
@@ -264,8 +230,6 @@ impl ModelsPanelState {
     pub fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<SettingsView>) {
         self.agents.clear();
         self.providers.clear();
-        self.expanded.clear();
-        self.renaming.clear();
         self.pending_delete = None;
         self.selected = None;
         self.load_error = None;
@@ -307,10 +271,8 @@ impl ModelsPanelState {
             .into_iter()
             .map(|p| ProviderForm::from_config(p, window, cx, &mut self.next_form_id))
             .collect();
-        // Select the first provider so the form is never idle; only its card
-        // starts expanded.
-        self.selected = self.providers.first().map(|p| p.id);
-        self.expanded = self.selected.into_iter().collect();
+        // The list is the entry face; drilling in is always a click.
+        self.selected = None;
         self.load_error = None;
     }
 
@@ -371,27 +333,20 @@ impl ModelsPanelState {
             .find(|m| m.id == id)
     }
 
-    /// Select a provider (form follows, card expands accordion-style);
-    /// clicking the already-selected header only toggles the collapse.
+    /// Drill into one provider's detail.
     fn select_provider(&mut self, pid: usize) {
-        if self.selected == Some(pid) {
-            if !self.expanded.remove(&pid) {
-                self.expanded.insert(pid);
-            }
-            return;
-        }
         self.selected = Some(pid);
-        self.expanded.clear();
-        self.expanded.insert(pid);
     }
 
-    /// Double-click rename: put the header into edit mode and focus the name
-    /// input. Blur (subscribed at input creation) leaves rename mode.
-    fn begin_rename(&mut self, pid: usize, window: &mut Window, cx: &mut Context<SettingsView>) {
-        self.renaming.insert(pid);
-        if let Some(name) = self.provider_mut(pid).map(|p| p.name.clone()) {
-            name.update(cx, |state, cx| state.focus(window, cx));
-        }
+    /// Drill into the provider at `ix` in list order (the visual harness and
+    /// any future deep link use this; user input goes through the tiles).
+    pub fn select_at(&mut self, ix: usize) {
+        self.selected = self.providers.get(ix).map(|p| p.id);
+    }
+
+    /// Back to the provider list.
+    pub fn close_provider(&mut self) {
+        self.selected = None;
     }
 
     fn add_provider(&mut self, window: &mut Window, cx: &mut Context<SettingsView>) {
@@ -409,22 +364,18 @@ impl ModelsPanelState {
         );
         let id = form.id;
         self.providers.push(form);
+        // A new provider lands straight in its detail, name input focused, so
+        // it can be named without hunting for it in the list.
         self.selected = Some(id);
-        self.expanded.clear();
-        self.expanded.insert(id);
-        // Jump straight into rename so the new provider gets a name.
-        self.begin_rename(id, window, cx);
+        if let Some(name) = self.provider_mut(id).map(|p| p.name.clone()) {
+            name.update(cx, |state, cx| state.focus(window, cx));
+        }
     }
 
     fn remove_provider(&mut self, id: usize) {
         self.providers.retain(|p| p.id != id);
-        self.expanded.remove(&id);
-        self.renaming.remove(&id);
         if self.selected == Some(id) {
-            self.selected = self.providers.first().map(|p| p.id);
-            if let Some(sid) = self.selected {
-                self.expanded.insert(sid);
-            }
+            self.selected = None;
         }
     }
 
@@ -890,14 +841,6 @@ impl ProviderForm {
             ProviderModels::RemoteUrl(_) => Vec::new(),
         };
         let id = take_id();
-        // Blur on the name input leaves double-click rename mode.
-        cx.subscribe(&name, move |this, _state, event, cx| {
-            if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                this.models_panel.renaming.remove(&id);
-                cx.notify();
-            }
-        })
-        .detach();
         ProviderForm {
             id,
             name,
@@ -1023,74 +966,211 @@ fn model_err(
 
 // --- Rendering ------------------------------------------------------------
 
-/// Right-pane renderer for Settings → General → Models: left column holds the
-/// provider accordion (expanded card renders the selected module form); the
-/// narrow right column is a module-name nav scoped to the selected provider.
+/// Entry face of Settings → Models: the provider list, or one provider's
+/// detail when drilled in.
 pub fn render_models(view: &mut SettingsView, cx: &mut Context<SettingsView>) -> AnyElement {
     let theme = cx.theme().clone();
-    let entity = cx.entity();
-
-    // Left column: provider tree (provider nodes with module children) plus
-    // the dashed add-provider button at the list end.
-    let mut left: Vec<AnyElement> = Vec::new();
-    let provider_ids: Vec<usize> = view.models_panel.providers.iter().map(|p| p.id).collect();
-    for pid in provider_ids {
-        left.push(render_provider_node(view, &theme, entity.clone(), pid, cx));
+    if let Some(err) = view.models_panel.load_error.clone() {
+        return v_flex()
+            .id("models-load-error")
+            .w_full()
+            .h_full()
+            .overflow_y_scroll()
+            .p_4()
+            .child(render_load_error(&theme, err))
+            .into_any_element();
     }
-    left.push(dashed_add_button(
-        &theme,
-        "models-add-provider",
-        "settings-models-add-provider",
-        entity.clone(),
-        Arc::new(move |this, window, cx| {
-            this.models_panel.add_provider(window, cx);
-            this.models_panel.touch(cx);
-        }),
-    ));
+    match view.models_panel.selected {
+        Some(pid) => render_provider_detail(view, &theme, pid, cx),
+        None => render_provider_list(view, &theme, cx),
+    }
+}
 
-    let right = if let Some(err) = view.models_panel.load_error.clone() {
-        render_load_error(&theme, err)
-    } else if view.models_panel.providers.is_empty() {
-        render_empty(&theme)
-    } else {
-        render_module_form(view, &theme, entity.clone(), cx)
-    };
+/// The provider list: one thin-bordered tile per provider (no card fill, a
+/// per-position accent), then the dashed add-provider control.
+fn render_provider_list(
+    view: &mut SettingsView,
+    theme: &Theme,
+    cx: &mut Context<SettingsView>,
+) -> AnyElement {
+    let entity = cx.entity();
+    if view.models_panel.providers.is_empty() {
+        return v_flex()
+            .id("models-empty")
+            .w_full()
+            .h_full()
+            .overflow_y_scroll()
+            .p_4()
+            .gap_3()
+            .child(render_empty(theme))
+            .child(dashed_add_button(
+                theme,
+                "models-add-provider",
+                "settings-models-add-provider",
+                entity,
+                Arc::new(move |this, window, cx| {
+                    this.models_panel.add_provider(window, cx);
+                    this.models_panel.touch(cx);
+                }),
+            ))
+            .into_any_element();
+    }
 
+    let mut column = v_flex().w_full().gap(px(10.));
+    for (ix, provider) in view.models_panel.providers.iter().enumerate() {
+        column = column.child(render_provider_tile(
+            theme,
+            provider,
+            ix,
+            entity.clone(),
+            cx,
+        ));
+    }
     v_flex()
+        .id("models-list")
         .w_full()
         .h_full()
         .min_h_0()
-        .gap_3()
+        .overflow_y_scroll()
         .p_4()
+        .gap_3()
+        .child(column)
+        .child(dashed_add_button(
+            theme,
+            "models-add-provider",
+            "settings-models-add-provider",
+            entity,
+            Arc::new(move |this, window, cx| {
+                this.models_panel.add_provider(window, cx);
+                this.models_panel.touch(cx);
+            }),
+        ))
+        .into_any_element()
+}
+
+/// One provider tile: avatar · name + kind/endpoint/model badges / the first
+/// endpoint URL (or a muted "no endpoints" line).
+fn render_provider_tile(
+    theme: &Theme,
+    provider: &ProviderForm,
+    ix: usize,
+    entity: Entity<SettingsView>,
+    cx: &Context<SettingsView>,
+) -> AnyElement {
+    let accent = super::accent_color(ix);
+    let pid = provider.id;
+    let name = provider.name.read(cx).value();
+    let name: SharedString = if name.trim().is_empty() {
+        i18n::t("settings-models-unnamed")
+    } else {
+        name
+    };
+    let endpoint_count = provider.endpoints.len();
+    let model_count = provider.models.len();
+    let first_url = provider
+        .endpoints
+        .first()
+        .map(|e| e.url.read(cx).value())
+        .filter(|url| !url.trim().is_empty());
+    let subtitle: SharedString = first_url.unwrap_or_else(|| {
+        if provider.endpoints.is_empty() {
+            i18n::t("settings-models-no-endpoints")
+        } else {
+            SharedString::from("")
+        }
+    });
+
+    let click_entity = entity.clone();
+    div()
+        .id(("models-provider-row", pid))
+        .min_h(px(PROVIDER_ROW_MIN_H))
+        .w_full()
+        .overflow_hidden()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(accent.opacity(0.45))
+        .px_4()
+        .py_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .cursor_pointer()
+        .hover(move |this| this.border_color(accent))
+        .on_click(move |_ev, _window, cx| {
+            click_entity.update(cx, |this, cx| {
+                this.models_panel.select_provider(pid);
+                cx.notify();
+            });
+        })
         .child(
-            h_flex()
+            div()
+                .size(px(36.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radius_lg)
+                .bg(accent.opacity(0.12))
+                .child(Icon::new(AssetIcon::Server).size_4().text_color(accent)),
+        )
+        .child(
+            v_flex()
+                .min_w_0()
                 .flex_1()
-                .min_h_0()
-                .w_full()
-                .gap_4()
+                .gap(px(3.))
                 .child(
-                    div()
-                        .id("settings-models-left")
-                        .w(px(NAV_COL_W))
-                        .flex_shrink_0()
-                        .h_full()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .pr_1()
-                        .child(v_flex().w_full().gap_1().children(left)),
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child(name),
+                        )
+                        .child(meta_badge(theme, kind_label(provider.apikey_kind)))
+                        .child(meta_badge(
+                            theme,
+                            i18n::t_str(
+                                "settings-models-badge-endpoints",
+                                &[("count", &endpoint_count.to_string())],
+                            ),
+                        ))
+                        .child(meta_badge(
+                            theme,
+                            i18n::t_str(
+                                "settings-models-badge-models",
+                                &[("count", &model_count.to_string())],
+                            ),
+                        )),
                 )
                 .child(
                     div()
-                        .id("settings-models-right")
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .pr_1()
-                        .child(right),
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child(subtitle),
                 ),
         )
+        .into_any_element()
+}
+
+/// Small read-only pill on a provider tile.
+fn meta_badge(theme: &Theme, text: SharedString) -> AnyElement {
+    div()
+        .h(px(20.))
+        .px_1p5()
+        .flex_none()
+        .flex()
+        .items_center()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(11.))
+        .text_color(theme.muted_foreground)
+        .child(text)
         .into_any_element()
 }
 
@@ -1131,223 +1211,229 @@ fn render_empty(theme: &Theme) -> AnyElement {
     )
 }
 
-/// Right column: the form of the module selected in the left tree, wrapped in
-/// a bordered panel.
-fn render_module_form(
+/// One provider's detail: the back row, then all four sections stacked in a
+/// single scrolling column (no nested split).
+fn render_provider_detail(
     view: &mut SettingsView,
     theme: &Theme,
-    entity: Entity<SettingsView>,
-    _cx: &mut Context<SettingsView>,
-) -> AnyElement {
-    let muted = theme.muted_foreground;
-    let hint = || {
-        v_flex()
-            .w_full()
-            .child(muted_text(i18n::t("settings-models-no-selection"), muted))
-            .into_any_element()
-    };
-    let panel = &view.models_panel;
-    let Some(pid) = panel.selected else {
-        return hint();
-    };
-    let Some(p) = panel.providers.iter().find(|p| p.id == pid) else {
-        return hint();
-    };
-    let agent_options = panel.agent_options.clone();
-    let pending = panel.pending_delete.clone();
-    let module = panel.module;
-    let body = match module {
-        ModuleTab::Basic => render_basic_module(theme, entity.clone(), pid, p),
-        ModuleTab::Env => render_env_block(theme, entity.clone(), pid, None, &p.env, &pending),
-        ModuleTab::Endpoints => {
-            render_endpoints_module(theme, entity.clone(), pid, p, &agent_options, &pending)
-        }
-        ModuleTab::Models => {
-            render_models_module(theme, entity.clone(), pid, p, &agent_options, &pending)
-        }
-    };
-    div()
-        .w_full()
-        .rounded(px(10.))
-        .border_1()
-        .border_color(theme.border.opacity(0.6))
-        .p_3()
-        .child(body)
-        .into_any_element()
-}
-
-/// Left-column tree node: provider header (double-click renames inline) with
-/// the four module names as indented children when expanded; clicking a
-/// module child selects (provider, module) for the right-column form.
-fn render_provider_node(
-    view: &mut SettingsView,
-    theme: &Theme,
-    entity: Entity<SettingsView>,
     pid: usize,
     cx: &mut Context<SettingsView>,
 ) -> AnyElement {
-    let panel = &view.models_panel;
-    let Some(p) = panel.providers.iter().find(|p| p.id == pid) else {
-        return div().into_any_element();
+    let entity = cx.entity();
+    let Some(p) = view.models_panel.providers.iter().find(|p| p.id == pid) else {
+        // The provider vanished (deleted); fall back to the list.
+        return render_provider_list(view, theme, cx);
     };
-    let muted = theme.muted_foreground;
-    let expanded = panel.expanded.contains(&pid);
-    let selected = panel.selected == Some(pid);
-    let renaming = panel.renaming.contains(&pid);
+    let agent_options = view.models_panel.agent_options.clone();
+    let pending = view.models_panel.pending_delete.clone();
 
-    let toggle_entity = entity.clone();
-    let rename_entity = entity.clone();
-    let toggle = h_flex()
-        .id(format!("models-p{pid}-toggle"))
-        .flex_1()
-        .min_w_0()
-        .items_center()
-        .gap_2()
+    // Top row: back to the list on the left, delete-provider on the right.
+    let back_entity = entity.clone();
+    let back = div()
+        .id("models-back")
+        .h(px(30.))
         .px_2()
-        .py_1()
+        .flex()
+        .items_center()
+        .gap_1p5()
         .rounded(theme.radius)
+        .text_size(px(13.))
+        .text_color(theme.foreground)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.accent.opacity(0.06)))
-        .on_click(move |ev, window, cx| {
-            if ev.click_count() >= 2 {
-                rename_entity.update(cx, |this, cx| {
-                    this.models_panel.begin_rename(pid, window, cx);
-                    cx.notify();
-                });
-            } else {
-                toggle_entity.update(cx, |this, cx| {
-                    this.models_panel.select_provider(pid);
-                    cx.notify();
-                });
-            }
+        .hover(|this| this.bg(theme.secondary))
+        .on_click(move |_ev, _window, cx| {
+            back_entity.update(cx, |this, cx| {
+                this.models_panel.close_provider();
+                cx.notify();
+            });
         })
-        .child(
-            Icon::new(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .small()
-            .text_color(muted),
-        );
-    let name = p.name.clone();
-    let out_entity = entity.clone();
-    let toggle = if renaming {
-        toggle.child(
-            div()
-                .id(format!("models-p{pid}-rename"))
-                .flex_1()
-                .min_w_0()
-                .on_mouse_down_out(move |_ev, window, cx| {
-                    out_entity.update(cx, |this, cx| {
-                        this.models_panel.renaming.remove(&pid);
-                        cx.notify();
-                    });
-                    // Exiting rename leaves the caret in the name input;
-                    // drop focus so the blur handler surfaces pending edits.
-                    let handle = Focusable::focus_handle(&name, cx);
-                    if handle.is_focused(window) {
-                        window.blur(cx);
-                    }
-                })
-                .child(Input::new(&p.name)),
-        )
-    } else {
-        let name_value = p.name.read(cx).value();
-        let header_label: SharedString = if name_value.trim().is_empty() {
-            i18n::t("settings-models-unnamed")
-        } else {
-            name_value
-        };
-        let label = div().text_sm().truncate().child(header_label);
-        let label = if selected {
-            label
-                .text_color(theme.info)
-                .font_weight(gpui::FontWeight::MEDIUM)
-        } else {
-            label.font_weight(gpui::FontWeight::MEDIUM)
-        };
-        toggle.child(label)
-    };
-
-    let header_row = h_flex()
+        .child(Icon::new(AssetIcon::ArrowLeft).size_4())
+        .child(i18n::t("settings-models-back"));
+    let remove_key = format!("models-p{pid}-remove");
+    let remove_pending = pending.as_deref() == Some(remove_key.as_str());
+    let top = h_flex()
         .w_full()
         .items_center()
-        .gap_2()
-        .child(toggle)
-        .child({
-            let key = format!("models-p{pid}-remove");
-            let pending = panel.pending_delete.as_deref() == Some(key.as_str());
-            remove_button(
-                theme,
-                key,
-                pending,
-                entity.clone(),
-                Arc::new(move |this, cx| {
-                    this.models_panel.remove_provider(pid);
-                    this.models_panel.touch(cx);
-                }),
-            )
-        })
-        .into_any_element();
+        .justify_between()
+        .child(back)
+        .child(delete_provider_button(
+            theme,
+            pid,
+            remove_pending,
+            entity.clone(),
+        ));
 
-    let mut children: Vec<AnyElement> = vec![header_row];
-    if expanded {
-        for module in MODULE_TABS {
-            let active = selected && panel.module == module;
-            let nav_entity = entity.clone();
-            let row = div()
-                .id(format!("models-p{pid}-nav-{module:?}"))
-                .pl_6()
-                .pr_2()
-                .py_1()
-                .rounded(theme.radius)
-                .cursor_pointer()
-                .text_sm();
-            let row = if active {
-                row.text_color(theme.info)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-            } else {
-                row.hover(|s| s.bg(theme.accent.opacity(0.06)))
-            };
-            children.push(
-                row.on_click(move |_ev, _window, cx| {
-                    nav_entity.update(cx, |this, cx| {
-                        this.models_panel.selected = Some(pid);
-                        this.models_panel.module = module;
-                        cx.notify();
-                    });
-                })
-                .child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .child(module_label(module))
-                        .child(if active {
-                            Icon::new(IconName::ChevronRight)
-                                .small()
-                                .text_color(theme.info)
-                                .into_any_element()
-                        } else {
-                            div().into_any_element()
-                        }),
-                )
-                .into_any_element(),
-            );
-        }
-    }
-    v_flex().w_full().children(children).into_any_element()
+    let sections = v_flex()
+        .w_full()
+        .gap_4()
+        .pt_4()
+        .pb_6()
+        .child(detail_section(
+            theme,
+            AssetIcon::BadgeInfo,
+            "settings-models-section-basic",
+            vec![
+                detail_field_row(
+                    theme,
+                    i18n::t("settings-models-row-name"),
+                    input_field(&p.name),
+                ),
+                detail_field_row(
+                    theme,
+                    i18n::t("settings-models-row-apikey"),
+                    render_apikey_control(entity.clone(), pid, p),
+                ),
+            ],
+        ))
+        .child(detail_section(
+            theme,
+            AssetIcon::Variable,
+            "settings-models-section-env",
+            vec![env_rows(theme, entity.clone(), pid, None, &p.env, &pending)],
+        ))
+        .child(detail_section(
+            theme,
+            AssetIcon::Globe,
+            "settings-models-section-endpoints",
+            vec![render_endpoints_module(
+                theme,
+                entity.clone(),
+                pid,
+                p,
+                &agent_options,
+                &pending,
+            )],
+        ))
+        .child(detail_section(
+            theme,
+            AssetIcon::List,
+            "settings-models-section-models",
+            vec![render_models_module(
+                theme,
+                entity.clone(),
+                pid,
+                p,
+                &agent_options,
+                &pending,
+            )],
+        ));
+
+    v_flex()
+        .id("models-detail")
+        .w_full()
+        .h_full()
+        .min_h_0()
+        .overflow_y_scroll()
+        .p_4()
+        .child(top)
+        .child(sections)
+        .into_any_element()
 }
 
-/// 基本信息 module: the API Key kind dropdown + value input pair (the name
-/// lives in the card header, edited via double-click).
-fn render_basic_module(
+/// One bordered section card of the provider detail: icon + title + rule,
+/// then the body.
+fn detail_section(
     theme: &Theme,
-    entity: Entity<SettingsView>,
-    pid: usize,
-    p: &ProviderForm,
+    icon: AssetIcon,
+    title_key: &'static str,
+    body: Vec<AnyElement>,
 ) -> AnyElement {
+    v_flex()
+        .w_full()
+        .gap_3()
+        .p_4()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(theme.border.opacity(0.65))
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(icon).size_4().text_color(theme.info))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground)
+                        .child(i18n::t(title_key)),
+                )
+                .child(div().flex_1().h(px(1.)).bg(theme.border.opacity(0.5))),
+        )
+        .children(body)
+        .into_any_element()
+}
+
+/// A flat label/control row used inside a detail section (the section card
+/// supplies the padding, so this one adds none of its own).
+fn detail_field_row(theme: &Theme, label: SharedString, control: AnyElement) -> AnyElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .w(px(LABEL_W))
+                .flex_shrink_0()
+                .text_sm()
+                .text_color(theme.foreground)
+                .child(label),
+        )
+        .child(h_flex().flex_1().min_w_0().child(control))
+        .into_any_element()
+}
+
+/// The detail's 删除 Provider control: a labeled two-step button (first click
+/// arms it with a danger tint, the second deletes and returns to the list).
+fn delete_provider_button(
+    theme: &Theme,
+    pid: usize,
+    pending: bool,
+    entity: Entity<SettingsView>,
+) -> AnyElement {
+    let key = format!("models-p{pid}-remove");
+    let label = if pending {
+        i18n::t("settings-models-delete-confirm")
+    } else {
+        i18n::t("settings-models-delete-hint")
+    };
+    let click_key = key.clone();
+    div()
+        .id(key)
+        .h(px(30.))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .rounded(theme.radius)
+        .text_size(px(13.))
+        .cursor_pointer()
+        .when(pending, |this| {
+            this.bg(theme.danger.opacity(0.12)).text_color(theme.danger)
+        })
+        .when(!pending, |this| {
+            this.text_color(theme.muted_foreground)
+                .hover(|this| this.bg(theme.secondary).text_color(theme.danger))
+        })
+        .on_click(move |_ev, _window, cx| {
+            entity.update(cx, |this, cx| {
+                if this.models_panel.pending_delete.as_deref() == Some(click_key.as_str()) {
+                    this.models_panel.pending_delete = None;
+                    this.models_panel.remove_provider(pid);
+                    this.models_panel.touch(cx);
+                } else {
+                    this.models_panel.pending_delete = Some(click_key.clone());
+                }
+                cx.notify();
+            });
+        })
+        .child(Icon::new(AssetIcon::Trash).size_4())
+        .child(label)
+        .into_any_element()
+}
+
+/// 基本信息 API Key control: kind dropdown + value input.
+fn render_apikey_control(entity: Entity<SettingsView>, pid: usize, p: &ProviderForm) -> AnyElement {
     let kind_options: Vec<(SharedString, SharedString)> = [
         ApiKeySourceKind::Literal,
         ApiKeySourceKind::Env,
@@ -1358,7 +1444,7 @@ fn render_basic_module(
     .map(|k| (kind_label(*k), SharedString::from(kind_token(*k))))
     .collect();
 
-    let kind_control = h_flex()
+    h_flex()
         .w_full()
         .gap_2()
         .child(token_dropdown(
@@ -1388,26 +1474,13 @@ fn render_basic_module(
                 .on_mouse_down_out(blur_on_click_out(p.apikey_value.clone()))
                 .child(Input::new(&p.apikey_value)),
         )
-        .into_any_element();
-
-    v_flex()
-        .w_full()
-        .child(
-            h_flex().px_3().py_1p5().child(
-                div()
-                    .text_sm()
-                    .text_color(theme.foreground)
-                    .child(i18n::t("settings-models-row-apikey")),
-            ),
-        )
-        .child(h_flex().w_full().px_3().py_1p5().child(kind_control))
         .into_any_element()
 }
 
-/// 环境变量 key/value block: plain label, indented rows, each row trailed by
-/// 「-」(delete row) and 「+」(insert a focused empty row below). With no rows
-/// a muted hint plus a 「+」 offers the first row.
-fn render_env_block(
+/// 环境变量 key/value rows: each row trailed by 「-」(delete row) and
+/// 「+」(insert a focused empty row below). With no rows a muted hint plus a
+/// 「+」 offers the first row. The caller supplies the section heading.
+fn env_rows(
     theme: &Theme,
     entity: Entity<SettingsView>,
     pid: usize,
@@ -1415,23 +1488,11 @@ fn render_env_block(
     rows: &[KvForm],
     pending: &Option<String>,
 ) -> AnyElement {
-    let mut children: Vec<AnyElement> = vec![
-        h_flex()
-            .px_3()
-            .py_1p5()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.foreground)
-                    .child(i18n::t("settings-models-section-env")),
-            )
-            .into_any_element(),
-    ];
+    let mut children: Vec<AnyElement> = Vec::new();
 
     if rows.is_empty() {
         children.push(
             h_flex()
-                .px_3()
                 .py_1()
                 .items_center()
                 .gap_2()
@@ -1456,7 +1517,6 @@ fn render_env_block(
         let kid = kv.id;
         children.push(
             h_flex()
-                .px_3()
                 .py_1()
                 .items_center()
                 .gap_2()
@@ -1503,7 +1563,36 @@ fn render_env_block(
                 .into_any_element(),
         );
     }
-    v_flex().w_full().children(children).into_any_element()
+    v_flex()
+        .w_full()
+        .gap_1()
+        .children(children)
+        .into_any_element()
+}
+
+/// 环境变量 block inside a model card: a small heading over the shared row
+/// list.
+fn render_env_block(
+    theme: &Theme,
+    entity: Entity<SettingsView>,
+    pid: usize,
+    mid: Option<usize>,
+    rows: &[KvForm],
+    pending: &Option<String>,
+) -> AnyElement {
+    v_flex()
+        .w_full()
+        .px_3()
+        .py_1p5()
+        .gap_1()
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.foreground)
+                .child(i18n::t("settings-models-section-env")),
+        )
+        .child(env_rows(theme, entity, pid, mid, rows, pending))
+        .into_any_element()
 }
 
 /// 端点信息 module: add button first (hidden once all three wire APIs are
