@@ -1668,7 +1668,8 @@ fn render_endpoint(
         ),
     ];
 
-    let wire_control = token_dropdown(
+    let wire_control = wire_dropdown(
+        theme,
         format!("models-e{eid}-wire"),
         e.wire_api.clone(),
         wire_options,
@@ -2081,6 +2082,90 @@ fn token_dropdown(
         .into_any_element()
 }
 
+/// The config endpoint map's wire key (`responses` / `completions`) vs. the
+/// canonical model-catalog api key the picker palette is keyed by.
+fn wire_color_name(wire: &str) -> gpui_component::ColorName {
+    let api = match wire {
+        "responses" => "openai_responses",
+        "completions" => "openai_completions",
+        other => other,
+    };
+    crate::model_catalog::wire_visual(api).2
+}
+
+/// The wire api's dedicated tint at the picker tag's scale (600 light / 300
+/// dark); unknown keys fall back to muted.
+fn wire_tint(theme: &Theme, wire: &str) -> gpui::Hsla {
+    match wire_color_name(wire) {
+        gpui_component::ColorName::Gray => theme.muted_foreground,
+        color => color.scale(if theme.is_dark() { 300 } else { 600 }),
+    }
+}
+
+/// The Wire API dropdown: the shared token dropdown with the api's dedicated
+/// color on its dot, label and border.
+fn wire_dropdown(
+    theme: &Theme,
+    id: impl Into<gpui::ElementId>,
+    current: SharedString,
+    options: Vec<(SharedString, SharedString)>,
+    entity: Entity<SettingsView>,
+    apply: TokenApply,
+) -> AnyElement {
+    let label = options
+        .iter()
+        .find(|(_, token)| *token == current)
+        .map(|(display, _)| display.clone())
+        .unwrap_or(current.clone());
+    let tint = wire_tint(theme, &current);
+    Button::new(id)
+        .outline()
+        .dropdown_caret(true)
+        .border_color(tint.opacity(0.45))
+        .child(
+            h_flex()
+                .items_center()
+                .gap_1p5()
+                .child(div().size(px(8.)).flex_none().rounded_full().bg(tint))
+                .child(
+                    div()
+                        .text_color(tint)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(label),
+                ),
+        )
+        .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _window, _cx| {
+            options.iter().fold(menu, |menu, (display, token)| {
+                let token = token.clone();
+                let display = display.clone();
+                let entity = entity.clone();
+                let apply = apply.clone();
+                menu.item(
+                    PopupMenuItem::element({
+                        let token = token.clone();
+                        move |_window, cx| {
+                            // Each row wears its own api color, so the open
+                            // menu reads exactly like the selected control.
+                            let tint = wire_tint(cx.theme(), &token);
+                            h_flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(div().size(px(8.)).flex_none().rounded_full().bg(tint))
+                                .child(div().text_color(tint).child(display.clone()))
+                        }
+                    })
+                    .on_click(move |_ev, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            apply(this, token.clone(), window, cx);
+                            cx.notify();
+                        });
+                    }),
+                )
+            })
+        })
+        .into_any_element()
+}
+
 /// true/false dropdown for the effective supports_tools / supports_images
 /// value (unset config resolves to the documented default at load time).
 fn bool_dropdown(
@@ -2342,8 +2427,22 @@ fn carry_over_unmodeled_sections(config: &mut CxConfig, fresh: &CxConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::carry_over_unmodeled_sections;
+    use super::{carry_over_unmodeled_sections, wire_color_name};
+    use gpui_component::ColorName;
     use manox_providers::{ChatGptAppSettings, CxConfig, VsCodeAppSettings, VsCodeExtensionBlock};
+
+    /// The endpoint map's wire keys must reuse the picker's dedicated palette
+    /// (Blue / Cyan / Amber), not fall through to the unknown-API gray.
+    #[test]
+    fn endpoint_wire_keys_map_to_the_picker_palette() {
+        assert_eq!(wire_color_name("anthropic"), ColorName::Blue);
+        assert_eq!(wire_color_name("responses"), ColorName::Cyan);
+        assert_eq!(wire_color_name("completions"), ColorName::Amber);
+        // Canonical catalog keys keep working too.
+        assert_eq!(wire_color_name("openai_responses"), ColorName::Cyan);
+        assert_eq!(wire_color_name("openai_completions"), ColorName::Amber);
+        assert_eq!(wire_color_name("unknown"), ColorName::Gray);
+    }
 
     /// Regression: the CxConfig produced by the Models panel's `collect()`
     /// carries empty values for all three unmodeled sections; the carry-over
