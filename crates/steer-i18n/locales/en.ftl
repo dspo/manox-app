@@ -705,10 +705,6 @@ about-ok = OK
 
 about-copy = Copy
 
-about-commit = Commit
-
-about-version = Version
-
 # Background task status card
 
 

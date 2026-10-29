@@ -681,10 +681,6 @@ about-ok = 确定
 
 about-copy = 复制
 
-about-commit = 提交
-
-about-version = 版本
-
 # Background task status card
 
 

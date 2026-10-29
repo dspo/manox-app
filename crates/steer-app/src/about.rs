@@ -1,10 +1,14 @@
-//! About window: centered floating dialog with the app icon, a headline
-//! app-version line, one muted-label provenance row per pinned stack
-//! (steer desktop, manox runtime, gpui-component, gpui-pre), and an OK / Copy
-//! action row. Copy writes the structured info block
-//! (`version::structured_about`) followed by those rows to the clipboard and
-//! closes the window; Escape closes as well. Duplicate window detection keeps a
-//! single instance.
+//! About window: centered floating dialog with the app icon, the headline
+//! `Steer.app v<version>+<short commit>`, and the provenance block — every
+//! row is a label/value pair laid out on one continuous vertical axis (the
+//! labels right-align onto it, the values left-align off it): the OS (with
+//! the chip's marketing name where the platform reports one), the rustc the
+//! binary was compiled by, and the pinned stacks (manox runtime,
+//! gpui-component, gpui-pre). The OK / Copy action row sits at the bottom;
+//! Copy writes the structured info block (`version::structured_about`), the
+//! full app commit, and one `label: value` line per row to the clipboard and
+//! closes the window; Escape closes as well. Duplicate window detection
+//! keeps a single instance.
 
 use std::sync::Arc;
 
@@ -12,15 +16,15 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     StyledExt as _, Theme,
     button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
 };
 use manox_agent::version;
 use steer_i18n as i18n;
 
 use crate::pins;
 
-/// About dialog size. The height has to fit the icon, the headline and one
-/// label/value pair per provenance row without clipping; `rows_fit_in_window`
-/// pins that.
+/// About dialog size. The height has to fit the icon, the headline and the
+/// provenance axis without clipping; `rows_fit_in_window` pins that.
 const WINDOW_WIDTH: f32 = 440.;
 const WINDOW_HEIGHT: f32 = 440.;
 
@@ -34,8 +38,23 @@ struct InfoRow {
 struct AboutWindow {
     focus_handle: FocusHandle,
     app_icon: Arc<Image>,
-    message: SharedString,
+    headline: SharedString,
     rows: Vec<InfoRow>,
+}
+
+/// `Steer.app v<version>+<short commit>` — the app's own identity line; the
+/// short commit is the only face the old `steer desktop` row's value survives
+/// in. A build without git metadata stays on the bare version.
+fn headline() -> SharedString {
+    match pins::app_commit() {
+        Some(commit) => format!(
+            "Steer.app v{}+{}",
+            env!("CARGO_PKG_VERSION"),
+            pins::short_commit(commit)
+        )
+        .into(),
+        None => format!("Steer.app v{}", env!("CARGO_PKG_VERSION")).into(),
+    }
 }
 
 impl AboutWindow {
@@ -46,11 +65,7 @@ impl AboutWindow {
                 ImageFormat::Png,
                 include_bytes!("../resources/app-icon.png").to_vec(),
             )),
-            message: SharedString::from(format!(
-                "Steer {} ({})",
-                env!("CARGO_PKG_VERSION"),
-                version::build_type()
-            )),
+            headline: headline(),
             rows: provenance_rows(),
         }
     }
@@ -62,7 +77,7 @@ impl AboutWindow {
 }
 
 /// The provenance rows the window renders, in display order. A row whose value
-/// could not be resolved at build time is dropped rather than shown blank.
+/// could not be resolved is dropped rather than shown blank.
 fn provenance_rows() -> Vec<InfoRow> {
     let mut rows = Vec::new();
     let mut push = |label, value: Option<SharedString>| {
@@ -71,7 +86,8 @@ fn provenance_rows() -> Vec<InfoRow> {
         }
     };
     let short = |commit| SharedString::from(pins::short_commit(commit).to_string());
-    push("steer desktop", pins::app_commit().map(short));
+    push("OS", Some(os_label()));
+    push("rustc", pins::rustc_version().map(SharedString::from));
     push("manox runtime", pins::manox_commit().map(short));
     push(
         "gpui-component",
@@ -81,11 +97,59 @@ fn provenance_rows() -> Vec<InfoRow> {
     rows
 }
 
+/// The OS row's value: the platform and, where the hardware names itself, its
+/// marketing name — `macOS · Apple M4 Pro`. A platform without a brand string
+/// falls back to its arch.
+fn os_label() -> SharedString {
+    let os = match std::env::consts::OS {
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    };
+    match platform_cpu() {
+        Some(cpu) => format!("{os} · {cpu}"),
+        None => format!("{os} {}", std::env::consts::ARCH),
+    }
+    .into()
+}
+
+/// The running machine's marketing chip name (`Apple M4 Pro`), where the
+/// platform exposes one.
+#[cfg(target_os = "macos")]
+fn platform_cpu() -> Option<String> {
+    let mut value = [0u8; 128];
+    let mut len = value.len();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"machdep.cpu.brand_string".as_ptr(),
+            value.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let end = value.iter().position(|&b| b == 0)?;
+    let name = std::str::from_utf8(&value[..end]).ok()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_cpu() -> Option<String> {
+    None
+}
+
 /// The clipboard block: the runtime's own structured block, whose first lines
-/// are a stable format, followed by one line per provenance row so a pasted
-/// report carries every identity the window shows.
+/// are a stable format, then the full app commit the headline only
+/// abbreviates, then one line per provenance row so a pasted report carries
+/// every identity the window shows.
 fn details_block(rows: &[InfoRow]) -> String {
     let mut block = version::structured_about();
+    if let Some(commit) = pins::app_commit() {
+        block.push_str(&format!("\nsteer-app commit: {commit}"));
+    }
     for row in rows {
         block.push_str(&format!("\n{}: {}", row.label, row.value));
     }
@@ -95,32 +159,54 @@ fn details_block(rows: &[InfoRow]) -> String {
 impl Render for AboutWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx);
-        let muted = theme.muted_foreground;
 
-        let mut details = div()
+        // The provenance block: labels right-align onto one continuous
+        // vertical rule, values left-align off it — every row sits on the
+        // same axis, so a scan down either column stays straight. Both
+        // columns re-pin their text alignment: the dialog root centers text
+        // (headline, buttons), and the inheritance would otherwise center
+        // every cell inside its column and float it off the axis.
+        let keys = v_flex()
+            .gap_1p5()
+            .items_end()
+            .text_right()
+            .children(self.rows.iter().map(|row| {
+                gpui::div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(SharedString::new_static(row.label))
+            }));
+        let values = v_flex()
+            .gap_1p5()
+            .text_left()
+            .children(self.rows.iter().map(|row| {
+                gpui::div()
+                    .text_sm()
+                    .text_color(theme.foreground)
+                    .child(row.value.clone())
+            }));
+        let axis = h_flex()
+            .debug_selector(|| "about-axis".into())
+            .items_stretch()
+            .child(keys.pr_3())
+            .child(gpui::div().w(px(1.)).bg(theme.border))
+            .child(values.pl_3());
+
+        let details = div()
             .id("about-details")
             .debug_selector(|| "about-details".into())
             .v_flex()
             .w_full()
-            .gap_2()
+            .gap_5()
             .items_center()
             .child(gpui::img(self.app_icon.clone()).size_16().flex_none())
             .child(
                 div()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.message.clone()),
-            );
-        for row in &self.rows {
-            details = details
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(SharedString::new_static(row.label)),
-                )
-                .child(div().text_sm().child(row.value.clone()));
-        }
+                    .child(self.headline.clone()),
+            )
+            .child(axis);
 
         div()
             .id("about-window")
@@ -217,26 +303,48 @@ mod tests {
     use super::{AboutWindow, WINDOW_HEIGHT, WINDOW_WIDTH, details_block, provenance_rows};
     use crate::pins;
 
-    /// The window must name every pinned stack, in display order; a wrong label
-    /// or a dropped row would otherwise only be visible to a human eyeballing
-    /// the dialog. Rows whose value this build cannot resolve are absent by
-    /// design, so the expectation follows `app_commit` (the one value that needs
-    /// git metadata in the manox-app checkout).
+    /// The window must name the platform, the toolchain, and every pinned
+    /// stack, in display order; a wrong label or a dropped row would otherwise
+    /// only be visible to a human eyeballing the dialog. Rows whose value this
+    /// build cannot resolve are absent by design, so the expectation follows
+    /// the pins that need git metadata or a lockfile.
     #[test]
-    fn provenance_rows_name_every_pinned_stack() {
+    fn provenance_rows_name_the_platform_toolchain_and_pins() {
         let rows = provenance_rows();
         let labels: Vec<_> = rows.iter().map(|row| row.label).collect();
-        let mut expected = vec!["manox runtime", "gpui-component", "gpui-pre"];
-        if pins::app_commit().is_some() {
-            expected.insert(0, "steer desktop");
+        let mut expected = vec!["OS"];
+        if pins::rustc_version().is_some() {
+            expected.push("rustc");
         }
+        if pins::manox_commit().is_some() {
+            expected.push("manox runtime");
+        }
+        expected.extend(["gpui-component", "gpui-pre"]);
         assert_eq!(labels, expected);
     }
 
-    /// A copied report must stay greppable by the runtime's format (its own
-    /// lines first, untouched) while carrying the rows unique to this build.
+    /// The OS row names the running platform and carries the chip's marketing
+    /// name where the platform reports one — never an empty value.
     #[test]
-    fn details_block_appends_every_row_to_the_runtime_block() {
+    fn the_os_row_names_the_platform() {
+        let rows = provenance_rows();
+        let os = &rows
+            .iter()
+            .find(|row| row.label == "OS")
+            .expect("the OS row is unconditional")
+            .value;
+        assert!(!os.is_empty());
+        assert!(
+            os.starts_with("macOS") || os.starts_with("Linux") || os.starts_with("windows"),
+            "the OS row names the running platform: {os}"
+        );
+    }
+
+    /// A copied report must stay greppable by the runtime's format (its own
+    /// lines first, untouched) while carrying the app commit and the rows
+    /// unique to this build.
+    #[test]
+    fn details_block_appends_the_app_commit_and_every_row_to_the_runtime_block() {
         let rows = provenance_rows();
         let block = details_block(&rows);
 
@@ -245,11 +353,34 @@ mod tests {
             block.starts_with(&runtime),
             "runtime block must lead: {block}"
         );
+        if let Some(commit) = pins::app_commit() {
+            assert!(
+                block.contains(&format!("\nsteer-app commit: {commit}")),
+                "the full app commit rides the report: {block}"
+            );
+        }
         for row in &rows {
             assert!(
                 block.contains(&format!("\n{}: {}", row.label, row.value)),
                 "missing {}: {block}",
                 row.label
+            );
+        }
+    }
+
+    /// The headline names the app, its version, and — where the build has git
+    /// metadata — the short commit it was built from.
+    #[test]
+    fn the_headline_names_the_app_version_and_commit() {
+        let headline = super::headline();
+        assert!(
+            headline.starts_with("Steer.app v"),
+            "the headline names the app and version: {headline}"
+        );
+        if let Some(commit) = pins::app_commit() {
+            assert!(
+                headline.ends_with(&format!("+{}", pins::short_commit(commit))),
+                "the short commit rides the headline: {headline}"
             );
         }
     }
@@ -278,10 +409,20 @@ mod tests {
         let dialog = cx
             .debug_bounds("about-window")
             .expect("the dialog must be laid out");
+        let axis = cx
+            .debug_bounds("about-axis")
+            .expect("the provenance axis must be laid out");
 
         assert!(
             details.bottom() <= buttons.top(),
             "provenance rows overlap the actions: {details:?} vs {buttons:?}"
+        );
+        // The axis is the dialog's spine: every row hangs on one continuous
+        // rule, so it renders taller than one row and narrower than the
+        // content box it centers in.
+        assert!(
+            axis.size.height > px(40.),
+            "the axis spans the provenance rows: {axis:?}"
         );
         // The action row is pinned to the content box's bottom edge, so this
         // only fails once the rows above have pushed it through the padding.

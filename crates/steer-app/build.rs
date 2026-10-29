@@ -88,6 +88,17 @@ fn main() {
         "GPUI_SOURCE",
         gpui.and_then(|(_, _, source)| source.as_deref()),
     );
+    // The compiling toolchain's own self-report (`rustc 1.97.1 (…)`), for
+    // the About window's rustc row. Cargo hands the build script the rustc
+    // it drives; a failed probe injects empty and the row is absent.
+    let rustc_version = std::env::var("RUSTC").ok().and_then(|rustc| {
+        let output = Command::new(rustc).arg("--version").output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    });
+    inject("STEER_RUSTC_VERSION", rustc_version.as_deref());
 }
 
 /// Commit of the manox-app checkout this build reads from. A tree without its
