@@ -76,8 +76,14 @@ impl Workspace {
             .unwrap_or_else(|| row.label.clone());
         let view = crate::views::subagent_stream::SubagentStreamView::new(
             row.id.clone(),
-            kind,
-            Some(topic),
+            crate::views::subagent_stream::StreamHeader {
+                label: kind,
+                activity: Some(topic),
+                color: row
+                    .color
+                    .as_deref()
+                    .and_then(steer_agent_chat_ui::views::subagents::agent_color),
+            },
             store.clone(),
             host,
             role,

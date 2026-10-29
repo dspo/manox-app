@@ -69,7 +69,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 图片附件 | ✅ | 剪贴板粘贴 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
-| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读；头部 access-mode 徽章 = dspo/manox#968 的 app 伴随，读子会话自己 session 通道的声明行）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询 |
+| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读；头部 access-mode 徽章 = dspo/manox#968 的 app 伴随，读子会话自己 session 通道的声明行）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询。子代理行与 SubagentStream 头部携带定义声明的展示色（background-work `_meta.agentColor`，Claude 八色词汇经 `views::subagents::agent_color` 映射为身份色点，未知值不着色）——上游「Claude agent frontmatter 全字段适配」的 app 伴随 |
 | 退役（plan mode 整体删除，随上游 manox PR #946） | — | `/plan` 为上游内置 skill（规划契约一次性注入，见 §Slash 行）；plan 裁决 = 单问题 ask（`detail`=plan 正文，经 wire 的 `ChatInputRequest.message` 折入），批准/修订即普通答案；rail 的 plan 节（`UpdatePlan`）仍消费执行进度，快照经 sidecar 持久化、compaction 后可恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
@@ -491,13 +491,17 @@ projects as the parent chat's AHP background work
 (`leaf.running_subagents()`, `crates/steer-agent-chat-ui/src/ahp_store.rs`) —
 the host opens a run's entry on its first running tick and removes it when the
 run settles, so the rows are exactly the live set. Each row is the same shape
-(`spinner` + `subagent-steering-prefix`「{name}正在驾驶」+ the model tag +
+(`spinner` + 定义声明的身份色点 + `subagent-steering-prefix`「{name}正在驾驶」+ the model tag +
 `·{elapsed}`), where `{name}` is the run's agent type and task label as
 `{type}({topic})` (`task_display_title`: 「Explore(修登录跳转)」— flattened by
 `one_line` and bounded the same way the Captain's own row is: a run's task
 label is runtime text and may carry newlines, and the block must never grow a
-line per input line). The wire's background-work entry carries the topic only;
-the type is resolved from the delegation tool call (its
+line per input line). The identity dot renders the definition's declared
+display color (`_meta.agentColor`, the Claude eight-color vocabulary mapped by
+`views::subagents::agent_color`); an unknown name renders uncolored, like no
+color. The wire's background-work entry carries the topic only;
+the type (and color) ride its `_meta` once the host stamps them — the type
+additionally falls back to the delegation tool call (its
 `ToolResultSubagentContent.agentName`, or the call's own name on a completion
 receipt naming the run) and stays absent when that call is not in the retained
 fold. The model segment names the
@@ -523,7 +527,9 @@ uses, so the rows ARE the child's messages (never a second transcript
 expression). It is
 read-only by design: a child run is driven by the parent's dispatch, not by the
 watcher (no composer, no chips). Header = back control (`Captain` → the
-conversation) + `{type}({topic})`.
+conversation) + the definition's declared identity color dot (same
+`_meta.agentColor` mapping the Captain strip's row renders; absent = uncolored)
++ `{type}({topic})`.
 
 Live model: the host bridges a running child's journal into its own chat
 channel, so the ONE subscribe on open delivers the folded history AND the live
