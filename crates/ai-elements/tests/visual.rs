@@ -351,8 +351,12 @@ fn main() {
                             "```rust\nlet rewrite = Rewrite { instruction: \"把这段说明文字改成更正式的语气，保留全部技术细节，不要引入新的事实，输出为 JSON 并保持原有结构不变\", target: \"crates/steer-components/src/markdown/code_block.rs\", max_length: 4096 };\nfinish(rewrite);\n```\n".to_string(),
                         ),
                         doc(
-                            "diff + conflict",
-                            "```diff\n--- a/crates/steer-components/src/markdown/mod.rs\n+++ b/crates/steer-components/src/markdown/mod.rs\n@@ -12,6 +12,7 @@ pub mod linkify {\n pub mod svg_block {\n     pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;\n+    pub const FENCE_BLOCKS: usize = 4;\n-    pub const DIAGRAM_BLOCKS: usize = 2;\n }\n```\n\n```rust\n<<<<<<< HEAD\nlet mode = Mode::Editor;\n=======\nlet mode = Mode::Panel;\n>>>>>>> feat/code-block\n```\n".to_string(),
+                            "diff — split",
+                            "```diff\n--- a/crates/steer-components/src/markdown/mod.rs\n+++ b/crates/steer-components/src/markdown/mod.rs\n@@ -12,6 +12,7 @@ pub mod linkify {\n pub mod svg_block {\n     pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;\n+    pub const FENCE_BLOCKS: usize = 4;\n-    pub const DIAGRAM_BLOCKS: usize = 2;\n-    pub const DIAGRAM_CAP: Pixels = px(512.);\n }\n```\n".to_string(),
+                        ),
+                        doc(
+                            "merge — three columns",
+                            "```rust\n<<<<<<< HEAD\nlet mode = Mode::Editor;\n||||||| merged common ancestors\nlet mode = Mode::Auto;\n=======\nlet mode = Mode::Panel;\n>>>>>>> feat/code-block\n```\n".to_string(),
                         ),
                         doc(
                             "cjk + bare",

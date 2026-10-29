@@ -26,6 +26,7 @@
 //! one path for the entity they own.
 
 pub mod code_block;
+mod diff_view;
 pub mod linkify;
 pub mod math_block;
 pub mod mermaid_block;

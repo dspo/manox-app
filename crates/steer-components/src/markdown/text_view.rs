@@ -682,8 +682,9 @@ fn line_ranges(code: &str) -> impl Iterator<Item = (usize, &str)> {
 
 /// A fence is a git merge conflict when it carries both the opening and the
 /// closing marker — the pair guards against a stray marker mis-routing a real
-/// code block.
-fn is_conflict(code: &str) -> bool {
+/// code block. Shared with the fence-shape parser ([`super::code_block`]),
+/// which routes on the same classification the flat dispatch uses.
+pub(crate) fn is_conflict(code: &str) -> bool {
     let mut open = false;
     let mut close = false;
     for line in code.lines() {
