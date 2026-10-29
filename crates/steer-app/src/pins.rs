@@ -24,6 +24,12 @@ pub fn manox_commit() -> Option<&'static str> {
         .or_else(|| non_empty(option_env!("MANOX_UPSTREAM_REV")))
 }
 
+/// The compiling toolchain's self-report (`rustc 1.97.1 (…)`), captured by
+/// `build.rs` from the rustc cargo drove.
+pub fn rustc_version() -> Option<&'static str> {
+    non_empty(option_env!("STEER_RUSTC_VERSION"))
+}
+
 /// The pinned `gpui-component` (GPUI Kit) dependency, as the About row shows it.
 pub fn gpui_kit_pin() -> Option<String> {
     pin(
@@ -39,14 +45,13 @@ pub fn gpui_pin() -> Option<String> {
 }
 
 /// A lockfile-resolved dependency as one display value: the version literal for
-/// a registry release, so the row reads like the manifest entry it came from
-/// (`gpui-component` / `"0.6.1"`); `owner/repo @ rev` when the dependency is a
-/// git checkout, where the version alone would not say what was built.
+/// a registry release, `owner/repo @ rev` when the dependency is a git
+/// checkout, where the version alone would not say what was built.
 fn pin(version: Option<&str>, source: Option<&str>) -> Option<String> {
     let version = non_empty(version)?;
     Some(match git_origin(source) {
         Some((repo, rev)) => format!("{repo} @ {rev}"),
-        None => format!("\"{version}\""),
+        None => version.to_string(),
     })
 }
 
@@ -82,8 +87,8 @@ mod tests {
             locked_kit.is_some() && locked_gpui.is_some(),
             "the lockfile must list both gpui crates"
         );
-        assert_eq!(gpui_kit_pin(), locked_kit.map(|v| format!("\"{v}\"")));
-        assert_eq!(gpui_pin(), locked_gpui.map(|v| format!("\"{v}\"")));
+        assert_eq!(gpui_kit_pin(), locked_kit);
+        assert_eq!(gpui_pin(), locked_gpui);
     }
 
     /// An empty injection means "unresolved" everywhere downstream, so no
@@ -92,6 +97,7 @@ mod tests {
     fn accessors_never_yield_an_empty_value() {
         assert!(app_commit() != Some(""));
         assert!(manox_commit() != Some(""));
+        assert!(rustc_version() != Some(""));
         assert!(gpui_kit_pin() != Some(String::new()));
         assert!(gpui_pin() != Some(String::new()));
     }
@@ -107,10 +113,10 @@ mod tests {
         );
         assert_eq!(
             pin(
-                Some("0.6.1"),
+                Some("0.8.0"),
                 Some("registry+https://github.com/rust-lang/crates.io-index")
             ),
-            Some("\"0.6.1\"".to_string())
+            Some("0.8.0".to_string())
         );
         assert_eq!(
             pin(
@@ -122,7 +128,7 @@ mod tests {
             Some("longbridge/gpui-kit @ 6dc76499".to_string())
         );
         // A path-patched source records no origin, so the version stands alone.
-        assert_eq!(pin(Some("0.6.1"), None), Some("\"0.6.1\"".to_string()));
+        assert_eq!(pin(Some("0.6.1"), None), Some("0.6.1".to_string()));
     }
 
     #[test]

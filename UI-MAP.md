@@ -69,7 +69,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 图片附件 | ✅ | 剪贴板粘贴 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
-| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询 |
+| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读；头部 access-mode 徽章 = dspo/manox#968 的 app 伴随，读子会话自己 session 通道的声明行）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询 |
 | 退役（plan mode 整体删除，随上游 manox PR #946） | — | `/plan` 为上游内置 skill（规划契约一次性注入，见 §Slash 行）；plan 裁决 = 单问题 ask（`detail`=plan 正文，经 wire 的 `ChatInputRequest.message` 折入），批准/修订即普通答案；rail 的 plan 节（`UpdatePlan`）仍消费执行进度，快照经 sidecar 持久化、compaction 后可恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
@@ -170,9 +170,9 @@ macOS menu bar built by `build_app_menus()`: `Steer` (About/Settings…/Quit), `
 
 #### AboutWindow
 
-Centered, non-resizable floating dialog (440×440, `WINDOW_WIDTH` / `WINDOW_HEIGHT` in `about.rs`) opened by the `OpenAbout` action from the native menu bar / tray path, single-instance (an existing About window is activated instead of a second one). Two direct children of the root (`about-window`, `p_4`, `justify_between`): `details` (`about-details`) — the app icon, the headline `Steer <app version> (<build type>)`, and then one muted-label provenance row per pinned stack, `steer desktop` (this repository's short commit), `manox runtime` (the dspo/manox runtime commit), `gpui-component` and `gpui-pre` (the lockfile pins, rendered as their version literal or `owner/repo @ rev` when resolved from git); a row whose value the build could not resolve is absent — and `about-buttons` (`about-buttons`) with the OK / Copy pair (`about-ok` closes, `about-copy` writes the clipboard block and closes). Escape closes the window. Rows come from `provenance_rows()`; the clipboard block is the runtime's `version::structured_about()` followed by one `label: value` line per row.
+Centered, non-resizable floating dialog (440×440, `WINDOW_WIDTH` / `WINDOW_HEIGHT` in `about.rs`) opened by the `OpenAbout` action from the native menu bar / tray path, single-instance (an existing About window is activated instead of a second one). Two direct children of the root (`about-window`, `p_4`, `justify_between`): `details` (`about-details`) — the app icon, the headline `Steer.app v<version>+<short commit>` (this repository's commit, abbreviated; a build without git metadata stays on the bare version), and the provenance **axis** (`about-axis`): one continuous vertical rule with every label/value row hung on it — the label column right-aligns onto the rule, the value column left-aligns off it (both columns re-pin their text alignment against the dialog root's centered text). The rows, in display order: `OS` (platform + the chip's marketing name via `sysctlbyname`, e.g. `macOS · Apple M2 Max`; arch fallback where the platform has no brand string), `rustc` (the compiling toolchain's self-report, captured by `build.rs` from the rustc cargo drives), `manox runtime` (the dspo/manox runtime short commit), `gpui-component` and `gpui-pre` (the lockfile pins, the bare version literal or `owner/repo @ rev` when resolved from git); a row whose value the build could not resolve is absent. The other child is `about-buttons` (`about-buttons`) with the OK / Copy pair (`about-ok` closes, `about-copy` writes the clipboard block and closes). Escape closes the window. Rows come from `provenance_rows()`; the clipboard block is the runtime's `version::structured_about()`, then the full app commit (`steer-app commit: …`, the headline only abbreviates it), then one `label: value` line per row.
 
-> Source: `crates/steer-app/src/about.rs`
+> Source: `crates/steer-app/src/about.rs`, `crates/steer-app/src/pins.rs`, `crates/steer-app/build.rs`
 
 #### SystemTray
 
@@ -861,7 +861,11 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 
 单个子代理运行的只读钻取页签（装配层宿主页签，`ToolTab` kind `subagent`）。页签**身份**是 run id
 （`subagent:{run_id}`——`open_tab` 按 id 去重，topic 撞车的两个 run 各得各的转录；身份拿 topic 当，
-第二次打开只会聚焦第一个 run 的旧面板）；页签标签是任务的 **topic**（不再是裸 run id）；面板头部是状态指示 + mono topic 文本——状态在运行期实时派生自
+第二次打开只会聚焦第一个 run 的旧面板）；页签标签是任务的 **topic**（不再是裸 run id）；面板头部是状态指示 + **access-mode 徽章**（dspo/manox#968 的 app 伴随：子 journal 的开局
+`access_mode_change` 行折进子会话自己的 session 通道，泵读该叶的 `access_mode` 并缓存——纯观察面，
+声明未落地就不显示，绝不猜测运行未见证的档位；文案复用 `access-mode-{sandbox,full-access}-title`
+与 composer 开关同名同义，full-access 染 danger；network 半边在该协议代无持久行亦无 wire 面，
+故徽章只载 mode）+ mono topic 文本——状态在运行期实时派生自
 `background_work`（run 在列即 Running），终态沿用打开时的快照。正文是与主列**同一套会话管线**
 渲染的微型会话：子会话（run id 即子会话 id，swarm 不变量）在打开时经 multiplexer attach，
 面板持有自己的 `ConversationState`，观察 `AhpStore` 并排水**该子会话自己的事件桶**

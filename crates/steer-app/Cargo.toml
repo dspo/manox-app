@@ -47,6 +47,10 @@ objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
 
+# The About window's OS row reads the chip's marketing name via
+# sysctlbyname("machdep.cpu.brand_string") — one syscall, no subprocess.
+libc.workspace = true
+
 [dev-dependencies]
 # gpui test-support — the headless layout check in src/about.rs measures the
 # About dialog's rendered bounds, matching what the other UI crates do.

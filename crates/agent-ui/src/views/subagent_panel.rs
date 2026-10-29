@@ -5,14 +5,16 @@
 //! session is attached on open and the panel inherits the child's whole
 //! fold the first time it lands — a child that streamed long before the
 //! tab opened (or one that already settled) shows its full transcript, not
-//! just the deltas that follow the open. A worker
+//! just the deltas that follow the open. The header carries the child's
+//! effective access mode as a read-only badge (the child journal's opening
+//! declaration folded through its own session channel). A worker
 //! chat is read-only (the host stamps the interactivity; the footer states
 //! it).
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, ScrollHandle, Subscription, Window, px};
-use gpui_component::{ActiveTheme as _, ElementExt as _, h_flex, v_flex};
-use manox_agent::ToolCallStatus;
+use gpui_component::{ActiveTheme as _, ElementExt as _, Theme, h_flex, v_flex};
+use manox_agent::{ToolCallStatus, thread::AccessMode};
 use steer_agent_chat_ui::ahp_store::AhpStore;
 use steer_agent_chat_ui::transcript::ProjectEnv;
 
@@ -40,6 +42,11 @@ pub struct SubagentPanel {
     /// run id names the child session — the swarm invariant). `None` when
     /// no store is bound; the panel then stays in its settling phase.
     source: Option<(Entity<AhpStore>, String)>,
+    /// The child's effective access mode as last pumped (the header badge
+    /// renders this): cached so a store notification that lands only a mode
+    /// flip — no chat row — still repaints the header. `None` until the
+    /// child journal's opening declaration is folded.
+    access_mode: Option<AccessMode>,
     _subscription: Option<Subscription>,
     scroll_handle: ScrollHandle,
     stick_to_bottom: bool,
@@ -78,6 +85,7 @@ impl SubagentPanel {
                 role,
                 host,
                 source,
+                access_mode: None,
                 _subscription: subscription,
                 scroll_handle: ScrollHandle::new(),
                 stick_to_bottom: true,
@@ -94,6 +102,12 @@ impl SubagentPanel {
         let role = self.role.clone();
         let recipient = manox_agent::MessageAuthor::Agent(self.label.clone());
         let host = self.host.clone();
+        let access_mode = {
+            let view = store.read(cx);
+            crate::ahp_store::leaf(&view.book, sid)
+                .access_mode()
+                .and_then(AccessMode::from_wire)
+        };
         let env = ProjectEnv {
             role: &role,
             recipient: &recipient,
@@ -115,11 +129,12 @@ impl SubagentPanel {
             };
             conv.reconcile(nodes, &env, cx)
         });
-        // A notification the projection answered with no row change has
-        // nothing to repaint.
-        if !change.any() {
+        // A notification the projection answered with no row change AND no
+        // mode flip has nothing to repaint.
+        if !change.any() && access_mode == self.access_mode {
             return;
         }
+        self.access_mode = access_mode;
         // Re-arm tail-follow only while the viewport is still near the
         // bottom; a reader scrolled into history must not be yanked back.
         let off = self.scroll_handle.offset().y;
@@ -166,6 +181,38 @@ enum Phase {
     Empty,
 }
 
+/// The header's access-mode badge (#968 companion): the child's effective
+/// authority made observable on the sub-agent page. Labels are the same
+/// chrome copy the composer's access switch uses, so both faces name a tier
+/// identically; a widened run is tinted danger because it is the one state
+/// a reader must not miss. Read-only — the badge observes, the composer
+/// switches.
+fn access_mode_badge(mode: AccessMode, theme: &Theme) -> AnyElement {
+    let (key, fg, bg) = match mode {
+        AccessMode::Sandbox => (
+            "access-mode-sandbox-title",
+            theme.muted_foreground,
+            theme.muted,
+        ),
+        AccessMode::FullAccess => (
+            "access-mode-full-access-title",
+            theme.danger,
+            theme.danger.opacity(0.08),
+        ),
+    };
+    h_flex()
+        .flex_shrink_0()
+        .debug_selector(|| "subagent-access-badge".to_string())
+        .px_1p5()
+        .py(px(1.))
+        .rounded(px(4.))
+        .bg(bg)
+        .text_size(px(10.))
+        .text_color(fg)
+        .child(i18n::t(key))
+        .into_any_element()
+}
+
 #[cfg(all(test, feature = "test-support"))]
 impl SubagentPanel {
     /// Run one pump tick against the bound store. Test-support diagnostic:
@@ -189,6 +236,12 @@ impl SubagentPanel {
             })
             .collect()
     }
+
+    /// The cached header-badge mode. Test-support diagnostic: production
+    /// renders from the same cached value.
+    pub(crate) fn diagnostic_access_mode(&self) -> Option<AccessMode> {
+        self.access_mode
+    }
 }
 
 impl Render for SubagentPanel {
@@ -210,6 +263,7 @@ impl Render for SubagentPanel {
             .border_b_1()
             .border_color(theme.border)
             .child(status_indicator(status, theme))
+            .children(self.access_mode.map(|mode| access_mode_badge(mode, theme)))
             .child(
                 gpui::div()
                     .flex_1()
@@ -303,10 +357,41 @@ impl Render for SubagentPanel {
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, VisualTestContext, px, size};
     use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
 
     const RUN: &str = "sub-ns-7";
+
+    /// Seat the child session's folded config with an access mode — the
+    /// shape a child journal's opening declaration folds into.
+    fn seed_child_mode(store: &mut AhpStore, mode: &str) {
+        use ahp_types::state::{SessionConfigSchema, SessionConfigState};
+        let mut session: ahp_types::state::SessionState =
+            serde_json::from_value(serde_json::json!({
+                "resource": steer_agent_chat_ui::ahp_store::session_uri(RUN),
+                "provider": "glm",
+                "title": "the child session",
+                "status": 0,
+                "modifiedAt": "",
+                "lifecycle": "creating",
+                "activeClients": [],
+                "chats": [],
+            }))
+            .expect("the child session state parses");
+        let mut config = SessionConfigState {
+            schema: SessionConfigSchema {
+                r#type: "object".to_string(),
+                properties: Default::default(),
+                required: None,
+            },
+            values: Default::default(),
+        };
+        config
+            .values
+            .insert("accessMode".to_string(), serde_json::json!(mode));
+        session.config = Some(config);
+        store.book.sessions.insert(RUN.to_string(), session);
+    }
 
     fn child_chat(text: &str) -> ahp_types::state::ChatState {
         serde_json::from_value(serde_json::json!({
@@ -512,6 +597,81 @@ mod tests {
             joined.matches("raced").count(),
             1,
             "the rebuild replaces the raced row instead of doubling it: {joined}"
+        );
+    }
+
+    /// #968 companion: the child journal's opening access-mode declaration
+    /// folds through the child's own session channel and the header badge
+    /// surfaces it, following a mid-run flip. A run whose declaration has
+    /// not landed shows no badge — the panel never guesses a mode the run
+    /// is not witnessed under.
+    #[gpui::test]
+    fn the_header_badge_carries_the_childs_declared_mode(cx: &mut TestAppContext) {
+        let store = cx.new(|_| AhpStore::detached());
+        let panel = test_panel(store.clone(), cx);
+        assert!(
+            panel
+                .read_with(cx, |p, _| p.diagnostic_access_mode())
+                .is_none(),
+            "no declaration, no badge"
+        );
+
+        store.update(cx, |s, _| seed_child_mode(s, "sandbox"));
+        panel.update(cx, |p, cx| p.diagnostic_pump(cx));
+        assert_eq!(
+            panel.read_with(cx, |p, _| p.diagnostic_access_mode()),
+            Some(AccessMode::Sandbox),
+            "the opening declaration seats the badge"
+        );
+
+        store.update(cx, |s, _| seed_child_mode(s, "full-access"));
+        panel.update(cx, |p, cx| p.diagnostic_pump(cx));
+        assert_eq!(
+            panel.read_with(cx, |p, _| p.diagnostic_access_mode()),
+            Some(AccessMode::FullAccess),
+            "a propagated flip moves the badge"
+        );
+    }
+
+    /// The badge is not just cached state: the rendered header carries it.
+    #[gpui::test]
+    fn the_rendered_header_carries_the_badge(cx: &mut TestAppContext) {
+        // open_window builds its root view from `&mut Context<V> -> V`, so an
+        // already-built panel entity mounts through this one-element wrapper.
+        struct PanelRoot(Entity<SubagentPanel>);
+        impl Render for PanelRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                self.0.clone().into_any_element()
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let store = cx.new(|_| AhpStore::detached());
+        store.update(cx, |s, _| seed_child_mode(s, "full-access"));
+        let panel = test_panel(store.clone(), cx);
+        panel.update(cx, |p, cx| p.diagnostic_pump(cx));
+
+        let root = PanelRoot(panel);
+        let window = cx.open_window(size(px(480.), px(360.)), |_, _| root);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let badge = cx
+            .debug_bounds("subagent-access-badge")
+            .expect("the access-mode badge must render in the header");
+        assert!(
+            badge.size.width > px(20.),
+            "the badge carries the mode label: {badge:?}"
+        );
+        // The panel fills the window, so its header strip — spinner, badge,
+        // topic — hugs the top edge.
+        assert!(
+            badge.top() < px(60.),
+            "the badge renders in the header region: {badge:?}"
         );
     }
 }
