@@ -4,6 +4,13 @@
 //! (`agent_ui::chrome_assembly`) in the window. Agent logic lives in the
 //! `agent` crate; UI lives in the `agent-ui` crate.
 
+// The dev binary's `__eh_frame` exceeds ld's 16MB compact-unwind encoding
+// cap, so every non-release link prints ld's "performance of exception
+// handling might be affected" note. Nothing app-side shrinks the section
+// (the size is the debug build's own weight), and the note is noise in the
+// gate builds, so the `linker_messages` lint stays off for this bin.
+#![allow(linker_messages)]
+
 use gpui::{App, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
 use gpui::{WindowBounds, WindowOptions};
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
