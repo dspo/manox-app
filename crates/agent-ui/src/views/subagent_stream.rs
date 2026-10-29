@@ -32,6 +32,15 @@ use steer_agent_chat_ui::views::subagents::CAPTAIN_LABEL;
 
 use crate::i18n;
 
+/// The header's identity, resolved by the opener from the background-work
+/// row: the agent type, the task topic, and the definition's declared
+/// display color (`None` keeps the header uncolored).
+pub(crate) struct StreamHeader {
+    pub label: String,
+    pub activity: Option<String>,
+    pub color: Option<gpui::Hsla>,
+}
+
 /// The sub-agent stream page: one child chat rendered read-only.
 pub struct SubagentStreamView {
     /// The child's chat id (== the run id == the child session id).
@@ -62,14 +71,17 @@ pub struct SubagentStreamView {
 impl SubagentStreamView {
     pub(crate) fn new(
         chat_id: String,
-        label: String,
-        activity: Option<String>,
-        color: Option<gpui::Hsla>,
+        header: StreamHeader,
         store: Entity<AhpStore>,
         host: ChatHostHandle,
         role: String,
         cx: &mut gpui::App,
     ) -> Entity<Self> {
+        let StreamHeader {
+            label,
+            activity,
+            color,
+        } = header;
         let recipient = manox_agent::MessageAuthor::Agent(label.clone());
         let conversation = cx.new(|_| ConversationState::new(recipient));
         let view = cx.new(|cx| {
