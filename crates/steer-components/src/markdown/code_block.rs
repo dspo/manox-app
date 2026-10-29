@@ -151,7 +151,7 @@ fn code_block_node(body: &str, lang: Option<&str>, fence: &str) -> Option<Markdo
 /// Which face a shaped block shows. The flat panel is one face of every
 /// shape; the second faces live in [`diff_view`].
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BlockView {
+pub(crate) enum BlockView {
     Flat,
     Split,
     Merge,
@@ -164,14 +164,7 @@ pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut Ap
     let Some(payload) = node.data::<Arc<EditorPayload>>() else {
         return div().child(node.as_text().to_string()).into_any_element();
     };
-    // Cloned up front: the render borrows `cx` again below (keyed state, the
-    // copy control), and the held borrow would collide with them.
-    let theme = Theme::global(cx).clone();
     let key = block_key(node);
-
-    // Fenced values can carry trailing blank lines; the gutter counts and the
-    // painted code agree on the trimmed form, and copy takes it too.
-    let code: SharedString = payload.code.trim_end_matches('\n').to_owned().into();
 
     // The view starts at the shape's second face when there is one (that is
     // the face the fence was written for) and never drifts from the reader's
@@ -181,7 +174,60 @@ pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut Ap
         FenceShape::Merge(_) => BlockView::Merge,
         FenceShape::Code => BlockView::Flat,
     });
-    let showing = *view.read(cx);
+
+    // Fenced values can carry trailing blank lines; the gutter counts and the
+    // painted code agree on the trimmed form, and copy takes it too.
+    let code: SharedString = payload.code.trim_end_matches('\n').to_owned().into();
+    panel(
+        PanelShape::Shaped {
+            shape: &payload.shape,
+            view: &view,
+        },
+        &code,
+        payload.lang.as_deref(),
+        key,
+        window,
+        cx,
+    )
+}
+
+/// Which body a panel paints, and whether the header carries the face
+/// toggle. `Shaped` is a fence's own panel — shape decides the default face
+/// and the toggle appears; `Flat` is a bare code panel with no second face
+/// (the diagram blocks' source faces compose through this).
+pub(crate) enum PanelShape<'a> {
+    Shaped {
+        shape: &'a FenceShape,
+        view: &'a gpui::Entity<BlockView>,
+    },
+    Flat,
+}
+
+/// One editor panel for arbitrary code — the same artifact a fence renders,
+/// callable from outside the markdown pipeline (the diagram blocks' source
+/// faces). `key` namespaces the panel's element ids and keyed state; pass a
+/// key distinct from the caller's other uses.
+pub(crate) fn panel(
+    shaped: PanelShape<'_>,
+    code: &str,
+    lang: Option<&str>,
+    key: u64,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    // Cloned up front: the render borrows `cx` again below (keyed state, the
+    // copy control), and the held borrow would collide with them.
+    let theme = Theme::global(cx).clone();
+    let code: SharedString = code.trim_end_matches('\n').to_owned().into();
+
+    let (shape, view): (Option<&FenceShape>, Option<&gpui::Entity<BlockView>>) = match shaped {
+        PanelShape::Shaped { shape, view } => (Some(shape), Some(view)),
+        PanelShape::Flat => (None, None),
+    };
+    let showing = match (shape, view) {
+        (Some(_), Some(view)) => *view.read(cx),
+        _ => BlockView::Flat,
+    };
 
     let header = h_flex()
         .items_center()
@@ -193,27 +239,21 @@ pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut Ap
         .border_b_1()
         .border_color(theme.border)
         .bg(theme.secondary.opacity(0.4))
-        .children(
-            payload
-                .lang
-                .as_ref()
-                .filter(|lang| !lang.is_empty())
-                .map(|lang| {
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(lang.clone())
-                }),
-        )
+        .children(lang.filter(|lang| !lang.is_empty()).map(|lang| {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .min_w_0()
+                .overflow_hidden()
+                .child(SharedString::from(lang.to_owned()))
+        }))
         // The spacer keeps the controls at the trailing edge on blocks with
         // nothing to show on the left.
         .child(div().flex_1())
-        .children(
-            (payload.shape != FenceShape::Code)
-                .then(|| view_toggle(key, &payload.shape, showing, view.clone())),
-        )
+        .children(shape.and_then(|shape| {
+            let view = view?;
+            (*shape != FenceShape::Code).then(|| view_toggle(key, shape, showing, view.clone()))
+        }))
         .child(copy_control(key, code.to_string(), window, cx));
 
     // The body scrolls vertically as one region — whichever face it carries —
@@ -224,16 +264,19 @@ pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut Ap
         .read(cx)
         .clone();
     let palette = DispatchPalette::new(&theme);
-    let body = match (&payload.shape, showing) {
-        (FenceShape::Diff(parts), BlockView::Split) => diff_view::split_body(parts, key, &theme),
-        (FenceShape::Merge(segments), BlockView::Merge) => {
+    let body = match (shape, showing) {
+        (Some(FenceShape::Diff(parts)), BlockView::Split) => {
+            diff_view::split_body(parts, key, &theme)
+        }
+        (Some(FenceShape::Merge(segments)), BlockView::Merge) => {
             diff_view::merge_body(segments, key, &theme)
         }
-        _ => flat_body(&code, payload.lang.as_deref(), &palette, &theme, key),
+        _ => flat_body(&code, lang, &palette, &theme, key),
     };
 
     div()
         .id(("code-block", key))
+        .debug_selector(|| "markdown-editor-code".into())
         .w_full()
         .min_w_0()
         .relative()

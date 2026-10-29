@@ -32,13 +32,21 @@
 //! this view's own is the composition — text plus runs, not row divs —
 //! because in-band selection is the feature.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{ElementId, HighlightStyle, Hsla, IntoElement, RenderOnce, StyleRefinement, px, rems};
+use gpui::{
+    ElementId, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    RenderOnce, StyleRefinement, Styled as _, div, px, rems,
+};
 use gpui_base::{TextView, TextViewStyle};
 use gpui_component::{ActiveTheme as _, Theme};
 use steer_components::code_surface::{self, CodeRow};
+use steer_components::markdown::CodeHighlighter;
 
 /// A line's role in the editor surface — the shared row model's kind.
 pub use code_surface::CodeRowKind as CodeLineKind;
@@ -476,14 +484,58 @@ impl RenderOnce for CodeView {
         // code block reuses its highlights only while the highlighter is the
         // same Arc — a fresh closure would re-highlight every frame.
         let runs = Arc::new(runs);
-        TextView::markdown(self.id, fenced(&text))
+        let view = TextView::markdown(self.id.clone(), fenced(&text))
             .style(code_style(theme))
             // The core tiles runs over the parsed code; clamping at the
             // boundary keeps that tiling valid (see `text_runs`).
-            .code_block_highlighter(move |block| {
-                crate::text_runs::clamp_runs(runs.as_ref().clone(), &block.code())
-            })
+            .shared_code_block_highlighter(highlighter_for(&self.id, &text, Arc::clone(&runs)));
+        // The selector is the selection contract's test anchor: a drag over
+        // `code-view-body` must select the document the reader sees.
+        div()
+            .id(self.id.clone())
+            .debug_selector(|| "code-view-body".into())
+            .w_full()
+            .child(view)
     }
+}
+
+thread_local! {
+    /// The per-body highlighter Arcs, keyed by (view id, composed text). This
+    /// view is `RenderOnce` — rebuilt every frame — and upstream reuses a
+    /// code block's highlights only while the highlighter Arc is identical:
+    /// a fresh closure per frame arms the selection-preserving reflow every
+    /// frame, and the document ends up holding no selection at all (a drag
+    /// paints nothing and copies nothing). A frozen body hashes to the same
+    /// key and shares one Arc across frames; a body whose text changed gets
+    /// a new Arc, which is the reflow that content change wants anyway.
+    static HIGHLIGHTERS: RefCell<HashMap<(ElementId, u64), CodeHighlighter>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The highlighter Arc for one body, shared across frames while the text
+/// stands still.
+fn highlighter_for(
+    id: &ElementId,
+    text: &str,
+    runs: Arc<Vec<(Range<usize>, HighlightStyle)>>,
+) -> CodeHighlighter {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let key = (id.clone(), hasher.finish());
+    HIGHLIGHTERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > 1024 {
+            cache.clear();
+        }
+        cache
+            .entry(key)
+            .or_insert_with(move || {
+                Arc::new(move |block: &gpui_base::text::CodeBlock| {
+                    crate::text_runs::clamp_runs(runs.as_ref().clone(), &block.code())
+                }) as CodeHighlighter
+            })
+            .clone()
+    })
 }
 
 /// Fence `text` as one `ansi` code block — the same shape the app's terminal

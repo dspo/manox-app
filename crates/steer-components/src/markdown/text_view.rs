@@ -213,10 +213,7 @@ pub fn message_document(
     let style = message_style(theme);
     svg_block::with_fence_blocks(
         TextView::new(state).style(style.clone()).text_size(body),
-        svg_block::FaceStyle {
-            style,
-            size: Some(body),
-        },
+        Some(body),
         cx,
     )
 }
@@ -233,10 +230,7 @@ pub fn reasoning_document(
     let style = message_style(theme).with_foreground(theme.muted_foreground);
     svg_block::with_fence_blocks(
         TextView::new(state).style(style.clone()).text_size(body),
-        svg_block::FaceStyle {
-            style,
-            size: Some(body),
-        },
+        Some(body),
         cx,
     )
 }
@@ -251,10 +245,7 @@ pub fn static_document(
 ) -> TextView {
     svg_block::with_fence_blocks(
         TextView::markdown(id, linkify_markdown(text.into().as_ref())).style(chrome_style(theme)),
-        svg_block::FaceStyle {
-            style: chrome_style(theme),
-            size: None,
-        },
+        None,
         cx,
     )
 }

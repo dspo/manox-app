@@ -4,7 +4,7 @@
 //! permission needed.
 //!
 //! Run with `GALLERY_SHOT=/tmp/tools.png GALLERY_PAGE=text cargo test -p
-//! ai-elements --test visual` (pages: `text`, `shell`, `ask`, `code`, `code2`; default
+//! ai-elements --test visual` (pages: `text`, `shell`, `ask`, `code`, `code2`, `svg`; default
 //! `text`). The samples mirror the gallery example's demo content — leaner,
 //! one card per family shape, enough to judge the design's pixels. macOS
 //! only: the readback is a Metal texture; the harness's imports exist only
@@ -53,6 +53,7 @@ fn main() {
         Ok("ask") => PageKind::Ask,
         Ok("code") => PageKind::Code,
         Ok("code2") => PageKind::CodeMore,
+        Ok("svg") => PageKind::Svg,
         _ => PageKind::Text,
     };
 
@@ -96,6 +97,7 @@ fn main() {
         Ask,
         Code,
         CodeMore,
+        Svg,
     }
 
     struct Page {
@@ -113,7 +115,7 @@ fn main() {
             let card_count = match kind {
                 PageKind::Text => 4,
                 PageKind::Shell => 3,
-                PageKind::Ask | PageKind::Code | PageKind::CodeMore => 0,
+                PageKind::Ask | PageKind::Code | PageKind::CodeMore | PageKind::Svg => 0,
             };
             for _ in 0..card_count {
                 let state = cx.new(|cx| ToolState::new(cx).with_status(ToolStatus::Succeeded, cx));
@@ -329,6 +331,25 @@ fn main() {
                             tall_rust_block(),
                         ),
                     ]
+                }
+                PageKind::Svg => {
+                    let theme = Theme::global(cx);
+                    vec![static_document(
+                        "svg-page",
+                        concat!(
+                            "An ```svg fence renders as its diagram — the image is the ",
+                            "default face (the corner toggle flips to the source panel, ",
+                            "pinned by the flip test in steer-components):\n\n",
+                            "```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"240\" height=\"120\">",
+                            "<rect width=\"240\" height=\"120\" fill=\"#3b82f6\"/>",
+                            "<circle cx=\"60\" cy=\"60\" r=\"40\" fill=\"#fbbf24\"/>",
+                            "<rect x=\"140\" y=\"20\" width=\"80\" height=\"80\" fill=\"#10b981\"/>",
+                            "</svg>\n```\n"
+                        ),
+                        theme,
+                        cx,
+                    )
+                    .into_any_element()]
                 }
                 PageKind::CodeMore => {
                     let doc = |id: &'static str, source: String| {

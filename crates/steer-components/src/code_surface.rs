@@ -19,6 +19,13 @@
 //! Edit bodies and the markdown split view) and [`parse_conflict_segments`]
 //! (the markdown merge view). A new code surface starts here, not with a
 //! second row model.
+//!
+//! The contract the two sides pin (tests in `steer-components`
+//! `code_block_panel` and ai-elements `code_view_selection`): conversation
+//! prose renders effect-first — editor panels, split diffs, merge views,
+//! diagrams as images — while tool OUTPUT stays literal — in-band, unified,
+//! drag-select copyable, highlighting kept. Sharing this module must never
+//! drag the tool surfaces into the panel faces or the reverse.
 
 use gpui::{
     Hsla, InteractiveElement as _, ParentElement as _, Pixels, SharedString,
