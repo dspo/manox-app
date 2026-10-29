@@ -78,6 +78,9 @@ impl Workspace {
             row.id.clone(),
             kind,
             Some(topic),
+            row.color
+                .as_deref()
+                .and_then(steer_agent_chat_ui::views::subagents::agent_color),
             store.clone(),
             host,
             role,

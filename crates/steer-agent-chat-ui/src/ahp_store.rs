@@ -58,9 +58,12 @@ pub struct SubagentWorkRow {
     /// The run's task label (the wire's `label` — the topic a row shows).
     pub label: String,
     /// The run's task label (`_meta.latestActivity`), when the host carried
-    /// one (the current projection sends no `_meta`; kept for older
-    /// snapshots).
+    /// one.
     pub activity: Option<String>,
+    /// The definition's display color (`_meta.agentColor`, the Claude
+    /// vocabulary: `red|blue|green|yellow|purple|orange|pink|cyan`), when the
+    /// host carried one. Display data — surfaces fall back on anything else.
+    pub color: Option<String>,
     /// ISO 8601 stamp the run started at — the elapsed's origin.
     pub started_at: String,
 }
@@ -3017,6 +3020,13 @@ impl<'a> LeafView<'a> {
                         .and_then(Value::as_str)
                         .filter(|activity| !activity.is_empty())
                         .map(str::to_string),
+                    color: sub
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("agentColor"))
+                        .and_then(Value::as_str)
+                        .filter(|color| !color.is_empty())
+                        .map(str::to_string),
                     started_at: sub.started_at.clone(),
                 }),
                 _ => None,
@@ -3399,7 +3409,11 @@ mod tests {
                     "id": "sub-ns-3",
                     "label": "Explore",
                     "startedAt": "2026-01-01T00:00:00Z",
-                    "_meta": { "agentType": "Explore", "latestActivity": "fix the login redirect" },
+                    "_meta": {
+                        "agentType": "Explore",
+                        "latestActivity": "fix the login redirect",
+                        "agentColor": "pink"
+                    },
                     "chat": "ahp-chat:/sub-ns-3",
                 },
                 {
@@ -3424,6 +3438,7 @@ mod tests {
                     kind: Some("Explore".into()),
                     label: "Explore".into(),
                     activity: Some("fix the login redirect".into()),
+                    color: Some("pink".into()),
                     started_at: "2026-01-01T00:00:00Z".into(),
                 },
                 SubagentWorkRow {
@@ -3431,6 +3446,7 @@ mod tests {
                     kind: None,
                     label: "Sailor".into(),
                     activity: None,
+                    color: None,
                     started_at: "2026-01-01T00:00:00Z".into(),
                 },
             ]

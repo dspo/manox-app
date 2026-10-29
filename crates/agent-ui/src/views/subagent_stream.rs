@@ -44,6 +44,9 @@ pub struct SubagentStreamView {
     /// The run's task label — the header's topic (the wire's background-work
     /// label stands in when no separate activity was carried).
     activity: Option<String>,
+    /// The definition's declared display color, resolved at open time from
+    /// the background-work row; `None` keeps the header uncolored.
+    color: Option<gpui::Hsla>,
     /// The chat fold's client (the process-singleton AHP store). Held strong:
     /// the page's observer is its live leg, and the singleton outlives pages.
     store: Entity<AhpStore>,
@@ -61,6 +64,7 @@ impl SubagentStreamView {
         chat_id: String,
         label: String,
         activity: Option<String>,
+        color: Option<gpui::Hsla>,
         store: Entity<AhpStore>,
         host: ChatHostHandle,
         role: String,
@@ -75,6 +79,7 @@ impl SubagentStreamView {
                 label,
                 role,
                 activity,
+                color,
                 store,
                 host,
                 conversation,
@@ -232,12 +237,31 @@ impl Render for SubagentStreamView {
                 gpui::div()
                     .flex_1()
                     .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
                     .truncate()
-                    .whitespace_nowrap()
-                    .text_sm()
-                    .font_family(theme.mono_font_family.clone())
-                    .text_color(theme.foreground)
-                    .child(title),
+                    .child(
+                        gpui::div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.foreground)
+                            .child(title),
+                    )
+                    // The identity dot from the definition's declared color —
+                    // the same mark the Captain strip's row carries, so the
+                    // page and its row read as one run.
+                    .children(self.color.map(|color| {
+                        gpui::div()
+                            .flex_shrink_0()
+                            .size_2()
+                            .rounded_full()
+                            .bg(color)
+                    })),
             );
 
         let items: Vec<AnyElement> = self

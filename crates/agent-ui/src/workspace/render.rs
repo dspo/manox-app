@@ -667,7 +667,9 @@ impl Workspace {
         use steer_agent_chat_ui::conversation::LiveActivity;
         use steer_agent_chat_ui::model_tag::ModelTag;
         use steer_agent_chat_ui::text::one_line;
-        use steer_agent_chat_ui::views::subagents::{CAPTAIN_LABEL, task_display_title};
+        use steer_agent_chat_ui::views::subagents::{
+            CAPTAIN_LABEL, agent_color, task_display_title,
+        };
 
         let subagents = self.running_subagents(cx);
         if !running && subagents.is_empty() {
@@ -837,6 +839,16 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.secondary.opacity(0.4)))
                 .child(spinner())
+                // The definition's declared display color, when it named one:
+                // the identity dot that lets sibling runs be told apart at a
+                // glance. An unknown name renders uncolored, like no color.
+                .children(work.color.as_deref().and_then(agent_color).map(|color| {
+                    gpui::div()
+                        .flex_shrink_0()
+                        .size_2()
+                        .rounded_full()
+                        .bg(color)
+                }))
                 .child(status)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.open_subagent_stream(&work, cx);
