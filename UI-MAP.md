@@ -25,7 +25,7 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
 | 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
-| Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4）。注入面挂载期间侧栏被 pin：强制可见、titlebar 隐藏开关惰性化——导航是该模式唯一出口，不可被藏到身后 |
+| Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4）。注入面挂载期间侧栏被 pin：强制可见、titlebar 隐藏开关惰性化——导航是该模式唯一出口，不可被藏到身后；pin 只借用可见性，卸载时还原用户原先的折叠状态 |
 
 共享状态层不变：`agent-ui`（multiplexer / client_store / browser_host / dispatch / 侧栏投影 /
 slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与消息管线）、`terminal-ui`、
@@ -959,8 +959,9 @@ No title bar and no page header of its own — the window toolbar is the drag fa
 tree already says where you are; the detail never repeats it. Each page is the upstream
 `setting::Settings` shell with a zero-width sidebar AND a hidden header
 (`header_style(div().hidden())`), so only the group stack renders, riding a centered 880px
-column with a 16px top inset inside the main card. Pages (`settings::build_page`, read-only
-rosters cached on the view at creation):
+column with a 16px top inset inside the main card. Pages (`settings::build_page`; the read-only
+rosters are read against the foreground thread's cwd at view creation and re-read on entry when
+that cwd changed, plus on a plugin install/uninstall):
 
 - 常规 — the language dropdown (Fill card).
 - 模型 — the provider list with a drill-down detail (`views/settings/models.rs`); the endpoint
@@ -995,15 +996,17 @@ rosters cached on the view at creation):
   delegation entries — grouped into 文件与搜索 / 终端与运行时 / 网络与浏览器 / 交互与计划 /
   任务与目标 / 宿主与协作, each a 3-column grid of checked disabled checkboxes, with a note
   that the list is preset-only) / 系统提示词 (the REAL prompt — `AgentDef.system_prompt`;
-  the Captain preview stays empty (a muted stand-in) until a foreground thread gives the
-  runtime builder a cwd;
-  Captain's via the runtime-rendered `captain_prompt_builder` base — with an 编辑 / 预览
-  segmented toggle in its label row). 预览 renders the markdown (`static_document`); 编辑 hosts
-  a read-only `gpui_component::input::Editor` (monospace, line numbers, soft wrap, its own
-  scrolling) fed from the view's owned `EditorState`, reset to 预览 on every drill-down; the
-  mode is a view choice, not a write. Every write control is present but DISABLED: footer
-  保存/删除 inert, 取消 and the top back control walk back. Roster data cached at view creation
-  (registry scans never run per frame).
+  Captain's via the runtime-rendered `captain_prompt_builder` base, built against the foreground
+  thread's cwd — with an 编辑 / 预览 segmented toggle in its label row). 预览 renders the markdown
+  (`static_document`); 编辑 hosts a read-only `gpui_component::input::Editor` (monospace, line
+  numbers, soft wrap, its own scrolling) fed from the view's owned `EditorState`, reset to 预览 on
+  every drill-down; the mode is a view choice, not a write. Every write control is present but
+  DISABLED: footer 保存/删除 inert, 取消 and the top back control walk back. An empty prompt shows a muted
+  stand-in instead of the body and hides the toggle: the Captain's is empty only until a
+  foreground thread exists (`agents-prompt-empty-session`), any other agent simply declares no
+  prompt (`agents-prompt-none`). Roster data is read against the foreground cwd at view creation
+  and re-read on entry when that cwd changed, plus when a plugin lands (registry scans never run
+  per frame).
 - 插件 — the plugin manager view.
 - Skills — read-only roster from `manox_agent::skill::list_skill_records()` (user + plugin, with
   origin badges).

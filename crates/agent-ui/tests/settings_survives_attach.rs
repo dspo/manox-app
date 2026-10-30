@@ -1,7 +1,10 @@
 //! FULL-WIRING regression for the attach tail's mode guard. A stale async
 //! attach must not steal the main column back from a mode the user entered
 //! while it was in flight — Settings (the injected nav's only exit is the
-//! sidebar; flipping past it strands the nav) and external sessions alike.
+//! sidebar; flipping past it strands the nav), an external session and the
+//! sub-agent page alike (the four-mode predicate is pinned by `attach.rs`'s
+//! own unit test; this binary drives the Settings and external-session legs
+//! through the real assembly).
 //!
 //! Own test binary: the harness initializes process-global singletons (see
 //! `tests/common/mod.rs` — one `#[gpui::test]` per binary).
@@ -9,7 +12,6 @@
 
 mod common;
 
-use agent_ui::Workspace;
 use common::{FakePty, init_harness, landing_thread, open_assembly};
 use gpui::{AppContext as _, TestAppContext};
 
@@ -18,7 +20,12 @@ async fn a_stale_attach_never_flips_past_settings_or_an_external_session(cx: &mu
     init_harness(cx);
     let (window, shell, ws) = open_assembly(cx);
 
-    // Settings owns the column and the injected nav owns the sidebar.
+    // The user keeps the sidebar collapsed; Settings must not cost them that
+    // preference — the pin is a loan, not an override.
+    cx.update(|cx| shell.update(cx, |shell, _| shell.show_sidebar = false));
+
+    // Settings owns the column and the injected nav owns the sidebar. The
+    // pin forces the sidebar visible for the duration.
     cx.update_window(window.into(), |_, window, cx| {
         ws.update(cx, |ws, cx| ws.enter_settings(window, cx));
     })
@@ -32,6 +39,18 @@ async fn a_stale_attach_never_flips_past_settings_or_an_external_session(cx: &mu
         shell.read_with(cx, |s, _| s.sidebar_surface.is_some()),
         "the settings nav owns the sidebar slot"
     );
+    assert!(
+        shell.read_with(cx, |s, _| s.show_sidebar),
+        "the pin forces the sidebar up while the nav is mounted"
+    );
+
+    // ⌘, inside Settings re-enters (a second mount while pinned): it must not
+    // overwrite the remembered preference the first mount recorded.
+    cx.update_window(window.into(), |_, window, cx| {
+        ws.update(cx, |ws, cx| ws.enter_settings(window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
 
     // The stale attach tail lands: Settings must survive it (the pre-fix
     // regression flipped the column back and stranded the nav).
@@ -51,7 +70,8 @@ async fn a_stale_attach_never_flips_past_settings_or_an_external_session(cx: &mu
         "the settings nav keeps the sidebar slot"
     );
 
-    // Leave Settings; the pin releases and the session list is back.
+    // Leave Settings; the pin releases, the session list is back, and the
+    // collapsed preference is restored.
     cx.update_window(window.into(), |_, window, cx| {
         ws.update(cx, |ws, cx| ws.leave_settings(window, cx));
     })
@@ -64,6 +84,10 @@ async fn a_stale_attach_never_flips_past_settings_or_an_external_session(cx: &mu
     assert!(
         shell.read_with(cx, |s, _| s.sidebar_surface.is_none()),
         "the session list owns the sidebar slot again"
+    );
+    assert!(
+        !shell.read_with(cx, |s, _| s.show_sidebar),
+        "the pin restores the user's collapsed sidebar"
     );
 
     // Same guard for an external session: foregrounded, then a stale attach

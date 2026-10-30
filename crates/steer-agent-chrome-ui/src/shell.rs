@@ -306,7 +306,7 @@ pub struct Shell {
     /// sidebar stays up — the host cannot strand the injected nav behind a
     /// collapsed sidebar.
     pub(crate) sidebar_pinned: bool,
-    /// \`show_sidebar\` as the user had it before the pin forced it visible;
+    /// `show_sidebar` as the user had it before the pin forced it visible;
     /// restored when the injected surface unmounts.
     pub(crate) sidebar_pinned_was: bool,
     /// The right pane (the shell view; tab content is decoupled through
@@ -347,10 +347,14 @@ impl Shell {
     pub fn set_sidebar_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
         // The injected surface is the mode's only exit, so mounting it pins
         // the sidebar open and remembers the user's preference; unmounting
-        // releases the pin and restores it.
+        // releases the pin and restores it. A second mount while pinned (the
+        // host re-entering its own mode) must not record the forced `true` as
+        // the preference.
         match surface {
             Some(_) => {
-                self.sidebar_pinned_was = self.show_sidebar;
+                if !self.sidebar_pinned {
+                    self.sidebar_pinned_was = self.show_sidebar;
+                }
                 self.sidebar_pinned = true;
                 self.show_sidebar = true;
             }

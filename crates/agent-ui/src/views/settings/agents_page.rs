@@ -17,8 +17,8 @@ use steer_components::markdown::static_document;
 
 use crate::i18n;
 use crate::views::settings::{
-    ACCENT_NAMES, AgentRow, PromptView, SettingsView, accent_by_name, accent_color, tile_avatar,
-    tile_badge,
+    ACCENT_NAMES, AgentRow, PromptView, SettingsView, accent_by_name, accent_color,
+    fallback_accent, tile_avatar, tile_badge,
 };
 
 /// Row metrics, ZCode-flavored.
@@ -176,8 +176,9 @@ fn detail(
     } else {
         row.system_prompt.clone()
     };
-    // The Captain preview stays empty until a foreground thread gives the
-    // builder a cwd — say so instead of painting a blank box.
+    // An empty body is either the Captain before any foreground thread gave
+    // the builder a cwd, or a definition that declares no prompt at all —
+    // say which instead of painting a blank box.
     let prompt_empty = body.is_empty();
     let model = row
         .model
@@ -235,7 +236,7 @@ fn detail(
     let declared = row.color.as_deref().map(str::to_ascii_lowercase);
     let mut dots = div().flex().gap_2().items_center();
     for name in ACCENT_NAMES {
-        let dot = accent_by_name(name).expect("palette names resolve");
+        let dot = accent_by_name(name).unwrap_or_else(fallback_accent);
         let selected = declared.as_deref() == Some(name);
         dots = dots.child(
             div()
@@ -319,8 +320,10 @@ fn detail(
                 .child(i18n::t("agents-tools-preset-note")),
         );
 
-    // 系统提示词 source/rendered toggle — a view choice, not a write.
-    let prompt_toggle = prompt_toggle(view, theme, cx);
+    // 系统提示词 source/rendered toggle — a view choice, not a write. With
+    // no prompt to show there is nothing to switch between, so the control
+    // stays off the label row.
+    let prompt_toggle = (!prompt_empty).then(|| prompt_toggle(view, theme, cx));
 
     // Back to the list: the top-left control; the footer 取消 mirrors it.
     let back_entity = cx.entity();
@@ -401,7 +404,7 @@ fn detail(
     // editor on demand. The editor owns its own scrolling; the preview sits
     // in the same fixed-height box so switching never jumps the page.
     let prompt_body = if prompt_empty {
-        return_prompt_placeholder(theme)
+        prompt_placeholder(theme, is_lead)
     } else {
         match view.prompt_view {
             PromptView::Preview => {
@@ -436,7 +439,7 @@ fn detail(
         .overflow_y_scroll()
         .child(
             // Top row: back to the list on the left, the scope face (作用域 ·
-            // 用户) on the right — both display only.
+            // the def's origin group) on the right — both display only.
             div()
                 .flex()
                 .items_center()
@@ -514,7 +517,7 @@ fn detail(
                                 .items_center()
                                 .justify_between()
                                 .child(label(theme, "agents-field-prompt"))
-                                .child(prompt_toggle),
+                                .children(prompt_toggle),
                         )
                         .child(
                             div()
@@ -535,10 +538,20 @@ fn detail(
         .into_any_element()
 }
 
-/// The muted stand-in for a Captain prompt that cannot be built yet (no
-/// foreground thread — the builder would claim a working directory no
-/// session has).
-fn return_prompt_placeholder(theme: &Theme) -> AnyElement {
+/// The stand-in key for an empty system prompt: the Captain's preview is
+/// empty only until a foreground thread exists (the builder would otherwise
+/// claim a working directory no session has); any other agent simply
+/// declares no prompt.
+fn prompt_placeholder_key(is_lead: bool) -> &'static str {
+    if is_lead {
+        "agents-prompt-empty-session"
+    } else {
+        "agents-prompt-none"
+    }
+}
+
+/// The muted stand-in for an empty system prompt.
+fn prompt_placeholder(theme: &Theme, is_lead: bool) -> AnyElement {
     div()
         .h_full()
         .w_full()
@@ -550,7 +563,7 @@ fn return_prompt_placeholder(theme: &Theme) -> AnyElement {
             div()
                 .text_size(px(13.))
                 .text_color(theme.muted_foreground)
-                .child(i18n::t("agents-prompt-empty")),
+                .child(i18n::t(prompt_placeholder_key(is_lead))),
         )
         .into_any_element()
 }
@@ -648,7 +661,7 @@ fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::preset_tool_groups;
+    use super::{preset_tool_groups, prompt_placeholder_key};
 
     /// The grid claims to list the whole preset set once; a duplicate, a
     /// dropped core tool or an empty group would silently misstate what the
@@ -681,5 +694,14 @@ mod tests {
             !unique.contains("Skill"),
             "skills are not preset tools (they belong to the skill fold)"
         );
+    }
+
+    /// An empty prompt has two reasons and two messages: the Captain's
+    /// preview waits for a foreground thread, every other agent declares no
+    /// prompt — one shared line would misdescribe one of them.
+    #[test]
+    fn empty_prompt_placeholder_names_the_reason() {
+        assert_eq!(prompt_placeholder_key(true), "agents-prompt-empty-session");
+        assert_eq!(prompt_placeholder_key(false), "agents-prompt-none");
     }
 }

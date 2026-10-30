@@ -1,15 +1,15 @@
-//! Settings overlay — a single-window alternative to opening a separate
-//! preferences window. Mounts inline over the Workspace via
-//! `Workspace::view_mode` as the upstream `gpui_component::setting::Settings`
-//! shell: it owns the sidebar (search input + grouped, collapsible menu), the
-//! resizable split and the page stack. Each page stacks its groups; simple
-//! rows bind onto this view's state through `SettingField` value/setter
-//! closures, while the larger panels ride along as opaque element items.
+//! Settings — the split layout's state and page factory. The chrome sidebar
+//! carries the nav (`views::settings_nav`); this view renders the selected
+//! page's detail as the upstream `gpui_component::setting::Settings` shell
+//! with a zero-width sidebar and a hidden header, so only the page's group
+//! stack paints. Each page stacks its groups; simple rows bind onto this
+//! view's state through `SettingField` value/setter closures, while the
+//! larger panels ride along as opaque element items.
 
 use std::collections::HashSet;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, Hsla, SharedString, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, Hsla, SharedString, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _,
@@ -57,11 +57,16 @@ pub struct SettingsView {
     /// on toggle (`manox_agent::settings::set_mcp_disabled`). Seeded from settings
     /// at view creation.
     pub(crate) mcp_disabled: HashSet<String>,
-    /// Read-only Agents roster (lead + preset + discovered defs), collected
-    /// once at view creation — the registry scan must not run per frame.
+    /// Read-only Agents roster (lead + preset + discovered defs). Read at view
+    /// creation and re-read when the foreground project changes or a plugin
+    /// lands — the registry scan must not run per frame.
     agents: Vec<AgentRow>,
-    /// Read-only Skills roster, collected once at view creation.
+    /// Read-only Skills roster, refreshed with the Agents roster.
     skills: Vec<SkillRow>,
+    /// The foreground thread's cwd the rosters above were read against
+    /// (`None` before any chrome frame populated it). Drives the refresh: the
+    /// project layer only changes when this does.
+    rosters_cwd: Option<std::path::PathBuf>,
     /// The Captain's live system prompt, rendered through the runtime's own
     /// builder (template + skill fold) against the foreground thread's cwd.
     /// Empty until a foreground thread exists — the preview never invents a
@@ -104,7 +109,13 @@ const ACCENT_NAMES: [&str; 8] = [
 /// definition that declares a color takes precedence (see
 /// [`accent_by_name`]).
 pub(super) fn accent_color(ix: usize) -> Hsla {
-    accent_by_name(ACCENT_NAMES[ix % ACCENT_NAMES.len()]).expect("palette names resolve")
+    accent_by_name(ACCENT_NAMES[ix % ACCENT_NAMES.len()]).unwrap_or_else(fallback_accent)
+}
+
+/// The neutral tint for anything outside the color vocabulary — a render
+/// path never panics on a name.
+pub(super) fn fallback_accent() -> Hsla {
+    Hsla::from(rgb(0x888888))
 }
 
 /// The 36px rounded-square avatar every roster tile carries, tinted with the
@@ -158,11 +169,13 @@ impl EventEmitter<SettingsEvent> for SettingsView {}
 impl SettingsView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let plugins = cx.new(|cx| PluginManagerView::new(window, cx));
-        // Plugin installs and uninstalls change the declared MCP server set;
-        // the cached list follows those changes instead of re-reading the
-        // config files on every render.
+        // Plugin installs and uninstalls change the declared MCP server set
+        // AND the agent/skill rosters those plugins ship; both cached lists
+        // follow the change instead of re-reading the config files on every
+        // render.
         let _plugins_sub = cx.observe(&plugins, |this, _, cx| {
             this.mcp_servers = mcp_server_names();
+            this.reload_rosters();
             cx.notify();
         });
         let prompt_editor = cx.new(|cx| {
@@ -170,6 +183,10 @@ impl SettingsView {
             state.set_readonly(true, cx);
             state
         });
+        // Read the rosters against the foreground thread's cwd: a bundled
+        // app's `current_dir()` is `/`, so the process cwd is never the
+        // session's project layer.
+        let rosters_cwd = crate::chrome_assembly::foreground_cwd();
         Self {
             plugins,
             _plugins_sub,
@@ -179,9 +196,10 @@ impl SettingsView {
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
             vscode_panel: vscode::VsCodePanelState::load(window, cx),
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
-            agents: collect_agents(foreground_cwd().as_deref()),
+            agents: collect_agents(rosters_cwd.as_deref()),
             skills: collect_skills(),
-            captain_prompt: foreground_cwd()
+            rosters_cwd: rosters_cwd.clone(),
+            captain_prompt: rosters_cwd
                 .as_deref()
                 .map(captain_prompt_preview)
                 .unwrap_or_default(),
@@ -191,12 +209,24 @@ impl SettingsView {
         }
     }
 
-    /// Re-read the rosters and the Captain prompt off the current foreground
-    /// cwd. Captured at view creation AND refreshed on every entry: the
-    /// cached scan must never keep the last foreground project's agent
-    /// layer across a project switch.
+    /// Re-read the rosters and the Captain prompt when the foreground project
+    /// changed. The scan is UI-thread work (registry + skills + the runtime's
+    /// prompt builder), so an unchanged cwd is a no-op — re-entering Settings
+    /// in the same project must not pay for it again.
     pub(crate) fn refresh_rosters(&mut self) {
-        let cwd = foreground_cwd();
+        let cwd = crate::chrome_assembly::foreground_cwd();
+        if cwd == self.rosters_cwd {
+            return;
+        }
+        self.rosters_cwd = cwd;
+        self.reload_rosters();
+    }
+
+    /// Re-read the rosters against the cwd already recorded — a plugin
+    /// install/uninstall changes the agent and skill layers without touching
+    /// the foreground project.
+    pub(crate) fn reload_rosters(&mut self) {
+        let cwd = self.rosters_cwd.clone();
         self.agents = collect_agents(cwd.as_deref());
         self.skills = collect_skills();
         self.captain_prompt = cwd
@@ -315,16 +345,23 @@ impl SettingsView {
         // state it needs is passed by reference — reaching back through the
         // entity handle here would panic (no reads on an updated entity).
         // The leaf is resolved to its page so the factory can match on the
-        // same vocabulary the nav tree renders; an out-of-range index is a
-        // caller bug and panics here rather than rendering a wrong page.
-        let leaf = nav_leaves()
+        // same vocabulary the nav tree renders. `select_settings_page` clamps
+        // its input, so an out-of-range index here means something bypassed
+        // the setter: degrade to the first page instead of crashing a render.
+        let page_id = nav_leaves()
             .into_iter()
             .find(|(leaf_ix, _)| *leaf_ix == ix)
-            .map(|(_, leaf)| leaf)
-            .unwrap_or_else(|| panic!("settings page index {ix} outside the nav tree"));
+            .map(|(_, leaf)| leaf.page)
+            .unwrap_or_else(|| {
+                debug_assert!(false, "settings page index {ix} outside the nav tree");
+                nav_leaves()
+                    .first()
+                    .map(|(_, leaf)| leaf.page)
+                    .unwrap_or(Page::General)
+            });
         let page = build_page(
             &view,
-            leaf.page,
+            page_id,
             &self.mcp_servers,
             &self.mcp_disabled,
             &self.skills,
@@ -333,14 +370,11 @@ impl SettingsView {
         let hidden_header = div().hidden().style().clone();
         // Component state keyed by the PAGE, not the index: a NAV reorder
         // must not carry one page's scroll state onto another.
-        Settings::new(SharedString::from(format!(
-            "settings-detail-{:?}",
-            leaf.page
-        )))
-        .sidebar_width(px(0.))
-        .sidebar_size_range(px(0.)..px(0.))
-        .page(page.header_style(&hidden_header))
-        .into_any_element()
+        Settings::new(SharedString::from(format!("settings-detail-{page_id:?}")))
+            .sidebar_width(px(0.))
+            .sidebar_size_range(px(0.)..px(0.))
+            .page(page.header_style(&hidden_header))
+            .into_any_element()
     }
 }
 
@@ -703,12 +737,6 @@ struct SkillRow {
     description: String,
     /// Fluent key of the origin badge.
     origin: &'static str,
-}
-
-/// The foreground thread's cwd at read time (`None` before any chrome
-/// frame has populated it).
-fn foreground_cwd() -> Option<std::path::PathBuf> {
-    crate::chrome_assembly::foreground_cwd()
 }
 
 /// The Agents roster, read-only: the lead agent first, then the registry the
