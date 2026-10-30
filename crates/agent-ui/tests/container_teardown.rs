@@ -193,6 +193,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         wait_child_dead(cx, cat2),
         "the death reclaimed the container's CLI-tab child"
     );
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     wait_until(
         cx,
         "the death reclaimed the container's browser route",
@@ -202,6 +203,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
             })
         },
     );
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let _ = route2;
 
     // ── the /exit browser leg is container-scoped ───────────────────────

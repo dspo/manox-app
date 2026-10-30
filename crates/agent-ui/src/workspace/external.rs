@@ -213,24 +213,18 @@ impl Workspace {
     /// for the `/exit` scope — the leg only reports what it would close).
     /// Empty on Linux/FreeBSD, where the integrated browser is compiled out
     /// and no tab ever registers.
+    /// The browser tab ids a container owns (the teardown's count/read face
+    /// for the `/exit` scope — the leg only reports what it would close).
+    /// Compiled out with the integrated browser: every caller is a browser
+    /// leg, so on Linux/FreeBSD the read (and the legs) do not exist.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub(crate) fn container_browser_tabs(
         &self,
         container: &str,
     ) -> Vec<manox_agent::thread_engine::BrowserTabId> {
-        // The integrated browser is compiled out on Linux/FreeBSD — the read
-        // degrades to "no tab ever registers" instead of naming the gated
-        // module (the doc's own contract).
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        {
-            crate::browser_host::WorkspaceBrowserHost::concrete()
-                .map(|host| host.tabs_owned_by(container))
-                .unwrap_or_default()
-        }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            let _ = container;
-            Vec::new()
-        }
+        crate::browser_host::WorkspaceBrowserHost::concrete()
+            .map(|host| host.tabs_owned_by(container))
+            .unwrap_or_default()
     }
 
     /// Diagnostic: register a browser-tab ROUTE owned by `container` without
@@ -256,8 +250,12 @@ impl Workspace {
     }
 
     /// Diagnostic: the browser tab ids a container owns (the ownership
-    /// regression read).
-    #[cfg(feature = "test-support")]
+    /// regression read). Browser-platforms only — the read itself compiles
+    /// out with the integrated browser.
+    #[cfg(all(
+        feature = "test-support",
+        not(any(target_os = "linux", target_os = "freebsd"))
+    ))]
     pub fn diagnostic_container_browser_tabs(
         &self,
         container: &str,
