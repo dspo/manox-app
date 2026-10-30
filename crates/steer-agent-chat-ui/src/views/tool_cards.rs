@@ -223,7 +223,7 @@ fn card_args(family: CardFamily, entry: &ToolCallItem, theme: &Theme) -> AnyElem
         .min_w_0()
         .truncate()
         .font_family(mono)
-        .text_xs()
+        .text_size(crate::views::message::MESSAGE_BODY_SIZE)
         .text_color(muted)
         .child(summary)
         .into_any_element()

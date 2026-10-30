@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, DispatchPhase, ElementId, Entity, FontStyle, FontWeight, HighlightStyle, Hsla,
-    IntoElement, MouseMoveEvent, Pixels, SharedString, Styled as _, WeakEntity, Window, hsla, rems,
+    IntoElement, MouseMoveEvent, Pixels, SharedString, StyleRefinement, Styled as _, WeakEntity,
+    Window, hsla, px, relative, rems,
 };
 use gpui_base::TextSelection;
 use gpui_base::TextView;
@@ -39,7 +40,7 @@ use crate::markdown::svg_block;
 // --- theme bridge ------------------------------------------------------------
 
 /// The app document style shared by every surface: theme colors, tight
-/// paragraph gap, per-surface heading ladder. Code blocks keep the old
+/// paragraph gap, the pinned heading ladder. Code blocks keep the old
 /// transparent-on-message look (hairline via `border`, no filled panel).
 fn base_style(theme: &Theme) -> gpui_base::TextViewStyle {
     gpui_base::TextViewStyle::default()
@@ -55,19 +56,35 @@ fn base_style(theme: &Theme) -> gpui_base::TextViewStyle {
             background_color: Some(theme.accent.opacity(0.6)),
             ..Default::default()
         })
+        .with_heading(heading_refinement)
         .with_dark(theme.is_dark())
 }
 
-/// Heading typography rides upstream's relative ladder (0.8.0 heading
-/// hierarchy: size, line height and section spacing all scale with the
-/// inherited font size, weight uniform semibold, H6 muted) — the app pins no
-/// heading overrides of its own, so the ladder tracks the body size each
-/// mount sets.
+/// The heading ladder every markdown surface renders: uniform Medium weight,
+/// fixed pixel sizes independent of the body size each mount sets. H4 and
+/// below sit at the transcript body size (13px — `MESSAGE_BODY_SIZE` in
+/// steer-agent-chat-ui, mirrored here across the crate boundary), so below H3
+/// hierarchy rests on weight and H6's muted color alone. Section gaps and
+/// line heights stay upstream's: relative to each heading's own size.
+fn heading_refinement(level: u8) -> StyleRefinement {
+    let size = match level {
+        1 => px(18.),
+        2 => px(16.),
+        3 => px(14.),
+        _ => px(13.),
+    };
+    StyleRefinement::default()
+        .text_size(size)
+        .font_weight(FontWeight::MEDIUM)
+}
+
+/// The message-tier document style; headings per the pinned ladder in
+/// [`base_style`].
 pub fn message_style(theme: &Theme) -> gpui_base::TextViewStyle {
     base_style(theme)
 }
 
-/// Heading typography as in [`message_style`]: upstream's ladder, unpinned.
+/// Heading typography as in [`message_style`]: the same pinned ladder.
 pub fn chrome_style(theme: &Theme) -> gpui_base::TextViewStyle {
     base_style(theme)
 }
@@ -77,6 +94,11 @@ pub fn chrome_style(theme: &Theme) -> gpui_base::TextViewStyle {
 pub fn panel_style(theme: &Theme) -> gpui_base::TextViewStyle {
     message_style(theme).with_code_background(hsla(0., 0., 0., 0.))
 }
+
+/// The transcript body's line-box ratio. Pinned on the message and reasoning
+/// documents — not the conversation column — so the headers and card rows
+/// around them keep the shell's compact 1.28 density.
+const BODY_LINE_HEIGHT: f32 = 1.5;
 
 /// End a text-selection drag as soon as the pointer moves with no button
 /// held. Register once per frame from a view that paints whenever selectable
@@ -211,7 +233,10 @@ pub fn message_document(
 ) -> TextView {
     let style = message_style(theme);
     svg_block::with_diagram_blocks(
-        TextView::new(state).style(style.clone()).text_size(body),
+        TextView::new(state)
+            .style(style.clone())
+            .text_size(body)
+            .line_height(relative(BODY_LINE_HEIGHT)),
         svg_block::FaceStyle {
             style,
             size: Some(body),
@@ -231,7 +256,10 @@ pub fn reasoning_document(
 ) -> TextView {
     let style = message_style(theme).with_foreground(theme.muted_foreground);
     svg_block::with_diagram_blocks(
-        TextView::new(state).style(style.clone()).text_size(body),
+        TextView::new(state)
+            .style(style.clone())
+            .text_size(body)
+            .line_height(relative(BODY_LINE_HEIGHT)),
         svg_block::FaceStyle {
             style,
             size: Some(body),

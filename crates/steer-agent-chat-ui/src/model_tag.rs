@@ -121,7 +121,7 @@ impl ModelTag {
             .flex()
             .items_baseline()
             .min_w_0()
-            .text_sm()
+            .text_size(crate::views::message::MESSAGE_BODY_SIZE)
             .children(self.spans(theme).into_iter().map(|(text, color)| {
                 gpui::div()
                     .min_w_0()

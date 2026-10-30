@@ -1084,6 +1084,7 @@ fn render_user(
         .accent(accent)
         .header(
             gpui::div()
+                .text_size(MESSAGE_BODY_SIZE)
                 .text_color(theme.muted_foreground)
                 .child(header_el),
         )
@@ -1707,7 +1708,7 @@ pub fn render_thinking(
     if stats.thinking_rounds > 0 {
         header = header.meta(
             gpui::div()
-                .text_sm()
+                .text_size(MESSAGE_BODY_SIZE)
                 .text_color(theme.muted_foreground)
                 .child(format!(
                     "{}×{}",
@@ -1719,7 +1720,7 @@ pub fn render_thinking(
     for (name, count) in &stats.tools {
         header = header.meta(
             gpui::div()
-                .text_sm()
+                .text_size(MESSAGE_BODY_SIZE)
                 .font_family(theme.mono_font_family.clone())
                 .text_color(theme.muted_foreground)
                 .child(format!("{name}×{count}")),
@@ -1730,7 +1731,7 @@ pub fn render_thinking(
     {
         header = header.meta(
             gpui::div()
-                .text_sm()
+                .text_size(MESSAGE_BODY_SIZE)
                 .text_color(theme.muted_foreground)
                 .child(i18n::t_duration(secs as i64)),
         );
@@ -1738,15 +1739,21 @@ pub fn render_thinking(
     if stats.failed > 0 {
         header = header.meta(
             gpui::div()
-                .text_sm()
+                .text_size(MESSAGE_BODY_SIZE)
                 .text_color(theme.danger)
                 .child(i18n::t_count("activity-failed", stats.failed as i64).to_string()),
         );
     }
     if stats.pending_approval > 0 {
-        header = header.meta(gpui::div().text_sm().text_color(theme.warning).child(
-            i18n::t_count("activity-awaiting-approval", stats.pending_approval as i64).to_string(),
-        ));
+        header = header.meta(
+            gpui::div()
+                .text_size(MESSAGE_BODY_SIZE)
+                .text_color(theme.warning)
+                .child(
+                    i18n::t_count("activity-awaiting-approval", stats.pending_approval as i64)
+                        .to_string(),
+                ),
+        );
     }
     chain = chain.header(header);
 
