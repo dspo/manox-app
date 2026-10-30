@@ -23,8 +23,8 @@ use crate::code_surface::{
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Hsla, IntoElement, ParentElement as _, Pixels, SharedString, Styled as _, div,
-    relative,
+    AnyElement, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    SharedString, Styled as _, div, relative,
 };
 use gpui_component::{Theme, h_flex, v_flex};
 
@@ -128,7 +128,10 @@ pub(crate) fn split_body(parts: &[DiffPart], key: u64, theme: &Theme) -> AnyElem
         }
     }
 
-    scroll_root(key, theme).child(body).into_any_element()
+    scroll_root(key, theme)
+        .debug_selector(|| "markdown-editor-split".into())
+        .child(body)
+        .into_any_element()
 }
 
 /// The merge face of a parsed conflict fence: column groups per conflict,
@@ -167,7 +170,10 @@ pub(crate) fn merge_body(segments: &[MergeSegment], key: u64, theme: &Theme) -> 
         }
     }
 
-    scroll_root(key, theme).child(body).into_any_element()
+    scroll_root(key, theme)
+        .debug_selector(|| "markdown-editor-merge".into())
+        .child(body)
+        .into_any_element()
 }
 
 // --- layout -----------------------------------------------------------------
@@ -320,4 +326,60 @@ fn conflict_columns(
         group = group.child(column);
     }
     group
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code_surface::CodeRow;
+
+    /// Rows pair within change runs in feed order; the shorter side pads with
+    /// empty cells; context lands on both sides carrying its own (drifted)
+    /// numbers.
+    #[test]
+    fn runs_pair_in_feed_order_with_padding() {
+        let rows = vec![
+            CodeRow::context(1, "keep"),
+            CodeRow::removed(2, "gone one"),
+            CodeRow::removed(3, "gone two"),
+            CodeRow::added(2, "here"),
+            // The trailing context: the old side spent two deletions more
+            // than the new side, so its numbers have drifted.
+            CodeRow {
+                old: Some(4),
+                new: Some(3),
+                kind: CodeRowKind::Context,
+                text: "tail".into(),
+            },
+        ];
+        let paired = split_rows(&rows);
+        assert_eq!(paired.len(), 4);
+        assert!(!paired[0].changed);
+        assert_eq!(paired[0].old.as_ref().unwrap().1, "keep");
+        assert_eq!(paired[0].new.as_ref().unwrap().1, "keep");
+        assert!(paired[1].changed);
+        assert_eq!(paired[1].old.as_ref().unwrap().1, "gone one");
+        assert_eq!(paired[1].new.as_ref().unwrap().1, "here");
+        assert!(
+            paired[2].new.is_none(),
+            "the deletion run pads the new side"
+        );
+        assert_eq!(paired[2].old.as_ref().unwrap().1, "gone two");
+        assert_eq!(
+            paired[3].old.as_ref().unwrap().0,
+            4,
+            "the trailing context reads the old side's own number"
+        );
+        assert_eq!(paired[3].new.as_ref().unwrap().0, 3, "and the new side's");
+    }
+
+    /// Additions without deletions (a pure insertion run) pad the old side.
+    #[test]
+    fn an_insertion_run_pads_the_old_side() {
+        let rows = vec![CodeRow::added(7, "fresh"), CodeRow::added(8, "more")];
+        let paired = split_rows(&rows);
+        assert_eq!(paired.len(), 2);
+        assert!(paired.iter().all(|row| row.old.is_none()));
+        assert_eq!(paired[0].new.as_ref().unwrap().0, 7);
+    }
 }

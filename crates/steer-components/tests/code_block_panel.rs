@@ -28,12 +28,15 @@ impl Render for Host {
 }
 
 #[gpui::test]
-async fn a_diff_fence_renders_the_editor_panel(cx: &mut TestAppContext) {
+async fn a_diff_fence_renders_the_split_face(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     let window = cx.add_window(|window, cx| {
         let host = cx.new(|cx| {
             let mut doc = steer_components::markdown::ChatDocument::default();
-            doc.sync("```diff\n-let gone = 1;\n+let here = 2;\n```", cx);
+            doc.sync(
+                "```diff\n@@ -1,2 +1,2 @@\n-let gone = 1;\n+let here = 2;\n```",
+                cx,
+            );
             Host {
                 doc: doc.state().expect("synced").clone(),
             }
@@ -49,6 +52,53 @@ async fn a_diff_fence_renders_the_editor_panel(cx: &mut TestAppContext) {
     assert!(
         visual.debug_bounds("markdown-editor-code").is_some(),
         "a conversation fence renders as the editor panel"
+    );
+    assert!(
+        visual.debug_bounds("markdown-editor-split").is_some(),
+        "a well-formed diff fence opens the split face"
+    );
+    assert!(
+        visual.debug_bounds("markdown-editor-merge").is_none(),
+        "the merge face belongs to conflict fences, not diffs"
+    );
+}
+
+/// The header's face toggle flips split to flat and back — the round trip
+/// the reader uses when the two columns feel too wide.
+#[gpui::test]
+async fn the_diff_face_toggle_round_trips(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let window = cx.add_window(|window, cx| {
+        let host = cx.new(|cx| {
+            let mut doc = steer_components::markdown::ChatDocument::default();
+            doc.sync(
+                "```diff\n@@ -1,2 +1,2 @@\n-let gone = 1;\n+let here = 2;\n```",
+                cx,
+            );
+            Host {
+                doc: doc.state().expect("synced").clone(),
+            }
+        });
+        Root::new(host, window, cx)
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    assert!(visual.debug_bounds("markdown-editor-split").is_some());
+
+    let toggle = visual
+        .debug_bounds("markdown-editor-code-view-toggle")
+        .expect("the face toggle paints on shaped panels");
+    let center = gpui::point(toggle.center().x, toggle.center().y);
+    visual.simulate_click(center, gpui::Modifiers::default());
+    visual.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    assert!(
+        visual.debug_bounds("markdown-editor-split").is_none(),
+        "the toggle returns the panel to the flat face"
     );
 }
 

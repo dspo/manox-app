@@ -386,11 +386,15 @@ fn svg_element(
 /// for it. Two documents can hand out the same range, but the element ids these
 /// key into are namespaced by the document that renders them.
 pub(crate) fn block_key(node: &MarkdownNode) -> u64 {
+    // Only the range's START hashes: the end grows with every streamed
+    // delta, and these keys name window-keyed state (scroll offset, face
+    // flips, copy flashes) that must survive appends instead of resetting
+    // the panel each delta. Within one document no two blocks share a start.
     let mut hasher = std::hash::DefaultHasher::new();
     match node.source_range() {
-        Some(range) => range.hash(&mut hasher),
-        // A custom node always carries its span; a block without one still keys
-        // apart by its source instead of collapsing onto key zero.
+        Some(range) => range.start.hash(&mut hasher),
+        // A custom node always carries its span; a block without one still
+        // keys apart by its source instead of collapsing onto key zero.
         None => node.as_markdown().len().hash(&mut hasher),
     }
     hasher.finish()

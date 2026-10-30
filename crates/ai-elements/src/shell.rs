@@ -277,6 +277,10 @@ impl RenderOnce for ShellView {
         let mono = theme.mono_font_family.clone();
         let (doc, runs) = self.compose(&theme);
         let runs = Arc::new(runs);
+        // The highlighter Arc is cached per (view id, text) exactly like
+        // CodeView's — a fresh closure per frame arms upstream's
+        // selection-preserving reflow every frame and the body never holds
+        // a selection.
 
         let duration = self.duration.map(format_tool_duration).unwrap_or_default();
 
@@ -315,20 +319,20 @@ impl RenderOnce for ShellView {
             theme.is_dark(),
         );
 
+        let doc_id = gpui::ElementId::Name(SharedString::from(format!("{:?}-doc", self.id)));
         v_flex()
             .w_full()
             .min_w_0()
             .py_2()
             .child(
-                TextView::markdown((self.id.clone(), "doc"), fenced(&doc))
+                TextView::markdown(doc_id.clone(), fenced(&doc))
                     .style(style)
-                    // The core tiles runs over the parsed code; clamping at
-                    // the boundary keeps that tiling valid even if the parse
-                    // and the runs were produced against slightly different
-                    // text (see `text_runs`).
-                    .code_block_highlighter(move |block| {
-                        crate::text_runs::clamp_runs(runs.as_ref().clone(), &block.code())
-                    }),
+                    .shared_code_block_highlighter(crate::code_view::highlighter_for(
+                        &doc_id,
+                        &doc,
+                        crate::code_view::theme_stamp(&theme),
+                        Arc::clone(&runs),
+                    )),
             )
             .child(
                 h_flex()

@@ -781,6 +781,7 @@ fn copy_chip(
     state: &Entity<ToolState>,
     cx: &App,
 ) -> impl IntoElement {
+    let id = id.into();
     let theme = cx.theme();
     let (muted, background, success, mono) = (
         theme.muted_foreground,
@@ -797,7 +798,9 @@ fn copy_chip(
     };
     let state_for_click = state.clone();
     div()
-        .id(id)
+        .id(id.clone())
+        // The combined id's Display already reads "{card}-{label}".
+        .debug_selector(move || format!("{id}"))
         .flex()
         .items_center()
         .gap_1()

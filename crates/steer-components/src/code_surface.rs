@@ -349,13 +349,25 @@ impl PartialHunk {
         } else if let Some(text) = line.strip_prefix('+') {
             self.new_run.push((self.new, SharedString::from(text)));
             self.new += 1;
+        } else if line.is_empty() {
+            // A bare empty line: Git writes the leading space, tools that
+            // trim trailing whitespace strip it — still context.
+            self.settle_runs();
+            self.rows.push(CodeRow {
+                old: Some(self.old),
+                new: Some(self.new),
+                kind: CodeRowKind::Context,
+                text: SharedString::default(),
+            });
+            self.old += 1;
+            self.new += 1;
         } else {
-            // Context — with Git's leading space, or stripped by a tool that
-            // trims trailing whitespace — settles both runs. Its two numbers
-            // have drifted apart across the hunk's changes, so it carries
-            // both explicitly. A `\ No newline` note is presentation, not a
-            // line: dropped here. A line with no legal prefix at all
-            // degrades to a gutter-less row and flags the fence.
+            // Context — with Git's leading space — settles both runs. Its
+            // two numbers have drifted apart across the hunk's changes, so
+            // it carries both explicitly. A `\ No newline` note is
+            // presentation, not a line: dropped here. A line with no legal
+            // prefix at all degrades to a gutter-less row and flags the
+            // fence.
             let context = match (line.strip_prefix(' '), line.strip_prefix('\\')) {
                 (Some(text), _) => Some(text),
                 (None, Some(_)) => None,

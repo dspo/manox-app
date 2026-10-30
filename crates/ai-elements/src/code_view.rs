@@ -489,7 +489,12 @@ impl RenderOnce for CodeView {
             .style(code_style(theme))
             // The core tiles runs over the parsed code; clamping at the
             // boundary keeps that tiling valid (see `text_runs`).
-            .shared_code_block_highlighter(highlighter_for(&self.id, &text, Arc::clone(&runs)));
+            .shared_code_block_highlighter(highlighter_for(
+                &self.id,
+                &text,
+                theme_stamp(theme),
+                Arc::clone(&runs),
+            ));
         // The selector is the selection contract's test anchor: a drag over
         // `code-view-body` must select the document the reader sees.
         div()
@@ -498,6 +503,25 @@ impl RenderOnce for CodeView {
             .w_full()
             .child(view)
     }
+}
+
+/// A hash of the theme hues the composed runs depend on — part of the
+/// highlighter cache key, so a theme swap with unchanged text re-keys the
+/// cache instead of repainting old-theme colors.
+pub(crate) fn theme_stamp(theme: &Theme) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for hue in [
+        theme.foreground,
+        theme.muted_foreground,
+        theme.accent,
+        theme.info,
+        theme.warning,
+        theme.danger,
+        theme.success,
+    ] {
+        hue.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 thread_local! {
@@ -515,13 +539,15 @@ thread_local! {
 
 /// The highlighter Arc for one body, shared across frames while the text
 /// stands still.
-fn highlighter_for(
+pub(crate) fn highlighter_for(
     id: &ElementId,
     text: &str,
+    theme_stamp: u64,
     runs: Arc<Vec<(Range<usize>, HighlightStyle)>>,
 ) -> CodeHighlighter {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
+    theme_stamp.hash(&mut hasher);
     let key = (id.clone(), hasher.finish());
     HIGHLIGHTERS.with(|cache| {
         let mut cache = cache.borrow_mut();

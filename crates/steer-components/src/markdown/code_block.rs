@@ -43,6 +43,7 @@
 
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Axis, ClipboardItem, ElementId, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _,
@@ -54,7 +55,7 @@ use gpui_component::scroll::{ScrollableMask, Scrollbar};
 use gpui_component::{Sizable as _, Theme, h_flex};
 use gpui_kit_assets::IconName;
 
-use crate::code_surface::{self, DiffPart, MergeSegment, is_conflict};
+use crate::code_surface::{self, BODY_PAD_Y, DiffPart, MergeSegment, is_conflict};
 use crate::copy_feedback::COPY_FEEDBACK;
 use crate::markdown::diff_view;
 use crate::markdown::svg_block::block_key;
@@ -69,10 +70,6 @@ pub(crate) const BLOCK_NAME: &str = "code";
 /// terminal panel paginates at a similar line budget; an editor panel scrolls
 /// instead, because a code block reads as one artifact.
 const MAX_BODY_HEIGHT: Pixels = px(420.);
-
-/// The body's vertical padding, shared by the gutter and the code area so
-/// their baselines align line for line.
-pub(crate) const BODY_PAD_Y: f32 = 12.;
 
 /// One intercepted fence's payload: the raw code (what copy takes), the info
 /// string's language token (verbatim — a protocol value, never localized),
@@ -134,6 +131,9 @@ fn code_block_node(body: &str, lang: Option<&str>, fence: &str) -> Option<Markdo
     } else {
         FenceShape::Code
     };
+    // The text form is the raw code (a drag crossing the block and
+    // plain-format copies take the code, not the fence); the markdown form
+    // is the whole fence, so a Markdown-format copy round-trips the source.
     Some(
         MarkdownNode::new(
             BLOCK_NAME,
@@ -143,7 +143,7 @@ fn code_block_node(body: &str, lang: Option<&str>, fence: &str) -> Option<Markdo
                 shape,
             }),
         )
-        .text(fence)
+        .text(body)
         .markdown(fence),
     )
 }
@@ -315,7 +315,13 @@ fn flat_body(
     theme: &Theme,
     key: u64,
 ) -> AnyElement {
-    let line_count = code.split('\n').count().max(1);
+    // An empty fence numbers nothing: a gutter row reading "1" over no code
+    // is noise.
+    let line_count = if code.is_empty() {
+        0
+    } else {
+        code.split('\n').count().max(1)
+    };
     let num_width = line_count.to_string().len();
     let gutter: SharedString = (1..=line_count)
         .map(|n| format!("{n:>num_width$}"))
@@ -332,14 +338,16 @@ fn flat_body(
         .text_size(theme.mono_font_size)
         .line_height(relative(1.6))
         .whitespace_nowrap()
-        .child(
-            div()
-                .py(px(BODY_PAD_Y))
-                .px_2()
-                .flex_shrink_0()
-                .text_color(theme.muted_foreground.opacity(0.7))
-                .child(gutter),
-        )
+        .when(!gutter.is_empty(), |row| {
+            row.child(
+                div()
+                    .py(px(BODY_PAD_Y))
+                    .px_2()
+                    .flex_shrink_0()
+                    .text_color(theme.muted_foreground.opacity(0.7))
+                    .child(gutter),
+            )
+        })
         .child(
             div()
                 .id(("code-x", key))
@@ -376,6 +384,7 @@ fn view_toggle(
     Button::new(("code-view-toggle", key))
         .ghost()
         .xsmall()
+        .debug_selector(|| "markdown-editor-code-view-toggle".into())
         .icon(icon)
         .on_click(move |_, _, cx: &mut App| {
             view.update(cx, |current, cx| {
@@ -438,7 +447,10 @@ mod tests {
             .clone();
         assert_eq!(payload.code, "fn main() {}\n");
         assert_eq!(payload.lang.as_deref(), Some("rust"));
-        assert_eq!(block.as_text(), "```rust\nfn main() {}\n```");
+        // The text form is the raw code (plain-format copies take the code);
+        // the markdown form is the whole fence (markdown-format copies
+        // round-trip the source).
+        assert_eq!(block.as_text(), "fn main() {}\n");
         assert_eq!(block.as_markdown(), "```rust\nfn main() {}\n```");
     }
 
@@ -450,7 +462,8 @@ mod tests {
         let payload = block.data::<Arc<EditorPayload>>().expect("payload");
         assert_eq!(payload.lang, None);
         assert_eq!(payload.code, "plain\n");
-        assert_eq!(block.as_text(), "```\nplain\n```");
+        assert_eq!(block.as_text(), "plain\n");
+        assert_eq!(block.as_markdown(), "```\nplain\n```");
     }
 
     /// An unterminated fence — the mid-stream shape — intercepts with the
@@ -504,6 +517,6 @@ mod tests {
             code_block_node("a\nb\n\n", Some("text"), "```text\na\nb\n\n```").expect("taken");
         let payload = block.data::<Arc<EditorPayload>>().expect("payload");
         assert_eq!(payload.code, "a\nb\n\n");
-        assert_eq!(block.as_text(), "```text\na\nb\n\n```");
+        assert_eq!(block.as_markdown(), "```text\na\nb\n\n```");
     }
 }
