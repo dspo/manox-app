@@ -407,7 +407,9 @@ pub(crate) enum Page {
     Plugins,
     Skills,
     Mcp,
+    #[cfg(target_os = "macos")]
     ChatGptApp,
+    #[cfg(target_os = "macos")]
     VsCodeApp,
 }
 
@@ -420,7 +422,9 @@ impl Page {
             Page::Plugins => "settings-item-plugins",
             Page::Skills => "settings-item-skills",
             Page::Mcp => "settings-item-mcp",
+            #[cfg(target_os = "macos")]
             Page::ChatGptApp => "settings-item-chatgpt-app",
+            #[cfg(target_os = "macos")]
             Page::VsCodeApp => "settings-item-vscode-app",
         }
     }
@@ -435,7 +439,7 @@ pub(crate) enum NavEntry {
     Leaf { leaf: NavLeaf, indented: bool },
 }
 
-pub(crate) const NAV: [NavEntry; 11] = [
+pub(crate) const NAV: &[NavEntry] = &[
     NavEntry::Group("settings-group-general"),
     NavEntry::Leaf {
         leaf: NavLeaf {
@@ -711,9 +715,8 @@ fn build_page(
         Page::Skills => title("settings-item-skills").group(skills_group(skills)),
         // MCP.
         Page::Mcp => title("settings-item-mcp").group(mcp_group(view, mcp_servers, mcp_disabled)),
-        // 外部工具 — macOS only: the panels launch .app bundles, and the nav
-        // does not offer these leaves elsewhere, so the arms only need a
-        // compile-time-valid body off macOS.
+        // 外部工具 — macOS only: the panels launch .app bundles, so the pages,
+        // their nav leaves and their enum variants all follow the platform.
         #[cfg(target_os = "macos")]
         Page::ChatGptApp => title("settings-item-chatgpt-app").group(panel_group(
             view,
@@ -728,8 +731,6 @@ fn build_page(
             &["vscode", "visual studio code", "extension", "inject"],
             vscode::render_vscode_app,
         )),
-        #[cfg(not(target_os = "macos"))]
-        Page::ChatGptApp | Page::VsCodeApp => title("settings-item-general"),
     }
 }
 
