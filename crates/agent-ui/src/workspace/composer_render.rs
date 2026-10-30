@@ -933,7 +933,13 @@ impl Workspace {
             },
             theme,
             cx,
-            |this, _window, cx| this.cancel_turn(cx),
+            // The stop control is the container's stop-all (D7): the ONE
+            // `x-manox/teardown` stop-all command — every live run and
+            // background task in the container dies, overriding the
+            // "background runs survive turn abort" runtime default. The
+            // turn-level interrupts (排队 message's 打断) keep the plain
+            // cancel.
+            |this, _window, cx| this.stop_container(cx),
         );
         // The default face carries the draft gate; the stop chip above never
         // does (the deadlock class: stop became an empty-input-disabled send

@@ -60,7 +60,7 @@ pub(crate) fn ext_and_meta_pinned(
 /// `session/isArchivedChanged` echo on the session channel is the instant
 /// fact, the list snapshot's status bit the fallback. A zero-status fold
 /// entry is the pre-snapshot placeholder and carries no archive fact — it
-/// defers to the summary (the same guard `toggle_archived` flips against).
+/// defers to the summary (the same guard the archived toggle reads).
 pub(crate) fn effective_archived(
     book: &steer_agent_chat_ui::ahp_store::ChannelBook,
     session_id: &str,
@@ -234,47 +234,50 @@ impl SessionMultiplexer {
         }
     }
 
-    /// Flip a session's archived bit through the extension's batch write
-    /// (`x-manox/archivedChanged` on the catalogue root): the host journals
-    /// and persists the decision (the store row, the sidecar) and the next
-    /// summary walk confirms the row's departure. The root ride matters: the
-    /// native `session/isArchivedChanged` resolves its target from the
-    /// session channel, which this client holds only for attached sessions —
-    /// a sidebar archive on any other row was refused by the host's
-    /// subscribed-gate and never landed.
-    pub fn toggle_archived(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        let view = self.store.read(cx);
-        // The live fold outranks the summary row — except a zero-status fold
-        // entry (the pre-snapshot empty_session placeholder), which carries
-        // no archive fact and defers to the summary. Neither source knowing
-        // the id refuses the flip: callers pass live rows, and a dispatch
-        // into the void would only land in the diagnostics deque.
-        let archived = match view.book.sessions.get(session_id) {
-            Some(state) if state.status != 0 => {
-                Some(state.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0)
-            }
-            _ => None,
-        }
-        .or_else(|| {
-            view.book
-                .summaries
-                .values()
-                .find(|summary| {
-                    steer_agent_chat_ui::ahp_store::id_of(&summary.resource) == session_id
-                })
-                .map(|summary| {
-                    summary.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0
-                })
+    /// The container lifecycle forwards (plan A6, D7): the gestures speak
+    /// the store's container faces — stop-all and archive through the ONE
+    /// `x-manox/teardown` command, unarchive through the whole-tree
+    /// `archivedChanged(false)` write. Each confirms with a notify so the
+    /// sidebar re-projects off the store's optimistic state.
+    pub fn stop_container(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, _| {
+            store.teardown_containers(
+                std::slice::from_ref(&session_id.to_string()),
+                steer_agent_chat_ui::ahp_store::TeardownMode::StopAll,
+            );
         });
-        let Some(archived) = archived else {
-            return;
-        };
-        self.archive_sessions(&[session_id.to_string()], !archived, cx);
+        cx.notify();
     }
 
-    /// Archive (or unarchive) sessions in one write — the sidebar's batch
-    /// selection commits through here, and the row menu's single toggle is
-    /// a batch of one.
+    /// Archive containers (the containers' death, plan D7): the teardown
+    /// command's archive mode for the whole batch — ONE call carries every
+    /// captain; the store's optimistic half drops each tree. The gestures
+    /// (row menu, batch bar, `cmd-;`, `/new`, `/exit`) all land here through
+    /// the workspace's confirm-or-direct entry.
+    pub fn archive_containers(&mut self, session_ids: &[String], cx: &mut Context<Self>) {
+        self.store.update(cx, |store, _| {
+            store.teardown_containers(
+                session_ids,
+                steer_agent_chat_ui::ahp_store::TeardownMode::Archive,
+            );
+        });
+        cx.notify();
+    }
+
+    /// Revive a container's whole tree (the unarchive gesture): the captain
+    /// and its catalogue children ride one `archivedChanged(false)` write.
+    pub fn revive_container(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, _| {
+            store.revive_container(session_id);
+        });
+        cx.notify();
+    }
+
+    /// Archive (or unarchive) sessions in one write — the generic
+    /// `archivedChanged` forward. The container gestures do NOT ride it (an
+    /// archive is a teardown command, an unarchive is
+    /// [`Self::revive_container`]); the unarchived direction of a plain id
+    /// list still goes through here.
     pub fn archive_sessions(
         &mut self,
         session_ids: &[String],

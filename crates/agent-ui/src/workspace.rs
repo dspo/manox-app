@@ -212,6 +212,7 @@ mod composer;
 pub mod container;
 mod external;
 pub mod external_sessions;
+mod lifecycle;
 mod right_diff;
 mod subagent;
 mod subagent_stream;

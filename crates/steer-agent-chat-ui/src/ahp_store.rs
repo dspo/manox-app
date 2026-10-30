@@ -186,6 +186,40 @@ impl ChildRunRow {
 /// client claims).
 pub const CLIENT_ID: &str = "desktop";
 
+/// The container-teardown command (upstream #990's
+/// `manox_ahp::ext::commands::TEARDOWN`, declared here until the pinned tag
+/// carries it — the bump swaps this for the upstream constant). One call
+/// cancels the captains' active turns, interrupts their live runs, settles
+/// their background tasks and — archive mode — cascades the archive down the
+/// parent edges; the receipt
+/// `{containers: [{session, interruptedRuns, stoppedTasks, archived}]}`
+/// confirms per container.
+const X_MANOX_TEARDOWN: &str = "x-manox/teardown";
+
+/// The teardown verb (plan D7): what one `x-manox/teardown` call does to its
+/// containers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TeardownMode {
+    /// Kill every live run and background task; the container STAYS alive
+    /// (idle). The user's stop control — deliberately overriding the
+    /// runtime's "background runs survive turn abort" default: the explicit
+    /// stop is the one gesture that kills the whole container's work.
+    StopAll,
+    /// Kill everything AND archive the container tree (the container's
+    /// death, D7).
+    Archive,
+}
+
+impl TeardownMode {
+    /// The wire verb string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StopAll => "stop-all",
+            Self::Archive => "archive",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ChannelBook: the folded protocol state (no GPUI).
 // ---------------------------------------------------------------------------
@@ -952,6 +986,13 @@ enum PendingWrite {
     Subscribe(String),
     Unsubscribe(String),
     Dispatch(String, Box<StateAction>),
+    /// An extension command (`x-manox/*`) issued before the handshake:
+    /// replayed in order like every other write, so a teardown queued while
+    /// the connection was down still fires once the host answers.
+    Command {
+        method: &'static str,
+        params: Value,
+    },
 }
 
 /// The UI-side answerer signature for host → client capability requests.
@@ -1632,6 +1673,18 @@ impl AhpStore {
                         })
                         .await;
                     }
+                    PendingWrite::Command { method, params } => {
+                        let _ = tokio_wait({
+                            let client = client.clone();
+                            move || async move {
+                                client
+                                    .request::<_, Value>(method, params)
+                                    .await
+                                    .map_err(|err| err.to_string())
+                            }
+                        })
+                        .await;
+                    }
                 }
             }
             let _ = this.update(cx, |store, _| store.replay_pending = false);
@@ -2075,6 +2128,11 @@ impl AhpStore {
     /// not attached (a sidebar archive was a silent no-op), while attaching
     /// would fold each row's whole journal.
     ///
+    /// Since the container lifecycle landed (plan A6) this is the batch write
+    /// face for the UNARCHIVE direction (`revive_container`'s whole-tree
+    /// write); a container ARCHIVE rides `teardown_containers` — the one
+    /// teardown command whose host cascade subsumes the per-row write.
+    ///
     /// Archiving drops the rows from the catalogue NOW: the sidebar is the
     /// active list, and the host's store broadcast (a summary walk) confirms
     /// the drop rather than performing it. A refused write re-seeds the rows
@@ -2118,6 +2176,76 @@ impl AhpStore {
                 "archived": archived,
             })),
         );
+    }
+
+    /// Tear the named containers down in one call — the `x-manox/teardown`
+    /// command (plan D7, upstream #990). The command IS the gesture: it
+    /// cancels the captains' active turns, interrupts their live runs and
+    /// settles their background tasks host-side, and in archive mode
+    /// cascades the archive down the parent edges. There is deliberately NO
+    /// parallel client-side kill sweep (no per-run cancels, no per-row
+    /// archivedChanged): one write, one waterfall.
+    ///
+    /// Archive mode's optimistic half drops the whole tree's rows NOW (the
+    /// sidebar is the active list; a refused command re-seeds them on the
+    /// next catalogue walk, the same self-heal `archive_sessions` leans on)
+    /// and marks the object rows' archived bits at the same choke point
+    /// (the draft refill must never resurrect a retired container). The
+    /// receipt only confirms; the UI has already moved.
+    pub fn teardown_containers(&mut self, captain_ids: &[String], mode: TeardownMode) {
+        if captain_ids.is_empty() {
+            return;
+        }
+        let tree = container_tree_ids(&self.book, captain_ids);
+        if mode == TeardownMode::Archive {
+            for id in &tree {
+                self.book.remove_summary(&session_uri(id));
+            }
+            if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+                for id in &tree {
+                    objects.set_archived(id, true);
+                }
+            }
+        }
+        let params = serde_json::json!({
+            "sessions": captain_ids,
+            "mode": mode.as_str(),
+        });
+        // A write issued while the pre-connect replay is running queues
+        // behind it — the same write-ahead face every other write keeps.
+        if self.client.is_none() || self.replay_pending {
+            if self.queue_head_at.is_none() {
+                self.queue_head_at = Some(std::time::Instant::now());
+            }
+            self.pending_writes.push(PendingWrite::Command {
+                method: X_MANOX_TEARDOWN,
+                params,
+            });
+            return;
+        }
+        let reply = self.call(X_MANOX_TEARDOWN, params);
+        // The receipt is a confirmation, not a driver: the optimistic half
+        // above (archive) and the fold echoes (stop-all's turn edges) carry
+        // the UI. A refusal is traced, not retried — the gesture's optimistic
+        // state self-heals through the catalogue walk.
+        manox_agent::runtime::handle().spawn(async move {
+            match reply.recv().await {
+                Ok(Ok(receipt)) => tracing::info!(?receipt, "container teardown receipt"),
+                Ok(Err(err)) => tracing::warn!(error = %err, "container teardown refused"),
+                Err(_) => {}
+            }
+        });
+    }
+
+    /// Revive a container's whole tree (D7's unarchive): the captain plus
+    /// every catalogue row whose parent edge names it ride ONE
+    /// `x-manox/archivedChanged(false)` write, so the children come back
+    /// with the captain instead of staying retired behind it. Edges the
+    /// catalogue no longer carries leave the child archived — the write
+    /// covers what the book can prove.
+    pub fn revive_container(&mut self, captain_id: &str) {
+        let tree = container_tree_ids(&self.book, std::slice::from_ref(&captain_id.to_string()));
+        self.archive_sessions(&tree, false);
     }
 
     /// Subscribe a session's thread channel once per store lifetime (the
@@ -3169,6 +3297,34 @@ pub fn goal_of<'a>(book: &'a ChannelBook, session_id: &str) -> Option<&'a Value>
     book.ext
         .get(&work_uri(session_id))
         .and_then(|x| x.goal.as_ref())
+}
+
+/// The container tree ids for `captains`: the captains themselves (input
+/// order, deduped) plus every catalogue row whose parent edge names one —
+/// upstream #987's `_meta.x-manox.parentSessionId`, the same edges the
+/// sidebar fold (plan A3) reads. Children the catalogue no longer carries
+/// are not invented: the walk covers what the book can prove. This is the
+/// membership face for the whole-tree teardown and the whole-tree revive.
+pub fn container_tree_ids(book: &ChannelBook, captains: &[String]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for captain in captains {
+        if !ids.iter().any(|id| id == captain) {
+            ids.push(captain.clone());
+        }
+    }
+    for (id, summary) in &book.summaries {
+        let names_a_captain = summary
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("x-manox"))
+            .and_then(|x| x.get("parentSessionId"))
+            .and_then(Value::as_str)
+            .is_some_and(|parent| captains.iter().any(|c| c == parent));
+        if names_a_captain && !ids.iter().any(|seen| seen == id) {
+            ids.push(id.clone());
+        }
+    }
+    ids
 }
 
 /// The call id of a confirmation-state tool call (pending / pending-result).
@@ -4929,6 +5085,204 @@ mod tests {
         // An empty batch writes nothing.
         store.archive_sessions(&[], true);
         assert_eq!(store.pending_writes.len(), 1);
+    }
+
+    /// The tree walk (plan A6): the captains themselves plus every catalogue
+    /// row whose parent edge names one — the membership face the whole-tree
+    /// teardown and the whole-tree revive share. Captains keep their order;
+    /// children join in catalogue order; unrelated rows stay out; edges the
+    /// book does not carry are not invented.
+    #[test]
+    fn the_tree_walk_names_captains_and_their_children() {
+        let row = |id: &str, parent: Option<&str>| -> SessionSummary {
+            let mut json = serde_json::json!({
+                "resource": session_uri(id),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            });
+            if let Some(parent) = parent {
+                json["_meta"] = serde_json::json!({
+                    "x-manox": { "parentSessionId": parent },
+                });
+            }
+            serde_json::from_value(json).expect("a summary parses")
+        };
+        let mut book = ChannelBook::default();
+        book.seed_summaries(vec![
+            row("cap-a", None),
+            row("cap-b", None),
+            row("sub-1", Some("cap-a")),
+            row("sub-2", Some("cap-a")),
+            row("sub-3", Some("cap-b")),
+        ]);
+
+        assert_eq!(
+            container_tree_ids(&book, &["cap-a".to_string()]),
+            vec![
+                "cap-a".to_string(),
+                "sub-1".to_string(),
+                "sub-2".to_string()
+            ],
+        );
+        assert_eq!(
+            container_tree_ids(&book, &["cap-b".to_string()]),
+            vec!["cap-b".to_string(), "sub-3".to_string()],
+        );
+        // Both captains, deduped; the two trees interleave by catalogue order.
+        assert_eq!(
+            container_tree_ids(
+                &book,
+                &[
+                    "cap-b".to_string(),
+                    "cap-a".to_string(),
+                    "cap-b".to_string()
+                ]
+            ),
+            vec![
+                "cap-b".to_string(),
+                "cap-a".to_string(),
+                "sub-1".to_string(),
+                "sub-2".to_string(),
+                "sub-3".to_string(),
+            ],
+        );
+        // A captain the book does not know still names itself: the write
+        // carries it, the host owns the cascade it cannot see.
+        assert_eq!(
+            container_tree_ids(&book, &["gone".to_string()]),
+            vec!["gone".to_string()],
+        );
+    }
+
+    /// stop-all emits the ONE teardown command — no per-run cancels, no
+    /// archivedChanged, no book mutations (the container stays alive; the
+    /// receipt and the fold echoes drive the UI).
+    #[test]
+    fn teardown_stop_all_emits_the_container_command() {
+        let mut store = disconnected_store();
+        let row: SessionSummary = serde_json::from_value(serde_json::json!({
+            "resource": session_uri("cap"),
+            "provider": "test",
+            "title": "row",
+            "status": 0,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "modifiedAt": "2026-01-01T00:00:00Z",
+        }))
+        .expect("a summary parses");
+        store.book.seed_summaries(vec![row]);
+
+        store.teardown_containers(&["cap".to_string()], TeardownMode::StopAll);
+
+        assert_eq!(store.pending_writes.len(), 1, "one write: the command");
+        let Some(PendingWrite::Command { method, params }) = store.pending_writes.first() else {
+            panic!("the command queues while disconnected");
+        };
+        assert_eq!(*method, "x-manox/teardown");
+        assert_eq!(params["sessions"], serde_json::json!(["cap"]));
+        assert_eq!(params["mode"], "stop-all");
+        // The container stays in the catalogue: stop-all is not a death.
+        assert!(store.book.summaries.contains_key("cap"));
+
+        // An empty batch emits nothing.
+        store.teardown_containers(&[], TeardownMode::StopAll);
+        assert_eq!(store.pending_writes.len(), 1);
+    }
+
+    /// Archive mode emits the same ONE command with the archive verb, and
+    /// its optimistic half drops the whole tree's catalogue rows at the
+    /// write — the sidebar never shows a tree whose captain just died. A
+    /// refused command re-seeds the rows on the next walk (the same
+    /// self-heal `archive_sessions` leans on).
+    #[test]
+    fn teardown_archive_emits_the_command_and_drops_the_tree() {
+        let summary = |id: &str, parent: Option<&str>| -> SessionSummary {
+            let mut json = serde_json::json!({
+                "resource": session_uri(id),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            });
+            if let Some(parent) = parent {
+                json["_meta"] = serde_json::json!({
+                    "x-manox": { "parentSessionId": parent },
+                });
+            }
+            serde_json::from_value(json).expect("a summary parses")
+        };
+        let mut store = disconnected_store();
+        store.book.seed_summaries(vec![
+            summary("cap", None),
+            summary("sub-1", Some("cap")),
+            summary("other", None),
+        ]);
+
+        store.teardown_containers(&["cap".to_string()], TeardownMode::Archive);
+
+        assert_eq!(store.pending_writes.len(), 1, "one write: the command");
+        let Some(PendingWrite::Command { method, params }) = store.pending_writes.first() else {
+            panic!("the command queues while disconnected");
+        };
+        assert_eq!(*method, "x-manox/teardown");
+        assert_eq!(params["sessions"], serde_json::json!(["cap"]));
+        assert_eq!(params["mode"], "archive");
+        // The optimistic whole-tree row drop: the captain AND its child leave
+        // the catalogue at the write; the unrelated row stays.
+        assert!(!store.book.summaries.contains_key("cap"));
+        assert!(!store.book.summaries.contains_key("sub-1"));
+        assert!(store.book.summaries.contains_key("other"));
+    }
+
+    /// The whole-tree revive rides ONE `archivedChanged(false)` write that
+    /// carries the captain and every child the book's parent edges can
+    /// prove — the children come back with the captain, not behind it.
+    #[test]
+    fn revive_carries_the_whole_tree_in_one_write() {
+        let summary = |id: &str, parent: Option<&str>| -> SessionSummary {
+            let mut json = serde_json::json!({
+                "resource": session_uri(id),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            });
+            if let Some(parent) = parent {
+                json["_meta"] = serde_json::json!({
+                    "x-manox": { "parentSessionId": parent },
+                });
+            }
+            serde_json::from_value(json).expect("a summary parses")
+        };
+        let mut store = disconnected_store();
+        store.book.seed_summaries(vec![
+            summary("cap", None),
+            summary("sub-1", Some("cap")),
+            summary("sub-2", Some("cap")),
+            summary("other-sub", Some("other")),
+        ]);
+
+        store.revive_container("cap");
+
+        assert_eq!(store.pending_writes.len(), 1);
+        let Some(PendingWrite::Dispatch(channel, action)) = store.pending_writes.first() else {
+            panic!("the revive queues while disconnected");
+        };
+        assert_eq!(channel, ROOT_RESOURCE_URI);
+        let StateAction::Unknown(tag) = action.as_ref() else {
+            panic!("the revive is the extension action");
+        };
+        assert_eq!(tag["type"], ext::actions::ARCHIVED_CHANGED);
+        assert_eq!(tag["archived"], false);
+        assert_eq!(
+            tag["sessions"],
+            serde_json::json!(["cap", "sub-1", "sub-2"]),
+            "the captain's children ride the same write"
+        );
     }
 
     /// The steer path rides `chat/pendingMessageSet{kind: steering}`: the
