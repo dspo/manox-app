@@ -23,6 +23,7 @@
 //! (resource reclaim → sub-session archive → row drop) lands with the
 //! lifecycle PRs.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
