@@ -68,6 +68,120 @@ pub struct SubagentWorkRow {
     pub started_at: String,
 }
 
+/// The persistent child-run roster action (upstream #989's
+/// `manox_ahp::ext::actions::WORK_CHILD_RUNS`, declared here until the
+/// pinned tag carries it — the bump swaps this for the upstream constant).
+/// One run row per action, upserted by `runId` on the session's
+/// `x-manox-work` channel; settled rows stay with their verdict, a
+/// `run/continued` re-marks the run running.
+const WORK_CHILD_RUNS: &str = "x-manox-work/childRunsChanged";
+
+/// A roster entry's lifecycle face: running, or settled (the verdict rides
+/// the row).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildRunStatus {
+    Running,
+    Settled,
+}
+
+/// One persistent child-run roster row (the work channel's
+/// `childRunsChanged` registry, upstream #989): the durable account the
+/// live-only chat background work never carries — a settled run keeps its
+/// row, so a captain's whole crew is enumerable from the wire alone, and
+/// this is the restore source for the crew surfaces (plan PR-A4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildRunRow {
+    /// The run id — the child session id, and the id of the child's own
+    /// chat (`ahp-chat:/<id>`), which is where the child's transcript
+    /// lives.
+    pub run_id: String,
+    /// The agent definition's name (`Explore`, `Sailor`, …); empty on rows
+    /// written before the field existed.
+    pub kind: String,
+    /// The run's task label (the topic a row shows).
+    pub label: String,
+    /// The definition's display color (the Claude vocabulary:
+    /// `red|blue|green|yellow|purple|orange|pink|cyan`), when the row
+    /// carried one. Display data — surfaces fall back on anything else.
+    pub color: Option<String>,
+    pub status: ChildRunStatus,
+    /// The settlement verdict (the settlement kind's kebab-case wire
+    /// string — `completed` / `timed-out` / …), on a settled row. `None`
+    /// also covers the host's own serialization failure (`null`).
+    pub verdict: Option<String>,
+    /// ISO 8601 stamp the run started at.
+    pub started_at: String,
+    /// The child chat pointer (`ahp-chat:/<run-id>`).
+    pub chat: String,
+}
+
+impl ChildRunRow {
+    /// Parse one wire row (the `run` payload of a `childRunsChanged`
+    /// action, or one entry of a baseline's `childRuns` map). A row
+    /// without a keyable `runId` or a status outside the two-word
+    /// vocabulary cannot be classified and is dropped — the fold only
+    /// ever shows what it recognizes.
+    fn from_wire(run_id: &str, row: &Value) -> Option<Self> {
+        if run_id.is_empty() {
+            return None;
+        }
+        let status = match row.get("status").and_then(Value::as_str)? {
+            "running" => ChildRunStatus::Running,
+            "settled" => ChildRunStatus::Settled,
+            _ => return None,
+        };
+        Some(Self {
+            run_id: run_id.to_string(),
+            kind: row
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            label: row
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            color: row.get("color").and_then(Value::as_str).map(str::to_string),
+            status,
+            verdict: row
+                .get("verdict")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            started_at: row
+                .get("startedAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            chat: row
+                .get("chat")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
+    }
+
+    /// The row's display status: the running mark while live, the verdict's
+    /// mapping once settled — the settlement kind's kebab-case wire strings
+    /// (the upstream `SettlementKind` vocabulary) onto the app's
+    /// `ToolCallStatus`. A verdict outside the vocabulary (or absent — the
+    /// host's serialization failure path) reads as the neutral cancelled
+    /// mark: the display only ever shows what it recognizes.
+    pub fn display_status(&self) -> manox_agent::ToolCallStatus {
+        match self.status {
+            ChildRunStatus::Running => manox_agent::ToolCallStatus::Running,
+            ChildRunStatus::Settled => match self.verdict.as_deref() {
+                Some("completed") => manox_agent::ToolCallStatus::Success,
+                Some("refusal") => manox_agent::ToolCallStatus::Denied,
+                Some("timed-out" | "stalled" | "error" | "max-tokens") => {
+                    manox_agent::ToolCallStatus::Error
+                }
+                _ => manox_agent::ToolCallStatus::Cancelled,
+            },
+        }
+    }
+}
+
 /// How the client identifies itself to the host (echo correlation, active
 /// client claims).
 pub const CLIENT_ID: &str = "desktop";
@@ -107,6 +221,14 @@ pub struct ChannelBook {
     pub chats: HashMap<String, ChatState>,
     /// Extension channel URI → folded state (a baseline replaces, deltas fold).
     pub ext: HashMap<String, XManoxState>,
+    /// Work-channel URI → child-run roster view (run id → the run's latest
+    /// row). The persistent sub-agent account (upstream #989's
+    /// `XManoxState.childRuns`, folded into its own registry because the
+    /// pinned `XManoxState` has no slot for it — its serde silently drops
+    /// the field today). Like the ext bag itself: `childRunsChanged`
+    /// upserts by run id and never clears, a baseline replaces the view
+    /// wholesale. The read face is [`child_runs_of`].
+    pub child_runs: HashMap<String, BTreeMap<String, ChildRunRow>>,
     /// Metrics channel URI → aggregated Q face.
     pub metrics: HashMap<String, ConversationMetrics>,
     /// Annotations channel state by session id (`ahp-session:/<id>/
@@ -244,6 +366,7 @@ impl Default for ChannelBook {
             sessions: HashMap::new(),
             chats: HashMap::new(),
             ext: HashMap::new(),
+            child_runs: HashMap::new(),
             metrics: HashMap::new(),
             annotations: HashMap::new(),
             catalogues: HashMap::new(),
@@ -351,21 +474,86 @@ impl ChannelBook {
                 return FoldEffect::Ignored;
             }
             return match value.get("state") {
-                Some(state) => match serde_json::from_value::<XManoxState>(state.clone()) {
-                    Ok(state) => {
-                        self.ext.insert(channel.to_string(), state);
-                        FoldEffect::Changed
+                Some(state) => {
+                    // The roster rides the baseline too (the work channel's
+                    // is a pure journal fold, upstream #989); the pinned
+                    // `XManoxState` has no slot for it, so the rows come
+                    // out of the raw state before the typed parse drops
+                    // them. The baseline REPLACES the channel's view
+                    // wholesale — the same semantics the typed parse gives
+                    // the ext bag, both ways: a roster the baseline does
+                    // not carry clears, one it carries replaces.
+                    let roster_changed = match state.get("childRuns") {
+                        Some(runs) => {
+                            let rows: BTreeMap<String, ChildRunRow> = runs
+                                .as_object()
+                                .into_iter()
+                                .flat_map(|runs| runs.iter())
+                                .filter_map(|(run_id, row)| {
+                                    ChildRunRow::from_wire(run_id, row)
+                                        .map(|parsed| (run_id.clone(), parsed))
+                                })
+                                .collect();
+                            let changed = self.child_runs.get(channel) != Some(&rows);
+                            self.child_runs.insert(channel.to_string(), rows);
+                            changed
+                        }
+                        None => self.child_runs.remove(channel).is_some(),
+                    };
+                    match serde_json::from_value::<XManoxState>(state.clone()) {
+                        Ok(state) => {
+                            self.ext.insert(channel.to_string(), state);
+                            FoldEffect::Changed
+                        }
+                        Err(err) => {
+                            tracing::warn!(channel = %channel, error = %err, "baseline did not parse");
+                            if roster_changed {
+                                FoldEffect::Changed
+                            } else {
+                                FoldEffect::Ignored
+                            }
+                        }
                     }
-                    Err(err) => {
-                        tracing::warn!(channel = %channel, error = %err, "baseline did not parse");
-                        FoldEffect::Ignored
-                    }
-                },
+                }
                 None => FoldEffect::Ignored,
             };
         }
         if let Some(reason) = value.get("rejectionReason").and_then(Value::as_str) {
             return FoldEffect::Rejected(reason.to_string());
+        }
+        // The persistent child-run roster (upstream #989): one run row per
+        // action, upserted by `runId`, settled rows kept with their verdict,
+        // a continuation re-marking the run running. The pinned
+        // `XManoxState` has no slot for the registry — the shared ext fold
+        // would drop the action as unknown-tolerant noise — so the book
+        // folds it into its own registry before that fold ever sees it.
+        // Interception sits ahead of the ext lookup on purpose: the roster
+        // does not depend on the channel's ext bag having landed.
+        if value.get("type").and_then(Value::as_str) == Some(WORK_CHILD_RUNS) {
+            let row = value.get("run").and_then(|run| {
+                let run_id = run.get("runId").and_then(Value::as_str)?;
+                ChildRunRow::from_wire(run_id, run)
+            });
+            let Some(row) = row else {
+                // A row without a keyable `runId` cannot enter the view,
+                // and this action has no clear edge — nothing to fold.
+                return FoldEffect::Ignored;
+            };
+            let view = self.child_runs.entry(channel.to_string()).or_default();
+            return match view.entry(row.run_id.clone()) {
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    if *slot.get() == row {
+                        FoldEffect::Ignored
+                    } else {
+                        slot.insert(row);
+                        FoldEffect::Changed
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(row);
+                    FoldEffect::Changed
+                }
+            };
         }
         if channel.starts_with(ext::channels::METRICS) {
             if value.get("type").and_then(Value::as_str) == Some(ext::actions::METRICS_CHANGED) {
@@ -2953,6 +3141,27 @@ pub fn browser_suites_of(book: &ChannelBook, session_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The session's persistent child-run roster — live AND settled runs —
+/// from the `x-manox-work` channel (keyed by the session id; work rows
+/// have no chat scope), in dispatch order (`startedAt` ascending, run id
+/// as the tiebreak; the wire registry is keyed by run id, so the stamp
+/// sort is what keeps the rows in the order the runs were dispatched).
+/// The durable account behind the crew surfaces: the Captain strip's
+/// live-only face reads `background_work` instead (plan PR-A4).
+pub fn child_runs_of(book: &ChannelBook, session_id: &str) -> Vec<ChildRunRow> {
+    let mut rows: Vec<ChildRunRow> = book
+        .child_runs
+        .get(&work_uri(session_id))
+        .map(|view| view.values().cloned().collect())
+        .unwrap_or_default();
+    rows.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.run_id.cmp(&b.run_id))
+    });
+    rows
+}
+
 /// The session goal (verbatim payload), from the `x-manox-work` channel —
 /// work rows never ride the thread channel, so a `LeafView.ext` read is
 /// always `None` for them.
@@ -4065,6 +4274,215 @@ mod tests {
         // An unsubscribed channel reads empty rather than panicking.
         assert!(browser_suites_of(&book, "s-2").is_empty());
         assert!(goal_of(&book, "s-2").is_none());
+    }
+
+    /// The persistent child-run roster's fold semantics (upstream #989,
+    /// driven here through the SYNTHETIC action — the pinned tag does not
+    /// declare it yet): one run row per action, upserted by `runId`; a
+    /// settle keeps the row with its verdict; a continuation re-marks it
+    /// running; a row without a keyable `runId` cannot enter the view and
+    /// a restated row is a NoOp.
+    #[test]
+    fn child_run_actions_upsert_the_roster_and_settled_rows_stay() {
+        let mut book = ChannelBook::default();
+        let action_for = |run: Value| {
+            StateAction::Unknown(serde_json::json!({
+                "type": "x-manox-work/childRunsChanged",
+                "run": run,
+            }))
+        };
+        let started = serde_json::json!({
+            "runId": "sub-1", "kind": "Explore", "label": "survey",
+            "status": "running", "startedAt": "2026-10-15T00:00:00.000Z",
+            "chat": "ahp-chat:/sub-1",
+        });
+        assert_eq!(
+            book.apply(&work_uri("s-1"), &action_for(started.clone())),
+            FoldEffect::Changed
+        );
+        assert_eq!(
+            child_runs_of(&book, "s-1"),
+            vec![ChildRunRow {
+                run_id: "sub-1".into(),
+                kind: "Explore".into(),
+                label: "survey".into(),
+                color: None,
+                status: ChildRunStatus::Running,
+                verdict: None,
+                started_at: "2026-10-15T00:00:00.000Z".into(),
+                chat: "ahp-chat:/sub-1".into(),
+            }]
+        );
+
+        // A second run joins; then the first settles — the row STAYS, with
+        // the verdict (the durable account the live-only background work
+        // never carries).
+        let other = serde_json::json!({
+            "runId": "sub-2", "kind": "Write", "label": "draft",
+            "color": "pink",
+            "status": "running", "startedAt": "2026-10-15T00:00:01.000Z",
+            "chat": "ahp-chat:/sub-2",
+        });
+        assert_eq!(
+            book.apply(&work_uri("s-1"), &action_for(other)),
+            FoldEffect::Changed
+        );
+        let settled = serde_json::json!({
+            "runId": "sub-1", "kind": "Explore", "label": "survey",
+            "status": "settled", "verdict": "completed",
+            "startedAt": "2026-10-15T00:00:00.000Z",
+            "chat": "ahp-chat:/sub-1",
+        });
+        assert_eq!(
+            book.apply(&work_uri("s-1"), &action_for(settled)),
+            FoldEffect::Changed
+        );
+        let roster = child_runs_of(&book, "s-1");
+        assert_eq!(roster.len(), 2, "a settle keeps the row");
+        assert_eq!(roster[0].status, ChildRunStatus::Settled);
+        assert_eq!(roster[0].verdict.as_deref(), Some("completed"));
+        assert_eq!(roster[1].color.as_deref(), Some("pink"));
+
+        // A continuation flips the same row back to running.
+        let continued = serde_json::json!({
+            "runId": "sub-1", "kind": "Explore", "label": "survey",
+            "status": "running", "startedAt": "2026-10-15T00:00:00.000Z",
+            "chat": "ahp-chat:/sub-1",
+        });
+        assert_eq!(
+            book.apply(&work_uri("s-1"), &action_for(continued.clone())),
+            FoldEffect::Changed
+        );
+        assert_eq!(
+            child_runs_of(&book, "s-1")[0].status,
+            ChildRunStatus::Running
+        );
+
+        // A restatement folds to a NoOp, and a row without a keyable
+        // `runId` (or a status outside the vocabulary) cannot enter the
+        // view — the action has no clear edge, so neither may disturb it.
+        assert_eq!(
+            book.apply(&work_uri("s-1"), &action_for(continued)),
+            FoldEffect::Ignored
+        );
+        for shape in [
+            serde_json::json!({"type": "x-manox-work/childRunsChanged"}),
+            serde_json::json!({
+                "type": "x-manox-work/childRunsChanged",
+                "run": {"status": "running"},
+            }),
+            serde_json::json!({
+                "type": "x-manox-work/childRunsChanged",
+                "run": {"runId": "", "status": "running"},
+            }),
+            serde_json::json!({
+                "type": "x-manox-work/childRunsChanged",
+                "run": {"runId": "sub-9", "status": "paused"},
+            }),
+        ] {
+            assert_eq!(
+                book.apply(&work_uri("s-1"), &StateAction::Unknown(shape)),
+                FoldEffect::Ignored,
+                "an unkeyable row cannot enter the view"
+            );
+        }
+        assert_eq!(child_runs_of(&book, "s-1").len(), 2);
+
+        // The roster is per work channel: another session's view is empty.
+        assert!(child_runs_of(&book, "s-2").is_empty());
+    }
+
+    /// The work-channel baseline (a pure journal fold upstream) carries the
+    /// WHOLE roster — the fresh-client restore source — and replaces the
+    /// channel's view wholesale, both ways: a roster the next baseline
+    /// carries replaces, and one it does not carry clears.
+    #[test]
+    fn the_work_baseline_carries_the_whole_roster_and_replaces_wholesale() {
+        let mut book = ChannelBook::default();
+        let baseline = |state: Value| {
+            StateAction::Unknown(serde_json::json!({
+                "type": "x-manox/baseline",
+                "state": state,
+            }))
+        };
+        assert_eq!(
+            book.apply(
+                &work_uri("s-1"),
+                &baseline(serde_json::json!({
+                    "childRuns": {
+                        "sub-1": {
+                            "runId": "sub-1", "kind": "Explore", "label": "survey",
+                            "status": "settled", "verdict": "timed-out",
+                            "startedAt": "2026-10-15T00:00:00.000Z",
+                            "chat": "ahp-chat:/sub-1",
+                        },
+                        "sub-2": {
+                            "runId": "sub-2", "kind": "Write", "label": "draft",
+                            "color": "cyan",
+                            "status": "running",
+                            "startedAt": "2026-10-15T00:00:01.000Z",
+                            "chat": "ahp-chat:/sub-2",
+                        },
+                    },
+                }))
+            ),
+            FoldEffect::Changed
+        );
+        let roster = child_runs_of(&book, "s-1");
+        assert_eq!(roster.len(), 2, "the baseline carries the whole roster");
+        // Dispatch order: the settled first run leads despite the map's own
+        // key order.
+        assert_eq!(roster[0].run_id, "sub-1");
+        assert_eq!(
+            roster[0].display_status(),
+            manox_agent::ToolCallStatus::Error,
+            "a timed-out verdict reads as the error mark"
+        );
+        assert_eq!(
+            roster[1].display_status(),
+            manox_agent::ToolCallStatus::Running
+        );
+
+        // A later baseline without the roster clears it (wholesale replace,
+        // the same semantics the typed parse gives the ext bag).
+        assert_eq!(
+            book.apply(&work_uri("s-1"), &baseline(serde_json::json!({}))),
+            FoldEffect::Changed
+        );
+        assert!(child_runs_of(&book, "s-1").is_empty());
+    }
+
+    /// The verdict→display mapping over the settlement vocabulary: the
+    /// failure family reads as the error mark, a completion as success, an
+    /// abort as cancelled — and a verdict outside the vocabulary (or the
+    /// host's null) reads as the neutral cancelled mark rather than
+    /// inventing an outcome.
+    #[test]
+    fn settled_rows_map_their_verdicts_onto_the_display_vocabulary() {
+        let row = |verdict: Option<&str>| ChildRunRow {
+            run_id: "sub-1".into(),
+            kind: String::new(),
+            label: String::new(),
+            color: None,
+            status: ChildRunStatus::Settled,
+            verdict: verdict.map(str::to_string),
+            started_at: String::new(),
+            chat: String::new(),
+        };
+        use manox_agent::ToolCallStatus as S;
+        assert_eq!(row(Some("completed")).display_status(), S::Success);
+        assert_eq!(row(Some("timed-out")).display_status(), S::Error);
+        assert_eq!(row(Some("stalled")).display_status(), S::Error);
+        assert_eq!(row(Some("aborted")).display_status(), S::Cancelled);
+        assert_eq!(row(Some("error")).display_status(), S::Error);
+        assert_eq!(row(Some("refusal")).display_status(), S::Denied);
+        assert_eq!(row(Some("max-tokens")).display_status(), S::Error);
+        assert_eq!(
+            row(Some("someday-new-kind")).display_status(),
+            S::Cancelled,
+            "a verdict outside the vocabulary is the neutral mark"
+        );
+        assert_eq!(row(None).display_status(), S::Cancelled);
     }
 
     /// The official unread count (#870's app half): the live session fold

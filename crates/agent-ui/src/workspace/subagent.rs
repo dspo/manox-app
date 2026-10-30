@@ -65,26 +65,29 @@ impl Workspace {
         });
     }
 
-    /// Rebuild the per-thread sub-agent observation state (rail rows + panel
-    /// prompt/final-text) from the restored transcript. Live rows are fed by
-    /// `SubagentProgress` events, which die with the process; this recovers
-    /// the settled rows after a restart or a thread switch-back so the rail
-    /// and panels are not left empty. Idempotent: rows upsert by address.
-    /// Takes precomputed rows (derived inside the store-read closure) so the
-    /// callers never clone the full transcript just for this scan.
+    /// Rebuild the per-thread sub-agent observation rows (the rail's crew
+    /// rows) from the persistent child-run roster — the work-channel
+    /// registry, settled runs included. This is the restore source (plan
+    /// PR-A4): a restart or a switch-back rebuilds the rail from the
+    /// roster, where the retired transcript-scan path fed an empty message
+    /// set (the roster rides the x-manox channels, which no message scan
+    /// can see) and rebuilt nothing. Idempotent: rows upsert by address.
+    /// Takes precomputed rows (read inside the store-read closure at the
+    /// attach) so the rail update is the only work done here.
     pub(super) fn apply_subagent_rows(
         &mut self,
-        rows: Vec<manox_agent::subagent_restore::RestoredSubagent>,
+        rows: Vec<steer_agent_chat_ui::ahp_store::ChildRunRow>,
         cx: &mut Context<Self>,
     ) {
-        for row in rows {
-            let first_line = crate::conversation::first_line(&row.prompt);
+        for run in rows {
+            let status = run.display_status();
+            let (address, kind, label) = (run.run_id, run.kind, run.label);
             self.chat_rail(cx).update(cx, |r, cx| {
                 r.apply_subagent_progress(
-                    &row.address,
-                    &row.subagent_type,
-                    first_line.as_deref(),
-                    row.status,
+                    &address,
+                    &kind,
+                    (!label.is_empty()).then_some(label.as_str()),
+                    status,
                     None,
                     cx,
                 );

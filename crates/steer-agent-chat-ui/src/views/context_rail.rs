@@ -73,6 +73,36 @@ pub fn fold_window(len: usize, cap: usize, expanded: bool) -> FoldPlan {
     }
 }
 
+/// The crew section's rows (plan PR-A4): the persistent child-run roster —
+/// live runs under the running mark, settled runs under their verdict's
+/// mark — with the observation rows the attach-time rebuild recovered
+/// merged underneath by run id. The store's rows win the merge: a settled
+/// verdict must not be shadowed back to a stale running mark, and a fold
+/// whose roster has not landed yet still shows the rows the rebuild
+/// recovered. Pure so the roster face tests against a hand-built book.
+pub fn crew_rows(
+    book: &crate::ahp_store::ChannelBook,
+    session_id: &str,
+    observed: &[SubagentInfo],
+) -> Vec<SubagentInfo> {
+    let mut rows: Vec<SubagentInfo> = crate::ahp_store::child_runs_of(book, session_id)
+        .into_iter()
+        .map(|run| SubagentInfo {
+            status: run.display_status(),
+            id: run.run_id,
+            subagent_type: run.kind,
+            description: run.label,
+            health: None,
+        })
+        .collect();
+    for info in observed {
+        if !rows.iter().any(|row| row.id == info.id) {
+            rows.push(info.clone());
+        }
+    }
+    rows
+}
+
 /// Lifecycle activity, per the `ToolCallStatus` — NOT the watchdog's
 /// `health` line, which describes liveness-with-possible-stalls and misses
 /// rows that finished before their first health verdict landed.
@@ -404,6 +434,18 @@ impl ContextRail {
         cx.notify();
     }
 
+    /// Adopt the persistent child-run roster as observation rows — the
+    /// attach-time rebuild's feed (plan PR-A4; `Workspace::apply_subagent_rows`
+    /// reads the roster and routes each row here). Test-support diagnostic:
+    /// the restore regression reads these rows back.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_subagent_rows(&self) -> Vec<(String, manox_agent::ToolCallStatus, String)> {
+        self.agents
+            .iter()
+            .map(|info| (info.id.clone(), info.status, info.subagent_type.clone()))
+            .collect()
+    }
+
     /// Update `cockpit_phase` for the streaming/tool variants that flow through
     /// the generic catch-all arm. `Error`, `Stop`, `TurnStarted`, and
     /// `ToolCallAuthorization` are handled in their dedicated arms on `Workspace`;
@@ -575,11 +617,14 @@ impl ContextRail {
             .into_any_element()
     }
 
-    /// Captain + subagents. The Captain row always renders; subagent rows
-    /// show `{type}({topic})` on the SAME left baseline (no indent, no
-    /// tree glyphs — the subordination is singular and certain). Only
-    /// unfinished rows show by default; finished rows fold into `+N` (a
-    /// quiet history keeps the Captain row and a bare `+N`).
+    /// Captain + subagents — the FULL roster (plan PR-A4): the Captain row
+    /// always renders; subagent rows (`{type}({topic})`, the SAME left
+    /// baseline — no indent, no tree glyphs, the subordination is singular
+    /// and certain) list every run the persistent roster carries, live and
+    /// settled alike. Only unfinished rows show by default; finished rows
+    /// fold into `+N` (a quiet history keeps the Captain row and a bare
+    /// `+N`). A row's click drills into that run's read-only child
+    /// transcript (the roster entry names the child chat).
     fn render_agents_section(
         &self,
         theme: &Theme,
@@ -621,45 +666,22 @@ impl ContextRail {
                 .into_any_element(),
         ];
 
-        // The active swarm rides `background_work` on the chat state —
-        // the pointer list whose entries name the child chats (the model
-        // sees the same roster through ListAgents). Settled rows the fold
-        // still carries merge underneath by run id.
-        let live: Vec<SubagentInfo> = self
+        // The crew section is the FULL roster (plan PR-A4): the persistent
+        // child-run registry on the work channel — live runs (spinner, as
+        // today) AND settled runs (their verdict mark, the settled styling
+        // the same status glyphs carry) both listed. The Captain strip
+        // above the composer stays live-only: this node is the "who ever
+        // served" account, that one is "what is running now". The
+        // attach-time rebuild's observation rows (`self.agents`) merge in
+        // underneath by run id.
+        let roster = self
             .store
             .as_ref()
             .map(|(store, sid)| {
                 let view = store.read(cx);
-                leaf_of(&view.book, sid)
-                    .chat
-                    .and_then(|chat| chat.background_work.clone())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|work| match work {
-                        ahp_types::state::BackgroundWork::Subagent(sub) => Some(SubagentInfo {
-                            id: sub.id,
-                            // The wire's label NAMES the run (its topic), it
-                            // is not the agent type — carrying it in both
-                            // slots renders "Explore(Explore)". The type
-                            // fills in from the settled rows once the run's
-                            // own progress events land (the merge below is
-                            // by id).
-                            subagent_type: String::new(),
-                            description: sub.label,
-                            status: manox_agent::ToolCallStatus::Running,
-                            health: None,
-                        }),
-                        _ => None,
-                    })
-                    .collect()
+                crew_rows(&view.book, sid, &self.agents)
             })
             .unwrap_or_default();
-        let mut roster = self.agents.clone();
-        for info in live {
-            if !roster.iter().any(|row| row.id == info.id) {
-                roster.push(info);
-            }
-        }
         let fold = subagent_display_order(&roster, self.bubble_expanded.subagents);
         for info in fold.rows {
             // `{type}({topic})` with graceful one-sided fallbacks.
@@ -1334,6 +1356,95 @@ mod tests {
             "no active rows: the section shows only +N"
         );
         assert_eq!(fold.hidden, 2);
+    }
+
+    /// The crew section's full-roster face (plan PR-A4), driven through the
+    /// SYNTHETIC roster action (the pinned tag does not declare it yet):
+    /// live rows read the running mark, settled rows their verdict's mark,
+    /// the rows list in dispatch order — and the observation rows from the
+    /// attach-time rebuild merge underneath by run id, with the store's
+    /// (fresher) rows winning so a settled verdict cannot be shadowed back
+    /// to a stale running mark.
+    #[test]
+    fn crew_rows_read_the_full_roster_and_the_store_wins_the_merge() {
+        use manox_agent::ToolCallStatus as S;
+
+        let mut book = crate::ahp_store::ChannelBook::default();
+        let action_for = |run: serde_json::Value| {
+            ahp_types::actions::StateAction::Unknown(serde_json::json!({
+                "type": "x-manox-work/childRunsChanged",
+                "run": run,
+            }))
+        };
+        let started = |run_id: &str, stamp: &str| {
+            serde_json::json!({
+                "runId": run_id, "kind": "Explore", "label": "survey",
+                "status": "running", "startedAt": stamp,
+                "chat": format!("ahp-chat:/{run_id}"),
+            })
+        };
+        assert_eq!(
+            book.apply(
+                &crate::ahp_store::work_uri("cap"),
+                &action_for(started("sub-1", "t0"))
+            ),
+            crate::ahp_store::FoldEffect::Changed
+        );
+        assert_eq!(
+            book.apply(
+                &crate::ahp_store::work_uri("cap"),
+                &action_for(started("sub-2", "t1"))
+            ),
+            crate::ahp_store::FoldEffect::Changed
+        );
+        // sub-1 settles with a completed verdict; sub-3 timed out.
+        assert_eq!(
+            book.apply(
+                &crate::ahp_store::work_uri("cap"),
+                &action_for(serde_json::json!({
+                    "runId": "sub-1", "kind": "Explore", "label": "survey",
+                    "status": "settled", "verdict": "completed",
+                    "startedAt": "t0", "chat": "ahp-chat:/sub-1",
+                }))
+            ),
+            crate::ahp_store::FoldEffect::Changed
+        );
+        assert_eq!(
+            book.apply(
+                &crate::ahp_store::work_uri("cap"),
+                &action_for(serde_json::json!({
+                    "runId": "sub-3", "kind": "Write", "label": "draft",
+                    "status": "settled", "verdict": "timed-out",
+                    "startedAt": "t2", "chat": "ahp-chat:/sub-3",
+                }))
+            ),
+            crate::ahp_store::FoldEffect::Changed
+        );
+
+        // The rebuild's observation rows: a STALE running mark for the
+        // settled sub-1, and one run the roster does not know.
+        let observed = vec![agent("sub-1", S::Running), agent("sub-x", S::Success)];
+        let rows = crew_rows(&book, "cap", &observed);
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["sub-1", "sub-2", "sub-3", "sub-x"],
+            "roster rows in dispatch order, the unknown observation row trailing"
+        );
+        assert_eq!(
+            rows[0].status,
+            S::Success,
+            "the settled verdict wins the merge"
+        );
+        assert_eq!(rows[0].subagent_type, "Explore");
+        assert_eq!(rows[0].description, "survey");
+        assert_eq!(rows[1].status, S::Running, "the live row keeps the spinner");
+        assert_eq!(
+            rows[2].status,
+            S::Error,
+            "a timed-out verdict reads as error"
+        );
+        // Another session's roster is empty — the read is per work channel.
+        assert!(crew_rows(&book, "other", &[]).is_empty());
     }
 
     // ── todo sort ────────────────────────────────────────────────────────

@@ -509,26 +509,22 @@ impl Workspace {
                 tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
                 Default::default()
             });
-        // Derive the transcript's plan and the sub-agent rows inside one
-        // store read — the display fold's message rows ARE the messages
-        // (L6, mechanical transcription), and cloning the whole transcript
-        // here would copy it on the main thread on every switch.
-        let (plan_from_messages, subagent_rows) = self
+        // The sub-agent observation rows rebuild from the PERSISTENT ROSTER
+        // (the work channel's child-run registry): the roster is the
+        // restore source (plan PR-A4), settled runs included, so the
+        // switch-away-and-back / restart rebuild carries the whole crew.
+        // The transcript-scan path this replaces fed an empty message set —
+        // the sub-agent tree rides the x-manox channels, which no message
+        // scan can see — and so rebuilt nothing (the retired KNOWN
+        // DOWNGRADE).
+        let subagent_rows = self
             .chat
             .read(cx)
             .store
             .as_ref()
-            .map(|_| {
-                // The plan snapshot and the sub-agent tree ride the x-manox
-                // channels (unmodelled on this pass), so the restore starts
-                // from an empty message set. KNOWN DOWNGRADE: switching to a
-                // thread with a proposed plan or live sub-agents rebuilds
-                // those panels empty until their channels repopulate.
-                let msgs: Vec<manox_agent::Message> = Vec::new();
-                (
-                    manox_agent::plan::rebuild_from_messages(&msgs),
-                    manox_agent::subagent_restore::rebuild_from_messages(&msgs),
-                )
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::child_runs_of(&view.book, sid)
             })
             .unwrap_or_else(|| {
                 tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
@@ -688,17 +684,15 @@ impl Workspace {
         self.rearm_goal_ticker(goal_elapsed_live, cx);
         // Cockpit state is per-thread: the outgoing thread's plan,
         // running-tool title, and per-model counter state do not apply to the
-        // incoming one. The execution plan, unlike the proposed-plan review,
-        // IS recoverable: re-derived from the transcript's `UpdatePlan` tool
-        // calls, falling back to the independent sidecar snapshot (the facade
-        // mirrors the persisted copy on every `PlanUpdated` / `Ready`).
-        let restored_plan = plan_from_messages.or_else(|| {
-            self.chat.read(cx).store.clone().and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::plan_snapshot_of(&view.book, &sid)
-                    .cloned()
-                    .and_then(|v| serde_json::from_value::<manox_agent::plan::PlanSnapshot>(v).ok())
-            })
+        // incoming one. The execution plan's restore is the sidecar snapshot
+        // (the transcript-scan leg never had a real input here either — the
+        // plan rides the x-manox plan channel, unmodelled on the transcript
+        // face — and the roster read above replaced the scan outright).
+        let restored_plan = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
+            let view = store.read(cx);
+            crate::ahp_store::plan_snapshot_of(&view.book, &sid)
+                .cloned()
+                .and_then(|v| serde_json::from_value::<manox_agent::plan::PlanSnapshot>(v).ok())
         });
         let rail_leaf = self.chat.read(cx).store.clone();
         self.chat_rail(cx).update(cx, |r, cx| {
@@ -718,9 +712,9 @@ impl Workspace {
             }
             cx.notify();
         });
-        // Recover the settled sub-agent observation rows for the incoming
-        // thread after the rail reset above (a restoring thread has no
-        // messages yet — its rows land with the `HistoryRestored` rebuild).
+        // Recover the crew's observation rows for the incoming thread after
+        // the rail reset above, straight from the persistent roster (live
+        // and settled rows alike — the roster is the restore source).
         self.apply_subagent_rows(subagent_rows, cx);
         // Replay the window's live-only tail (sub-agent child/progress rows, an
         // in-flight tool's streamed output, a live retry notice): the parked

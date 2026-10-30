@@ -348,17 +348,6 @@ pub fn subagent_topic(prompt: &str) -> String {
     }
 }
 
-/// The first non-empty line of a prompt, for the background-task card title
-/// and the restored sub-agent rail rows (local presentation rule, same as
-/// `subagent_topic`).
-pub fn first_line(prompt: &str) -> Option<String> {
-    prompt
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
 /// The delegation-shape predicate lives in the projection vocabulary (the
 /// data plane reads it too, to name a live sub-agent row); re-exported here
 /// so the conversation's call sites keep one spelling.
