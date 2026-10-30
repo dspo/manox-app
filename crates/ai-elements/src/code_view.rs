@@ -553,10 +553,15 @@ pub(crate) fn fenced(text: &str) -> String {
             run = 0;
         }
     }
+    // The fence carries NO language token: upstream renders a fenced block's
+    // language in the top-right corner and pads the first line clear of it —
+    // a stray row with an "ansi" chip above the body's first line. The body
+    // colors through the view's own highlighter, which never looks at the
+    // token.
     let fence = "`".repeat((longest + 1).max(3));
     let mut source = String::with_capacity(text.len() + fence.len() * 2 + 8);
     source.push_str(&fence);
-    source.push_str("ansi\n");
+    source.push('\n');
     source.push_str(text);
     if !text.ends_with('\n') {
         source.push('\n');

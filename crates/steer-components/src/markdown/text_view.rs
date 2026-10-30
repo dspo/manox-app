@@ -298,10 +298,15 @@ pub fn panel_document(
     theme: &Theme,
     motion: TextViewMotion,
 ) -> TextView {
+    // The fence carries NO language token: upstream renders a fenced block's
+    // language in the top-right corner and pads the first line clear of it,
+    // so a labeled fence here would read as a stray row with an "ansi" chip
+    // above the body. The runs come from the caller's highlighter, which
+    // never looks at the token.
     let fence = "`".repeat(fence_len(text));
     let mut source = String::with_capacity(text.len() + fence.len() * 2 + 8);
     source.push_str(&fence);
-    source.push_str("ansi\n");
+    source.push('\n');
     source.push_str(text);
     if !text.ends_with('\n') {
         source.push('\n');
@@ -769,7 +774,7 @@ mod tests {
         let fence = "`".repeat(fence_len(text));
         let mut source = String::new();
         source.push_str(&fence);
-        source.push_str("ansi\n");
+        source.push('\n');
         source.push_str(text);
         if !text.ends_with('\n') {
             source.push('\n');
@@ -843,7 +848,7 @@ mod tests {
         let fence = "`".repeat(fence_len(&s));
         let mut source = String::new();
         source.push_str(&fence);
-        source.push_str("ansi\n");
+        source.push('\n');
         source.push_str(&s);
         if !s.ends_with('\n') {
             source.push('\n');
@@ -885,7 +890,7 @@ mod tests {
         let fence = "`".repeat(fence_len(text));
         let mut source = String::new();
         source.push_str(&fence);
-        source.push_str("ansi\n");
+        source.push('\n');
         source.push_str(text);
         if !text.ends_with('\n') {
             source.push('\n');
