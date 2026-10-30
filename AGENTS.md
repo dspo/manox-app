@@ -42,7 +42,7 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
 
 manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（dspo/manox#818 删除 manox-protocol）：journal 仍是唯一 durable 权威，宿主把 journal 折叠成 AHP 通道状态，本仓退化为纯 AHP 客户端。规范与映射表唯一事实源在 dspo/manox 的 `docs/ahp-v3-architecture.md`（§G.W3 = 本仓切换、§F.2 = 本仓删除清单）。
 
-- **数据面**：`crates/steer-agent-chat-ui/src/ahp_store.rs`（`AhpStore`：一个 `ahp::Client` 挂宿主进程单例的 in-proc 腿，折叠 root/session/chat/extension 通道，类型化写面）+ `chat_fold.rs`（`ChatState` → 显示词汇）。视图只许读 AhpStore（grep 门禁 `script/check-no-v2-wire.sh` 冻结 v2 词汇）。
+- **数据面**：`crates/steer-agent-chat-ui/src/ahp_store.rs`（`AhpStore`：一个 `ahp::Client` 挂宿主进程单例的 in-proc 腿，折叠 root/session/chat/extension 通道，类型化写面）+ `chat_fold.rs`（`ChatState` → 显示词汇）。视图只许读 AhpStore；v2 wire 词汇（`manox_protocol`/`FromClient`/`ClientCall`/`StreamFrame` 一类命名）不得在本仓重现——上游已删除 manox-protocol，这条从此靠评审守，不再有脚本门禁。
 - **生命周期**：`agent-ui/src/multiplexer.rs` 只管 attach（订阅）/focus（GW5）/create-fork 命令缝；unread 是协议状态（`session/isReadChanged`，AhpStore 折叠），不再有本地镜像；不再有 per-session 线程泵。
 - **客户端 SDK**：crates.io `ahp`/`ahp-types` `=1.0.0` 精确 pin（与上游 workspace 一致）；x-manox 扩展通道的 fold 与声明常量经上游 `manox-ahp::ext`。
 - 已知降级（接 x-manox 通道未建模的部分）：sub-agent 树、UI 本地注释卡不持久、终端走内核 PTY 直连不走 AHP terminal 通道。
@@ -77,13 +77,13 @@ cargo clippy --all-targets
 cargo fmt --all
 ```
 
-Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 构建（集成浏览器已编译排除，无需 GTK/WebKitGTK）需要 X11/Wayland 系统依赖（Fedora 等价物：`dnf install gcc wayland-devel fontconfig-devel libX11-devel libXcursor-devel libXi-devel libXrandr-devel libXrender-devel libXinerama-devel libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel openssl-devel zlib-devel`）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
+Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 系统依赖的**唯一清单**是 `.github/actions/linux-deps/action.yml`（Fedora 侧对应 `.github/actions/linux-deps-fedora/action.yml`，两份声明同一包集合；集成浏览器在 Linux 编译排除，故两份都不含 GTK/WebKitGTK；改一处必须同步另一处）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
 
 **Linux 无集成浏览器（编译期排除）**：wry 的 Linux 子 webview 只能经 Xlib 句柄挂载，Wayland 窗口无法承载嵌入式浏览器 —— 集成浏览器在 Linux/FreeBSD 上整体不编译（`#[cfg(not(any(linux, freebsd)))]` 盖住 `browser_host` / `browser_view` / `BrowserTool` / steer-webview 整个 crate，依赖面随 target gate 收紧，wry/WebKitGTK/GTK 不进 Linux 构建），UI 无入口，agent 的 `web_explore_*` 工具经 capability provider 得到干净的「not available」拒绝（剪贴板能力保留在 `capability_host`，全平台）。窗口后端回归 gpui 默认（Wayland 会话原生 Wayland）。已知系统雷区：部分栈（Fedora 44 mutter 50.4 + XWayland 24.1 + ANV 实测）在 Vulkan X11 WSI 的 `AcquireNextImageKHR` 里死锁，活跃重绘的 XWayland/X11 窗口数十秒内冻结 —— 原生 Wayland 路径不受影响；若需在 X11 会话跑，`VK_LOADER_DRIVERS_DISABLE=*`（wgpu 落 Mesa GL）可绕开。托盘受宿主限制：无 StatusNotifierWatcher 的桌面（原生 GNOME）上 `tray::install` 刻意失败，应用保持「关窗即退出」而非隐形驻留。
 
 ### Release（tag 触发）
 
-push 语义化版本 tag（`vMAJOR.MINOR.PATCH[-PRERELEASE]`）触发 `.github/workflows/release.yml`：三路构建并发布 GitHub Release——macOS arm64（`script/bundle-mac` 产 ad-hoc 签名的 Steer.app 后 zip）、deb amd64（`script/bundle-deb`）、rpm x86_64（`script/bundle-rpm`，在 fedora 容器内构建 + `dnf` 冒烟安装）；tag 版本必须等于 `[workspace.package].version`（bundle 脚本以它为唯一版本源，发版前先 bump 再打 tag）。`workflow_dispatch` 可在任意分支跑同一管线做纯构建验证（不发布）。制品内均含 steer 与 cx 双 bin。
+push 语义化版本 tag（`vMAJOR.MINOR.PATCH[-PRERELEASE]`）触发 `.github/workflows/release.yml`：三路构建并发布 GitHub Release——macOS arm64（`script/bundle-mac` 产 ad-hoc 签名的 Steer.app，再由 `script/bundle-dmg --skip-bundle` 打成 `.dmg`，zip 一并保留）、deb amd64（`script/bundle-deb`）、rpm x86_64（`script/bundle-rpm`，在 fedora 容器内构建 + `dnf` 冒烟安装）；tag 版本必须等于 `[workspace.package].version`（bundle 脚本以它为唯一版本源，发版前先 bump 再打 tag）。`workflow_dispatch` 可在任意分支跑同一管线做纯构建验证（不发布）。制品内均含 steer 与 cx 双 bin。
 
 ### 出 UI 图（chrome 壳）
 
@@ -100,7 +100,7 @@ CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p steer-agent
 
 - 诊断开关 `CHROME_SWITCH=1`：开第二个（更宽的）页签、等布局稳定后切回第一个——**这是唯一能触达页签指示器滑动动画的路径**，单页签出图看不到「从哪来」。
 - **动画类改动注意**：离屏测试**没有平台帧循环**，`request_animation_frame` 排的回调只有经 `Window::simulate_next_frame` 才会送达；只 `run_until_parked` 的话动画永远停在第一帧（`delta=0`）。settle 循环已补一帧，但**要看中间帧必须自己 pump**；出图只反映终态。
-- 页签指示器的对齐由 `script/check-tab-indicator.sh` 把关（量**左端**而非宽度——曾经宽度/高度全对却整体右偏 6px，任何宽度或 y 断言都看不见）。它依赖 macOS 离屏 harness，CI 上自动跳过。
+- **页签指示器的不变量**（原 `script/check-tab-indicator.sh` 已删，改成出图时人工核对）：① 对齐量**左端**而非宽度——曾经宽度/高度全对却整体右偏 6px，任何宽度或 y 断言都看不见；正确位置是 rail 左端 + 8 device px（`STRIP_PL` 4 logical @2x）。② 可见厚度必须是 4 device px（`TAB_INDICATOR_H` 2 logical），而指示器必须是 strip 的**兄弟节点**（放在 relative wrapper 里）——gpui 在子节点之后绘制父级 border，做成 strip 的子节点会被盖掉一半。
 - 产物是 **1280×820 @2x = 2560×1640** 的 PNG（约 300KB）。
 - **macOS only**：Metal 纹理回读，其它平台打印一行跳过；**未设 `CHROME_SHOT` 时同样跳过**，所以在 CI 里安全（门禁不受影响）。
 - 侧栏铺的是真实 thread store（`refresh_thread_list` 一次同步扫描），所以图里是**真实会话数据**，不是占位。
@@ -120,7 +120,7 @@ CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p steer-agent
 
 GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再直接依赖 zed-industries/zed**：`gpui`/`gpui_platform` 是 `gpui-pre`/`gpui-pre-platform` 的包名别名——Longbridge 每周从 zed main republish 的快照（`[lib]` 名保留，`use gpui::*` 不变），每个版本自带 zed commit 映射（crate description / `[package.metadata]`）可审计。组件层 `gpui-component` 与资产 `gpui-kit-assets`（原 gpui-component-assets）同线 semver。全部 `=` 精确 pin，防周更快照漂移。
 
-升级姿势：`cargo update -p gpui-pre --precise x.y.z`（与组件版本按 gpui-kit lock 对齐）→ 重跑全部门禁；gpui-pre 的 `[[patch.unused]]`/duplicate 用 `cargo tree -d | grep -i gpui` 验证单一版本，`script/check-no-zed-git.sh` 验证 zed 零引用（CI 门禁）。gpui 相关依赖在 debug 下仍需 opt-level=3（`[profile.dev.package] gpui-pre*`）。历史注：旧栈（gpui@zed-1d217ee + gpui-component@longbridge-git）已退役；gpui-pre ≥0.3.4 含上游 gpui#60295 element-arena 修复。
+升级姿势：`cargo update -p gpui-pre --precise x.y.z`（与组件版本按 gpui-kit lock 对齐）→ 重跑全部门禁；gpui-pre 的 `[[patch.unused]]`/duplicate 用 `cargo tree -d | grep -i gpui` 验证单一版本，并人工确认没有任何 Cargo.toml / `.cargo/config.toml` 重新引入 `git = "...zed-industries..."`（原 `script/check-no-zed-git.sh` 已从 CI 移除，这条改由评审守）。gpui 相关依赖在 debug 下仍需 opt-level=3（`[profile.dev.package] gpui-pre*`）。历史注：旧栈（gpui@zed-1d217ee + gpui-component@longbridge-git）已退役；gpui-pre ≥0.3.4 含上游 gpui#60295 element-arena 修复。
 
 版本跟进/升级的完整流程（跟进触发面、评估三问、整列 runbook、adoption 跟进与手搓热点表）见 `.agents/skills/gpui-kit-follow/SKILL.md`。
 
@@ -142,9 +142,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
   （chrome crate 的 Shell + 投影侧栏 + 右栏 ToolTab 注册表 + 会话列作为主区卡内容）。
   双壳构建开关（`--features chrome-shell`）与 `agent-ui::Workspace` 的旧全壳渲染已删净；
   上一个双壳形态留在 tag `dual-shell-final`（计划文档已随退役删除，历史见 git log）。
-- 每 PR 门禁：`cargo clippy -D warnings --all-targets` + 全量
-  `cargo test` + `cargo test -p agent-ui --features test-support` + `cargo fmt`；
-  PR 写清 Test Plan 与 Assumptions。
+- **每 PR 门禁 = `.github/workflows/ci.yml` 的 `checks_pass`**（分支保护只 require 这一条；`no-coauthor.yml` 是第二条、事件集不同不能并入）：`guards`（`cargo fmt --check` + chat crate 依赖不变量）→ 两条并行 verify（linux amd64 `ubuntu-24.04` / macOS arm64 `macos-26`，各自 `clippy -D warnings --all-targets` → 一次 feature-inclusive 全量 `cargo test --features agent-ui/test-support`；`--all-targets` 已把 bin 编过，所以没有单独的 build 步，shipping 二进制由打包腿的 release 构建产出）。本地等价：`cargo fmt --all -- --check`、`./script/check-chat-crate-deps.sh`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets --features agent-ui/test-support`。打包腿（`.deb` / `.dmg`）与 verify **并行**，只在 main 推送、`workflow_dispatch`、PR 带 `ci:package` 标签、或 PR 改到打包面（`script/bundle-*`、两个 linux-deps action、`release.yml`、`ci.yml`、`crates/steer-app/Cargo.toml`）时启用——冷 release 构建不该躺在每个 PR 的必经路上；`.rpm` 只在 `release.yml` 出（Fedora 容器 + glibc baseline）。PR 写清 Test Plan 与 Assumptions。
 - **合并前必须把 manox 依赖 bump 到最新兼容发布**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下确认 Cargo.toml 的 runtime tag 指向当前 release 线（release/0.5 的 v0.5.x，或 main 的下一轨）最新兼容 tag——9 个依赖共用同一 tag，改一处声明 + `cargo update -p manox-agent` 整体移动——重跑全部门禁，并把变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容发布再 bump，或在 PR 中显式声明滞留原因（旧 tag 停留是债务，不是默认状态）。
 - 提交信息不得携带 Co-Authored-By 尾注（CI 强制拒绝）。
 

@@ -5,7 +5,10 @@
 //! `agent` crate; UI lives in the `agent-ui` crate.
 
 use gpui::{App, Menu, MenuItem, QuitMode, WindowHandle, actions, px, size};
-use gpui::{WindowBounds, WindowDecorations, WindowOptions};
+use gpui::{WindowBounds, WindowOptions};
+// Serves the client-side-decoration request below; compiled out with it.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use gpui::WindowDecorations;
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use std::borrow::Cow;
 

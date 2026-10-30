@@ -4,7 +4,9 @@ name: release
 # (vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]) builds the three shipping
 # artifacts and attaches them to a GitHub Release:
 #
-#   - macOS arm64:  Steer.app, ad-hoc signed, zipped (script/bundle-mac)
+#   - macOS arm64:  Steer.app, ad-hoc signed — shipped as a .dmg (the install
+#                   artifact) and a .zip (scripting) — script/bundle-mac +
+#                   script/bundle-dmg
 #   - deb amd64:    steer + cx, Depends from the linked binaries (script/bundle-deb)
 #   - rpm x86_64:   built inside a Fedora container so the glibc baseline and
 #                   rpmbuild's dependency generators match the target distro
@@ -131,11 +133,19 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "${app}" "dist/Steer_${VERSION}_macos_arm64.zip"
           unzip -t "dist/Steer_${VERSION}_macos_arm64.zip" > /dev/null
 
+      # The disk image is the artifact a macOS user installs from; the zip stays
+      # for anyone scripting against it. --skip-bundle reuses the .app above
+      # (already built and signed) instead of rebuilding it.
+      - name: Create the disk image
+        run: ./script/bundle-dmg --skip-bundle
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: dist/Steer_*_macos_arm64.zip
+          path: |
+            dist/Steer_*_macos_arm64.zip
+            dist/Steer_*_macos_arm64.dmg
           if-no-files-found: error
 
   build-deb:
@@ -147,34 +157,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Same set as the build workflow (the -dev packages pull their runtime
-      # counterparts, which both the build and the smoke-test install need),
-      # plus desktop-file-utils for the desktop-entry check.
+      # Same list the ci workflow uses (one definition: linux-deps), plus
+      # desktop-file-utils for the desktop-entry check.
       - name: Install system dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libx11-dev \
-            libxcb1-dev \
-            libxrender-dev \
-            libxrandr-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxi-dev \
-            libxcursor-dev \
-            libxinerama-dev \
-            libwayland-dev \
-            desktop-file-utils
+        uses: ./.github/actions/linux-deps
+
+      - name: Install packaging tools
+        run: sudo apt-get install -y --no-install-recommends desktop-file-utils
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
 
-      # Same key namespace as the build workflow: on release builds this
+      # Same key namespace as the ci workflow: on release builds this
       # restores the registry warm from main-branch CI runs.
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -227,20 +223,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Fedora-side translation of the build workflow's apt list (the -devel
-      # packages pull their runtime counterparts for the smoke test), plus the
-      # bits the GitHub ubuntu image preinstalls but this container lacks:
-      # a C linker, openssl/zlib headers (ubuntu ships libssl-dev/zlib1g-dev),
-      # python3 (the bundle script parses cargo metadata with it), file(1) for
-      # rpmbuild's ELF dependency generators and rpm-build itself.
+      # Fedora-side package set (one definition:
+      # .github/actions/linux-deps-fedora). The rpm is built only here — the PR
+      # pipeline has no Fedora container — so this is the action's only consumer.
       - name: Install build dependencies
-        run: >
-          dnf install -y gcc python3 file rpm-build openssl-devel zlib-devel
-          pkgconf-pkg-config alsa-lib-devel
-          fontconfig-devel libX11-devel libxcb-devel libXrender-devel
-          libXrandr-devel libxkbcommon-devel libxkbcommon-x11-devel
-          libXi-devel libXcursor-devel libXinerama-devel
-          wayland-devel
+        uses: ./.github/actions/linux-deps-fedora
 
       - name: Install Rust toolchain
         run: |
