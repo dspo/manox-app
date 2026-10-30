@@ -889,12 +889,16 @@ impl Workspace {
         // parked session accumulated drain on the sync above, retiring their
         // cards before the user sees the strip.
         // A stale attach tail must not steal the main column back: the user
-        // may have re-entered an external session or Settings while this
-        // async attach was landing — the synchronous leave in open_thread
-        // already handled the normal transition. Settings is excluded too:
-        // flipping past it would strand the settings nav in the sidebar
-        // (its surface is mounted exactly while the mode is Settings).
-        if !matches!(self.view_mode, ViewMode::Workspace | ViewMode::Settings) {
+        // may have re-entered an external session, the sub-agent page or
+        // Settings while this async attach was landing — the synchronous
+        // leave in open_thread already handled the normal transition.
+        // Settings is in the exclusion set because flipping past it would
+        // strand the settings nav in the sidebar (its surface is mounted
+        // exactly while the mode is Settings).
+        if !matches!(
+            self.view_mode,
+            ViewMode::ExternalSession | ViewMode::SubagentStream | ViewMode::Settings
+        ) {
             self.active_external = None;
             self.view_mode = ViewMode::Workspace;
         }
