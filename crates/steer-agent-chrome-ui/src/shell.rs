@@ -300,6 +300,12 @@ pub struct Shell {
     // ── layout ──
     pub show_sidebar: bool,
     pub show_panel: bool,
+    /// Set while a host-injected sidebar surface is mounted (the Settings
+    /// split layout). The injected surface is the only exit of that mode, so
+    /// while this is set the titlebar's hide toggle is a no-op and the
+    /// sidebar stays up — the host cannot strand the injected nav behind a
+    /// collapsed sidebar.
+    pub(crate) sidebar_pinned: bool,
     /// The right pane (the shell view; tab content is decoupled through
     /// ToolTab — see `right_pane.rs`).
     pub right: Entity<RightPane>,
@@ -336,6 +342,12 @@ pub struct Shell {
 
 impl Shell {
     pub fn set_sidebar_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        // The injected surface is the mode's only exit, so mounting it pins
+        // the sidebar open; unmounting releases the pin.
+        self.sidebar_pinned = surface.is_some();
+        if surface.is_some() {
+            self.show_sidebar = true;
+        }
         self.sidebar_surface = surface;
         cx.notify();
     }
@@ -371,6 +383,7 @@ impl Shell {
             title_edit: None,
             show_sidebar: true,
             show_panel: false,
+            sidebar_pinned: false,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
             sidebar_surface: None,
             brand: config.brand,
