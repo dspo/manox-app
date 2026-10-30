@@ -6,13 +6,15 @@
 //! sessions live); switching away parks the session (its terminal keeps
 //! running), closing drops the view and tears the process tree down.
 //!
-//! Identity (the legacy model): each session mints a manox-app-style row id
-//! `external:{agent}:{uuid}` — namespaced so it never collides with a manox
-//! thread UUID in the sidebar's selection namespace — and records the REAL
-//! external session id behind it (`cx_session_id`, derived from the cx
-//! session socket's `<id>.sock` filename; empty for plain terminals and
-//! when the IPC bind failed). The row id is what the sidebar shows and
-//! routes on; the cx id is the traceable link to `~/.manox/sessions/`.
+//! Identity (the container model, D2): each session's id mints in the
+//! manox-app-style row-id namespace `external:{agent}:{uuid}`
+//! (`container::ContainerId::external`) — namespaced so it never collides
+//! with a manox thread UUID in the sidebar's selection namespace — and the
+//! record keeps the REAL external session id behind it (`cx_session_id`,
+//! derived from the cx session socket's `<id>.sock` filename; empty for
+//! plain terminals and when the IPC bind failed). The row id is what the
+//! sidebar shows and routes on; the cx id is the traceable link to
+//! `~/.manox/sessions/`.
 //!
 //! In-memory only — the PTY dies with the process, nothing persists. The
 //! sidebar rows are projected by [`Workspace::external_session_rows`] and
@@ -21,15 +23,18 @@
 
 use std::path::PathBuf;
 
-use manox_terminal::event::TerminalEvent;
 use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
 use steer_agent_chrome_ui::shell::{MAX_EXTERNAL_TITLE_CHARS, SessionRow};
 
 use super::Workspace;
+use super::container;
 
-/// One live external session: the identity pair, the sidebar row's fields,
-/// and the terminal entity that occupies the main column while the session
-/// is foreground.
+/// One live external container (the SessionContainer model's external home —
+/// this record IS the container): the identity pair, the sidebar row's
+/// fields, and the terminal entity that occupies the main column while the
+/// session is foreground. The container face (kind, attrs snapshot, alive
+/// bit) lives beside the row fields; native containers are views over
+/// threads and have no record here (see `container`).
 pub(crate) struct ExternalSessionRecord {
     /// `external:{agent_id}:{uuid}` — the manox-app-style row id. It is the
     /// sidebar selection key AND the routing key; the `external:` namespace
@@ -49,17 +54,29 @@ pub(crate) struct ExternalSessionRecord {
     pub default_label: String,
     pub svg: &'static str,
     /// The project directory the session was launched in — the sidebar
-    /// group it merges into; `None` → the loose Chats bucket.
+    /// group it merges into; `None` → the loose Chats bucket. The
+    /// container's project association for this home (app memory; the live
+    /// read rides `Workspace::container_project`).
     pub project: Option<PathBuf>,
     pub created_at: i64,
     pub view: gpui::Entity<terminal_ui::TerminalView>,
     /// The terminal's `Title` events → [`Self::label`]. Lives (and dies)
     /// with the record: the session's PTY outlives nothing else.
-    _title_sub: gpui::Subscription,
-}
-
-fn mint_row_id(agent_id: &str) -> String {
-    format!("external:{}:{}", agent_id, uuid::Uuid::new_v4())
+    pub(super) _title_sub: gpui::Subscription,
+    // ── the container face (the A1 upgrade) ──
+    /// The kind the 0 号 decides: the launched CLI agent. `None` for a plain
+    /// terminal — its 0 号 is a bare shell, which the kind vocabulary has no
+    /// entry for.
+    pub kind: Option<container::ContainerKind>,
+    /// The creation-time attribute snapshot (D10): the spawn cwd + the
+    /// environment at the creation call, frozen — resources spawned later
+    /// (A2) inherit this copy.
+    pub attrs: container::ContainerAttrs,
+    /// The death predicate's external half (D8): true until the PTY's
+    /// child-exit event lands. Flipping it raises
+    /// `container::ContainerEvent::Died`; the record itself stays until the
+    /// lifecycle PR wires the teardown.
+    pub alive: bool,
 }
 
 /// One launch's session payload (bundled — the spawn would otherwise arc
@@ -76,7 +93,10 @@ pub struct ExternalSessionLaunch<'a> {
 
 impl Workspace {
     /// Register a spawned terminal and bring it up in the main column —
-    /// focused, so the TUI takes keyboard input immediately.
+    /// focused, so the TUI takes keyboard input immediately. The record
+    /// itself (identity, attrs snapshot, the PTY subscriptions) lands
+    /// through the unified container entry; what remains here is the
+    /// foreground hand-off.
     pub fn spawn_external_session(
         &mut self,
         launch: ExternalSessionLaunch<'_>,
@@ -84,48 +104,16 @@ impl Workspace {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        let id = mint_row_id(launch.agent_id);
-        // The terminal may carry a title already — the program claims it
-        // through the PTY as soon as it boots — and that claim beats the
-        // launch label for the initial row.
-        let default_label = launch.label.clone();
-        let label = view
-            .read(cx)
-            .terminal()
-            .read(cx)
-            .title()
-            .map(|t| clamp_external_title(&t))
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| default_label.clone());
-        // Title events ride the PROXY's gpui event face, never the kernel
-        // handle's broadcast: the proxy pump assumes it is the handle's sole
-        // subscriber (its `Arc::try_unwrap` drops every event otherwise).
-        let proxy = view.read(cx).terminal().clone();
-        let id_for_title = id.clone();
-        let title_sub = cx.subscribe(&proxy, move |this, _, ev: &TerminalEvent, cx| {
-            if let TerminalEvent::Title(title) = ev {
-                this.apply_terminal_title(&id_for_title, title.clone(), cx);
-            }
-        });
-        self.externals.push(ExternalSessionRecord {
-            id: id.clone(),
-            cx_session_id: launch.cx_session_id,
-            default_label,
-            label,
-            svg: launch.svg,
-            project: launch.project,
-            created_at: chrono::Utc::now().timestamp(),
-            view: view.clone(),
-            _title_sub: title_sub,
-        });
-        // The identity link, read from the record: a row id traces back to
-        // the cx session's socket on disk.
-        let record = self.externals.last().expect("just pushed");
-        tracing::info!(
-            row_id = %record.id,
-            cx_session_id = %record.cx_session_id,
-            agent = launch.agent_id,
-            "external session registered"
+        let id = self.create_container(
+            container::ContainerSeed::External(container::ExternalContainerSeed {
+                agent_id: launch.agent_id,
+                cx_session_id: launch.cx_session_id,
+                label: launch.label,
+                svg: launch.svg,
+                project: launch.project,
+                view: view.clone(),
+            }),
+            cx,
         );
         // The main column changes hands. The sub-agent page obeys the same
         // invariant its own fields do — it exists only while its mode owns the
@@ -199,7 +187,7 @@ impl Workspace {
     /// the row; `None` (a program's title reset) restores the launch label.
     /// No-op on an unchanged or empty title — TUIs re-emit constantly and
     /// each emission must not churn the sidebar.
-    fn apply_terminal_title(
+    pub(super) fn apply_terminal_title(
         &mut self,
         id: &str,
         title: Option<String>,
@@ -294,7 +282,7 @@ impl Workspace {
 /// Clamp a terminal's raw title to the chrome's title budget (chars, not
 /// bytes — the OSC stream is arbitrary program output) and trim it; an
 /// empty result means "not a title", the caller keeps the old label.
-fn clamp_external_title(raw: &str) -> String {
+pub(super) fn clamp_external_title(raw: &str) -> String {
     raw.trim().chars().take(MAX_EXTERNAL_TITLE_CHARS).collect()
 }
 
@@ -312,16 +300,6 @@ fn focus_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The row-id vocabulary: namespaced `external:{agent}:{uuid}`, unique,
-    /// and never colliding with a bare thread UUID.
-    #[test]
-    fn row_ids_are_namespaced_and_unique() {
-        let id = mint_row_id("claude");
-        assert!(id.starts_with("external:claude:"));
-        assert!(mint_row_id("claude") != id, "ids are unique");
-        assert!(!id.starts_with("0197"), "never a bare thread-uuid shape");
-    }
 
     /// The OSC stream is arbitrary program output: the clamp trims and caps
     /// it at the chrome's title budget (char-counted, emoji included).

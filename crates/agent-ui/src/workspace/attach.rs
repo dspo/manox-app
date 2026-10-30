@@ -14,7 +14,7 @@ use super::*;
 /// create path must land one. A create path that skips this leaves a
 /// conversation with no object behind it, and the pickers then address an
 /// id the store has never seen.
-fn land_conversation_row(
+pub(super) fn land_conversation_row(
     sid: &str,
     project: Option<&std::path::Path>,
     provider: Option<&str>,
@@ -40,7 +40,7 @@ fn land_conversation_row(
 /// Split the session config's `model` value into the two halves the row
 /// keeps apart. The app writes the wire form (`provider/id`); a value that
 /// carries no provider keeps its id whole.
-fn split_wire_model(model: Option<&str>) -> (Option<&str>, Option<&str>) {
+pub(super) fn split_wire_model(model: Option<&str>) -> (Option<&str>, Option<&str>) {
     match model.and_then(|m| m.split_once('/')) {
         Some((provider, id)) => (Some(provider), Some(id)),
         None => (None, model),
@@ -78,7 +78,7 @@ impl Workspace {
     /// reads the object row's `archived` bit first, but that bit is this
     /// client's projection — a row archived by another client (or before the
     /// bit existed) would otherwise be resurrected as a draft.
-    fn session_retired(&self, cx: &App, id: &str) -> bool {
+    pub(super) fn session_retired(&self, cx: &App, id: &str) -> bool {
         if let Some((store, _)) = self.chat.read(cx).store.as_ref() {
             let view = store.read(cx);
             if let Some(state) = view.book.sessions.get(id)
@@ -112,7 +112,10 @@ impl Workspace {
     /// `{cwd, project?, initial_model?}` so the server owns creation) and,
     /// when the server's `{session_id}` receipt lands, binds a detached
     /// rendering mirror to that server-minted id and opens the follow stream.
-    /// Creation happens exactly once — on the server.
+    /// Creation happens exactly once — on the server. The construction
+    /// itself is the container entry's native half
+    /// (`container::create_container`): the session container model's
+    /// draft-refill-or-mint decision, object row and folded createSession.
     ///
     /// Returns the client-minted session id: the attach lands asynchronously,
     /// so a caller that must address the fresh thread (e.g. `/exit`'s closing
@@ -171,159 +174,18 @@ impl Workspace {
         let model = inherited.as_ref().and_then(|(_, m, _, _)| m.clone());
         let access = inherited.as_ref().and_then(|(_, _, a, _)| a.clone());
         let effort_str = inherited.as_ref().and_then(|(_, _, _, e)| e.clone());
-        let cwd = project
-            .as_ref()
-            .unwrap_or(&self.cwd)
-            .to_string_lossy()
-            .to_string();
-        let ws = cx.weak_entity();
-        let dir_for_store = project.clone();
-        // The draft refill: a never-materialized conversation under the
-        // same project (or project-less) is that project's unfinished
-        // draft — return to it instead of minting a sibling. Its row
-        // already carries the model/access picks the user left there.
-        // The FOREGROUND session and archived rows are excluded: the
-        // landing conversation (created project-less at boot, never
-        // spoken) is itself the latest project-less draft, and a just
-        // archived draft would be resurrected — refilling either would
-        // make "new session" a no-op on the very session it should leave.
-        let foreground = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(_, sid)| sid.clone());
-        let objects = manox_agent::object_store::ObjectStore::try_global();
-        let refill = objects.as_ref().and_then(|store| {
-            store.latest_draft(
-                project
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .as_deref(),
-            )
-        });
-        let refill = refill.filter(|row| {
-            !row.archived
-                && foreground.as_deref() != Some(row.id.as_str())
-                && !self.session_retired(cx, &row.id)
-        });
-        // v3: the id is client-minted; a refill carries the draft's own
-        // picks (its row wins over inheritance) and a fresh conversation the
-        // inherited config, and the attach lands once the host answered.
-        let sid = refill
-            .as_ref()
-            .map(|row| row.id.clone())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let mut config = serde_json::Map::new();
-        if let Some(model) = &model {
-            config.insert("model".into(), serde_json::json!(model));
-        }
-        if let Some(access) = &access {
-            config.insert("accessMode".into(), serde_json::json!(access));
-        }
-        if let Some(effort) = &effort_str {
-            config.insert("reasoningEffort".into(), serde_json::json!(effort));
-        }
-        if let Some(row) = &refill {
-            if let Some(model_id) = row.model_id.as_deref() {
-                let model = match row.model_provider.as_deref() {
-                    Some(provider) => format!("{provider}/{model_id}"),
-                    None => model_id.to_string(),
-                };
-                config.insert("model".into(), serde_json::json!(model));
-            }
-            if let Some(access) = &row.access_mode {
-                config.insert("accessMode".into(), serde_json::json!(access));
-            }
-            if let Some(effort) = &row.reasoning_effort {
-                config.insert("reasoningEffort".into(), serde_json::json!(effort));
-            }
-        }
-        // `working_directories` is the create intent's only directory
-        // carrier (the host binds its first entry as the session's cwd): a
-        // project launch binds the project — the landing chip and the
-        // sidebar group both read it back — a loose one the fallback cwd.
-        // An empty vector leaves the session directory-less ("choose
-        // project" on a thread the user launched FROM a project).
-        let cwds = vec![format!("file://{cwd}")];
-        // The object row: created at once, carrying the conversation's
-        // belonging and picks. A refilled draft reuses its row (the picks
-        // it holds win over inheritance); a fresh conversation starts a
-        // new row.
-        let (provider, model_id, access, effort) = match &refill {
-            Some(row) => (
-                row.model_provider.as_deref(),
-                row.model_id.as_deref(),
-                row.access_mode.as_deref(),
-                row.reasoning_effort.as_deref(),
-            ),
-            None => {
-                let (provider, model_id) = split_wire_model(model.as_deref());
-                (provider, model_id, access.as_deref(), effort_str.as_deref())
-            }
-        };
-        land_conversation_row(&sid, project.as_deref(), provider, model_id, access, effort);
-        let reply = self.with_foreground_store(cx, |store, _| {
-            store.create_session(&sid, cwds, Some(config))
-        });
-        let sid2 = sid.clone();
-        cx.spawn(async move |_, cx| {
-            // A create refused with the protocol's SESSION_ALREADY_EXISTS
-            // means the refill named a session the host still carries: the
-            // draft is LIVE (the archive-time bit and the host-retired check
-            // keep retired rows out of the refill). The host owns that live
-            // session and this create does not touch it — attaching to it is
-            // the refill's intent, the same way the host's claim table reuses
-            // a blank id. Every other failure (and a store unbound, where no
-            // create can even ride) lands a visible notification: a
-            // user-initiated new session must never die quietly.
-            let refusal = match reply {
-                Some(reply) => match reply.recv().await {
-                    Ok(Ok(_)) => None,
-                    Ok(Err(err)) if err.is_already_exists() => {
-                        tracing::info!(
-                            session_id = %sid2,
-                            error = %err,
-                            "createSession met a live draft — opening it instead"
-                        );
-                        None
-                    }
-                    Ok(Err(err)) => Some(err.message),
-                    Err(closed) => Some(closed.to_string()),
-                },
-                None => Some(i18n::t("new-thread-no-session").to_string()),
-            };
-            if let Some(err) = refusal {
-                tracing::warn!(session_id = %sid2, error = %err, "createSession failed");
-                let _ = ws.update_in(cx, |_this, window, cx| {
-                    window.push_notification(
-                        Notification::error(i18n::t_str(
-                            "new-thread-create-failed",
-                            &[("err", &err)],
-                        )),
-                        cx,
-                    );
-                });
-                return;
-            }
-            if let Some(dir) = &dir_for_store {
-                let _ = ws.update(cx, |_ws, cx| {
-                    Workspace::register_project_in_store(dir, cx);
-                });
-            }
-            match ws.update_in(cx, |this, window, cx| {
-                this.attach_created_session(&sid2, window, cx);
-            }) {
-                Ok(()) => tracing::info!(session_id = %sid2, "new-thread attach landed"),
-                Err(err) => {
-                    tracing::warn!(session_id = %sid2, error = %err, "new-thread attach FAILED")
-                }
-            }
-            // The session channel needs no client-side fill here: the host
-            // seeds it from the create intent and the object row, and the
-            // journal (once the first turn materializes it) wins over both.
-        })
-        .detach();
+        // The construction is the container entry's native half (§2.2): the
+        // draft-refill-or-mint decision, the object row, the folded
+        // createSession and the async attach all live in `create_container`.
+        let sid = self.create_container(
+            container::ContainerSeed::Manox(container::NativeContainerSeed {
+                project,
+                model,
+                access,
+                effort: effort_str,
+            }),
+            cx,
+        );
         let _ = window;
         sid
     }
@@ -934,6 +796,12 @@ impl Workspace {
             mux.archive_sessions(std::slice::from_ref(&sid.to_string()), true, cx);
         });
         manox_agent::thread_store_global().with_mut(|s| s.archive_thread(sid, true));
+        // Archive IS the native container's death (D7) — raise the
+        // predicate-flip event. A fold echo (another client archived) keeps
+        // riding the store's own notify; the alive read is the one interface
+        // either way. Nothing consumes the event yet — the teardown cascade
+        // lands with the lifecycle PRs.
+        cx.emit(container::ContainerEvent::Died(sid.to_string()));
     }
 
     /// Archive the active thread if it is idle; `false` when a turn is
