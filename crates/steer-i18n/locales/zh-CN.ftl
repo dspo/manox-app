@@ -162,6 +162,10 @@ tool-output-truncated = 输出已截断，拷贝 out 可得完整内容
 
 tool-diff-open-in-pane = 在右栏打开 diff
 
+code-block-merge-ours = 当前
+code-block-merge-theirs = 传入
+code-block-merge-base = 基准
+
 status-continued = 继续讨论
 
 status-error = 出错

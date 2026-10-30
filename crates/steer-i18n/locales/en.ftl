@@ -176,6 +176,10 @@ tool-output-truncated = Output truncated — copy `out` for the full text
 
 tool-diff-open-in-pane = Open diff in right pane
 
+code-block-merge-ours = Ours
+code-block-merge-theirs = Theirs
+code-block-merge-base = Base
+
 status-continued = Continued
 
 status-error = Error

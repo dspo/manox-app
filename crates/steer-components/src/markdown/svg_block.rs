@@ -200,28 +200,22 @@ fn width_box(width: f32) -> SvgSize {
     SvgSize::Size(Size::new(width, width))
 }
 
-/// Register the inline diagram blocks — the ```svg fence and the ```mermaid
-/// fence — on a markdown document. Every markdown surface that shows authored
-/// prose goes through this, so a diagram renders as its image wherever it
-/// appears. Terminal panels are the one exception: their body is a single
-/// `ansi` fence around machine output, so nothing inside it is parsed as a
-/// block of its own.
+/// Register the app's fence blocks on a markdown document — the ```svg and
+/// ```mermaid fences (rasterized diagrams), the math fences, and the editor
+/// code block every remaining fence renders through
+/// ([`super::code_block`]). Every markdown surface that shows authored prose
+/// goes through this, so a fence renders the same way wherever it appears.
+/// Terminal panels are the one exception: their body is a single `ansi` fence
+/// around machine output, so nothing inside it is parsed as a block of its
+/// own.
 ///
-/// `code` is how the surface's own documents are styled: the block's code face
-/// wears it so the revealed fence reads like a code block beside it.
-pub fn with_diagram_blocks(view: TextView, code: FaceStyle, cx: &App) -> TextView {
-    let extensions = extensions(cx.svg_renderer(), code);
+/// `body_size` is the text size where the surface pins one (`None` leaves
+/// the size to the inherited text style, as a per-frame chrome document
+/// does); the math block's inline run reads it, and the source faces of the
+/// diagram blocks render as editor panels, which style themselves.
+pub fn with_fence_blocks(view: TextView, body_size: Option<Pixels>, cx: &App) -> TextView {
+    let extensions = extensions(cx.svg_renderer(), body_size);
     view.markdown_extensions(extensions)
-}
-
-/// The surface's typography, handed to the block for its code face — the style
-/// its own documents use, plus the text size where the surface pins one (`None`
-/// leaves the size to the inherited text style, as a per-frame chrome document
-/// does).
-#[derive(Clone)]
-pub struct FaceStyle {
-    pub style: gpui_base::TextViewStyle,
-    pub size: Option<Pixels>,
 }
 
 /// Which face one block shows.
@@ -243,30 +237,29 @@ impl Face {
 }
 
 /// The document's Markdown extension registry: the defaults plus the two
-/// diagram fences and LaTeX math ([`super::math_block`]), which typesets to an
-/// SVG document in both its shapes — the display block and the inline run —
-/// and rides this block's raster path from there.
-pub(crate) fn extensions(renderer: SvgRenderer, code: FaceStyle) -> MarkdownExtensions {
+/// diagram fences, the editor code block ([`super::code_block`], last so the
+/// fences the others own never reach it), and LaTeX math
+/// ([`super::math_block`]), which typesets to an SVG document in both its
+/// shapes — the display block and the inline run — and rides this block's
+/// raster path from there.
+pub(crate) fn extensions(renderer: SvgRenderer, body_size: Option<Pixels>) -> MarkdownExtensions {
     let mermaid_renderer = renderer.clone();
-    let mermaid_code = code.clone();
     let math_renderer = renderer.clone();
-    let math_text_size = code.size;
+    let math_text_size = body_size;
     let extensions = MarkdownExtensions::default()
         .block_parser(move |node, cx| svg_fence(node, cx, &renderer))
         .block_renderer(BLOCK_NAME, move |node, window, cx| {
-            svg_element(node, BLOCK_NAME, &code, window, cx)
+            svg_element(node, BLOCK_NAME, window, cx)
         })
         .block_parser(move |node, cx| {
             super::mermaid_block::mermaid_fence(node, cx, &mermaid_renderer)
         })
         .block_renderer(super::mermaid_block::BLOCK_NAME, move |node, window, cx| {
-            svg_element(
-                node,
-                super::mermaid_block::BLOCK_NAME,
-                &mermaid_code,
-                window,
-                cx,
-            )
+            svg_element(node, super::mermaid_block::BLOCK_NAME, window, cx)
+        })
+        .block_parser(super::code_block::code_fence)
+        .block_renderer(super::code_block::BLOCK_NAME, |node, window, cx| {
+            super::code_block::code_element(node, window, cx)
         });
     super::math_block::math_extensions(extensions, math_renderer, math_text_size)
 }
@@ -303,10 +296,33 @@ fn raster_fence(
     }
     let raster = rasterize(renderer, body.as_bytes())?;
     Some(
-        MarkdownNode::new(BLOCK_NAME, raster)
+        MarkdownNode::new(BLOCK_NAME, Arc::new(DiagramFence::new(raster, body, lang)))
             .text(fence)
             .markdown(fence),
     )
+}
+
+/// One diagram fence's payload: the raster the image face paints, plus the
+/// raw source and language the source face renders as an editor panel.
+#[derive(Clone)]
+pub(crate) struct DiagramFence {
+    pub(crate) raster: Arc<RenderImage>,
+    code: SharedString,
+    lang: Option<SharedString>,
+}
+
+impl DiagramFence {
+    pub(crate) fn new(
+        raster: Arc<RenderImage>,
+        code: impl Into<SharedString>,
+        lang: Option<&str>,
+    ) -> Self {
+        Self {
+            raster,
+            code: code.into(),
+            lang: lang.map(SharedString::from),
+        }
+    }
 }
 
 /// The block's element: the face it shows, over the hover control that flips
@@ -316,11 +332,10 @@ fn raster_fence(
 fn svg_element(
     node: &MarkdownNode,
     name: &'static str,
-    code: &FaceStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let Some(raster) = node.data::<Arc<RenderImage>>() else {
+    let Some(fence) = node.data::<Arc<DiagramFence>>() else {
         return div().child(node.as_text().to_string()).into_any_element();
     };
     let key = block_key(node);
@@ -334,8 +349,26 @@ fn svg_element(
         .w_full()
         .min_w_0()
         .child(match showing {
-            Face::Image => image_face(raster, name),
-            Face::Code => code_face(node, key, name, code),
+            Face::Image => image_face(&fence.raster, name),
+            Face::Code => {
+                // The source face is the same editor panel any fence renders
+                // — one implementation, one presentation (Flat: no second
+                // face to toggle, the flip back belongs to the block). The
+                // wrapper keeps the face's own selector for the flip tests.
+                div()
+                    .debug_selector(move || format!("markdown-inline-{name}-code"))
+                    .w_full()
+                    .min_w_0()
+                    .child(super::code_block::panel(
+                        super::code_block::PanelShape::Flat,
+                        &fence.code,
+                        fence.lang.as_deref(),
+                        key,
+                        window,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
         })
         .child(
             div()
@@ -352,7 +385,7 @@ fn svg_element(
 /// One block's identity inside its document: the source range upstream recorded
 /// for it. Two documents can hand out the same range, but the element ids these
 /// key into are namespaced by the document that renders them.
-fn block_key(node: &MarkdownNode) -> u64 {
+pub(crate) fn block_key(node: &MarkdownNode) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     match node.source_range() {
         Some(range) => range.hash(&mut hasher),
@@ -388,23 +421,6 @@ fn image_face(raster: &Arc<RenderImage>, name: &'static str) -> AnyElement {
                 .size_full()
                 .object_fit(ObjectFit::Contain),
         )
-        .into_any_element()
-}
-
-/// The fence as its own code block: the surface's markdown stack over the
-/// source. No diagram block is registered on this document — the fence would
-/// rasterize again, and that one again.
-fn code_face(node: &MarkdownNode, key: u64, name: &'static str, code: &FaceStyle) -> AnyElement {
-    let mut view = TextView::markdown(("markdown-svg-code", key), node.as_markdown().to_string())
-        .style(code.style.clone());
-    if let Some(size) = code.size {
-        view = view.text_size(size);
-    }
-    div()
-        .w_full()
-        .min_w_0()
-        .debug_selector(|| format!("markdown-inline-{name}-code"))
-        .child(view)
         .into_any_element()
 }
 
@@ -466,10 +482,11 @@ mod tests {
             raster_fence(Some("SVG"), DIAGRAM, &source, &renderer).expect("the fence rasterizes");
 
         assert_eq!(block.name(), BLOCK_NAME);
-        assert!(
-            block.data::<Arc<RenderImage>>().is_some(),
-            "the block carries its raster"
-        );
+        let fence = block
+            .data::<Arc<DiagramFence>>()
+            .expect("carries its payload");
+        assert!(matches!(fence.lang.as_deref(), Some("SVG") | Some("svg")));
+        assert_eq!(fence.code, DIAGRAM);
         assert_eq!(block.as_text(), source, "the text form is the fence");
         assert_eq!(block.as_markdown(), source);
     }
@@ -505,7 +522,7 @@ mod tests {
             &renderer,
         )
         .expect("the artifact draws once its namespace names svg");
-        assert!(block.data::<Arc<RenderImage>>().is_some());
+        assert!(block.data::<Arc<DiagramFence>>().is_some());
     }
 
     #[test]

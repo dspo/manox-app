@@ -32,6 +32,7 @@ use gpui_component::Theme;
 use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use ropey::Rope;
 
+use crate::code_surface::is_conflict;
 use crate::copy_feedback::{CopyFeedbackHost, copy_button};
 use crate::markdown::linkify::{linkify_markdown, pin_reference_definitions};
 use crate::markdown::svg_block;
@@ -210,12 +211,9 @@ pub fn message_document(
     cx: &App,
 ) -> TextView {
     let style = message_style(theme);
-    svg_block::with_diagram_blocks(
+    svg_block::with_fence_blocks(
         TextView::new(state).style(style.clone()).text_size(body),
-        svg_block::FaceStyle {
-            style,
-            size: Some(body),
-        },
+        Some(body),
         cx,
     )
 }
@@ -230,12 +228,9 @@ pub fn reasoning_document(
     cx: &App,
 ) -> TextView {
     let style = message_style(theme).with_foreground(theme.muted_foreground);
-    svg_block::with_diagram_blocks(
+    svg_block::with_fence_blocks(
         TextView::new(state).style(style.clone()).text_size(body),
-        svg_block::FaceStyle {
-            style,
-            size: Some(body),
-        },
+        Some(body),
         cx,
     )
 }
@@ -248,12 +243,9 @@ pub fn static_document(
     theme: &Theme,
     cx: &App,
 ) -> TextView {
-    svg_block::with_diagram_blocks(
+    svg_block::with_fence_blocks(
         TextView::markdown(id, linkify_markdown(text.into().as_ref())).style(chrome_style(theme)),
-        svg_block::FaceStyle {
-            style: chrome_style(theme),
-            size: None,
-        },
+        None,
         cx,
     )
 }
@@ -306,10 +298,15 @@ pub fn panel_document(
     theme: &Theme,
     motion: TextViewMotion,
 ) -> TextView {
+    // The fence carries NO language token: upstream renders a fenced block's
+    // language in the top-right corner and pads the first line clear of it,
+    // so a labeled fence here would read as a stray row with an "ansi" chip
+    // above the body. The runs come from the caller's highlighter, which
+    // never looks at the token.
     let fence = "`".repeat(fence_len(text));
     let mut source = String::with_capacity(text.len() + fence.len() * 2 + 8);
     source.push_str(&fence);
-    source.push_str("ansi\n");
+    source.push('\n');
     source.push_str(text);
     if !text.ends_with('\n') {
         source.push('\n');
@@ -402,17 +399,6 @@ fn fence_len(text: &str) -> usize {
 
 // --- copy controls -------------------------------------------------------------
 
-/// The hover copy control for fenced code blocks, wired to a
-/// [`CopyFeedbackHost`] entity. Upstream scopes plain element ids per block,
-/// so one shared id serves every block.
-pub fn code_copy_actions<T: CopyFeedbackHost>(
-    owner: WeakEntity<T>,
-) -> impl Fn(&CodeBlock, &mut Window, &mut App) -> AnyElement + Send + Sync + 'static {
-    move |block: &CodeBlock, _window: &mut Window, cx: &mut App| {
-        copy_control(&owner, block.code().to_string(), cx).into_any_element()
-    }
-}
-
 /// The hover copy control for tables, copying the table's GFM serialization.
 pub fn table_copy_actions<T: CopyFeedbackHost>(
     owner: WeakEntity<T>,
@@ -436,48 +422,99 @@ fn copy_control<T: CopyFeedbackHost>(
 
 // --- code highlight dispatch -----------------------------------------------------
 
-/// The app's code-highlight dispatch. `ansi` fences found in prose parse their
-/// escape sequences (without them the content is plain and unhighlighted);
-/// fences carrying conflict markers classify as conflicts regardless of
-/// language; `diff` fences color per line; everything else highlights through
-/// tree-sitter.
+/// The app's code-block highlighter, handed to documents as the `TextViewDefaults`
+/// highlighter. Code fences in prose render through the editor block
+/// ([`crate::markdown::code_block`]) which calls [`dispatch_runs`] directly;
+/// this closure serves the surfaces that still ride the upstream code block —
+/// terminal panels, the svg block's code face — and exists because those
+/// documents take their highlighter from the defaults.
 ///
-/// The returned closure is rebuilt every frame (the element is rebuilt every
-/// frame), which defeats upstream's per-highlighter cache — the thread-local
-/// tree-sitter cache below is what keeps frozen blocks at zero work per frame,
-/// same as the old renderer.
+/// Identity is load-bearing: gpui-base reuses a code block's highlights only
+/// while the highlighter is the same `Arc` — see [`install_code_highlighter`]
+/// for why it is installed once, never per document.
 pub fn steer_code_highlighter(
     theme: &Theme,
 ) -> impl Fn(&CodeBlock) -> Vec<(Range<usize>, HighlightStyle)> + Send + Sync + 'static {
-    let highlight_theme = theme.highlight_theme.clone();
-    let foreground = theme.foreground;
-    let muted = theme.muted_foreground;
-    let secondary = theme.secondary;
-    let add_fg = theme.success;
-    let del_fg = theme.danger;
+    let palette = DispatchPalette::new(theme);
     move |block: &CodeBlock| {
-        let code = block.code();
         let lang_holder = block.lang();
-        let lang = lang_holder.as_deref().unwrap_or("text");
-        let runs = if lang.eq_ignore_ascii_case("ansi") {
-            ansi_runs(&code)
-        } else if is_conflict(&code) {
-            conflict_runs(&code, foreground, muted, secondary, add_fg, del_fg)
-        } else if lang.eq_ignore_ascii_case("diff") {
-            diff_runs(&code, foreground, muted, secondary, add_fg, del_fg)
-        } else {
-            // An svg fence is markup, and markup is what the registry carries
-            // for it: `svg` itself is unregistered, which would color nothing
-            // and warn on every distinct fence.
-            let lang = if lang.eq_ignore_ascii_case("svg") {
-                "html"
-            } else {
-                lang
-            };
-            tree_sitter_runs(&code, lang, &highlight_theme)
-        };
-        normalize_runs(clamp_runs(runs, &code))
+        dispatch_runs(&block.code(), lang_holder.as_deref(), &palette)
     }
+}
+
+/// The palette one dispatch call reads from the theme: the highlight theme
+/// plus the five flat colors the line-based dispatches tint with. Plain data,
+/// `Send + Sync` — the `TextViewDefaults` closure holds it across threads,
+/// which [`Theme`] itself cannot (its config rides an `Rc`).
+#[derive(Clone)]
+pub(crate) struct DispatchPalette {
+    highlight_theme: Arc<HighlightTheme>,
+    foreground: Hsla,
+    muted: Hsla,
+    secondary: Hsla,
+    add_fg: Hsla,
+    del_fg: Hsla,
+}
+
+impl DispatchPalette {
+    pub(crate) fn new(theme: &Theme) -> Self {
+        Self {
+            highlight_theme: theme.highlight_theme.clone(),
+            foreground: theme.foreground,
+            muted: theme.muted_foreground,
+            secondary: theme.secondary,
+            add_fg: theme.success,
+            del_fg: theme.danger,
+        }
+    }
+}
+
+/// The app's code-highlight dispatch over one block's raw text and language
+/// token. `ansi` fences found in prose parse their escape sequences (without
+/// them the content is plain and unhighlighted); fences carrying conflict
+/// markers classify as conflicts regardless of language; `diff` fences color
+/// per line; everything else highlights through tree-sitter, memoized by the
+/// thread-local cache below — the message list re-renders every dirty frame,
+/// so this cache is what keeps a long conversation from re-highlighting every
+/// completed block on each streaming delta.
+pub(crate) fn dispatch_runs(
+    code: &str,
+    lang: Option<&str>,
+    palette: &DispatchPalette,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let lang = lang.unwrap_or("text");
+    let runs = if lang.eq_ignore_ascii_case("ansi") {
+        ansi_runs(code)
+    } else if is_conflict(code) {
+        conflict_runs(
+            code,
+            palette.foreground,
+            palette.muted,
+            palette.secondary,
+            palette.add_fg,
+            palette.del_fg,
+        )
+    } else if lang.eq_ignore_ascii_case("diff") {
+        diff_runs(
+            code,
+            palette.foreground,
+            palette.muted,
+            palette.secondary,
+            palette.add_fg,
+            palette.del_fg,
+        )
+    } else {
+        // An svg fence is markup, and markup is what the registry carries
+        // for it: `svg` itself is unregistered, which would color nothing
+        // and warn on every distinct fence.
+        let lang = if lang.eq_ignore_ascii_case("svg") {
+            "html"
+        } else {
+            lang
+        };
+        tree_sitter_runs(code, lang, &palette.highlight_theme)
+    };
+    normalize_runs(clamp_runs(runs, code))
 }
 
 /// Sort by start and clip overlaps so the list is always in the one shape
@@ -640,22 +677,6 @@ fn line_ranges(code: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-/// A fence is a git merge conflict when it carries both the opening and the
-/// closing marker — the pair guards against a stray marker mis-routing a real
-/// code block.
-fn is_conflict(code: &str) -> bool {
-    let mut open = false;
-    let mut close = false;
-    for line in code.lines() {
-        if line.starts_with("<<<<<<<") {
-            open = true;
-        } else if line.starts_with(">>>>>>>") {
-            close = true;
-        }
-    }
-    open && close
-}
-
 /// The accent hue faded into a wash for line backgrounds.
 fn wash(color: Hsla) -> Hsla {
     color.opacity(0.15)
@@ -753,7 +774,7 @@ mod tests {
         let fence = "`".repeat(fence_len(text));
         let mut source = String::new();
         source.push_str(&fence);
-        source.push_str("ansi\n");
+        source.push('\n');
         source.push_str(text);
         if !text.ends_with('\n') {
             source.push('\n');
@@ -827,7 +848,7 @@ mod tests {
         let fence = "`".repeat(fence_len(&s));
         let mut source = String::new();
         source.push_str(&fence);
-        source.push_str("ansi\n");
+        source.push('\n');
         source.push_str(&s);
         if !s.ends_with('\n') {
             source.push('\n');
@@ -869,7 +890,7 @@ mod tests {
         let fence = "`".repeat(fence_len(text));
         let mut source = String::new();
         source.push_str(&fence);
-        source.push_str("ansi\n");
+        source.push('\n');
         source.push_str(text);
         if !text.ends_with('\n') {
             source.push('\n');
@@ -917,13 +938,6 @@ mod tests {
     fn line_ranges_exclude_terminators() {
         let ranges: Vec<(usize, &str)> = line_ranges("ab\ncd\n").collect();
         assert_eq!(ranges, vec![(0, "ab"), (3, "cd")]);
-    }
-
-    #[test]
-    fn conflict_needs_both_markers() {
-        assert!(is_conflict("<<<<<<< ours\nx\n>>>>>>> theirs"));
-        assert!(!is_conflict("<<<<<<< ours\nx"));
-        assert!(!is_conflict("just a > quote"));
     }
 
     #[test]

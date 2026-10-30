@@ -36,6 +36,9 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
 `manox-agent`/`agent-ui` —— 正文与本地化文案由调用方注入，所以组件级验证走
 `cargo run -p ai-elements --example gallery`。
 
+**代码表面 A/B 契约**（`steer-components::code_surface` 共享行模型/度量/解析器，组合策略刻意二分，勿合并）：
+对话正文的代码内容走**效果化**——markdown 代码栅栏渲染为编辑器面板（diff 默认 side-by-side、冲突默认 3-way，header 可切回），svg/mermaid 默认渲染为图（翻面到编辑器面板源码）；工具输出的正文走**忠实字面**——Tool 卡的 CodeView/ShellView 与终端面板保持 in-band 单文档（unified diff、不分割不合并），鼠标拖选复制所见即所得，高亮保留（naive 行级分词器）。面板行无法加入窗口级选区，in-band 是工具面的第一性；两侧性质各有测试钉住（steer-components `code_block_panel`、ai-elements `code_view_selection`）。
+
 上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真核心（manox-terminal）与 hyperlinks 已回流 dspo/manox（同经 git 依赖消费），`CxSessionSource` 桥留在本仓 steer-ext-agents。
 
 ### 交互协议 v3 = AHP（2026-09-28 切换）

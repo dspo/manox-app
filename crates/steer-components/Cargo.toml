@@ -23,6 +23,8 @@ mermaid-rs-renderer.workspace = true
 ropey.workspace = true
 # vte::ansi::Processor + Handler — parse SGR/color escapes in tool output for the TerminalPanel.
 vte.workspace = true
+# The merge view's role chips (Ours / Theirs / Base) are app chrome.
+steer-i18n.workspace = true
 hyperlinks.workspace = true
 
 [dev-dependencies]

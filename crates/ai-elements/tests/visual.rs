@@ -4,7 +4,7 @@
 //! permission needed.
 //!
 //! Run with `GALLERY_SHOT=/tmp/tools.png GALLERY_PAGE=text cargo test -p
-//! ai-elements --test visual` (pages: `text`, `shell`, `ask`; default
+//! ai-elements --test visual` (pages: `text`, `shell`, `ask`, `code`, `code2`, `svg`; default
 //! `text`). The samples mirror the gallery example's demo content — leaner,
 //! one card per family shape, enough to judge the design's pixels. macOS
 //! only: the readback is a Metal texture; the harness's imports exist only
@@ -13,6 +13,18 @@
 #[cfg(not(target_os = "macos"))]
 fn main() {
     eprintln!("visual: the gallery harness is macOS-only (Metal readback), skipping");
+}
+
+#[cfg(target_os = "macos")]
+fn tall_rust_block() -> String {
+    let mut out = String::from("```rust\nmatch event {\n");
+    for ix in 0..32 {
+        out.push_str(&format!(
+            "    Event::Kind{ix:02} {{ payload }} => fold(payload, Acc::from(ix)),\n"
+        ));
+    }
+    out.push_str("    Event::Flush => acc.into_result(),\n}\n```\n");
+    out
 }
 
 #[cfg(target_os = "macos")]
@@ -26,7 +38,7 @@ fn main() {
     };
     use gpui::{
         AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-        Styled as _, VisualTestAppContext, Window, div, px, size,
+        SharedString, Styled as _, VisualTestAppContext, Window, div, px, size,
     };
     use gpui_component::{Icon, Root, Sizable as _, Theme, h_flex, v_flex};
     use gpui_kit_assets::IconName;
@@ -39,6 +51,9 @@ fn main() {
     let page = match std::env::var("GALLERY_PAGE").as_deref() {
         Ok("shell") => PageKind::Shell,
         Ok("ask") => PageKind::Ask,
+        Ok("code") => PageKind::Code,
+        Ok("code2") => PageKind::CodeMore,
+        Ok("svg") => PageKind::Svg,
         _ => PageKind::Text,
     };
 
@@ -80,6 +95,9 @@ fn main() {
         Text,
         Shell,
         Ask,
+        Code,
+        CodeMore,
+        Svg,
     }
 
     struct Page {
@@ -97,7 +115,7 @@ fn main() {
             let card_count = match kind {
                 PageKind::Text => 4,
                 PageKind::Shell => 3,
-                PageKind::Ask => 0,
+                PageKind::Ask | PageKind::Code | PageKind::CodeMore | PageKind::Svg => 0,
             };
             for _ in 0..card_count {
                 let state = cx.new(|cx| ToolState::new(cx).with_status(ToolStatus::Succeeded, cx));
@@ -225,6 +243,8 @@ fn main() {
                         .icon(Icon::new(IconName::SquareTerminal).xsmall())
                         .name("Bash")
                         .args(cmd_args("cargo test -p ai-elements"))
+                        .copy_input(r#"{"command":"cargo test -p ai-elements"}"#)
+                        .copy_output("running 40 tests\ntest result: ok. 40 passed; 0 failed")
                         .content(prompt(
                             ShellView::new("bash-shell", "cargo test -p ai-elements")
                                 .line(ShellLine::dim("   Compiling ai-elements v0.1.0"))
@@ -288,6 +308,89 @@ fn main() {
                         ))
                         .into_any_element(),
                 ],
+                PageKind::Code => {
+                    let doc = |id: &'static str, source: String| {
+                        v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(foreground)
+                                    .child(SharedString::from(id)),
+                            )
+                            .child(static_document(format!("code-doc-{id}"), source, theme, cx))
+                            .into_any_element()
+                    };
+                    vec![
+                        doc(
+                            "rust",
+                            "```rust\n/// One streaming delta, appended to a persistent document.\npub fn push_str(&mut self, delta: &str, cx: &mut Context<TextViewState>) {\n    // Only the appended suffix re-parses; the prefix keeps its layout.\n    let parsed = parse_delta(delta).unwrap_or_else(|| delta.to_string());\n    self.text.push_str(&parsed);\n    cx.notify();\n}\n```\n".to_string(),
+                        ),
+                        doc(
+                            "tall",
+                            tall_rust_block(),
+                        ),
+                    ]
+                }
+                PageKind::Svg => {
+                    let theme = Theme::global(cx);
+                    vec![static_document(
+                        "svg-page",
+                        concat!(
+                            "An ```svg fence renders as its diagram — the image is the ",
+                            "default face (the corner toggle flips to the source panel, ",
+                            "pinned by the flip test in steer-components):\n\n",
+                            "```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"240\" height=\"120\">",
+                            "<rect width=\"240\" height=\"120\" fill=\"#3b82f6\"/>",
+                            "<circle cx=\"60\" cy=\"60\" r=\"40\" fill=\"#fbbf24\"/>",
+                            "<rect x=\"140\" y=\"20\" width=\"80\" height=\"80\" fill=\"#10b981\"/>",
+                            "</svg>\n```\n"
+                        ),
+                        theme,
+                        cx,
+                    )
+                    .into_any_element()]
+                }
+                PageKind::CodeMore => {
+                    let doc = |id: &'static str, source: String| {
+                        v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(foreground)
+                                    .child(SharedString::from(id)),
+                            )
+                            .child(static_document(format!("code-doc-{id}"), source, theme, cx))
+                            .into_any_element()
+                    };
+                    vec![
+                        doc(
+                            "wide",
+                            "```rust\nlet rewrite = Rewrite { instruction: \"把这段说明文字改成更正式的语气，保留全部技术细节，不要引入新的事实，输出为 JSON 并保持原有结构不变\", target: \"crates/steer-components/src/markdown/code_block.rs\", max_length: 4096 };\nfinish(rewrite);\n```\n".to_string(),
+                        ),
+                        doc(
+                            "diff — split",
+                            "```diff\n--- a/crates/steer-components/src/markdown/mod.rs\n+++ b/crates/steer-components/src/markdown/mod.rs\n@@ -12,6 +12,7 @@ pub mod linkify {\n pub mod svg_block {\n     pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;\n+    pub const FENCE_BLOCKS: usize = 4;\n-    pub const DIAGRAM_BLOCKS: usize = 2;\n-    pub const DIAGRAM_CAP: Pixels = px(512.);\n }\n```\n".to_string(),
+                        ),
+                        doc(
+                            "merge — three columns",
+                            "```rust\n<<<<<<< HEAD\nlet mode = Mode::Editor;\n||||||| merged common ancestors\nlet mode = Mode::Auto;\n=======\nlet mode = Mode::Panel;\n>>>>>>> feat/code-block\n```\n".to_string(),
+                        ),
+                        doc(
+                            "cjk + bare",
+                            "```python\n# 中文注释：流式增量只重解析追加的后缀。\ndef push_str(self, delta: str) -> str:\n    return f\"已追加 {len(delta)} 个字节\"\n```\n\n```\nno info string, no highlighting — but the panel, gutter and copy stay\n```\n".to_string(),
+                        ),
+                        doc(
+                            "message",
+                            "The incremental path only re-parses the appended suffix, so a streaming fence renders as a panel from its first delta:\n\n```json\n{\"kind\": \"delta\", \"text\": \"fn main() {\"}\n}\n```\n\nand settles when the closing fence arrives. See `ChatDocument::sync`.\n\n```rust\nlet appended = self.linkified.as_ref()\n    .filter(|prev| next.starts_with(prev.as_str()));\n```\n".to_string(),
+                        ),
+                    ]
+                }
                 PageKind::Ask => {
                     let settled = self.ask_settled.as_ref().expect("settled ask state");
                     let fresh = self.ask_fresh.as_ref().expect("fresh ask state");
