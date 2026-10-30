@@ -3086,10 +3086,12 @@ fn agent_status_indicator(status: ToolCallStatus, theme: &Theme) -> gpui::AnyEle
 }
 
 /// Render a sub-agent task as a single-line clickable item:
-/// `[status_icon] {subagent_type}({description})`.
-/// No expand/collapse, no inline body, no metrics chip. Clicking opens the
-/// sub-agent's observation panel in the right pane (live transcript while
-/// running, final answer after a reload).
+/// `[status_icon] {subagent_type}({description})` — continuation dispatches
+/// (a `run/continued` rework of an existing run) carry a localized
+/// follow-up chip so the row reads as a follow-up on that run, not a fresh
+/// task. No expand/collapse, no inline body, no metrics chip. Clicking
+/// opens the sub-agent's observation panel in the right pane (live
+/// transcript while running, final answer after a reload).
 pub fn render_agent_task(
     item: &AgentTaskItem,
     ix: usize,
@@ -3150,6 +3152,21 @@ pub fn render_agent_task(
                 .text_color(theme.muted_foreground)
                 .child(display_title),
         )
+        .when(item.continuation, |row| {
+            // The rework marker: same run id as the creating card, so the
+            // chip plus the shared drill-down read as one run's follow-up.
+            row.child(
+                gpui::div()
+                    .flex_shrink_0()
+                    .px_1()
+                    .py_0p5()
+                    .rounded(theme.radius)
+                    .bg(theme.accent.opacity(0.15))
+                    .text_xs()
+                    .text_color(theme.accent_foreground)
+                    .child(i18n::t("agent-task-follow-up")),
+            )
+        })
         .into_any_element()
 }
 
@@ -3777,6 +3794,7 @@ mod tests {
                 run_id: Some("sub-1".into()),
                 subagent_type: "Explore".into(),
                 description: "检查一段非常长的中英文混合标题 and verify that it remains a single truncated line without rendering metrics or child output".into(),
+                continuation: false,
                 status: ToolCallStatus::Success,
                 is_error: false,
             });

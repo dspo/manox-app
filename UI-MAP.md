@@ -398,9 +398,9 @@ Faces: header (mono path + status + hover copy-path + chevron for manual collaps
 
 #### AgentTaskCard
 
-Compact, single-line sub-agent row: `[status] type · short title`. Running and pending rows use a braille-dot spinner (`BrailleSpinner`); terminal rows use check, error, or minus icons. The title is always one line with truncation and a full-title tooltip. It deliberately renders no child text, nested messages, copy control, metrics, or expansion affordance; clicking stays a no-op. Live drill-down lives on the Agent tool-call card instead: the child session's streamed text/thinking deltas and tool lifecycle lines (`▸ Tool hint` / `✓ Tool` / `✗ Tool`) append to the card's output in real time (bridged through the Agent tool's progress channel).
+Compact, single-line sub-agent row: `[status] type · short title`. The card face is the unified `Steer` Dispatch envelope (`reason: "Dispatch"` + `prompt`): the type is the spawned definition (`to.spawn` — the `run/started` row's kind), the title the call's own `description` (prompt-topic fallback). A continuation dispatch (`to.agent_address`, no spawn — the `run/continued` rework of a settled run) renders a localized follow-up chip (`agent-task-follow-up`) and joins the creating card via the run id: both drill into the same child conversation, the address naming the run before any ack lands. The member spawn arm (`to.spawn: "TeamMember"`) and the Inject/Abort verbs never take the card — the former rides a plain tool call, the latter fold into the activity segment (the guidance's durable face is the [guided note](#noticemessage)). Running and pending rows use a braille-dot spinner (`BrailleSpinner`); terminal rows use check, error, or minus icons. The title is always one line with truncation and a full-title tooltip. It deliberately renders no child text, nested messages, copy control, metrics, or expansion affordance beyond the follow-up chip; clicking opens the sub-agent drill-down on the card's run id. Live drill-down lives on the Agent tool-call card instead: the child session's streamed text/thinking deltas and tool lifecycle lines (`▸ Tool hint` / `✓ Tool` / `✗ Tool`) append to the card's output in real time (bridged through the Agent tool's progress channel).
 
-> Source: `crates/steer-agent-chat-ui/src/views/message.rs`
+> Source: `crates/steer-agent-chat-ui/src/views/message.rs` (card), `crates/steer-agent-chat-ui/src/transcript.rs` (envelope detection: `is_agent_task_call` / `steer_spawn_of` / `steer_run_address_of`), `crates/steer-agent-chat-ui/src/conversation.rs` (`AgentTaskItem`, `agent_task_labels`, `envelope_run_id`)
 
 #### BackgroundTaskCard
 
@@ -417,6 +417,8 @@ Rounded card, `bg:danger/0.06`, red text, "Error" label + copy btn. Body is a pe
 #### NoticeMessage
 
 Rounded card, `bg:secondary/0.15`, muted text, "Notice" label + copy btn. Body is a persistent paginated `TerminalPanel` (`PanelKind::Plain`, no command/cwd) — the same folded surface as tool output: default `PAGE_SIZE` (20) lines with a `+N` load-more row; selection + pagination cursor survive across frames. Mounted by `MessageItem::ensure_notice_panel` (live) and `new_history_item` (reload).
+
+Steer row kind: the Captain's mid-run guidance folds upstream into a `run/guided` journal row riding a `systemNotification` part (`_meta.x-manox.runGuided` names the run) — the note renders here verbatim ("Steered run `X`: text"; runtime text is never re-localized), once per guidance on the Captain transcript. The child's own face of the same guidance is the injected message opening its own turn on the child fold, badged `message-steered-badge` like any steer row.
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs` · panel: `crates/steer-components/src/markdown/terminal_panel.rs`
 
@@ -884,10 +886,10 @@ chat fold 里——泵在**尚未继承**时按 fold 快照整表重建（`synth
 `subagent-panel-settling`（订阅快照未回）→ 活动（有行）/`subagent-panel-empty`（快照已回、
 无内容），永不渲染无依据的假占位。底部是 `subagent-panel-readonly` 只读说明条（宿主侧 #910
 已把子会话标记为 `ChatInteractivity::ReadOnly`）。入口：会话内子代理卡片点击——卡片的
-`AgentTaskItem.run_id` 来自派发信封（前台结果 / promotion 回执 / 后台启动回执都携带 `run_id`）；
+`AgentTaskItem.run_id` 来自派发信封（前台结果 / promotion 回执 / 后台启动回执都携带 `run_id`；续跑 Dispatch 的信封地址 `to.agent_address` 即同一 run id，续跑卡与创建卡钻取同一子会话）；
 rail agents 段（#165 起直读 `background_work`）展示运行中花名册。live 行的 wire `label` 只作
 话题（`description`）不作类型；类型由父会话的派发 tool call 解析（`ToolResultSubagentContent.agentName`
-或完成回执按 `run_id` 关联到的 call 名），行标题渲染为「Explore(话题)」。主列的
+或完成回执按 `run_id` 关联到的 call 信封 `to.spawn`——统一 Steer 面下即派生定义名，不再是 call 名），行标题渲染为「Explore(话题)」。主列的
 [SubagentStream](#subagentstream) 观察页共享同一 live 源（子会话自己的通道）与同一投影词汇，
 但走自己的腿：fold 进、keyed diff 出，无事件桶。
 
