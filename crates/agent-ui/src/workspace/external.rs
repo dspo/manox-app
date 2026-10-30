@@ -217,17 +217,32 @@ impl Workspace {
         &self,
         container: &str,
     ) -> Vec<manox_agent::thread_engine::BrowserTabId> {
-        crate::browser_host::WorkspaceBrowserHost::concrete()
-            .map(|host| host.tabs_owned_by(container))
-            .unwrap_or_default()
+        // The integrated browser is compiled out on Linux/FreeBSD — the read
+        // degrades to "no tab ever registers" instead of naming the gated
+        // module (the doc's own contract).
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        {
+            crate::browser_host::WorkspaceBrowserHost::concrete()
+                .map(|host| host.tabs_owned_by(container))
+                .unwrap_or_default()
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            let _ = container;
+            Vec::new()
+        }
     }
 
     /// Diagnostic: register a browser-tab ROUTE owned by `container` without
     /// building a webview — the ownership/teardown regressions drive the
     /// host's routing table directly (a real webview is an OS child window
     /// the test harness cannot host). The teardown's browser leg reclaims
-    /// these exactly like a live tab's.
-    #[cfg(feature = "test-support")]
+    /// these exactly like a live tab's. No browser on Linux/FreeBSD — the
+    /// regression can only exist where the integrated browser compiles.
+    #[cfg(all(
+        feature = "test-support",
+        not(any(target_os = "linux", target_os = "freebsd"))
+    ))]
     pub fn diagnostic_register_browser_route(
         &mut self,
         container: &str,

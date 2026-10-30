@@ -161,7 +161,11 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     ws.update(cx, |ws, _| {
         ws.diagnostic_register_kill_handle(&row2, "codex-tab-1", cat2.clone());
     });
+    // The browser-route legs assert only where the integrated browser
+    // compiles (Linux/FreeBSD have no browser host — nothing can register).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let route2 = ws.update(cx, |ws, cx| ws.diagnostic_register_browser_route(&row2, cx));
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     assert_eq!(
         ws.read_with(cx, |ws, _| ws.diagnostic_container_browser_tabs(&row2))
             .len(),
@@ -207,19 +211,28 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     // BEFORE the dock section because a fake TerminalView parked in the
     // shell is a test-only construct whose presence across the waterfall's
     // simulated-timer beats wedges the hermetic host — the sections stay
-    // independent.)
-    let foreign = "external:claude:00000000-0000-0000-0000-000000000000";
-    let foreign_route = ws.update(cx, |ws, cx| {
-        ws.diagnostic_register_browser_route(foreign, cx)
-    });
-    common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
-        .expect("/exit lands a fresh conversation");
-    assert!(
-        ws.read_with(cx, |ws, _| ws
-            .diagnostic_container_browser_tabs(foreign)
-            .contains(&foreign_route)),
-        "/exit must not nuke other containers' browser tabs"
-    );
+    // independent.) The browser asserts ride the integrated browser's
+    // platforms; the /exit waterfall itself runs everywhere below.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        let foreign = "external:claude:00000000-0000-0000-0000-000000000000";
+        let foreign_route = ws.update(cx, |ws, cx| {
+            ws.diagnostic_register_browser_route(foreign, cx)
+        });
+        common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
+            .expect("/exit lands a fresh conversation");
+        assert!(
+            ws.read_with(cx, |ws, _| ws
+                .diagnostic_container_browser_tabs(foreign)
+                .contains(&foreign_route)),
+            "/exit must not nuke other containers' browser tabs"
+        );
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
+            .expect("/exit lands a fresh conversation");
+    }
 
     // ── the dock/right stash is keyed per container ─────────────────────
     let fake_dock_view = |cx: &mut TestAppContext| {
