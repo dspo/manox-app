@@ -300,6 +300,7 @@ pub struct ToolHeader {
     icon: Option<AnyElement>,
     name: Option<SharedString>,
     args: Option<AnyElement>,
+    controls: Option<AnyElement>,
     status: Option<AnyElement>,
     on_toggle: Option<ToolToggle>,
 }
@@ -312,9 +313,18 @@ impl ToolHeader {
             icon: None,
             name: None,
             args: None,
+            controls: None,
             status: None,
             on_toggle: None,
         }
+    }
+
+    /// The card's controls, rendered on the titlebar between the argument
+    /// summary and the status chip. A control's click stops propagation —
+    /// the row's own click is the fold toggle.
+    pub fn controls(mut self, controls: impl IntoElement) -> Self {
+        self.controls = Some(controls.into_any_element());
+        self
     }
 
     /// Replaces what a header click does. The card's own `ToolState` stays
@@ -477,6 +487,7 @@ impl RenderOnce for ToolHeader {
                     .text_xs()
                     .children(self.args),
             )
+            .children(self.controls)
             .child(status)
             .child(chevron)
     }
@@ -486,14 +497,16 @@ impl RenderOnce for ToolHeader {
 /// whatever the host renders — the crate ships editor and shell surfaces as
 /// siblings of this frame.
 ///
-/// The body may carry copy controls, always visible at its top-right corner:
-/// `in` copies the call's quotable input — the raw argument structure, or the
-/// host's chosen shape where re-running matters (the app quotes a Bash
-/// command) — and `out` its raw output: the machine shape, as opposed to
-/// selecting the rendered text, which copies what the card shows. An
-/// `open_diff` chip rides the same row: a card whose body is a capped view of
-/// something the host can show in full hands the expansion to a callback (the
-/// app opens the right pane's diff tab) instead of growing the transcript.
+/// The body may carry controls, and they live on the card's titlebar — never
+/// on the text surface: `in` copies the call's quotable input — the raw
+/// argument structure, or the host's chosen shape where re-running matters
+/// (the app quotes a Bash command) — and `out` its raw output: the machine
+/// shape, as opposed to selecting the rendered text, which copies what the
+/// card shows. An `open_diff` control rides the same row: a card whose body
+/// is a capped view of something the host can show in full hands the
+/// expansion to a callback (the app opens the right pane's diff tab) instead
+/// of growing the transcript. The body renders text, nothing else — controls
+/// floating over it sat between the reader and the first line.
 #[derive(IntoElement)]
 pub struct Tool {
     id: ElementId,
@@ -655,31 +668,14 @@ impl RenderOnce for Tool {
             if let Some(args) = args {
                 header = header.args(args);
             }
-            if let Some(status) = status {
-                header = header.status(status);
-            }
-            if let Some(on_toggle) = on_toggle {
-                header = header.on_toggle(move |window, cx| on_toggle(window, cx));
-            }
-            header.into_any_element()
-        });
-
-        let body = content.map(|body| {
-            // The copy controls float over the body's top-right corner, always
-            // visible — same chrome, no hover reveal; a discovery affordance
-            // that hides is one a failing command's user cannot find. A click
-            // presses, lands on the clipboard, and the glyph flashes to a
-            // check for COPY_FLASH.
             let controls = (copy_input.is_some()
                 || copy_output.is_some()
                 || copy_diff.is_some()
                 || open_diff.is_some())
             .then(|| {
                 h_flex()
-                    .absolute()
-                    .top_1()
-                    .right_1()
                     .gap_1()
+                    .flex_shrink_0()
                     .children(copy_input.map(|raw| {
                         copy_chip((id.clone(), "copy-in"), "in", CopySide::In, raw, &state, cx)
                     }))
@@ -707,18 +703,29 @@ impl RenderOnce for Tool {
                         open_chip((id.clone(), "open-diff"), label, on_open, cx)
                     }))
             });
+            if let Some(controls) = controls {
+                header = header.controls(controls);
+            }
+            if let Some(status) = status {
+                header = header.status(status);
+            }
+            if let Some(on_toggle) = on_toggle {
+                header = header.on_toggle(move |window, cx| on_toggle(window, cx));
+            }
+            header.into_any_element()
+        });
+
+        let body = content.map(|body| {
             let wrapper = div()
                 .w_full()
                 .min_w_0()
-                .relative()
                 .border_t_1()
                 .border_color(cx.theme().border)
                 .debug_selector({
                     let id = id.clone();
                     move || format!("{id}-content")
                 })
-                .child(body)
-                .children(controls);
+                .child(body);
             if animated {
                 wrapper
                     .with_animation(
@@ -775,9 +782,8 @@ fn copy_chip(
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let (muted, border, background, success, mono) = (
+    let (muted, background, success, mono) = (
         theme.muted_foreground,
-        theme.border,
         theme.background,
         theme.success,
         theme.mono_font_family.clone(),
@@ -798,12 +804,13 @@ fn copy_chip(
         .px_1p5()
         .py_0p5()
         .rounded(px(5.))
-        .bg(background.opacity(0.85))
-        .border_1()
-        .border_color(border)
         .cursor_pointer()
+        .hover(move |chip| chip.bg(background.opacity(0.6)))
         .active(move |chip| chip.opacity(0.7))
         .on_click(move |_, _window, cx| {
+            // A control press is not a fold press: the titlebar row's own
+            // click toggles the card, so the chip swallows the event.
+            cx.stop_propagation();
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(raw.to_string()));
             state_for_click.update(cx, |state, cx| state.flash_copy(side, cx));
         })
@@ -835,12 +842,14 @@ fn open_chip(
         .px_1p5()
         .py_0p5()
         .rounded(px(5.))
-        .bg(theme.background.opacity(0.85))
-        .border_1()
-        .border_color(theme.border)
         .cursor_pointer()
+        .hover(move |chip| chip.bg(theme.secondary.opacity(0.6)))
         .active(|chip| chip.opacity(0.7))
-        .on_click(move |_, window, cx| on_open(window, cx))
+        .on_click(move |_, window, cx| {
+            // Not a fold press — see the copy chips.
+            cx.stop_propagation();
+            on_open(window, cx)
+        })
         .child(
             div()
                 .text_color(theme.muted_foreground)

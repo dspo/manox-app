@@ -20,10 +20,11 @@
 //! equivalent of what it did. (The gallery demos an `Ls` card; the runtime
 //! ships no such tool.)
 //!
-//! The palette is the component's own and stays dark regardless of the app
-//! theme: a terminal surface is read as a terminal by being dark. Colors are
-//! GitHub-dark tones — muted enough to sit under a light theme without
-//! shouting.
+//! The palette rides the app theme — the shell reads as a transcript of the
+//! tool's output, not as a dark terminal prop: same surface as every other
+//! tool body, spans tinted by the shared accent hues (paths the info color,
+//! git segments and the prompt glyph the success hue, errors the danger
+//! hue).
 
 use std::time::Duration;
 
@@ -31,8 +32,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    ElementId, HighlightStyle, Hsla, IntoElement, RenderOnce, Rgba, SharedString, div, prelude::*,
-    px,
+    ElementId, HighlightStyle, Hsla, IntoElement, RenderOnce, SharedString, div, prelude::*,
 };
 use gpui_base::TextView;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -40,32 +40,6 @@ use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use crate::code_view::{doc_style, fenced};
 use crate::spinner::BrailleSpinner;
 use crate::tool::format_tool_duration;
-
-/// `gpui::rgb` is not `const`, so the palette spells its literals out.
-const fn shell_rgb(r: u8, g: u8, b: u8) -> Rgba {
-    Rgba {
-        r: r as f32 / 255.0,
-        g: g as f32 / 255.0,
-        b: b as f32 / 255.0,
-        a: 1.0,
-    }
-}
-
-const BG: Rgba = shell_rgb(0x0f, 0x12, 0x16);
-const FG: Rgba = shell_rgb(0xc9, 0xd1, 0xd9);
-const DIM: Rgba = shell_rgb(0x8b, 0x94, 0x9e);
-const PROMPT: Rgba = shell_rgb(0x3f, 0xb9, 0x50);
-const PATH: Rgba = shell_rgb(0x79, 0xc0, 0xff);
-const LINE_NO: Rgba = shell_rgb(0xd2, 0xa8, 0xff);
-const HIT: Rgba = shell_rgb(0xe3, 0xb3, 0x41);
-const GIT: Rgba = shell_rgb(0x7e, 0xe7, 0x87);
-const ERR: Rgba = shell_rgb(0xf8, 0x51, 0x49);
-const RULE: Rgba = Rgba {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 0.07,
-};
 
 /// How a span of the transcript is tinted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,15 +60,19 @@ pub enum ShellSpanKind {
 }
 
 impl ShellSpanKind {
-    fn color(self) -> Rgba {
+    /// The theme hue a span reads as, the same accents CodeView's tokenizer
+    /// maps to: paths the info color, git segments the success hue, hits and
+    /// dirt markers the warning hue, errors the danger color, everything
+    /// else plain or muted.
+    fn color(self, theme: &gpui_component::Theme) -> Hsla {
         match self {
-            Self::Plain => FG,
-            Self::Dim => DIM,
-            Self::Path => PATH,
-            Self::LineNo => LINE_NO,
-            Self::Hit => HIT,
-            Self::Git => GIT,
-            Self::Error => ERR,
+            Self::Plain => theme.foreground,
+            Self::Dim => theme.muted_foreground,
+            Self::Path => theme.info,
+            Self::LineNo => theme.muted_foreground,
+            Self::Hit => theme.warning,
+            Self::Git => theme.success,
+            Self::Error => theme.danger,
         }
     }
 }
@@ -236,7 +214,10 @@ impl ShellView {
 
     /// The transcript document: context lines, the `❯` command line, a
     /// blank, then output — one fenced text with a run per span.
-    fn compose(&self) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+    fn compose(
+        &self,
+        theme: &gpui_component::Theme,
+    ) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
         let mut text = String::new();
         let mut runs = Vec::new();
         let emit = |text: &mut String,
@@ -248,7 +229,7 @@ impl ShellView {
                 runs.push((
                     at..at + span.len(),
                     HighlightStyle {
-                        color: Some(Hsla::from(kind.color())),
+                        color: Some(kind.color(theme)),
                         ..Default::default()
                     },
                 ));
@@ -265,7 +246,7 @@ impl ShellView {
         runs.push((
             prompt_at..prompt_at + "❯".len(),
             HighlightStyle {
-                color: Some(Hsla::from(PROMPT)),
+                color: Some(theme.success),
                 ..Default::default()
             },
         ));
@@ -274,7 +255,7 @@ impl ShellView {
         runs.push((
             cmd_at..cmd_at + self.command.len(),
             HighlightStyle {
-                color: Some(Hsla::from(FG)),
+                color: Some(theme.foreground),
                 font_weight: Some(gpui::FontWeight::MEDIUM),
                 ..Default::default()
             },
@@ -292,9 +273,9 @@ impl ShellView {
 
 impl RenderOnce for ShellView {
     fn render(self, _window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
-        let (doc, runs) = self.compose();
+        let (doc, runs) = self.compose(&theme);
         let runs = Arc::new(runs);
 
         let duration = self.duration.map(format_tool_duration).unwrap_or_default();
@@ -302,12 +283,12 @@ impl RenderOnce for ShellView {
         let footer = if self.running {
             h_flex()
                 .gap_2()
-                .child(BrailleSpinner::new().xsmall().color(Hsla::from(DIM)))
-                .child(div().text_color(Hsla::from(DIM)).child("running"))
+                .child(BrailleSpinner::new().xsmall().color(theme.muted_foreground))
+                .child(div().text_color(theme.muted_foreground).child("running"))
         } else {
             let (glyph, glyph_color, label_color) = match self.exit {
-                Some(0) => ("✓", PROMPT, DIM),
-                _ => ("✗", ERR, ERR),
+                Some(0) => ("✓", theme.success, theme.muted_foreground),
+                _ => ("✗", theme.danger, theme.danger),
             };
             let code = self
                 .exit
@@ -315,32 +296,28 @@ impl RenderOnce for ShellView {
                 .unwrap_or_default();
             h_flex()
                 .gap_2()
-                .child(div().text_color(Hsla::from(glyph_color)).child(glyph))
-                .child(div().text_color(Hsla::from(label_color)).child(code))
+                .child(div().text_color(glyph_color).child(glyph))
+                .child(div().text_color(label_color).child(code))
                 .when(!duration.is_empty(), |row| {
-                    row.child(div().text_color(Hsla::from(DIM)).child(duration))
+                    row.child(div().text_color(theme.muted_foreground).child(duration))
                 })
         };
 
-        // The shell's take on the shared skeleton: the dark surface is the
-        // wrapper's paint, so the code background stays transparent and the
-        // border matches it (no hairline inside the terminal).
+        // The shell's take on the shared skeleton: the surface is the card's
+        // own — transparent body, no dark prop — so the document paints with
+        // the theme palette on the same ground as every other tool body.
         let style = doc_style(
-            Hsla::from(FG),
-            Hsla::from(DIM),
+            theme.foreground,
+            theme.muted_foreground,
             gpui::transparent_black(),
-            Hsla::from(BG),
+            theme.border,
             theme.selection,
-            true,
+            theme.is_dark(),
         );
 
-        // The dark surface is the wrapper's paint; the document itself is
-        // transparent so the wrapper's rounding carries through.
         v_flex()
             .w_full()
             .min_w_0()
-            .bg(Hsla::from(BG))
-            .rounded(px(6.))
             .py_2()
             .child(
                 TextView::markdown((self.id.clone(), "doc"), fenced(&doc))
@@ -360,7 +337,7 @@ impl RenderOnce for ShellView {
                     .mx_3()
                     .pt_1p5()
                     .border_t_1()
-                    .border_color(Hsla::from(RULE))
+                    .border_color(theme.border)
                     .font_family(mono)
                     .text_xs()
                     .child(footer),

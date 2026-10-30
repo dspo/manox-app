@@ -243,6 +243,8 @@ fn main() {
                         .icon(Icon::new(IconName::SquareTerminal).xsmall())
                         .name("Bash")
                         .args(cmd_args("cargo test -p ai-elements"))
+                        .copy_input(r#"{"command":"cargo test -p ai-elements"}"#)
+                        .copy_output("running 40 tests\ntest result: ok. 40 passed; 0 failed")
                         .content(prompt(
                             ShellView::new("bash-shell", "cargo test -p ai-elements")
                                 .line(ShellLine::dim("   Compiling ai-elements v0.1.0"))
