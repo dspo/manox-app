@@ -44,11 +44,11 @@ impl Render for Workspace {
         // The render pass is the only place a `Window` is in hand, so the
         // composer's blank-project input is maintained here.
         self.ensure_blank_project_input(window, cx);
-        // Settings is a main-column swap: the card hosts the settings nav +
-        // panel until the back control exits. The nav lives inside the card
-        // because the chrome sidebar slot is the session list.
-        if matches!(self.view_mode, ViewMode::Settings) && !self.exiting_settings {
-            return self.render_settings_card(window, cx);
+        // Settings is the split layout: the chrome sidebar carries the nav
+        // (swapped in by `enter_settings`) and this column carries the
+        // selected page's detail.
+        if matches!(self.view_mode, ViewMode::Settings) {
+            return self.render_settings_detail(window, cx);
         }
         // An external session (a launched CLI agent TUI / plain terminal)
         // owns the main column the same way — the shell wraps the main
@@ -187,55 +187,42 @@ impl Workspace {
         .into_any_element()
     }
 
-    /// Settings inside the card: the upstream `Settings` shell fills the area
-    /// below the TitleBar strip; the strip spans the whole card as a drag
-    /// region and carries the back control at its left edge, over the sidebar
-    /// column (the chrome sidebar slot belongs to the session list, so the
-    /// whole settings surface — nav included — lives inside the card).
-    fn render_settings_card(
+    /// The settings detail (the main column's content while Settings is
+    /// open): the selected page's group stack below a TitleBar strip naming
+    /// the page. Navigation is the chrome sidebar's injected nav — no back
+    /// control here, the nav owns exiting.
+    fn render_settings_detail(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        use gpui::{ParentElement as _, Styled as _, div};
-        use gpui_component::{TITLE_BAR_HEIGHT, TitleBar, h_flex, v_flex};
+        use gpui::{ParentElement as _, Styled as _, div, px};
+        use gpui_component::v_flex;
 
-        use crate::views::management_shell::back_control;
         let settings = self
             .settings_view
             .as_ref()
             .expect("enter_settings must have created the SettingsView")
             .clone();
-        let back = back_control(&cx.theme().clone(), i18n::t("settings-back"), {
-            let settings = settings.clone();
-            move |_ev, _window, cx| {
-                settings.update(cx, |_, cx| cx.emit(SettingsEvent::Exit));
-            }
-        });
-        let content = settings.update(cx, |s, cx| s.render(window, cx));
-        let root = v_flex()
-            .id("embedded-settings")
-            .size_full()
-            .min_w_0()
-            .relative()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .pt(TITLE_BAR_HEIGHT)
-                    .child(content),
-            )
-            .child(
+        let page_ix = self.settings_nav;
+        let content = settings.update(cx, |s, cx| s.render_page(page_ix, window, cx));
+        // The detail has NO title bar of its own (the window's toolbar is
+        // the drag face) and NO page header — the nav tree already says
+        // where you are. The page rides a centered, measure-limited column
+        // inside the main card: gutters of card background on the flanks
+        // instead of full-bleed content.
+        const DETAIL_MAX_W: f32 = 880.;
+        let root = v_flex().id("settings-detail").size_full().min_w_0().child(
+            div().flex_1().min_h_0().w_full().overflow_hidden().child(
                 div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(TITLE_BAR_HEIGHT)
-                    .child(TitleBar::new().child(h_flex().px_2().child(back))),
-            );
+                    .max_w(px(DETAIL_MAX_W))
+                    .w_full()
+                    .h_full()
+                    .pt(px(16.))
+                    .mx_auto()
+                    .child(content),
+            ),
+        );
         self.apply_chat_actions(root, window, cx)
     }
 

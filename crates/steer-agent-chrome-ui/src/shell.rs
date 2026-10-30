@@ -300,11 +300,25 @@ pub struct Shell {
     // ── layout ──
     pub show_sidebar: bool,
     pub show_panel: bool,
+    /// Set while a host-injected sidebar surface is mounted (the Settings
+    /// split layout). The injected surface is the only exit of that mode, so
+    /// while this is set the titlebar's hide toggle is a no-op and the
+    /// sidebar stays up — the host cannot strand the injected nav behind a
+    /// collapsed sidebar.
+    pub(crate) sidebar_pinned: bool,
+    /// `show_sidebar` as the user had it before the pin forced it visible;
+    /// restored when the injected surface unmounts.
+    pub(crate) sidebar_pinned_was: bool,
     /// The right pane (the shell view; tab content is decoupled through
     /// ToolTab — see `right_pane.rs`).
     pub right: Entity<RightPane>,
     /// Sidebar width (invisible-handle drag, 180–460, double-click reset).
     pub sidebar_width: Pixels,
+    /// Host-injected sidebar content. When set, the sidebar slot renders
+    /// this view instead of the session list (the Settings split layout:
+    /// nav in the sidebar, detail in the main card). `None` is the normal
+    /// conversation face.
+    pub sidebar_surface: Option<gpui::AnyView>,
     /// The app brand mark factory (the titlebar avatar slot's content).
     brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
     /// Sidebar grouping mode (the sort button's toggle).
@@ -330,6 +344,29 @@ pub struct Shell {
 }
 
 impl Shell {
+    pub fn set_sidebar_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        // The injected surface is the mode's only exit, so mounting it pins
+        // the sidebar open and remembers the user's preference; unmounting
+        // releases the pin and restores it. A second mount while pinned (the
+        // host re-entering its own mode) must not record the forced `true` as
+        // the preference.
+        match surface {
+            Some(_) => {
+                if !self.sidebar_pinned {
+                    self.sidebar_pinned_was = self.show_sidebar;
+                }
+                self.sidebar_pinned = true;
+                self.show_sidebar = true;
+            }
+            None => {
+                self.sidebar_pinned = false;
+                self.show_sidebar = self.sidebar_pinned_was;
+            }
+        }
+        self.sidebar_surface = surface;
+        cx.notify();
+    }
+
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let right = cx.new(|_| RightPane::new(config.tool_kinds));
         let panel = config.panel_surface.map(|surface| PanelSlot {
@@ -361,7 +398,10 @@ impl Shell {
             title_edit: None,
             show_sidebar: true,
             show_panel: false,
+            sidebar_pinned: false,
+            sidebar_pinned_was: true,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
+            sidebar_surface: None,
             brand: config.brand,
             grouping: SidebarGrouping::default(),
             sidebar_filter_open: false,
@@ -1720,6 +1760,7 @@ impl Shell {
     fn render_content(&mut self, cx: &mut Context<Shell>) -> gpui::AnyElement {
         let show_sidebar = self.show_sidebar;
         let show_panel = self.show_panel;
+        let sidebar_surface = self.sidebar_surface.clone();
         let right = self.right.clone();
         let right_visible = right.read(cx).visible;
         let main = self.main.view();
@@ -1736,7 +1777,19 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .gap(px(PANE_GAP))
-            .when(show_sidebar, |this| this.child(self.render_sidebar(cx)))
+            .when(show_sidebar, |this| match sidebar_surface {
+                Some(surface) => this.child(
+                    // The injected surface rides the same frame as the
+                    // session list: the shell's width, clipping and edge.
+                    div()
+                        .w(self.sidebar_width)
+                        .h_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .child(surface),
+                ),
+                None => this.child(self.render_sidebar(cx)),
+            })
             .child(
                 div()
                     .flex()

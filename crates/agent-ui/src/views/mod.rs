@@ -11,6 +11,7 @@ pub mod management_shell;
 pub mod model_cascade;
 pub mod plugin_manager;
 pub mod settings;
+pub mod settings_nav;
 pub mod subagent_panel;
 pub mod subagent_stream;
 

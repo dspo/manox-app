@@ -46,8 +46,12 @@ const PICKER_LIMIT: usize = 10;
 
 pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
     let toggle_sidebar = cx.listener(|this, _: &ClickEvent, _w, cx| {
-        this.show_sidebar = !this.show_sidebar;
-        cx.notify();
+        // A pinned sidebar (host-injected surface, e.g. the settings nav)
+        // stays up: it is that mode's only exit.
+        if !this.sidebar_pinned {
+            this.show_sidebar = !this.show_sidebar;
+            cx.notify();
+        }
     });
     let toggle_panel = cx.listener(|this, _: &ClickEvent, window, cx| {
         this.toggle_panel(window, cx);
@@ -110,7 +114,11 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
                     "tb-sidebar",
                     icons::LAYOUT_SIDEBAR_LEFT,
                     15.,
-                    if shell.show_sidebar {
+                    // A pinned sidebar (host-injected surface, e.g. the
+                    // settings nav) paints disabled: the click is a no-op.
+                    if shell.sidebar_pinned {
+                        IconButtonState::Disabled
+                    } else if shell.show_sidebar {
                         IconButtonState::On
                     } else {
                         IconButtonState::Off

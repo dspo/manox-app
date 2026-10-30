@@ -225,6 +225,47 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = 返回应用
 
+settings-item-agents = 智能体
+settings-item-skills = 技能
+
+settings-origin-builtin = 内置
+settings-origin-user = 用户
+settings-origin-plugin = 插件
+
+agents-captain-desc = 主对话智能体。系统提示词由运行时模板与项目指令、技能清单、用户笔记按会话组装。
+agents-field-name = 名称
+agents-field-color = 颜色标记
+agents-field-model = 模型
+agents-field-desc = 描述
+agents-field-tools = 可用工具
+agents-field-prompt = 系统提示词
+agents-tools-hint = 控制该子智能体可以调用的工具范围。
+agents-tools-preset-note = 仅列出内置预设工具；MCP 服务器、技能与插件提供的工具不在此列出。
+agents-tools-group-files = 文件与搜索
+agents-tools-group-shell = 终端与运行时
+agents-tools-group-web = 网络与浏览器
+agents-tools-group-interaction = 交互与计划
+agents-tools-group-tasks = 任务与目标
+agents-tools-group-host = 宿主与协作
+agents-back = 返回列表
+agents-prompt-empty-session = 打开一个会话后，这里显示运行时组装的系统提示词预览。
+agents-prompt-none = 该智能体没有声明系统提示词。
+agents-prompt-edit = 编辑
+agents-prompt-preview = 预览
+agents-detail-scope = 作用域
+agents-save = 保存
+agents-cancel = 取消
+agents-delete = 删除
+
+agents-all-tools = 全部工具
+
+agents-model-inherit = 继承会话模型
+agents-tools-count = 个工具
+
+
+skills-readonly-note = 技能目前为只读展示；用户技能位于 ~/.claude/skills/，插件技能随插件安装。
+
+
 ### views/settings.rs — 常规面板
 
 settings-row-ui-language = 用户界面语言
@@ -329,7 +370,19 @@ settings-models-empty = 尚未配置任何 Provider
 
 settings-models-unnamed = 未命名 Provider
 
-settings-models-no-selection = 选择左侧 Provider 查看模型
+settings-models-back = 返回列表
+
+settings-models-row-name = 名称
+
+settings-models-badge-endpoints = { $count } 个端点
+
+settings-models-badge-models = { $count } 个模型
+
+settings-models-no-endpoints = 未配置端点
+
+settings-models-delete-hint = 删除 Provider
+
+settings-models-delete-confirm = 确认删除
 
 settings-models-load-error-title = 配置读取失败
 

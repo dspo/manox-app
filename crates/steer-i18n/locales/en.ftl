@@ -241,6 +241,47 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = Back to app
 
+settings-item-agents = Agents
+settings-item-skills = Skills
+
+settings-origin-builtin = Built-in
+settings-origin-user = User
+settings-origin-plugin = Plugin
+
+agents-captain-desc = The lead agent. Its system prompt is assembled per session from the runtime template, project instructions, the skill fold and user notes.
+agents-field-name = Name
+agents-field-color = Color tag
+agents-field-model = Model
+agents-field-desc = Description
+agents-field-tools = Allowed tools
+agents-field-prompt = System prompt
+agents-tools-hint = Controls which tools this subagent may call.
+agents-tools-preset-note = Preset built-in tools only; MCP servers, skills and plugin tools are listed elsewhere.
+agents-tools-group-files = Files & search
+agents-tools-group-shell = Shell & runtime
+agents-tools-group-web = Web & browser
+agents-tools-group-interaction = Interaction & planning
+agents-tools-group-tasks = Tasks & goals
+agents-tools-group-host = Host & collaboration
+agents-back = Back to list
+agents-prompt-empty-session = Open a session to preview the runtime-assembled system prompt.
+agents-prompt-none = This agent declares no system prompt.
+agents-prompt-edit = Edit
+agents-prompt-preview = Preview
+agents-detail-scope = Scope
+agents-save = Save
+agents-cancel = Cancel
+agents-delete = Delete
+
+agents-all-tools = all tools
+
+agents-model-inherit = follows the session
+agents-tools-count = tools
+
+
+skills-readonly-note = Skills are read-only for now; user skills live under ~/.claude/skills/, plugin skills ship with their plugin.
+
+
 ### views/settings.rs — General panel
 
 settings-row-ui-language = User interface language
@@ -345,7 +386,19 @@ settings-models-empty = No providers configured yet
 
 settings-models-unnamed = Unnamed provider
 
-settings-models-no-selection = Select a provider on the left to view its models
+settings-models-back = Back to list
+
+settings-models-row-name = Name
+
+settings-models-badge-endpoints = { $count } endpoints
+
+settings-models-badge-models = { $count } models
+
+settings-models-no-endpoints = No endpoints configured
+
+settings-models-delete-hint = Delete provider
+
+settings-models-delete-confirm = Confirm delete
 
 settings-models-load-error-title = Config load failed
 

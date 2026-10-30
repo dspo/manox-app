@@ -46,6 +46,27 @@ fn shell_handle() -> Option<Entity<Shell>> {
     }
 }
 
+/// The Settings split layout: swap the chrome sidebar's session list for the
+/// settings nav. The main column's swap rides the Workspace's view mode —
+/// this owns only the sidebar half of the layout.
+pub fn enter_settings_layout(cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    let nav = cx.new(crate::views::settings_nav::SettingsNavView::new);
+    shell.update(cx, |shell, cx| {
+        shell.set_sidebar_surface(Some(nav.into()), cx)
+    });
+}
+
+/// Restore the session-list sidebar (leaving the Settings split layout).
+pub fn leave_settings_layout(cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    shell.update(cx, |shell, cx| shell.set_sidebar_surface(None, cx));
+}
+
 /// Open (or focus) a host-built tool tab in the live right pane. `false` when
 /// no shell or window is live — the caller's gesture has no surface then.
 pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {

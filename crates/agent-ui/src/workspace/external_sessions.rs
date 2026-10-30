@@ -228,6 +228,14 @@ impl Workspace {
         }
     }
 
+    /// Whether the Settings split layout owns the main column. The
+    /// regression read for the attach tail's mode guard: a stale attach
+    /// must not flip past Settings (the nav's injected surface is mounted
+    /// exactly while this is true).
+    pub fn settings_foreground(&self) -> bool {
+        matches!(self.view_mode, super::ViewMode::Settings)
+    }
+
     /// Whether an external session currently owns the main column (the
     /// hosts'/tests' read face; the flip is the row click's contract).
     pub fn external_session_foreground(&self) -> bool {

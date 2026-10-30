@@ -889,13 +889,13 @@ impl Workspace {
         // parked session accumulated drain on the sync above, retiring their
         // cards before the user sees the strip.
         // A stale attach tail must not steal the main column back: the user
-        // may have re-entered an external session (or anything else) while
-        // this async attach was landing — the synchronous leave in
-        // open_thread already handled the normal transition.
-        if !matches!(
-            self.view_mode,
-            ViewMode::ExternalSession | ViewMode::SubagentStream
-        ) {
+        // may have re-entered an external session, the sub-agent page or
+        // Settings while this async attach was landing — the synchronous
+        // leave in open_thread already handled the normal transition. Each
+        // of those modes owns a surface the flip would strand (the settings
+        // nav's sidebar slot, the terminal, the sub-agent page's poll), so
+        // only the conversation is flippable.
+        if !stale_attach_keeps_column(&self.view_mode) {
             self.active_external = None;
             self.view_mode = ViewMode::Workspace;
         }
@@ -1261,5 +1261,32 @@ impl Workspace {
             });
         })
         .detach();
+    }
+}
+
+/// The modes a stale attach tail must not flip out of: each owns the main
+/// column with a surface the flip would strand (the settings nav's sidebar
+/// slot, the external terminal, the sub-agent page's poll). The conversation
+/// is the only flippable mode.
+fn stale_attach_keeps_column(mode: &ViewMode) -> bool {
+    matches!(
+        mode,
+        ViewMode::ExternalSession | ViewMode::SubagentStream | ViewMode::Settings
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ViewMode, stale_attach_keeps_column};
+
+    /// The guard's whole contract, pinned over every variant: an attach that
+    /// lands after the user navigated elsewhere may only take the column back
+    /// from the conversation itself.
+    #[test]
+    fn only_the_conversation_is_flippable_by_a_stale_attach() {
+        assert!(!stale_attach_keeps_column(&ViewMode::Workspace));
+        assert!(stale_attach_keeps_column(&ViewMode::Settings));
+        assert!(stale_attach_keeps_column(&ViewMode::ExternalSession));
+        assert!(stale_attach_keeps_column(&ViewMode::SubagentStream));
     }
 }
