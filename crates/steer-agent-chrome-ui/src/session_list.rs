@@ -85,13 +85,14 @@ pub struct SessionRowData {
     /// Last-active unix seconds — the info line's display source.
     pub updated_at: i64,
     /// The time-grouping stamp (unix seconds): the row's own `updated_at`,
-    /// except team members, which the projection stamps with their leader's
-    /// — a team lands in ONE recency bucket, contiguous under its chevron.
+    /// except a container tree's child rows, which the projection stamps
+    /// with their captain's — a tree lands in ONE recency bucket, contiguous
+    /// under its chevron.
     pub sort_stamp: i64,
     /// The row's position in the HOST's sidebar order (0 = top). The
     /// chrome's local `(pinned, rank)` sort reproduces the host's
-    /// interaction-ranked order — no local timestamp reshuffles it. Team
-    /// members carry their leader's rank; rows the host never ranked (live
+    /// interaction-ranked order — no local timestamp reshuffles it. Child
+    /// rows carry their captain's rank; rows the host never ranked (live
     /// external sessions) carry `i64::MAX` and sort last.
     pub rank: i64,
     pub status: SessionStatus,
@@ -109,8 +110,9 @@ pub struct SessionRowData {
     pub archived: bool,
     /// The persisted user tag chip on the tag line.
     pub tag: Option<String>,
-    /// A team leader renders its collapse chevron before the status slot
-    /// (the row itself does not indent — nesting shows via the chevron only).
+    /// A row with container-tree children renders its collapse chevron
+    /// before the status slot (the row itself does not indent — nesting
+    /// shows via the chevron only).
     pub team_leader: bool,
 }
 

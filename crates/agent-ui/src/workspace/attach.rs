@@ -54,7 +54,7 @@ impl Workspace {
     /// background thread's streaming deltas and tool events cannot be
     /// misrouted into the foreground view.
     /// The parked entry is left in `background_threads` (reclaimed on a later
-    /// `open_thread`); self-removal from within the callback would drop the very
+    /// `open_container`); self-removal from within the callback would drop the very
     /// subscription running it.
     pub(super) fn subscribe_background_thread(
         &self,
@@ -100,10 +100,10 @@ impl Workspace {
             .unwrap_or(false)
     }
 
-    /// New thread for the pi harness: no provider reload (registration is
-    /// one-shot; actors await readiness themselves). A project binds at
-    /// construction time — a single session creation, no orphaned session
-    /// file.
+    /// The sidebar's new-container gesture (⌘N, the Steer row, `/new`): read
+    /// the foreground's inherited picks, then hand the intent to the ONE
+    /// creation entry (`container::create_container`). No provider reload —
+    /// registration is one-shot; actors await readiness themselves.
     ///
     /// T6: the double path is deleted. The workspace no longer pre-builds a
     /// local `Thread` and then attaches the AgentServer session to the same
@@ -120,7 +120,7 @@ impl Workspace {
     /// Returns the client-minted session id: the attach lands asynchronously,
     /// so a caller that must address the fresh thread (e.g. `/exit`'s closing
     /// notes) keys on this id instead of the live foreground.
-    pub fn start_new_thread(
+    pub fn new_container(
         &mut self,
         project: Option<PathBuf>,
         window: &mut Window,
@@ -753,7 +753,7 @@ impl Workspace {
         // A stale attach tail must not steal the main column back: the user
         // may have re-entered an external session, the sub-agent page or
         // Settings while this async attach was landing — the synchronous
-        // leave in open_thread already handled the normal transition. Each
+        // leave in open_container already handled the normal transition. Each
         // of those modes owns a surface the flip would strand (the settings
         // nav's sidebar slot, the terminal, the sub-agent page's poll), so
         // only the conversation is flippable.
@@ -771,7 +771,7 @@ impl Workspace {
         if !self.archive_active_thread_if_idle(cx) {
             return;
         }
-        self.start_new_thread(None, window, cx);
+        self.new_container(None, window, cx);
     }
 
     /// The archiving body every path shares: mark the session archived in the
@@ -788,7 +788,7 @@ impl Workspace {
         // `session/isArchivedChanged` needs the row's session channel and
         // is refused for the rest: a silently refused archive left the
         // conversation live and its never-spoken object row a zombie
-        // draft, which `start_new_thread`'s refill then resurrected as a
+        // draft, which `new_container`'s refill then resurrected as a
         // `createSession` the host could only answer "already exists" — a
         // dead click on 新建会话, and a `/exit` whose final beat never
         // landed.
@@ -904,7 +904,7 @@ impl Workspace {
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
         let sid = uuid::Uuid::new_v4().to_string();
-        // The object row, exactly as `start_new_thread` lands it: this
+        // The object row, exactly as `new_container` lands it: this
         // conversation is minted here and never passes through that path.
         land_conversation_row(
             &sid,
@@ -924,7 +924,7 @@ impl Workspace {
         if let Some(effort) = &effort_str {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));
         }
-        // Same directory rule as `start_new_thread`: the intent's working
+        // Same directory rule as `new_container`: the intent's working
         // directories are the only carrier — bind the inherited cwd so the
         // fresh thread keeps its project instead of landing directory-less.
         let cwds = vec![format!("file://{cwd_str}")];
@@ -980,16 +980,16 @@ impl Workspace {
         if !running {
             return;
         }
-        self.start_new_thread(project, window, cx);
+        self.new_container(project, window, cx);
     }
 
-    pub fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        // Opening a thread is an implicit park for the external session on
-        // screen (its terminal keeps running) — the conversation returns, and
-        // so does a sub-agent stream page (the run keeps running).
+    pub fn open_container(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Opening a native row is an implicit park for the external session
+        // on screen (its terminal keeps running) — the conversation returns,
+        // and so does a sub-agent stream page (the run keeps running).
         self.leave_external_session();
         self.leave_subagent_stream(cx);
-        self.open_thread_inner(id, true, window, cx);
+        self.open_container_inner(id, true, window, cx);
     }
 
     /// The successor hand-off: the foreground conversation continues under a
@@ -1003,7 +1003,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.nav.replace_current(&id);
-        self.open_thread_inner(id, false, window, cx);
+        self.open_container_inner(id, false, window, cx);
     }
 
     /// One step back through the visited-thread history; returns the thread
@@ -1014,7 +1014,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let id = self.nav.step_back()?;
-        self.open_thread_inner(id.clone(), false, window, cx);
+        self.open_container_inner(id.clone(), false, window, cx);
         Some(id)
     }
 
@@ -1026,7 +1026,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let id = self.nav.step_forward()?;
-        self.open_thread_inner(id.clone(), false, window, cx);
+        self.open_container_inner(id.clone(), false, window, cx);
         Some(id)
     }
 
@@ -1035,7 +1035,7 @@ impl Workspace {
         self.nav.avail()
     }
 
-    fn open_thread_inner(
+    fn open_container_inner(
         &mut self,
         id: String,
         record: bool,
@@ -1125,7 +1125,7 @@ impl Workspace {
                     chat.fork_in_flight = false;
                     cx.notify();
                 });
-                this.open_thread(chat_id, window, cx);
+                this.open_container(chat_id, window, cx);
             });
         })
         .detach();

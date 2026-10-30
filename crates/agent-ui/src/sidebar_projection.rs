@@ -14,10 +14,16 @@
 //!   ladder Pending > Running > Unread > Idle. Errors are not a list
 //!   state: the wire `Error` bit stays on the fold but no row consumes it
 //!   (a turn's failure renders in the transcript);
-//! - team forest: `parent_id`/`depth` rows nest under their leader
-//!   (recency-ordered leaders, members trailing), rows whose parent is
-//!   missing or archived flatten to top-level; rows never indent — the
-//!   hierarchy shows via the group header and the leader chevron only;
+//! - the container tree (plan D3, two levels only): a `ContainerRow` knows
+//!   its membership — `member_kind` (upstream #987's
+//!   `_meta.x-manox.memberKind`) and `parent_id` (`parentSessionId`, child
+//!   rows only). The catalogue folds level-1 children OUT before projection
+//!   ([`ContainerRow::is_child`] — the roster surface joins them, never the
+//!   sidebar), so the sidebar is one row per container; [`project_forest`]
+//!   keeps the captain/child walk for any feed that does carry children
+//!   (captains in list order, children trailing, orphans flatten to
+//!   top-level); rows never indent — the hierarchy shows via the group
+//!   header and the captain chevron only;
 //! - `updated_at` / `archived` / the tag chip / the pinned flag ride the row
 //!   verbatim.
 
@@ -28,11 +34,12 @@ use steer_agent_chrome_ui::session_list::{
     PendingKind, SessionGroup, SessionRowData, SessionRowKind, SessionStatus,
 };
 
-/// One sidebar row: the fields the chrome list renders, derived from a
-/// session summary plus its extension fold. Replaces the retired v2
-/// `ThreadListItem`.
+/// One sidebar row: one SESSION CONTAINER (plan D1) — the fields the chrome
+/// list renders, derived from a session summary plus its extension fold.
+/// Replaces the retired v2 `ThreadListItem`; the sidebar's row vocabulary
+/// speaks containers, the wire's session vocabulary underneath is untouched.
 #[derive(Debug, Clone)]
-pub struct ThreadRow {
+pub struct ContainerRow {
     pub id: String,
     pub title: String,
     /// Whether this row's own turn is running.
@@ -43,8 +50,16 @@ pub struct ThreadRow {
     /// The unread mirror — the completion reminder.
     pub unread: bool,
     pub pinned: bool,
+    /// The parent container's id — upstream #987's
+    /// `_meta.x-manox.parentSessionId` (child rows only): the tree edge to
+    /// the owning captain.
     pub parent_id: Option<String>,
-    pub depth: i32,
+    /// The row's membership in the container tree (upstream #987's
+    /// `_meta.x-manox.memberKind`): a [`MemberKind::Subagent`] row is its
+    /// captain's level-1 child and folds out of the sidebar; unannotated
+    /// rows (today's runtime sends no member slot) and captains are
+    /// top-level.
+    pub member_kind: MemberKind,
     pub project: Option<String>,
     pub tag: Option<String>,
     /// Last-active unix seconds, from the summary's `modified_at` (the same
@@ -61,7 +76,39 @@ pub struct ThreadRow {
     pub rank: i64,
 }
 
-impl ThreadRow {
+/// The container tree's two memberships (plan D3 — captain 0-level, produced
+/// subagents 1-level, nothing deeper). An unannotated summary reads
+/// [`MemberKind::Captain`]: the sidebar renders top-level rows only, so the
+/// unknown must render rather than vanish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MemberKind {
+    #[default]
+    Captain,
+    Subagent,
+}
+
+impl MemberKind {
+    fn from_meta(value: Option<&str>) -> Self {
+        match value {
+            Some("subagent") => Self::Subagent,
+            // `captain`, unknown words, and the absent slot all read
+            // top-level — the fold only ever hides what it recognizes.
+            _ => Self::Captain,
+        }
+    }
+}
+
+impl ContainerRow {
+    /// Whether the row is a container's LEVEL-1 child: a `subagent`
+    /// memberKind, or a parent edge that arrived without a recognized
+    /// annotation (the plan's fold rule keys on the parent too). Children
+    /// never render as top-level sidebar rows — the catalogue folds them
+    /// out (`SessionMultiplexer::container_rows`); they stay in the book for
+    /// the roster surface and whole-tree unarchive.
+    pub fn is_child(&self) -> bool {
+        self.member_kind == MemberKind::Subagent || self.parent_id.is_some()
+    }
+
     /// Derive a row's FALLBACK facts from the AHP summary and its
     /// extension state — bit tests over the summary's status set plus the
     /// passed open-ask flag; Ask outranks Auth when both faces are open —
@@ -70,11 +117,23 @@ impl ThreadRow {
     /// state. The multiplexer's `merged_row` then lets a landed live session
     /// or chat fold outrank the row, so the summary bits speak for sessions
     /// this client never subscribed AND through a fold's pre-snapshot
-    /// window. Sub-agent nesting (depth/parent) has no summary face yet —
-    /// flat, until the work channel carries the tree.
+    /// window. The container-tree facts (`memberKind` / `parentSessionId`)
+    /// read the summary's `_meta.x-manox` slot — the same read the row pin
+    /// does (`ext_and_meta_pinned`); a summary without the slot (today's
+    /// pinned runtime) reads a top-level captain with no parent.
     pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_ask: bool) -> Self {
         let bits = summary.status;
         let needs_auth = bits & WireStatus::InputNeeded.bits() != 0;
+        let member_slot = || summary.meta.as_ref().and_then(|m| m.get("x-manox"));
+        let parent_id = member_slot()
+            .and_then(|x| x.get("parentSessionId"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let member_kind = MemberKind::from_meta(
+            member_slot()
+                .and_then(|x| x.get("memberKind"))
+                .and_then(serde_json::Value::as_str),
+        );
         Self {
             id: crate::ahp_store::id_of(&summary.resource).to_string(),
             title: summary.title.clone(),
@@ -89,8 +148,8 @@ impl ThreadRow {
             unread: bits & WireStatus::IsRead.bits() == 0,
             archived: bits & WireStatus::IsArchived.bits() != 0,
             pinned,
-            parent_id: None,
-            depth: 0,
+            parent_id,
+            member_kind,
             // The host fills `project` from the thread row for every session;
             // workingDirectories only exists on seeded folds (live engine), so
             // the project is the grouping source of truth.
@@ -120,9 +179,9 @@ impl ThreadRow {
 /// is the single unread source (the official IsRead bit folded from the
 /// protocol). The time stamp and the host rank ride separately — the stamp
 /// is a real unix time the chrome's recency buckets decode, the rank its
-/// order key; a team's members are re-stamped to their leader's by
-/// [`project_forest`].
-pub fn project_row(item: &ThreadRow) -> SessionRowData {
+/// order key; a container tree's children are re-stamped to their captain's
+/// by [`project_forest`].
+pub fn project_row(item: &ContainerRow) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),
         short_id: item.id.chars().take(8).collect(),
@@ -141,7 +200,7 @@ pub fn project_row(item: &ThreadRow) -> SessionRowData {
 
 /// The display ladder over the stored facts: Pending > Running > Unread >
 /// Idle.
-pub fn derive_status(item: &ThreadRow) -> SessionStatus {
+pub fn derive_status(item: &ContainerRow) -> SessionStatus {
     match item.pending {
         Some(kind) => SessionStatus::Pending(kind),
         None if item.running => SessionStatus::Running,
@@ -150,23 +209,26 @@ pub fn derive_status(item: &ThreadRow) -> SessionStatus {
     }
 }
 
-/// Project a partition's rows into the chrome group shape with the team
-/// forest materialized: leaders in list order, each followed by its member
-/// rows (the wire's team nesting is never deeper — pi sub-agents — so no
-/// recursion is needed). Members no longer indent — the leader's chevron is
-/// the only nesting marker, and the projection re-stamps each member's
-/// `sort_stamp` and `rank` to its leader's so the team sorts (and survives
-/// a pin re-order) as one unit. Orphans (a parent that is missing,
-/// archived, or outside the partition) flatten to top-level rather than
-/// vanishing, keeping their own stamp.
-pub fn project_forest(rows: &[ThreadRow]) -> Vec<SessionRowData> {
-    let by_id: HashMap<&str, &ThreadRow> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
+/// Project a partition's rows into the chrome group shape with the container
+/// tree materialized: captains in list order, each followed by its child
+/// rows ([`ContainerRow::is_child`] rows pointing at the captain — the wire
+/// tree is never deeper than the plan's two levels, so no recursion is
+/// needed). The catalogue feed never carries children (they fold out in
+/// `container_rows`), so the sidebar walk is a pass-through today; the
+/// roster feed joins children later through this same shape. Children no
+/// longer indent — the captain's chevron is the only nesting marker, and
+/// the projection re-stamps each child's `sort_stamp` and `rank` to its
+/// captain's so the unit sorts (and survives a pin re-order) as one.
+/// Orphans (a parent that is missing, archived, or outside the partition)
+/// flatten to top-level rather than vanishing, keeping their own stamp.
+pub fn project_forest(rows: &[ContainerRow]) -> Vec<SessionRowData> {
+    let by_id: HashMap<&str, &ContainerRow> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        if row.depth == 0 {
-            let members: Vec<&ThreadRow> = rows
+        if !row.is_child() {
+            let members: Vec<&ContainerRow> = rows
                 .iter()
-                .filter(|r| r.depth > 0 && r.parent_id.as_deref() == Some(row.id.as_str()))
+                .filter(|r| r.is_child() && r.parent_id.as_deref() == Some(row.id.as_str()))
                 .collect();
             let mut leader = project_row(row);
             leader.team_leader = !members.is_empty();
@@ -180,12 +242,12 @@ pub fn project_forest(rows: &[ThreadRow]) -> Vec<SessionRowData> {
                 out.push(member);
             }
         } else {
-            // A member whose leader is absent from this partition flattens.
+            // A member whose captain is absent from this partition flattens.
             let leader_present = row
                 .parent_id
                 .as_deref()
                 .and_then(|p| by_id.get(p))
-                .is_some_and(|l| l.depth == 0);
+                .is_some_and(|l| !l.is_child());
             if !leader_present {
                 out.push(project_row(row));
             }
@@ -201,19 +263,19 @@ pub fn project_forest(rows: &[ThreadRow]) -> Vec<SessionRowData> {
 /// in the set groups as loose, the v2 store's remove-project semantics — the
 /// folder dissolves, the history stays.
 pub fn project_groups(
-    rows: &[ThreadRow],
+    rows: &[ContainerRow],
     folders: &[(String, Option<String>)],
     removed: &HashSet<String>,
 ) -> Vec<SessionGroup> {
     // The effective grouping project: the row's own, minus removed paths (a
     // removed row keeps its row data — it re-buckets, it does not vanish).
-    let effective = |row: &ThreadRow| -> Option<String> {
+    let effective = |row: &ContainerRow| -> Option<String> {
         row.project
             .clone()
             .filter(|p| !p.is_empty() && !removed.contains(p))
     };
     let mut order: Vec<String> = Vec::new();
-    let mut buckets: HashMap<String, Vec<ThreadRow>> = HashMap::new();
+    let mut buckets: HashMap<String, Vec<ContainerRow>> = HashMap::new();
     let mut bucket_project: HashMap<String, Option<String>> = HashMap::new();
     // The durable project skeleton first: a folder renders even with zero
     // rows — archiving every conversation never dissolves the project. The
@@ -287,8 +349,8 @@ pub(crate) fn project_label(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn row(id: &str, depth: i32, parent: Option<&str>) -> ThreadRow {
-        ThreadRow {
+    fn row(id: &str, member: MemberKind, parent: Option<&str>) -> ContainerRow {
+        ContainerRow {
             id: id.into(),
             title: format!("row {id}"),
             running: false,
@@ -298,7 +360,7 @@ mod tests {
             archived: false,
             rank: 0,
             parent_id: parent.map(|p| p.to_string()),
-            depth,
+            member_kind: member,
             project: Some("/p/wire".into()),
             tag: None,
             updated_at: 0,
@@ -307,7 +369,7 @@ mod tests {
 
     #[test]
     fn derive_status_priority_order() {
-        let mut r = row("s", 0, None);
+        let mut r = row("s", MemberKind::Captain, None);
         assert_eq!(derive_status(&r), SessionStatus::Idle);
         r.unread = true;
         assert_eq!(derive_status(&r), SessionStatus::Unread);
@@ -342,22 +404,71 @@ mod tests {
             .expect("a summary parses")
         };
         let both = WireStatus::InputNeeded.bits() | WireStatus::Error.bits();
-        let r = ThreadRow::from_summary(&summary(both), false, true);
+        let r = ContainerRow::from_summary(&summary(both), false, true);
         assert_eq!(r.pending, Some(PendingKind::Ask));
-        let r = ThreadRow::from_summary(&summary(both), false, false);
+        let r = ContainerRow::from_summary(&summary(both), false, false);
         assert_eq!(r.pending, Some(PendingKind::Auth));
         let read_error = WireStatus::Error.bits() | WireStatus::IsRead.bits();
-        let r = ThreadRow::from_summary(&summary(read_error), false, false);
+        let r = ContainerRow::from_summary(&summary(read_error), false, false);
         assert_eq!(derive_status(&r), SessionStatus::Idle);
+    }
+
+    /// The member slot parses through [`ContainerRow::from_summary`]: a
+    /// `subagent` memberKind with its parent edge reads a level-1 child, a
+    /// `captain` annotation reads top-level, and a summary WITHOUT the slot
+    /// (today's pinned runtime never sends it) reads a top-level captain —
+    /// the fold must never hide what it does not recognize.
+    #[test]
+    fn from_summary_parses_the_member_slot() {
+        let summary = |meta: serde_json::Value| -> SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": "ahp-session:/s-1",
+                "provider": "test",
+                "title": "row",
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+                "_meta": meta,
+            }))
+            .expect("a summary parses")
+        };
+        let subagent = summary(serde_json::json!({
+            "x-manox": { "memberKind": "subagent", "parentSessionId": "cap-1" },
+        }));
+        let r = ContainerRow::from_summary(&subagent, false, false);
+        assert_eq!(r.member_kind, MemberKind::Subagent);
+        assert_eq!(r.parent_id.as_deref(), Some("cap-1"));
+        assert!(r.is_child());
+
+        let captain = summary(serde_json::json!({
+            "x-manox": { "memberKind": "captain" },
+        }));
+        let r = ContainerRow::from_summary(&captain, false, false);
+        assert_eq!(r.member_kind, MemberKind::Captain);
+        assert_eq!(r.parent_id, None);
+        assert!(!r.is_child());
+
+        let bare = summary(serde_json::json!({}));
+        let r = ContainerRow::from_summary(&bare, false, false);
+        assert_eq!(r.member_kind, MemberKind::Captain);
+        assert_eq!(r.parent_id, None);
+        assert!(!r.is_child(), "an unannotated row renders top-level");
+
+        // A parent edge without a recognized memberKind still folds: the
+        // tree edge is the plan's fold fact, not just the annotation.
+        let parent_only = summary(serde_json::json!({
+            "x-manox": { "parentSessionId": "cap-1" },
+        }));
+        assert!(ContainerRow::from_summary(&parent_only, false, false).is_child());
     }
 
     #[test]
     fn forest_nests_members_under_leaders_and_flattens_orphans() {
         let mut rows = vec![
-            row("leader", 0, None),
-            row("member", 1, Some("leader")),
-            row("orphan", 1, Some("gone")),
-            row("top", 0, None),
+            row("leader", MemberKind::Captain, None),
+            row("member", MemberKind::Subagent, Some("leader")),
+            row("orphan", MemberKind::Subagent, Some("gone")),
+            row("top", MemberKind::Captain, None),
         ];
         // Wire columns ride the projection verbatim.
         rows[0].updated_at = 300;
@@ -382,7 +493,7 @@ mod tests {
         assert_eq!(out[1].updated_at, 150);
         assert!(out[2].archived);
         assert!(!out[0].archived);
-        // The team shares one sort stamp AND one host rank (the leader's);
+        // The unit shares one sort stamp AND one host rank (the captain's);
         // a flattened orphan and an unrelated top row keep their own.
         assert_eq!(out[0].sort_stamp, 300);
         assert_eq!(out[0].rank, 0);
@@ -397,7 +508,10 @@ mod tests {
 
     #[test]
     fn groups_key_by_project_tail_and_chats_bucket() {
-        let mut rows = vec![row("a", 0, None), row("b", 0, None)];
+        let mut rows = vec![
+            row("a", MemberKind::Captain, None),
+            row("b", MemberKind::Captain, None),
+        ];
         rows[1].project = None;
         rows[1].tag = Some("mytag".into());
         rows[1].pinned = true;
@@ -414,7 +528,7 @@ mod tests {
     /// no-project group carries no path.
     #[test]
     fn folder_skeleton_renders_empty_projects_with_aliases() {
-        let mut rows = vec![row("a", 0, None)];
+        let mut rows = vec![row("a", MemberKind::Captain, None)];
         rows[0].project = Some("/p/live".into());
         let folders = vec![
             ("/p/empty".to_string(), Some("空项目".to_string())),
@@ -435,7 +549,10 @@ mod tests {
     /// basename-headed bucket beside an empty alias head.
     #[test]
     fn an_aliased_folder_absorbs_its_rows_by_path() {
-        let mut rows = vec![row("a", 0, None), row("b", 0, None)];
+        let mut rows = vec![
+            row("a", MemberKind::Captain, None),
+            row("b", MemberKind::Captain, None),
+        ];
         rows[0].project = Some("/p/live".into());
         rows[1].project = Some("/p/live".into());
         let folders = vec![("/p/live".to_string(), Some("别名".to_string()))];
@@ -450,7 +567,7 @@ mod tests {
     /// rows (if any) re-bucket loose.
     #[test]
     fn a_removed_skeleton_folder_dissolves() {
-        let mut rows = vec![row("a", 0, None)];
+        let mut rows = vec![row("a", MemberKind::Captain, None)];
         rows[0].project = Some("/p/gone".into());
         let folders = vec![("/p/gone".to_string(), None)];
         let removed: HashSet<String> = ["/p/gone".to_string()].into_iter().collect();
@@ -465,7 +582,10 @@ mod tests {
     /// real unix time (the recency buckets decode it), never a rank.
     #[test]
     fn the_rank_carries_the_host_order_and_the_stamp_stays_a_time() {
-        let mut rows = [row("a", 0, None), row("b", 0, None)];
+        let mut rows = [
+            row("a", MemberKind::Captain, None),
+            row("b", MemberKind::Captain, None),
+        ];
         rows[0].rank = 0;
         rows[0].updated_at = 1_700_000_000;
         rows[1].rank = 1;
@@ -485,7 +605,11 @@ mod tests {
     /// remove-project semantics): the folder dissolves, the history stays.
     #[test]
     fn groups_carry_project_and_removed_paths_rebucket_to_loose() {
-        let mut rows = vec![row("a", 0, None), row("b", 0, None), row("c", 0, None)];
+        let mut rows = vec![
+            row("a", MemberKind::Captain, None),
+            row("b", MemberKind::Captain, None),
+            row("c", MemberKind::Captain, None),
+        ];
         rows[0].project = None;
         rows[1].project = Some("/p/wire".into());
         rows[2].project = Some("/p/wire".into());
