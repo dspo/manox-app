@@ -326,7 +326,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             })
             .detach();
         }
-        let rows = mux.read(cx).thread_list(cx);
+        let rows = mux.read(cx).container_list(cx);
         let folders = mux.read(cx).project_folders(cx);
         let removed = crate::project_registry::removed_projects();
         let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
@@ -621,12 +621,12 @@ fn shell_config(
             on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
                 manox_agent::thread_store_global().with_mut(|st| st.set_thread_tag(id, tag));
             })),
-            // The workspace's own new-thread path (park + fresh landing).
+            // The workspace's own new-container path (park + fresh landing).
             on_new_session: Some(Box::new({
                 let ws = ws.clone();
                 move |w, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.start_new_thread(None, w, cx);
+                        ws.new_container(None, w, cx);
                         cx.notify();
                     });
                 }
@@ -648,7 +648,7 @@ fn shell_config(
                         if is_external {
                             ws.open_external_session(id, w, cx);
                         } else {
-                            ws.open_thread(id.to_string(), w, cx);
+                            ws.open_container(id.to_string(), w, cx);
                         }
                         cx.notify();
                     });
@@ -880,7 +880,7 @@ fn load_right_pane(container_id: &str) -> Option<String> {
 /// attrs through [`crate::Workspace::container_attrs`] at spawn time.)
 fn refresh_foreground_project(
     ws: &Entity<Workspace>,
-    rows: &[crate::sidebar_projection::ThreadRow],
+    rows: &[crate::sidebar_projection::ContainerRow],
     cx: &App,
 ) {
     // The thread's working directory is its PROJECT path — the wire row's

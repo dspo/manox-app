@@ -751,7 +751,8 @@ impl Workspace {
             if running {
                 self.spawn_thinking_ticker(cx);
             } else {
-                self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
+                self.multiplexer
+                    .update(cx, |m, cx| m.fetch_container_list(cx));
                 self.spawn_git_status_refresh(cx);
                 self.settle_follow_ups(cancelled, cx);
             }

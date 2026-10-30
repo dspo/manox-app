@@ -310,7 +310,8 @@ impl Workspace {
         // Persist on submit so the sidebar shows the new entry immediately
         // (cross-domain #5: the wire refetch — the server self-holds the
         // rescan in its answer).
-        self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
+        self.multiplexer
+            .update(cx, |m, cx| m.fetch_container_list(cx));
         cx.notify();
     }
 
@@ -367,7 +368,8 @@ impl Workspace {
             // The conversation exists the moment the message is sent: refetch
             // the sidebar list now (the transcript-side refetch on the user
             // MessageEnd notice then fills in the summary text).
-            self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
+            self.multiplexer
+                .update(cx, |m, cx| m.fetch_container_list(cx));
             return;
         }
         self.chat.update(cx, |chat, cx| {

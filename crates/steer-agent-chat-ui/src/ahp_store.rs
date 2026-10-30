@@ -1905,7 +1905,7 @@ impl AhpStore {
         // `/exit`'s teardown, the archive command) passes through. The row is
         // the draft refill's source of truth: an archived conversation whose
         // row stayed unarchived outlives its own archive as a zombie draft,
-        // and the next `start_new_thread` refills it into a `createSession`
+        // and the next `new_container` refills it into a `createSession`
         // the host can only answer "already exists".
         //
         // It is written unconditionally, before the dispatch: that is a
