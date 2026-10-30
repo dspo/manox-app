@@ -69,7 +69,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 图片附件 | ✅ | 剪贴板粘贴 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
-| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读；头部 access-mode 徽章 = dspo/manox#968 的 app 伴随，读子会话自己 session 通道的声明行）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询。子代理行与 SubagentStream 头部携带定义声明的展示色（background-work `_meta.agentColor`，Claude 八色词汇经 `views::subagents::agent_color` 映射为身份色点，未知值不着色）——上游「Claude agent frontmatter 全字段适配」的 app 伴随 |
+| Sub-agent 观察 | ✅ | rail agents 段（ConversationInfoBubble 的 crew 节）直读 x-manox-work 通道的**常驻子会话名册**（上游 #989 的 `childRunsChanged` 注册表，经 `ahp_store::child_runs_of`：live + settled 全量、settled 行带 verdict 映射的状态标、`run/continued` 翻回运行中；是「谁服役过」的全员花名册，也是切走切回/重启的 restore 源——attach 重建由名册驱动，原空消息集 KNOWN DOWNGRADE 已撤）；Captain 条仍直读 `background_work`（live-only，「现在在跑什么」）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读；头部 access-mode 徽章 = dspo/manox#968 的 app 伴随，读子会话自己 session 通道的声明行）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询。子代理行与 SubagentStream 头部携带定义声明的展示色（background-work `_meta.agentColor`，Claude 八色词汇经 `views::subagents::agent_color` 映射为身份色点，未知值不着色）——上游「Claude agent frontmatter 全字段适配」的 app 伴随 |
 | 退役（plan mode 整体删除，随上游 manox PR #946） | — | `/plan` 为上游内置 skill（规划契约一次性注入，见 §Slash 行）；plan 裁决 = 单问题 ask（`detail`=plan 正文，经 wire 的 `ChatInputRequest.message` 折入），批准/修订即普通答案；rail 的 plan 节（`UpdatePlan`）仍消费执行进度，快照经 sidecar 持久化、compaction 后可恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
@@ -513,6 +513,14 @@ in the main column ([SubagentStream](#subagentstream)). The Captain's own row ca
 click: the block is not on screen while the page owns the column, so the round
 trip back is the page's own back control (no dead affordance here).
 
+The strip is deliberately LIVE-ONLY (plan PR-A4 kept it so): it is the "what
+is running now" surface, retiring once neither a turn nor a run is live. The
+"who ever served" account — settled runs included — lives on the
+[ConversationInfoBubble](#conversationinfobubble)'s crew section, fed by the
+persistent child-run roster (`x-manox-work/childRunsChanged`, `ahp_store::
+child_runs_of`), which is also the attach-time restore source for the rail's
+observation rows.
+
 > Source: `crates/agent-ui/src/workspace/render.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`), `crates/agent-ui/src/workspace/subagent_stream.rs`
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
@@ -814,11 +822,18 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 
 段序（自上而下，空段连同分割线一起不画，相邻段不产生双线）：
 
-1. **Captain + subagents**：主 Agent 行字面量 `Captain`（不走 i18n；`views/message.rs` 的署名同样
-   是字面量 `Captain`，两种语言都不翻译）。subagent 行 `{type}({topic})`
-   （`subagents.rs::task_display_title`）与 Captain 同一条左基线（无缩进、无树符——从属关系唯一，
-   不需要视觉编码）。**默认只显示未结束的行**（`ToolCallStatus::Running | PendingApproval` 判定，
-   不用 watchdog 的 `health`），已结束的折叠进 `+N`；活行 0 也保留 Captain 行 + `+N`。上限 5。
+1. **Captain + subagents（全员花名册，plan PR-A4）**：主 Agent 行字面量 `Captain`（不走 i18n；
+   `views/message.rs` 的署名同样是字面量 `Captain`，两种语言都不翻译）。subagent 行
+   `{type}({topic})`（`subagents.rs::task_display_title`）与 Captain 同一条左基线（无缩进、无树符
+   ——从属关系唯一，不需要视觉编码）。**数据源 = x-manox-work 通道的常驻子会话名册**（上游 #989 的
+   `childRunsChanged` 注册表，`ahp_store::child_runs_of` 派发序输出；`context_rail::crew_rows` 做名册
+   → 行的映射并与 attach 重建的观察行按 run id 合并、store 行优先）：live 行（running 标，spinner）与
+   settled 行（verdict 映射的状态标——completed→成功、timed-out/stalled/error/max-tokens→失败、
+   aborted→取消、refusal→拒绝、词汇外/缺失→中性取消标）**都在册**；`run/continued` 把同一行翻回
+   运行中。这是「谁服役过」的全员花名册（Captain 条是 live-only 的「现在在跑什么」，两者分工）。
+   点击行 = 现有 SubagentPanel / SubagentStream 只读钻取（名册条目自带子会话指针）。**默认只显示
+   未结束的行**（`ToolCallStatus::Running | PendingApproval` 判定，不用 watchdog 的 `health`），已
+   结束的折叠进 `+N`；活行 0 也保留 Captain 行 + `+N`。上限 5。
 2. **branch / worktree 对**：`┌ {branch}` / `└ {worktree 目录名}`（mono 字体，长名 truncate），
    数据 = `git_branch_display` + store `cwd`（原 `render_branch_block` 的取数方式；±change 计数与
    点击复制随卡片退役，`git_status` 收敛为 branch-only）。
@@ -848,7 +863,8 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 
 气泡的数据舱仍是 `ContextRail` 实体（`Entity` 由 chat state 持有，`Workspace` 经
 `chat_rail()` 取用）：cockpit 相位（`update_cockpit_phase`）、subagent 行
-（`apply_subagent_progress`，首现序即展示序）、`PlanSnapshot`（`set_plan`）、branch 显示
+（`apply_subagent_progress`，首现序即展示序；attach 时由常驻名册重建——`Workspace::apply_subagent_rows`
+读 `child_runs_of` 喂入，名册即 restore 源）、`PlanSnapshot`（`set_plan`）、branch 显示
 （`set_git_branch`，`git_status::gather_branch` 后台 400ms 去抖刷新）。浮层卡片的渲染面
 （`render_panel` 及分段渲染）、宽度门（`rail_width_for`/`RAIL_NARROW_BREAK`）、
 `ENV_CONTENT_INSET` 列内缩、`set_host` 观察面板入口已随卡片删除；会话切换

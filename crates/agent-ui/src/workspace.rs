@@ -1296,6 +1296,31 @@ impl Workspace {
         self.running_subagents(cx)
     }
 
+    /// The rail's crew observation rows (run id, status, definition name)
+    /// — the attach-time roster rebuild's read face. Test-support
+    /// diagnostic: the restore regression reads these rows back.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_rail_subagent_rows(
+        &self,
+        cx: &App,
+    ) -> Vec<(String, manox_agent::ToolCallStatus, String)> {
+        self.chat_rail(cx).read(cx).diagnostic_subagent_rows()
+    }
+
+    /// The foreground store pair — the book the attach re-binds to.
+    /// Test-support diagnostic: the restore regression seeds its roster
+    /// through the bound store the attach itself selected.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_chat_store(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
+        String,
+    )> {
+        self.chat.read(cx).store.clone()
+    }
+
     /// Open one run's sub-agent page by id — the line click's own path.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_open_subagent_stream(&mut self, id: &str, cx: &mut Context<Self>) {
