@@ -95,6 +95,8 @@ async fn container_death_flips_on_both_homes(cx: &mut TestAppContext) {
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
                     project: None,
+                    // The fake PTY has no cx session behind it.
+                    handle: None,
                 },
                 view,
                 window,
@@ -157,14 +159,29 @@ async fn container_death_flips_on_both_homes(cx: &mut TestAppContext) {
         died.borrow().iter().any(|id| id == &row_id),
         "the external flip raised the death event"
     );
-    // Behavior unchanged in this PR: the record (and its sidebar row) stays
-    // after the flip — the teardown cascade lands with the lifecycle PRs.
+    // Since the teardown PR (A2): the death ALSO drops the record — the
+    // sidebar row goes with it — and reclaims the container's resources
+    // (the workspace's own subscription runs the ONE teardown).
+    let mut row_gone = false;
+    for _ in 0..250 {
+        cx.run_until_parked();
+        if !ws.read_with(cx, |ws, _| {
+            ws.diagnostic_external_session_ids()
+                .iter()
+                .any(|id| id == &row_id)
+        }) {
+            row_gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
     assert!(
-        ws.read_with(cx, |ws, _| ws
-            .diagnostic_external_session_ids()
-            .iter()
-            .any(|id| id == &row_id)),
-        "the death flip alone does not drop the row"
+        row_gone,
+        "the external container's death drops its record (the row with it)"
+    );
+    assert!(
+        !cx.update(|cx| ws.read(cx).container_alive(&row_id, cx)),
+        "a closed external id reads dead (the record is gone)"
     );
 
     common::full_wiring_teardown(cx);
