@@ -24,9 +24,15 @@ use manox_agent::settings as user_settings;
 use crate::views::plugin_manager::PluginManagerView;
 
 mod agents_page;
+// The external-tool panels drive macOS app launches (ChatGPT.app / VS Code
+// app bundles via osascript); on other platforms the actions can never
+// succeed, so the panels, their nav group and their pages stay mac-only
+// instead of dead-ending in error notifications.
+#[cfg(target_os = "macos")]
 mod chatgpt;
 mod models;
 mod panels;
+#[cfg(target_os = "macos")]
 mod vscode;
 
 pub struct SettingsView {
@@ -49,9 +55,11 @@ pub struct SettingsView {
     models_panel: models::ModelsPanelState,
     /// Form state for the `chatgpt_app:` section of `cx.providers.config.yaml`,
     /// seeded from the file when the Settings view is created.
+    #[cfg(target_os = "macos")]
     chatgpt_panel: chatgpt::ChatGptPanelState,
     /// Form state for the `vscode_app:` section of `cx.providers.config.yaml`,
     /// seeded from the file when the Settings view is created.
+    #[cfg(target_os = "macos")]
     vscode_panel: vscode::VsCodePanelState,
     /// Server names switched off by the user; persisted to `settings.toml`
     /// on toggle (`manox_agent::settings::set_mcp_disabled`). Seeded from settings
@@ -193,7 +201,9 @@ impl SettingsView {
             mcp_servers: mcp_server_names(),
             ui_language: steer_i18n::load_ui_language(),
             models_panel: models::ModelsPanelState::load(window, cx),
+            #[cfg(target_os = "macos")]
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
+            #[cfg(target_os = "macos")]
             vscode_panel: vscode::VsCodePanelState::load(window, cx),
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
             agents: collect_agents(rosters_cwd.as_deref()),
@@ -470,7 +480,11 @@ pub(crate) const NAV: [NavEntry; 11] = [
         },
         indented: true,
     },
+    // 外部工具 — the two pages drive .app launches, so they only exist on macOS
+    // (the pages' panels are cfg'd out elsewhere; see the module gates above).
+    #[cfg(target_os = "macos")]
     NavEntry::Group("settings-group-external-tools"),
+    #[cfg(target_os = "macos")]
     NavEntry::Leaf {
         leaf: NavLeaf {
             page: Page::ChatGptApp,
@@ -478,6 +492,7 @@ pub(crate) const NAV: [NavEntry; 11] = [
         },
         indented: true,
     },
+    #[cfg(target_os = "macos")]
     NavEntry::Leaf {
         leaf: NavLeaf {
             page: Page::VsCodeApp,
@@ -696,19 +711,25 @@ fn build_page(
         Page::Skills => title("settings-item-skills").group(skills_group(skills)),
         // MCP.
         Page::Mcp => title("settings-item-mcp").group(mcp_group(view, mcp_servers, mcp_disabled)),
-        // 外部工具.
+        // 外部工具 — macOS only: the panels launch .app bundles, and the nav
+        // does not offer these leaves elsewhere, so the arms only need a
+        // compile-time-valid body off macOS.
+        #[cfg(target_os = "macos")]
         Page::ChatGptApp => title("settings-item-chatgpt-app").group(panel_group(
             view,
             Some("settings-item-chatgpt-app"),
             &["chatgpt", "codex", "injection", "external tools"],
             chatgpt::render_chatgpt_app,
         )),
+        #[cfg(target_os = "macos")]
         Page::VsCodeApp => title("settings-item-vscode-app").group(panel_group(
             view,
             Some("settings-item-vscode-app"),
             &["vscode", "visual studio code", "extension", "inject"],
             vscode::render_vscode_app,
         )),
+        #[cfg(not(target_os = "macos"))]
+        Page::ChatGptApp | Page::VsCodeApp => title("settings-item-general"),
     }
 }
 
@@ -912,18 +933,26 @@ mod tests {
             .iter()
             .map(|(_, leaf)| leaf.page.i18n_key())
             .collect();
-        assert_eq!(
-            keys,
-            [
-                "settings-item-general",
-                "settings-item-models",
-                "settings-item-agents",
-                "settings-item-plugins",
-                "settings-item-skills",
-                "settings-item-mcp",
-                "settings-item-chatgpt-app",
-                "settings-item-vscode-app",
-            ]
-        );
+        #[cfg(target_os = "macos")]
+        let expected = [
+            "settings-item-general",
+            "settings-item-models",
+            "settings-item-agents",
+            "settings-item-plugins",
+            "settings-item-skills",
+            "settings-item-mcp",
+            "settings-item-chatgpt-app",
+            "settings-item-vscode-app",
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let expected = [
+            "settings-item-general",
+            "settings-item-models",
+            "settings-item-agents",
+            "settings-item-plugins",
+            "settings-item-skills",
+            "settings-item-mcp",
+        ];
+        assert_eq!(keys, expected);
     }
 }

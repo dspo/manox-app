@@ -107,13 +107,16 @@ impl Workspace {
 
     /// Build a browser tab's webview (app-restart path and the pane's own
     /// "new browser tab"): the view goes into `browser_views` and its routing
-    /// entry into the process-wide host; the caller places the tab.
+    /// entry into the process-wide host; the caller places the tab. Returns
+    /// `None` when the platform could not host the embed — the view is then
+    /// discarded before registration, so no unusable tab id escapes.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub fn restore_browser_tab(
         &mut self,
         url: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> BrowserTabId {
+    ) -> Option<manox_agent::thread_engine::BrowserTabId> {
         let url = if url.is_empty() {
             crate::views::browser_view::DEFAULT_URL
         } else {
@@ -122,11 +125,15 @@ impl Workspace {
         let tab_id = crate::views::browser_view::allocate_tab_id();
         let view =
             cx.new(|cx| crate::views::browser_view::BrowserView::new(tab_id, url, window, cx));
+        if view.read(cx).webview().is_none() {
+            tracing::warn!(url = %url, "browser tab not created: embedded webview unavailable");
+            return None;
+        }
         self.browser_views.insert(tab_id, view);
         if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
             host.register_ui_tab(tab_id);
         }
-        tab_id
+        Some(tab_id)
     }
 
     /// Open a browser tab navigated to `url` (the host's own open path — the
@@ -134,19 +141,27 @@ impl Workspace {
     /// surfaced as a right-pane tab; a build with no live pane still leaves
     /// the tab drivable, so the tool call never depends on the UI. The
     /// webview is built untrusted: no Tauri command surface, only the
-    /// notify/inbound bridges.
+    /// notify/inbound bridges. `None` means the embed was refused (the user
+    /// sees a notification; the caller must treat the id as never issued).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub fn open_browser_tab(
         &mut self,
         url: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> BrowserTabId {
+    ) -> Option<manox_agent::thread_engine::BrowserTabId> {
         let url = if url.is_empty() {
             crate::views::browser_view::DEFAULT_URL
         } else {
             url
         };
-        let tab_id = self.restore_browser_tab(url, window, cx);
+        let Some(tab_id) = self.restore_browser_tab(url, window, cx) else {
+            window.push_notification(
+                Notification::error(i18n::t("browser-webview-unavailable")),
+                cx,
+            );
+            return None;
+        };
         let tab = crate::tool_tabs::adopt_browser_tab(cx.entity(), tab_id, url);
         // The pane open runs on the event path: this call arrives inside a
         // Workspace update (the host's dispatch), and the tab's own `open`
@@ -164,13 +179,18 @@ impl Workspace {
                 );
             }
         });
-        tab_id
+        Some(tab_id)
     }
 
     /// Drop a browser tab: the view (whose `Drop` hides and detaches the
     /// native subview) and the host's routing entry. No-op if the id is not
     /// live.
-    pub fn close_browser_tab(&mut self, tab_id: BrowserTabId, cx: &mut Context<Self>) {
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    pub fn close_browser_tab(
+        &mut self,
+        tab_id: manox_agent::thread_engine::BrowserTabId,
+        cx: &mut Context<Self>,
+    ) {
         if self.browser_views.remove(&tab_id).is_none() {
             return;
         }
@@ -187,8 +207,10 @@ impl Workspace {
     /// Drop every live browser webview, mounted as a pane tab or not, and
     /// report how many went away. `/exit`'s browser step runs this after the
     /// pane kind close so the workspace holds no routed webview afterwards.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub(super) fn close_all_browser_tabs(&mut self, cx: &mut Context<Self>) -> usize {
-        let ids: Vec<BrowserTabId> = self.browser_views.keys().copied().collect();
+        let ids: Vec<manox_agent::thread_engine::BrowserTabId> =
+            self.browser_views.keys().copied().collect();
         let n = ids.len();
         for id in ids {
             self.close_browser_tab(id, cx);

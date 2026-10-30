@@ -6,7 +6,7 @@ name: release
 #
 #   - macOS arm64:  Steer.app, ad-hoc signed, zipped (script/bundle-mac)
 #   - deb amd64:    steer + cx, Depends from the linked binaries (script/bundle-deb)
-#   - rpm x86_64:   built inside a Fedora container so glibc/WebKit sonames and
+#   - rpm x86_64:   built inside a Fedora container so the glibc baseline and
 #                   rpmbuild's dependency generators match the target distro
 #
 # The tag version must equal [workspace.package].version — the bundle scripts
@@ -166,12 +166,7 @@ jobs:
             libxi-dev \
             libxcursor-dev \
             libxinerama-dev \
-            libglib2.0-dev \
             libwayland-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev \
             desktop-file-utils
 
       - name: Install Rust toolchain
@@ -221,8 +216,8 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    # Build inside Fedora so the glibc baseline, the WebKit/JavaScriptCore
-    # sonames and rpmbuild's dependency generators match the target distro.
+    # Build inside Fedora so the glibc baseline and rpmbuild's dependency
+    # generators match the target distro.
     container:
       image: fedora:latest
     steps:
@@ -244,9 +239,8 @@ jobs:
           pkgconf-pkg-config alsa-lib-devel
           fontconfig-devel libX11-devel libxcb-devel libXrender-devel
           libXrandr-devel libxkbcommon-devel libxkbcommon-x11-devel
-          libXi-devel libXcursor-devel libXinerama-devel glib2-devel
-          wayland-devel gtk3-devel webkit2gtk4.1-devel libsoup3-devel
-          javascriptcoregtk4.1-devel
+          libXi-devel libXcursor-devel libXinerama-devel
+          wayland-devel
 
       - name: Install Rust toolchain
         run: |

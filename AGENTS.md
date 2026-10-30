@@ -77,7 +77,9 @@ cargo clippy --all-targets
 cargo fmt --all
 ```
 
-Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 需要 GTK3/Wayland/WebKit2GTK 系统依赖（CI build.yml 的 apt 清单）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
+Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 构建（集成浏览器已编译排除，无需 GTK/WebKitGTK）需要 X11/Wayland 系统依赖（Fedora 等价物：`dnf install gcc wayland-devel fontconfig-devel libX11-devel libXcursor-devel libXi-devel libXrandr-devel libXrender-devel libXinerama-devel libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel openssl-devel zlib-devel`）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
+
+**Linux 无集成浏览器（编译期排除）**：wry 的 Linux 子 webview 只能经 Xlib 句柄挂载，Wayland 窗口无法承载嵌入式浏览器 —— 集成浏览器在 Linux/FreeBSD 上整体不编译（`#[cfg(not(any(linux, freebsd)))]` 盖住 `browser_host` / `browser_view` / `BrowserTool` / steer-webview 整个 crate，依赖面随 target gate 收紧，wry/WebKitGTK/GTK 不进 Linux 构建），UI 无入口，agent 的 `web_explore_*` 工具经 capability provider 得到干净的「not available」拒绝（剪贴板能力保留在 `capability_host`，全平台）。窗口后端回归 gpui 默认（Wayland 会话原生 Wayland）。已知系统雷区：部分栈（Fedora 44 mutter 50.4 + XWayland 24.1 + ANV 实测）在 Vulkan X11 WSI 的 `AcquireNextImageKHR` 里死锁，活跃重绘的 XWayland/X11 窗口数十秒内冻结 —— 原生 Wayland 路径不受影响；若需在 X11 会话跑，`VK_LOADER_DRIVERS_DISABLE=*`（wgpu 落 Mesa GL）可绕开。托盘受宿主限制：无 StatusNotifierWatcher 的桌面（原生 GNOME）上 `tray::install` 刻意失败，应用保持「关窗即退出」而非隐形驻留。
 
 ### Release（tag 触发）
 

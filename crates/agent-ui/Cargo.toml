@@ -70,7 +70,6 @@ terminal-ui.workspace = true
 steer-components.workspace = true
 ai-elements.workspace = true
 open.workspace = true
-steer-webview.workspace = true
 
 # steer-ext-agents — spawn external agent CLIs (claude/codex/copilot) and hold
 # the PTY handle for an `ExternalSession`.
@@ -119,3 +118,9 @@ dbg_macro = "deny"
 # letting every `cargo run` spray it.
 [lints.rust]
 linker_messages = "allow"
+
+# The integrated browser (embedded webview) is compiled out on Linux/FreeBSD
+# — wry parents Linux child webviews through Xlib only, so a window there
+# cannot host one. Clipboard capability (`capability_host`) needs none of it.
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
+steer-webview.workspace = true

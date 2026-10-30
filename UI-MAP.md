@@ -23,7 +23,7 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 根视图 | `steer_agent_chrome_ui::Shell`（壳：38px 工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
 | 侧栏 | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影） |
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
-| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
+| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff——浏览器仅 macOS/Windows，Linux/FreeBSD 编译排除）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
 | Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4）。注入面挂载期间侧栏被 pin：强制可见、titlebar 隐藏开关惰性化——导航是该模式唯一出口，不可被藏到身后；pin 只借用可见性，卸载时还原用户原先的折叠状态 |
 
@@ -63,7 +63,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 后台线程（ctrl-b 置底 / 切换自动 park） | ✅ | `background_threads` + `attach_thread` parking |
 | CLI agent 终端（Claude Code / Codex / GitHub Copilot） | ✅ | 右栏 ToolTab：先落 provider→model 级联（共享投影 `cascade_provider_groups`），选中即以该端点 `AgentBuilder` 拉起 CLI（PTY relay → `TerminalView`；cwd = 前台线程项目目录） |
 | 集成终端 / VS Code 注入 / ChatGPT.app 注入 | ✅ | 右栏终端页签（$SHELL，独立 PTY）+ 工具菜单的 VS Code / ChatGPT.app 注入启动（后台线程 + 通知，应用独立存活） |
-| Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface |
+| Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface（Browser 标签仅 macOS/Windows——Linux/FreeBSD 上集成浏览器整体不编译） |
 | TurnNavigator | ✅ | cmd-m 打开；↑/↓ 选条、enter 定位、⌘↵ 回填 composer、⌘C 复制；历史回溯另有 ⌥↑/⌥↓ |
 | TurnRail（左缘轮次导航） | ✅ | 常驻左缘刻度 rail（dsh TurnNavigator 移植，≥2 轮且卡宽 ≥640px 显示）；悬停预览、点击定位、active 随滚动追踪 |
 | 图片附件 | ✅ | 剪贴板粘贴 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
@@ -913,6 +913,12 @@ inbound 写入请求桥 —— 页面没有 Tauri 命令面。进程级桥在构
 - **Read hint** —— `read_text` / `read_dom` / `screenshot` / `eval_script` 从 `https://` 源取到内容后
   显示的一行弱化提示，表明登录态页面内容已暴露给 agent。
 
+**平台范围**：整个集成浏览器（本视图、`WorkspaceBrowserHost`、`BrowserTool` 注册表项、
+composer「内部浏览器」菜单行、steer-webview crate 及其 wry/WebKitGTK/GTK 依赖）在
+Linux/FreeBSD 上经 `#[cfg(not(any(linux, freebsd)))]` 编译排除 —— 无 UI 入口，`web_explore_*`
+工具经 capability provider 收到干净的「not available」拒绝（剪贴板能力保留在
+`capability_host`，全平台）。持久快照里的 browser kind 行在恢复时被右栏静默跳过。
+
 > Source: `crates/agent-ui/src/views/browser_view.rs`
 
 #### DiffTab
@@ -1036,7 +1042,7 @@ Retired: Settings has no title strip of its own — the window toolbar is the dr
 
 #### SettingsShell
 
-The upstream `gpui_component::setting::Settings` component, rendered per selected page with a ZERO-width sidebar and a hidden header (its own sidebar/search/split retired with the split layout — navigation belongs to the chrome sidebar). What remains is the page's group stack (virtualized list + scrollbar), one `SettingPage` per nav leaf: 常规 (the language `Fill` card), 模型, Agents, 插件, Skills, MCP, ChatGPT.app, VS Code. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface); MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself. The Agents and Models groups render headless (no title): their pages own their chrome.
+The upstream `gpui_component::setting::Settings` component, rendered per selected page with a ZERO-width sidebar and a hidden header (its own sidebar/search/split retired with the split layout — navigation belongs to the chrome sidebar). What remains is the page's group stack (virtualized list + scrollbar), one `SettingPage` per nav leaf: 常规 (the language `Fill` card), 模型, Agents, 插件, Skills, MCP, ChatGPT.app, VS Code. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface); MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself. The Agents and Models groups render headless (no title): their pages own their chrome. **ChatGPT.app / VS Code are macOS only**: their panels drive `.app` bundle launches that cannot exist elsewhere, so those two pages, their nav leaves and their group are cfg'd out on non-macOS (the page factory keeps a compile-time-valid body that the nav never reaches).
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
@@ -1087,7 +1093,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### ChromeShell
 
-应用壳根视图（`crates/steer-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px、侧栏开关、**←/→ 会话历史导航**（可用性由宿主经 `nav_avail` 查询钩子渲染期提供，无可去边界时置灰 inert）、session 下拉选择器（触发器是两组 `flex_1` 控件翼之外的最后挂载 absolute 层：固定 360px 宽、按 `(视口宽−360)/2` 钉在窗口水平中心线；下拉开面板用同一公式锚在标题栏下方 4px，面板恰好盖住触发器正下方，不再记录点击锚点）、**「在 VS Code 中打开」**（`on_open_editor` → 宿主后台 spawn `launch_plain(前台 project)`，只失败推错误通知（成功由 VS Code 打开自证）；无项目时推「没有可打开的项目」错误通知，绝不静默打开 `$HOME`）、面板/右栏开关、**品牌位**（`ShellConfig.brand` 注入的 app logo 元素工厂，None 回退通用字形；刻意非交互，且被排除在窗口拖拽面外——mouse-down 被吞掉））+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为上游 gpui-base `resize_handle` 隐形带（外观渲染为空——卡缝即卡间空隙，不画分隔线；把手只发起拖载与双击重置，`on_drag_move` 挂根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行、品牌位与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（分组折叠/拖排、下拉/行菜单、**侧栏分组模式与过滤词**）；选中高亮由宿主每次快照用前台线程 id 覆写（`shell.active`），不跟随点击。固定行（Automations/Chats）与 Customizations 块（Overview/MCP）**尚未实现**：整行 `FG_FAINT` 化 + hover「尚未实现」tooltip，保持 inert（2026-09-30 假控件清理：Run/split/右栏 split·external 已删——原版 Run 是 split-button、manox 无任务系统；Sync Changes 胶囊已删——git pull/push 集成另立特性）。
+应用壳根视图（`crates/steer-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px 仅 macOS（其余平台 12px 起排）；Linux/FreeBSD 客户端装饰下右翼末尾另有自绘最小化/最大化/关闭按钮——请求 `WindowDecorations::Client` 后无系统标题栏，Server 回退时自动隐藏；侧栏开关、**←/→ 会话历史导航**（可用性由宿主经 `nav_avail` 查询钩子渲染期提供，无可去边界时置灰 inert）、session 下拉选择器（触发器是两组 `flex_1` 控件翼之外的最后挂载 absolute 层：固定 360px 宽、按 `(视口宽−360)/2` 钉在窗口水平中心线；下拉开面板用同一公式锚在标题栏下方 4px，面板恰好盖住触发器正下方，不再记录点击锚点）、**「在 VS Code 中打开」**（`on_open_editor` → 宿主后台 spawn `launch_plain(前台 project)`，只失败推错误通知（成功由 VS Code 打开自证）；无项目时推「没有可打开的项目」错误通知，绝不静默打开 `$HOME`）、面板/右栏开关、**品牌位**（`ShellConfig.brand` 注入的 app logo 元素工厂，None 回退通用字形；刻意非交互，且被排除在窗口拖拽面外——mouse-down 被吞掉；行级拖拽是 arm/move 模型：mouse-down 只置位、首次 mouse-move 才 `start_window_move`，双击最大化——press 直接启动交互移动会被 WM 抢走 pointer、吞掉子件 click））+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为上游 gpui-base `resize_handle` 隐形带（外观渲染为空——卡缝即卡间空隙，不画分隔线；把手只发起拖载与双击重置，`on_drag_move` 挂根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行、品牌位与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（分组折叠/拖排、下拉/行菜单、**侧栏分组模式与过滤词**）；选中高亮由宿主每次快照用前台线程 id 覆写（`shell.active`），不跟随点击。固定行（Automations/Chats）与 Customizations 块（Overview/MCP）**尚未实现**：整行 `FG_FAINT` 化 + hover「尚未实现」tooltip，保持 inert（2026-09-30 假控件清理：Run/split/右栏 split·external 已删——原版 Run 是 split-button、manox 无任务系统；Sync Changes 胶囊已删——git pull/push 集成另立特性）。
 
 会话历史的权威栈在 `Workspace` 的 `NavHistory`（cap 100，去重判据是「当前指向项」而非栈尾）：用户发起的 `open_thread`（侧栏点击/下拉选中）与 fork 落地、新建落地（⌘N、/exit 的替换会话经 `attach_created_session`）都入栈并截断前进尾；←/→ 移动指针不重复记录；successor 换代把**当前条目原地改写**为后继 id（`replace_nav_current`——追加会把已处置的前任留在 ← 一步可达处）。降级语义：栈内 id 若在线程归档/换代后失效，回退仍走 landing attach（空 landing 可接受）——不剪枝是接受的取舍。
 
@@ -1129,7 +1135,7 @@ wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar
 
 #### ToolTabRegistry
 
-chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮）、**diff**（见 [DiffTab](#difftab)，注册表内但不上快捷操作页——无 patch 的空 diff 页签没有意义，入口只在 Edit 卡片上）。
+chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮；**仅 macOS/Windows，Linux/FreeBSD 编译排除**——见 [BrowserView](#browserview)）、**diff**（见 [DiffTab](#difftab)，注册表内但不上快捷操作页——无 patch 的空 diff 页签没有意义，入口只在 Edit 卡片上）。
 
 > Source: `crates/agent-ui/src/tool_tabs.rs`
 

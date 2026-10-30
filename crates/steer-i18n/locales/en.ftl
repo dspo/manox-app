@@ -132,6 +132,8 @@ browser-yield-complete = Done
 
 browser-read-hint = Agent is reading this page — its logged-in content is exposed to the agent.
 
+browser-webview-unavailable = Embedded browser unavailable: this window backend cannot host child webviews (native Wayland windows on Linux cannot; run under X11/XWayland)
+
 right-pane-toggle = Toggle side panel
 
 sidebar-toggle = Toggle sidebar
