@@ -38,6 +38,19 @@ external-session-resume-failed = Failed to resume external agent
 sidebar-archive = Archive
 
 sidebar-unarchive = Unarchive
+
+archive-confirm-title = Archive this container?
+
+archive-confirm-subtitle = Archiving stops the work below and cascades the archive to every sub-session of the container.
+
+archive-confirm-subagent = Subagent: { $name }
+
+archive-confirm-bash = Background command: { $name }
+
+archive-confirm-ok = Archive anyway
+
+archive-confirm-cancel = Cancel
+
 sidebar-multi-select = Select sessions…
 sidebar-selection-count = { $count } selected
 sidebar-selection-select-all = Select all

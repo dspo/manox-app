@@ -38,6 +38,19 @@ external-session-resume-failed = 恢复外部 agent 失败
 sidebar-archive = 归档
 
 sidebar-unarchive = 取消归档
+
+archive-confirm-title = 归档容器？
+
+archive-confirm-subtitle = 归档会停止下列仍在运行的工作，并级联归档该容器的全部子会话。
+
+archive-confirm-subagent = 子代理：{ $name }
+
+archive-confirm-bash = 后台命令：{ $name }
+
+archive-confirm-ok = 仍要归档
+
+archive-confirm-cancel = 取消
+
 sidebar-multi-select = 多选会话…
 sidebar-selection-count = 已选 { $count } 项
 sidebar-selection-select-all = 全选
