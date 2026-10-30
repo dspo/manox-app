@@ -113,6 +113,8 @@ async fn a_stale_attach_never_flips_past_settings_or_an_external_session(cx: &mu
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
                     project: None,
+                    // The fake PTY has no cx session behind it.
+                    handle: None,
                 },
                 view,
                 window,

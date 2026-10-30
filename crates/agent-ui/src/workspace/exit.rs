@@ -6,17 +6,14 @@
 //! The sequence plays as progress notes in the conversation (the
 //! annotation-card face `add_info_message` writes), one beat per action so
 //! the teardown is legible: subagents, the thread's own turn, the right
-//! pane's terminals + CLI-agent tabs + the dock's terminal (their PTY drop
-//! is the process-tree kill), the integrated browser, and the archive
-//! itself. Notes pushed before the switch land on the archived thread's
-//! journal; the closing pair lands on the fresh thread.
+//! pane's terminals + CLI-agent tabs + the dock's terminal + the external
+//! containers (the ONE teardown kills their processes and drops their rows),
+//! the container's own browser tabs (other containers' tabs survive — the
+//! reclaim is keyed, not a global nuke), and the archive itself. Notes pushed
+//! before the switch land on the archived thread's journal; the closing pair
+//! lands on the fresh thread.
 
 use super::*;
-
-/// The pane kinds whose tab content owns a PTY: the integrated terminal and
-/// the three CLI-agent TUI tabs (claude / codex / copilot). Closing the tab
-/// drops the view, and the view drop tears the process tree down.
-const TERMINAL_TAB_KINDS: [&str; 4] = ["terminal", "claude", "codex", "copilot"];
 
 /// The pause between one teardown beat's announcement and its action — long
 /// enough for the progress notes to read as a sequence, short enough that
@@ -91,13 +88,14 @@ impl Workspace {
                 .ok();
                 beat(cx).await;
             }
-            // ── terminal subprocesses (pane tabs + the dock) ───────────
+            // ── terminal subprocesses (pane tabs + the dock + externals) ──
             let has_terminals = this
-                .update(cx, |_ws, cx| {
+                .update(cx, |ws, cx| {
                     crate::chrome_assembly::pane_open_kinds(cx)
                         .iter()
-                        .any(|k| TERMINAL_TAB_KINDS.contains(&k.as_str()))
+                        .any(|k| crate::tool_tabs::PTY_TAB_KINDS.contains(&k.as_str()))
                         || crate::chrome_assembly::dock_terminal_live(cx)
+                        || !ws.external_container_ids().is_empty()
                 })
                 .unwrap_or(false);
             if has_terminals {
@@ -108,27 +106,33 @@ impl Workspace {
                 this.update(cx, |ws, cx| ws.note("exit-killing-terminal", &[], cx))
                     .ok();
                 beat(cx).await;
-                // These tab kinds' `close` never re-enters the workspace
+                // The PTY tab kinds' `close` never re-enters the workspace
                 // (store resets + shell-only dock take), so they run inside
-                // the lease.
-                this.update(cx, |_ws, cx| {
-                    for kind in TERMINAL_TAB_KINDS {
+                // the lease. The external containers join the sweep here
+                // (the ONE teardown: kill the process, drop the row,
+                // reclaim the resources — D8's close semantics on /exit's
+                // way down).
+                this.update(cx, |ws, cx| {
+                    for kind in crate::tool_tabs::PTY_TAB_KINDS {
                         crate::chrome_assembly::close_tool_tabs_of_kind(kind, cx);
                     }
                     crate::chrome_assembly::stop_dock_terminal(cx);
+                    for id in ws.external_container_ids() {
+                        ws.teardown_container(&id, cx);
+                    }
                 })
                 .ok();
                 this.update(cx, |ws, cx| ws.note("exit-terminal-killed", &[], cx))
                     .ok();
                 beat(cx).await;
             }
-            // ── the integrated browser ─────────────────────────────────
+            // ── the integrated browser (this container's tabs only) ────
             // Compiled out with the integrated browser on Linux/FreeBSD —
             // there are never any browser tabs to close.
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             {
                 let browser_tabs = this
-                    .update(cx, |ws, _cx| ws.browser_views.len())
+                    .update(cx, |ws, _| ws.container_browser_tabs(&sid).len())
                     .unwrap_or(0);
                 if browser_tabs > 0 {
                     if !foreground_is(&this, cx, &sid) {
@@ -141,11 +145,16 @@ impl Workspace {
                     // A browser tab's `close` re-enters the workspace (it closes
                     // its webview through `Workspace::close_browser_tab`), so the
                     // pane-side close runs OUTSIDE the workspace lease, on the
-                    // bare App; the orphan drain afterwards is lease-local.
+                    // bare App; the orphan drain afterwards is lease-local. The
+                    // leg is container-scoped: the pane belongs to the outgoing
+                    // container (foreground), and the workspace half reclaims
+                    // only the tabs registered under it — other containers'
+                    // browser tabs survive the /exit.
                     cx.update(|cx| {
                         crate::chrome_assembly::close_tool_tabs_of_kind("browser", cx);
                     });
-                    this.update(cx, |ws, cx| ws.close_all_browser_tabs(cx)).ok();
+                    this.update(cx, |ws, cx| ws.close_container_browser_tabs(&sid, cx))
+                        .ok();
                     this.update(cx, |ws, cx| ws.note("exit-browser-closed", &[], cx))
                         .ok();
                     beat(cx).await;

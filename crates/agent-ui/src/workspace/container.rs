@@ -19,9 +19,11 @@
 //! native reads the archived bit (the fold-first read `session_retired`
 //! already performs), external reads the record's alive bit, flipped by the
 //! PTY's child-exit event (D8). A flip raises [`ContainerEvent`] on the
-//! workspace. Nothing consumes the event yet — the teardown cascade
-//! (resource reclaim → sub-session archive → row drop) lands with the
-//! lifecycle PRs.
+//! workspace; the workspace subscribes to its own emission and runs the
+//! teardown ([`Workspace::teardown_container`]) — external containers drop
+//! their record (the sidebar row goes with it) and reclaim every resource
+//! under their key. The native half of the cascade (sub-session archive +
+//! row drop) lands with the lifecycle PRs.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -183,7 +185,8 @@ pub struct NativeContainerSeed {
 }
 
 /// The external record seed — the already-spawned PTY's identity and row
-/// face (the project menu's launch payload, unchanged).
+/// face (the project menu's launch payload, plus the CLI agent's kill
+/// handle).
 pub struct ExternalContainerSeed<'a> {
     /// The row-id namespace segment (`external:{agent}:{uuid}`).
     pub agent_id: &'a str,
@@ -201,6 +204,10 @@ pub struct ExternalContainerSeed<'a> {
     /// The spawned terminal (its view occupies the main column while the
     /// session is foreground; dropping it tears the process tree down).
     pub view: gpui::Entity<terminal_ui::TerminalView>,
+    /// The CLI agent's session handle — the owner's independent clone for
+    /// the explicit kill on close (the contract `cx_session` states). `None`
+    /// for plain terminals: their PTY dies with the view drop.
+    pub handle: Option<Arc<steer_ext_agents::SessionHandle>>,
 }
 
 /// The death-predicate flip (§2.3): the container's 0 号 reached its kind's
@@ -422,6 +429,7 @@ impl Workspace {
             svg,
             project,
             view,
+            handle,
         } = seed;
         let kind = ContainerKind::from_external_agent(agent_id);
         let id = ContainerId::external(agent_id);
@@ -469,6 +477,7 @@ impl Workspace {
                 view,
                 kind,
                 attrs,
+                handle,
                 alive: true,
                 _title_sub: title_sub,
             });
@@ -485,9 +494,10 @@ impl Workspace {
     }
 
     /// The external container's death (D8): the 0 号 process exited — flip
-    /// the record's alive bit and raise the event. The record itself stays
-    /// (the sidebar row remains until the lifecycle PR wires the teardown);
-    /// a second exit event after the flip is a no-op.
+    /// the record's alive bit and raise the event. The event drives the
+    /// teardown (the workspace subscribes to its own emission): the record
+    /// and its sidebar row drop, and every resource under the container's
+    /// key is reclaimed. A second exit event after the flip is a no-op.
     fn retire_external_container(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(record) = self.externals.iter_mut().find(|s| s.id == id) else {
             return;
@@ -497,6 +507,57 @@ impl Workspace {
         }
         record.alive = false;
         cx.emit(ContainerEvent::Died(id.to_string()));
+    }
+
+    /// The ONE container teardown (§2.3: predicate flip ⇒ same teardown):
+    /// kill the 0 号's process (external homes — the owner's independent
+    /// handle clone, the cx_session contract), kill every CLI tab the
+    /// container owns (the registry's kill handles), reclaim its browser
+    /// tabs (webview drop + host-route reclaim), and drop its registry
+    /// entries (the stashed dock view and right-pane session — the PTYs die
+    /// with the views). The shell half — the LIVE dock view and pane session,
+    /// when this container owns them — reclaims outside the workspace lease
+    /// (`chrome_assembly::reclaim_container_panes`): closing live tabs
+    /// re-enters the shell, which a leased workspace update must not.
+    ///
+    /// Triggers: `ContainerEvent::Died` (the workspace's own subscription —
+    /// an external container's process exit drops its record and sidebar row
+    /// here) and the explicit close (`close_external_session`, D8: closing a
+    /// container kills its process). Idempotent: a container with nothing
+    /// left under its key tears down to no-ops.
+    pub(crate) fn teardown_container(&mut self, container_id: &str, cx: &mut Context<Self>) {
+        let was_foreground = self.active_external.as_deref() == Some(container_id);
+        // The external record: the owner's kill fires FIRST (the dropped
+        // view's own tear-down then lands on an already-dead child — no
+        // blocking reap on the main thread), then the record goes, sidebar
+        // row included.
+        let handle = self
+            .externals
+            .iter()
+            .find(|s| s.id == container_id)
+            .and_then(|s| s.handle.clone());
+        if let Some(handle) = handle {
+            let _ = handle.kill();
+        }
+        self.externals.retain(|s| s.id != container_id);
+        // The CLI tabs' children (right-pane terminal/CLI tabs, dock included
+        // via their spawn-time owner stamp).
+        self.kill_handles_of_container(container_id);
+        // The browser tabs: webview drop + host-route reclaim, owned tabs
+        // only — other containers' tabs survive. (Compiled out with the
+        // integrated browser on Linux/FreeBSD — no tab ever registers.)
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        self.close_container_browser_tabs(container_id, cx);
+        // The stashed dock view + right-pane session.
+        self.reclaim_stash(container_id);
+        // The live dock/pane half: outside the lease (see above).
+        let dead = container_id.to_string();
+        cx.defer(move |cx| crate::chrome_assembly::reclaim_container_panes(&dead, cx));
+        if was_foreground {
+            self.active_external = None;
+            self.view_mode = super::ViewMode::Workspace;
+        }
+        cx.notify();
     }
 
     /// The ONE death predicate (§2.3). Native: the session is not retired —

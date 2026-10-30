@@ -330,6 +330,8 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
                     project: None,
+                    // The fake PTY has no cx session behind it.
+                    handle: None,
                 },
                 view,
                 window,

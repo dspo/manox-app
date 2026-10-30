@@ -7,7 +7,9 @@
 //! (`capability_host::GpuiCapability`). It owns a `WeakEntity<Workspace>` for the
 //! outbound operations (open/navigate/eval, which touch the live `BrowserView`
 //! entities) and a routing table that maps each tab's webview label to its
-//! owning `Thread`.
+//! owning `Thread` — and, since the container model, each tab to its owning
+//! CONTAINER (the foreground container at open time): the container
+//! teardown's browser leg reads the same table to reclaim its tabs.
 //!
 //! The gpui-backed `CapabilityClient` lives in `capability_host` (clipboard is
 //! platform-wide; browser ops reach this host only where it is compiled in).
@@ -55,6 +57,11 @@ pub(crate) enum HostMessage {
 /// closed or the owning thread is released.
 struct TabState {
     label: String,
+    /// The owning container (the foreground container id at open time — D6:
+    /// resources hang off their container). The container teardown's browser
+    /// leg reclaims by this key; an empty string means "opened with no
+    /// foreground container" and matches no teardown.
+    owner: String,
     /// Pending eval-script oneshots, keyed by `request_id`. A read op injects
     /// a script that calls `__manox_notify__("eval_result", { request_id,
     /// payload })`; the notify handler pairs the arriving payload back to the
@@ -312,11 +319,23 @@ impl WorkspaceBrowserHost {
             .remove(&label);
     }
 
+    /// The owning container a tab opened RIGHT NOW records: the foreground
+    /// container (D6 — the resource hangs off its container), empty when no
+    /// container is foreground (matches no teardown).
+    fn foreground_owner(&self, cx: &mut App) -> String {
+        self.weak_ws
+            .upgrade()
+            .and_then(|ws| ws.read_with(cx, |ws, cx| ws.foreground_container_id(cx)))
+            .unwrap_or_default()
+    }
+
     /// Register a UI-opened tab (the `+` launcher / `cmd-b` path) in the
     /// routing table so host evals (`page_title`) can reach it. Tool-opened
     /// tabs register inside `open_tab`; this mirrors that registration half
-    /// for the workspace-opened direction. Idempotent — a re-insert replaces.
-    pub(crate) fn register_ui_tab(&self, id: BrowserTabId) {
+    /// for the workspace-opened direction. `owner` is the container the
+    /// registration belongs to (the workspace resolves the foreground one).
+    /// Idempotent — a re-insert replaces.
+    pub(crate) fn register_ui_tab(&self, id: BrowserTabId, owner: String) {
         let label = crate::views::browser_view::webview_label_for(id);
         {
             let mut labels = self
@@ -332,11 +351,27 @@ impl WorkspaceBrowserHost {
                 id,
                 TabState {
                     label,
+                    owner,
                     pending_evals: Mutex::new(HashMap::new()),
                     pending_yield: Mutex::new(None),
                 },
             );
         }
+    }
+
+    /// The tab ids a container owns (the teardown's reclaim list), in
+    /// registration order. Reads the same routing table the notify path
+    /// resolves labels through — the owner is the foreground container at
+    /// open time.
+    pub(crate) fn tabs_owned_by(&self, container: &str) -> Vec<BrowserTabId> {
+        self.routes
+            .tabs
+            .lock()
+            .expect("routes lock poisoned")
+            .iter()
+            .filter(|(_, tab)| tab.owner == container)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Poll the page's `<title>` for the right-pane tab label. Unlike agent
@@ -548,12 +583,14 @@ impl WorkspaceBrowserHost {
                 .expect("routes lock poisoned");
             labels.insert(label.clone(), tab_id);
         }
+        let owner = self.foreground_owner(cx);
         {
             let mut tabs = self.routes.tabs.lock().expect("routes lock poisoned");
             tabs.insert(
                 tab_id,
                 TabState {
                     label,
+                    owner,
                     pending_evals: Mutex::new(HashMap::new()),
                     pending_yield: Mutex::new(None),
                 },

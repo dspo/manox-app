@@ -141,6 +141,19 @@ pub const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(50);
 /// the completed AHP handshake. One `#[gpui::test]` per binary (module
 /// header) — the singletons are process-wide.
 pub fn full_wiring_boot(cx: &mut TestAppContext) -> (Entity<Workspace>, gpui::AnyWindowHandle) {
+    let (ws, window, _shell) = full_wiring_boot_shell(cx);
+    (ws, window)
+}
+
+/// The same boot, returning the mounted `Shell` entity too — the
+/// pane/dock-switch regressions drive the shell face directly.
+pub fn full_wiring_boot_shell(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Workspace>,
+    gpui::AnyWindowHandle,
+    gpui::Entity<steer_agent_chrome_ui::Shell>,
+) {
     cx.update(|_cx| {
         manox_agent::runtime::init_hermetic_for_test();
         manox_agent::provider_glue::init();
@@ -150,7 +163,11 @@ pub fn full_wiring_boot(cx: &mut TestAppContext) -> (Entity<Workspace>, gpui::An
     cx.background_executor.allow_parking();
     let cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
+    let shell_cell: std::rc::Rc<
+        std::cell::RefCell<Option<gpui::Entity<steer_agent_chrome_ui::Shell>>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(None));
     let capture = cell.clone();
+    let shell_capture = shell_cell.clone();
     cx.update(gpui_component::init);
     cx.update(|cx| {
         steer_i18n::init();
@@ -161,6 +178,7 @@ pub fn full_wiring_boot(cx: &mut TestAppContext) -> (Entity<Workspace>, gpui::An
         let shell = agent_ui::chrome_assembly::mount(window, cx);
         let ws = agent_ui::dispatch::workspace_global().expect("assembly workspace");
         *capture.borrow_mut() = Some(ws);
+        *shell_capture.borrow_mut() = Some(shell.clone());
         gpui_component::Root::new(shell, window, cx)
     });
     // The production main installs this right after the window opens
@@ -170,6 +188,7 @@ pub fn full_wiring_boot(cx: &mut TestAppContext) -> (Entity<Workspace>, gpui::An
     agent_ui::dispatch::set_window(window);
     cx.run_until_parked();
     let ws = cell.borrow().clone().expect("workspace captured");
+    let shell = shell_cell.borrow().clone().expect("shell captured");
     for _ in 0..PARK_ROUNDS {
         cx.run_until_parked();
         if cx.update(|cx| ws.read(cx).diagnostic_ahp_connected(cx)) {
@@ -178,7 +197,7 @@ pub fn full_wiring_boot(cx: &mut TestAppContext) -> (Entity<Workspace>, gpui::An
         std::thread::sleep(PARK_STEP);
     }
     cx.run_until_parked();
-    (ws, window.into())
+    (ws, window.into(), shell)
 }
 
 /// The Steer row's own gesture: 新建会话 on the workspace, returning the

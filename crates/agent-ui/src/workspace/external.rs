@@ -107,9 +107,10 @@ impl Workspace {
 
     /// Build a browser tab's webview (app-restart path and the pane's own
     /// "new browser tab"): the view goes into `browser_views` and its routing
-    /// entry into the process-wide host; the caller places the tab. Returns
-    /// `None` when the platform could not host the embed — the view is then
-    /// discarded before registration, so no unusable tab id escapes.
+    /// entry into the process-wide host (owned by the foreground container —
+    /// D6: the resource hangs off its container); the caller places the tab.
+    /// Returns `None` when the platform could not host the embed — the view
+    /// is then discarded before registration, so no unusable tab id escapes.
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub fn restore_browser_tab(
         &mut self,
@@ -131,7 +132,8 @@ impl Workspace {
         }
         self.browser_views.insert(tab_id, view);
         if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
-            host.register_ui_tab(tab_id);
+            let owner = self.foreground_container_id(cx).unwrap_or_default();
+            host.register_ui_tab(tab_id, owner);
         }
         Some(tab_id)
     }
@@ -191,26 +193,74 @@ impl Workspace {
         tab_id: manox_agent::thread_engine::BrowserTabId,
         cx: &mut Context<Self>,
     ) {
-        if self.browser_views.remove(&tab_id).is_none() {
-            return;
-        }
+        let removed = self.browser_views.remove(&tab_id).is_some();
         // Reclaim the host's routing entry so a late notify for this tab finds
         // no route (no orphaned oneshot). The host's own close path reclaims
         // first then calls us — in that direction `reclaim_routes` is a no-op;
-        // this call covers the UI-close direction.
+        // this call covers the UI-close direction AND a teardown reclaiming a
+        // tab whose pane entity went away first (the route must not outlive
+        // either half).
         if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
             host.reclaim_routes(tab_id);
+        }
+        if !removed {
+            return;
         }
         cx.notify();
     }
 
-    /// Drop every live browser webview, mounted as a pane tab or not, and
-    /// report how many went away. `/exit`'s browser step runs this after the
-    /// pane kind close so the workspace holds no routed webview afterwards.
+    /// The browser tab ids a container owns (the teardown's count/read face
+    /// for the `/exit` scope — the leg only reports what it would close).
+    /// Empty on Linux/FreeBSD, where the integrated browser is compiled out
+    /// and no tab ever registers.
+    pub(crate) fn container_browser_tabs(
+        &self,
+        container: &str,
+    ) -> Vec<manox_agent::thread_engine::BrowserTabId> {
+        crate::browser_host::WorkspaceBrowserHost::concrete()
+            .map(|host| host.tabs_owned_by(container))
+            .unwrap_or_default()
+    }
+
+    /// Diagnostic: register a browser-tab ROUTE owned by `container` without
+    /// building a webview — the ownership/teardown regressions drive the
+    /// host's routing table directly (a real webview is an OS child window
+    /// the test harness cannot host). The teardown's browser leg reclaims
+    /// these exactly like a live tab's.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_register_browser_route(
+        &mut self,
+        container: &str,
+        _cx: &mut Context<Self>,
+    ) -> manox_agent::thread_engine::BrowserTabId {
+        let tab_id = crate::views::browser_view::allocate_tab_id();
+        if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
+            host.register_ui_tab(tab_id, container.to_string());
+        }
+        tab_id
+    }
+
+    /// Diagnostic: the browser tab ids a container owns (the ownership
+    /// regression read).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_container_browser_tabs(
+        &self,
+        container: &str,
+    ) -> Vec<manox_agent::thread_engine::BrowserTabId> {
+        self.container_browser_tabs(container)
+    }
+
+    /// Reclaim every browser tab a container owns (webview drop + route
+    /// reclaim) and report how many went away. The container-scoped face the
+    /// teardown and `/exit`'s browser leg share — other containers' tabs
+    /// survive.
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    pub(super) fn close_all_browser_tabs(&mut self, cx: &mut Context<Self>) -> usize {
-        let ids: Vec<manox_agent::thread_engine::BrowserTabId> =
-            self.browser_views.keys().copied().collect();
+    pub(crate) fn close_container_browser_tabs(
+        &mut self,
+        container: &str,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let ids = self.container_browser_tabs(container);
         let n = ids.len();
         for id in ids {
             self.close_browser_tab(id, cx);

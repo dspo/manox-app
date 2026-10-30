@@ -155,7 +155,7 @@ pub fn group_menu(
             PopupMenuItem::new(steer_i18n::t("sidebar-new-terminal"))
                 .icon(Icon::default().path("icons/terminal.svg"))
                 .on_click(move |_, window, cx| {
-                    let cwd = dir_terminal.clone().unwrap_or_else(fallback_cwd);
+                    let cwd = dir_terminal.clone().unwrap_or_else(|| fallback_cwd(cx));
                     match crate::tool_tabs::spawn_standalone_terminal(&cwd, cx) {
                         Ok(view) => launch_external(
                             &ws_terminal,
@@ -165,6 +165,9 @@ pub fn group_menu(
                                 label: steer_i18n::t("chrome-tab-terminal").to_string(),
                                 svg: "icons/terminal.svg",
                                 project: dir_terminal.clone(),
+                                // A plain shell owns no cx session handle —
+                                // its PTY dies with the view drop.
+                                handle: None,
                             },
                             view,
                             window,
@@ -249,11 +252,13 @@ struct AgentSpawn<'a> {
 /// Spawn the agent CLI under the picked endpoint, rooted at the project
 /// (falling back to the host's cwd rules), and register it as an external
 /// session — the TUI comes up IN THE MAIN COLUMN, its row in the sidebar.
-/// A spawn failure notifies instead of opening anything.
+/// The child's session handle rides the launch into the record: the owner's
+/// independent kill clone for the close (D8). A spawn failure notifies
+/// instead of opening anything.
 fn spawn_agent_tab(request: &AgentSpawn, window: &mut Window, cx: &mut App) {
     let (agent_id, display, svg) = request.agent;
     let project = request.dir.clone();
-    let cwd = request.dir.clone().unwrap_or_else(fallback_cwd);
+    let cwd = request.dir.clone().unwrap_or_else(|| fallback_cwd(cx));
     match crate::tool_tabs::spawn_agent_terminal(
         agent_id,
         &cwd,
@@ -262,16 +267,17 @@ fn spawn_agent_tab(request: &AgentSpawn, window: &mut Window, cx: &mut App) {
         request.wire.clone(),
         cx,
     ) {
-        Ok((view, cx_session_id)) => launch_external(
+        Ok(spawned) => launch_external(
             request.ws,
             ExternalSessionLaunch {
                 agent_id,
-                cx_session_id,
+                cx_session_id: spawned.cx_session_id,
                 label: display.to_string(),
                 svg,
                 project,
+                handle: Some(spawned.handle),
             },
-            view,
+            spawned.view,
             window,
             cx,
         ),
@@ -343,8 +349,8 @@ fn launch_vscode(folder: Option<PathBuf>, cx: &mut App) {
     .detach();
 }
 
-/// The no-project bucket's launch target: the foreground thread's cwd (the
-/// same fallback the dock terminal uses), then home.
-fn fallback_cwd() -> PathBuf {
-    crate::tool_tabs::thread_cwd_or_home()
+/// The no-project bucket's launch target: the foreground container's cwd
+/// (the same fallback the dock terminal uses), then home.
+fn fallback_cwd(cx: &App) -> PathBuf {
+    crate::tool_tabs::thread_cwd_or_home(cx)
 }
