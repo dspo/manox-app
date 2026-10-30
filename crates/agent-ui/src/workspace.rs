@@ -1950,11 +1950,17 @@ impl Workspace {
     /// reused so the user's last selection (and any scroll position)
     /// survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_view.is_none() {
-            let settings = cx.new(|cx| SettingsView::new(window, cx));
-            let sub = self.subscribe_settings(&settings, window, cx);
-            self.settings_view = Some(settings);
-            self.settings_sub = Some(sub);
+        match &self.settings_view {
+            None => {
+                let settings = cx.new(|cx| SettingsView::new(window, cx));
+                let sub = self.subscribe_settings(&settings, window, cx);
+                self.settings_view = Some(settings);
+                self.settings_sub = Some(sub);
+            }
+            // A reused view re-reads the rosters: switching projects between
+            // visits must not keep the last foreground project's agent
+            // layer.
+            Some(settings) => settings.update(cx, |settings, _| settings.refresh_rosters()),
         }
         // Leaving the external session for Settings drops its ownership:
         // the invariant is `view_mode == ExternalSession` ⟺
@@ -1981,9 +1987,12 @@ impl Workspace {
     }
 
     /// Selects the settings page shown in the main column (the split
-    /// layout's nav selection).
+    /// layout's nav selection). Out-of-range indices clamp to the last page:
+    /// this is a public setter, so a bad index degrades to a wrong-ish page
+    /// instead of panicking a render path.
     pub fn select_settings_page(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.settings_nav = ix;
+        let last = crate::views::settings::nav_leaves().len().saturating_sub(1);
+        self.settings_nav = ix.min(last);
         cx.notify();
     }
 

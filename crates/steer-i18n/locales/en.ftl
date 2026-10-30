@@ -264,6 +264,7 @@ agents-tools-group-interaction = Interaction & planning
 agents-tools-group-tasks = Tasks & goals
 agents-tools-group-host = Host & collaboration
 agents-back = Back to list
+agents-prompt-empty = Open a session to preview the runtime-assembled system prompt.
 agents-prompt-edit = Edit
 agents-prompt-preview = Preview
 agents-detail-scope = Scope

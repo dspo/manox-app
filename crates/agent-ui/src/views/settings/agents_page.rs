@@ -7,7 +7,7 @@
 //! markdown and the raw source.
 
 use gpui::{
-    AnyElement, Context, Hsla, Pixels, StatefulInteractiveElement as _, div, prelude::*, px, rgb,
+    AnyElement, Context, Hsla, Pixels, StatefulInteractiveElement as _, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, Theme, checkbox::Checkbox, input::Editor, v_flex,
@@ -17,7 +17,8 @@ use steer_components::markdown::static_document;
 
 use crate::i18n;
 use crate::views::settings::{
-    ACCENT_DOTS, AgentRow, PromptView, SettingsView, accent_color, tile_avatar, tile_badge,
+    ACCENT_NAMES, AgentRow, PromptView, SettingsView, accent_by_name, accent_color, tile_avatar,
+    tile_badge,
 };
 
 /// Row metrics, ZCode-flavored.
@@ -63,7 +64,7 @@ fn list(view: &SettingsView, theme: &Theme, cx: &mut Context<SettingsView>) -> A
         let accent = row
             .color
             .as_deref()
-            .and_then(super::accent_by_name)
+            .and_then(accent_by_name)
             .unwrap_or_else(|| accent_color(ix));
         let row = row.clone();
         let click_entity = entity.clone();
@@ -175,6 +176,9 @@ fn detail(
     } else {
         row.system_prompt.clone()
     };
+    // The Captain preview stays empty until a foreground thread gives the
+    // builder a cwd — say so instead of painting a blank box.
+    let prompt_empty = body.is_empty();
     let model = row
         .model
         .clone()
@@ -230,8 +234,8 @@ fn detail(
     // is the one ringed. Display only — the page is read-only.
     let declared = row.color.as_deref().map(str::to_ascii_lowercase);
     let mut dots = div().flex().gap_2().items_center();
-    for (name, hex) in ACCENT_DOTS {
-        let dot = rgb(u32::from_str_radix(&hex[1..], 16).unwrap_or(0x888888));
+    for name in ACCENT_NAMES {
+        let dot = accent_by_name(name).expect("palette names resolve");
         let selected = declared.as_deref() == Some(name);
         dots = dots.child(
             div()
@@ -396,30 +400,34 @@ fn detail(
     // The prompt body: rendered markdown by default, the read-only source
     // editor on demand. The editor owns its own scrolling; the preview sits
     // in the same fixed-height box so switching never jumps the page.
-    let prompt_body = match view.prompt_view {
-        PromptView::Preview => {
-            let id = gpui::ElementId::Name(format!("agents-prompt-{name}").into());
-            div()
-                .id("agents-prompt-preview")
-                .h_full()
+    let prompt_body = if prompt_empty {
+        return_prompt_placeholder(theme)
+    } else {
+        match view.prompt_view {
+            PromptView::Preview => {
+                let id = gpui::ElementId::Name(format!("agents-prompt-{name}").into());
+                div()
+                    .id("agents-prompt-preview")
+                    .h_full()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .child(static_document(id, body, theme, cx))
+                    .into_any_element()
+            }
+            PromptView::Edit => div()
                 .w_full()
-                .min_w_0()
-                .overflow_y_scroll()
-                .p_3()
-                .child(static_document(id, body, theme, cx))
-                .into_any_element()
+                .overflow_hidden()
+                .child(
+                    Editor::new(&view.prompt_editor)
+                        .h(PROMPT_H)
+                        .appearance(false)
+                        .bordered(false)
+                        .readonly(true),
+                )
+                .into_any_element(),
         }
-        PromptView::Edit => div()
-            .w_full()
-            .overflow_hidden()
-            .child(
-                Editor::new(&view.prompt_editor)
-                    .h(PROMPT_H)
-                    .appearance(false)
-                    .bordered(false)
-                    .readonly(true),
-            )
-            .into_any_element(),
     };
 
     v_flex()
@@ -523,6 +531,26 @@ fn detail(
                         ),
                 )
                 .child(footer),
+        )
+        .into_any_element()
+}
+
+/// The muted stand-in for a Captain prompt that cannot be built yet (no
+/// foreground thread — the builder would claim a working directory no
+/// session has).
+fn return_prompt_placeholder(theme: &Theme) -> AnyElement {
+    div()
+        .h_full()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p_3()
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(theme.muted_foreground)
+                .child(i18n::t("agents-prompt-empty")),
         )
         .into_any_element()
 }

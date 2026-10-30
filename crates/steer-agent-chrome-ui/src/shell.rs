@@ -306,6 +306,9 @@ pub struct Shell {
     /// sidebar stays up — the host cannot strand the injected nav behind a
     /// collapsed sidebar.
     pub(crate) sidebar_pinned: bool,
+    /// \`show_sidebar\` as the user had it before the pin forced it visible;
+    /// restored when the injected surface unmounts.
+    pub(crate) sidebar_pinned_was: bool,
     /// The right pane (the shell view; tab content is decoupled through
     /// ToolTab — see `right_pane.rs`).
     pub right: Entity<RightPane>,
@@ -343,10 +346,18 @@ pub struct Shell {
 impl Shell {
     pub fn set_sidebar_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
         // The injected surface is the mode's only exit, so mounting it pins
-        // the sidebar open; unmounting releases the pin.
-        self.sidebar_pinned = surface.is_some();
-        if surface.is_some() {
-            self.show_sidebar = true;
+        // the sidebar open and remembers the user's preference; unmounting
+        // releases the pin and restores it.
+        match surface {
+            Some(_) => {
+                self.sidebar_pinned_was = self.show_sidebar;
+                self.sidebar_pinned = true;
+                self.show_sidebar = true;
+            }
+            None => {
+                self.sidebar_pinned = false;
+                self.show_sidebar = self.sidebar_pinned_was;
+            }
         }
         self.sidebar_surface = surface;
         cx.notify();
@@ -384,6 +395,7 @@ impl Shell {
             show_sidebar: true,
             show_panel: false,
             sidebar_pinned: false,
+            sidebar_pinned_was: true,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
             sidebar_surface: None,
             brand: config.brand,

@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, Hsla, SharedString, Window, div, prelude::*, px, rgb,
+    AnyElement, Context, Entity, EventEmitter, Hsla, SharedString, Window, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _,
@@ -62,10 +62,12 @@ pub struct SettingsView {
     agents: Vec<AgentRow>,
     /// Read-only Skills roster, collected once at view creation.
     skills: Vec<SkillRow>,
-    /// The Captain's live system prompt, rendered once at view creation
-    /// through the runtime's own builder (template + skill fold). Read-only
-    /// preview; the per-session assembly (project instructions, user notes,
-    /// active-tool docs) is what a real session adds on top.
+    /// The Captain's live system prompt, rendered through the runtime's own
+    /// builder (template + skill fold) against the foreground thread's cwd.
+    /// Empty until a foreground thread exists — the preview never invents a
+    /// working directory. Read-only; the per-session assembly (project
+    /// instructions, user notes, active-tool docs) is what a real session
+    /// adds on top.
     captain_prompt: String,
     /// The drilled-down agent of the Agents page (`None` = the list).
     pub(crate) selected_agent: Option<String>,
@@ -88,18 +90,13 @@ pub(crate) enum PromptView {
     Edit,
 }
 
-/// The agent color-tag palette, shared by the Agents and Models item cards.
-/// Names follow the Claude manifest vocabulary, so a definition's declared
-/// `color:` resolves straight onto a dot.
-const ACCENT_DOTS: [(&str, &str); 8] = [
-    ("yellow", "#FACC15"),
-    ("red", "#FB7185"),
-    ("orange", "#FB923C"),
-    ("green", "#4ADE80"),
-    ("cyan", "#22D3EE"),
-    ("blue", "#60A5FA"),
-    ("purple", "#A78BFA"),
-    ("pink", "#F472B6"),
+/// The Claude color vocabulary, in cycle order. The TINTS are not redefined
+/// here: [`accent_by_name`] reads the app's one mapping
+/// (`steer_agent_chat_ui::views::subagents::agent_color`), so a
+/// definition's color is the same on its roster tile as on the transcript's
+/// sub-agent row.
+const ACCENT_NAMES: [&str; 8] = [
+    "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
 ];
 
 /// A stable accent per list position: the thin border marks the item, the
@@ -107,8 +104,7 @@ const ACCENT_DOTS: [(&str, &str); 8] = [
 /// definition that declares a color takes precedence (see
 /// [`accent_by_name`]).
 pub(super) fn accent_color(ix: usize) -> Hsla {
-    let hex = ACCENT_DOTS[ix % ACCENT_DOTS.len()].1;
-    Hsla::from(rgb(u32::from_str_radix(&hex[1..], 16).unwrap_or(0x888888)))
+    accent_by_name(ACCENT_NAMES[ix % ACCENT_NAMES.len()]).expect("palette names resolve")
 }
 
 /// The 36px rounded-square avatar every roster tile carries, tinted with the
@@ -145,17 +141,10 @@ pub(super) fn tile_badge(theme: &gpui_component::Theme, text: SharedString) -> g
         .child(text)
 }
 
-/// The palette dot for a declared color name (case-insensitive), or `None`
-/// for names outside the vocabulary.
+/// The tint for a declared color name (case-insensitive), or `None` for
+/// names outside the vocabulary.
 pub(super) fn accent_by_name(name: &str) -> Option<Hsla> {
-    let lower = name.to_ascii_lowercase();
-    let hex = ACCENT_DOTS
-        .iter()
-        .find(|(dot, _)| *dot == lower)
-        .map(|(_, hex)| *hex)?;
-    Some(Hsla::from(rgb(
-        u32::from_str_radix(&hex[1..], 16).unwrap_or(0x888888)
-    )))
+    steer_agent_chat_ui::views::subagents::agent_color(&name.to_ascii_lowercase())
 }
 
 #[derive(Clone)]
@@ -190,19 +179,30 @@ impl SettingsView {
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
             vscode_panel: vscode::VsCodePanelState::load(window, cx),
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
-            agents: collect_agents(
-                &crate::chrome_assembly::foreground_cwd()
-                    .unwrap_or_else(|| std::path::PathBuf::from("/")),
-            ),
+            agents: collect_agents(foreground_cwd().as_deref()),
             skills: collect_skills(),
-            captain_prompt: captain_prompt_preview(
-                &crate::chrome_assembly::foreground_cwd()
-                    .unwrap_or_else(|| std::path::PathBuf::from("/")),
-            ),
+            captain_prompt: foreground_cwd()
+                .as_deref()
+                .map(captain_prompt_preview)
+                .unwrap_or_default(),
             selected_agent: None,
             prompt_editor,
             prompt_view: PromptView::default(),
         }
+    }
+
+    /// Re-read the rosters and the Captain prompt off the current foreground
+    /// cwd. Captured at view creation AND refreshed on every entry: the
+    /// cached scan must never keep the last foreground project's agent
+    /// layer across a project switch.
+    pub(crate) fn refresh_rosters(&mut self) {
+        let cwd = foreground_cwd();
+        self.agents = collect_agents(cwd.as_deref());
+        self.skills = collect_skills();
+        self.captain_prompt = cwd
+            .as_deref()
+            .map(captain_prompt_preview)
+            .unwrap_or_default();
     }
 
     /// Drill into one agent's detail: load its prompt into the source editor
@@ -331,11 +331,16 @@ impl SettingsView {
         );
         use gpui::Styled as _;
         let hidden_header = div().hidden().style().clone();
-        Settings::new(SharedString::from(format!("settings-detail-{ix}")))
-            .sidebar_width(px(0.))
-            .sidebar_size_range(px(0.)..px(0.))
-            .page(page.header_style(&hidden_header))
-            .into_any_element()
+        // Component state keyed by the PAGE, not the index: a NAV reorder
+        // must not carry one page's scroll state onto another.
+        Settings::new(SharedString::from(format!(
+            "settings-detail-{:?}",
+            leaf.page
+        )))
+        .sidebar_width(px(0.))
+        .sidebar_size_range(px(0.)..px(0.))
+        .page(page.header_style(&hidden_header))
+        .into_any_element()
     }
 }
 
@@ -350,7 +355,7 @@ pub(crate) struct NavLeaf {
 }
 
 /// The pages themselves; each names its Fluent key.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Page {
     General,
     Models,
@@ -587,8 +592,6 @@ fn mcp_keywords() -> Vec<SharedString> {
         .collect()
 }
 
-/// The three pages of the settings shell, mirroring the previous nav groups:
-/// General (language + Models), Integrations (Plugins + MCP), External Tools.
 /// The page factory for one nav leaf, matched on the leaf's [`Page`] — the
 /// match must cover every page the nav can select.
 fn build_page(
@@ -702,17 +705,29 @@ struct SkillRow {
     origin: &'static str,
 }
 
+/// The foreground thread's cwd at read time (`None` before any chrome
+/// frame has populated it).
+fn foreground_cwd() -> Option<std::path::PathBuf> {
+    crate::chrome_assembly::foreground_cwd()
+}
+
 /// The Agents roster, read-only: the lead agent first, then the registry the
-/// runtime itself builds — the built-in presets plus user/plugin discovery
-/// under the foreground thread's cwd (the same layers a live session loads),
-/// with user files able to override built-ins by name.
-fn collect_agents(cwd: &std::path::Path) -> Vec<AgentRow> {
+/// runtime itself builds — the built-in presets plus user/plugin discovery,
+/// plus the project layer when a foreground thread has a cwd (the same
+/// layers a live session loads), with earlier layers overridden by later
+/// same-name registrations. `None` (no foreground thread yet) loads no
+/// project layer rather than inventing one.
+fn collect_agents(cwd: Option<&std::path::Path>) -> Vec<AgentRow> {
     use manox_harness::core::ext_point_agent::AgentRegistry;
     let mut rows = Vec::new();
     let mut registry = AgentRegistry::new();
     manox_harness::ext::subagent::register_defaults(&mut registry);
-    manox_agent::agent_defs::register_user_and_plugin(&mut registry, Some(cwd));
+    manox_agent::agent_defs::register_user_and_plugin(&mut registry, cwd);
     for def in registry.all() {
+        // TODO(dspo/manox#985): the registry stamps each definition's layer
+        // (`AgentSource`) — group on it instead of this name heuristic once
+        // the next tag carries it. Project-layer agents mislabel as 用户
+        // until then.
         let origin = if def.name.contains('@') {
             "settings-origin-plugin"
         } else if def.name == "Explore" || def.name == "Sailor" {
@@ -826,12 +841,45 @@ fn skills_group(skills: &[SkillRow]) -> SettingGroup {
 
 #[cfg(test)]
 mod tests {
-    use super::nav_leaves;
+    use super::{accent_by_name, nav_leaves, origin_rank};
 
-    /// The flat leaf order IS `build_page`'s match-arm index space; a drift
-    /// here would silently swap pages behind the nav.
+    /// The roster palette must BE the chat's mapping, not a second table:
+    /// one definition renders on a roster tile and on the transcript's
+    /// sub-agent row, and the two must agree.
     #[test]
-    fn nav_leaf_order_matches_the_page_factory() {
+    fn accent_palette_reads_the_canonical_agent_color_mapping() {
+        use steer_agent_chat_ui::views::subagents::agent_color;
+        for name in [
+            "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
+        ] {
+            assert_eq!(accent_by_name(name), agent_color(name), "{name} drifted");
+        }
+        assert_eq!(accent_by_name("chartreuse"), None, "outside the vocabulary");
+    }
+
+    #[test]
+    fn origin_rank_orders_builtin_user_plugin() {
+        let mut origins = [
+            "settings-origin-plugin",
+            "settings-origin-user",
+            "settings-origin-builtin",
+        ];
+        origins.sort_by_key(|origin| origin_rank(origin));
+        assert_eq!(
+            origins,
+            [
+                "settings-origin-builtin",
+                "settings-origin-user",
+                "settings-origin-plugin",
+            ]
+        );
+    }
+
+    /// The flat leaf order is the page index space (`Workspace::settings_nav`
+    /// → `nav_leaves()[ix]`); a drift here would reorder the pages behind
+    /// the nav's labels.
+    #[test]
+    fn nav_leaf_order_is_the_page_index_space() {
         let keys: Vec<&str> = nav_leaves()
             .iter()
             .map(|(_, leaf)| leaf.page.i18n_key())

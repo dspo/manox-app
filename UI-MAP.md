@@ -25,7 +25,7 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
 | 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
-| Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4） |
+| Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4）。注入面挂载期间侧栏被 pin：强制可见、titlebar 隐藏开关惰性化——导航是该模式唯一出口，不可被藏到身后 |
 
 共享状态层不变：`agent-ui`（multiplexer / client_store / browser_host / dispatch / 侧栏投影 /
 slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与消息管线）、`terminal-ui`、
@@ -982,17 +982,21 @@ rosters cached on the view at creation):
   fields autosave as before; the group renders WITHOUT a title (the nav names the page).
 - Agents — the read-only mirror of ZCode's SubagentsSection
   (`views/settings/agents_page.rs`). The list is a vertical stack of fixed-height item cards
-  (10px gaps): no card fill, a thin 1px color-coded border per item (the shared 8-color accent
-  palette, cycled by position; the avatar carries the same tint), 36px rounded-square Bot
-  avatar · name + model/tools badges · two-line clamped description. The group renders WITHOUT
-  a title — the nav tree already names the page. Click → drill-down detail
-  (`Workspace::select_agent`): the top row carries the `ArrowLeft` 返回列表 control (back to the
-  list) on the left and the 作用域·用户 face on the right; then 名称 input / 颜色标记 palette
+  (10px gaps): no card fill, a thin 1px color-coded border per item — the definition's DECLARED
+  `color:` (Claude vocabulary) tinted through the chat's one `agent_color` mapping when it
+  declares one, the shared palette cycled by position otherwise; the avatar carries the same
+  tint — 36px rounded-square Bot avatar · name + model/tools badges · two-line clamped
+  description. The group renders WITHOUT a title — the nav tree already names the page.
+  Click → drill-down detail (`Workspace::select_agent`): the top row carries the `ArrowLeft`
+  返回列表 control (back to the list) on the left and the 作用域 face showing the def's origin
+  group (内置 / 用户 / 插件) on the right; then 名称 input / 颜色标记 palette
   dots / 模型 select (继承会话模型 unless pinned) / 描述 box / 可用工具 (the FULL preset tool
   catalog — built-in tools excluding MCP servers, skills, plugin/embedder tools and per-agent
   delegation entries — grouped into 文件与搜索 / 终端与运行时 / 网络与浏览器 / 交互与计划 /
   任务与目标 / 宿主与协作, each a 3-column grid of checked disabled checkboxes, with a note
   that the list is preset-only) / 系统提示词 (the REAL prompt — `AgentDef.system_prompt`;
+  the Captain preview stays empty (a muted stand-in) until a foreground thread gives the
+  runtime builder a cwd;
   Captain's via the runtime-rendered `captain_prompt_builder` base — with an 编辑 / 预览
   segmented toggle in its label row). 预览 renders the markdown (`static_document`); 编辑 hosts
   a read-only `gpui_component::input::Editor` (monospace, line numbers, soft wrap, its own
