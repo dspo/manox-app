@@ -777,7 +777,17 @@ impl Shell {
                             if let Some(hook) = &this.hooks.on_archive {
                                 hook(&id_arch2, window, cx);
                             }
-                            this.set_archived(&id_arch2, !archived, cx);
+                            // The archive direction's row drop is the hook's
+                            // container-teardown optimistic half (plan A6) —
+                            // the menu must not pre-drop, or a confirmation
+                            // dialog the host raised (live dependents) would
+                            // have already vanished the row when the user
+                            // cancels it. Unarchive keeps the local flip:
+                            // the row is present, the next snapshot
+                            // confirms.
+                            if archived {
+                                this.set_archived(&id_arch2, false, cx);
+                            }
                             this.close_row_menu(cx);
                         });
                     }),
@@ -901,14 +911,15 @@ impl Shell {
         }
     }
 
-    /// Commit the batch (the bar's 归档): the host dispatches the write, the
-    /// rows leave the sidebar now (the same optimistic drop the row menu's
-    /// archive performs), and selection mode ends. An empty batch commits
-    /// nothing and stays in selection mode.
+    /// Commit the batch (the bar's 归档): the host dispatches the write for
+    /// the whole checked batch — the container teardown path (plan A6)
+    /// performs the row drops as its own optimistic half, after its
+    /// confirmation when live dependents ask for one — and selection mode
+    /// ends. An empty batch commits nothing and stays in selection mode.
     ///
-    /// A host without the hook has no write path at all: committing would only
-    /// hide the rows until the next snapshot re-seeded them, so the bar is
-    /// inert there (the same contract [`Self::set_tag`] keeps).
+    /// A host without the hook has no write path at all: committing would
+    /// only promise an archive that never lands, so the bar is inert there
+    /// (the same contract [`Self::set_tag`] keeps).
     pub fn commit_selection_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picked) = self.selection.clone() else {
             return;
@@ -924,9 +935,6 @@ impl Shell {
         }
         if let Some(hook) = &self.hooks.on_batch_archive {
             hook(&picked, window, cx);
-        }
-        for id in &picked {
-            self.set_archived(id, true, cx);
         }
         self.selection = None;
         cx.notify();
@@ -1046,10 +1054,12 @@ impl Shell {
         let _ = cx;
     }
 
-    /// Archive/unarchive local reconciliation (the hook performs the store
-    /// write): archiving drops the row (and clears the selection if it was
-    /// active); unarchiving flips the row's partition flag so the next
-    /// snapshot only confirms it.
+    /// Archive/unarchive local reconciliation. Since the container lifecycle
+    /// (plan A6) the row drop on ARCHIVE is the host teardown path's own
+    /// optimistic half — the callers are the host's `drop_sidebar_row`
+    /// primitive and the batch bar's commit face, never the row menu (whose
+    /// confirm dialog must not pre-drop). Unarchiving flips the row's
+    /// partition flag so the next snapshot only confirms it.
     pub fn set_archived(&mut self, id: &str, archived: bool, cx: &mut App) {
         if archived {
             self.sessions.retain(|s| s.id != id);
