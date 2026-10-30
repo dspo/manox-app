@@ -1011,25 +1011,25 @@ session-list sidebar. The upstream shell's own sidebar/search retired with the s
 
 #### ManagementBackControl
 
-Unified "back to app" control — `ArrowLeft` + label row (px_2/py_1p5/gap_2, accent hover wash, `theme.radius`). Mounted at the left edge of the sub-agent stream page's header (the settings overlay no longer uses it — its exits are Escape / mask / ×). Each management surface reuses the app-page scaffold (overlay TitleBar in the main column), and the back control lives in that strip.
+Unified "back to app" control — `ArrowLeft` + label row (px_2/py_1p5/gap_2, accent hover wash, `theme.radius`). Mounted at the left edge of the sub-agent stream page's header. Each management surface reuses the app-page scaffold (overlay TitleBar in the main column), and the back control lives in that strip. Settings has its own back controls instead: the nav's 返回应用 and each detail page's `ArrowLeft` 返回列表 row.
 
 > Source: `crates/agent-ui/src/views/management_shell.rs`
 
 #### SettingsView
 
-Settings page state + page factory. `render` hands `build_pages()` to the upstream `Settings` shell each frame (titles re-resolve through Fluent, so they track the live locale); selection and the search query live in the shell's window-keyed state (stable id `settings`). Holds the panel sub-states — the Models / ChatGPT / VS Code form states, the MCP disabled set, the plugins view — and the persisted `ui_language`, bound to the language dropdown through `SettingField` value/setter closures (persist-then-flip; a failed save emits `SettingsEvent::SaveFailed`, surfaced by the Workspace as a toast).
+Settings page state + page factory. `render_page(ix)` resolves the nav leaf to its [`Page`](#settingsview) and hands `build_page(page)` to the upstream `Settings` shell each frame (titles re-resolve through Fluent, so they track the live locale); the factory matches on the `Page` enum, so a NAV leaf edit that lacks a factory arm fails to compile. Holds the panel sub-states — the Models / ChatGPT / VS Code form states, the MCP disabled set, the plugins view — and the persisted `ui_language`, bound to the language dropdown through `SettingField` value/setter closures (persist-then-flip; a failed save emits `SettingsEvent::SaveFailed`, surfaced by the Workspace as a toast). Also owns the read-only Agents/Skills rosters and the Captain prompt preview (both captured once at view creation off the foreground thread's cwd) and the Agents detail's prompt `EditorState`.
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsTitleBar
 
-Retired with the floating-overlay rework: the in-card TitleBar strip (and the [ManagementBackControl](#managementbackcontrol) it carried) no longer renders for Settings — the card's own header row (`settings-float-header`, title + × close) replaced it, and the whole-card drag region went with it (a floating overlay does not drag the window).
+Retired: Settings has no title strip of its own — the window toolbar is the drag face, the nav tree (and each detail's back row) says where you are, and exits are the nav's 返回应用 plus ⌘,. See git history for the overlay-era strip.
 
 > Source: `crates/agent-ui/src/workspace/render.rs` (retired; see git history for the strip)
 
 #### SettingsShell
 
-The upstream `gpui_component::setting::Settings` component, rendered per page with a ZERO-width sidebar (its own sidebar/search/split retired with the split layout — navigation belongs to the chrome sidebar). What remains is the per-page group stack (virtualized list + scrollbar). Three pages mirror the nav groups: **General** (the language group — a `Fill` card whose single row is the UI-language dropdown — plus the Models panel group), **Integrations** (Plugins + MCP), **External Tools** (ChatGPT.app + VS Code). Group titles double as the sidebar's sub-items; clicking one selects the page and scrolls to the group. Search filters groups by item title/description/keywords. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface), each with English keywords so search reaches them. MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself.
+The upstream `gpui_component::setting::Settings` component, rendered per selected page with a ZERO-width sidebar and a hidden header (its own sidebar/search/split retired with the split layout — navigation belongs to the chrome sidebar). What remains is the page's group stack (virtualized list + scrollbar), one `SettingPage` per nav leaf: 常规 (the language `Fill` card), 模型, Agents, 插件, Skills, MCP, ChatGPT.app, VS Code. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface); MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself. The Agents and Models groups render headless (no title): their pages own their chrome.
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 

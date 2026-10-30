@@ -20,7 +20,7 @@ harness = false
 name = "visual_inline_svg"
 harness = false
 
-# Visual acceptance for the Settings floating overlay (same offscreen-render
+# Visual acceptance for the Settings split layout (same offscreen-render
 # constraints as visual_bubble).
 [[test]]
 name = "visual_settings"

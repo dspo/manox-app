@@ -88,22 +88,78 @@ pub(crate) enum PromptView {
     Edit,
 }
 
-/// The ZCode agent color-tag palette, shared by the Agents and Models item
-/// cards (display only; no def carries a color).
-const ACCENT_DOTS: [&str; 8] = [
-    "#FACC15", "#FB7185", "#FB923C", "#4ADE80", "#22D3EE", "#60A5FA", "#A78BFA", "#F472B6",
+/// The agent color-tag palette, shared by the Agents and Models item cards.
+/// Names follow the Claude manifest vocabulary, so a definition's declared
+/// `color:` resolves straight onto a dot.
+const ACCENT_DOTS: [(&str, &str); 8] = [
+    ("yellow", "#FACC15"),
+    ("red", "#FB7185"),
+    ("orange", "#FB923C"),
+    ("green", "#4ADE80"),
+    ("cyan", "#22D3EE"),
+    ("blue", "#60A5FA"),
+    ("purple", "#A78BFA"),
+    ("pink", "#F472B6"),
 ];
 
 /// A stable accent per list position: the thin border marks the item, the
-/// avatar carries the same tint, and nothing paints a background.
+/// avatar carries the same tint, and nothing paints a background. A
+/// definition that declares a color takes precedence (see
+/// [`accent_by_name`]).
 pub(super) fn accent_color(ix: usize) -> Hsla {
-    let hex = ACCENT_DOTS[ix % ACCENT_DOTS.len()];
+    let hex = ACCENT_DOTS[ix % ACCENT_DOTS.len()].1;
     Hsla::from(rgb(u32::from_str_radix(&hex[1..], 16).unwrap_or(0x888888)))
+}
+
+/// The 36px rounded-square avatar every roster tile carries, tinted with the
+/// item's accent.
+pub(super) fn tile_avatar(
+    theme: &gpui_component::Theme,
+    accent: Hsla,
+    icon: gpui_component::Icon,
+) -> gpui::Div {
+    div()
+        .size(px(36.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(theme.radius_lg)
+        .bg(accent.opacity(0.12))
+        .child(icon.size_4().text_color(accent))
+}
+
+/// The 20px read-only pill every roster tile uses for its meta badges.
+pub(super) fn tile_badge(theme: &gpui_component::Theme, text: SharedString) -> gpui::Div {
+    div()
+        .h(px(20.))
+        .px_1p5()
+        .flex_none()
+        .flex()
+        .items_center()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(11.))
+        .text_color(theme.muted_foreground)
+        .child(text)
+}
+
+/// The palette dot for a declared color name (case-insensitive), or `None`
+/// for names outside the vocabulary.
+pub(super) fn accent_by_name(name: &str) -> Option<Hsla> {
+    let lower = name.to_ascii_lowercase();
+    let hex = ACCENT_DOTS
+        .iter()
+        .find(|(dot, _)| *dot == lower)
+        .map(|(_, hex)| *hex)?;
+    Some(Hsla::from(rgb(
+        u32::from_str_radix(&hex[1..], 16).unwrap_or(0x888888)
+    )))
 }
 
 #[derive(Clone)]
 pub enum SettingsEvent {
-    Exit,
     /// A persistence step failed; the message is ready for a toast.
     SaveFailed(SharedString),
 }
@@ -134,9 +190,15 @@ impl SettingsView {
             chatgpt_panel: chatgpt::ChatGptPanelState::load(window, cx),
             vscode_panel: vscode::VsCodePanelState::load(window, cx),
             mcp_disabled: user_settings::mcp_disabled().into_iter().collect(),
-            agents: collect_agents(),
+            agents: collect_agents(
+                &crate::chrome_assembly::foreground_cwd()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/")),
+            ),
             skills: collect_skills(),
-            captain_prompt: captain_prompt_preview(),
+            captain_prompt: captain_prompt_preview(
+                &crate::chrome_assembly::foreground_cwd()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/")),
+            ),
             selected_agent: None,
             prompt_editor,
             prompt_view: PromptView::default(),
@@ -252,14 +314,20 @@ impl SettingsView {
         // build_page runs while this view holds its update lease, so the
         // state it needs is passed by reference — reaching back through the
         // entity handle here would panic (no reads on an updated entity).
+        // The leaf is resolved to its page so the factory can match on the
+        // same vocabulary the nav tree renders; an out-of-range index is a
+        // caller bug and panics here rather than rendering a wrong page.
+        let leaf = nav_leaves()
+            .into_iter()
+            .find(|(leaf_ix, _)| *leaf_ix == ix)
+            .map(|(_, leaf)| leaf)
+            .unwrap_or_else(|| panic!("settings page index {ix} outside the nav tree"));
         let page = build_page(
             &view,
-            ix,
+            leaf.page,
             &self.mcp_servers,
             &self.mcp_disabled,
-            &self.agents,
             &self.skills,
-            &self.captain_prompt,
         );
         use gpui::Styled as _;
         let hidden_header = div().hidden().style().clone();
@@ -271,12 +339,42 @@ impl SettingsView {
     }
 }
 
-/// One selectable page of the settings nav tree.
+/// One selectable page of the settings nav tree. The factory matches on
+/// this enum, so a NAV edit that adds or removes a leaf fails to compile
+/// until `build_page` follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NavLeaf {
-    /// Fluent key of the leaf's title.
-    pub key: &'static str,
+    pub page: Page,
     /// Lucide icon rendered before the title.
     pub icon: IconName,
+}
+
+/// The pages themselves; each names its Fluent key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Page {
+    General,
+    Models,
+    Agents,
+    Plugins,
+    Skills,
+    Mcp,
+    ChatGptApp,
+    VsCodeApp,
+}
+
+impl Page {
+    pub(crate) fn i18n_key(self) -> &'static str {
+        match self {
+            Page::General => "settings-item-general",
+            Page::Models => "settings-item-models",
+            Page::Agents => "settings-item-agents",
+            Page::Plugins => "settings-item-plugins",
+            Page::Skills => "settings-item-skills",
+            Page::Mcp => "settings-item-mcp",
+            Page::ChatGptApp => "settings-item-chatgpt-app",
+            Page::VsCodeApp => "settings-item-vscode-app",
+        }
+    }
 }
 
 /// The settings nav tree: labeled groups (non-selectable) and selectable
@@ -292,21 +390,21 @@ pub(crate) const NAV: [NavEntry; 11] = [
     NavEntry::Group("settings-group-general"),
     NavEntry::Leaf {
         leaf: NavLeaf {
-            key: "settings-item-general",
+            page: Page::General,
             icon: IconName::SlidersHorizontal,
         },
         indented: true,
     },
     NavEntry::Leaf {
         leaf: NavLeaf {
-            key: "settings-item-models",
+            page: Page::Models,
             icon: IconName::Boxes,
         },
         indented: false,
     },
     NavEntry::Leaf {
         leaf: NavLeaf {
-            key: "settings-item-agents",
+            page: Page::Agents,
             icon: IconName::Bot,
         },
         indented: false,
@@ -314,21 +412,21 @@ pub(crate) const NAV: [NavEntry; 11] = [
     NavEntry::Group("settings-group-integrations"),
     NavEntry::Leaf {
         leaf: NavLeaf {
-            key: "settings-item-plugins",
+            page: Page::Plugins,
             icon: IconName::Puzzle,
         },
         indented: true,
     },
     NavEntry::Leaf {
         leaf: NavLeaf {
-            key: "settings-item-skills",
+            page: Page::Skills,
             icon: IconName::Sparkles,
         },
         indented: true,
     },
     NavEntry::Leaf {
         leaf: NavLeaf {
-            key: "settings-item-mcp",
+            page: Page::Mcp,
             icon: IconName::PlugZap,
         },
         indented: true,
@@ -336,14 +434,14 @@ pub(crate) const NAV: [NavEntry; 11] = [
     NavEntry::Group("settings-group-external-tools"),
     NavEntry::Leaf {
         leaf: NavLeaf {
-            key: "settings-item-chatgpt-app",
+            page: Page::ChatGptApp,
             icon: IconName::MessageCircle,
         },
         indented: true,
     },
     NavEntry::Leaf {
         leaf: NavLeaf {
-            key: "settings-item-vscode-app",
+            page: Page::VsCodeApp,
             icon: IconName::Code,
         },
         indented: true,
@@ -351,7 +449,6 @@ pub(crate) const NAV: [NavEntry; 11] = [
 ];
 
 /// The selectable leaves in nav order — the page index space.
-#[cfg(test)]
 pub(crate) fn nav_leaves() -> Vec<(usize, &'static NavLeaf)> {
     let mut ix = 0;
     NAV.iter()
@@ -492,22 +589,19 @@ fn mcp_keywords() -> Vec<SharedString> {
 
 /// The three pages of the settings shell, mirroring the previous nav groups:
 /// General (language + Models), Integrations (Plugins + MCP), External Tools.
-/// The page factory for one nav leaf. Leaf order is `nav_leaves()`:
-/// 0 常规 (language) · 1 模型 · 2 Agents · 3 插件 · 4 Skills · 5 MCP ·
-/// 6 ChatGPT.app · 7 VS Code.
+/// The page factory for one nav leaf, matched on the leaf's [`Page`] — the
+/// match must cover every page the nav can select.
 fn build_page(
     view: &Entity<SettingsView>,
-    leaf: usize,
+    page: Page,
     mcp_servers: &[String],
     mcp_disabled: &HashSet<String>,
-    _agents: &[AgentRow],
     skills: &[SkillRow],
-    _captain_prompt: &str,
 ) -> SettingPage {
     let title = |key: &str| SettingPage::new(i18n::t(key)).default_open(true);
-    match leaf {
+    match page {
         // 常规 — language and app-chrome preferences.
-        0 => {
+        Page::General => {
             let value_view = view.clone();
             let set_view = view.clone();
             title("settings-item-general").group(
@@ -539,7 +633,7 @@ fn build_page(
         }
         // 模型 — the provider list with a drill-down detail. No group title:
         // the nav tree names the page and the list/detail own their chrome.
-        1 => title("settings-item-models").group(panel_group(
+        Page::Models => title("settings-item-models").group(panel_group(
             view,
             None,
             &["models", "providers", "llm", "api key", "endpoint"],
@@ -548,37 +642,36 @@ fn build_page(
         // Agents — read-only roster (the lead + preset + discovered defs).
         // No group title: the nav tree already names the page, and the
         // detail's own top row carries the back control instead.
-        2 => title("settings-item-agents").group(panel_group(
+        Page::Agents => title("settings-item-agents").group(panel_group(
             view,
             None,
             &["agents", "subagents", "子代理", "captain"],
             agents_page::render,
         )),
         // 插件.
-        3 => title("settings-item-plugins").group(panel_group(
+        Page::Plugins => title("settings-item-plugins").group(panel_group(
             view,
             Some("settings-item-plugins"),
             &["plugins", "marketplace", "extensions", "插件"],
             |view, _cx| view.plugins.clone().into_any_element(),
         )),
         // Skills — read-only registry view.
-        4 => title("settings-item-skills").group(skills_group(skills)),
+        Page::Skills => title("settings-item-skills").group(skills_group(skills)),
         // MCP.
-        5 => title("settings-item-mcp").group(mcp_group(view, mcp_servers, mcp_disabled)),
+        Page::Mcp => title("settings-item-mcp").group(mcp_group(view, mcp_servers, mcp_disabled)),
         // 外部工具.
-        6 => title("settings-item-chatgpt-app").group(panel_group(
+        Page::ChatGptApp => title("settings-item-chatgpt-app").group(panel_group(
             view,
             Some("settings-item-chatgpt-app"),
             &["chatgpt", "codex", "injection", "external tools"],
             chatgpt::render_chatgpt_app,
         )),
-        7 => title("settings-item-vscode-app").group(panel_group(
+        Page::VsCodeApp => title("settings-item-vscode-app").group(panel_group(
             view,
             Some("settings-item-vscode-app"),
             &["vscode", "visual studio code", "extension", "inject"],
             vscode::render_vscode_app,
         )),
-        _ => title("settings-item-general"),
     }
 }
 
@@ -594,6 +687,9 @@ pub(crate) struct AgentRow {
     /// The def's allowed tool names (empty = all tools).
     pub tools: Vec<String>,
     pub all_tools: bool,
+    /// The def's declared display color (Claude vocabulary), when the
+    /// manifest carries one.
+    pub color: Option<String>,
     /// The def's system prompt (the manifest body).
     pub system_prompt: String,
 }
@@ -607,14 +703,15 @@ struct SkillRow {
 }
 
 /// The Agents roster, read-only: the lead agent first, then the registry the
-/// runtime itself builds — the built-in presets plus user/plugin discovery,
+/// runtime itself builds — the built-in presets plus user/plugin discovery
+/// under the foreground thread's cwd (the same layers a live session loads),
 /// with user files able to override built-ins by name.
-fn collect_agents() -> Vec<AgentRow> {
+fn collect_agents(cwd: &std::path::Path) -> Vec<AgentRow> {
     use manox_harness::core::ext_point_agent::AgentRegistry;
     let mut rows = Vec::new();
     let mut registry = AgentRegistry::new();
     manox_harness::ext::subagent::register_defaults(&mut registry);
-    manox_agent::agent_defs::register_user_and_plugin(&mut registry, None);
+    manox_agent::agent_defs::register_user_and_plugin(&mut registry, Some(cwd));
     for def in registry.all() {
         let origin = if def.name.contains('@') {
             "settings-origin-plugin"
@@ -630,13 +727,28 @@ fn collect_agents() -> Vec<AgentRow> {
             model: def.model.clone(),
             tools: def.tools.clone(),
             all_tools: def.tools.is_empty(),
+            color: def.color.clone(),
             system_prompt: def.system_prompt.clone(),
         });
     }
     // Stable list order: built-ins first, then user files, then plugin
     // entries — the list reads the same regardless of discovery order.
-    rows.sort_by(|a, b| a.origin.cmp(b.origin).then(a.name.cmp(&b.name)));
+    // Ranked on the origin itself, not the Fluent key strings.
+    rows.sort_by(|a, b| {
+        origin_rank(a.origin)
+            .cmp(&origin_rank(b.origin))
+            .then(a.name.cmp(&b.name))
+    });
     rows
+}
+
+/// The display order of the origin groups (内置 → 用户 → 插件).
+fn origin_rank(origin: &str) -> u8 {
+    match origin {
+        "settings-origin-builtin" => 0,
+        "settings-origin-user" => 1,
+        _ => 2,
+    }
 }
 
 /// The Skills roster, read-only: a fresh scan of user + plugin skills
@@ -672,10 +784,10 @@ fn meta_field(text: SharedString) -> SettingField<SharedString> {
 /// prose, the skill fold), not a summary of it. The per-session fold
 /// (project instructions, user notes, active-tool docs) rides on top in a
 /// live session; this preview is the stable base.
-fn captain_prompt_preview() -> String {
+fn captain_prompt_preview(cwd: &std::path::Path) -> String {
     use manox_harness::core::harness::HarnessResources;
     use manox_harness::ext::prompt::{CaptainConfig, SkillSummary};
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    let cwd = cwd.to_path_buf();
     let skills: Vec<SkillSummary> = manox_agent::skill::list_skill_records()
         .into_iter()
         .map(|record| SkillSummary {
@@ -720,7 +832,10 @@ mod tests {
     /// here would silently swap pages behind the nav.
     #[test]
     fn nav_leaf_order_matches_the_page_factory() {
-        let keys: Vec<&str> = nav_leaves().iter().map(|(_, leaf)| leaf.key).collect();
+        let keys: Vec<&str> = nav_leaves()
+            .iter()
+            .map(|(_, leaf)| leaf.page.i18n_key())
+            .collect();
         assert_eq!(
             keys,
             [

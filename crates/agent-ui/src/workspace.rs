@@ -399,8 +399,9 @@ pub struct Workspace {
     /// tab switches; dropped when the tab closes, which detaches the native
     /// view via [`steer_webview::webview::WebView`]'s `Drop`.
     pub(crate) browser_views: BTreeMap<BrowserTabId, Entity<BrowserView>>,
-    /// Top-level view mode. `Settings` mounts the floating settings overlay
-    /// over the live column until the user requests exit.
+    /// Top-level view mode. `Settings` swaps the main column for the
+    /// settings detail and the chrome sidebar for the settings nav (the
+    /// injected surface mounts exactly while the mode is `Settings`).
     view_mode: ViewMode,
     /// Live external sessions (project-menu launches: CLI agent TUIs and
     /// plain terminals) and the id of the one occupying the main column
@@ -424,7 +425,7 @@ pub struct Workspace {
     settings_sub: Option<Subscription>,
     /// The selected settings page (the split layout's nav selection; the
     /// chrome sidebar's injected nav writes it, the main column reads it).
-    /// Index into `views::settings::NAV_KEYS` / `build_pages`.
+    /// Index into `views::settings::nav_leaves()`'s flat leaf order.
     pub(crate) settings_nav: usize,
     /// Composer dictation: the speech session behind the mic button. Created
     /// unconditionally — where the platform has no system recognizer (Linux)
@@ -447,10 +448,10 @@ pub struct Workspace {
 enum ViewMode {
     #[default]
     Workspace,
-    /// The floating settings overlay is mounted over the live column (the
-    /// column keeps rendering underneath, dimmed by the mask). Entering
-    /// still parks any external session / sub-agent page that owned the
-    /// column — the overlay is the page while it is up.
+    /// The settings detail owns the main column while the chrome sidebar
+    /// renders the injected settings nav. Entering still parks any external
+    /// session / sub-agent page that owned the column — Settings is the
+    /// page while it is up.
     Settings,
     /// A live external session (a launched CLI agent TUI / plain terminal)
     /// renders IN PLACE OF the conversation column — the legacy shell's
@@ -1944,9 +1945,10 @@ impl Workspace {
         (repaint, successor)
     }
 
-    /// Switch into the Settings overlay. The Settings view is created lazily on
-    /// first entry; from then on the entity + subscription are reused so the
-    /// user's last selection (and any scroll position) survives re-entry.
+    /// Switch into the Settings split layout. The Settings view is created
+    /// lazily on first entry; from then on the entity + subscription are
+    /// reused so the user's last selection (and any scroll position)
+    /// survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_view.is_none() {
             let settings = cx.new(|cx| SettingsView::new(window, cx));
@@ -2034,13 +2036,11 @@ impl Workspace {
             settings,
             window,
             |_this, _settings, ev: &SettingsEvent, window, cx| {
-                if let SettingsEvent::SaveFailed(msg) = ev {
-                    window.push_notification(
-                        Notification::error(msg.clone())
-                            .title(i18n::t("settings-save-failed-title")),
-                        cx,
-                    );
-                }
+                let SettingsEvent::SaveFailed(msg) = ev;
+                window.push_notification(
+                    Notification::error(msg.clone()).title(i18n::t("settings-save-failed-title")),
+                    cx,
+                );
             },
         )
     }

@@ -225,8 +225,8 @@ settings-item-vscode-app = Visual Studio Code.app
 
 settings-back = 返回应用
 
-settings-item-agents = Agents
-settings-item-skills = Skills
+settings-item-agents = 智能体
+settings-item-skills = 技能
 
 settings-origin-builtin = 内置
 settings-origin-user = 用户
@@ -251,20 +251,17 @@ agents-back = 返回列表
 agents-prompt-edit = 编辑
 agents-prompt-preview = 预览
 agents-detail-scope = 作用域
-agents-detail-scope-user = 用户
 agents-save = 保存
 agents-cancel = 取消
 agents-delete = 删除
-agents-captain-meta = 内置 · 模型随会话
 
 agents-all-tools = 全部工具
 
 agents-model-inherit = 继承会话模型
 agents-tools-count = 个工具
 
-agents-readonly-note = Agents 目前为只读展示；自定义 agent 放在 ~/.claude/agents/ 下的 .md 文件即可被识别。
 
-skills-readonly-note = Skills 目前为只读展示；用户技能位于 ~/.claude/skills/，插件技能随插件安装。
+skills-readonly-note = 技能目前为只读展示；用户技能位于 ~/.claude/skills/，插件技能随插件安装。
 
 
 ### views/settings.rs — 常规面板

@@ -267,18 +267,15 @@ agents-back = Back to list
 agents-prompt-edit = Edit
 agents-prompt-preview = Preview
 agents-detail-scope = Scope
-agents-detail-scope-user = User
 agents-save = Save
 agents-cancel = Cancel
 agents-delete = Delete
-agents-captain-meta = Built-in · model follows the session
 
 agents-all-tools = all tools
 
 agents-model-inherit = follows the session
 agents-tools-count = tools
 
-agents-readonly-note = Agents are read-only for now; drop a .md file under ~/.claude/agents/ to register a custom one.
 
 skills-readonly-note = Skills are read-only for now; user skills live under ~/.claude/skills/, plugin skills ship with their plugin.
 

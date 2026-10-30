@@ -41,10 +41,10 @@ use manox_providers::{
     normalize_agent_ids, read_config_file, split_apikey_source, write_config_file,
 };
 
-use super::SettingsView;
 use super::panels::{
     blur_on_click_out, defer_blur_flush, muted_text, section_card, section_header,
 };
+use super::{SettingsView, tile_avatar, tile_badge};
 
 const LABEL_W: f32 = 168.;
 const KEY_W: f32 = 360.;
@@ -1102,17 +1102,7 @@ fn render_provider_tile(
                 cx.notify();
             });
         })
-        .child(
-            div()
-                .size(px(36.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(theme.radius_lg)
-                .bg(accent.opacity(0.12))
-                .child(Icon::new(AssetIcon::Server).size_4().text_color(accent)),
-        )
+        .child(tile_avatar(theme, accent, Icon::new(AssetIcon::Server)))
         .child(
             v_flex()
                 .min_w_0()
@@ -1130,15 +1120,15 @@ fn render_provider_tile(
                                 .text_color(theme.foreground)
                                 .child(name),
                         )
-                        .child(meta_badge(theme, kind_label(provider.apikey_kind)))
-                        .child(meta_badge(
+                        .child(tile_badge(theme, kind_label(provider.apikey_kind)))
+                        .child(tile_badge(
                             theme,
                             i18n::t_str(
                                 "settings-models-badge-endpoints",
                                 &[("count", &endpoint_count.to_string())],
                             ),
                         ))
-                        .child(meta_badge(
+                        .child(tile_badge(
                             theme,
                             i18n::t_str(
                                 "settings-models-badge-models",
@@ -1154,23 +1144,6 @@ fn render_provider_tile(
                         .child(subtitle),
                 ),
         )
-        .into_any_element()
-}
-
-/// Small read-only pill on a provider tile.
-fn meta_badge(theme: &Theme, text: SharedString) -> AnyElement {
-    div()
-        .h(px(20.))
-        .px_1p5()
-        .flex_none()
-        .flex()
-        .items_center()
-        .rounded(theme.radius)
-        .border_1()
-        .border_color(theme.border)
-        .text_size(px(11.))
-        .text_color(theme.muted_foreground)
-        .child(text)
         .into_any_element()
 }
 

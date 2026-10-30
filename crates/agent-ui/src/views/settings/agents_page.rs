@@ -16,13 +16,13 @@ use gpui_kit_assets::IconName as AssetIcon;
 use steer_components::markdown::static_document;
 
 use crate::i18n;
-use crate::views::settings::{ACCENT_DOTS, AgentRow, PromptView, SettingsView, accent_color};
+use crate::views::settings::{
+    ACCENT_DOTS, AgentRow, PromptView, SettingsView, accent_color, tile_avatar, tile_badge,
+};
 
 /// Row metrics, ZCode-flavored.
 const ROW_H: Pixels = px(78.);
 const ROW_GAP: Pixels = px(10.);
-const AVATAR: Pixels = px(36.);
-const BADGE_H: Pixels = px(20.);
 const FIELD_W: Pixels = px(320.);
 const PROMPT_H: Pixels = px(280.);
 /// One tool column is wide enough for the longest preset name
@@ -49,6 +49,7 @@ fn list(view: &SettingsView, theme: &Theme, cx: &mut Context<SettingsView>) -> A
         model: None,
         tools: Vec::new(),
         all_tools: true,
+        color: None,
         system_prompt: view.captain_prompt.clone(),
     };
     let mut items: Vec<AgentRow> = Vec::with_capacity(view.agents.len() + 1);
@@ -57,7 +58,13 @@ fn list(view: &SettingsView, theme: &Theme, cx: &mut Context<SettingsView>) -> A
     let entity = cx.entity();
     let mut column = v_flex().w_full().gap(ROW_GAP);
     for (ix, row) in items.iter().enumerate() {
-        let accent = accent_color(ix);
+        // A definition that declares a color wears it; the rest cycle the
+        // palette by position.
+        let accent = row
+            .color
+            .as_deref()
+            .and_then(super::accent_by_name)
+            .unwrap_or_else(|| accent_color(ix));
         let row = row.clone();
         let click_entity = entity.clone();
         let name = row.name.clone();
@@ -106,7 +113,7 @@ fn row_face(theme: &Theme, row: &AgentRow, accent: Hsla) -> gpui::Div {
         .items_center()
         .gap_3()
         .w_full()
-        .child(avatar(theme, accent))
+        .child(tile_avatar(theme, accent, Icon::new(AssetIcon::Bot)))
         .child(
             v_flex()
                 .min_w_0()
@@ -125,8 +132,8 @@ fn row_face(theme: &Theme, row: &AgentRow, accent: Hsla) -> gpui::Div {
                                 .text_color(theme.foreground)
                                 .child(row.name.clone()),
                         )
-                        .child(badge(theme, model))
-                        .child(badge(theme, tools)),
+                        .child(tile_badge(theme, model.into()))
+                        .child(tile_badge(theme, tools.into())),
                 )
                 .child(
                     div()
@@ -137,33 +144,6 @@ fn row_face(theme: &Theme, row: &AgentRow, accent: Hsla) -> gpui::Div {
                         .child(row.description.clone()),
                 ),
         )
-}
-
-fn avatar(theme: &Theme, accent: Hsla) -> gpui::Div {
-    div()
-        .size(AVATAR)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(theme.radius_lg)
-        .bg(accent.opacity(0.12))
-        .child(Icon::new(AssetIcon::Bot).size_4().text_color(accent))
-}
-
-fn badge(theme: &Theme, text: String) -> gpui::Div {
-    div()
-        .h(BADGE_H)
-        .px_1p5()
-        .flex_none()
-        .flex()
-        .items_center()
-        .rounded(theme.radius)
-        .border_1()
-        .border_color(theme.border)
-        .text_size(px(11.))
-        .text_color(theme.muted_foreground)
-        .child(text)
 }
 
 // ── detail (drill-down; every write control DISABLED) ────────────────────
@@ -186,6 +166,7 @@ fn detail(
             model: None,
             tools: Vec::new(),
             all_tools: true,
+            color: None,
             system_prompt: view.captain_prompt.clone(),
         });
     let is_lead = row.name == "Captain";
@@ -245,14 +226,24 @@ fn detail(
             )
     };
 
-    // 颜色标记: the palette dots, none selected (no def carries a color).
+    // 颜色标记: the palette dots; the definition's declared color (if any)
+    // is the one ringed. Display only — the page is read-only.
+    let declared = row.color.as_deref().map(str::to_ascii_lowercase);
     let mut dots = div().flex().gap_2().items_center();
-    for hex in ACCENT_DOTS {
+    for (name, hex) in ACCENT_DOTS {
+        let dot = rgb(u32::from_str_radix(&hex[1..], 16).unwrap_or(0x888888));
+        let selected = declared.as_deref() == Some(name);
         dots = dots.child(
             div()
-                .size_4()
+                .size_5()
                 .rounded_full()
-                .bg(rgb(u32::from_str_radix(&hex[1..], 16).unwrap_or(0x888888))),
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected, |this| {
+                    this.border_1().border_color(theme.foreground)
+                })
+                .child(div().size_3().rounded_full().bg(dot)),
         );
     }
 
@@ -454,11 +445,9 @@ fn detail(
                                 .text_color(theme.muted_foreground)
                                 .child(i18n::t("agents-detail-scope")),
                         )
-                        .child(select_box(
-                            theme,
-                            i18n::t("agents-detail-scope-user").to_string(),
-                            false,
-                        )),
+                        // The def's own origin group (内置 / 用户 / 插件) —
+                        // display only, so a pill rather than a select face.
+                        .child(tile_badge(theme, i18n::t(row.origin))),
                 ),
         )
         .child(
@@ -591,7 +580,7 @@ fn prompt_toggle(view: &SettingsView, theme: &Theme, cx: &mut Context<SettingsVi
 fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
     use manox_agent::tools::{
         ASK_USER_QUESTION, BASH, BASH_OUTPUT, CREATE_GOAL, EDIT, GET_GOAL, GLOB, GREP, PY, READ,
-        UPDATE_GOAL, UPDATE_PLAN, WEB_FETCH, WRITE,
+        TASK_STOP, UPDATE_GOAL, UPDATE_PLAN, WEB_FETCH, WRITE,
     };
 
     let mut web = vec![WEB_FETCH];
@@ -609,7 +598,10 @@ fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
         ),
         (
             "agents-tools-group-tasks",
-            vec!["TaskList", "TaskStop", GET_GOAL, CREATE_GOAL, UPDATE_GOAL],
+            // The names without upstream constants stay as literals: exported
+            // from `manox_agent::tools` in dspo/manox#984 (the module's own
+            // single-source rule) and this list follows the next tag.
+            vec!["TaskList", TASK_STOP, GET_GOAL, CREATE_GOAL, UPDATE_GOAL],
         ),
         (
             "agents-tools-group-host",

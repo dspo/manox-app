@@ -24,14 +24,15 @@ const LEAF_INDENT: Pixels = px(18.);
 pub(crate) struct SettingsNavView {
     /// Selection lives on the Workspace; the nav re-renders on every
     /// workspace notification (chatty, but a settings-page nav is cheap).
-    _ws_sub: Subscription,
+    /// `None` only in a window with no Workspace — the nav then renders
+    /// empty rather than panicking (same posture as `render`).
+    _ws_sub: Option<Subscription>,
 }
 
 impl SettingsNavView {
     pub(crate) fn new(cx: &mut gpui::Context<Self>) -> Self {
-        let ws =
-            crate::dispatch::workspace_global().expect("settings nav mounts after the workspace");
-        let _ws_sub = cx.observe(&ws, |_, _, cx| cx.notify());
+        let _ws_sub =
+            crate::dispatch::workspace_global().map(|ws| cx.observe(&ws, |_, _, cx| cx.notify()));
         Self { _ws_sub }
     }
 }
@@ -40,7 +41,7 @@ impl Render for SettingsNavView {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let Some(ws) = crate::dispatch::workspace_global() else {
-            return v_flex();
+            return v_flex().into_any_element();
         };
         let selected = ws.read(cx).settings_nav;
 
@@ -66,7 +67,18 @@ impl Render for SettingsNavView {
                     .child(i18n::t("settings-back")),
             );
 
-        let mut tree = v_flex().w_full().px_2().pb_3().gap_0p5().child(back);
+        // The nav is the sidebar's whole surface: it scrolls when a short
+        // window cannot fit the tree.
+        let mut tree = v_flex()
+            .id("settings-nav")
+            .w_full()
+            .h_full()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_2()
+            .pb_3()
+            .gap_0p5()
+            .child(back);
         // The flat leaf index IS the page index space.
         let mut leaf_ix = 0usize;
         for entry in NAV {
@@ -91,8 +103,10 @@ impl Render for SettingsNavView {
                             .id(("settings-nav-row", leaf_ix))
                             .w_full()
                             .h(ROW_H)
-                            .when(indented, |this| this.pl(LEAF_INDENT))
                             .px_2()
+                            // `px` writes both edges, so the left override
+                            // must come after it or the indent is clobbered.
+                            .when(indented, |this| this.pl(LEAF_INDENT))
                             .gap_2()
                             .items_center()
                             .rounded(RADIUS)
@@ -116,13 +130,13 @@ impl Render for SettingsNavView {
                                 gpui::div()
                                     .text_size(px(13.))
                                     .when(active, |this| this.font_weight(gpui::FontWeight::MEDIUM))
-                                    .child(i18n::t(leaf.key)),
+                                    .child(i18n::t(leaf.page.i18n_key())),
                             ),
                     );
                     leaf_ix += 1;
                 }
             }
         }
-        tree
+        tree.into_any_element()
     }
 }
