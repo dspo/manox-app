@@ -193,6 +193,7 @@ impl Workspace {
     }
 }
 mod composer;
+pub mod container;
 mod external;
 pub mod external_sessions;
 mod right_diff;
@@ -1224,6 +1225,19 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_external_session_ids(&self) -> Vec<String> {
         self.externals.iter().map(|s| s.id.clone()).collect()
+    }
+
+    /// One external container's A1 face — the alive bit, the 0 号-decided
+    /// kind, and the attrs snapshot's cwd. Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_external_container(
+        &self,
+        id: &str,
+    ) -> Option<(bool, Option<container::ContainerKind>, std::path::PathBuf)> {
+        self.externals
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| (s.alive, s.kind, s.attrs.cwd.clone()))
     }
 
     /// The foreground chat's running sub-agents (the Captain block's sub-agent
