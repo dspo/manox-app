@@ -11,7 +11,13 @@ pub use chat_host::WorkspaceChatHost;
 // re-exports keep every `crate::…` path inside agent-ui (and the tests)
 // resolving unchanged.
 pub use steer_agent_chat_ui::{ahp_store, cockpit, conversation, git_status, overlap_diag};
+// The integrated browser (embedded webview host, browser tabs) is compiled
+// out on Linux/FreeBSD: wry parents Linux child webviews through an Xlib
+// handle only, so a window there cannot host one. Clipboard capability
+// survives in `capability_host` on every platform.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub mod browser_host;
+pub mod capability_host;
 pub mod chatgpt_app;
 pub mod chrome_assembly;
 pub mod dispatch;

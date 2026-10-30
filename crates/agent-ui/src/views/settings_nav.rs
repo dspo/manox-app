@@ -106,7 +106,7 @@ impl Render for SettingsNavView {
                             .px_2()
                             // `px` writes both edges, so the left override
                             // must come after it or the indent is clobbered.
-                            .when(indented, |this| this.pl(LEAF_INDENT))
+                            .when(*indented, |this| this.pl(LEAF_INDENT))
                             .gap_2()
                             .items_center()
                             .rounded(RADIUS)

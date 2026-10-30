@@ -269,6 +269,16 @@ mod backend {
     }
 
     pub fn install() -> anyhow::Result<()> {
+        // Stock GNOME ships no StatusNotifierItem host: D-Bus registration
+        // still succeeds, so ksni reports no error — but nothing ever renders
+        // the icon or its menu. Parking the app on `QuitMode::Explicit` in
+        // that state strands it invisibly once the last window closes, so the
+        // tray is only trusted when a watcher is actually on the session bus.
+        if !watcher_on_bus() {
+            anyhow::bail!(
+                "no StatusNotifierWatcher on the session bus (the desktop has no tray host)"
+            );
+        }
         let (tx, rx) = mpsc::channel();
         let handle = SteerTray {
             icon: make_icon()?,
@@ -279,6 +289,24 @@ mod backend {
         HANDLE
             .set(handle)
             .map_err(|_| anyhow::anyhow!("tray already installed"))
+    }
+
+    /// Whether an SNI host has taken the well-known watcher name. Any D-Bus
+    /// failure counts as "no host": a bus-less session cannot show a tray
+    /// either, and the caller then keeps quit-on-close.
+    fn watcher_on_bus() -> bool {
+        let Ok(name) = zbus::names::BusName::try_from("org.kde.StatusNotifierWatcher") else {
+            return false;
+        };
+        let check = zbus::blocking::Connection::session()
+            .and_then(|conn| Ok(zbus::blocking::fdo::DBusProxy::new(&conn)?.name_has_owner(name)?));
+        match check {
+            Ok(present) => present,
+            Err(e) => {
+                tracing::debug!("tray host probe failed: {e}");
+                false
+            }
+        }
     }
 
     fn make_icon() -> anyhow::Result<ksni::Icon> {

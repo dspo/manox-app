@@ -1,3 +1,10 @@
+// The integrated browser is compiled out on Linux/FreeBSD: wry parents Linux
+// child webviews through an Xlib raw handle only, so a gpui window there
+// (native Wayland — or XWayland, which the app no longer prefers) cannot host
+// one. The whole crate — and with it wry, WebKitGTK and the GTK bridge — is
+// absent from those builds; every consumer is cfg'd out alongside.
+#![cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+
 pub mod plugins;
 pub mod webview;
 pub use http;
