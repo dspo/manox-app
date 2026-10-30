@@ -74,9 +74,13 @@ pub fn chrome_style(theme: &Theme) -> gpui_base::TextViewStyle {
 }
 
 /// Transparent-surface style for terminal panels: the panel body reads as
-/// inline text on the message card, not a filled code panel.
+/// inline text on the message card, not a filled code panel — no background
+/// and no inner border (the hosting card is the container; an inner hairline
+/// box would read as a second container pasted inside it).
 pub fn panel_style(theme: &Theme) -> gpui_base::TextViewStyle {
-    message_style(theme).with_code_background(hsla(0., 0., 0., 0.))
+    message_style(theme)
+        .with_code_background(hsla(0., 0., 0., 0.))
+        .with_border(hsla(0., 0., 0., 0.))
 }
 
 /// End a text-selection drag as soon as the pointer moves with no button

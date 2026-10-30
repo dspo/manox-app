@@ -286,15 +286,16 @@ pub(crate) fn doc_style(
         })
 }
 
-/// The editor's take on the skeleton: a transparent code surface — the card
-/// frame provides the chrome, and the only tint the editor allows itself is
-/// the diff run background.
+/// The editor's take on the skeleton: a transparent code surface with no
+/// border of its own — the card frame is the container, and an inner
+/// hairline box would read as a second container pasted inside it. The only
+/// tint the editor allows itself is the diff run background.
 fn code_style(theme: &Theme) -> TextViewStyle {
     doc_style(
         theme.foreground,
         theme.muted_foreground,
         gpui::transparent_black(),
-        theme.border,
+        gpui::transparent_black(),
         theme.selection,
         theme.is_dark(),
     )

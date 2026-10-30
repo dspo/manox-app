@@ -310,7 +310,7 @@ impl RenderOnce for ShellView {
             theme.foreground,
             theme.muted_foreground,
             gpui::transparent_black(),
-            theme.border,
+            gpui::transparent_black(),
             theme.selection,
             theme.is_dark(),
         );
