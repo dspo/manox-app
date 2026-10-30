@@ -370,6 +370,10 @@ fn main() {
                     };
                     vec![
                         doc(
+                            "bash",
+                            "```bash\n# some code\ncargo test -p ai-elements\n```\n".to_string(),
+                        ),
+                        doc(
                             "wide",
                             "```rust\nlet rewrite = Rewrite { instruction: \"把这段说明文字改成更正式的语气，保留全部技术细节，不要引入新的事实，输出为 JSON 并保持原有结构不变\", target: \"crates/steer-components/src/markdown/code_block.rs\", max_length: 4096 };\nfinish(rewrite);\n```\n".to_string(),
                         ),
