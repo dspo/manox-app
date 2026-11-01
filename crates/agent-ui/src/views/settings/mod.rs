@@ -745,7 +745,7 @@ fn build_page(
 pub(crate) struct AgentRow {
     pub name: String,
     pub description: String,
-    /// Fluent key of the origin group (内置 / 用户 / 插件).
+    /// Fluent key of the origin group (内置 / 用户 / 项目 / 插件).
     pub origin: &'static str,
     /// The def's pinned model, when it has one.
     pub model: Option<String>,
@@ -780,16 +780,14 @@ fn collect_agents(cwd: Option<&std::path::Path>) -> Vec<AgentRow> {
     manox_harness::ext::subagent::register_defaults(&mut registry);
     manox_agent::agent_defs::register_user_and_plugin(&mut registry, cwd);
     for def in registry.all() {
-        // TODO(dspo/manox#985): the registry stamps each definition's layer
-        // (`AgentSource`) — group on it instead of this name heuristic once
-        // the next tag carries it. Project-layer agents mislabel as 用户
-        // until then.
-        let origin = if def.name.contains('@') {
-            "settings-origin-plugin"
-        } else if def.name == "Explore" || def.name == "Sailor" {
-            "settings-origin-builtin"
-        } else {
-            "settings-origin-user"
+        // The definition's own registration layer (upstream #985's
+        // `AgentSource`) — no name heuristic: a project agent no longer
+        // masquerades as a user file.
+        let origin = match def.source {
+            manox_harness::core::ext_point_agent::AgentSource::Builtin => "settings-origin-builtin",
+            manox_harness::core::ext_point_agent::AgentSource::User => "settings-origin-user",
+            manox_harness::core::ext_point_agent::AgentSource::Project => "settings-origin-project",
+            manox_harness::core::ext_point_agent::AgentSource::Plugin => "settings-origin-plugin",
         };
         rows.push(AgentRow {
             name: def.name.clone(),
@@ -813,12 +811,13 @@ fn collect_agents(cwd: Option<&std::path::Path>) -> Vec<AgentRow> {
     rows
 }
 
-/// The display order of the origin groups (内置 → 用户 → 插件).
+/// The display order of the origin groups (内置 → 用户 → 项目 → 插件).
 fn origin_rank(origin: &str) -> u8 {
     match origin {
         "settings-origin-builtin" => 0,
         "settings-origin-user" => 1,
-        _ => 2,
+        "settings-origin-project" => 2,
+        _ => 3,
     }
 }
 
@@ -914,9 +913,10 @@ mod tests {
     }
 
     #[test]
-    fn origin_rank_orders_builtin_user_plugin() {
+    fn origin_rank_orders_builtin_user_project_plugin() {
         let mut origins = [
             "settings-origin-plugin",
+            "settings-origin-project",
             "settings-origin-user",
             "settings-origin-builtin",
         ];
@@ -926,6 +926,7 @@ mod tests {
             [
                 "settings-origin-builtin",
                 "settings-origin-user",
+                "settings-origin-project",
                 "settings-origin-plugin",
             ]
         );

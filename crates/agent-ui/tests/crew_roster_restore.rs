@@ -9,10 +9,9 @@
 //! Own test binary: the shared harness initializes process-global
 //! singletons (see `tests/common/mod.rs` — one `#[gpui::test]` per binary).
 //!
-//! The roster rows ride the SYNTHETIC `x-manox-work/childRunsChanged`
-//! action: the pinned manox tag (v0.6.11) does not declare it yet, so the
-//! fold only activates with the later tag bump — the fixtures here pin the
-//! wire shape upstream #989 committed.
+//! The roster rows ride the real `x-manox-work/childRunsChanged` action
+//! (upstream #989, live since the v0.7.0 bump) — the fixtures hand-build
+//! the wire rows the host commits.
 #![cfg(feature = "test-support")]
 
 mod common;

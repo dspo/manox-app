@@ -270,9 +270,9 @@ mod tests {
 
     /// The confirm gate's data face (plan D7): live roster rows and
     /// background shells name themselves in the dialog; settled roster rows
-    /// and absent work read as nothing live (no confirmation). The SYNTHETIC
-    /// fixtures cover both wire faces — the roster rides the work channel's
-    /// `childRunsChanged` registry (upstream #989, post-bump) and the
+    /// and absent work read as nothing live (no confirmation). The fixtures
+    /// cover both wire faces — the roster rides the work channel's
+    /// `childRunsChanged` registry (upstream #989, the v0.7.0 wire) and the
     /// background shells the live-only chat face.
     #[test]
     fn the_confirm_gate_counts_live_dependents_only() {

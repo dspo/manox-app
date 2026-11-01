@@ -261,6 +261,7 @@ settings-item-skills = Skills
 
 settings-origin-builtin = Built-in
 settings-origin-user = User
+settings-origin-project = Project
 settings-origin-plugin = Plugin
 
 agents-captain-desc = The lead agent. Its system prompt is assembled per session from the runtime template, project instructions, the skill fold and user notes.

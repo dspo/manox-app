@@ -556,9 +556,10 @@ mod row_read_tests {
     /// child row NEVER reaches the projected list — not even while
     /// foregrounded — while captain rows keep the host's `summary_order`
     /// and take their compacted ranks exactly as before the fold. The
-    /// summaries are SYNTHETIC: today's pinned runtime (manox v0.6.11)
-    /// never sends the `_meta.x-manox.memberKind` slot — it activates with
-    /// the upstream #987 tag bump, which is the bump this fold makes safe.
+    /// summaries are hand-built, but the `_meta.x-manox.memberKind` slot is
+    /// the real v0.7.0 wire face (upstream #987's listSessions contract:
+    /// ranked captains first, children appended after) — the fold keeps
+    /// those appended children out of the sidebar.
     #[test]
     fn children_fold_out_of_the_catalogue_and_captains_keep_the_host_order() {
         use crate::sidebar_projection::MemberKind;

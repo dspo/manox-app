@@ -245,6 +245,7 @@ settings-item-skills = 技能
 
 settings-origin-builtin = 内置
 settings-origin-user = 用户
+settings-origin-project = 项目
 settings-origin-plugin = 插件
 
 agents-captain-desc = 主对话智能体。系统提示词由运行时模板与项目指令、技能清单、用户笔记按会话组装。
