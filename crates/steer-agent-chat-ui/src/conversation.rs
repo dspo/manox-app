@@ -310,33 +310,44 @@ impl Default for ThinkingContainer {
     }
 }
 
-/// A sub-agent (`agent` tool) invocation. Displayed as a single-line clickable
-/// item in the parent message flow; the click opens the child's own
-/// conversation (right-pane drill-down tab, or the main-column stream page),
-/// where the full child transcript renders through the shared pipeline.
+/// A sub-agent (`Steer` Dispatch) invocation. Displayed as a single-line
+/// clickable item in the parent message flow; the click opens the child's
+/// own conversation (right-pane drill-down tab, or the main-column stream
+/// page), where the full child transcript renders through the shared
+/// pipeline.
 #[derive(Debug, Clone)]
 pub struct AgentTaskItem {
     pub id: String,
-    /// The run id a delegation envelope names — the child session the card
-    /// drills into (foreground results, promotion receipts, and background
-    /// start receipts all carry `run_id`).
+    /// The run id the dispatch names — the child session the card drills
+    /// into. Foreground results, promotion receipts, and background start
+    /// receipts all carry `run_id`; a continuation carries it in the
+    /// envelope address itself (`to.agent_address`), so the rework card is
+    /// drillable before any ack lands and lands on the SAME child
+    /// conversation as the card that created the run.
     pub run_id: Option<String>,
     pub subagent_type: String,
     pub description: String,
+    /// True when the dispatch continues an existing run (`to.agent_address`,
+    /// no spawn): the card reads as a follow-up on that run, not a fresh
+    /// task — the `run/continued` journal row's transcript face.
+    pub continuation: bool,
     pub status: ToolCallStatus,
     pub is_error: bool,
 }
 
-/// One-line observation title for a delegated task's prompt: whitespace
-/// flattened and capped at 60 chars with an ellipsis. Local presentation
-/// rule (the runtime helper of the same shape was removed with the retired
-/// harness).
+/// The dispatch ack's run id: the child session a completed card drills
+/// into. Every Steer Dispatch ack — the foreground report, the promotion
+/// receipt, the background start receipt — names it.
 pub fn envelope_run_id(output: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(output)
         .ok()
         .and_then(|v| v.get("run_id").and_then(|r| r.as_str()).map(str::to_string))
 }
 
+/// One-line observation title for a delegated task's prompt: whitespace
+/// flattened and capped at 60 chars with an ellipsis. Local presentation
+/// rule (the runtime helper of the same shape was removed with the retired
+/// harness).
 pub fn subagent_topic(prompt: &str) -> String {
     let flat: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = flat.chars();
@@ -364,11 +375,16 @@ pub fn first_line(prompt: &str) -> Option<String> {
 /// so the conversation's call sites keep one spelling.
 pub use crate::transcript::is_agent_task_call;
 
-/// The card's `(subagent_type, description)`: the TYPE is the tool name
-/// (per-agent-definition), the description prefers the call's own
-/// `description` and falls back to the shared prompt-topic derivation the
-/// rail uses — both surfaces show the same title.
+/// The card's `(subagent_type, description)`: the TYPE is the Steer
+/// Dispatch's spawned definition (`to.spawn` — the `run/started` row's
+/// `kind`), falling back to the tool name; the description prefers the
+/// call's own `description` and falls back to the shared prompt-topic
+/// derivation the rail uses — both surfaces show the same title.
 pub fn agent_task_labels(name: &str, input: &serde_json::Value) -> (String, String) {
+    let subagent_type = crate::transcript::steer_spawn_of(input)
+        .filter(|spawn| *spawn != crate::transcript::MEMBER_SPAWN)
+        .map(str::to_string)
+        .unwrap_or_else(|| name.to_string());
     let description = input
         .get("description")
         .and_then(serde_json::Value::as_str)
@@ -381,7 +397,7 @@ pub fn agent_task_labels(name: &str, input: &serde_json::Value) -> (String, Stri
                 .map(subagent_topic)
         })
         .unwrap_or_default();
-    (name.to_string(), description)
+    (subagent_type, description)
 }
 
 /// What one projection pass did to the row list, so the caller can keep the
@@ -942,6 +958,7 @@ fn sync_row(item: &Entity<MessageItem>, node: &Node, env: &ProjectEnv, cx: &mut 
                 changed |= set(&mut t.status, n.status);
                 changed |= set(&mut t.is_error, n.is_error);
                 changed |= set(&mut t.run_id, n.run_id.clone());
+                changed |= set(&mut t.continuation, n.continuation);
                 changed
             }
             ConvItem::Notice(text) => {
@@ -1261,7 +1278,7 @@ fn set<T: PartialEq>(slot: &mut T, value: T) -> bool {
 mod tests {
 
     use super::*;
-    use crate::transcript::{Overlays, ProjectEnv, no_steered_turns, project};
+    use crate::transcript::{Overlays, ProjectEnv, project};
     use ahp_types::actions::StateAction;
     use ahp_types::state::ChatState;
 
@@ -1331,11 +1348,29 @@ mod tests {
         ProjectEnv<'static>,
         std::sync::Arc<dyn crate::host::ChatHost>,
     ) {
+        env_with_steered(&[])
+    }
+
+    /// The env with a `steered` set: the projection facts behind the user
+    /// rows' steer badge (the store derives the set from the envelopes; the
+    /// fixture hands it straight to the projection).
+    fn env_with_steered(
+        steered: &[&str],
+    ) -> (
+        ProjectEnv<'static>,
+        std::sync::Arc<dyn crate::host::ChatHost>,
+    ) {
         // Leak the test constants: the env borrows for the call's lifetime,
         // and each test builds exactly one.
         let recipient = Box::leak(Box::new(manox_agent::MessageAuthor::Lead));
         let host: &'static crate::host::ChatHostHandle =
             Box::leak(Box::new(crate::host::noop_host()));
+        let steered: &'static std::collections::HashSet<String> = Box::leak(Box::new(
+            steered
+                .iter()
+                .map(|turn| turn.to_string())
+                .collect::<std::collections::HashSet<String>>(),
+        ));
         (
             ProjectEnv {
                 role: "test-model",
@@ -1345,7 +1380,7 @@ mod tests {
                 fork_source: false,
                 promoted_confirmation: None,
                 entering_turns: &[],
-                steered_turns: no_steered_turns(),
+                steered_turns: steered,
             },
             host.clone(),
         )
@@ -2466,5 +2501,284 @@ mod tests {
                 "the projection converges with the retired rebuild"
             );
         }
+    }
+
+    // ── the unified Steer surface: dispatch cards, the guided note, the
+    //    child's injected row ──────────────────────────────────────────────
+
+    fn steer_start(turn: &str, call: &str) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallStart", "turnId": turn, "toolCallId": call,
+            "toolName": "Steer", "displayName": "Steer",
+            "intention": "Steer",
+        }))
+        .expect("the tool start parses")
+    }
+
+    fn steer_ready(turn: &str, call: &str, input: serde_json::Value) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallReady", "turnId": turn, "toolCallId": call,
+            "invocationMessage": "Steer",
+            "toolInput": input.to_string(),
+            "confirmed": "not-needed",
+        }))
+        .expect("the tool ready parses")
+    }
+
+    fn steer_done(turn: &str, call: &str, ack: serde_json::Value) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/toolCallComplete", "turnId": turn, "toolCallId": call,
+            "result": {
+                "success": true,
+                "pastTenseMessage": "Steered",
+                "content": [{ "type": "text", "text": ack.to_string() }],
+            },
+        }))
+        .expect("the tool complete parses")
+    }
+
+    fn task_card(nodes: &[Node]) -> &crate::conversation::AgentTaskItem {
+        nodes
+            .iter()
+            .find_map(|n| match &n.kind {
+                ConvItem::AgentTask(task) => Some(task),
+                _ => None,
+            })
+            .expect("the dispatch projects a task card")
+    }
+
+    /// A create dispatch projects the agent-task card: the type is the
+    /// spawned definition (the envelope's `to.spawn` — the `run/started`
+    /// row's kind), the label the call's own `description`, and the
+    /// completed card drills into the ack's run id.
+    #[test]
+    fn a_steer_dispatch_projects_the_agent_task_card() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "sweep"));
+        fold(&mut chat, &steer_start("t-1", "tc-1"));
+        fold(
+            &mut chat,
+            &steer_ready(
+                "t-1",
+                "tc-1",
+                serde_json::json!({
+                    "to": { "spawn": "Explore" },
+                    "reason": "Dispatch",
+                    "prompt": "find every caller",
+                    "description": "call-site sweep",
+                }),
+            ),
+        );
+        fold(
+            &mut chat,
+            &steer_done(
+                "t-1",
+                "tc-1",
+                serde_json::json!({
+                    "kind": "foreground",
+                    "run_id": "sub-3",
+                    "stop_reason": "completed",
+                    "output": "done",
+                }),
+            ),
+        );
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let task = task_card(&nodes);
+        assert_eq!(task.subagent_type, "Explore", "the type is the spawn");
+        assert_eq!(task.description, "call-site sweep");
+        assert_eq!(
+            task.run_id.as_deref(),
+            Some("sub-3"),
+            "the ack names the run"
+        );
+        assert!(!task.continuation, "a create is not a follow-up");
+        assert_eq!(task.status, ToolCallStatus::Success);
+    }
+
+    /// A continuation dispatch reads as the follow-up it is: the envelope's
+    /// address names the run BEFORE any ack lands, and the completed ack
+    /// carries the same run id — the card joins the creating card onto one
+    /// child conversation (the `run/continued` row's transcript face).
+    #[test]
+    fn a_continuation_dispatch_reads_as_a_follow_up_on_the_same_run() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "rework"));
+        fold(&mut chat, &steer_start("t-1", "tc-1"));
+        fold(
+            &mut chat,
+            &steer_ready(
+                "t-1",
+                "tc-1",
+                serde_json::json!({
+                    "to": { "agent_address": "sub-3" },
+                    "reason": "Dispatch",
+                    "prompt": "now also check the tests",
+                }),
+            ),
+        );
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let task = task_card(&nodes);
+        assert!(
+            task.continuation,
+            "the addressed dispatch is marked a follow-up"
+        );
+        assert_eq!(
+            task.run_id.as_deref(),
+            Some("sub-3"),
+            "the address names the run before any ack"
+        );
+
+        fold(
+            &mut chat,
+            &steer_done(
+                "t-1",
+                "tc-1",
+                serde_json::json!({
+                    "kind": "foreground",
+                    "run_id": "sub-3",
+                    "stop_reason": "completed",
+                    "output": "done",
+                }),
+            ),
+        );
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let task = task_card(&nodes);
+        assert_eq!(
+            task.run_id.as_deref(),
+            Some("sub-3"),
+            "the settled ack keeps the same run id"
+        );
+        assert!(task.continuation);
+    }
+
+    /// Inject and Abort are not task cards: they fold into the activity
+    /// segment like any other tool call — the guidance's durable face is
+    /// the `run/guided` note, not the verb's call frame.
+    #[test]
+    fn steer_inject_and_abort_do_not_project_task_cards() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "watch"));
+        fold(&mut chat, &steer_start("t-1", "tc-1"));
+        fold(
+            &mut chat,
+            &steer_ready(
+                "t-1",
+                "tc-1",
+                serde_json::json!({
+                    "to": { "agent_address": "sub-3" },
+                    "reason": "Inject",
+                    "prompt": "focus on the projection layer",
+                }),
+            ),
+        );
+        fold(&mut chat, &steer_start("t-1", "tc-2"));
+        fold(
+            &mut chat,
+            &steer_ready(
+                "t-1",
+                "tc-2",
+                serde_json::json!({
+                    "to": { "agent_address": "sub-3" },
+                    "reason": "Abort",
+                    "prompt": "",
+                }),
+            ),
+        );
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert!(
+            nodes
+                .iter()
+                .all(|n| !matches!(n.kind, ConvItem::AgentTask(_))),
+            "no dispatch card for the guide and stop verbs"
+        );
+        let segment = nodes.iter().find_map(|n| match &n.kind {
+            ConvItem::Thinking(t) => Some(t),
+            _ => None,
+        });
+        let segment = segment.expect("the verbs fold into a segment");
+        assert_eq!(segment.entries.len(), 2, "both verbs are segment entries");
+    }
+
+    /// The `run/guided` row's captain-transcript face: the upstream fold
+    /// rides the guidance onto a systemNotification part naming the run,
+    /// and the projection renders it as a notice row, verbatim — runtime
+    /// text is never re-localized.
+    #[test]
+    fn the_run_guided_note_projects_a_captain_notice_row() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "watch"));
+        let guided: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/responsePart", "turnId": "t-1",
+            "part": {
+                "kind": "systemNotification",
+                "content": "Steered run `sub-3`: focus on the projection layer only",
+                "_meta": { "x-manox": { "runGuided": { "runId": "sub-3" } } },
+            },
+        }))
+        .expect("the guided note part parses");
+        fold(&mut chat, &guided);
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let notice = nodes.iter().find_map(|n| match &n.kind {
+            ConvItem::Notice(text) => Some(text.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            notice.as_deref(),
+            Some("Steered run `sub-3`: focus on the projection layer only"),
+            "the note renders verbatim, naming the guided run"
+        );
+    }
+
+    /// The child's own face of the same guidance: the injected message
+    /// opens its own turn on the child fold (`chat/turnStarted` threading
+    /// the steer's pending id), and that opening row carries the steered
+    /// badge — the store derives the set from the envelopes, the projection
+    /// stamps it.
+    #[test]
+    fn a_steered_injection_opens_a_badged_child_row() {
+        let mut chat = empty_chat();
+        let injected: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/turnStarted", "turnId": "t-steer",
+            "startedAt": "2026-01-01T00:00:00Z",
+            "queuedMessageId": "steer-1",
+            "message": {
+                "text": "focus on the projection layer only",
+                "origin": { "kind": "user" },
+            },
+        }))
+        .expect("the injected turn start parses");
+        fold(&mut chat, &injected);
+        let (env, _host) = env_with_steered(&["t-steer"]);
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let Some(ConvItem::User {
+            meta: Some(meta), ..
+        }) = nodes.first().map(|n| &n.kind)
+        else {
+            panic!("the injected message opens the row");
+        };
+        assert!(meta.steered, "the injection row carries the steer badge");
+
+        // A plain turn on the same child carries no badge.
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-plain", "typed send"));
+        let (env, _host) = env_with_steered(&["t-steer"]);
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let Some(ConvItem::User {
+            meta: Some(meta), ..
+        }) = nodes.first().map(|n| &n.kind)
+        else {
+            panic!("the plain send opens the row");
+        };
+        assert!(!meta.steered);
     }
 }

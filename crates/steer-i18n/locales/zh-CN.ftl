@@ -728,6 +728,11 @@ message-steer-pending-badge = 待引导
 message-queued-badge = 排队中
 
 message-steered-badge = 已引导
+
+### views/message.rs — agent task card
+
+agent-task-follow-up = 续跑
+
 ### about.rs (About window)
 
 about-title = 关于 Steer

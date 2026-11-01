@@ -470,6 +470,12 @@ fn push_turn(
                     let input = tool_input_of(state);
                     let (subagent_type, description) =
                         crate::conversation::agent_task_labels(name, &input);
+                    // A continuation names its run in the envelope address
+                    // itself; a create only learns it from the ack. The
+                    // envelope wins once present — the run id is the
+                    // whole-cycle address, so both spellings name the same
+                    // child conversation.
+                    let addressed = steer_run_address_of(&input).map(str::to_string);
                     nodes.push(Node {
                         key: ItemKey::ToolCard(call_id.clone()),
                         kind: ConvItem::AgentTask(crate::conversation::AgentTaskItem {
@@ -478,9 +484,11 @@ fn push_turn(
                                 .then(|| {
                                     crate::conversation::envelope_run_id(&tool_output_of(state))
                                 })
-                                .flatten(),
+                                .flatten()
+                                .or(addressed.clone()),
                             subagent_type,
                             description,
+                            continuation: addressed.is_some(),
                             status: tool_status_of(state),
                             is_error: matches!(state, ToolCallState::Completed(c) if !c.success),
                         }),
@@ -1046,19 +1054,178 @@ pub fn usage_of(usage: &UsageInfo) -> manox_agent::TokenUsage {
     }
 }
 
-/// Whether a tool call's input has the delegation shape (`description` +
-/// `prompt`, none of the retired envelope keys) — the shared vocabulary the
-/// data plane and the projection both read.
+/// The `to.spawn` literal that spawns a real manox Thread — the frozen
+/// member arm of the Steer tool. Every other spawn value names a subagent
+/// definition; the literal lives here because the card vocabulary is what
+/// must not claim it.
+pub const MEMBER_SPAWN: &str = "TeamMember";
+
+/// Whether a tool call's input is the unified `Steer` Dispatch that creates
+/// or continues a subagent run — the shared vocabulary the data plane and
+/// the projection both read. The envelope is `reason: "Dispatch"` +
+/// `prompt`, addressing a definition spawn (`to.spawn`) or a continued run
+/// (`to.agent_address`); the run id is the whole-cycle address, so a
+/// continuation names its run before any ack lands. Everything else on the
+/// Steer tool is not a run card: the member spawn arm rides a plain tool
+/// call, and Inject/Abort ride the `run/guided` note and the activity
+/// segment. The retired per-definition delegation shape (`description` +
+/// `prompt` with no envelope) is not recognized.
 pub fn is_agent_task_call(input: Option<&serde_json::Value>) -> bool {
-    input.is_some_and(|value| {
-        value.get("description").is_some()
-            && value.get("prompt").is_some()
-            && value.get("to").is_none()
-            && value.get("reason").is_none()
-    })
+    let Some(value) = input else {
+        return false;
+    };
+    if value.get("reason").and_then(serde_json::Value::as_str) != Some("Dispatch")
+        || value.get("prompt").is_none()
+    {
+        return false;
+    }
+    match steer_spawn_of(value) {
+        Some(spawn) => spawn != MEMBER_SPAWN,
+        None => steer_run_address_of(value).is_some(),
+    }
+}
+
+/// The definition a Steer envelope's Dispatch spawns (`to.spawn`); `None`
+/// when the envelope addresses a run instead.
+pub fn steer_spawn_of(input: &serde_json::Value) -> Option<&str> {
+    input
+        .get("to")?
+        .get("spawn")?
+        .as_str()
+        .filter(|spawn| !spawn.is_empty())
+}
+
+/// The run id a Steer envelope addresses (`to.agent_address`) — a
+/// continuation Dispatch's rework target, an Inject's guidance address, an
+/// Abort's stop address.
+pub fn steer_run_address_of(input: &serde_json::Value) -> Option<&str> {
+    input
+        .get("to")?
+        .get("agent_address")?
+        .as_str()
+        .filter(|addr| !addr.is_empty())
 }
 
 /// Whether an AHP message is user-authored (drives turn-boundary checks).
 pub fn is_user(message: &ahp_types::state::Message) -> bool {
     message.origin.kind == ahp_types::state::MessageKind::User
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A create dispatch: `reason: "Dispatch"` + `to.spawn` + `prompt` —
+    /// the unified Steer envelope the card renders.
+    #[test]
+    fn a_steer_dispatch_with_spawn_is_an_agent_task() {
+        let input = serde_json::json!({
+            "to": { "spawn": "Explore" },
+            "reason": "Dispatch",
+            "prompt": "find every caller",
+            "description": "call-site sweep",
+        });
+        assert!(is_agent_task_call(Some(&input)));
+    }
+
+    /// A continuation dispatch: the envelope addresses a settled run instead
+    /// of naming a spawn — still a card, the follow-up on that run.
+    #[test]
+    fn a_steer_dispatch_to_a_run_id_is_an_agent_task() {
+        let input = serde_json::json!({
+            "to": { "agent_address": "sub-3" },
+            "reason": "Dispatch",
+            "prompt": "now also check the tests",
+        });
+        assert!(is_agent_task_call(Some(&input)));
+        assert_eq!(steer_run_address_of(&input), Some("sub-3"));
+    }
+
+    /// Only Dispatch cards: Inject (the guided note rides the `run/guided`
+    /// row, not a card) and Abort (the stop verb) fold into the segment.
+    #[test]
+    fn steer_reason_variants_are_not_task_cards() {
+        let inject = serde_json::json!({
+            "to": { "agent_address": "sub-3" },
+            "reason": "Inject",
+            "prompt": "focus on the projection layer",
+        });
+        let abort = serde_json::json!({
+            "to": { "agent_address": "sub-3" },
+            "reason": "Abort",
+            "prompt": "",
+        });
+        let unreasoned = serde_json::json!({
+            "to": { "spawn": "Explore" },
+            "prompt": "find every caller",
+        });
+        assert!(!is_agent_task_call(Some(&inject)));
+        assert!(!is_agent_task_call(Some(&abort)));
+        assert!(!is_agent_task_call(Some(&unreasoned)));
+        assert!(!is_agent_task_call(None));
+    }
+
+    /// The frozen member arm spawns a real manox Thread — a sidebar row, not
+    /// a subagent run, so it never claims the card.
+    #[test]
+    fn the_member_spawn_arm_is_not_a_task_card() {
+        let member = serde_json::json!({
+            "to": { "spawn": MEMBER_SPAWN, "agent_address": "refactorer" },
+            "reason": "Dispatch",
+            "prompt": "start the refactor",
+        });
+        assert!(!is_agent_task_call(Some(&member)));
+    }
+
+    /// The retired per-definition delegation shape (`description` + `prompt`
+    /// with no envelope) is not recognized — the aggressive discipline, no
+    /// dual detection.
+    #[test]
+    fn the_retired_delegation_shape_is_not_a_card() {
+        let retired = serde_json::json!({
+            "description": "sweep",
+            "prompt": "find every caller",
+        });
+        assert!(!is_agent_task_call(Some(&retired)));
+    }
+
+    /// The run id a completed card drills into: every Steer Dispatch ack —
+    /// the foreground report, the background start receipt, the promotion
+    /// receipt — names `run_id`.
+    #[test]
+    fn envelope_run_id_reads_the_steer_acks() {
+        let foreground = serde_json::json!({
+            "kind": "foreground",
+            "run_id": "sub-3",
+            "stop_reason": "completed",
+            "output": "done",
+        })
+        .to_string();
+        let background = serde_json::json!({
+            "kind": "background",
+            "run_id": "sub-4",
+            "status": "started",
+        })
+        .to_string();
+        let promoted = serde_json::json!({
+            "kind": "foreground",
+            "run_id": "sub-5",
+            "stop_reason": "promoted",
+            "output": "promoted to background after 5000ms",
+        })
+        .to_string();
+        assert_eq!(
+            crate::conversation::envelope_run_id(&foreground),
+            Some("sub-3".into())
+        );
+        assert_eq!(
+            crate::conversation::envelope_run_id(&background),
+            Some("sub-4".into())
+        );
+        assert_eq!(
+            crate::conversation::envelope_run_id(&promoted),
+            Some("sub-5".into())
+        );
+        assert_eq!(crate::conversation::envelope_run_id("not json"), None);
+    }
 }

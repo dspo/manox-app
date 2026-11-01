@@ -752,6 +752,11 @@ message-steer-pending-badge = Waiting to steer
 message-queued-badge = Queued
 
 message-steered-badge = Steered
+
+### views/message.rs — agent task card
+
+agent-task-follow-up = Follow-up
+
 ### about.rs (About window)
 
 about-title = About Steer

@@ -2805,24 +2805,27 @@ pub struct LeafView<'a> {
     pub metrics: Option<&'a ConversationMetrics>,
 }
 
-/// Whether a tool call's inline input has the delegation shape
-/// (`description` + `prompt`, none of the retired envelope keys) — the same
-/// predicate the transcript's agent card uses, so the two never disagree.
-fn is_delegation_input(input: Option<&ahp_types::state::ToolInput>) -> bool {
+/// Parse a tool call's inline input when it has the unified Steer Dispatch
+/// shape (`reason: "Dispatch"` + `prompt` addressing a spawn or a
+/// continued run) — the same predicate the transcript's agent card uses,
+/// so the two never disagree. The parsed envelope comes back so the caller
+/// can read the spawn definition off it.
+fn delegation_input(input: Option<&ahp_types::state::ToolInput>) -> Option<Value> {
     let Some(ahp_types::state::ToolInput::Inline(raw)) = input else {
-        return false;
+        return None;
     };
     serde_json::from_str::<Value>(raw)
         .ok()
-        .is_some_and(|value| crate::transcript::is_agent_task_call(Some(&value)))
+        .filter(|value| crate::transcript::is_agent_task_call(Some(value)))
 }
 
 /// Resolve each live run's agent type from the parent chat's delegation tool
 /// calls. Two faces carry the link: the spawn call's
 /// `ToolResultSubagentContent` names the child chat plus the agent's internal
-/// name, and once that call completes with its receipt, the receipt text names
-/// `run_id` while the call's own name is the agent definition. A run whose
-/// call is not in the retained fold simply stays unresolved.
+/// name, and once that call completes with its receipt, the receipt text
+/// names `run_id` while the call's own envelope names the spawned definition
+/// (the unified `Steer` Dispatch's `to.spawn`). A run whose call is not in
+/// the retained fold simply stays unresolved.
 fn subagent_kinds(chat: &ChatState, run_ids: &[String]) -> HashMap<String, String> {
     let mut kinds = HashMap::new();
     let mut unresolved: HashSet<&str> = run_ids.iter().map(String::as_str).collect();
@@ -2845,22 +2848,22 @@ fn subagent_kinds(chat: &ChatState, run_ids: &[String]) -> HashMap<String, Strin
             ahp_types::state::ToolCallState::Running(state) => (
                 state.tool_name.as_str(),
                 state.content.as_deref(),
-                is_delegation_input(state.tool_input.as_ref()),
+                delegation_input(state.tool_input.as_ref()),
             ),
             ahp_types::state::ToolCallState::Completed(state) => (
                 state.tool_name.as_str(),
                 state.content.as_deref(),
-                is_delegation_input(state.tool_input.as_ref()),
+                delegation_input(state.tool_input.as_ref()),
             ),
             ahp_types::state::ToolCallState::AuthRequired(state) => (
                 state.tool_name.as_str(),
                 state.content.as_deref(),
-                is_delegation_input(state.tool_input.as_ref()),
+                delegation_input(state.tool_input.as_ref()),
             ),
             ahp_types::state::ToolCallState::PendingResultConfirmation(state) => (
                 state.tool_name.as_str(),
                 state.content.as_deref(),
-                is_delegation_input(state.tool_input.as_ref()),
+                delegation_input(state.tool_input.as_ref()),
             ),
             _ => continue,
         };
@@ -2880,13 +2883,17 @@ fn subagent_kinds(chat: &ChatState, run_ids: &[String]) -> HashMap<String, Strin
                     }
                 }
                 // A receipt names `run_id` in its text, but so may any tool's
-                // JSON output. Only a DELEGATION call's own name is the agent
-                // type, so the input shape gates this arm.
-                ahp_types::state::ToolResultContent::Text(text) if delegation => {
+                // JSON output. Only a DELEGATION call's own envelope names the
+                // agent type (`to.spawn`), so the input shape gates this arm.
+                ahp_types::state::ToolResultContent::Text(text) if delegation.is_some() => {
+                    let input = delegation.as_ref().expect("the gate checked it");
                     if let Some(run_id) = crate::conversation::envelope_run_id(&text.text)
                         && unresolved.remove(run_id.as_str())
                     {
-                        kinds.insert(run_id, name.to_string());
+                        let kind = crate::transcript::steer_spawn_of(input)
+                            .unwrap_or(name)
+                            .to_string();
+                        kinds.insert(run_id, kind);
                     }
                 }
                 _ => {}
@@ -3508,9 +3515,9 @@ mod tests {
     }
 
     /// A run's completion receipt names `run_id`, but so can any tool's JSON
-    /// output. Only a call whose INPUT has the delegation shape may lend its
-    /// name as the agent type; a `TaskStop`-shaped call carrying the same run
-    /// id must not rename the row.
+    /// output. Only a call whose INPUT has the Steer Dispatch shape may name
+    /// the agent type (its envelope's `to.spawn`); a `TaskStop`-shaped call
+    /// carrying the same run id must not rename the row.
     #[test]
     fn only_a_delegation_receipt_names_the_runs_type() {
         fn chat_with_receipt(tool_name: &str, tool_input: &str) -> ChatState {
@@ -3556,13 +3563,17 @@ mod tests {
         let mut delegated = ChannelBook::default();
         delegated.chats.insert(
             "s-1".to_string(),
-            chat_with_receipt("Sailor", "{\"description\":\"d\",\"prompt\":\"p\"}"),
+            chat_with_receipt(
+                "Steer",
+                "{\"to\":{\"spawn\":\"Sailor\"},\"reason\":\"Dispatch\",\"prompt\":\"p\"}",
+            ),
         );
         assert_eq!(
             leaf(&delegated, "s-1").running_subagents()[0]
                 .kind
                 .as_deref(),
-            Some("Sailor")
+            Some("Sailor"),
+            "the envelope's spawn names the type, not the unified tool name"
         );
 
         let mut decoy = ChannelBook::default();
