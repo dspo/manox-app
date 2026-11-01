@@ -2737,9 +2737,10 @@ impl AhpStore {
     }
 
     /// How many subscriptions this store has queued because it has no client
-    /// yet (a detached test store queues every write). The sub-agent page's
-    /// refresh poll is a re-subscribe loop, so counting queued subscribes is
-    /// how a test proves the poll fires (and stops). Test-support diagnostic.
+    /// yet (a detached test store queues every write). The sub-agent page
+    /// subscribes exactly once on open — counting queued subscribes is how a
+    /// test pins that single subscribe (and that leaving drops the observer).
+    /// Test-support diagnostic.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_queued_subscribes(&self) -> usize {
         self.pending_writes
