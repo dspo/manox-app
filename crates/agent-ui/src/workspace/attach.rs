@@ -758,97 +758,58 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Archive the active thread and navigate to a fresh empty one. Shared
-    /// by the `/exit` slash command and the `cmd-;` keybinding. No-op while
-    /// a turn is running (a parked thread would strand pending verdicts).
+    /// Archive the active container and navigate to a fresh one. Shared by
+    /// the `cmd-;` keybinding. No-op while a turn is running (a parked
+    /// thread would strand pending verdicts). The archive itself rides the
+    /// confirm-or-direct container entry (plan D7): live dependents confirm
+    /// first; the fresh landing follows the confirmed archive.
     pub(crate) fn archive_current_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.archive_active_thread_if_idle(cx) {
+        let Some((_, sid)) = self.chat_store(cx) else {
+            return;
+        };
+        if self.foreground_running(cx) {
             return;
         }
-        self.new_container(None, window, cx);
+        let landing: super::lifecycle::ArchiveLanding = std::sync::Arc::new(
+            |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+                ws.new_container(None, window, cx);
+            },
+        );
+        self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
     }
 
-    /// The archiving body every path shares: mark the session archived in the
-    /// book (its optimistic half) and persist through the store, which
-    /// refreshes the sidebar list. The GATE is the caller's (the idle check
-    /// for the archive command, none for `/exit`'s force path) and so is the
-    /// sidebar's optimistic row drop (the command drops in place; `/exit`
-    /// drops inside its own sequence).
-    pub(super) fn archive_thread_now(&mut self, sid: &str, cx: &mut Context<Self>) {
-        // The write rides the catalogue root (`x-manox/archivedChanged`),
-        // the one path that reaches the host for EVERY row — attached or
-        // not — and marks the object row's archived bit on the way
-        // (`AhpStore::archive_sessions`). The native
-        // `session/isArchivedChanged` needs the row's session channel and
-        // is refused for the rest: a silently refused archive left the
-        // conversation live and its never-spoken object row a zombie
-        // draft, which `new_container`'s refill then resurrected as a
-        // `createSession` the host could only answer "already exists" — a
-        // dead click on 新建会话, and a `/exit` whose final beat never
-        // landed.
-        self.multiplexer.update(cx, |mux, cx| {
-            mux.archive_sessions(std::slice::from_ref(&sid.to_string()), true, cx);
-        });
-        manox_agent::thread_store_global().with_mut(|s| s.archive_thread(sid, true));
-        // Archive IS the native container's death (D7) — raise the
-        // predicate-flip event. A fold echo (another client archived) keeps
-        // riding the store's own notify; the alive read is the one interface
-        // either way. Nothing consumes the event yet — the teardown cascade
-        // lands with the lifecycle PRs.
-        cx.emit(container::ContainerEvent::Died(sid.to_string()));
-    }
-
-    /// Archive the active thread if it is idle; `false` when a turn is
-    /// running (attaching would park the thread and clear `pending_ask`,
-    /// stranding a user verdict).
-    pub(super) fn archive_active_thread_if_idle(&mut self, cx: &mut Context<Self>) -> bool {
-        if self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).running()
-            })
-            .unwrap_or_else(|| {
-                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
-                Default::default()
-            })
-        {
-            return false;
-        }
-        let id = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(_, sid)| sid.clone())
-            .unwrap_or_else(|| {
-                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
-                Default::default()
-            });
-        self.archive_thread_now(&id, cx);
-        // The sidebar's optimistic drop (the same half the row menu's archive
-        // performs): the row must leave when the gesture fires, not when the
-        // echo + the next list snapshot catch up.
-        crate::chrome_assembly::drop_sidebar_row(&id, cx);
-        true
-    }
-
-    /// Archive the active thread and open a fresh one that inherits the
+    /// Archive the active container and open a fresh one that inherits the
     /// outgoing thread's project, model, access mode, and reasoning effort —
     /// `/new` starts a clean conversation without dropping the working
-    /// context. No-op while a turn is running (see
-    /// `archive_active_thread_if_idle`).
+    /// context. No-op while a turn is running (a parked thread would strand
+    /// pending verdicts). The archive rides the confirm-or-direct container
+    /// entry (plan D7); the inheriting creation reads the live foreground at
+    /// fire time — the same still-bound state the post-archive read here has
+    /// always seen.
     pub(crate) fn archive_current_thread_inheriting(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.archive_active_thread_if_idle(cx) {
+        let Some((_, sid)) = self.chat_store(cx) else {
+            return;
+        };
+        if self.foreground_running(cx) {
             return;
         }
+        let landing: super::lifecycle::ArchiveLanding = std::sync::Arc::new(
+            |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+                ws.open_inheriting_container(window, cx);
+            },
+        );
+        self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
+    }
+
+    /// The inheriting fresh-container creation `/new` lands after its
+    /// archive. Extracted verbatim from the old post-archive tail — the
+    /// inheritance reads the live foreground fold and object row, which is
+    /// still the outgoing (just archived) session's at this point.
+    fn open_inheriting_container(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let old = self.chat.read(cx).thread.clone();
         let cwd = self
             .chat

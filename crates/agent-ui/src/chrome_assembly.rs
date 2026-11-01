@@ -592,27 +592,32 @@ fn shell_config(
                     });
                 }
             })),
-            // The menu's archive toggle is protocol state now
-            // (#870's app half): `session/isArchivedChanged` dispatches on
-            // the session channel, the host journals + persists it and
-            // echoes back, and the summary's IsArchived bit flips for every
-            // client. The current state reads the same official bit (the
-            // v2 store's own partitions are no longer touched from here).
+            // The row menu's archive toggle rides the container lifecycle
+            // (plan A6, D7): a live container goes through the
+            // confirm-or-direct teardown entry (the confirmation lists the
+            // live dependents and the archive lands as the ONE teardown
+            // command), an archived one revives whole-tree. The shell-side
+            // row drop is the path's own optimistic half — the menu does not
+            // pre-drop, or a cancelled confirmation would have already
+            // vanished the row.
             on_archive: Some(Box::new({
-                let mux = mux.clone();
-                move |id, _w, cx| {
-                    mux.update(cx, |mux, cx| {
-                        mux.toggle_archived(id, cx);
+                let ws = ws.clone();
+                move |id, w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.toggle_container_archived(id, w, cx);
+                        cx.notify();
                     });
                 }
             })),
-            // The selection bar's commit: one `x-manox/archivedChanged`
-            // write for every checked row.
+            // The selection bar's commit: the whole checked batch goes
+            // through the same confirm-or-direct container teardown — ONE
+            // teardown command carries every captain.
             on_batch_archive: Some(Box::new({
-                let mux = mux.clone();
-                move |ids, _w, cx| {
-                    mux.update(cx, |mux, cx| {
-                        mux.archive_sessions(ids, true, cx);
+                let ws = ws.clone();
+                move |ids, w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.confirm_archive_containers(ids.to_vec(), None, w, cx);
+                        cx.notify();
                     });
                 }
             })),

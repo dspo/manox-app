@@ -123,7 +123,11 @@ fn picked(shell: &gpui::Entity<Shell>, cx: &mut TestAppContext) -> Option<Vec<St
 
 /// 多选 checks the row it was invoked on; toggles add and remove; 全选 covers
 /// every thread row and skips the external one; 归档 commits the batch
-/// through ONE hook call, drops the rows and leaves selection mode.
+/// through ONE hook call and leaves selection mode. Since the container
+/// lifecycle (plan A6) the ROW DROP is the host teardown path's own
+/// optimistic half — the shell does not pre-drop (the path may confirm
+/// first), so the test replays the path's drop face (`set_archived`) and
+/// asserts the rows leave through it.
 #[gpui::test]
 fn selection_toggles_and_commits_the_batch_through_one_hook(cx: &mut TestAppContext) {
     let batch_log: BatchLog = Rc::new(RefCell::new(Vec::new()));
@@ -181,9 +185,24 @@ fn selection_toggles_and_commits_the_batch_through_one_hook(cx: &mut TestAppCont
     assert_eq!(committed, vec!["t-1", "t-2", "t-3"]);
     drop(log);
     assert_eq!(picked(&shell, cx), None, "the commit leaves selection mode");
+    // The shell did NOT pre-drop: the confirmed archive's row drop is the
+    // host path's optimistic half (which may confirm with the dependents
+    // first). Replaying that drop face (what the app's `drop_sidebar_row`
+    // calls) removes the batch's rows.
+    assert!(
+        visual.debug_bounds("chrome-session-row-t-2").is_some(),
+        "the rows stay until the host path drops them"
+    );
+    shell.update(cx, |s, cx| {
+        for id in ["t-1", "t-2", "t-3"] {
+            s.set_archived(id, true, cx);
+        }
+        cx.notify();
+    });
+    visual.run_until_parked();
     assert!(
         visual.debug_bounds("chrome-session-row-t-2").is_none(),
-        "the archived rows leave the sidebar at the commit"
+        "the host path's row drop removes the archived rows"
     );
     assert!(
         visual.debug_bounds("chrome-session-row-ext-1").is_some(),

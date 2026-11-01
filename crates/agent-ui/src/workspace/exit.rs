@@ -1,17 +1,21 @@
-//! The `/exit` teardown sequence: stop everything this thread owns, then
-//! archive it and land on a fresh thread — the same end state as the thread
-//! list's archive action, reached through a force path that also works while
-//! a turn is running.
+//! The `/exit` teardown sequence: stop everything this container owns, then
+//! archive it and land on a fresh container — the same end state as the
+//! sidebar's archive action, reached through a force path that also works
+//! while a turn is running.
 //!
 //! The sequence plays as progress notes in the conversation (the
 //! annotation-card face `add_info_message` writes), one beat per action so
-//! the teardown is legible: subagents, the thread's own turn, the right
+//! the teardown is legible: the subagent observation panels, the right
 //! pane's terminals + CLI-agent tabs + the dock's terminal + the external
 //! containers (the ONE teardown kills their processes and drops their rows),
 //! the container's own browser tabs (other containers' tabs survive — the
-//! reclaim is keyed, not a global nuke), and the archive itself. Notes pushed
-//! before the switch land on the archived thread's journal; the closing pair
-//! lands on the fresh thread.
+//! reclaim is keyed, not a global nuke), and then the landing beat: ONE
+//! container teardown (archive mode — the `x-manox/teardown` command, whose
+//! host waterfall cancels the turn, interrupts the live runs, settles the
+//! background tasks and cascades the archive; the path's optimistic half has
+//! already emptied the container's UI) plus the fresh container through the
+//! unified creation entry. Notes pushed before the switch land on the
+//! archived container's journal; the closing pair lands on the fresh one.
 
 use super::*;
 
@@ -70,7 +74,10 @@ impl Workspace {
                 }
                 beat(cx).await;
             }
-            // ── the thread's own turn ──────────────────────────────────
+            // ── the container's own turn ───────────────────────────────
+            // The turn's cancel rides the teardown command (the ONE path —
+            // `/exit` does not send a parallel turn-cancel write); the
+            // beats only announce what the waterfall does.
             if turn_running {
                 if !foreground_is(&this, cx, &sid) {
                     tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
@@ -81,7 +88,6 @@ impl Workspace {
                 })
                 .ok();
                 beat(cx).await;
-                this.update(cx, |ws, cx| ws.cancel_turn(cx)).ok();
                 this.update(cx, |ws, cx| {
                     ws.note("exit-agent-stopped", &[("name", &title)], cx)
                 })
@@ -160,31 +166,29 @@ impl Workspace {
                     beat(cx).await;
                 }
             }
-            // ── archive + fresh thread ─────────────────────────────────
+            // ── the container teardown + the fresh container ──────────
+            // One teardown (archive mode) through THE container archive
+            // path — the command's host waterfall cancels the turn,
+            // interrupts the live runs, settles the background tasks and
+            // cascades the archive down the parent edges, while the path's
+            // optimistic half (the book drop, the object rows, the sidebar
+            // row, the resource reclaim) has already emptied the container's
+            // UI. The force path needs no confirm dialog: the beats above
+            // ARE the announcement.
             if !foreground_is(&this, cx, &sid) {
                 tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
                 return;
             }
-            let archived_id = this
-                .update(cx, |ws, cx| {
-                    ws.note("exit-archiving", &[("name", &title)], cx);
-                    ws.archive_active_thread_force(cx)
-                })
-                .unwrap_or(None);
-            // The sidebar's optimistic drop (the same half the row menu's
-            // archive performs): without it the row lingers until the echo
-            // lands — and the fresh-thread landing re-projects the list from
-            // the not-yet-echoed summary in between.
-            if let Some(id) = archived_id.clone() {
-                cx.update(|cx| {
-                    crate::chrome_assembly::drop_sidebar_row(&id, cx);
-                });
-            }
-            // The switch lands on the fresh thread; the closing pair rides it.
-            // The attach is asynchronous (`new_container` returns the
-            // minted id without switching), so the pair is ADDRESSED to that
-            // id — a foreground-targeted note here would journal onto the
-            // thread just archived.
+            this.update(cx, |ws, cx| {
+                ws.note("exit-archiving", &[("name", &title)], cx);
+                ws.archive_containers(std::slice::from_ref(&sid), cx);
+            })
+            .ok();
+            // The switch lands on the fresh container; the closing pair
+            // rides it. The attach is asynchronous (`new_container` returns
+            // the minted id without switching), so the pair is ADDRESSED to
+            // that id — a foreground-targeted note here would journal onto
+            // the container just archived.
             let landed = this.update_in(cx, |ws, window, cx| ws.new_container(None, window, cx));
             let fresh_sid = match landed {
                 Ok(sid) => sid,
@@ -244,22 +248,6 @@ impl Workspace {
                 _ => None,
             })
             .collect()
-    }
-
-    /// Archive the active thread WITHOUT the idle gate — the `/exit` force
-    /// path, sharing `archive_thread_now`'s body with the gated command. The
-    /// caller has already cancelled the turn (the host's waterfall settles
-    /// pending verdicts and ask cards), which is the hazard the idle guard in
-    /// `archive_active_thread_if_idle` exists for. Returns the archived
-    /// session id (the caller's sidebar-reconciliation key).
-    fn archive_active_thread_force(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let pair = self.chat.read(cx).store.clone();
-        let Some((_, sid)) = &pair else {
-            return None;
-        };
-        let sid = sid.clone();
-        self.archive_thread_now(&sid, cx);
-        Some(sid)
     }
 }
 
