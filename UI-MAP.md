@@ -203,8 +203,8 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 #### 容器生命周期手势（plan D7，`workspace/lifecycle.rs`）
 
-每动词一条路径，全部落在 `x-manox/teardown`（上游 #990，pinned tag 尚未携带——常量与
-`PendingWrite::Command` 预连接队列本地声明，bump 后换上游常量）：
+每动词一条路径，全部落在 `x-manox/teardown`（上游 #990，v0.7.0 已携带——走上游常量
+`manox_ahp::ext::commands::TEARDOWN`，预连接队列共享同一 `PendingWrite::Command` 面）：
 
 - **停止**（composer 停止 chip → `stop_container`）：前台容器 stop-all——显式停止覆盖运行时
   「后台 run 活到交报告」默认；无并行客户端清扫，命令即路径。
@@ -217,7 +217,7 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
   归档臂、壳菜单自摘、`/exit` 显式摘行）全部收敛到这一条路径。`cmd-;` 与 `/new` 保持 idle 门禁，
   归档落地后续接新容器（`ArchiveLanding` 延续）。
 - **取消归档**（行菜单取消归档 → `revive_container`）：整树复活——captain 与 catalogue 里
-  带 parent 边的子会话同乘一条 `archivedChanged(false)`（上游 #987 的边，bump 后上线）。
+  带 parent 边的子会话同乘一条 `archivedChanged(false)`（上游 #987 的边，v0.7.0 起在 wire 上）。
 - 外部容器维持 D8：关闭 = kill（A2 teardown），无归档手势。
 
 > Source: `crates/agent-ui/src/workspace/lifecycle.rs`, `crates/agent-ui/src/workspace/exit.rs`,
@@ -1162,7 +1162,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### SidebarProjection
 
-wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ContainerRow`（一行 = 一个 SessionContainer，plan D1 的侧栏词汇；multiplexer 权威行，含 §D.5 增量合并）三事实 `running`（chat fold 的 active turn；未订阅会话回退 wire `InProgress`）／`pending`（会话 chat 折叠里有未答的 input request = Ask——turn-final 的 ask 会保持 turn 打开直到答案结算；会话 input-needed 队列 = Auth；同开时 Ask 胜。fold 的沉默须待承载它的通道快照落地才生效——chat 通道管 running/Ask，session 队列管 Auth，wire 位是快照落地前的回退）／`unread`（叶子 unread 镜像覆盖 wire 标志，status-0 占位退让 summary）→ `derive_status` 阶梯（Pending > Running > Unread > Idle；wire `Error` 位不再被行消费——错误是 turn 内容，列表永不显示）＋ **容器树两事实**（upstream #987 的 `_meta.x-manox` 槽，与行 pin 同款读法）：`memberKind`（captain／subagent；缺省与未识别值读 captain——折叠只藏它认得的）与 `parentSessionId`（仅子行携带）；**子行折叠**（plan A3）：`subagent` 行（及带 parent 边的行，`is_child`）永远不出现在侧栏——`SessionMultiplexer::container_rows`（`container_list` 的纯核，可对手搭 book 直测）在排序之前把它们滤出，侧栏**一行一容器**；行留在 book（`book.summaries`）里，名册面（A4）与整树 unarchive 稍后取用——这是上游 #987 tag bump 的前置安全（bump 后 catalogue 会把子行追在排名行之后回流，无此折叠即灌满侧栏；captain 行的宿主序与压缩 rank 不受折叠扰动）＋ 容器树 walk（`project_forest`：captain 保序、子行随后、孤儿拍平；子行不缩进，captain chevron 是唯一嵌套标记；catalogue 喂入恒不含子行——今日是透传，A4 名册面复用同一形状）＋ `updated_at`/`archived`/tag/pinned 原样透传 ＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
+wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar_projection.rs`）：`ContainerRow`（一行 = 一个 SessionContainer，plan D1 的侧栏词汇；multiplexer 权威行，含 §D.5 增量合并）三事实 `running`（chat fold 的 active turn；未订阅会话回退 wire `InProgress`）／`pending`（会话 chat 折叠里有未答的 input request = Ask——turn-final 的 ask 会保持 turn 打开直到答案结算；会话 input-needed 队列 = Auth；同开时 Ask 胜。fold 的沉默须待承载它的通道快照落地才生效——chat 通道管 running/Ask，session 队列管 Auth，wire 位是快照落地前的回退）／`unread`（叶子 unread 镜像覆盖 wire 标志，status-0 占位退让 summary）→ `derive_status` 阶梯（Pending > Running > Unread > Idle；wire `Error` 位不再被行消费——错误是 turn 内容，列表永不显示）＋ **容器树两事实**（upstream #987 的 `_meta.x-manox` 槽，与行 pin 同款读法）：`memberKind`（captain／subagent；缺省与未识别值读 captain——折叠只藏它认得的）与 `parentSessionId`（仅子行携带）；**子行折叠**（plan A3）：`subagent` 行（及带 parent 边的行，`is_child`）永远不出现在侧栏——`SessionMultiplexer::container_rows`（`container_list` 的纯核，可对手搭 book 直测）在排序之前把它们滤出，侧栏**一行一容器**；行留在 book（`book.summaries`）里，名册面（A4）与整树 unarchive 稍后取用——这是上游 #987 面的前置安全（v0.7.0 起 catalogue 把子行追在排名行之后回流，无此折叠即灌满侧栏；captain 行的宿主序与压缩 rank 不受折叠扰动）＋ 容器树 walk（`project_forest`：captain 保序、子行随后、孤儿拍平；子行不缩进，captain chevron 是唯一嵌套标记；catalogue 喂入恒不含子行——今日是透传，A4 名册面复用同一形状）＋ `updated_at`/`archived`/tag/pinned 原样透传 ＋ 按项目路径尾段分组。装配层在 multiplexer notify 时喂给 `ChromeSessionList`。
 
 > Source: `crates/agent-ui/src/sidebar_projection.rs`
 

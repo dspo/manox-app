@@ -68,14 +68,6 @@ pub struct SubagentWorkRow {
     pub started_at: String,
 }
 
-/// The persistent child-run roster action (upstream #989's
-/// `manox_ahp::ext::actions::WORK_CHILD_RUNS`, declared here until the
-/// pinned tag carries it — the bump swaps this for the upstream constant).
-/// One run row per action, upserted by `runId` on the session's
-/// `x-manox-work` channel; settled rows stay with their verdict, a
-/// `run/continued` re-marks the run running.
-const WORK_CHILD_RUNS: &str = "x-manox-work/childRunsChanged";
-
 /// A roster entry's lifecycle face: running, or settled (the verdict rides
 /// the row).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,18 +178,11 @@ impl ChildRunRow {
 /// client claims).
 pub const CLIENT_ID: &str = "desktop";
 
-/// The container-teardown command (upstream #990's
-/// `manox_ahp::ext::commands::TEARDOWN`, declared here until the pinned tag
-/// carries it — the bump swaps this for the upstream constant). One call
-/// cancels the captains' active turns, interrupts their live runs, settles
-/// their background tasks and — archive mode — cascades the archive down the
-/// parent edges; the receipt
-/// `{containers: [{session, interruptedRuns, stoppedTasks, archived}]}`
-/// confirms per container.
-const X_MANOX_TEARDOWN: &str = "x-manox/teardown";
-
 /// The teardown verb (plan D7): what one `x-manox/teardown` call does to its
-/// containers.
+/// containers (upstream #990,
+/// [`manox_ahp::ext::commands::TEARDOWN`]). One call cancels the captains'
+/// active turns, interrupts their live runs, settles their background tasks
+/// and — archive mode — cascades the archive down the parent edges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TeardownMode {
     /// Kill every live run and background task; the container STAYS alive
@@ -563,7 +548,7 @@ impl ChannelBook {
         // folds it into its own registry before that fold ever sees it.
         // Interception sits ahead of the ext lookup on purpose: the roster
         // does not depend on the channel's ext bag having landed.
-        if value.get("type").and_then(Value::as_str) == Some(WORK_CHILD_RUNS) {
+        if value.get("type").and_then(Value::as_str) == Some(ext::actions::WORK_CHILD_RUNS) {
             let row = value.get("run").and_then(|run| {
                 let run_id = run.get("runId").and_then(Value::as_str)?;
                 ChildRunRow::from_wire(run_id, run)
@@ -2218,12 +2203,12 @@ impl AhpStore {
                 self.queue_head_at = Some(std::time::Instant::now());
             }
             self.pending_writes.push(PendingWrite::Command {
-                method: X_MANOX_TEARDOWN,
+                method: ext::commands::TEARDOWN,
                 params,
             });
             return;
         }
-        let reply = self.call(X_MANOX_TEARDOWN, params);
+        let reply = self.call(ext::commands::TEARDOWN, params);
         // The receipt is a confirmation, not a driver: the optimistic half
         // above (archive) and the fold echoes (stop-all's turn edges) carry
         // the UI. A refusal is traced, not retried — the gesture's optimistic
@@ -4444,8 +4429,8 @@ mod tests {
     }
 
     /// The persistent child-run roster's fold semantics (upstream #989,
-    /// driven here through the SYNTHETIC action — the pinned tag does not
-    /// declare it yet): one run row per action, upserted by `runId`; a
+    /// driven here through hand-built `childRunsChanged` actions): one run
+    /// row per action, upserted by `runId`; a
     /// settle keeps the row with its verdict; a continuation re-marks it
     /// running; a row without a keyable `runId` cannot enter the view and
     /// a restated row is a NoOp.

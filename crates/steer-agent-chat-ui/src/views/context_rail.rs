@@ -1359,7 +1359,7 @@ mod tests {
     }
 
     /// The crew section's full-roster face (plan PR-A4), driven through the
-    /// SYNTHETIC roster action (the pinned tag does not declare it yet):
+    /// roster action (upstream #989's `childRunsChanged`, hand-built here):
     /// live rows read the running mark, settled rows their verdict's mark,
     /// the rows list in dispatch order — and the observation rows from the
     /// attach-time rebuild merge underneath by run id, with the store's
