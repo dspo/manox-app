@@ -175,7 +175,11 @@ pub enum SettingsEvent {
 impl EventEmitter<SettingsEvent> for SettingsView {}
 
 impl SettingsView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        rosters_cwd: Option<std::path::PathBuf>,
+    ) -> Self {
         let plugins = cx.new(|cx| PluginManagerView::new(window, cx));
         // Plugin installs and uninstalls change the declared MCP server set
         // AND the agent/skill rosters those plugins ship; both cached lists
@@ -191,10 +195,11 @@ impl SettingsView {
             state.set_readonly(true, cx);
             state
         });
-        // Read the rosters against the foreground thread's cwd: a bundled
-        // app's `current_dir()` is `/`, so the process cwd is never the
-        // session's project layer.
-        let rosters_cwd = crate::chrome_assembly::foreground_cwd();
+        // Read the rosters against the foreground container's cwd (resolved
+        // by the caller — settings never re-reads the workspace, its
+        // constructor runs inside the entry's lease): a bundled app's
+        // `current_dir()` is `/`, so the process cwd is never the session's
+        // project layer.
         Self {
             plugins,
             _plugins_sub,
@@ -220,11 +225,12 @@ impl SettingsView {
     }
 
     /// Re-read the rosters and the Captain prompt when the foreground project
-    /// changed. The scan is UI-thread work (registry + skills + the runtime's
-    /// prompt builder), so an unchanged cwd is a no-op — re-entering Settings
-    /// in the same project must not pay for it again.
-    pub(crate) fn refresh_rosters(&mut self) {
-        let cwd = crate::chrome_assembly::foreground_cwd();
+    /// changed (`cwd` — the caller resolves the foreground container's attrs
+    /// cwd on its own lease; settings must not re-read the workspace). The
+    /// scan is UI-thread work (registry + skills + the runtime's prompt
+    /// builder), so an unchanged cwd is a no-op — re-entering Settings in the
+    /// same project must not pay for it again.
+    pub(crate) fn refresh_rosters(&mut self, cwd: Option<std::path::PathBuf>) {
         if cwd == self.rosters_cwd {
             return;
         }

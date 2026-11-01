@@ -22,6 +22,7 @@
 //! project's header).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
 use steer_agent_chrome_ui::shell::{MAX_EXTERNAL_TITLE_CHARS, SessionRow};
@@ -60,6 +61,10 @@ pub(crate) struct ExternalSessionRecord {
     pub project: Option<PathBuf>,
     pub created_at: i64,
     pub view: gpui::Entity<terminal_ui::TerminalView>,
+    /// The CLI agent's session handle — the owner's independent clone for
+    /// the explicit kill on close (the promise `cx_session` states). `None`
+    /// for plain terminals: their PTY dies with the view drop.
+    pub handle: Option<Arc<steer_ext_agents::SessionHandle>>,
     /// The terminal's `Title` events → [`Self::label`]. Lives (and dies)
     /// with the record: the session's PTY outlives nothing else.
     pub(super) _title_sub: gpui::Subscription,
@@ -89,6 +94,9 @@ pub struct ExternalSessionLaunch<'a> {
     pub label: String,
     pub svg: &'static str,
     pub project: Option<PathBuf>,
+    /// The CLI agent's session handle (the owner's kill clone); `None` for
+    /// plain terminals.
+    pub handle: Option<Arc<steer_ext_agents::SessionHandle>>,
 }
 
 impl Workspace {
@@ -112,6 +120,7 @@ impl Workspace {
                 svg: launch.svg,
                 project: launch.project,
                 view: view.clone(),
+                handle: launch.handle,
             }),
             cx,
         );
@@ -155,17 +164,20 @@ impl Workspace {
         self.externals.iter().any(|s| s.id == id)
     }
 
-    /// Close a session (the sidebar row's 关闭会话): drop the record — the
-    /// dropped `TerminalView` tears the process tree down — and fall back
-    /// to the conversation when it was the one on screen.
+    /// Every live external container's row id (the `/exit` sweep's target
+    /// list — the teardown face kills each).
+    pub(crate) fn external_container_ids(&self) -> Vec<String> {
+        self.externals.iter().map(|s| s.id.clone()).collect()
+    }
+
+    /// Close a session (the sidebar row's 关闭会话): the ONE container
+    /// teardown — kill the process explicitly (the record's handle clone;
+    /// D8: closing a container kills it, nothing is left to the view-drop's
+    /// timing), drop the record (the row goes with it) and reclaim every
+    /// resource under the container's key. Falls back to the conversation
+    /// when the closed session owned the main column.
     pub fn close_external_session(&mut self, id: &str, cx: &mut gpui::Context<Self>) {
-        let was_active = self.active_external.as_deref() == Some(id);
-        self.externals.retain(|s| s.id != id);
-        if was_active {
-            self.active_external = None;
-            self.view_mode = super::ViewMode::Workspace;
-        }
-        cx.notify();
+        self.teardown_container(id, cx);
     }
 
     /// The external row menu's 重命名 write-back (the shell's host hook):

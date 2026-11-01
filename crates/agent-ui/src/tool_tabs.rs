@@ -12,9 +12,9 @@
 //! (`WorkspaceBrowserHost::install` binds to a `Workspace`), tracked as the
 //! remaining tranche-4 item.
 //!
-//! All tabs inherit per-thread session state for free: the chrome
-//! `RightPaneSession` stash/restore carries the whole tab set across thread
-//! switches.
+//! All tabs inherit per-container session state for free: the chrome
+//! `RightPaneSession` stash/restore carries the whole tab set across
+//! container switches (keyed by container id in the resource registry).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,15 +35,27 @@ fn next_instance_id(kind: &str) -> String {
     format!("{kind}-{}", INSTANCE.fetch_add(1, Ordering::Relaxed))
 }
 
-/// The foreground thread's working directory (its project path — the wire
-/// row's `project` column, the same source the sidebar groups by), falling
-/// back to the store's cwd, then home.
-pub(crate) fn thread_cwd_or_home() -> std::path::PathBuf {
-    crate::chrome_assembly::foreground_cwd().unwrap_or_else(|| {
-        std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| ".".into())
-    })
+/// The pane tab kinds whose content owns a PTY: the integrated terminal and
+/// the three CLI-agent TUI tabs (claude / codex / copilot). Closing the tab
+/// drops the view (the view drop tears the process tree down); the CLI tabs'
+/// children die by their registered kill handle first.
+pub const PTY_TAB_KINDS: [&str; 4] = ["terminal", "claude", "codex", "copilot"];
+
+/// The FOREGROUND CONTAINER's working directory (D10/D6: resources root at
+/// their owning container's attrs cwd — a native container's session-channel
+/// grant, an external container's spawn snapshot), falling back to home: a
+/// terminal has to spawn SOMEWHERE.
+pub(crate) fn thread_cwd_or_home(cx: &App) -> std::path::PathBuf {
+    crate::dispatch::workspace_global()
+        .and_then(|ws| {
+            let fg = ws.read(cx).foreground_container_id(cx)?;
+            Some(ws.read(cx).container_attrs(&fg, cx).cwd)
+        })
+        .unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| ".".into())
+        })
 }
 
 // ── integrated terminal ────────────────────────────────────────────────────
@@ -99,7 +111,7 @@ impl ToolTab for TerminalTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
-        match spawn_standalone_terminal(&thread_cwd_or_home(), cx) {
+        match spawn_standalone_terminal(&thread_cwd_or_home(cx), cx) {
             Ok(view) => store.put(&self.id, view),
             Err(e) => store.set_error(
                 &self.id,
@@ -559,6 +571,18 @@ impl ToolTab for AgentTab {
         brand_icon(self.svg)
     }
 
+    fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
+        // Explicit kill on close (plan A2 — the orphaned-cx-child fix): the
+        // picker registered the child's handle under this tab at spawn; kill
+        // it through the registry rather than leaning on the view drop.
+        if let Some(ws) = crate::dispatch::workspace_global() {
+            ws.update(cx, |ws, _| {
+                ws.kill_handle_for_tab(&self.id);
+            });
+        }
+        store.reset(&self.id);
+    }
+
     fn open(
         &self,
         _window: &mut Window,
@@ -571,6 +595,7 @@ impl ToolTab for AgentTab {
         // picker renders the TUI from then on — one entity for the tab's
         // whole lifetime, so close-tab teardown stays a single drop.
         let picker = cx.new(|_| AgentPicker {
+            tab_id: self.id.clone(),
             agent_id: self.agent_id,
             display: self.display,
             mux: self.mux.clone(),
@@ -595,7 +620,19 @@ fn div_missing() -> gpui::Div {
 
 /// The full cx launch path: registry-pinned agent + the picked endpoint →
 /// `AgentBuilder` (PTY relay) → `Terminal` → `TerminalView`. Dropping the
-/// view tears the child tree down.
+/// view tears the child tree down; the handle is threaded OUT (the right-pane
+/// CLI tab record and the external record keep an independent clone) so a
+/// close can kill explicitly instead of leaning on drop timing — the
+/// contract `steer_ext_agents::cx_session` states.
+pub(crate) struct SpawnedAgentTerminal {
+    pub view: Entity<terminal_ui::TerminalView>,
+    /// The child's session handle — the owner's kill clone.
+    pub handle: Arc<steer_ext_agents::SessionHandle>,
+    /// The REAL external session id (the cx session socket's `<id>.sock`
+    /// filename).
+    pub cx_session_id: String,
+}
+
 pub(crate) fn spawn_agent_terminal(
     agent_id: &str,
     cwd: &std::path::Path,
@@ -603,7 +640,7 @@ pub(crate) fn spawn_agent_terminal(
     model: &str,
     wire: Option<String>,
     cx: &mut App,
-) -> Result<(Entity<terminal_ui::TerminalView>, String), String> {
+) -> Result<SpawnedAgentTerminal, String> {
     let agent = match agent_id {
         "claude" => steer_ext_agents::Agent::Claude,
         "codex" => steer_ext_agents::Agent::Codex,
@@ -631,7 +668,11 @@ pub(crate) fn spawn_agent_terminal(
     let terminal = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, Box::new(source))
         .map_err(|e| e.to_string())?;
     let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-    Ok((terminal_ui::TerminalView::new(proxy, cx), cx_session_id))
+    Ok(SpawnedAgentTerminal {
+        view: terminal_ui::TerminalView::new(proxy, cx),
+        handle,
+        cx_session_id,
+    })
 }
 
 // ── the agent model picker ────────────────────────────────────────────────
@@ -663,12 +704,16 @@ impl From<(String, CascadeEntry)> for PickRow {
 /// cascade's rule — a missing `agents` column means non-cx registration and
 /// stays visible). Picking one spawns the agent under that endpoint and
 /// this entity renders the terminal from then on; a spawn failure stays on
-/// the picker with the error surfaced.
+/// the picker with the error surfaced. The picker holds the spawn's payload
+/// (view + kill handle) — it IS the CLI tab's record.
 struct AgentPicker {
+    /// The tab instance this picker rides — the kill handle's registry key
+    /// (the tab's close kills through it).
+    tab_id: String,
     agent_id: &'static str,
     display: &'static str,
     mux: Entity<crate::multiplexer::SessionMultiplexer>,
-    launched: Option<Entity<terminal_ui::TerminalView>>,
+    launched: Option<SpawnedAgentTerminal>,
     error: Option<String>,
 }
 
@@ -697,11 +742,11 @@ impl gpui::Render for AgentPicker {
         let theme = cx.theme().clone();
 
         // Launched: the terminal IS the tab body from here on.
-        if let Some(view) = self.launched.clone() {
+        if let Some(spawned) = &self.launched {
             return v_flex()
                 .size_full()
                 .p(px(4.))
-                .child(view)
+                .child(spawned.view.clone())
                 .into_any_element();
         }
 
@@ -747,7 +792,7 @@ impl gpui::Render for AgentPicker {
                           _: &gpui::ClickEvent,
                           _w: &mut Window,
                           cx: &mut Context<AgentPicker>| {
-                        let cwd = thread_cwd_or_home();
+                        let cwd = thread_cwd_or_home(cx);
                         match spawn_agent_terminal(
                             agent_id,
                             &cwd,
@@ -756,7 +801,22 @@ impl gpui::Render for AgentPicker {
                             wire.clone(),
                             cx,
                         ) {
-                            Ok((view, _cx_session_id)) => this.launched = Some(view),
+                            Ok(spawned) => {
+                                // The kill handle rides the registry under
+                                // (foreground container, this tab): the
+                                // tab's close and the container teardown
+                                // both kill through it.
+                                if let Some(ws) = crate::dispatch::workspace_global() {
+                                    let container =
+                                        ws.read(cx).foreground_container_id(cx).unwrap_or_default();
+                                    let tab_id = this.tab_id.clone();
+                                    let handle = spawned.handle.clone();
+                                    ws.update(cx, |ws, _| {
+                                        ws.register_kill_handle(&container, &tab_id, handle);
+                                    });
+                                }
+                                this.launched = Some(spawned);
+                            }
                             Err(e) => this.error = Some(e),
                         }
                         let _ = display_name;
@@ -1031,8 +1091,9 @@ fn brand_icon(svg_path: &'static str) -> AnyElement {
 }
 
 /// The bottom dock's terminal surface for the chrome assembly: each spawn
-/// roots at the FOREGROUND thread's cwd (the store's working directory),
-/// so the dock follows the conversation.
+/// roots at the FOREGROUND CONTAINER's attrs cwd (D6 inheritance), so the
+/// dock follows the conversation — or the external session holding the main
+/// column.
 pub struct ThreadTerminalPanelSurface;
 
 impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
@@ -1045,7 +1106,7 @@ impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
     }
 
     fn open(&self, _window: &mut Window, cx: &mut App) -> Result<gpui::AnyView, String> {
-        let view = spawn_standalone_terminal(&thread_cwd_or_home(), cx)?;
+        let view = spawn_standalone_terminal(&thread_cwd_or_home(cx), cx)?;
         Ok(gpui::AnyView::from(view))
     }
 }

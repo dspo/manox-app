@@ -191,6 +191,22 @@ impl Workspace {
             })
             .unwrap_or_default()
     }
+
+    /// The FOREGROUND CONTAINER id (the container model's routing face): the
+    /// active external container's row id while one owns the main column, the
+    /// foreground session id (a native container's id, D2) otherwise. The key
+    /// the dock/right stashes, the pane persistence and the spawn-cwd read
+    /// share; `None` only while no session is bound and no external is up.
+    pub fn foreground_container_id(&self, cx: &App) -> Option<String> {
+        if matches!(self.view_mode, ViewMode::ExternalSession) {
+            return self.active_external.clone();
+        }
+        self.chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone())
+    }
 }
 mod composer;
 pub mod container;
@@ -443,6 +459,19 @@ pub struct Workspace {
     /// [`Self::land_dictation`]).
     pub(crate) speech: Entity<SpeechState>,
     _speech_events: Subscription,
+    /// The per-container resource registry fields (see `resource_registry`):
+    /// the pane-side stash keyed by container id, the live dock/pane owner
+    /// slots, and the CLI tabs' kill handles. Process-lifetime (the
+    /// workspace's own), main-thread by construction.
+    pub(crate) pane_stash: HashMap<String, crate::resource_registry::PaneEntry>,
+    pub(crate) live_dock_owner: Option<String>,
+    pub(crate) live_right_owner: Option<String>,
+    pub(crate) kill_handles: crate::resource_registry::KillHandles,
+    /// The container-death cascade: the workspace subscribes to its own
+    /// [`crate::workspace::container::ContainerEvent`] and tears the dead
+    /// container down (external homes drop the record + reclaim the
+    /// resources; native cascade waits for the lifecycle PR).
+    _died_sub: Option<Subscription>,
 }
 
 /// Top-level rendering mode of the app page. `Settings` and the two
@@ -939,6 +968,11 @@ impl Workspace {
             _rail_updates: rail_updates,
             speech,
             _speech_events: speech_events,
+            pane_stash: HashMap::new(),
+            live_dock_owner: None,
+            live_right_owner: None,
+            kill_handles: HashMap::new(),
+            _died_sub: None,
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
@@ -1046,6 +1080,17 @@ impl Workspace {
             cc.notify();
         });
         ws.observe_conversation(cx);
+        // The death cascade (§2.3): the predicate's flip reaches the ONE
+        // teardown through the workspace's own emission. External containers
+        // tear down now (D8: process exit drops the row and reclaims the
+        // resources); the native cascade (sub-session archive + row drop)
+        // lands with the lifecycle PR.
+        ws._died_sub = Some(cx.subscribe(&cx.entity(), |this, _, ev, cx| {
+            let container::ContainerEvent::Died(id) = ev;
+            if container::ContainerId::is_external_id(id) {
+                this.teardown_container(id, cx);
+            }
+        }));
         // Focus the composer so typing works immediately on the hero screen.
         ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
         ws
@@ -1224,7 +1269,7 @@ impl Workspace {
     /// what `open_external_session` resolves). Test-support diagnostic.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_external_session_ids(&self) -> Vec<String> {
-        self.externals.iter().map(|s| s.id.clone()).collect()
+        self.external_container_ids()
     }
 
     /// One external container's A1 face — the alive bit, the 0 号-decided
@@ -1971,9 +2016,16 @@ impl Workspace {
     /// reused so the user's last selection (and any scroll position)
     /// survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The foreground container's attrs cwd, resolved HERE — the entry
+        // already holds the workspace lease, and the settings view must not
+        // re-read the workspace (its constructor and refresh run inside this
+        // update).
+        let rosters_cwd = self
+            .foreground_container_id(cx)
+            .map(|fg| self.container_attrs(&fg, cx).cwd);
         match &self.settings_view {
             None => {
-                let settings = cx.new(|cx| SettingsView::new(window, cx));
+                let settings = cx.new(|cx| SettingsView::new(window, cx, rosters_cwd));
                 let sub = self.subscribe_settings(&settings, window, cx);
                 self.settings_view = Some(settings);
                 self.settings_sub = Some(sub);
@@ -1981,7 +2033,9 @@ impl Workspace {
             // A reused view re-reads the rosters: switching projects between
             // visits must not keep the last foreground project's agent
             // layer.
-            Some(settings) => settings.update(cx, |settings, _| settings.refresh_rosters()),
+            Some(settings) => {
+                settings.update(cx, |settings, _| settings.refresh_rosters(rosters_cwd))
+            }
         }
         // Leaving the external session for Settings drops its ownership:
         // the invariant is `view_mode == ExternalSession` ⟺
