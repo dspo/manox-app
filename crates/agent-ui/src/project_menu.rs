@@ -232,7 +232,7 @@ fn new_thread_at(
     cx: &mut App,
 ) {
     let _ = ws.update(cx, |ws, cx| {
-        ws.start_new_thread(dir.clone(), window, cx);
+        ws.new_container(dir.clone(), window, cx);
         cx.notify();
     });
 }

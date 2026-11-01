@@ -181,11 +181,11 @@ impl Workspace {
                 });
             }
             // The switch lands on the fresh thread; the closing pair rides it.
-            // The attach is asynchronous (`start_new_thread` returns the
+            // The attach is asynchronous (`new_container` returns the
             // minted id without switching), so the pair is ADDRESSED to that
             // id — a foreground-targeted note here would journal onto the
             // thread just archived.
-            let landed = this.update_in(cx, |ws, window, cx| ws.start_new_thread(None, window, cx));
+            let landed = this.update_in(cx, |ws, window, cx| ws.new_container(None, window, cx));
             let fresh_sid = match landed {
                 Ok(sid) => sid,
                 Err(_) => {

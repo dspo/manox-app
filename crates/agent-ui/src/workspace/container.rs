@@ -226,10 +226,11 @@ impl Workspace {
     /// The ONE container creation entry (§2.2 `create_container(kind,
     /// attrs)`). Native folds its conceptual two steps (container record +
     /// session) into one `createSession` — the draft-refill-or-mint decision,
-    /// the object row and the attach all live here, verbatim from the former
-    /// `start_new_thread` body; external lands the record (the spawn already
-    /// happened). Returns the container id — the routing string both homes
-    /// share.
+    /// the object row and the attach all live here; the sidebar's
+    /// `new_container` gesture is the thin wrapper over this entry
+    /// (leave-external + inheritance, then the native seed). External lands
+    /// the record (the spawn already happened). Returns the container id —
+    /// the routing string both homes share.
     pub fn create_container(&mut self, seed: ContainerSeed, cx: &mut Context<Self>) -> String {
         match seed {
             ContainerSeed::Manox(intent) => self.create_native_container(intent, cx),

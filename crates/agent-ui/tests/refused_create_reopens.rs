@@ -24,7 +24,7 @@ async fn refused_create_reopens_the_held_session(cx: &mut TestAppContext) {
 
     // A second conversation (foreground moves there once its create lands);
     // the landing stays unarchived and never spoken — host-held.
-    let second = common::start_new_thread(cx, &ws, window, None);
+    let second = common::new_container(cx, &ws, window, None);
     assert_ne!(second, landing, "the foreground refill excludes itself");
     for _ in 0..common::PARK_ROUNDS {
         cx.run_until_parked();
@@ -44,7 +44,7 @@ async fn refused_create_reopens_the_held_session(cx: &mut TestAppContext) {
     // candidate: unarchived, never spoken, and a session the host holds.
     objects.mark_human_message(&second, 1_770_000_000);
 
-    let minted = common::start_new_thread(cx, &ws, window, None);
+    let minted = common::new_container(cx, &ws, window, None);
     assert_eq!(
         minted, landing,
         "the refill must name the live draft the host still carries"

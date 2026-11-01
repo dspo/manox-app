@@ -202,7 +202,7 @@ pub fn full_wiring_boot_shell(
 
 /// The Steer row's own gesture: 新建会话 on the workspace, returning the
 /// minted (or refilled) session id.
-pub fn start_new_thread(
+pub fn new_container(
     cx: &mut TestAppContext,
     ws: &Entity<Workspace>,
     window: gpui::AnyWindowHandle,
@@ -210,9 +210,7 @@ pub fn start_new_thread(
 ) -> String {
     let ws = ws.clone();
     cx.update_window(window, move |_, window, cx| {
-        ws.update(cx, |ws, cx| {
-            ws.start_new_thread(project.clone(), window, cx)
-        })
+        ws.update(cx, |ws, cx| ws.new_container(project.clone(), window, cx))
     })
     .expect("the full-wiring window is live")
 }
