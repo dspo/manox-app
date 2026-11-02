@@ -182,10 +182,10 @@ pub fn dock_terminal_live(cx: &App) -> bool {
 }
 
 /// The archive gesture's shell-side reconciliation: drop the row from the
-/// sidebar now (the same optimistic drop the row menu's archive performs),
-/// instead of waiting for the protocol echo + the next list snapshot. The
-/// workspace-side archive paths (`/exit`, `cmd-;`) have no menu handler to
-/// do this half for them. `false` when no shell is live.
+/// sidebar now (the container teardown path's own optimistic half, at its
+/// shell face), instead of waiting for the protocol echo + the next list
+/// snapshot. The workspace-side archive paths (`/exit`, `cmd-;`) have no
+/// menu handler to do this half for them. `false` when no shell is live.
 pub fn drop_sidebar_row(id: &str, cx: &mut App) -> bool {
     let Some(shell) = shell_handle() else {
         return false;

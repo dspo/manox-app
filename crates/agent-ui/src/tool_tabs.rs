@@ -46,16 +46,36 @@ pub const PTY_TAB_KINDS: [&str; 4] = ["terminal", "claude", "codex", "copilot"];
 /// grant, an external container's spawn snapshot), falling back to home: a
 /// terminal has to spawn SOMEWHERE.
 pub(crate) fn thread_cwd_or_home(cx: &App) -> std::path::PathBuf {
-    crate::dispatch::workspace_global()
-        .and_then(|ws| {
-            let fg = ws.read(cx).foreground_container_id(cx)?;
-            Some(ws.read(cx).container_attrs(&fg, cx).cwd)
-        })
-        .unwrap_or_else(|| {
+    thread_attrs_for_spawn(cx).0
+}
+
+/// The FOREGROUND CONTAINER's attrs snapshot for a standalone terminal spawn
+/// (D10/D6): the cwd the terminal roots at, and the env it inherits (D11's
+/// approved capability — an external container's creation-time copy; a
+/// native container's view re-captures the world at this read, which is the
+/// honest capture the runtime's lack of environment history leaves). Falls
+/// back to home + no overrides: a terminal has to spawn somewhere.
+pub(crate) fn thread_attrs_for_spawn(cx: &App) -> (std::path::PathBuf, Vec<(String, String)>) {
+    let attrs = crate::dispatch::workspace_global().and_then(|ws| {
+        let fg = ws.read(cx).foreground_container_id(cx)?;
+        Some(ws.read(cx).container_attrs(&fg, cx))
+    });
+    match attrs {
+        Some(attrs) => {
+            let env = attrs
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            (attrs.cwd, env)
+        }
+        None => (
             std::env::var("HOME")
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| ".".into())
-        })
+                .unwrap_or_else(|_| ".".into()),
+            Vec::new(),
+        ),
+    }
 }
 
 // ── integrated terminal ────────────────────────────────────────────────────
@@ -111,7 +131,8 @@ impl ToolTab for TerminalTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
-        match spawn_standalone_terminal(&thread_cwd_or_home(cx), cx) {
+        let (cwd, env) = thread_attrs_for_spawn(cx);
+        match spawn_standalone_terminal(&cwd, &env, cx) {
             Ok(view) => store.put(&self.id, view),
             Err(e) => store.set_error(
                 &self.id,
@@ -1061,17 +1082,30 @@ impl ToolTab for DiffTab {
 
 /// A standalone PTY spawn (the chrome-example path): the tab owns its
 /// terminal fully; closing the tab drops the view and tears the process
-/// tree down with it.
+/// tree down with it. The PTY inherits the owning container's env snapshot
+/// (D11) layered over the process environment, with the user's
+/// `[terminal].env` (settings) applying last and winning — the same
+/// authority `default_source` gives it, now over a container-inherited base.
 pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
+    env: &[(String, String)],
     cx: &mut App,
 ) -> Result<Entity<terminal_ui::TerminalView>, String> {
     // An app-owned PTY rooted at `cwd`: the integrated terminal is an
     // app-side surface no agent turn touches, and the shell must land where
     // the caller picked — the foreground thread's project for the dock and
     // right-pane spawns, the cascade's folder for the project menu.
-    let source: Box<dyn manox_terminal::pty_source::PtySource> =
-        manox_terminal::pty::default_source(cwd, 80, 24).map_err(|e| e.to_string())?;
+    // `default_source` reads shell + env from settings alone; this spawn
+    // needs the container's env slice between the process world and the
+    // user's settings, so the source is built directly (`pty::open` is the
+    // public constructor `default_source` wraps).
+    let settings = manox_terminal::settings::load();
+    let mut env_layer: Vec<(String, String)> = env.to_vec();
+    env_layer.extend(settings.env.iter().cloned());
+    let source: Box<dyn manox_terminal::pty_source::PtySource> = Box::new(
+        manox_terminal::pty::open(cwd, 80, 24, settings.shell.as_deref(), &env_layer)
+            .map_err(|e| e.to_string())?,
+    );
     let id = format!("chrome-assembly:$SHELL:{}", next_instance_id("pty"));
     let handle = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, source)
         .map_err(|e| e.to_string())?;
@@ -1106,7 +1140,8 @@ impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
     }
 
     fn open(&self, _window: &mut Window, cx: &mut App) -> Result<gpui::AnyView, String> {
-        let view = spawn_standalone_terminal(&thread_cwd_or_home(cx), cx)?;
+        let (cwd, env) = thread_attrs_for_spawn(cx);
+        let view = spawn_standalone_terminal(&cwd, &env, cx)?;
         Ok(gpui::AnyView::from(view))
     }
 }

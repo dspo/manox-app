@@ -240,10 +240,11 @@ impl SessionMultiplexer {
     /// `archivedChanged(false)` write. Each confirms with a notify so the
     /// sidebar re-projects off the store's optimistic state.
     pub fn stop_container(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, _| {
+        self.store.update(cx, |store, cx| {
             store.teardown_containers(
                 std::slice::from_ref(&session_id.to_string()),
                 steer_agent_chat_ui::ahp_store::TeardownMode::StopAll,
+                cx,
             );
         });
         cx.notify();
@@ -255,10 +256,11 @@ impl SessionMultiplexer {
     /// (row menu, batch bar, `cmd-;`, `/new`, `/exit`) all land here through
     /// the workspace's confirm-or-direct entry.
     pub fn archive_containers(&mut self, session_ids: &[String], cx: &mut Context<Self>) {
-        self.store.update(cx, |store, _| {
+        self.store.update(cx, |store, cx| {
             store.teardown_containers(
                 session_ids,
                 steer_agent_chat_ui::ahp_store::TeardownMode::Archive,
+                cx,
             );
         });
         cx.notify();
@@ -269,24 +271,6 @@ impl SessionMultiplexer {
     pub fn revive_container(&mut self, session_id: &str, cx: &mut Context<Self>) {
         self.store.update(cx, |store, _| {
             store.revive_container(session_id);
-        });
-        cx.notify();
-    }
-
-    /// Archive (or unarchive) sessions in one write — the generic
-    /// `archivedChanged` forward. The container gestures do NOT ride it (an
-    /// archive is a teardown command, an unarchive is
-    /// [`Self::revive_container`]); the unarchived direction of a plain id
-    /// list still goes through here.
-    pub fn archive_sessions(
-        &mut self,
-        session_ids: &[String],
-        archived: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.store.update(cx, |store, cx| {
-            store.archive_sessions(session_ids, archived);
-            cx.notify();
         });
         cx.notify();
     }

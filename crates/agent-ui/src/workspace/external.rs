@@ -211,10 +211,6 @@ impl Workspace {
 
     /// The browser tab ids a container owns (the teardown's count/read face
     /// for the `/exit` scope — the leg only reports what it would close).
-    /// Empty on Linux/FreeBSD, where the integrated browser is compiled out
-    /// and no tab ever registers.
-    /// The browser tab ids a container owns (the teardown's count/read face
-    /// for the `/exit` scope — the leg only reports what it would close).
     /// Compiled out with the integrated browser: every caller is a browser
     /// leg, so on Linux/FreeBSD the read (and the legs) do not exist.
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]

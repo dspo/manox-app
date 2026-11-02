@@ -156,7 +156,10 @@ pub fn group_menu(
                 .icon(Icon::default().path("icons/terminal.svg"))
                 .on_click(move |_, window, cx| {
                     let cwd = dir_terminal.clone().unwrap_or_else(|| fallback_cwd(cx));
-                    match crate::tool_tabs::spawn_standalone_terminal(&cwd, cx) {
+                    // The shell PTY IS the new container's 0 号 — no
+                    // container env to inherit; its own attrs snapshot is
+                    // captured at the registration that follows.
+                    match crate::tool_tabs::spawn_standalone_terminal(&cwd, &[], cx) {
                         Ok(view) => launch_external(
                             &ws_terminal,
                             ExternalSessionLaunch {

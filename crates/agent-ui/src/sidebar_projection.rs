@@ -119,8 +119,8 @@ impl ContainerRow {
     /// this client never subscribed AND through a fold's pre-snapshot
     /// window. The container-tree facts (`memberKind` / `parentSessionId`)
     /// read the summary's `_meta.x-manox` slot — the same read the row pin
-    /// does (`ext_and_meta_pinned`); a summary without the slot (today's
-    /// pinned runtime) reads a top-level captain with no parent.
+    /// does (`ext_and_meta_pinned`); a summary without the slot reads a
+    /// top-level captain with no parent.
     pub fn from_summary(summary: &SessionSummary, pinned: bool, pending_ask: bool) -> Self {
         let bits = summary.status;
         let needs_auth = bits & WireStatus::InputNeeded.bits() != 0;
@@ -416,8 +416,8 @@ mod tests {
     /// The member slot parses through [`ContainerRow::from_summary`]: a
     /// `subagent` memberKind with its parent edge reads a level-1 child, a
     /// `captain` annotation reads top-level, and a summary WITHOUT the slot
-    /// (today's pinned runtime never sends it) reads a top-level captain —
-    /// the fold must never hide what it does not recognize.
+    /// reads a top-level captain — the fold must never hide what it does
+    /// not recognize.
     #[test]
     fn from_summary_parses_the_member_slot() {
         let summary = |meta: serde_json::Value| -> SessionSummary {

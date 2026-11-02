@@ -1054,12 +1054,13 @@ impl Shell {
         let _ = cx;
     }
 
-    /// Archive/unarchive local reconciliation. Since the container lifecycle
-    /// (plan A6) the row drop on ARCHIVE is the host teardown path's own
-    /// optimistic half — the callers are the host's `drop_sidebar_row`
-    /// primitive and the batch bar's commit face, never the row menu (whose
-    /// confirm dialog must not pre-drop). Unarchiving flips the row's
-    /// partition flag so the next snapshot only confirms it.
+    /// Archive/unarchive local reconciliation. The ARCHIVE direction is the
+    /// container teardown path's own optimistic half at its shell face — its
+    /// only caller is the host's `drop_sidebar_row` primitive (the
+    /// workspace-side archive gestures have no menu handler to do this half
+    /// for them); the row menu and the batch bar never pre-drop (a
+    /// confirmation may cancel). The UNARCHIVE direction keeps the local
+    /// flip: the row is present, the next snapshot confirms it.
     pub fn set_archived(&mut self, id: &str, archived: bool, cx: &mut App) {
         if archived {
             self.sessions.retain(|s| s.id != id);
