@@ -159,7 +159,11 @@ pub fn group_menu(
                     // The shell PTY IS the new container's 0 号 — no
                     // container env to inherit; its own attrs snapshot is
                     // captured at the registration that follows.
-                    match crate::tool_tabs::spawn_standalone_terminal(&cwd, &[], cx) {
+                    let no_attrs = crate::workspace::container::ContainerAttrs {
+                        cwd: cwd.clone(),
+                        env: Default::default(),
+                    };
+                    match crate::tool_tabs::spawn_standalone_terminal(&cwd, &no_attrs, cx) {
                         Ok(view) => launch_external(
                             &ws_terminal,
                             ExternalSessionLaunch {
