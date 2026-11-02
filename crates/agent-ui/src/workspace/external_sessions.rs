@@ -79,8 +79,9 @@ pub(crate) struct ExternalSessionRecord {
     pub attrs: container::ContainerAttrs,
     /// The death predicate's external half (D8): true until the PTY's
     /// child-exit event lands. Flipping it raises
-    /// `container::ContainerEvent::Died`; the record itself stays until the
-    /// lifecycle PR wires the teardown.
+    /// `container::ContainerEvent::Died`; the workspace's subscription runs
+    /// the teardown on it — the record and its sidebar row drop, and every
+    /// resource under the container's key is reclaimed.
     pub alive: bool,
 }
 
@@ -162,12 +163,6 @@ impl Workspace {
     /// the thread switch path).
     pub fn is_external_session(&self, id: &str) -> bool {
         self.externals.iter().any(|s| s.id == id)
-    }
-
-    /// Every live external container's row id (the `/exit` sweep's target
-    /// list — the teardown face kills each).
-    pub(crate) fn external_container_ids(&self) -> Vec<String> {
-        self.externals.iter().map(|s| s.id.clone()).collect()
     }
 
     /// Close a session (the sidebar row's 关闭会话): the ONE container

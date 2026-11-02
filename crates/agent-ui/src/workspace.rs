@@ -471,7 +471,8 @@ pub struct Workspace {
     /// The container-death cascade: the workspace subscribes to its own
     /// [`crate::workspace::container::ContainerEvent`] and tears the dead
     /// container down (external homes drop the record + reclaim the
-    /// resources; native cascade waits for the lifecycle PR).
+    /// resources; native ids ride the archive paths' explicit teardown —
+    /// a native container's death IS the archive gesture).
     _died_sub: Option<Subscription>,
 }
 
@@ -1084,9 +1085,10 @@ impl Workspace {
         ws.observe_conversation(cx);
         // The death cascade (§2.3): the predicate's flip reaches the ONE
         // teardown through the workspace's own emission. External containers
-        // tear down now (D8: process exit drops the row and reclaims the
-        // resources); the native cascade (sub-session archive + row drop)
-        // lands with the lifecycle PR.
+        // tear down here (D8: process exit drops the row and reclaims the
+        // resources); native ids need no subscription leg — a native
+        // container's death IS the archive gesture (D7), and
+        // `archive_containers` runs the teardown for them explicitly.
         ws._died_sub = Some(cx.subscribe(&cx.entity(), |this, _, ev, cx| {
             let container::ContainerEvent::Died(id) = ev;
             if container::ContainerId::is_external_id(id) {
@@ -1271,7 +1273,7 @@ impl Workspace {
     /// what `open_external_session` resolves). Test-support diagnostic.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_external_session_ids(&self) -> Vec<String> {
-        self.external_container_ids()
+        self.externals.iter().map(|s| s.id.clone()).collect()
     }
 
     /// One external container's A1 face — the alive bit, the 0 号-decided

@@ -6,10 +6,9 @@
 //! The sequence plays as progress notes in the conversation (the
 //! annotation-card face `add_info_message` writes), one beat per action so
 //! the teardown is legible: the subagent observation panels, the right
-//! pane's terminals + CLI-agent tabs + the dock's terminal + the external
-//! containers (the ONE teardown kills their processes and drops their rows),
-//! the container's own browser tabs (other containers' tabs survive — the
-//! reclaim is keyed, not a global nuke), and then the landing beat: ONE
+//! pane's terminals + CLI-agent tabs + the dock's terminal, the container's
+//! own browser tabs (other containers' tabs survive — the reclaim is keyed,
+//! not a global nuke), and then the landing beat: ONE
 //! container teardown (archive mode — the `x-manox/teardown` command, whose
 //! host waterfall cancels the turn, interrupts the live runs, settles the
 //! background tasks and cascades the archive; the path's optimistic half has
@@ -94,14 +93,13 @@ impl Workspace {
                 .ok();
                 beat(cx).await;
             }
-            // ── terminal subprocesses (pane tabs + the dock + externals) ──
+            // ── terminal subprocesses (the pane tabs + the dock) ─────────
             let has_terminals = this
-                .update(cx, |ws, cx| {
+                .update(cx, |_, cx| {
                     crate::chrome_assembly::pane_open_kinds(cx)
                         .iter()
                         .any(|k| crate::tool_tabs::PTY_TAB_KINDS.contains(&k.as_str()))
                         || crate::chrome_assembly::dock_terminal_live(cx)
-                        || !ws.external_container_ids().is_empty()
                 })
                 .unwrap_or(false);
             if has_terminals {
@@ -114,18 +112,16 @@ impl Workspace {
                 beat(cx).await;
                 // The PTY tab kinds' `close` never re-enters the workspace
                 // (store resets + shell-only dock take), so they run inside
-                // the lease. The external containers join the sweep here
-                // (the ONE teardown: kill the process, drop the row,
-                // reclaim the resources — D8's close semantics on /exit's
-                // way down).
-                this.update(cx, |ws, cx| {
+                // the lease. Background external containers are NOT touched:
+                // they are independent containers (D6/D8) with their own 0 号
+                // processes — `/exit` is the outgoing container's death only,
+                // and the app process quitting is the only thing that ends
+                // the survivors, by design.
+                this.update(cx, |_, cx| {
                     for kind in crate::tool_tabs::PTY_TAB_KINDS {
                         crate::chrome_assembly::close_tool_tabs_of_kind(kind, cx);
                     }
                     crate::chrome_assembly::stop_dock_terminal(cx);
-                    for id in ws.external_container_ids() {
-                        ws.teardown_container(&id, cx);
-                    }
                 })
                 .ok();
                 this.update(cx, |ws, cx| ws.note("exit-terminal-killed", &[], cx))
