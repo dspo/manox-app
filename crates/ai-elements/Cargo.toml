@@ -22,13 +22,18 @@ gpui-component.workspace = true
 # copy come from the window-level selection instead of per-mock rewrites.
 gpui-base.workspace = true
 
+# The row model (`CodeLine`) and its color/metrics policy live in
+# steer-components' `code_surface` — the one vocabulary every editor-looking
+# surface reads — and the tool bodies ride the same TextView machinery the
+# transcript's markdown uses.
+steer-components.workspace = true
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 gpui_platform.workspace = true
 gpui-kit-assets.workspace = true
 # The gallery renders reasoning bodies through the real markdown component, so
 # the demonstrated content is what the app shows rather than a stand-in.
-steer-components.workspace = true
 
 # The offscreen visual harness (tests/visual.rs) reads back a Metal texture,
 # so it is macOS-only — as is the platform crate it needs.

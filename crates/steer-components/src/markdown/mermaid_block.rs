@@ -76,9 +76,16 @@ fn raster_fence(
         .ok()?;
     let raster: Arc<RenderImage> = rasterize(renderer, svg.as_bytes())?;
     Some(
-        MarkdownNode::new(BLOCK_NAME, raster)
-            .text(fence)
-            .markdown(fence),
+        MarkdownNode::new(
+            BLOCK_NAME,
+            Arc::new(super::svg_block::DiagramFence::new(
+                raster,
+                body,
+                Some(BLOCK_NAME),
+            )),
+        )
+        .text(fence)
+        .markdown(fence),
     )
 }
 
@@ -123,10 +130,10 @@ mod tests {
             .expect("the flowchart renders and rasterizes");
 
         assert_eq!(block.name(), BLOCK_NAME);
-        let raster = block
-            .data::<Arc<RenderImage>>()
-            .expect("the block carries its raster");
-        let size = raster.size(0);
+        let fence = block
+            .data::<Arc<crate::markdown::svg_block::DiagramFence>>()
+            .expect("the block carries its payload");
+        let size = fence.raster.size(0);
         assert!(
             size.width.0 > 0 && size.height.0 > 0,
             "a drawn picture: {size:?}"

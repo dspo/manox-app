@@ -11281,6 +11281,7 @@ dependencies = [
  "mathra",
  "mermaid-rs-renderer",
  "ropey",
+ "steer-i18n",
  "vte",
 ]
 
