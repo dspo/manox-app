@@ -22,8 +22,9 @@
 //! workspace; the workspace subscribes to its own emission and runs the
 //! teardown ([`Workspace::teardown_container`]) — external containers drop
 //! their record (the sidebar row goes with it) and reclaim every resource
-//! under their key. The native half of the cascade (sub-session archive +
-//! row drop) lands with the lifecycle PRs.
+//! under their key. The native half needs no subscription leg: a native
+//! container's death IS the archive gesture (D7), and the archive paths drop
+//! the row.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -170,6 +171,19 @@ pub enum ContainerSeed<'a> {
     External(ExternalContainerSeed<'a>),
 }
 
+/// Whether the native half consults the draft refill. The refill is the
+/// sidebar gesture's return-to-draft semantics; `/new`'s landing opts out —
+/// its archive already disposed of the outgoing conversation, and the fresh
+/// sibling must never resurrect a draft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefillPolicy {
+    /// A never-materialized conversation under the same project (or
+    /// project-less) is that project's unfinished draft — return to it.
+    Draft,
+    /// Always mint a fresh sibling; the refill lookup never runs.
+    Fresh,
+}
+
 /// The native create intent — everything downstream of the draft-refill
 /// decision (the inherited picks ride the wire create intent).
 pub struct NativeContainerSeed {
@@ -182,6 +196,8 @@ pub struct NativeContainerSeed {
     pub access: Option<String>,
     /// The inherited reasoning effort.
     pub effort: Option<String>,
+    /// The draft-refill policy ([`RefillPolicy`]).
+    pub refill: RefillPolicy,
 }
 
 /// The external record seed — the already-spawned PTY's identity and row
@@ -212,8 +228,9 @@ pub struct ExternalContainerSeed<'a> {
 
 /// The death-predicate flip (§2.3): the container's 0 号 reached its kind's
 /// death — a manox session archived (D7), an external process exited (D8).
-/// Emitted on the [`Workspace`]; the teardown cascade lands with the
-/// lifecycle PRs.
+/// Emitted on the [`Workspace`]; the workspace's own subscription runs the
+/// external teardown on it, and the archive path raises it for the native
+/// ids it retires (the explicit call there is the reclaim, not a duplicate).
 #[derive(Debug)]
 pub enum ContainerEvent {
     /// The container id whose `alive` read flipped to false.
@@ -250,18 +267,22 @@ impl Workspace {
             model,
             access,
             effort: effort_str,
+            refill,
         } = intent;
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
-        // The draft refill: a never-materialized conversation under the
-        // same project (or project-less) is that project's unfinished
-        // draft — return to it instead of minting a sibling. Its row
-        // already carries the model/access picks the user left there.
-        // The FOREGROUND session and archived rows are excluded: the
-        // landing conversation (created project-less at boot, never
-        // spoken) is itself the latest project-less draft, and a just
-        // archived draft would be resurrected — refilling either would
-        // make "new session" a no-op on the very session it should leave.
+        // The draft refill (the [`RefillPolicy::Draft`] policy): a
+        // never-materialized conversation under the same project (or
+        // project-less) is that project's unfinished draft — return to it
+        // instead of minting a sibling. Its row already carries the
+        // model/access picks the user left there. The FOREGROUND session and
+        // archived rows are excluded: the landing conversation (created
+        // project-less at boot, never spoken) is itself the latest
+        // project-less draft, and a just archived draft would be resurrected
+        // — refilling either would make "new session" a no-op on the very
+        // session it should leave. [`RefillPolicy::Fresh`] skips the lookup:
+        // the caller already disposed of the outgoing conversation (`/new`'s
+        // landing) and the fresh sibling must not resurrect a draft.
         let foreground = self
             .chat
             .read(cx)
@@ -269,15 +290,19 @@ impl Workspace {
             .as_ref()
             .map(|(_, sid)| sid.clone());
         let objects = manox_agent::object_store::ObjectStore::try_global();
-        let refill = objects.as_ref().and_then(|store| {
-            store.latest_draft(
-                project
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .as_deref(),
-            )
-        });
-        let refill = refill.filter(|row| {
+        let refill_row = (refill == RefillPolicy::Draft)
+            .then(|| {
+                objects.as_ref().and_then(|store| {
+                    store.latest_draft(
+                        project
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .as_deref(),
+                    )
+                })
+            })
+            .flatten();
+        let refill = refill_row.filter(|row| {
             !row.archived
                 && foreground.as_deref() != Some(row.id.as_str())
                 && !self.session_retired(cx, &row.id)

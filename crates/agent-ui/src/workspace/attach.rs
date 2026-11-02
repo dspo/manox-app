@@ -183,6 +183,7 @@ impl Workspace {
                 model,
                 access,
                 effort: effort_str,
+                refill: container::RefillPolicy::Draft,
             }),
             cx,
         );
@@ -806,23 +807,13 @@ impl Workspace {
     }
 
     /// The inheriting fresh-container creation `/new` lands after its
-    /// archive. Extracted verbatim from the old post-archive tail — the
-    /// inheritance reads the live foreground fold and object row, which is
-    /// still the outgoing (just archived) session's at this point.
+    /// archive. The inheritance reads the live foreground fold and object
+    /// row, which is still the outgoing (just archived) session's at this
+    /// point, and the construction rides the ONE creation entry with the
+    /// [`container::RefillPolicy::Fresh`] policy — the archive already
+    /// disposed of the outgoing conversation, so no draft refill may run.
     fn open_inheriting_container(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let old = self.chat.read(cx).thread.clone();
-        let cwd = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
-                    .cwd()
-                    .map(std::path::PathBuf::from)
-            })
-            .unwrap_or_else(|| old.read(|t| t.cwd().to_path_buf()));
         let project = self
             .chat
             .read(cx)
@@ -848,64 +839,23 @@ impl Workspace {
                 .access_mode()
                 .map(str::to_string)
         });
-        // U6b③: the inherited state rides the v2 CreateSession intent —
-        // the compat-note create this replaces carried only the cwd, so
-        // the parked model/project/effort/access never reached the
-        // server (the #765 round-2 inheritance defect's shape); the
-        // receipt's minted id attaches through the standard
-        // created-session path.
-        let cwd_str = cwd.to_string_lossy().to_string();
+        // U6b③: the inherited state rides the v2 CreateSession intent — the
+        // compat-note create this replaced carried only the cwd, so the
+        // parked model/project/effort/access never reached the server (the
+        // #765 round-2 inheritance defect's shape). The wire-shaped model
+        // rides the seed; the entry's native half lands the row, the
+        // createSession and the attach.
         let model_str = model.as_ref().map(|m| format!("{}/{}", m.provider, m.id));
-        let ws = cx.weak_entity();
-        let dir_for_store = project.clone();
-        let sid = uuid::Uuid::new_v4().to_string();
-        // The object row, exactly as `new_container` lands it: this
-        // conversation is minted here and never passes through that path.
-        land_conversation_row(
-            &sid,
-            project.as_deref(),
-            model.as_ref().map(|m| m.provider.as_str()),
-            model.as_ref().map(|m| m.id.as_str()),
-            access.as_deref(),
-            effort_str.as_deref(),
+        self.create_container(
+            container::ContainerSeed::Manox(container::NativeContainerSeed {
+                project,
+                model: model_str,
+                access,
+                effort: effort_str,
+                refill: container::RefillPolicy::Fresh,
+            }),
+            cx,
         );
-        let mut config = serde_json::Map::new();
-        if let Some(model) = &model_str {
-            config.insert("model".into(), serde_json::json!(model));
-        }
-        if let Some(access) = &access {
-            config.insert("accessMode".into(), serde_json::json!(access));
-        }
-        if let Some(effort) = &effort_str {
-            config.insert("reasoningEffort".into(), serde_json::json!(effort));
-        }
-        // Same directory rule as `new_container`: the intent's working
-        // directories are the only carrier — bind the inherited cwd so the
-        // fresh thread keeps its project instead of landing directory-less.
-        let cwds = vec![format!("file://{cwd_str}")];
-        let reply = self.with_foreground_store(cx, |store, _| {
-            store.create_session(&sid, cwds, Some(config))
-        });
-        let sid2 = sid.clone();
-        cx.spawn(async move |_, cx| {
-            let failed = match reply {
-                Some(reply) => matches!(reply.recv().await, Ok(Err(_))),
-                None => true,
-            };
-            if failed {
-                tracing::warn!("inheriting create failed");
-                return;
-            }
-            if let Some(dir) = &dir_for_store {
-                let _ = ws.update(cx, |_ws, cx| {
-                    Workspace::register_project_in_store(dir, cx);
-                });
-            }
-            let _ = ws.update_in(cx, |this, window, cx| {
-                this.attach_created_session(&sid2, window, cx);
-            });
-        })
-        .detach();
         let _ = window;
     }
 
