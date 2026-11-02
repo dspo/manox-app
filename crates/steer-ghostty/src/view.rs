@@ -24,8 +24,12 @@ const FONT_SIZE: f32 = 13.0;
 const LINE_HEIGHT: f32 = 1.3;
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
-const THEME_FG: Rgb = Rgb::new(0xd4, 0xd4, 0xd4);
-const THEME_BG: Rgb = Rgb::new(0x10, 0x13, 0x18);
+// Mirror the chrome conversation panel (steer-agent-chrome-ui palette
+// CARD_BG 0xFFFFFF / FG 0x202020): the terminal reads as part of the chat
+// surface, not a dark inset.
+const THEME_FG: Rgb = Rgb::new(0x20, 0x20, 0x20);
+const THEME_BG: Rgb = Rgb::new(0xff, 0xff, 0xff);
+const WINDOW_BG_HEX: u32 = 0xffffffff;
 
 /// Events from the terminal world into the view's pump task.
 enum TermEvent {
@@ -79,6 +83,14 @@ pub struct GhosttyView {
     enc: RefCell<KeyEncoder>,
     /// Grid size the terminal+pty are currently resized to; render-driven.
     last_grid: Cell<(u16, u16)>,
+    /// While focused, owns the keyboard: this runs before any workbench
+    /// binding or focus traversal resolves (the integrated terminal's
+    /// mechanism) — without it "tab" is eaten by focus traversal and the
+    /// shell never sees \t.
+    key_interceptor: Option<gpui::Subscription>,
+    /// Focus on the first render only; afterwards click-to-focus, so the
+    /// terminal never steals the composer's focus on repaints.
+    focused_once: Cell<bool>,
     /// Live OSC title, mirrored by the pump on the UI thread.
     live_title: RefCell<Option<String>>,
     exited: Cell<bool>,
@@ -161,11 +173,39 @@ impl GhosttyView {
                         .expect("key encoder"),
                 ),
                 last_grid: Cell::new((0, 0)),
+                key_interceptor: None,
+                focused_once: Cell::new(false),
                 live_title: RefCell::new(None),
                 exited: Cell::new(false),
             };
             view.start_pump(events_rx, cx);
             view
+        });
+        // Keyboard ownership: intercept every keystroke while focused,
+        // before bindings and focus traversal (see the field doc).
+        view.update(cx, |view, cx| {
+            let weak = cx.entity().downgrade();
+            let interceptor = cx.intercept_keystrokes(move |ev, window, cx| {
+                let Some(view) = weak.upgrade() else {
+                    return;
+                };
+                let focused = view
+                    .read_with(cx, |v, _| v.focus.clone())
+                    .is_focused(window);
+                if !focused {
+                    return;
+                }
+                // cmd+* stays with the window (quit, tab switching, ...);
+                // the view's key-down listener still pastes cmd+v.
+                if ev.keystroke.modifiers.platform {
+                    return;
+                }
+                let keystroke = ev.keystroke.clone();
+                if view.update(cx, |v, cx| v.handle_key(&keystroke, cx)) {
+                    cx.stop_propagation();
+                }
+            });
+            view.key_interceptor = Some(interceptor);
         });
         Ok(view)
     }
@@ -223,20 +263,23 @@ impl GhosttyView {
 
     fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut gpui::Context<Self>) {
         let ks = &ev.keystroke;
-        let mods = &ks.modifiers;
-
-        if mods.platform {
-            // cmd+v pastes through the terminal (bracketed-paste aware);
-            // every other cmd combination stays with the window.
-            if ks.key == "v"
-                && let Some(text) = cx.read_from_clipboard().and_then(|c| c.text())
-            {
-                let _ = self.shared.inner.lock().unwrap().term.paste(&text);
-            }
-            return;
+        // Fallback path for cmd+* (the interceptor deliberately leaves those
+        // to the window): cmd+v pastes, everything else stays with the host.
+        if ks.modifiers.platform
+            && ks.key == "v"
+            && let Some(text) = cx.read_from_clipboard().and_then(|c| c.text())
+        {
+            let _ = self.shared.inner.lock().unwrap().term.paste(&text);
         }
-        if mods.function {
-            return;
+    }
+
+    /// Translate one keystroke to the PTY. Returns whether the key was
+    /// consumed (the interceptor then stops propagation so no workbench
+    /// binding or focus traversal can also act on it).
+    fn handle_key(&mut self, ks: &gpui::Keystroke, _cx: &mut gpui::Context<Self>) -> bool {
+        let mods = &ks.modifiers;
+        if mods.platform || mods.function {
+            return false;
         }
 
         let key = input::map_key(&ks.key);
@@ -250,9 +293,11 @@ impl GhosttyView {
             enc.sync_from_terminal(&inner.term);
             enc.encode_press(key, gmods, utf8.as_deref())
         };
-        if !bytes.is_empty() {
-            self.pty.write(&bytes);
+        if bytes.is_empty() {
+            return false;
         }
+        self.pty.write(&bytes);
+        true
     }
 
     fn on_wheel(
@@ -274,7 +319,8 @@ impl GhosttyView {
 
 impl Render for GhosttyView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        if !self.focus.is_focused(window) {
+        if !self.focused_once.get() {
+            self.focused_once.set(true);
             window.focus(&self.focus, cx);
         }
         gpui::div()
@@ -289,7 +335,7 @@ impl Render for GhosttyView {
             )
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_wheel))
-            .bg(rgba(0x101318ff))
+            .bg(rgba(WINDOW_BG_HEX))
             .child(GhosttyElement { view: cx.entity() })
     }
 }
@@ -677,7 +723,7 @@ impl Element for GhosttyElement {
         cx: &mut App,
     ) {
         // Default background.
-        window.paint_quad(fill(prepaint.bounds, rgba(0x101318ff)));
+        window.paint_quad(fill(prepaint.bounds, rgba(WINDOW_BG_HEX)));
 
         for (bounds, color) in &prepaint.bg_quads {
             window.paint_quad(fill(*bounds, *color));
