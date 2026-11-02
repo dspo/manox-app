@@ -531,7 +531,11 @@ impl ChannelBook {
         }
         let Some(book) = self.ext.get_mut(channel) else {
             // An extension delta for a channel this client never subscribed:
-            // tolerated (the host may broadcast catalogue changes).
+            // tolerated (the host may broadcast catalogue changes). A
+            // `childRunsChanged` delta arriving before its channel's baseline
+            // is dropped BY DESIGN: the roster is not baseline-independent —
+            // the baseline's journal fold (or a later settle row) restores
+            // the run.
             return FoldEffect::Ignored;
         };
         match apply_ext(book, value) {
@@ -4562,6 +4566,48 @@ mod tests {
 
         // The roster is per work channel: another session's view is empty.
         assert!(child_runs_of(&book, "s-2").is_empty());
+    }
+
+    /// The delta-before-baseline drop (the ext-bag-miss branch's documented
+    /// semantics): a `childRunsChanged` arriving before its channel's
+    /// baseline has no ext bag to fold into — Ignored, the roster stays
+    /// empty. The baseline's journal fold restores the run: the roster is
+    /// not baseline-independent.
+    #[test]
+    fn a_child_run_delta_before_its_baseline_is_dropped_and_the_baseline_restores() {
+        let mut book = ChannelBook::default();
+        let started = serde_json::json!({
+            "runId": "sub-1", "kind": "Explore", "label": "survey",
+            "status": "running", "startedAt": "2026-10-15T00:00:00.000Z",
+            "chat": "ahp-chat:/sub-1",
+        });
+        // The channel has no baseline yet: the delta has no bag to land in.
+        assert_eq!(
+            book.apply(
+                &work_uri("s-1"),
+                &StateAction::Unknown(serde_json::json!({
+                    "type": "x-manox-work/childRunsChanged",
+                    "run": started.clone(),
+                })),
+            ),
+            FoldEffect::Ignored,
+            "a delta before its channel's baseline is dropped by design"
+        );
+        assert!(child_runs_of(&book, "s-1").is_empty());
+        // The baseline folds the whole roster: the run the dropped delta
+        // carried comes back.
+        assert_eq!(
+            book.apply(
+                &work_uri("s-1"),
+                &StateAction::Unknown(serde_json::json!({
+                    "type": "x-manox/baseline",
+                    "state": { "childRuns": { "sub-1": started } },
+                })),
+            ),
+            FoldEffect::Changed
+        );
+        assert_eq!(child_runs_of(&book, "s-1").len(), 1);
+        assert_eq!(child_runs_of(&book, "s-1")[0].run_id, "sub-1");
     }
 
     /// The work-channel baseline (a pure journal fold upstream) carries the
