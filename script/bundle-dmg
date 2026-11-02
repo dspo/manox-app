@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Bundle the macOS .app and wrap it in a compressed disk image (.dmg) — the
+# artifact a macOS user actually installs from.
+#
+# Usage: script/bundle-dmg [options]
+# Options:
+#   -d              Compile in debug mode (passed through to bundle-mac)
+#   --skip-bundle   Reuse the .app already present under target/<triple>/<profile>/
+#   -h              Display this help and exit
+#
+# The image lands in dist/<App>_<version>_macos_<arch>.dmg and carries an
+# /Applications symlink beside the .app, so installing is a single drag. The
+# .app itself is assembled and ad-hoc signed by script/bundle-mac (see its
+# header) — this script only verifies the signature it inherits, never re-signs
+# it, so the image cannot diverge from the bundle's signing story.
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${root}"
+
+debug=false
+skip_bundle=false
+
+help_info() {
+    echo "
+Usage: ${0##*/} [options]
+Bundle the macOS .app as a .dmg (disk image with an /Applications symlink).
+
+Options:
+  -d              Compile in debug mode (passed through to bundle-mac)
+  --skip-bundle   Reuse the .app already present under target/<triple>/<profile>/
+  -h              Display this help and exit
+"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d) debug=true;;
+        --skip-bundle) skip_bundle=true;;
+        -h|--help) help_info; exit 0;;
+        *) echo "Error: unknown option '$1'"; help_info; exit 1;;
+    esac
+    shift
+done
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "Error: this script only runs on macOS (detected $(uname -s))"
+    exit 1
+fi
+
+triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+case "${triple}" in
+    aarch64-apple-darwin) arch="arm64";;
+    x86_64-apple-darwin) arch="x86_64";;
+    *) echo "Error: unsupported host triple '${triple}'"; exit 1;;
+esac
+
+profile_dir="release"
+bundle_args=(--no-cx-link)
+if [[ "${debug}" = true ]]; then
+    profile_dir="debug"
+    bundle_args=(-d --no-cx-link)
+fi
+
+# --no-cx-link always: a distributable image must not create a symlink into the
+# building host's ~/.local/bin (bundle-mac's dev convenience, not packaging).
+if [[ "${skip_bundle}" != true ]]; then
+    ./script/bundle-mac "${bundle_args[@]}"
+fi
+
+# The bundle name comes from [package.metadata.bundle]; glob instead of
+# re-parsing that metadata here so the two scripts cannot drift.
+shopt -s nullglob
+apps=("target/${triple}/${profile_dir}"/*.app)
+shopt -u nullglob
+if [[ ${#apps[@]} -ne 1 ]]; then
+    echo "Error: expected exactly one .app under target/${triple}/${profile_dir}, found ${#apps[@]}"
+    echo "Hint: run ./script/bundle-mac (or drop --skip-bundle) first"
+    exit 1
+fi
+app="${apps[0]}"
+app_name="$(basename "${app}" .app)"
+
+# Same resolver bundle-mac uses (workspace-inherited version); a failed lookup
+# must abort rather than ship an image named after a guessed version.
+app_version=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
+                   p=[x for x in pkgs if x['name']=='steer-app']; \
+                   print(p[0]['version'] if p else '')")
+[[ -n "${app_version}" ]] || { echo "Error: cannot resolve the steer-app version from cargo metadata"; exit 1; }
+
+mkdir -p dist
+out="dist/${app_name}_${app_version}_macos_${arch}.dmg"
+
+stage="$(mktemp -d "${TMPDIR:-/tmp}/steer-dmg.XXXXXX")"
+cleanup() { rm -rf "${stage}"; }
+trap cleanup EXIT
+
+# ditto (not cp) preserves the code signature and extended attributes the
+# ad-hoc signature covers; a byte-mangled copy would fail codesign --verify.
+ditto "${app}" "${stage}/${app_name}.app"
+ln -s /Applications "${stage}/Applications"
+
+codesign --verify --strict "${stage}/${app_name}.app"
+
+rm -f "${out}"
+# HFS+ is the conservative filesystem for a floating image (APFS images cannot
+# be opened on older macOS); UDZO is the compressed read-only format.
+hdiutil create -volname "${app_name}" -srcfolder "${stage}" -ov \
+    -format UDZO -fs HFS+ "${out}" >/dev/null
+hdiutil verify "${out}" >/dev/null
+
+echo "Bundle complete: ${out} ($(du -h "${out}" | awk '{print $1}'))"
+echo "Install: open ${out} and drag ${app_name}.app onto Applications"

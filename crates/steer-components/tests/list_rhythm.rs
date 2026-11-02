@@ -1,10 +1,9 @@
 //! List items must stack as line boxes plus one small uniform inter-item gap
 //! (0.8.0 "more restrained" lists): a marker wrap or an uneven gap breaks the
 //! equality, and the gap must stay far under a line box so lists read denser
-//! than paragraphs. The heading ladder is upstream's relative hierarchy
-//! (size, line height and section spacing all scale with the inherited font
-//! size, H1 largest, H6 smallest) — the app pins no overrides, so the guard
-//! pins the ladder's shape. The document tiers are density-equal: the
+//! than paragraphs. The heading ladder is the app-pinned hierarchy: H1–H3
+//! step down in fixed pixels, H4–H6 share the body size — the guard pins the
+//! ladder's shape. The document tiers are density-equal: the
 //! reasoning tier differs from the message body by color alone, so at one
 //! body size the two must measure the same.
 
@@ -216,10 +215,11 @@ fn list_vertical_footprint_matches_body_paragraphs(cx: &mut gpui::TestAppContext
     );
 }
 
-/// Heading ladder under upstream's relative hierarchy: the footprint
-/// descends strictly from H1 to H6, H1 stays within a bounded multiple of the
-/// body line (one section header must not dwarf the transcript), and H4 — the
-/// body-sized rung — sits close to the body line box.
+/// Heading ladder under the app-pinned hierarchy: H1–H3 step down in fixed
+/// pixels, H4–H6 share the body size — below H3 hierarchy rests on weight
+/// and H6's muted color, not footprint — and H1 stays within a bounded
+/// multiple of the body line (one section header must not dwarf the
+/// transcript).
 #[gpui::test]
 fn heading_ladder_descends_and_stays_bounded(cx: &mut gpui::TestAppContext) {
     let body = measure(cx, "alpha bravo charlie");
@@ -231,8 +231,12 @@ fn heading_ladder_descends_and_stays_bounded(cx: &mut gpui::TestAppContext) {
     let h6 = measure(cx, "###### alpha");
 
     assert!(
-        h1 > h2 && h2 > h3 && h3 > h4 && h4 > h5 && h5 > h6,
-        "heading footprints must descend strictly: {h1} {h2} {h3} {h4} {h5} {h6}"
+        h1 > h2 && h2 > h3 && h3 > h4,
+        "the pinned ladder descends H1→H4: {h1} {h2} {h3} {h4}"
+    );
+    assert!(
+        (h4 - h5).abs() <= 0.5 && (h5 - h6).abs() <= 0.5,
+        "H4–H6 are the body-sized rungs, one footprint: {h4} {h5} {h6}"
     );
     assert!(
         h1 <= 3.0 * body,

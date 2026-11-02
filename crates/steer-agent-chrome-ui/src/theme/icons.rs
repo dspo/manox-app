@@ -53,6 +53,8 @@ icon_table! {
     HOME => "icons/house.svg",
     LAYOUT_PANEL => "icons/panel-bottom.svg",
     LAYOUT_SIDEBAR_LEFT => "icons/panel-left.svg",
+    MAXIMIZE => "icons/maximize.svg",
+    MINIMIZE => "icons/minimize.svg",
     LAYOUT_SIDEBAR_RIGHT => "icons/panel-right.svg",
     LINK_EXTERNAL => "icons/external-link.svg",
     MORE => "icons/ellipsis.svg",

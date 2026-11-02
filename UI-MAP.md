@@ -23,9 +23,9 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 根视图 | `steer_agent_chrome_ui::Shell`（壳：38px 工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
 | 侧栏 | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影） |
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
-| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
+| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff——浏览器仅 macOS/Windows，Linux/FreeBSD 编译排除）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
-| Settings | 主区卡内换页：上游 `gpui_component::setting::Settings` 壳（`Workspace::render_settings_card`） |
+| Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4）。注入面挂载期间侧栏被 pin：强制可见、titlebar 隐藏开关惰性化——导航是该模式唯一出口，不可被藏到身后；pin 只借用可见性，卸载时还原用户原先的折叠状态 |
 
 共享状态层不变：`agent-ui`（multiplexer / client_store / browser_host / dispatch / 侧栏投影 /
 slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与消息管线）、`terminal-ui`、
@@ -63,13 +63,13 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 后台线程（ctrl-b 置底 / 切换自动 park） | ✅ | `background_threads` + `attach_thread` parking |
 | CLI agent 终端（Claude Code / Codex / GitHub Copilot） | ✅ | 右栏 ToolTab：先落 provider→model 级联（共享投影 `cascade_provider_groups`），选中即以该端点 `AgentBuilder` 拉起 CLI（PTY relay → `TerminalView`；cwd = 前台线程项目目录） |
 | 集成终端 / VS Code 注入 / ChatGPT.app 注入 | ✅ | 右栏终端页签（$SHELL，独立 PTY）+ 工具菜单的 VS Code / ChatGPT.app 注入启动（后台线程 + 通知，应用独立存活） |
-| Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface |
+| Browser 标签 / Terminal 标签 | ✅ | webview host notify/inbound 桥；平台 terminal surface（Browser 标签仅 macOS/Windows——Linux/FreeBSD 上集成浏览器整体不编译） |
 | TurnNavigator | ✅ | cmd-m 打开；↑/↓ 选条、enter 定位、⌘↵ 回填 composer、⌘C 复制；历史回溯另有 ⌥↑/⌥↓ |
 | TurnRail（左缘轮次导航） | ✅ | 常驻左缘刻度 rail（dsh TurnNavigator 移植，≥2 轮且卡宽 ≥640px 显示）；悬停预览、点击定位、active 随滚动追踪 |
 | 图片附件 | ✅ | 剪贴板粘贴 → chip → 气泡渲染 → 内核 `ContentBlock::Image` 投递（TS `prompt(text, {images})` parity，#438）；steer 带图同路 |
 | MCP | ✅ | 连接核心共享化 + pi AgentTool 桥（#442）；Settings → MCP servers 面板（列表/连接状态/持久开关） |
 | skill / subagent @mentions | ✅ | 共享层 registry（#440）：markdown 斜杆命令 + skill mentions（submit_command/submit_skill）；subagent 定义经 agent_defs 注册（#471） |
-| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读；头部 access-mode 徽章 = dspo/manox#968 的 app 伴随，读子会话自己 session 通道的声明行）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询 |
+| Sub-agent 观察 | ✅ | rail agents 段直读 `background_work`（运行中花名册）；Agent 工具卡片携带 run_id 可点击；右栏 SubagentPanel 钻取子会话（同管线渲染、live、相位三态、只读；头部 access-mode 徽章 = dspo/manox#968 的 app 伴随，读子会话自己 session 通道的声明行）；Captain 条的子代理行在主列打开 SubagentStream 观察页——子会话自己的通道即 live 源，同一 keyed diff 投影（含思考段与工具卡）、只读、无轮询。子代理行与 SubagentStream 头部携带定义声明的展示色（background-work `_meta.agentColor`，Claude 八色词汇经 `views::subagents::agent_color` 映射为身份色点，未知值不着色）——上游「Claude agent frontmatter 全字段适配」的 app 伴随 |
 | 退役（plan mode 整体删除，随上游 manox PR #946） | — | `/plan` 为上游内置 skill（规划契约一次性注入，见 §Slash 行）；plan 裁决 = 单问题 ask（`detail`=plan 正文，经 wire 的 `ChatInputRequest.message` 折入），批准/修订即普通答案；rail 的 plan 节（`UpdatePlan`）仍消费执行进度，快照经 sidecar 持久化、compaction 后可恢复 |
 | Goal | ✅ 部分 | facade+GoalBridge 共享快照、GetGoal/CreateGoal/UpdateGoal 工具、`/goal` 命令、composer chip+状态 popover（attach/reclaim 时按 projection 重新武装 elapsed ticker）；per-turn 记账/自动续跑/BudgetLimited 强制为后续项 |
 | Team | ✅ 部分 | 成员经 `Steer(spawn="TeamMember")` 创建为真实 thread（sidebar 可见、可恢复）；同伴消息经 Steer Inject 路由。旧 roster 容器 `Entity<Team>`、MemberPanel 空壳、composer team chip、sidebar role badge、`TeamDismiss/TeamStatus` 等 roster 工具与授权冒泡已完全退役删除（见 #625）；member→parent 自主汇报未接线（Abort 仅 cancel 当前轮，dismiss/archive 无替代品） |
@@ -491,13 +491,17 @@ projects as the parent chat's AHP background work
 (`leaf.running_subagents()`, `crates/steer-agent-chat-ui/src/ahp_store.rs`) —
 the host opens a run's entry on its first running tick and removes it when the
 run settles, so the rows are exactly the live set. Each row is the same shape
-(`spinner` + `subagent-steering-prefix`「{name}正在驾驶」+ the model tag +
+(`spinner` + 定义声明的身份色点 + `subagent-steering-prefix`「{name}正在驾驶」+ the model tag +
 `·{elapsed}`), where `{name}` is the run's agent type and task label as
 `{type}({topic})` (`task_display_title`: 「Explore(修登录跳转)」— flattened by
 `one_line` and bounded the same way the Captain's own row is: a run's task
 label is runtime text and may carry newlines, and the block must never grow a
-line per input line). The wire's background-work entry carries the topic only;
-the type is resolved from the delegation tool call (its
+line per input line). The identity dot renders the definition's declared
+display color (`_meta.agentColor`, the Claude eight-color vocabulary mapped by
+`views::subagents::agent_color`); an unknown name renders uncolored, like no
+color. The wire's background-work entry carries the topic only;
+the type (and color) ride its `_meta` once the host stamps them — the type
+additionally falls back to the delegation tool call (its
 `ToolResultSubagentContent.agentName`, or the call's own name on a completion
 receipt naming the run) and stays absent when that call is not in the retained
 fold. The model segment names the
@@ -523,7 +527,9 @@ uses, so the rows ARE the child's messages (never a second transcript
 expression). It is
 read-only by design: a child run is driven by the parent's dispatch, not by the
 watcher (no composer, no chips). Header = back control (`Captain` → the
-conversation) + `{type}({topic})`.
+conversation) + the definition's declared identity color dot (same
+`_meta.agentColor` mapping the Captain strip's row renders; absent = uncolored)
++ `{type}({topic})`.
 
 Live model: the host bridges a running child's journal into its own chat
 channel, so the ONE subscribe on open delivers the folded history AND the live
@@ -907,6 +913,12 @@ inbound 写入请求桥 —— 页面没有 Tauri 命令面。进程级桥在构
 - **Read hint** —— `read_text` / `read_dom` / `screenshot` / `eval_script` 从 `https://` 源取到内容后
   显示的一行弱化提示，表明登录态页面内容已暴露给 agent。
 
+**平台范围**：整个集成浏览器（本视图、`WorkspaceBrowserHost`、`BrowserTool` 注册表项、
+composer「内部浏览器」菜单行、steer-webview crate 及其 wry/WebKitGTK/GTK 依赖）在
+Linux/FreeBSD 上经 `#[cfg(not(any(linux, freebsd)))]` 编译排除 —— 无 UI 入口，`web_explore_*`
+工具经 capability provider 收到干净的「not available」拒绝（剪贴板能力保留在
+`capability_host`，全平台）。持久快照里的 browser kind 行在恢复时被右栏静默跳过。
+
 > Source: `crates/agent-ui/src/views/browser_view.rs`
 
 #### DiffTab
@@ -931,37 +943,112 @@ entry，把 `(path, output)` 交给 `ChatHost::open_right_diff` → workspace �
 
 ## 4. ViewMode::Settings
 
-Settings page rendered inside the shell's main card as the upstream `gpui_component::setting::Settings`
-shell (its own sidebar + resizable split + page stack, starting at 240px), swapping the conversation
-column until the back control exits. The exit waits 200ms before flipping the mode back.
+The Settings split layout: Settings reuses the shell's own two-column structure. On
+`enter_settings` the chrome sidebar swaps its session list for the injected settings nav
+(`Shell::sidebar_surface` ← `chrome_assembly::enter_settings_layout`,
+`views/settings_nav::SettingsNavView`), and the main column carries the selected page's detail
+(`Workspace::render_settings_detail`).
+
+#### SettingsNavView
+
+A two-level tree after ZCode's settings patterns: the back control (返回应用 →
+`Workspace::leave_settings`) above labeled groups and 30px icon rows (chrome session-row metrics;
+NEUTRAL active wash — `theme.secondary`, never an accent). Top-level leaves ride unindented;
+grouped leaves indent 18px under their label. The flat leaf order IS the page index space
+(`Workspace::settings_nav`) — pinned by `settings::tests::nav_leaf_order_matches_the_page_factory`.
+Tree shape (`views::settings::NAV`): 通用>常规 · 模型 · Agents · 集成>插件/Skills/MCP ·
+外部工具>ChatGPT.app/Visual Studio Code.app, one Lucide icon per leaf.
+
+#### SettingsDetail
+
+No title bar and no page header of its own — the window toolbar is the drag face, and the nav
+tree already says where you are; the detail never repeats it. Each page is the upstream
+`setting::Settings` shell with a zero-width sidebar AND a hidden header
+(`header_style(div().hidden())`), so only the group stack renders, riding a centered 880px
+column with a 16px top inset inside the main card. Pages (`settings::build_page`; the read-only
+rosters are read against the foreground thread's cwd at view creation and re-read on entry when
+that cwd changed, plus on a plugin install/uninstall):
+
+- 常规 — the language dropdown (Fill card).
+- 模型 — the provider list with a drill-down detail (`views/settings/models.rs`); the endpoint
+  detail's Wire API dropdown is tinted with the project's dedicated wire-api palette. The list is a
+  vertical stack of provider tiles (10px gaps): no card fill, a thin 1px color-coded border
+  (the shared 8-color accent palette, cycled by position; the avatar carries the same tint),
+  36px `Server` avatar · name + API-key-kind/endpoint-count/model-count badges / the first
+  endpoint URL (or 未配置端点). The dashed 「+ 添加 Provider」 sits at the list end. Click →
+  detail: the top row carries the `ArrowLeft` 返回列表 control on the left and the
+  two-step 「删除 Provider」 control on the right. There is NO nested split — the detail is one
+  scrolling column of four bordered section cards (icon + title + rule), stacked in order:
+  基本信息 (名称 input + API Key kind/value) / 环境变量 (key/value rows with per-row −/+ and
+  添加) / 端点配置 (one bordered endpoint card per wire API: Wire API, URL, 启用的 Agents,
+  GitHub Copilot auth; dashed 添加端点; the Wire API dropdown carries the api's dedicated picker
+  color — Blue Anthropic / Cyan Responses / Amber Completions — on its dot, label and border,
+  resolved through `model_catalog::wire_visual`) / 模型列表 (手动配置 / 自动获取 tabs; inline mode renders
+  one bordered card per model with 模型 ID / 描述 / 上下文窗口 / 最大输出 tokens / Wire API
+  checkboxes / 启用的 Agents / 工具调用 / 图片输入 / 环境变量, plus dashed 添加模型). Editable
+  fields autosave as before; the group renders WITHOUT a title (the nav names the page).
+- Agents — the read-only mirror of ZCode's SubagentsSection
+  (`views/settings/agents_page.rs`). The list is a vertical stack of fixed-height item cards
+  (10px gaps): no card fill, a thin 1px color-coded border per item — the definition's DECLARED
+  `color:` (Claude vocabulary) tinted through the chat's one `agent_color` mapping when it
+  declares one, the shared palette cycled by position otherwise; the avatar carries the same
+  tint — 36px rounded-square Bot avatar · name + model/tools badges · two-line clamped
+  description. The group renders WITHOUT a title — the nav tree already names the page.
+  Click → drill-down detail (`Workspace::select_agent`): the top row carries the `ArrowLeft`
+  返回列表 control (back to the list) on the left and the 作用域 face showing the def's origin
+  group (内置 / 用户 / 插件) on the right; then 名称 input / 颜色标记 palette
+  dots / 模型 select (继承会话模型 unless pinned) / 描述 box / 可用工具 (the FULL preset tool
+  catalog — built-in tools excluding MCP servers, skills, plugin/embedder tools and per-agent
+  delegation entries — grouped into 文件与搜索 / 终端与运行时 / 网络与浏览器 / 交互与计划 /
+  任务与目标 / 宿主与协作, each a 3-column grid of checked disabled checkboxes, with a note
+  that the list is preset-only) / 系统提示词 (the REAL prompt — `AgentDef.system_prompt`;
+  Captain's via the runtime-rendered `captain_prompt_builder` base, built against the foreground
+  thread's cwd — with an 编辑 / 预览 segmented toggle in its label row). 预览 renders the markdown
+  (`static_document`); 编辑 hosts a read-only `gpui_component::input::Editor` (monospace, line
+  numbers, soft wrap, its own scrolling) fed from the view's owned `EditorState`, reset to 预览 on
+  every drill-down; the mode is a view choice, not a write. Every write control is present but
+  DISABLED: footer 保存/删除 inert, 取消 and the top back control walk back. An empty prompt shows a muted
+  stand-in instead of the body and hides the toggle: the Captain's is empty only until a
+  foreground thread exists (`agents-prompt-empty-session`), any other agent simply declares no
+  prompt (`agents-prompt-none`). Roster data is read against the foreground cwd at view creation
+  and re-read on entry when that cwd changed, plus when a plugin lands (registry scans never run
+  per frame).
+- 插件 — the plugin manager view.
+- Skills — read-only roster from `manox_agent::skill::list_skill_records()` (user + plugin, with
+  origin badges).
+- MCP — per-server switches with live registry status.
+- 外部工具 — the ChatGPT.app / VS Code injection panels.
+
+Exiting (`leave_settings` / the nav's back control / any `focus_conversation`) restores the
+session-list sidebar. The upstream shell's own sidebar/search retired with the split layout.
 
 #### ManagementBackControl
 
-Unified "back to app" control — `ArrowLeft` + label row (px_2/py_1p5/gap_2, accent hover wash, `theme.radius`). Mounted at the left edge of the [SettingsTitleBar](#settingstitlebar) strip, over the settings sidebar column. The settings page no longer ships a shared management TitleBar — each management surface reuses the app-page scaffold (overlay TitleBar in the main column), and the back control lives in that strip.
+Unified "back to app" control — `ArrowLeft` + label row (px_2/py_1p5/gap_2, accent hover wash, `theme.radius`). Mounted at the left edge of the sub-agent stream page's header. Each management surface reuses the app-page scaffold (overlay TitleBar in the main column), and the back control lives in that strip. Settings has its own back controls instead: the nav's 返回应用 and each detail page's `ArrowLeft` 返回列表 row.
 
 > Source: `crates/agent-ui/src/views/management_shell.rs`
 
 #### SettingsView
 
-Settings page state + page factory. `render` hands `build_pages()` to the upstream `Settings` shell each frame (titles re-resolve through Fluent, so they track the live locale); selection and the search query live in the shell's window-keyed state (stable id `settings`). Holds the panel sub-states — the Models / ChatGPT / VS Code form states, the MCP disabled set, the plugins view — and the persisted `ui_language`, bound to the language dropdown through `SettingField` value/setter closures (persist-then-flip; a failed save emits `SettingsEvent::SaveFailed`, surfaced by the Workspace as a toast).
+Settings page state + page factory. `render_page(ix)` resolves the nav leaf to its [`Page`](#settingsview) and hands `build_page(page)` to the upstream `Settings` shell each frame (titles re-resolve through Fluent, so they track the live locale); the factory matches on the `Page` enum, so a NAV leaf edit that lacks a factory arm fails to compile. Holds the panel sub-states — the Models / ChatGPT / VS Code form states, the MCP disabled set, the plugins view — and the persisted `ui_language`, bound to the language dropdown through `SettingField` value/setter closures (persist-then-flip; a failed save emits `SettingsEvent::SaveFailed`, surfaced by the Workspace as a toast). Also owns the read-only Agents/Skills rosters and the Captain prompt preview (both captured once at view creation off the foreground thread's cwd) and the Agents detail's prompt `EditorState`.
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsTitleBar
 
-Absolute-positioned `TitleBar` overlay (`h(TITLE_BAR_HEIGHT)`, `top_0/left_0`) across the whole settings card — same chrome as the conversation column's TitleBar. A window-drag region that renders no text; the [ManagementBackControl](#managementbackcontrol) sits at its left edge, above the sidebar column.
+Retired: Settings has no title strip of its own — the window toolbar is the drag face, the nav tree (and each detail's back row) says where you are, and exits are the nav's 返回应用 plus ⌘,. See git history for the overlay-era strip.
 
-> Source: `crates/agent-ui/src/views/settings/mod.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs` (retired; see git history for the strip)
 
 #### SettingsShell
 
-The upstream `gpui_component::setting::Settings` component, mounted below the TitleBar strip. It owns the sidebar (a built-in search input on top of a grouped, collapsible `SidebarMenu`), the resizable split (starts at 240px, draggable) and the per-page group stack (virtualized list + scrollbar). Three pages mirror the former nav groups: **General** (the language group — a `Fill` card whose single row is the UI-language dropdown — plus the Models panel group), **Integrations** (Plugins + MCP), **External Tools** (ChatGPT.app + VS Code). Group titles double as the sidebar's sub-items; clicking one selects the page and scrolls to the group. Search filters groups by item title/description/keywords. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface), each with English keywords so search reaches them. MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself.
+The upstream `gpui_component::setting::Settings` component, rendered per selected page with a ZERO-width sidebar and a hidden header (its own sidebar/search/split retired with the split layout — navigation belongs to the chrome sidebar). What remains is the page's group stack (virtualized list + scrollbar), one `SettingPage` per nav leaf: 常规 (the language `Fill` card), 模型, Agents, 插件, Skills, MCP, ChatGPT.app, VS Code. The larger panels ride as opaque `SettingItem::render` element items inside `GroupBoxVariant::Normal` groups (no card surface); MCP servers render as per-server `SettingField::switch` rows — the server name as the title, the live registry status (tool count / not connected / disabled) as the description — with the group description and restart-note on the group itself. The Agents and Models groups render headless (no title): their pages own their chrome. **ChatGPT.app / VS Code are macOS only**: their panels drive `.app` bundle launches that cannot exist elsewhere, so those two pages, their nav leaves and their group are cfg'd out on non-macOS (the page factory keeps a compile-time-valid body that the nav never reaches).
 
 > Source: `crates/agent-ui/src/views/settings/mod.rs`
 
 #### SettingsModelsPanel
 
-Settings → General → Models: two-column form editor for the cx provider config (`~/.manox/cx.providers.config.yaml`). Left column is a tree nav: provider nodes (double-click header renames inline) whose expanded children are the four module names — 基本信息 / 环境变量 / 端点配置 / 模型列表 — and a dashed 「+ 添加 Provider」 button at the list end; clicking a module child selects (provider, module) and the wide right column renders that module's form in a bordered panel: 基本信息 (API Key kind dropdown/value pair), 环境变量 (indented key/value rows with per-row 「-」/「+」), 端点配置 (one card per endpoint) or 模型列表 (one card per model, 手动配置 / 自动获取 tab). Add-item buttons are dashed full-width and sit at the end of their lists. Remove controls are uniform 「-」 buttons with two-step confirmation (first click arms with a danger tint, second deletes); block-level removes (model / endpoint) sit outside the block's right edge, vertically centered; selected tree items use `theme.info` text; form blocks carry no background fill; the 手动配置 / 自动获取 tabs underline the active choice in `theme.info`; double-click provider rename exits on blur, Enter or mouse-down-out and autosaves. Every edit debounces into an autosave: validate, atomically write the whole config back (top-level `agents:` preserved verbatim), then reload the provider registry off the main thread. Autosave is disabled while the file fails to parse. Endpoints are unique per Wire API and displayed as Anthropic Messages / OpenAI Responses / OpenAI Completions; `agents:` filters are badge pickers fed by a dropdown (empty selection = all agents); supports_tools / supports_images echo their effective defaults instead of an unset state.
+Settings → General → Models: the provider config editor (`~/.manox/cx.providers.config.yaml`), shaped as a list → drill-down. The list is a stack of provider tiles (see the 模型 entry above); the detail is one scrolling column of four bordered section cards — 基本信息 (名称 input + API Key kind dropdown/value pair), 环境变量 (key/value rows with per-row 「-」/「+」), 端点配置 (one nested card per endpoint: Wire API, URL, 启用的 Agents, GitHub Copilot auth) and 模型列表 (手动配置 / 自动获取 tabs; one nested card per model with 模型 ID / 描述 / 上下文窗口 / 最大输出 tokens / Wire API checkboxes / 启用的 Agents / 工具调用 / 图片输入 / 环境变量). There is no second split column and no module nav: the provider list replaces the old tree, and the four sections render together. Add-item buttons are dashed full-width and sit at the end of their lists. Remove controls are uniform 「-」 buttons with two-step confirmation (first click arms with a danger tint, second deletes); block-level removes (provider / model / endpoint) sit outside the block's right edge, vertically centered; form blocks carry no background fill; the 手动配置 / 自动获取 tabs underline the active choice in `theme.info`. Every edit debounces into an autosave: validate, atomically write the whole config back (top-level `agents:` preserved verbatim), then reload the provider registry off the main thread. Autosave is disabled while the file fails to parse. Endpoints are unique per Wire API and displayed as Anthropic Messages / OpenAI Responses / OpenAI Completions; `agents:` filters are badge pickers fed by a dropdown (empty selection = all agents); supports_tools / supports_images echo their effective defaults instead of an unset state.
 
 > Source: `crates/agent-ui/src/views/settings/models.rs`
 
@@ -1006,7 +1093,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### ChromeShell
 
-应用壳根视图（`crates/steer-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px、侧栏开关、**←/→ 会话历史导航**（可用性由宿主经 `nav_avail` 查询钩子渲染期提供，无可去边界时置灰 inert）、session 下拉选择器（触发器是两组 `flex_1` 控件翼之外的最后挂载 absolute 层：固定 360px 宽、按 `(视口宽−360)/2` 钉在窗口水平中心线；下拉开面板用同一公式锚在标题栏下方 4px，面板恰好盖住触发器正下方，不再记录点击锚点）、**「在 VS Code 中打开」**（`on_open_editor` → 宿主后台 spawn `launch_plain(前台 project)`，只失败推错误通知（成功由 VS Code 打开自证）；无项目时推「没有可打开的项目」错误通知，绝不静默打开 `$HOME`）、面板/右栏开关、**品牌位**（`ShellConfig.brand` 注入的 app logo 元素工厂，None 回退通用字形；刻意非交互，且被排除在窗口拖拽面外——mouse-down 被吞掉））+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为上游 gpui-base `resize_handle` 隐形带（外观渲染为空——卡缝即卡间空隙，不画分隔线；把手只发起拖载与双击重置，`on_drag_move` 挂根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行、品牌位与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（分组折叠/拖排、下拉/行菜单、**侧栏分组模式与过滤词**）；选中高亮由宿主每次快照用前台线程 id 覆写（`shell.active`），不跟随点击。固定行（Automations/Chats）与 Customizations 块（Overview/MCP）**尚未实现**：整行 `FG_FAINT` 化 + hover「尚未实现」tooltip，保持 inert（2026-09-30 假控件清理：Run/split/右栏 split·external 已删——原版 Run 是 split-button、manox 无任务系统；Sync Changes 胶囊已删——git pull/push 集成另立特性）。
+应用壳根视图（`crates/steer-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px 仅 macOS（其余平台 12px 起排）；Linux/FreeBSD 客户端装饰下右翼末尾另有自绘最小化/最大化/关闭按钮——请求 `WindowDecorations::Client` 后无系统标题栏，Server 回退时自动隐藏；侧栏开关、**←/→ 会话历史导航**（可用性由宿主经 `nav_avail` 查询钩子渲染期提供，无可去边界时置灰 inert）、session 下拉选择器（触发器是两组 `flex_1` 控件翼之外的最后挂载 absolute 层：固定 360px 宽、按 `(视口宽−360)/2` 钉在窗口水平中心线；下拉开面板用同一公式锚在标题栏下方 4px，面板恰好盖住触发器正下方，不再记录点击锚点）、**「在 VS Code 中打开」**（`on_open_editor` → 宿主后台 spawn `launch_plain(前台 project)`，只失败推错误通知（成功由 VS Code 打开自证）；无项目时推「没有可打开的项目」错误通知，绝不静默打开 `$HOME`）、面板/右栏开关、**品牌位**（`ShellConfig.brand` 注入的 app logo 元素工厂，None 回退通用字形；刻意非交互，且被排除在窗口拖拽面外——mouse-down 被吞掉；行级拖拽是 arm/move 模型：mouse-down 只置位、首次 mouse-move 才 `start_window_move`，双击最大化——press 直接启动交互移动会被 WM 抢走 pointer、吞掉子件 click））+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为上游 gpui-base `resize_handle` 隐形带（外观渲染为空——卡缝即卡间空隙，不画分隔线；把手只发起拖载与双击重置，`on_drag_move` 挂根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行、品牌位与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（分组折叠/拖排、下拉/行菜单、**侧栏分组模式与过滤词**）；选中高亮由宿主每次快照用前台线程 id 覆写（`shell.active`），不跟随点击。固定行（Automations/Chats）与 Customizations 块（Overview/MCP）**尚未实现**：整行 `FG_FAINT` 化 + hover「尚未实现」tooltip，保持 inert（2026-09-30 假控件清理：Run/split/右栏 split·external 已删——原版 Run 是 split-button、manox 无任务系统；Sync Changes 胶囊已删——git pull/push 集成另立特性）。
 
 会话历史的权威栈在 `Workspace` 的 `NavHistory`（cap 100，去重判据是「当前指向项」而非栈尾）：用户发起的 `open_thread`（侧栏点击/下拉选中）与 fork 落地、新建落地（⌘N、/exit 的替换会话经 `attach_created_session`）都入栈并截断前进尾；←/→ 移动指针不重复记录；successor 换代把**当前条目原地改写**为后继 id（`replace_nav_current`——追加会把已处置的前任留在 ← 一步可达处）。降级语义：栈内 id 若在线程归档/换代后失效，回退仍走 landing attach（空 landing 可接受）——不剪枝是接受的取舍。
 
@@ -1048,7 +1135,7 @@ wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar
 
 #### ToolTabRegistry
 
-chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮）、**diff**（见 [DiffTab](#difftab)，注册表内但不上快捷操作页——无 patch 的空 diff 页签没有意义，入口只在 Edit 卡片上）。
+chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮；**仅 macOS/Windows，Linux/FreeBSD 编译排除**——见 [BrowserView](#browserview)）、**diff**（见 [DiffTab](#difftab)，注册表内但不上快捷操作页——无 patch 的空 diff 页签没有意义，入口只在 Edit 卡片上）。
 
 > Source: `crates/agent-ui/src/tool_tabs.rs`
 
@@ -1066,7 +1153,7 @@ chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操
 
 #### SettingsCard
 
-Settings（`Workspace::render_settings_card`）：同一状态机（`ViewMode::Settings` + `SettingsView` 订阅），渲染换位——设置导航列（240px）｜分隔线｜面板 放进主卡（chrome 侧栏槽是会话列表）；⌘, 与原生菜单 `Settings…` 经 `apply_chat_actions` 的 `OpenSettings` 处理进入，返回走 nav 的 back 控件（`SettingsEvent::Exit` → 滑出后回会话）。
+Settings（`Workspace::render_settings_detail`）：同一状态机（`ViewMode::Settings` + `SettingsView` 订阅），分栏布局——chrome 侧栏注入设置导航、主列放选中页的 Group 栈；⌘, 与原生菜单 `Settings…` 经 `apply_chat_actions` 的 `OpenSettings` 处理进入，退出走导航的返回应用（`Workspace::leave_settings`，还原会话列表侧栏）。
 
 > Source: `crates/agent-ui/src/workspace/render.rs`, `crates/agent-ui/src/views/settings/mod.rs`
 

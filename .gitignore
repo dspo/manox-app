@@ -1,4 +1,6 @@
 target/
+# 打包产物（script/bundle-dmg、release.yml 的 dist/ 暂存）
+dist/
 .issues/
 .zcode/
 

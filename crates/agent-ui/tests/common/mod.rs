@@ -510,3 +510,74 @@ pub fn bash_tool_use_message(id: &str) -> Message {
         thought_signature: None,
     })])
 }
+
+/// A PTY source that never starts a process; the test drives its OUTPUT side
+/// directly through the shared sender (see the external-session regression
+/// binary for the long form).
+#[derive(Clone, Default)]
+pub struct FakePty {
+    pub event_tx: std::sync::Arc<
+        std::sync::Mutex<Option<async_channel::Sender<manox_terminal::event::TerminalEvent>>>,
+    >,
+}
+
+impl FakePty {
+    pub fn emit(&self, bytes: &[u8]) {
+        self.event_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("pty started")
+            .send_blocking(manox_terminal::event::TerminalEvent::PtyOutput(
+                bytes.to_vec(),
+            ))
+            .expect("event channel open");
+    }
+}
+
+impl manox_terminal::pty_source::PtySource for FakePty {
+    fn start(&mut self, event_tx: async_channel::Sender<manox_terminal::event::TerminalEvent>) {
+        *self.event_tx.lock().unwrap() = Some(event_tx);
+    }
+    fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn resize(&self, _cols: u16, _rows: u16) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The REAL chrome assembly (shell + sidebar + production select hook)
+/// around the REAL workspace; returns both entities.
+pub fn open_assembly(
+    cx: &mut TestAppContext,
+) -> (
+    gpui::WindowHandle<gpui_component::Root>,
+    gpui::Entity<steer_agent_chrome_ui::Shell>,
+    gpui::Entity<Workspace>,
+) {
+    let shell_cell: std::rc::Rc<
+        std::cell::RefCell<Option<gpui::Entity<steer_agent_chrome_ui::Shell>>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let ws_cell: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let (shell_for_build, ws_for_build) = (shell_cell.clone(), ws_cell.clone());
+
+    cx.update(gpui_component::init);
+    cx.update(|_cx| {
+        steer_i18n::init();
+    });
+    let window = cx.open_window(size(px(1_280.), px(820.)), move |window, cx| {
+        steer_agent_chrome_ui::register_fonts(cx);
+        let shell = agent_ui::chrome_assembly::mount(window, cx);
+        let ws =
+            agent_ui::dispatch::workspace_global().expect("the assembly created the workspace");
+        *shell_for_build.borrow_mut() = Some(shell.clone());
+        *ws_for_build.borrow_mut() = Some(ws);
+        gpui_component::Root::new(shell, window, cx)
+    });
+    cx.run_until_parked();
+    let shell = shell_cell.borrow().clone().expect("shell captured");
+    let ws = ws_cell.borrow().clone().expect("workspace captured");
+    (window, shell, ws)
+}

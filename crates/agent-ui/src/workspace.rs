@@ -9,7 +9,10 @@
 //!
 //! Enter in the input box → append a user message + run_turn + persist (the sidebar shows the new entry immediately).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+// Backs the platform-gated `browser_views` map.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::i18n;
@@ -36,14 +39,12 @@ use gpui_component::{
 use gpui_component::{WindowExt as _, notification::Notification, tooltip::Tooltip};
 use manox_agent::PermissionDecision;
 use manox_agent::thread::AccessMode;
-use manox_agent::thread_engine::BrowserTabId;
 use manox_agent::{Thread, ThreadId};
 
 use crate::OpenSettings;
 use crate::ToggleTurnNavigator;
 use crate::cockpit::format_elapsed;
 use crate::conversation::{ConvItem, ConversationState, UserImage, UserTurnMeta};
-use crate::views::browser_view::BrowserView;
 use crate::views::centered;
 use crate::views::completion::{
     CompletionState, SelectHandler, build_replacement, build_replacement_content,
@@ -192,6 +193,7 @@ impl Workspace {
     }
 }
 mod composer;
+pub mod container;
 mod external;
 pub mod external_sessions;
 mod right_diff;
@@ -398,9 +400,15 @@ pub struct Workspace {
     /// tab keeps its `BrowserView` (and the underlying native webview) across
     /// tab switches; dropped when the tab closes, which detaches the native
     /// view via [`steer_webview::webview::WebView`]'s `Drop`.
-    pub(crate) browser_views: BTreeMap<BrowserTabId, Entity<BrowserView>>,
-    /// Top-level view mode. `Settings` replaces the entire window content
-    /// with the SettingsView overlay until the user requests exit.
+    /// Compiled out on Linux/FreeBSD with the integrated browser.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    pub(crate) browser_views: BTreeMap<
+        manox_agent::thread_engine::BrowserTabId,
+        Entity<crate::views::browser_view::BrowserView>,
+    >,
+    /// Top-level view mode. `Settings` swaps the main column for the
+    /// settings detail and the chrome sidebar for the settings nav (the
+    /// injected surface mounts exactly while the mode is `Settings`).
     view_mode: ViewMode,
     /// Live external sessions (project-menu launches: CLI agent TUIs and
     /// plain terminals) and the id of the one occupying the main column
@@ -409,10 +417,6 @@ pub struct Workspace {
     /// `external_sessions` + `active_external` pair).
     pub(crate) externals: Vec<external_sessions::ExternalSessionRecord>,
     active_external: Option<String>,
-    /// Set briefly while the Settings overlay is sliding out to the right.
-    /// Keeps `view_mode == Settings` mounted so the exit animation can play
-    /// before the unmount; cleared when the slide-out completes.
-    exiting_settings: bool,
     /// The open sub-agent stream page (the Captain status block's sub-agent
     /// line opens it; `view_mode == SubagentStream` while it owns the main
     /// column). One page at a time — the block lists the live runs, and the
@@ -422,16 +426,14 @@ pub struct Workspace {
     /// see `right_diff.rs`): ONE tab per pane, its content replaced by every
     /// open-diff click. Session-lived, retired on thread switch.
     pub(crate) right_diff: Option<right_diff::RightDiff>,
-    /// Bumped on every transition into or out of Settings. Embedded in the
-    /// slide animation's element id so a fresh tween fires on each direction
-    /// change (an old id would replay from the cached delta and visibly
-    /// jump), and into the exit spawn so a stale unmount can be no-op'd
-    /// when a new enter supersedes it.
-    settings_transition_gen: u64,
     /// Lazily created on the first `enter_settings` call so we don't pay the
     /// cost when the user never opens Settings.
     settings_view: Option<Entity<SettingsView>>,
     settings_sub: Option<Subscription>,
+    /// The selected settings page (the split layout's nav selection; the
+    /// chrome sidebar's injected nav writes it, the main column reads it).
+    /// Index into `views::settings::nav_leaves()`'s flat leaf order.
+    pub(crate) settings_nav: usize,
     /// Composer dictation: the speech session behind the mic button. Created
     /// unconditionally — where the platform has no system recognizer (Linux)
     /// or the process lacks the Info.plist usage keys (test binaries; the
@@ -453,6 +455,10 @@ pub struct Workspace {
 enum ViewMode {
     #[default]
     Workspace,
+    /// The settings detail owns the main column while the chrome sidebar
+    /// renders the injected settings nav. Entering still parks any external
+    /// session / sub-agent page that owned the column — Settings is the
+    /// page while it is up.
     Settings,
     /// A live external session (a launched CLI agent TUI / plain terminal)
     /// renders IN PLACE OF the conversation column — the legacy shell's
@@ -507,11 +513,6 @@ fn turn_navigator_layout(card_width: Pixels) -> TurnNavigatorLayout {
         panel_width,
     }
 }
-
-/// The Exit handler in `subscribe_settings` waits this long before flipping
-/// `view_mode` back to `Workspace`, giving the outgoing page a frame to
-/// settle before the swap.
-const SLIDE_OUT_MS: u64 = 200;
 
 enum RecallDirection {
     Up,
@@ -938,16 +939,16 @@ impl Workspace {
             _rail_updates: rail_updates,
             speech,
             _speech_events: speech_events,
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
             externals: Vec::new(),
             active_external: None,
-            exiting_settings: false,
             subagent_stream: None,
             right_diff: None,
-            settings_transition_gen: 0,
             settings_view: None,
             settings_sub: None,
+            settings_nav: 0,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
@@ -1224,6 +1225,19 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_external_session_ids(&self) -> Vec<String> {
         self.externals.iter().map(|s| s.id.clone()).collect()
+    }
+
+    /// One external container's A1 face — the alive bit, the 0 号-decided
+    /// kind, and the attrs snapshot's cwd. Test-support diagnostic.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_external_container(
+        &self,
+        id: &str,
+    ) -> Option<(bool, Option<container::ContainerKind>, std::path::PathBuf)> {
+        self.externals
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| (s.alive, s.kind, s.attrs.cwd.clone()))
     }
 
     /// The foreground chat's running sub-agents (the Captain block's sub-agent
@@ -1952,15 +1966,22 @@ impl Workspace {
         (repaint, successor)
     }
 
-    /// Switch into the Settings overlay. The Settings view is created lazily on
-    /// first entry; from then on the entity + subscription are reused so the
-    /// user's last selection (and any scroll position) survives re-entry.
+    /// Switch into the Settings split layout. The Settings view is created
+    /// lazily on first entry; from then on the entity + subscription are
+    /// reused so the user's last selection (and any scroll position)
+    /// survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_view.is_none() {
-            let settings = cx.new(|cx| SettingsView::new(window, cx));
-            let sub = self.subscribe_settings(&settings, window, cx);
-            self.settings_view = Some(settings);
-            self.settings_sub = Some(sub);
+        match &self.settings_view {
+            None => {
+                let settings = cx.new(|cx| SettingsView::new(window, cx));
+                let sub = self.subscribe_settings(&settings, window, cx);
+                self.settings_view = Some(settings);
+                self.settings_sub = Some(sub);
+            }
+            // A reused view re-reads the rosters: switching projects between
+            // visits must not keep the last foreground project's agent
+            // layer.
+            Some(settings) => settings.update(cx, |settings, _| settings.refresh_rosters()),
         }
         // Leaving the external session for Settings drops its ownership:
         // the invariant is `view_mode == ExternalSession` ⟺
@@ -1972,14 +1993,67 @@ impl Workspace {
         // Dropping the page drops its refresh poll with it.
         self.subagent_stream = None;
         self.view_mode = ViewMode::Settings;
-        // Clear any pending exit animation: clicking Settings… while the
-        // panel is still sliding out re-opens the overlay. Bumping the
-        // transition generation also retires the old exit spawn (it carries
-        // the previous gen and no-ops on stale state), and forces the slide
-        // animation to replay from the left edge.
-        self.exiting_settings = false;
-        self.settings_transition_gen = self.settings_transition_gen.wrapping_add(1);
+        // The split layout's other half: the chrome sidebar swaps its session
+        // list for the settings nav (leave_settings restores it).
+        crate::chrome_assembly::enter_settings_layout(cx);
         cx.notify();
+    }
+
+    /// Leave the Settings split layout: back to the conversation column and
+    /// the session-list sidebar (the nav's back control routes here).
+    pub fn leave_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.view_mode = ViewMode::default();
+        crate::chrome_assembly::leave_settings_layout(cx);
+        cx.notify();
+    }
+
+    /// Selects the settings page shown in the main column (the split
+    /// layout's nav selection). Out-of-range indices clamp to the last page:
+    /// this is a public setter, so a bad index degrades to a wrong-ish page
+    /// instead of panicking a render path.
+    pub fn select_settings_page(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let last = crate::views::settings::nav_leaves().len().saturating_sub(1);
+        self.settings_nav = ix.min(last);
+        cx.notify();
+    }
+
+    /// Flips the Agents detail's prompt display to the source editor or the
+    /// rendered preview.
+    pub fn set_agent_prompt_edit(&mut self, edit: bool, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_view.as_ref() {
+            settings.update(cx, |settings, cx| {
+                settings.set_prompt_edit(edit);
+                cx.notify();
+            });
+        }
+    }
+
+    /// Drills the Models page into the provider at list position `ix`.
+    pub fn select_model_provider(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_view.as_ref() {
+            settings.update(cx, |settings, cx| {
+                settings.select_model_provider(ix);
+                cx.notify();
+            });
+        }
+    }
+
+    /// Drills the Agents page into one agent's detail (`None` = the list).
+    pub fn select_agent(
+        &mut self,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self.settings_view.as_ref() {
+            settings.update(cx, |settings, cx| {
+                match name {
+                    Some(name) => settings.open_agent(name, window, cx),
+                    None => settings.close_agent(),
+                }
+                cx.notify();
+            });
+        }
     }
 
     fn subscribe_settings(
@@ -1991,60 +2065,25 @@ impl Workspace {
         cx.subscribe_in(
             settings,
             window,
-            |this, _settings, ev: &SettingsEvent, window, cx| {
-                if let SettingsEvent::SaveFailed(msg) = ev {
-                    window.push_notification(
-                        Notification::error(msg.clone())
-                            .title(i18n::t("settings-save-failed-title")),
-                        cx,
-                    );
-                    return;
-                }
-                if matches!(ev, SettingsEvent::Exit) && !this.exiting_settings {
-                    // Start the slide-out animation; the actual mode flip and
-                    // unmount happen once the animation has finished. The
-                    // captured transition gen is the watermark for this exit
-                    // attempt — if a new enter supersedes it before the timer
-                    // fires, the spawn's update is a no-op.
-                    this.exiting_settings = true;
-                    this.settings_transition_gen = this.settings_transition_gen.wrapping_add(1);
-                    cx.notify();
-                    let entity = cx.entity().clone();
-                    let exit_gen = this.settings_transition_gen;
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(SLIDE_OUT_MS + 20))
-                            .await;
-                        entity.update(cx, |this, cx| {
-                            if this.settings_transition_gen != exit_gen {
-                                return;
-                            }
-                            // The user may have re-entered an external session
-                            // while the panel was sliding out — the exit must
-                            // not steal the column or drop its ownership id
-                            // (the attach tail carries the same guard).
-                            if matches!(this.view_mode, ViewMode::ExternalSession) {
-                                return;
-                            }
-                            this.view_mode = ViewMode::default();
-                            this.active_external = None;
-                            this.exiting_settings = false;
-                            cx.notify();
-                        });
-                    })
-                    .detach();
-                }
+            |_this, _settings, ev: &SettingsEvent, window, cx| {
+                let SettingsEvent::SaveFailed(msg) = ev;
+                window.push_notification(
+                    Notification::error(msg.clone()).title(i18n::t("settings-save-failed-title")),
+                    cx,
+                );
             },
         )
     }
 
     /// Switch to the conversation pane. Drops external ownership with the
     /// mode flip (same invariant as the Settings arm), and the sub-agent page
-    /// with it.
+    /// with it — and restores the session-list sidebar if the settings nav
+    /// was still mounted.
     pub fn focus_conversation(&mut self, cx: &mut Context<Self>) {
         self.active_external = None;
         self.subagent_stream = None;
         self.view_mode = ViewMode::Workspace;
+        crate::chrome_assembly::leave_settings_layout(cx);
         cx.notify();
     }
 

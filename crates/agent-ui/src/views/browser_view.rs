@@ -43,7 +43,12 @@ pub fn webview_label_for(tab_id: BrowserTabId) -> String {
 
 pub struct BrowserView {
     tab_id: BrowserTabId,
-    webview: Entity<steer_webview::webview::WebView>,
+    /// The native webview, when the platform could parent one. `None` means
+    /// the embed was rejected (e.g. a native Wayland gpui window: wry parents
+    /// Linux child webviews through Xlib only) and `build_error` carries the
+    /// message rendered in place of the page.
+    webview: Option<Entity<steer_webview::webview::WebView>>,
+    build_error: Option<String>,
     address: Entity<InputState>,
     url: String,
     /// The page's `<title>`, polled by the workspace's title ticker through
@@ -62,7 +67,9 @@ pub struct BrowserView {
 impl BrowserView {
     /// Build an untrusted webview parented to `window` and wrap it + its
     /// address bar in a gpui entity. `tab_id` must be process-unique; obtain
-    /// it from [`allocate_tab_id`].
+    /// it from [`allocate_tab_id`]. Construction never panics: an embed the
+    /// platform cannot host leaves [`Self::webview`] `None` and renders the
+    /// failure in place of the page (see `build_error`).
     pub fn new(
         tab_id: BrowserTabId,
         url: &str,
@@ -78,11 +85,23 @@ impl BrowserView {
         // first-attached closures, so every BrowserView attaches the same
         // host-owned closures (a later open never finds a stale handler).
         let builder = crate::browser_host::WorkspaceBrowserHost::attach_to_builder(builder);
-        let wry = builder
-            .apply(|b| b.with_url(url))
-            .build_as_child(window)
-            .expect("steer-webview: build_as_child failed");
-        let webview = cx.new(|cx| steer_webview::webview::WebView::new(wry, window, cx));
+        let wry = builder.apply(|b| b.with_url(url)).build_as_child(window);
+        let (webview, build_error) = match wry {
+            Ok(wry) => (
+                Some(cx.new(|cx| steer_webview::webview::WebView::new(wry, window, cx))),
+                None,
+            ),
+            Err(e) => {
+                tracing::warn!(url = %url, error = %e, "embedded webview build failed");
+                (
+                    None,
+                    Some(format!(
+                        "{} ({e})",
+                        steer_i18n::t("browser-webview-unavailable")
+                    )),
+                )
+            }
+        };
 
         let address = cx.new(|cx| {
             InputState::new(window, cx).placeholder(steer_i18n::t("browser-address-placeholder"))
@@ -107,6 +126,7 @@ impl BrowserView {
         Self {
             tab_id,
             webview,
+            build_error,
             address,
             url: url.to_string(),
             title: String::new(),
@@ -138,8 +158,9 @@ impl BrowserView {
     }
 
     /// The underlying webview entity, for host-driven eval/navigation.
-    pub fn webview(&self) -> &Entity<steer_webview::webview::WebView> {
-        &self.webview
+    /// `None` when the platform could not host the embed at build time.
+    pub fn webview(&self) -> Option<&Entity<steer_webview::webview::WebView>> {
+        self.webview.as_ref()
     }
 
     /// Navigate to `url` and sync the address bar. Navigation retires the
@@ -150,7 +171,9 @@ impl BrowserView {
         self.read_hint = false;
         self.address
             .update(cx, |s, cx| s.set_value(url, window, cx));
-        self.webview.update(cx, |wv, _| wv.load_url(url));
+        if let Some(webview) = &self.webview {
+            webview.update(cx, |wv, _| wv.load_url(url));
+        }
     }
 
     /// Mark the tab as yielded (or resumed). Toggling resumes the parked
@@ -171,12 +194,16 @@ impl BrowserView {
 
     /// Go back in the webview history.
     pub fn back(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.webview.update(cx, |wv, _| wv.back());
+        if let Some(webview) = &self.webview {
+            let _ = webview.update(cx, |wv, _| wv.back());
+        }
     }
 
     /// Go forward in the webview history.
     pub fn forward(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.webview.update(cx, |wv, _| wv.forward());
+        if let Some(webview) = &self.webview {
+            let _ = webview.update(cx, |wv, _| wv.forward());
+        }
     }
 }
 
@@ -274,7 +301,24 @@ impl Render for BrowserView {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(self.webview.clone()),
+                    .children(self.webview.clone())
+                    .children(self.build_error.as_ref().map(|message| {
+                        div()
+                            .id("browser-build-error")
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .p_4()
+                            .child(
+                                div()
+                                    .max_w_96()
+                                    .text_center()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(message.clone()),
+                            )
+                    })),
             )
     }
 }

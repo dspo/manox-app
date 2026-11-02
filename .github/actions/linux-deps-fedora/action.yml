@@ -1,0 +1,27 @@
+name: linux deps (fedora)
+description: >-
+  Fedora-side translation of ../linux-deps: the -devel packages a headless build
+  of the app needs, plus rpmbuild and the tooling its ELF dependency generators
+  require. Keep the package *set* in sync with the apt list — the names differ,
+  the set must not.
+
+runs:
+  using: composite
+  steps:
+    # A fresh fedora:latest container carries no compiler, no pkg-config and no
+    # rpmbuild generators. The -devel packages pull their runtime counterparts,
+    # which is what lets the rpm smoke test link-check the installed binary.
+    # `git`/`curl` are installed by the workflow before checkout (the container
+    # has neither, and a composite action cannot run before the repo exists).
+    # No GTK/WebKit/soup/JavaScriptCore: the integrated browser is compiled out
+    # on Linux, so nothing in the build links them.
+    - name: Install build dependencies
+      shell: bash
+      run: >
+        dnf install -y
+        gcc python3 file rpm-build openssl-devel zlib-devel
+        pkgconf-pkg-config alsa-lib-devel
+        fontconfig-devel libX11-devel libxcb-devel libXrender-devel
+        libXrandr-devel libxkbcommon-devel libxkbcommon-x11-devel
+        libXi-devel libXcursor-devel libXinerama-devel
+        wayland-devel

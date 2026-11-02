@@ -10,49 +10,8 @@
 
 mod common;
 
-use agent_ui::Workspace;
-use common::init_harness;
-use gpui::{AppContext as _, TestAppContext, VisualTestContext, px, size};
-use gpui_component::Root;
-use steer_agent_chrome_ui::register_fonts;
-
-/// A PTY source that never starts a process; the test drives its OUTPUT
-/// side directly through the shared sender, so pushed bytes travel the
-/// real path (terminal pump → vte parser → `Title` events) exactly as a
-/// TUI agent's stream would.
-#[derive(Clone, Default)]
-struct FakePty {
-    event_tx: std::sync::Arc<
-        std::sync::Mutex<Option<async_channel::Sender<manox_terminal::event::TerminalEvent>>>,
-    >,
-}
-
-impl FakePty {
-    /// Emit raw PTY output bytes (the program's side of the stream).
-    fn emit(&self, bytes: &[u8]) {
-        self.event_tx
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("pty started")
-            .send_blocking(manox_terminal::event::TerminalEvent::PtyOutput(
-                bytes.to_vec(),
-            ))
-            .expect("event channel open");
-    }
-}
-
-impl manox_terminal::pty_source::PtySource for FakePty {
-    fn start(&mut self, event_tx: async_channel::Sender<manox_terminal::event::TerminalEvent>) {
-        *self.event_tx.lock().unwrap() = Some(event_tx);
-    }
-    fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn resize(&self, _cols: u16, _rows: u16) -> std::io::Result<()> {
-        Ok(())
-    }
-}
+use common::{FakePty, init_harness, open_assembly};
+use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 
 #[gpui::test]
 async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestAppContext) {
@@ -245,39 +204,4 @@ fn wait_for_title(
             .collect()
     });
     panic!("the external row never wore the title {title:?}; current: {current:?}");
-}
-
-/// Mount the REAL chrome assembly (the production `chrome_assembly::mount`)
-/// and capture the shell + the workspace it created.
-fn open_assembly(
-    cx: &mut TestAppContext,
-) -> (
-    gpui::WindowHandle<Root>,
-    gpui::Entity<steer_agent_chrome_ui::Shell>,
-    gpui::Entity<Workspace>,
-) {
-    let shell_cell: std::rc::Rc<
-        std::cell::RefCell<Option<gpui::Entity<steer_agent_chrome_ui::Shell>>>,
-    > = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let ws_cell: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let (shell_for_build, ws_for_build) = (shell_cell.clone(), ws_cell.clone());
-
-    cx.update(gpui_component::init);
-    cx.update(|_cx| {
-        steer_i18n::init();
-    });
-    let window = cx.open_window(size(px(1_280.), px(820.)), move |window, cx| {
-        register_fonts(cx);
-        let shell = agent_ui::chrome_assembly::mount(window, cx);
-        let ws =
-            agent_ui::dispatch::workspace_global().expect("the assembly created the workspace");
-        *shell_for_build.borrow_mut() = Some(shell.clone());
-        *ws_for_build.borrow_mut() = Some(ws);
-        Root::new(shell, window, cx)
-    });
-    cx.run_until_parked();
-    let shell = shell_cell.borrow().clone().expect("shell captured");
-    let ws = ws_cell.borrow().clone().expect("workspace captured");
-    (window, shell, ws)
 }

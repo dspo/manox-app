@@ -203,7 +203,7 @@ impl ActivityChainHeader {
             .min_w_0()
             .py_0p5()
             .gap_2()
-            .text_sm()
+            .text_size(super::message::MESSAGE_BODY_SIZE)
             .text_color(muted)
             // The caller's meta slots can outgrow a narrow column (one chip
             // per tool kind adds up); wrapping keeps them inside it.

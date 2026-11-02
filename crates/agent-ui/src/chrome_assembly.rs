@@ -46,6 +46,27 @@ fn shell_handle() -> Option<Entity<Shell>> {
     }
 }
 
+/// The Settings split layout: swap the chrome sidebar's session list for the
+/// settings nav. The main column's swap rides the Workspace's view mode —
+/// this owns only the sidebar half of the layout.
+pub fn enter_settings_layout(cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    let nav = cx.new(crate::views::settings_nav::SettingsNavView::new);
+    shell.update(cx, |shell, cx| {
+        shell.set_sidebar_surface(Some(nav.into()), cx)
+    });
+}
+
+/// Restore the session-list sidebar (leaving the Settings split layout).
+pub fn leave_settings_layout(cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    shell.update(cx, |shell, cx| shell.set_sidebar_surface(None, cx));
+}
+
 /// Open (or focus) a host-built tool tab in the live right pane. `false` when
 /// no shell or window is live — the caller's gesture has no surface then.
 pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {
@@ -217,22 +238,29 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
     };
     let mux = ws.read(cx).multiplexer.clone();
     // The process-lifetime registries the app wires at startup:
-    // the dispatch slot (dock badge pump + reopen-focus read it) and the
-    // process-wide browser host (IPC routing + the agent's web capability).
+    // the dispatch slot (dock badge pump + reopen-focus read it), the
+    // process-wide capability provider (clipboard everywhere; browser ops
+    // only where the integrated browser is compiled in), and the browser
+    // host itself.
     crate::dispatch::set_workspace(ws.clone());
     {
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let ws = ws.clone();
         cx.spawn(async move |cx| {
-            crate::browser_host::WorkspaceBrowserHost::install(ws.clone(), cx);
-            // The install lands asynchronously, so a tab restored from
-            // threads.db before it (startup) missed its route registration:
-            // re-register every live view now that the host exists.
-            if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
-                let ids = ws.read_with(cx, |ws, _| {
-                    ws.browser_views.keys().copied().collect::<Vec<_>>()
-                });
-                for id in ids {
-                    host.register_ui_tab(id);
+            crate::capability_host::install(cx);
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+            {
+                crate::browser_host::WorkspaceBrowserHost::install(ws.clone(), cx);
+                // The install lands asynchronously, so a tab restored from
+                // threads.db before it (startup) missed its route registration:
+                // re-register every live view now that the host exists.
+                if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
+                    let ids = ws.read_with(cx, |ws, _| {
+                        ws.browser_views.keys().copied().collect::<Vec<_>>()
+                    });
+                    for id in ids {
+                        host.register_ui_tab(id);
+                    }
                 }
             }
         })
@@ -291,6 +319,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         // the dispatch slot (dock badge pump + reopen-focus read it) and the
         // process-wide browser host (IPC routing + the agent's web capability).
         crate::dispatch::set_workspace(ws.clone());
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         {
             let ws = ws.clone();
             cx.spawn(async move |cx| {

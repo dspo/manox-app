@@ -36,7 +36,7 @@
 工作树已就位（`gpui-pre =0.3.9` / `gpui-component =0.8.0` / `gpui-base =0.8.0` + 迁移改动）：
 
 - `cargo clippy --all-targets -- -D warnings`、全量 `cargo test`、`cargo test -p agent-ui --features test-support`、`cargo fmt`。
-- 视觉门禁：四张 `CHROME_SHOT`（base / right / panel / switch）+ `script/check-tab-indicator.sh`，与 0.7 基线对比。
+- 视觉门禁：四张 `CHROME_SHOT`（base / right / panel / switch），与 0.7 基线对比；页签指示器按 AGENTS.md 的不变量人工核对（左端 = rail + 8 device px、可见厚度 4 device px）。
 - 真机 `cargo run` 手感验收（离屏看不到动效）：composer（`.auto_grow(4,12)`）滚到底回弹、右栏 Editor / 设置页回弹、嵌套滚动独占——语义已确认期望，看手感即可。
 - PR 描述贴 release notes 链接 + zed-rev 映射；不带 Co-Authored-By。
 

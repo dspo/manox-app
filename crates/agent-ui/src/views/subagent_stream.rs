@@ -32,6 +32,15 @@ use steer_agent_chat_ui::views::subagents::CAPTAIN_LABEL;
 
 use crate::i18n;
 
+/// The header's identity, resolved by the opener from the background-work
+/// row: the agent type, the task topic, and the definition's declared
+/// display color (`None` keeps the header uncolored).
+pub(crate) struct StreamHeader {
+    pub label: String,
+    pub activity: Option<String>,
+    pub color: Option<gpui::Hsla>,
+}
+
 /// The sub-agent stream page: one child chat rendered read-only.
 pub struct SubagentStreamView {
     /// The child's chat id (== the run id == the child session id).
@@ -44,6 +53,9 @@ pub struct SubagentStreamView {
     /// The run's task label — the header's topic (the wire's background-work
     /// label stands in when no separate activity was carried).
     activity: Option<String>,
+    /// The definition's declared display color, resolved at open time from
+    /// the background-work row; `None` keeps the header uncolored.
+    color: Option<gpui::Hsla>,
     /// The chat fold's client (the process-singleton AHP store). Held strong:
     /// the page's observer is its live leg, and the singleton outlives pages.
     store: Entity<AhpStore>,
@@ -59,13 +71,17 @@ pub struct SubagentStreamView {
 impl SubagentStreamView {
     pub(crate) fn new(
         chat_id: String,
-        label: String,
-        activity: Option<String>,
+        header: StreamHeader,
         store: Entity<AhpStore>,
         host: ChatHostHandle,
         role: String,
         cx: &mut gpui::App,
     ) -> Entity<Self> {
+        let StreamHeader {
+            label,
+            activity,
+            color,
+        } = header;
         let recipient = manox_agent::MessageAuthor::Agent(label.clone());
         let conversation = cx.new(|_| ConversationState::new(recipient));
         let view = cx.new(|cx| {
@@ -75,6 +91,7 @@ impl SubagentStreamView {
                 label,
                 role,
                 activity,
+                color,
                 store,
                 host,
                 conversation,
@@ -232,12 +249,31 @@ impl Render for SubagentStreamView {
                 gpui::div()
                     .flex_1()
                     .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
                     .truncate()
-                    .whitespace_nowrap()
-                    .text_sm()
-                    .font_family(theme.mono_font_family.clone())
-                    .text_color(theme.foreground)
-                    .child(title),
+                    .child(
+                        gpui::div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.foreground)
+                            .child(title),
+                    )
+                    // The identity dot from the definition's declared color —
+                    // the same mark the Captain strip's row carries, so the
+                    // page and its row read as one run.
+                    .children(self.color.map(|color| {
+                        gpui::div()
+                            .flex_shrink_0()
+                            .size_2()
+                            .rounded_full()
+                            .bg(color)
+                    })),
             );
 
         let items: Vec<AnyElement> = self

@@ -68,7 +68,7 @@ grep -rhoE "gpui_base::[a-zA-Z_:+]+" crates --include="*.rs" | sort -u   # 本�
 4. `cargo tree -d | grep -i gpui` 验单一版本；lock 随 PR 提交（macros 随 `^` 浮动，历史上浮出过编译炸）。
 5. `cargo clippy --all-targets -- -D warnings`：报错点即真实 breaking 面，按 release notes 迁移节逐条修。
 6. 全门禁：`cargo test` + `cargo test -p agent-ui --features test-support` + `cargo fmt`。
-7. 视觉门禁（快照风险的主安全网）：四张 `CHROME_SHOT`（base / right / panel / switch）+ `script/check-tab-indicator.sh`，与升级前基线截图对比。
+7. 视觉门禁（快照风险的主安全网）：四张 `CHROME_SHOT`（base / right / panel / switch），与升级前基线截图对比；页签指示器按 AGENTS.md 的不变量人工核对（左端 = rail + 8 device px、可见厚度 4 device px）。
 8. 有视觉差异但断言全绿 → `cargo run` 人工过一眼再合。
 9. PR：`chore(deps)` 前缀；贴 release notes 链接与 zed-rev 映射；Test Plan 写门禁与截图结论；**同一 PR 同步 AGENTS.md / Cargo.toml 注释里的版本表述**；不带 Co-Authored-By（CI 拒）。
 

@@ -66,9 +66,40 @@ pub fn status_indicator(status: ToolCallStatus, theme: &Theme) -> AnyElement {
     }
 }
 
+/// The Claude subagent display-color vocabulary mapped to fixed RGB. Runtime
+/// values render verbatim: a name outside the eight-color set is not an
+/// error — the caller falls back to its neutral treatment.
+pub fn agent_color(name: &str) -> Option<gpui::Hsla> {
+    let rgb: u32 = match name {
+        "red" => 0xE5484D,
+        "blue" => 0x3E63DD,
+        "green" => 0x30A46C,
+        "yellow" => 0xFFB224,
+        "purple" => 0x8E4EC6,
+        "orange" => 0xF76B15,
+        "pink" => 0xD6409F,
+        "cyan" => 0x00A2C7,
+        _ => return None,
+    };
+    Some(gpui::rgb(rgb).into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_color_maps_the_eight_color_vocabulary_and_degrades_to_none() {
+        assert_eq!(
+            agent_color("pink").map(|c| c == gpui::rgb(0xD6409F).into()),
+            Some(true)
+        );
+        assert!(agent_color("cyan").is_some());
+        assert!(
+            agent_color("magenta").is_none() && agent_color("").is_none(),
+            "a name outside the vocabulary is uncolored, never an error"
+        );
+    }
 
     #[test]
     fn task_display_title_combines_type_and_topic() {

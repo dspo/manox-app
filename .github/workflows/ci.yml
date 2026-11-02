@@ -1,0 +1,405 @@
+name: ci
+
+# The PR/main pipeline. Both shipping platforms run the same two phases, and
+# the packaging legs run in parallel with them:
+#
+#   verify (linux amd64, ubuntu-24.04):  clippy → test
+#   verify (macOS arm64, macos-26):      clippy → test
+#   package (deb amd64 | dmg arm64):     release build + installable artifact
+#
+# There is no separate "build the binaries" step: `cargo test --all-targets`
+# already compiles and links every target (bins included), and the shipping
+# binaries are built by the packaging legs in the release profile — a second
+# debug `cargo build` would only restate what the test run did.
+#
+# The rpm is NOT built here: it needs a Fedora container for its glibc baseline
+# and rpmbuild's ELF dependency generators, so release.yml owns it (it shares
+# the same script and the same linux-deps-fedora action).
+#
+# `checks_pass` is the ONLY check branch protection should require: it fans in
+# every job below and goes red unless each one is `success` or `skipped`
+# (skipped = packaging on a PR that did not touch the packaging surface). Legs
+# can therefore be split, renamed or re-imaged without touching repo settings.
+# `no-coauthor.yml` stays a second required check of its own (different event
+# set; it cannot be a `needs` entry here).
+#
+# Packaging is the expensive axis (a cold release build per target) and its
+# inputs are the packaging scripts themselves, so it runs on:
+#   - every push to main / workflow_dispatch (always),
+#   - a PR carrying the `ci:package` label,
+#   - a PR that touches script/bundle-*, the packaging actions, release.yml,
+#     this file, or crates/steer-app/Cargo.toml (the bundle metadata).
+# Flip packaging to unconditional by making the `prepare` job output `true`
+# unconditionally — one line, at the cost of ~20 min on every PR's critical
+# path.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Run the pipeline on any branch without pushing a commit (useful to measure a
+  # CI change before it lands).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A superseded push to a PR keeps a runner for a result nobody reads; cancel it.
+# Main pushes are left alone: they are the runs people actually read.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # No incremental state: every job is a single cold build, so the extra
+  # artifacts are pure disk cost on a runner that is short on it.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Cheap, no compile: resolve the artifact version and decide whether the
+  # packaging jobs run at all (see the header).
+  prepare:
+    name: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      package: ${{ steps.meta.outputs.package }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history: the packaging decision diffs the PR against its merge
+          # base.
+          fetch-depth: 0
+
+      - name: Resolve version and packaging trigger
+        id: meta
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          PACKAGE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:package') }}
+        run: |
+          set -euo pipefail
+
+          # Same source of truth the bundle scripts read (they resolve it via
+          # cargo metadata); parsed straight out of [workspace.package] so this
+          # job needs no Rust toolchain.
+          version=$(awk '
+              $0 == "[workspace.package]" { in_section = 1; next }
+              /^\[/ { in_section = 0 }
+              in_section && $1 == "version" && $2 == "=" {
+                  line = $0
+                  sub(/^[^"]*"/, "", line)
+                  sub(/".*$/, "", line)
+                  print line
+                  exit
+              }
+          ' Cargo.toml)
+          [[ -n "${version}" ]] || { echo "::error::no version under [workspace.package] in Cargo.toml"; exit 1; }
+
+          package=false
+          reason=""
+          if [[ "${EVENT}" != "pull_request" ]]; then
+            package=true
+            reason="${EVENT} (not a PR)"
+          elif [[ "${PACKAGE_LABEL}" == "true" ]]; then
+            package=true
+            reason="ci:package label"
+          else
+            git fetch --no-tags origin "${BASE_REF}"
+            base=$(git merge-base FETCH_HEAD HEAD)
+            changed=$(git diff --name-only "${base}" HEAD)
+            if printf '%s\n' "${changed}" \
+                | grep -qE '^(script/bundle-|\.github/(workflows/ci\.yml|workflows/release\.yml|actions/linux-deps)|crates/steer-app/Cargo\.toml)'; then
+              package=true
+              reason="packaging surface changed"
+            else
+              reason="no packaging change (add the ci:package label to force it)"
+            fi
+          fi
+
+          {
+            echo "version=${version}"
+            echo "package=${package}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "version ${version} | packaging: ${package} — ${reason}" >> "${GITHUB_STEP_SUMMARY}"
+
+  # The fast gate: everything below `needs` it, so a formatting slip or a
+  # chrome/chat boundary regression fails in ~1 min instead of after a build.
+  guards:
+    name: guards (fmt + deps)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt
+
+      # `cargo tree` resolves the workspace graph, so the git dependencies must
+      # be fetchable even though nothing is compiled here.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      # Chrome/chat split invariant: the chat crate never depends on terminals,
+      # webviews, or external-agent wiring (PLAN-CHROME-CHAT-SPLIT §1 — the
+      # executable definition of the decoupling).
+      - name: Chat-crate dependency guard
+        run: ./script/check-chat-crate-deps.sh
+
+  verify_linux:
+    name: verify (linux amd64)
+    needs: guards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # lld over the default bfd: this workspace links 40+ test binaries that
+      # each carry the whole GPUI + runtime graph, which is where bfd spends
+      # minutes.
+      RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=lld"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        uses: ./.github/actions/linux-deps
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Disk is the constraint that has already broken this pipeline once (ld
+      # SIGBUS on a full filesystem), so record the headroom before building.
+      - name: Record disk headroom
+        run: df -h /
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # One feature-inclusive run: agent-ui's test-support suite compiles ONLY
+      # under the flag, and a second feature set would double the build tree
+      # (the runner does not have the disk for it).
+      - name: Test
+        run: >-
+          cargo test --workspace --all-targets --locked
+          --features agent-ui/test-support --no-fail-fast
+
+  verify_mac:
+    name: verify (macOS arm64)
+    needs: guards
+    # Same image as release.yml: verifying on a different macOS than releases
+    # are built on hides (or fabricates) SDK-level breaks.
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      # No lld here: Apple's ld64 is the toolchain, and `-fuse-ld=lld` would ask
+      # cc for a linker the image does not have.
+      RUSTFLAGS: "-D warnings"
+      RUST_LIB_BACKTRACE: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Record disk headroom
+        run: df -h /
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: >-
+          cargo test --workspace --all-targets --locked
+          --features agent-ui/test-support --no-fail-fast
+
+  # ── packaging ─────────────────────────────────────────────────────────────
+  # Each job produces the platform's installable artifact and checks it by
+  # unpacking rather than installing: a full apt/dnf install of every runtime
+  # dependency belongs to the release pipeline, the only place the package is
+  # actually published from.
+
+  package_deb:
+    name: package (deb amd64)
+    # Runs beside the verify legs, not after them: packaging is a different
+    # artifact (release profile) and needs none of their output, so waiting
+    # would only add their wall clock to the PR's critical path.
+    needs: [prepare]
+    if: needs.prepare.outputs.package == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        uses: ./.github/actions/linux-deps
+
+      - name: Install packaging tools
+        run: sudo apt-get install -y --no-install-recommends desktop-file-utils
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # --release inside the script; it also derives Depends from the linked
+      # binaries (ldd + dpkg -S), so the package metadata follows the real link
+      # set instead of a hand-kept list.
+      - name: Bundle .deb
+        run: ./script/bundle-deb
+
+      - name: Verify the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb_path=$(ls target/deb/*.deb)
+          echo "::group::dpkg-deb -I ${deb_path}"
+          dpkg-deb -I "${deb_path}"
+          echo "::endgroup::"
+
+          # Unpack instead of installing: the runner already carries the build
+          # deps, so the mismatch worth catching is a binary linked against a
+          # soname the package does not declare, or a desktop entry that would
+          # not validate after install.
+          stage=$(mktemp -d)
+          dpkg-deb -x "${deb_path}" "${stage}"
+          test -x "${stage}/usr/bin/steer"
+          test -x "${stage}/usr/bin/cx"
+          desktop=$(ls "${stage}"/usr/share/applications/*.desktop)
+          desktop-file-validate "${desktop}"
+          if ldd "${stage}/usr/bin/steer" | grep -F 'not found'; then
+            echo "::error::the packaged steer binary has unresolved libraries"
+            exit 1
+          fi
+          rm -rf "${stage}"
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/deb/*.deb dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-amd64
+          path: dist/*.deb
+          retention-days: 14
+          if-no-files-found: error
+
+  package_dmg:
+    name: package (dmg arm64)
+    # Parallel with verify, same reason as package_deb.
+    needs: [prepare]
+    if: needs.prepare.outputs.package == 'true'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Builds steer + cx, assembles and ad-hoc signs Steer.app, then creates the
+      # compressed image with an /Applications symlink and verifies both the
+      # signature it inherited and the image itself.
+      - name: Bundle .dmg
+        run: ./script/bundle-dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmg-arm64
+          path: dist/*.dmg
+          retention-days: 14
+          if-no-files-found: error
+
+  # The single required check. `always()` so it reports even when an upstream
+  # leg failed or was cancelled; `skipped` counts as pass so a PR that does not
+  # touch packaging stays green. Inspecting every `needs` entry (instead of
+  # listing names) means a leg added above can never be silently forgotten.
+  checks_pass:
+    name: checks_pass
+    needs:
+      - prepare
+      - guards
+      - verify_linux
+      - verify_mac
+      - package_deb
+      - package_dmg
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every leg succeeded or was skipped
+        shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "${NEEDS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "${NEEDS}" | jq -e \
+            'to_entries | all(.value.result == "success" or .value.result == "skipped")'
