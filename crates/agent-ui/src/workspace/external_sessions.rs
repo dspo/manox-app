@@ -33,8 +33,9 @@ use super::container;
 /// One live external container (the SessionContainer model's external home —
 /// this record IS the container): the identity pair, the sidebar row's
 /// fields, and the terminal entity that occupies the main column while the
-/// session is foreground. The container face (kind, attrs snapshot, alive
-/// bit) lives beside the row fields; native containers are views over
+/// session is foreground. The container face (attrs snapshot, alive bit)
+/// lives beside the row fields; the 0 号's agent namespace names itself in
+/// the id (`external:{agent}:{uuid}`); native containers are views over
 /// threads and have no record here (see `container`).
 pub(crate) struct ExternalSessionRecord {
     /// `external:{agent_id}:{uuid}` — the manox-app-style row id. It is the
@@ -56,8 +57,8 @@ pub(crate) struct ExternalSessionRecord {
     pub svg: &'static str,
     /// The project directory the session was launched in — the sidebar
     /// group it merges into; `None` → the loose Chats bucket. The
-    /// container's project association for this home (app memory; the live
-    /// read rides `Workspace::container_project`).
+    /// container's project association for this home (pure app memory,
+    /// §2.2 — the projection reads the record field directly).
     pub project: Option<PathBuf>,
     pub created_at: i64,
     pub view: gpui::Entity<terminal_ui::TerminalView>,
@@ -69,10 +70,6 @@ pub(crate) struct ExternalSessionRecord {
     /// with the record: the session's PTY outlives nothing else.
     pub(super) _title_sub: gpui::Subscription,
     // ── the container face (the A1 upgrade) ──
-    /// The kind the 0 号 decides: the launched CLI agent. `None` for a plain
-    /// terminal — its 0 号 is a bare shell, which the kind vocabulary has no
-    /// entry for.
-    pub kind: Option<container::ContainerKind>,
     /// The creation-time attribute snapshot (D10): the spawn cwd + the
     /// environment at the creation call, frozen — resources spawned later
     /// (A2) inherit this copy.
@@ -245,10 +242,14 @@ impl Workspace {
 
     /// The sidebar rows: one per live session, stamped with the external
     /// kind (brand-mark leading slot, close-session menu on the chrome
-    /// side) and the project grouping key.
+    /// side) and the project grouping key. The `alive` belt (A8): a record
+    /// whose death bit flipped but whose teardown (the event subscription
+    /// → the ONE teardown) has not landed yet projects no row — the
+    /// Died→teardown window stays invisible in the sidebar.
     pub(crate) fn external_session_rows(&self) -> Vec<SessionRow> {
         self.externals
             .iter()
+            .filter(|s| s.alive)
             .map(|s| {
                 let project = s.project.as_ref().map(|p| p.to_string_lossy().to_string());
                 let workspace =

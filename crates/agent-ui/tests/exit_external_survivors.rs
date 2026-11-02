@@ -137,7 +137,7 @@ async fn exit_kills_its_own_resources_and_spares_background_externals(cx: &mut T
     // child) — an independent container nothing in this test touches.
     let (_dir2, ext_child) = spawn_cat();
     let ext_row = spawn_external(cx, &ws, window, ext_child.clone());
-    let (alive, _kind, _cwd) = ws
+    let (alive, _cwd) = ws
         .read_with(cx, |ws, _| ws.diagnostic_external_container(&ext_row))
         .expect("the external record is live");
     assert!(alive);
@@ -161,7 +161,7 @@ async fn exit_kills_its_own_resources_and_spares_background_externals(cx: &mut T
         ws.read_with(cx, |ws, _| ws.is_external_session(&ext_row)),
         "the background external container's row survives another container's /exit"
     );
-    let (alive, _kind, _cwd) = ws
+    let (alive, _cwd) = ws
         .read_with(cx, |ws, _| ws.diagnostic_external_container(&ext_row))
         .expect("the external record survives");
     assert!(alive, "the external container's 0 号 never exited");
