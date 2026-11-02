@@ -36,42 +36,6 @@ use manox_terminal::event::TerminalEvent;
 
 use super::external_sessions::clamp_external_title;
 
-/// Which conversation owns the container — the type vocabulary the 0 号
-/// resource decides (§2.2). The kind IS the capability set: only
-/// [`ContainerKind::Manox`] may own level-1 sub-sessions; the external kinds
-/// own their 0 号 process plus resources.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContainerKind {
-    /// A manox session (the 0 号 is a Captain).
-    Manox,
-    Claude,
-    Codex,
-    Copilot,
-}
-
-impl ContainerKind {
-    /// The kind the external row-id namespace names (`external:{agent}:{uuid}`'s
-    /// agent segment — the id the project menu mints). `None` for a plain
-    /// terminal (`agent == "terminal"`): its 0 号 is a bare shell, not a CLI
-    /// agent, and the kind vocabulary has no shell entry — the container
-    /// still exists, it just carries no agent kind.
-    pub fn from_external_agent(agent_id: &str) -> Option<Self> {
-        match agent_id {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "copilot" => Some(Self::Copilot),
-            _ => None,
-        }
-    }
-
-    /// Whether the kind's 0 号 is an app-spawned process (D8: process exit is
-    /// death, no archive gesture) rather than a manox session (D7: archive is
-    /// death).
-    pub fn is_external(self) -> bool {
-        !matches!(self, Self::Manox)
-    }
-}
-
 /// Container identity (D2): a native container's id IS its captain session
 /// id (one string, shared with the createSession — the native conceptual two
 /// steps collapse onto it); an external container's id is the
@@ -156,9 +120,9 @@ impl ContainerAttrs {
 }
 
 /// The unified creation entry's payload (§2.2's `create_container(kind,
-/// attrs)`): the kind rides the seed — a native seed IS a
-/// [`ContainerKind::Manox`] container by definition, an external seed's kind
-/// is its 0 号's agent namespace.
+/// attrs)`): a native seed IS a manox container by definition; an external
+/// seed's 0 号 names itself in its row-id's agent segment
+/// (`external:{agent}:{uuid}` — the vocabulary `ContainerId` carries).
 pub enum ContainerSeed<'a> {
     /// A manox conversation container: the native conceptual two steps
     /// (container record + session) fold into ONE `createSession` with the
@@ -457,7 +421,6 @@ impl Workspace {
             view,
             handle,
         } = seed;
-        let kind = ContainerKind::from_external_agent(agent_id);
         let id = ContainerId::external(agent_id);
         // The terminal may carry a title already — the program claims it
         // through the PTY as soon as it boots — and that claim beats the
@@ -501,7 +464,6 @@ impl Workspace {
                 project,
                 created_at: chrono::Utc::now().timestamp(),
                 view,
-                kind,
                 attrs,
                 handle,
                 alive: true,
@@ -576,6 +538,10 @@ impl Workspace {
         self.close_container_browser_tabs(container_id, cx);
         // The stashed dock view + right-pane session.
         self.reclaim_stash(container_id);
+        // The durable pane snapshot: a restore source only for a LIVE
+        // container's return — the dead container's registry key must not
+        // outlive it.
+        crate::chrome_assembly::remove_right_pane(container_id);
         // The live dock/pane half: outside the lease (see above).
         let dead = container_id.to_string();
         cx.defer(move |cx| crate::chrome_assembly::reclaim_container_panes(&dead, cx));
@@ -608,38 +574,6 @@ impl Workspace {
                 && !manox_agent::object_store::ObjectStore::try_global()
                     .and_then(|objects| objects.conversation(container_id))
                     .is_some_and(|row| row.archived)
-        }
-    }
-
-    /// The project association, LIVE-read (D10): native consults the
-    /// conversation's object row per call (the belonging is registry state —
-    /// re-binding mid-life is legal and shows up on the next read); external
-    /// reads the record's launch-time project (pure app memory, §2.2). The
-    /// sidebar's removed-projects overlay applies on top of this at
-    /// projection time, exactly as before.
-    pub fn container_project(&self, container_id: &str) -> Option<PathBuf> {
-        if ContainerId::is_external_id(container_id) {
-            self.externals
-                .iter()
-                .find(|s| s.id == container_id)?
-                .project
-                .clone()
-        } else {
-            manox_agent::object_store::ObjectStore::try_global()
-                .and_then(|objects| objects.project_of(container_id))
-                .map(PathBuf::from)
-        }
-    }
-
-    /// The container's kind, read by id: native is always
-    /// [`ContainerKind::Manox`] (the 0 号 is a Captain — the view constructs
-    /// on demand); external resolves through the record (a plain terminal
-    /// carries no kind). An id with no record behind it has no kind.
-    pub fn container_kind(&self, container_id: &str) -> Option<ContainerKind> {
-        if ContainerId::is_external_id(container_id) {
-            self.externals.iter().find(|s| s.id == container_id)?.kind
-        } else {
-            Some(ContainerKind::Manox)
         }
     }
 
@@ -706,34 +640,6 @@ mod tests {
             ContainerId::parse("0197abcd-session"),
             ContainerId::Native("0197abcd-session".into())
         );
-    }
-
-    // ── the kind is the 0 号's namespace (§2.2) ──
-
-    /// The three CLI agents name their kinds; a plain terminal names none
-    /// (its 0 号 is a bare shell) — the container exists but carries no
-    /// agent kind. Manox is never derivable from the external namespace.
-    #[test]
-    fn external_agents_name_their_kind_and_terminals_name_none() {
-        assert_eq!(
-            ContainerKind::from_external_agent("claude"),
-            Some(ContainerKind::Claude)
-        );
-        assert_eq!(
-            ContainerKind::from_external_agent("codex"),
-            Some(ContainerKind::Codex)
-        );
-        assert_eq!(
-            ContainerKind::from_external_agent("copilot"),
-            Some(ContainerKind::Copilot)
-        );
-        assert_eq!(
-            ContainerKind::from_external_agent("terminal"),
-            None,
-            "a plain terminal's 0 号 is a bare shell — no kind"
-        );
-        assert!(!ContainerKind::Manox.is_external());
-        assert!(ContainerKind::Claude.is_external());
     }
 
     // ── attrs capture (D10 snapshot semantics) ──

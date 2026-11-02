@@ -186,16 +186,19 @@ impl Workspace {
 
 /// One line per live dependent across `ids`, from the folded book: running
 /// subagent rows (the persistent roster's live face, joined with the
-/// live-only backgroundWork entries the chat fold still carries; deduped by
-/// display name so a run the two faces both report lists once) and background
-/// shell entries. The pure core of the archive confirmation — testable
-/// against a hand-built book, the `container_rows` precedent.
+/// live-only backgroundWork entries the chat fold still carries) and
+/// background shell entries. Cross-face duplicates dedup WITHIN one
+/// container (a run the roster and the fold both report lists once);
+/// across containers the same-named dependent lists per container — the
+/// dialog names what each archived entry takes down. The pure core of
+/// the archive confirmation — testable against a hand-built book, the
+/// `container_rows` precedent.
 fn dependent_lines(
     book: &steer_agent_chat_ui::ahp_store::ChannelBook,
     ids: &[String],
 ) -> Vec<SharedString> {
     let mut lines: Vec<SharedString> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(&str, String)> = std::collections::HashSet::new();
     for id in ids {
         // The roster's live rows (upstream #989's persistent registry —
         // settled rows are records, not work).
@@ -210,13 +213,13 @@ fn dependent_lines(
             } else {
                 run.run_id
             };
-            if seen.insert(name.clone()) {
+            if seen.insert((id.as_str(), name.clone())) {
                 lines.push(i18n::t_str("archive-confirm-subagent", &[("name", &name)]));
             }
         }
-        // The live-only backgroundWork face: subagent entries the roster
-        // cannot report yet (the pinned runtime), and the background shell
-        // entries (live-only by construction).
+        // The live-only backgroundWork face: the subagent entries the chat
+        // fold still carries (live-only by construction — a settle removes
+        // them) and the background shell entries.
         let leaf = crate::ahp_store::leaf(book, id);
         for row in leaf.running_subagents() {
             let name = if !row.label.is_empty() {
@@ -224,7 +227,7 @@ fn dependent_lines(
             } else {
                 row.id
             };
-            if seen.insert(name.clone()) {
+            if seen.insert((id.as_str(), name.clone())) {
                 lines.push(i18n::t_str("archive-confirm-subagent", &[("name", &name)]));
             }
         }
@@ -238,7 +241,7 @@ fn dependent_lines(
                     } else {
                         shell.command.clone()
                     };
-                    if seen.insert(name.clone()) {
+                    if seen.insert((id.as_str(), name.clone())) {
                         lines.push(i18n::t_str("archive-confirm-bash", &[("name", &name)]));
                     }
                 }
@@ -323,11 +326,68 @@ mod tests {
 
         let lines = dependent_lines(&book, &["cap".to_string()]);
         // The settled roster row is a record, not work; the live subagent is
-        // reported by BOTH faces and lists ONCE (deduped by display name);
-        // the background shell lists.
+        // reported by BOTH faces and lists ONCE (cross-face dedup within the
+        // container); the background shell lists.
         assert_eq!(lines.len(), 2, "live subagent (deduped) + live shell");
         assert!(lines.iter().any(|l| l.contains("map the edges")));
         assert!(lines.iter().any(|l| l.contains("tail -f build.log")));
+
+        // A batch archive lists each container's same-named dependents
+        // separately — the dedup key is (container, name), not the bare
+        // name. A second container running the identically named subagent
+        // and shell doubles the dialog's lines.
+        let mut runs2 = std::collections::BTreeMap::new();
+        runs2.insert(
+            "run-live-2".to_string(),
+            roster_wire_row("run-live-2", "map the edges", "running").1,
+        );
+        book.ext.insert(
+            work_uri("cap2"),
+            manox_ahp::ext::XManoxState {
+                child_runs: Some(runs2),
+                ..Default::default()
+            },
+        );
+        let chat2: ahp_types::state::ChatState = serde_json::from_value(serde_json::json!({
+            "resource": chat_uri("cap2"),
+            "title": "cap2",
+            "status": 0,
+            "modifiedAt": "2026-10-30T00:00:00.000Z",
+            "turns": [],
+            "backgroundWork": [
+                {
+                    "kind": "shell",
+                    "id": "sh-2",
+                    "label": "tail -f build.log",
+                    "command": "tail -f build.log",
+                    "startedAt": "2026-10-30T00:00:00.000Z",
+                },
+            ],
+        }))
+        .expect("the second chat parses");
+        book.chats.insert("cap2".to_string(), chat2);
+        let batched = dependent_lines(&book, &["cap".to_string(), "cap2".to_string()]);
+        assert_eq!(
+            batched.len(),
+            4,
+            "same-named dependents list per container: 2× subagent + 2× shell"
+        );
+        assert_eq!(
+            batched
+                .iter()
+                .filter(|l| l.contains("map the edges"))
+                .count(),
+            2,
+            "each container's identically named subagent lists"
+        );
+        assert_eq!(
+            batched
+                .iter()
+                .filter(|l| l.contains("tail -f build.log"))
+                .count(),
+            2,
+            "each container's identically named shell lists"
+        );
 
         // No roster rows, no background work: nothing live, no confirmation.
         let quiet = ChannelBook::default();

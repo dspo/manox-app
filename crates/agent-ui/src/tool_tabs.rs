@@ -46,36 +46,48 @@ pub const PTY_TAB_KINDS: [&str; 4] = ["terminal", "claude", "codex", "copilot"];
 /// grant, an external container's spawn snapshot), falling back to home: a
 /// terminal has to spawn SOMEWHERE.
 pub(crate) fn thread_cwd_or_home(cx: &App) -> std::path::PathBuf {
-    thread_attrs_for_spawn(cx).0
+    thread_attrs_for_spawn(cx).cwd
 }
 
 /// The FOREGROUND CONTAINER's attrs snapshot for a standalone terminal spawn
-/// (D10/D6): the cwd the terminal roots at, and the env it inherits (D11's
-/// approved capability — an external container's creation-time copy; a
-/// native container's view re-captures the world at this read, which is the
-/// honest capture the runtime's lack of environment history leaves). Falls
-/// back to home + no overrides: a terminal has to spawn somewhere.
-pub(crate) fn thread_attrs_for_spawn(cx: &App) -> (std::path::PathBuf, Vec<(String, String)>) {
-    let attrs = crate::dispatch::workspace_global().and_then(|ws| {
-        let fg = ws.read(cx).foreground_container_id(cx)?;
-        Some(ws.read(cx).container_attrs(&fg, cx))
-    });
-    match attrs {
-        Some(attrs) => {
-            let env = attrs
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            (attrs.cwd, env)
-        }
-        None => (
-            std::env::var("HOME")
+/// (D10/D6): the cwd the terminal roots at, and the attrs whose env it
+/// inherits (D11's approved capability — an external container's
+/// creation-time copy; a native container's view re-captures the world at
+/// this read, which is the honest capture the runtime's lack of environment
+/// history leaves). Falls back to home + no overrides: a terminal has to
+/// spawn somewhere.
+pub(crate) fn thread_attrs_for_spawn(cx: &App) -> crate::workspace::container::ContainerAttrs {
+    crate::dispatch::workspace_global()
+        .and_then(|ws| {
+            let fg = ws.read(cx).foreground_container_id(cx)?;
+            Some(ws.read(cx).container_attrs(&fg, cx))
+        })
+        .unwrap_or_else(|| crate::workspace::container::ContainerAttrs {
+            cwd: std::env::var("HOME")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| ".".into()),
-            Vec::new(),
-        ),
-    }
+            env: Default::default(),
+        })
+}
+
+/// The standalone PTY spawn's environment layering, as a pure function (the
+/// A7-approved capability's testable core): the container's creation-time
+/// snapshot rides BETWEEN the process-inherited base and the user's
+/// `[terminal].env`. `pty::open` applies the returned slice over the
+/// inherited world with last-entry-wins, so a container value beats the
+/// process base's same-named variable and a settings value beats the
+/// container's — the ORDER of the returned pairs is the authority chain.
+pub(crate) fn layered_env(
+    container: &crate::workspace::container::ContainerAttrs,
+    settings: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = container
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    env.extend(settings.iter().cloned());
+    env
 }
 
 // ── integrated terminal ────────────────────────────────────────────────────
@@ -131,8 +143,8 @@ impl ToolTab for TerminalTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
-        let (cwd, env) = thread_attrs_for_spawn(cx);
-        match spawn_standalone_terminal(&cwd, &env, cx) {
+        let attrs = thread_attrs_for_spawn(cx);
+        match spawn_standalone_terminal(&attrs.cwd, &attrs, cx) {
             Ok(view) => store.put(&self.id, view),
             Err(e) => store.set_error(
                 &self.id,
@@ -1088,7 +1100,7 @@ impl ToolTab for DiffTab {
 /// authority `default_source` gives it, now over a container-inherited base.
 pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
-    env: &[(String, String)],
+    attrs: &crate::workspace::container::ContainerAttrs,
     cx: &mut App,
 ) -> Result<Entity<terminal_ui::TerminalView>, String> {
     // An app-owned PTY rooted at `cwd`: the integrated terminal is an
@@ -1100,8 +1112,7 @@ pub(crate) fn spawn_standalone_terminal(
     // user's settings, so the source is built directly (`pty::open` is the
     // public constructor `default_source` wraps).
     let settings = manox_terminal::settings::load();
-    let mut env_layer: Vec<(String, String)> = env.to_vec();
-    env_layer.extend(settings.env.iter().cloned());
+    let env_layer = layered_env(attrs, &settings.env);
     let source: Box<dyn manox_terminal::pty_source::PtySource> = Box::new(
         manox_terminal::pty::open(cwd, 80, 24, settings.shell.as_deref(), &env_layer)
             .map_err(|e| e.to_string())?,
@@ -1140,8 +1151,8 @@ impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
     }
 
     fn open(&self, _window: &mut Window, cx: &mut App) -> Result<gpui::AnyView, String> {
-        let (cwd, env) = thread_attrs_for_spawn(cx);
-        let view = spawn_standalone_terminal(&cwd, &env, cx)?;
+        let attrs = thread_attrs_for_spawn(cx);
+        let view = spawn_standalone_terminal(&attrs.cwd, &attrs, cx)?;
         Ok(gpui::AnyView::from(view))
     }
 }
@@ -1180,4 +1191,65 @@ pub fn registry(
         Arc::new(EditorTool),
         Arc::new(DiffTool::new(ws.clone())),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::container::ContainerAttrs;
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    /// The spawn env's authority chain (A7): `pty::open` applies the returned
+    /// slice over the process-inherited base with last-entry-wins, so the
+    /// ORDER `layered_env` emits is the layering — container snapshot first
+    /// (beats the process base), user settings last (beat the container).
+    #[test]
+    fn layered_env_orders_container_over_process_and_settings_over_container() {
+        let env_of = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<BTreeMap<String, String>>()
+        };
+        let container = ContainerAttrs {
+            cwd: PathBuf::from("/tmp/proj"),
+            env: Arc::new(env_of(&[
+                ("AGENT_HOME", "/container/state"),
+                ("SHARED", "from-container"),
+            ])),
+        };
+        let settings = vec![
+            ("SHARED".to_string(), "from-settings".to_string()),
+            ("EXTRA".to_string(), "settings-only".to_string()),
+        ];
+        let layered = layered_env(&container, &settings);
+        // The container's entries come first — over the process base the
+        // spawner inherits — and the settings' entries after them, so a
+        // same-named key resolves to the settings value.
+        assert_eq!(
+            layered,
+            vec![
+                ("AGENT_HOME".to_string(), "/container/state".to_string()),
+                ("SHARED".to_string(), "from-container".to_string()),
+                ("SHARED".to_string(), "from-settings".to_string()),
+                ("EXTRA".to_string(), "settings-only".to_string()),
+            ],
+            "container snapshot between process base and settings; settings last-wins"
+        );
+    }
+
+    /// An empty container snapshot (a native container before its view ever
+    /// saw an env, or a fallback spawn): the settings ride over the bare
+    /// process base, nothing else is injected.
+    #[test]
+    fn layered_env_with_empty_snapshot_yields_settings_only() {
+        let container = ContainerAttrs {
+            cwd: PathBuf::from("/tmp"),
+            env: Default::default(),
+        };
+        let settings = vec![("MY_FLAG".to_string(), "1".to_string())];
+        assert_eq!(layered_env(&container, &settings), settings);
+        // No settings either: an empty slice — the process base alone.
+        assert!(layered_env(&container, &[]).is_empty());
+    }
 }

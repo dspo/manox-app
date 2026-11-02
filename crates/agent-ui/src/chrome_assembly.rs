@@ -878,6 +878,38 @@ fn load_right_pane(container_id: &str) -> Option<String> {
         .cloned()
 }
 
+/// Remove a container's persisted right-pane snapshot (the teardown's
+/// presentation leg): the snapshot is a restore source for a LIVE
+/// container's return, so a dead container's key must not outlive it.
+pub fn remove_right_pane(container_id: &str) {
+    if let Some(map) = PANE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_mut()
+    {
+        map.remove(container_id);
+    }
+}
+
+/// Plant a pane snapshot verbatim (test-support only): the teardown
+/// regression plants under a container key directly — the production write
+/// (`persist_right_pane`) needs a live shell pane.
+#[cfg(feature = "test-support")]
+pub fn diagnostic_persist_right_pane(container_id: &str, payload: String) {
+    PANE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(container_id.to_string(), payload);
+}
+
+/// The test-support read over [`load_right_pane`] — the teardown regression
+/// proves a dead container's snapshot is gone.
+#[cfg(feature = "test-support")]
+pub fn diagnostic_right_pane_snapshot(container_id: &str) -> Option<String> {
+    load_right_pane(container_id)
+}
+
 /// The foreground thread's PROJECT path, refreshed by the assembly's observer
 /// on every projection — "open in editor" and the project menu's no-project
 /// fallback read it rather than silently opening `$HOME`. (The dock/right

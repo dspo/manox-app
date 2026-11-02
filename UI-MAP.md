@@ -218,6 +218,9 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
   归档落地后续接新容器（`ArchiveLanding` 延续）。
 - **取消归档**（行菜单取消归档 → `revive_container`）：整树复活——captain 与 catalogue 里
   带 parent 边的子会话同乘一条 `archivedChanged(false)`（上游 #987 的边，v0.7.0 起在 wire 上）。
+  数据面就绪且经测（`teardown_containers` / `revive_container` 的折叠语义直测）；**UI 入口待归档
+  分区面**（挂账）：归档行走整树复活的菜单分支已接线，但归档行当场离开侧栏、无归档分区渲染，
+  行不可达即入口不可达——分区面落地即销账。
 - 外部容器维持 D8：关闭 = kill（A2 teardown），无归档手势。
 
 > Source: `crates/agent-ui/src/workspace/lifecycle.rs`, `crates/agent-ui/src/workspace/exit.rs`,

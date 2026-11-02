@@ -1276,17 +1276,14 @@ impl Workspace {
         self.externals.iter().map(|s| s.id.clone()).collect()
     }
 
-    /// One external container's A1 face — the alive bit, the 0 号-decided
-    /// kind, and the attrs snapshot's cwd. Test-support diagnostic.
+    /// One external container's A1 face — the alive bit and the attrs
+    /// snapshot's cwd. Test-support diagnostic.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_external_container(
-        &self,
-        id: &str,
-    ) -> Option<(bool, Option<container::ContainerKind>, std::path::PathBuf)> {
+    pub fn diagnostic_external_container(&self, id: &str) -> Option<(bool, std::path::PathBuf)> {
         self.externals
             .iter()
             .find(|s| s.id == id)
-            .map(|s| (s.alive, s.kind, s.attrs.cwd.clone()))
+            .map(|s| (s.alive, s.attrs.cwd.clone()))
     }
 
     /// The foreground chat's running sub-agents (the Captain block's sub-agent
