@@ -99,9 +99,11 @@ impl CodeView {
         }
     }
 
-    /// The soft-wrap budget in mono columns.
+    /// The soft-wrap budget in mono columns. A zero column budget is clamped
+    /// to one — a host computing columns from a pre-layout width can hand
+    /// back 0, and `chunks(0)` panics.
     pub fn wrap_at(mut self, columns: usize) -> Self {
-        self.wrap = columns;
+        self.wrap = columns.max(1);
         self
     }
 }
@@ -372,8 +374,27 @@ impl CodeView {
             if line.kind == CodeLineKind::Gap {
                 let start = text.len() + indent.len() + 3;
                 text.push_str(&indent);
-                text.push_str("   ...\n");
-                runs.push((start..start + 3, muted));
+                text.push_str("   ");
+                if line.text.is_empty() {
+                    // The bare read-window gap.
+                    text.push_str("...\n");
+                    runs.push((start..start + 3, muted));
+                } else {
+                    // A carried note (the truncation note the cards append):
+                    // muted italic where the bare gap would sit, so a
+                    // machine row never reads as file content.
+                    text.push_str("... ");
+                    text.push_str(&line.text);
+                    text.push('\n');
+                    runs.push((
+                        start..text.len() - 1,
+                        HighlightStyle {
+                            color: Some(p.muted),
+                            font_style: Some(gpui::FontStyle::Italic),
+                            ..Default::default()
+                        },
+                    ));
+                }
                 continue;
             }
             let (marker, marker_color, tint) = match line.kind {
@@ -525,15 +546,22 @@ pub(crate) fn theme_stamp(theme: &Theme) -> u64 {
 }
 
 thread_local! {
-    /// The per-body highlighter Arcs, keyed by (view id, composed text). This
-    /// view is `RenderOnce` — rebuilt every frame — and upstream reuses a
-    /// code block's highlights only while the highlighter Arc is identical:
-    /// a fresh closure per frame arms the selection-preserving reflow every
-    /// frame, and the document ends up holding no selection at all (a drag
-    /// paints nothing and copies nothing). A frozen body hashes to the same
-    /// key and shares one Arc across frames; a body whose text changed gets
-    /// a new Arc, which is the reflow that content change wants anyway.
-    static HIGHLIGHTERS: RefCell<HashMap<(ElementId, u64), CodeHighlighter>> =
+    /// The per-body highlighter Arcs, one entry per view id holding the
+    /// (text+theme) stamp it was built for. This view is `RenderOnce` —
+    /// rebuilt every frame — and upstream reuses a code block's highlights
+    /// only while the highlighter Arc is identical: a fresh closure per frame
+    /// arms the selection-preserving reflow every frame, and the document
+    /// ends up holding no selection at all (a drag paints nothing and copies
+    /// nothing). A frozen body hashes to the same stamp and shares one Arc
+    /// across frames; a body whose text changed gets a new Arc, which is the
+    /// reflow that content change wants anyway. One slot per id (the newest
+    /// stamp wins) is what keeps a streaming body from minting an entry per
+    /// publish tick — and keeps the map from ever flushing wholesale, which
+    /// would re-arm every frozen body's reflow in one frame and drop a held
+    /// drag. View-unique ids are already the rich-text core's own
+    /// requirement: its window-keyed selection state resolves through the
+    /// element id.
+    static HIGHLIGHTERS: RefCell<HashMap<ElementId, (u64, CodeHighlighter)>> =
         RefCell::new(HashMap::new());
 }
 
@@ -548,20 +576,19 @@ pub(crate) fn highlighter_for(
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     theme_stamp.hash(&mut hasher);
-    let key = (id.clone(), hasher.finish());
+    let stamp = hasher.finish();
     HIGHLIGHTERS.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if cache.len() > 1024 {
-            cache.clear();
-        }
-        cache
-            .entry(key)
-            .or_insert_with(move || {
-                Arc::new(move |block: &gpui_base::text::CodeBlock| {
+        match cache.get(id) {
+            Some((cached_stamp, highlighter)) if *cached_stamp == stamp => highlighter.clone(),
+            _ => {
+                let highlighter = Arc::new(move |block: &gpui_base::text::CodeBlock| {
                     crate::text_runs::clamp_runs(runs.as_ref().clone(), &block.code())
-                }) as CodeHighlighter
-            })
-            .clone()
+                }) as CodeHighlighter;
+                cache.insert(id.clone(), (stamp, highlighter.clone()));
+                highlighter
+            }
+        }
     })
 }
 

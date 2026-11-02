@@ -89,6 +89,11 @@ impl ShellLine {
         Self { spans }
     }
 
+    /// The line's spans — what hosts and tests read back.
+    pub fn spans_ref(&self) -> &[(ShellSpanKind, SharedString)] {
+        &self.spans
+    }
+
     pub fn plain(text: impl Into<SharedString>) -> Self {
         Self::spans(vec![(ShellSpanKind::Plain, text.into())])
     }
@@ -277,10 +282,9 @@ impl RenderOnce for ShellView {
         let mono = theme.mono_font_family.clone();
         let (doc, runs) = self.compose(&theme);
         let runs = Arc::new(runs);
-        // The highlighter Arc is cached per (view id, text) exactly like
-        // CodeView's — a fresh closure per frame arms upstream's
-        // selection-preserving reflow every frame and the body never holds
-        // a selection.
+        // The highlighter Arc is cached per view id exactly like CodeView's
+        // — a fresh closure per frame arms upstream's selection-preserving
+        // reflow every frame and the body never holds a selection.
 
         let duration = self.duration.map(format_tool_duration).unwrap_or_default();
 
@@ -319,7 +323,7 @@ impl RenderOnce for ShellView {
             theme.is_dark(),
         );
 
-        let doc_id = gpui::ElementId::Name(SharedString::from(format!("{:?}-doc", self.id)));
+        let doc_id = gpui::ElementId::Name(SharedString::from(format!("{}-doc", self.id)));
         v_flex()
             .w_full()
             .min_w_0()

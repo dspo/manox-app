@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use ahp_types::actions::StateAction;
 use ahp_types::state::ChatState;
+use ai_elements::ShellSpanKind;
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
     TestAppContext, VisualTestContext, Window, div, px, size,
@@ -38,8 +39,10 @@ use gpui::{
 use manox_agent::MessageAuthor;
 use steer_agent_chat_ui::conversation::{ActivityEntry, ConvItem, ConversationState, ToolCallItem};
 use steer_agent_chat_ui::host::{ChatHostHandle, noop_host};
+use steer_agent_chat_ui::i18n;
 use steer_agent_chat_ui::transcript::{ProjectEnv, no_steered_turns};
 use steer_agent_chat_ui::views::message::MessageItem;
+use steer_agent_chat_ui::views::tool_cards::{LINE_CAP, shell_output_lines};
 use steer_agent_chat_ui::views::tool_stream::PUBLISH_CAP;
 
 /// The recorded output of the crashed session's Bash call
@@ -355,8 +358,8 @@ async fn a_carried_snapshot_is_throttled_mid_stream(cx: &mut TestAppContext) {
 }
 
 /// A settled body past `LINE_CAP` (400 lines): the card keeps the first 400
-/// lines and appends the truncation note; the full text stays authoritative on
-/// the entry (copy/diff paths).
+/// lines and appends the dim truncation note as row 401; the full text stays
+/// authoritative on the entry (copy/diff paths).
 #[gpui::test]
 async fn an_output_past_line_cap_settles_truncated(cx: &mut TestAppContext) {
     let full: String = (0..450)
@@ -372,12 +375,20 @@ async fn an_output_past_line_cap_settles_truncated(cx: &mut TestAppContext) {
     assert_eq!(entry.output, full, "the entry keeps the full text");
     assert_eq!(entry.stream.published(), full);
 
-    // The rendered shell body is the first LINE_CAP lines (the note is added
-    // by the card; the capped prefix is what must stay stable).
-    let rendered: Vec<&str> = entry.stream.published().lines().take(400).collect();
-    let expected: Vec<&str> = full.lines().take(400).collect();
-    assert_eq!(rendered.len(), 400);
-    assert_eq!(rendered, expected);
+    // The body the card actually paints, from the published snapshot: the
+    // capped prefix, then the note row — the full text rides the copy path,
+    // never the body.
+    let body = shell_output_lines(entry.stream.published(), false);
+    assert_eq!(body.len(), LINE_CAP + 1, "capped rows plus the note");
+    for (row, text) in body.iter().zip(full.lines().take(LINE_CAP)) {
+        let (kind, span) = row.spans_ref().first().expect("one span per row");
+        assert_eq!(*kind, ShellSpanKind::Plain);
+        assert_eq!(&**span, text);
+    }
+    let note_row = body.last().expect("the note row");
+    let (kind, note) = note_row.spans_ref().first().expect("one span");
+    assert_eq!(*kind, ShellSpanKind::Dim, "the note rides the dim tier");
+    assert_eq!(note.clone(), i18n::t("tool-output-truncated"));
     assert_card_paints(&mut case.visual);
 }
 

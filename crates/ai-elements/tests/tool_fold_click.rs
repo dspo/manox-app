@@ -60,7 +60,8 @@ async fn clicking_a_folded_card_header_re_opens_it(cx: &mut TestAppContext) {
 }
 
 /// A press on a titlebar control is not a fold press: the chip swallows the
-/// click (stop_propagation) and only the clipboard fires.
+/// click (stop_propagation) — the card stays folded — and the clipboard is
+/// what fires.
 #[gpui::test]
 async fn clicking_a_titlebar_copy_chip_does_not_toggle_the_card(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
@@ -81,19 +82,6 @@ async fn clicking_a_titlebar_copy_chip_does_not_toggle_the_card(cx: &mut TestApp
     let opened = cx.update(|cx| state.read(cx).is_open());
     assert!(opened, "the card mounts open");
 
-    let header_bounds = visual.debug_bounds("probe-card-header");
-    println!("DEBUG header bounds: {header_bounds:?}");
-    for candidate in [
-        "probe-card-copy-in",
-        "probe-card-in",
-        "copy-in",
-        "probe-card-copy-in-in",
-    ] {
-        println!(
-            "DEBUG candidate {candidate}: {:?}",
-            visual.debug_bounds(candidate)
-        );
-    }
     let chip = visual
         .debug_bounds("probe-card-copy-in")
         .expect("the titlebar copy chip paints");
@@ -103,4 +91,11 @@ async fn clicking_a_titlebar_copy_chip_does_not_toggle_the_card(cx: &mut TestApp
 
     let still_open = cx.update(|cx| state.read(cx).is_open());
     assert!(still_open, "the chip press must not toggle the card's fold");
+    let copied = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap_or_default();
+    assert_eq!(
+        copied, "cargo test",
+        "the chip press is the copy, not the fold"
+    );
 }

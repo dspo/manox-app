@@ -258,6 +258,12 @@ pub fn parse_unified_diff(code: &str) -> Option<ParsedDiff> {
     let mut parts: Vec<DiffPart> = Vec::new();
     let mut hunk: Option<PartialHunk> = None;
     let mut well_formed = true;
+    // Pre-hunk lines that are neither metadata nor blank — a runtime note
+    // bracketed between the file headers and the first `@@`. Held until a
+    // hunk header proves the text is really carrying a diff, then shipped in
+    // feed order (the literal surface renders them; the strict surface
+    // declines on the flag either way).
+    let mut prelude: Vec<String> = Vec::new();
 
     for line in lines {
         let Some(current) = hunk.as_mut() else {
@@ -266,6 +272,9 @@ pub fn parse_unified_diff(code: &str) -> Option<ParsedDiff> {
             if let Some(rest) = line.strip_prefix("@@ -") {
                 match hunk_starts(rest) {
                     Some((old, new)) => {
+                        for note in prelude.drain(..) {
+                            parts.push(DiffPart::Meta(note));
+                        }
                         hunk = Some(PartialHunk::new(line.to_owned(), old, new));
                     }
                     None => {
@@ -284,9 +293,10 @@ pub fn parse_unified_diff(code: &str) -> Option<ParsedDiff> {
                 || line.starts_with("+++ ")
                 || line.starts_with('\\');
             if !is_meta {
-                // Prose before any hunk: the text is not carrying a diff —
-                // flagged, and only a later hunk header can rescue it.
+                // Not metadata: flagged, and kept only if a later hunk header
+                // proves the text is a diff — prose alone never parses.
                 well_formed = false;
+                prelude.push(line.to_owned());
                 continue;
             }
             if !line.is_empty() {
@@ -311,7 +321,11 @@ pub fn parse_unified_diff(code: &str) -> Option<ParsedDiff> {
     if let Some(current) = hunk {
         parts.push(current.ship());
     }
-    // No hunk and no metadata: not a diff.
+    // Notes a hunk never proved ship only when metadata proved the shape
+    // anyway; prose alone stays `None` — not a diff.
+    if !parts.is_empty() {
+        parts.extend(prelude.into_iter().map(DiffPart::Meta));
+    }
     (!parts.is_empty()).then_some(ParsedDiff { parts, well_formed })
 }
 
@@ -631,6 +645,31 @@ mod tests {
     #[test]
     fn prose_is_not_a_diff() {
         assert!(parse_unified_diff("just some thoughts\nabout life").is_none());
+    }
+
+    /// A runtime note between the file headers and the first hunk: flagged
+    /// (the strict split view declines), but shipped as a part so the literal
+    /// tool-card surface still renders it.
+    #[test]
+    fn a_pre_hunk_note_survives_flagged() {
+        let parsed = parse_unified_diff(
+            "--- a/f\n+++ b/f\n[no snapshot: file changed since read]\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .expect("parses");
+        assert!(!parsed.well_formed);
+        assert_eq!(
+            parsed.parts[2],
+            DiffPart::Meta("[no snapshot: file changed since read]".to_owned())
+        );
+    }
+
+    /// The same note with the hunk still missing rides only when the headers
+    /// proved the shape; bare prose with no metadata and no hunk is `None`.
+    #[test]
+    fn pre_hunk_notes_never_rescue_a_prose_only_text() {
+        let parsed = parse_unified_diff("--- a/f\n[no snapshot]\n").expect("headers parse");
+        assert_eq!(parsed.parts.len(), 2, "header + note");
+        assert!(parse_unified_diff("[just a note]\nmore prose\n").is_none());
     }
 
     #[test]

@@ -166,14 +166,13 @@ pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut Ap
     };
     let key = block_key(node);
 
-    // The view starts at the shape's second face when there is one (that is
-    // the face the fence was written for) and never drifts from the reader's
-    // toggle: the state lives in the window's keyed store per block.
-    let view = window.use_keyed_state(("code-view", key), cx, |_, _| match &payload.shape {
-        FenceShape::Diff(_) => BlockView::Split,
-        FenceShape::Merge(_) => BlockView::Merge,
-        FenceShape::Code => BlockView::Flat,
-    });
+    // The reader's explicit face choice; `None` defers to the shape's
+    // default every frame. A fence mounts before its text is whole — a
+    // streaming ```diff arrives first as an unterminated fence whose shape
+    // is still `Code` — so the default must be re-derived as the shape
+    // completes, while a toggle's choice (an explicit `Some`) never drifts:
+    // the state lives in the window's keyed store per block.
+    let chosen = window.use_keyed_state(("code-view", key), cx, |_, _| None::<BlockView>);
 
     // Fenced values can carry trailing blank lines; the gutter counts and the
     // painted code agree on the trimmed form, and copy takes it too.
@@ -181,7 +180,7 @@ pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut Ap
     panel(
         PanelShape::Shaped {
             shape: &payload.shape,
-            view: &view,
+            chosen: &chosen,
         },
         &code,
         payload.lang.as_deref(),
@@ -194,13 +193,16 @@ pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut Ap
 /// Which body a panel paints, and whether the header carries the face
 /// toggle. `Shaped` is a fence's own panel — shape decides the default face
 /// and the toggle appears; `Flat` is a bare code panel with no second face
-/// (the diagram blocks' source faces compose through this).
+/// (the diagram blocks' source faces compose through this, with an optional
+/// control riding the header ahead of the copy one).
 pub(crate) enum PanelShape<'a> {
     Shaped {
         shape: &'a FenceShape,
-        view: &'a gpui::Entity<BlockView>,
+        chosen: &'a gpui::Entity<Option<BlockView>>,
     },
-    Flat,
+    Flat {
+        header_control: Option<AnyElement>,
+    },
 }
 
 /// One editor panel for arbitrary code — the same artifact a fence renders,
@@ -220,12 +222,19 @@ pub(crate) fn panel(
     let theme = Theme::global(cx).clone();
     let code: SharedString = code.trim_end_matches('\n').to_owned().into();
 
-    let (shape, view): (Option<&FenceShape>, Option<&gpui::Entity<BlockView>>) = match shaped {
-        PanelShape::Shaped { shape, view } => (Some(shape), Some(view)),
-        PanelShape::Flat => (None, None),
+    let (shape, chosen, header_control) = match shaped {
+        PanelShape::Shaped { shape, chosen } => (Some(shape), Some(chosen), None),
+        PanelShape::Flat { header_control } => (None, None, header_control),
     };
-    let showing = match (shape, view) {
-        (Some(_), Some(view)) => *view.read(cx),
+    // The face on show: the reader's explicit choice, else the shape's
+    // default — derived per frame, so a fence that completes mid-stream
+    // opens its second face without a remount.
+    let showing = match (shape, chosen) {
+        (Some(shape), Some(chosen)) => chosen.read(cx).unwrap_or(match shape {
+            FenceShape::Diff(_) => BlockView::Split,
+            FenceShape::Merge(_) => BlockView::Merge,
+            FenceShape::Code => BlockView::Flat,
+        }),
         _ => BlockView::Flat,
     };
 
@@ -251,9 +260,10 @@ pub(crate) fn panel(
         // nothing to show on the left.
         .child(div().flex_1())
         .children(shape.and_then(|shape| {
-            let view = view?;
-            (*shape != FenceShape::Code).then(|| view_toggle(key, shape, showing, view.clone()))
+            let chosen = chosen?;
+            (*shape != FenceShape::Code).then(|| view_toggle(key, shape, showing, chosen.clone()))
         }))
+        .children(header_control)
         .child(copy_control(key, code.to_string(), window, cx));
 
     // The body scrolls vertically as one region — whichever face it carries —
@@ -366,13 +376,15 @@ fn flat_body(
 }
 
 /// The header's face toggle: the icon names the face a click shows, the same
-/// reading the svg block's flip uses. State rides the keyed store, so the
-/// reader's choice survives every frame the document re-renders.
+/// reading the svg block's flip uses. The click records the reader's explicit
+/// choice (`Some`), which outranks the shape's default from then on; the
+/// state rides the keyed store, so it survives every frame the document
+/// re-renders.
 fn view_toggle(
     key: u64,
     shape: &FenceShape,
     showing: BlockView,
-    view: gpui::Entity<BlockView>,
+    chosen: gpui::Entity<Option<BlockView>>,
 ) -> AnyElement {
     let (icon, target) = match (shape, showing) {
         (FenceShape::Diff(_), BlockView::Split) => (IconName::Rows2, BlockView::Flat),
@@ -387,8 +399,8 @@ fn view_toggle(
         .debug_selector(|| "markdown-editor-code-view-toggle".into())
         .icon(icon)
         .on_click(move |_, _, cx: &mut App| {
-            view.update(cx, |current, cx| {
-                *current = target;
+            chosen.update(cx, |current, cx| {
+                *current = Some(target);
                 cx.notify();
             });
         })
@@ -406,6 +418,7 @@ fn copy_control(key: u64, text: String, window: &mut Window, cx: &mut App) -> An
     Button::new(id)
         .ghost()
         .xsmall()
+        .debug_selector(|| "markdown-editor-code-copy".into())
         .icon(if active {
             IconName::Check
         } else {

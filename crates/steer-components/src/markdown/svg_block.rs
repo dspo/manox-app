@@ -343,6 +343,11 @@ fn svg_element(
     let showing = *face.read(cx);
     let group: SharedString = format!("markdown-svg-{key}").into();
 
+    // The flip control rides the panel's header row on the source face —
+    // the trailing corner overlay it wears on the image would sit exactly
+    // on the editor panel's copy button, which the reader could never
+    // press. On the image it stays the floating corner control, since
+    // there is no header to host it.
     div()
         .relative()
         .group(group.clone())
@@ -360,7 +365,9 @@ fn svg_element(
                     .w_full()
                     .min_w_0()
                     .child(super::code_block::panel(
-                        super::code_block::PanelShape::Flat,
+                        super::code_block::PanelShape::Flat {
+                            header_control: Some(face_toggle(key, name, showing, face.clone(), cx)),
+                        },
                         &fence.code,
                         fence.lang.as_deref(),
                         key,
@@ -370,15 +377,15 @@ fn svg_element(
                     .into_any_element()
             }
         })
-        .child(
+        .children((showing == Face::Image).then(|| {
             div()
                 .absolute()
                 .top_1()
                 .right_1()
                 .opacity(0.75)
                 .group_hover(group, |style| style.opacity(1.))
-                .child(face_toggle(key, name, showing, face, cx)),
-        )
+                .child(face_toggle(key, name, showing, face, cx))
+        }))
         .into_any_element()
 }
 

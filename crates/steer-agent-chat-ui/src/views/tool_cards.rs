@@ -38,7 +38,7 @@ use crate::i18n;
 use crate::text::one_line;
 
 /// Lines a card body renders before the truncation note takes over.
-const LINE_CAP: usize = 400;
+pub const LINE_CAP: usize = 400;
 
 /// The tool families that render as ai-elements cards. Everything else stays
 /// on the `TerminalPanel` step.
@@ -422,19 +422,32 @@ fn shell_body(
     output: &str,
 ) -> AnyElement {
     let mut shell = ShellView::new(id, command).context(path_context(cwd));
+    for line in shell_output_lines(output, entry.is_error) {
+        shell = shell.line(line);
+    }
+    finish_shell(shell, entry)
+}
+
+/// The `Bash`/`BashOutput` families' transcript rows: the first [`LINE_CAP`]
+/// output lines (plain, or error-tinted when the call failed), then — when
+/// anything was cut — the dim truncation note. Pure, so the streaming
+/// regression test asserts the card's rendered shape against the published
+/// snapshot instead of re-deriving it.
+pub fn shell_output_lines(output: &str, is_error: bool) -> Vec<ShellLine> {
+    let mut lines = Vec::new();
     for (shown, line) in output.lines().enumerate() {
         if shown >= LINE_CAP {
-            shell = shell.line(ShellLine::dim(i18n::t("tool-output-truncated")));
+            lines.push(ShellLine::dim(i18n::t("tool-output-truncated")));
             break;
         }
-        let kind = if entry.is_error {
+        let kind = if is_error {
             ShellSpanKind::Error
         } else {
             ShellSpanKind::Plain
         };
-        shell = shell.line(ShellLine::spans(vec![(kind, SharedString::from(line))]));
+        lines.push(ShellLine::spans(vec![(kind, SharedString::from(line))]));
     }
-    finish_shell(shell, entry)
+    lines
 }
 
 /// The exit footer: success is exit 0; failures carry no invented code — the
