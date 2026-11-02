@@ -186,7 +186,7 @@ impl Workspace {
 
 /// One line per live dependent across `ids`, from the folded book: running
 /// subagent rows (the persistent roster's live face, joined with the
-/// live-only backgroundWork entries the pre-#989 runtime carries; deduped by
+/// live-only backgroundWork entries the chat fold still carries; deduped by
 /// display name so a run the two faces both report lists once) and background
 /// shell entries. The pure core of the archive confirmation — testable
 /// against a hand-built book, the `container_rows` precedent.
@@ -251,28 +251,30 @@ fn dependent_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use steer_agent_chat_ui::ahp_store::{
-        ChannelBook, ChildRunRow, ChildRunStatus, chat_uri, work_uri,
-    };
+    use steer_agent_chat_ui::ahp_store::{ChannelBook, chat_uri, work_uri};
 
-    fn roster_row(run_id: &str, label: &str, status: ChildRunStatus) -> ChildRunRow {
-        ChildRunRow {
-            run_id: run_id.to_string(),
-            kind: "Explore".to_string(),
-            label: label.to_string(),
-            color: None,
-            status,
-            verdict: None,
-            started_at: "2026-10-30T00:00:00.000Z".to_string(),
-            chat: format!("ahp-chat:/{run_id}"),
-        }
+    /// The fixture row in its wire shape — what the ext fold's `childRuns`
+    /// registry keeps verbatim (the reducer's tolerance), from which the
+    /// read face classifies.
+    fn roster_wire_row(run_id: &str, label: &str, status: &str) -> (String, serde_json::Value) {
+        (
+            run_id.to_string(),
+            serde_json::json!({
+                "runId": run_id,
+                "kind": "Explore",
+                "label": label,
+                "status": status,
+                "startedAt": "2026-10-30T00:00:00.000Z",
+                "chat": format!("ahp-chat:/{run_id}"),
+            }),
+        )
     }
 
     /// The confirm gate's data face (plan D7): live roster rows and
     /// background shells name themselves in the dialog; settled roster rows
     /// and absent work read as nothing live (no confirmation). The fixtures
-    /// cover both wire faces — the roster rides the work channel's
-    /// `childRunsChanged` registry (upstream #989, the v0.7.0 wire) and the
+    /// cover both wire faces — the roster rides the work channel's ext fold
+    /// (`XManoxState.childRuns`, upstream #989, the v0.7.0 wire) and the
     /// background shells the live-only chat face.
     #[test]
     fn the_confirm_gate_counts_live_dependents_only() {
@@ -280,13 +282,19 @@ mod tests {
         let mut runs = std::collections::BTreeMap::new();
         runs.insert(
             "run-live".to_string(),
-            roster_row("run-live", "map the edges", ChildRunStatus::Running),
+            roster_wire_row("run-live", "map the edges", "running").1,
         );
         runs.insert(
             "run-settled".to_string(),
-            roster_row("run-settled", "already done", ChildRunStatus::Settled),
+            roster_wire_row("run-settled", "already done", "settled").1,
         );
-        book.child_runs.insert(work_uri("cap"), runs);
+        book.ext.insert(
+            work_uri("cap"),
+            manox_ahp::ext::XManoxState {
+                child_runs: Some(runs),
+                ..Default::default()
+            },
+        );
         let chat: ahp_types::state::ChatState = serde_json::from_value(serde_json::json!({
             "resource": chat_uri("cap"),
             "title": "cap",

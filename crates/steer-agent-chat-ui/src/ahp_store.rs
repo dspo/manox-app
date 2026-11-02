@@ -108,11 +108,12 @@ pub struct ChildRunRow {
 }
 
 impl ChildRunRow {
-    /// Parse one wire row (the `run` payload of a `childRunsChanged`
-    /// action, or one entry of a baseline's `childRuns` map). A row
-    /// without a keyable `runId` or a status outside the two-word
-    /// vocabulary cannot be classified and is dropped — the fold only
-    /// ever shows what it recognizes.
+    /// Classify one wire row (an entry of the ext fold's `child_runs`
+    /// registry — the reducer keeps every keyed row verbatim, this face
+    /// picks out the ones the app can show). A row without a keyable
+    /// `runId` or a status outside the two-word vocabulary cannot be
+    /// classified and is dropped — the read face only ever shows what it
+    /// recognizes.
     fn from_wire(run_id: &str, row: &Value) -> Option<Self> {
         if run_id.is_empty() {
             return None;
@@ -239,15 +240,9 @@ pub struct ChannelBook {
     pub sessions: HashMap<String, SessionState>,
     pub chats: HashMap<String, ChatState>,
     /// Extension channel URI → folded state (a baseline replaces, deltas fold).
+    /// The work channel's bag carries the persistent child-run roster
+    /// (upstream #989's `XManoxState.childRuns`) alongside the suites/goal.
     pub ext: HashMap<String, XManoxState>,
-    /// Work-channel URI → child-run roster view (run id → the run's latest
-    /// row). The persistent sub-agent account (upstream #989's
-    /// `XManoxState.childRuns`, folded into its own registry because the
-    /// pinned `XManoxState` has no slot for it — its serde silently drops
-    /// the field today). Like the ext bag itself: `childRunsChanged`
-    /// upserts by run id and never clears, a baseline replaces the view
-    /// wholesale. The read face is [`child_runs_of`].
-    pub child_runs: HashMap<String, BTreeMap<String, ChildRunRow>>,
     /// Metrics channel URI → aggregated Q face.
     pub metrics: HashMap<String, ConversationMetrics>,
     /// Annotations channel state by session id (`ahp-session:/<id>/
@@ -385,7 +380,6 @@ impl Default for ChannelBook {
             sessions: HashMap::new(),
             chats: HashMap::new(),
             ext: HashMap::new(),
-            child_runs: HashMap::new(),
             metrics: HashMap::new(),
             annotations: HashMap::new(),
             catalogues: HashMap::new(),
@@ -494,31 +488,11 @@ impl ChannelBook {
             }
             return match value.get("state") {
                 Some(state) => {
-                    // The roster rides the baseline too (the work channel's
-                    // is a pure journal fold, upstream #989); the pinned
-                    // `XManoxState` has no slot for it, so the rows come
-                    // out of the raw state before the typed parse drops
-                    // them. The baseline REPLACES the channel's view
-                    // wholesale — the same semantics the typed parse gives
-                    // the ext bag, both ways: a roster the baseline does
-                    // not carry clears, one it carries replaces.
-                    let roster_changed = match state.get("childRuns") {
-                        Some(runs) => {
-                            let rows: BTreeMap<String, ChildRunRow> = runs
-                                .as_object()
-                                .into_iter()
-                                .flat_map(|runs| runs.iter())
-                                .filter_map(|(run_id, row)| {
-                                    ChildRunRow::from_wire(run_id, row)
-                                        .map(|parsed| (run_id.clone(), parsed))
-                                })
-                                .collect();
-                            let changed = self.child_runs.get(channel) != Some(&rows);
-                            self.child_runs.insert(channel.to_string(), rows);
-                            changed
-                        }
-                        None => self.child_runs.remove(channel).is_some(),
-                    };
+                    // The typed parse keeps the whole bag verbatim — the work
+                    // channel's `childRuns` roster (upstream #989) included,
+                    // its slot living on `XManoxState` since v0.7.0. The
+                    // baseline REPLACES the channel's view wholesale, both
+                    // ways.
                     match serde_json::from_value::<XManoxState>(state.clone()) {
                         Ok(state) => {
                             self.ext.insert(channel.to_string(), state);
@@ -526,11 +500,7 @@ impl ChannelBook {
                         }
                         Err(err) => {
                             tracing::warn!(channel = %channel, error = %err, "baseline did not parse");
-                            if roster_changed {
-                                FoldEffect::Changed
-                            } else {
-                                FoldEffect::Ignored
-                            }
+                            FoldEffect::Ignored
                         }
                     }
                 }
@@ -539,40 +509,6 @@ impl ChannelBook {
         }
         if let Some(reason) = value.get("rejectionReason").and_then(Value::as_str) {
             return FoldEffect::Rejected(reason.to_string());
-        }
-        // The persistent child-run roster (upstream #989): one run row per
-        // action, upserted by `runId`, settled rows kept with their verdict,
-        // a continuation re-marking the run running. The pinned
-        // `XManoxState` has no slot for the registry — the shared ext fold
-        // would drop the action as unknown-tolerant noise — so the book
-        // folds it into its own registry before that fold ever sees it.
-        // Interception sits ahead of the ext lookup on purpose: the roster
-        // does not depend on the channel's ext bag having landed.
-        if value.get("type").and_then(Value::as_str) == Some(ext::actions::WORK_CHILD_RUNS) {
-            let row = value.get("run").and_then(|run| {
-                let run_id = run.get("runId").and_then(Value::as_str)?;
-                ChildRunRow::from_wire(run_id, run)
-            });
-            let Some(row) = row else {
-                // A row without a keyable `runId` cannot enter the view,
-                // and this action has no clear edge — nothing to fold.
-                return FoldEffect::Ignored;
-            };
-            let view = self.child_runs.entry(channel.to_string()).or_default();
-            return match view.entry(row.run_id.clone()) {
-                std::collections::btree_map::Entry::Occupied(mut slot) => {
-                    if *slot.get() == row {
-                        FoldEffect::Ignored
-                    } else {
-                        slot.insert(row);
-                        FoldEffect::Changed
-                    }
-                }
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(row);
-                    FoldEffect::Changed
-                }
-            };
         }
         if channel.starts_with(ext::channels::METRICS) {
             if value.get("type").and_then(Value::as_str) == Some(ext::actions::METRICS_CHANGED) {
@@ -2175,11 +2111,52 @@ impl AhpStore {
     /// sidebar is the active list; a refused command re-seeds them on the
     /// next catalogue walk, the same self-heal `archive_sessions` leans on)
     /// and marks the object rows' archived bits at the same choke point
-    /// (the draft refill must never resurrect a retired container). The
-    /// receipt only confirms; the UI has already moved.
-    pub fn teardown_containers(&mut self, captain_ids: &[String], mode: TeardownMode) {
-        if captain_ids.is_empty() {
+    /// (the draft refill must never resurrect a retired container). When
+    /// the reply lands, the receipt's `archived` list RECONCILES the local
+    /// book: a child the optimistic pass missed (its parent edge landed
+    /// after the tree was computed, so the tree read never saw it) drops
+    /// with the confirmation — drop-only, restore nothing.
+    pub fn teardown_containers(
+        &mut self,
+        captain_ids: &[String],
+        mode: TeardownMode,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let archive_mode = mode == TeardownMode::Archive;
+        let Some(reply) = self.teardown_write(captain_ids, mode) else {
             return;
+        };
+        // The optimistic half (archive) and the fold echoes (stop-all's turn
+        // edges) carry the UI; a refusal is traced, not retried — the
+        // gesture's optimistic state self-heals through the catalogue walk.
+        // The archive receipt is the one correction pass: the host names
+        // exactly what it archived (children included), and any of it still
+        // showing in the book leaves.
+        cx.spawn(
+            async move |this, cx: &mut gpui::AsyncApp| match reply.recv().await {
+                Ok(Ok(receipt)) => {
+                    tracing::info!(?receipt, "container teardown receipt");
+                    if archive_mode {
+                        let _ = this.update(cx, |store, _| {
+                            store.reconcile_teardown_receipt(&receipt);
+                        });
+                    }
+                }
+                Ok(Err(err)) => tracing::warn!(error = %err, "container teardown refused"),
+                Err(_) => {}
+            },
+        )
+        .detach();
+    }
+
+    /// The write half of [`Self::teardown_containers`]: the optimistic
+    /// archive drop, then the command — `None` when no reply will land (an
+    /// empty batch, or the write queued behind the pre-connect replay,
+    /// where the flush's reply is the replay's business). Plain
+    /// `&mut self`, so the fold tests can drive it without a gpui context.
+    fn teardown_write(&mut self, captain_ids: &[String], mode: TeardownMode) -> Option<Reply> {
+        if captain_ids.is_empty() {
+            return None;
         }
         let tree = container_tree_ids(&self.book, captain_ids);
         if mode == TeardownMode::Archive {
@@ -2206,20 +2183,33 @@ impl AhpStore {
                 method: ext::commands::TEARDOWN,
                 params,
             });
-            return;
+            return None;
         }
-        let reply = self.call(ext::commands::TEARDOWN, params);
-        // The receipt is a confirmation, not a driver: the optimistic half
-        // above (archive) and the fold echoes (stop-all's turn edges) carry
-        // the UI. A refusal is traced, not retried — the gesture's optimistic
-        // state self-heals through the catalogue walk.
-        manox_agent::runtime::handle().spawn(async move {
-            match reply.recv().await {
-                Ok(Ok(receipt)) => tracing::info!(?receipt, "container teardown receipt"),
-                Ok(Err(err)) => tracing::warn!(error = %err, "container teardown refused"),
-                Err(_) => {}
+        Some(self.call(ext::commands::TEARDOWN, params))
+    }
+
+    /// Reconcile the local book against a `x-manox/teardown` archive
+    /// receipt: every id the receipt names as `archived` (the captains and
+    /// every child the host's cascade actually took) that is STILL in the
+    /// catalogue drops — the optimistic pass ran on the tree as the book
+    /// read it at dispatch, so a row that landed after that read (or whose
+    /// parent edge arrived late) would otherwise outlive its own archive.
+    /// Drop-only by design: a row the receipt does not name stays (the host
+    /// never archives more than it names; the walk is the other direction's
+    /// healer). Pure `&mut self`, so tests can drive it with a synthetic
+    /// receipt.
+    fn reconcile_teardown_receipt(&mut self, receipt: &Value) {
+        let Some(containers) = receipt.get("containers").and_then(Value::as_array) else {
+            return;
+        };
+        for container in containers {
+            let Some(archived) = container.get("archived").and_then(Value::as_array) else {
+                continue;
+            };
+            for id in archived.iter().filter_map(Value::as_str) {
+                self.book.remove_summary(&session_uri(id));
             }
-        });
+        }
     }
 
     /// Revive a container's whole tree (D7's unarchive): the captain plus
@@ -3263,17 +3253,25 @@ pub fn browser_suites_of(book: &ChannelBook, session_id: &str) -> Vec<String> {
 }
 
 /// The session's persistent child-run roster — live AND settled runs —
-/// from the `x-manox-work` channel (keyed by the session id; work rows
-/// have no chat scope), in dispatch order (`startedAt` ascending, run id
-/// as the tiebreak; the wire registry is keyed by run id, so the stamp
-/// sort is what keeps the rows in the order the runs were dispatched).
-/// The durable account behind the crew surfaces: the Captain strip's
-/// live-only face reads `background_work` instead (plan PR-A4).
+/// from the `x-manox-work` channel's ext fold (`XManoxState.childRuns`,
+/// upstream #989; keyed by the session id — work rows have no chat scope),
+/// in dispatch order (`startedAt` ascending, run id as the tiebreak; the
+/// wire registry is keyed by run id, so the stamp sort is what keeps the
+/// rows in the order the runs were dispatched). Rows the typed fold keeps
+/// but this face cannot classify (a status outside the vocabulary) never
+/// surface. The durable account behind the crew surfaces: the Captain
+/// strip's live-only face reads `background_work` instead (plan PR-A4).
 pub fn child_runs_of(book: &ChannelBook, session_id: &str) -> Vec<ChildRunRow> {
     let mut rows: Vec<ChildRunRow> = book
-        .child_runs
+        .ext
         .get(&work_uri(session_id))
-        .map(|view| view.values().cloned().collect())
+        .and_then(|x| x.child_runs.as_ref())
+        .map(|registry| {
+            registry
+                .iter()
+                .filter_map(|(run_id, row)| ChildRunRow::from_wire(run_id, row))
+                .collect()
+        })
         .unwrap_or_default();
     rows.sort_by(|a, b| {
         a.started_at
@@ -4430,20 +4428,34 @@ mod tests {
     }
 
     /// The persistent child-run roster's fold semantics (upstream #989,
-    /// driven here through hand-built `childRunsChanged` actions): one run
-    /// row per action, upserted by `runId`; a
-    /// settle keeps the row with its verdict; a continuation re-marks it
-    /// running; a row without a keyable `runId` cannot enter the view and
-    /// a restated row is a NoOp.
+    /// driven here through hand-built `childRunsChanged` actions flowing
+    /// through the REAL ext reducer): one run row per action, upserted by
+    /// `runId`; a settle keeps the row with its verdict; a continuation
+    /// re-marks it running; a restated row is a NoOp. The ext registry keeps
+    /// any keyed row verbatim (the reducer's tolerance); the read face only
+    /// surfaces rows it can classify.
     #[test]
     fn child_run_actions_upsert_the_roster_and_settled_rows_stay() {
         let mut book = ChannelBook::default();
+        let baseline = |state: Value| {
+            StateAction::Unknown(serde_json::json!({
+                "type": "x-manox/baseline",
+                "state": state,
+            }))
+        };
         let action_for = |run: Value| {
             StateAction::Unknown(serde_json::json!({
                 "type": "x-manox-work/childRunsChanged",
                 "run": run,
             }))
         };
+        // The channel's ext bag must exist before its deltas fold (the same
+        // lifecycle every extension channel has: subscribe answers with the
+        // baseline, deltas follow).
+        assert_eq!(
+            book.apply(&work_uri("s-1"), &baseline(serde_json::json!({}))),
+            FoldEffect::Changed
+        );
         let started = serde_json::json!({
             "runId": "sub-1", "kind": "Explore", "label": "survey",
             "status": "running", "startedAt": "2026-10-15T00:00:00.000Z",
@@ -4512,31 +4524,38 @@ mod tests {
         );
 
         // A restatement folds to a NoOp, and a row without a keyable
-        // `runId` (or a status outside the vocabulary) cannot enter the
-        // view — the action has no clear edge, so neither may disturb it.
+        // `runId` cannot enter the view. An empty-runId row or a status
+        // outside the vocabulary IS kept by the ext registry (the
+        // reducer's verbatim tolerance) — the fold reports the registry
+        // change — but the read face never surfaces what it cannot
+        // classify, so the roster stays at two either way.
         assert_eq!(
             book.apply(&work_uri("s-1"), &action_for(continued)),
             FoldEffect::Ignored
         );
+        assert_eq!(
+            book.apply(
+                &work_uri("s-1"),
+                &StateAction::Unknown(serde_json::json!({
+                    "type": "x-manox-work/childRunsChanged"
+                })),
+            ),
+            FoldEffect::Ignored,
+            "an action without a `run` row is nothing to fold"
+        );
+        assert_eq!(
+            book.apply(&work_uri("s-1"), &action_for(serde_json::json!({}))),
+            FoldEffect::Ignored,
+            "a row without a runId cannot be keyed"
+        );
         for shape in [
-            serde_json::json!({"type": "x-manox-work/childRunsChanged"}),
-            serde_json::json!({
-                "type": "x-manox-work/childRunsChanged",
-                "run": {"status": "running"},
-            }),
-            serde_json::json!({
-                "type": "x-manox-work/childRunsChanged",
-                "run": {"runId": "", "status": "running"},
-            }),
-            serde_json::json!({
-                "type": "x-manox-work/childRunsChanged",
-                "run": {"runId": "sub-9", "status": "paused"},
-            }),
+            serde_json::json!({"runId": "", "status": "running"}),
+            serde_json::json!({"runId": "sub-9", "status": "paused"}),
         ] {
             assert_eq!(
-                book.apply(&work_uri("s-1"), &StateAction::Unknown(shape)),
-                FoldEffect::Ignored,
-                "an unkeyable row cannot enter the view"
+                book.apply(&work_uri("s-1"), &action_for(shape)),
+                FoldEffect::Changed,
+                "the registry keeps the keyed row verbatim"
             );
         }
         assert_eq!(child_runs_of(&book, "s-1").len(), 2);
@@ -5171,7 +5190,7 @@ mod tests {
         .expect("a summary parses");
         store.book.seed_summaries(vec![row]);
 
-        store.teardown_containers(&["cap".to_string()], TeardownMode::StopAll);
+        store.teardown_write(&["cap".to_string()], TeardownMode::StopAll);
 
         assert_eq!(store.pending_writes.len(), 1, "one write: the command");
         let Some(PendingWrite::Command { method, params }) = store.pending_writes.first() else {
@@ -5184,7 +5203,7 @@ mod tests {
         assert!(store.book.summaries.contains_key("cap"));
 
         // An empty batch emits nothing.
-        store.teardown_containers(&[], TeardownMode::StopAll);
+        store.teardown_write(&[], TeardownMode::StopAll);
         assert_eq!(store.pending_writes.len(), 1);
     }
 
@@ -5218,7 +5237,7 @@ mod tests {
             summary("other", None),
         ]);
 
-        store.teardown_containers(&["cap".to_string()], TeardownMode::Archive);
+        store.teardown_write(&["cap".to_string()], TeardownMode::Archive);
 
         assert_eq!(store.pending_writes.len(), 1, "one write: the command");
         let Some(PendingWrite::Command { method, params }) = store.pending_writes.first() else {
@@ -5232,6 +5251,53 @@ mod tests {
         assert!(!store.book.summaries.contains_key("cap"));
         assert!(!store.book.summaries.contains_key("sub-1"));
         assert!(store.book.summaries.contains_key("other"));
+    }
+
+    /// The archive receipt RECONCILES the local book: a child the
+    /// optimistic pass missed (its parent edge landed after the tree was
+    /// computed, so the tree read never saw it) drops when the host's
+    /// receipt names it — drop-only, restore nothing.
+    #[test]
+    fn teardown_receipt_reconciles_rows_the_optimistic_pass_missed() {
+        let summary = |id: &str| -> SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": session_uri(id),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            }))
+            .expect("a summary parses")
+        };
+        let mut store = disconnected_store();
+        // `late-child` joined the catalogue AFTER the optimistic tree drop
+        // ran (its parent edge arrived late) — the book still carries it.
+        store
+            .book
+            .seed_summaries(vec![summary("late-child"), summary("survivor")]);
+
+        // The host's receipt: the cascade archived the captain, the child
+        // the book knew about, AND the late-joining one.
+        store.reconcile_teardown_receipt(&serde_json::json!({
+            "containers": [
+                {
+                    "session": "cap",
+                    "interruptedRuns": [],
+                    "stoppedTasks": 0,
+                    "archived": ["cap", "sub-1", "late-child"],
+                },
+            ],
+        }));
+
+        // The late child drops with the confirmation; the unarchived row
+        // stays; nothing is restored.
+        assert!(
+            !store.book.summaries.contains_key("late-child"),
+            "the receipt-named child the optimistic pass missed leaves the book"
+        );
+        assert!(store.book.summaries.contains_key("survivor"));
+        assert_eq!(store.book.summaries.len(), 1);
     }
 
     /// The whole-tree revive rides ONE `archivedChanged(false)` write that

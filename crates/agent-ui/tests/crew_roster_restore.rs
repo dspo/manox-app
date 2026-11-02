@@ -51,11 +51,25 @@ async fn the_attach_rebuild_crew_rows_from_the_roster(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     // Seed the roster: one live run, one settled with its verdict — the
-    // durable account the live-only background work never carries.
+    // durable account the live-only background work never carries. The
+    // channel's ext bag must exist before its deltas fold (the production
+    // lifecycle: subscribe answers the baseline, deltas follow), so the
+    // seeding opens with the baseline.
     let seeded = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_chat_store(cx));
     let (store, sid) = seeded.expect("the attach bound the foreground store");
     assert_eq!(sid, "cap-1");
     store.update(&mut visual.cx, |s, cx| {
+        assert_eq!(
+            s.book.apply(
+                &work_uri("cap-1"),
+                &ahp_types::actions::StateAction::Unknown(serde_json::json!({
+                    "type": "x-manox/baseline",
+                    "state": {},
+                })),
+            ),
+            steer_agent_chat_ui::ahp_store::FoldEffect::Changed,
+            "the baseline opens the channel's ext bag"
+        );
         for run in [
             serde_json::json!({
                 "runId": "sub-1", "kind": "Explore", "label": "survey",

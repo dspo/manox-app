@@ -1383,6 +1383,19 @@ mod tests {
                 "chat": format!("ahp-chat:/{run_id}"),
             })
         };
+        // The channel's ext bag must exist before its deltas fold (the
+        // production lifecycle: subscribe answers the baseline, deltas
+        // follow).
+        assert_eq!(
+            book.apply(
+                &crate::ahp_store::work_uri("cap"),
+                &ahp_types::actions::StateAction::Unknown(serde_json::json!({
+                    "type": "x-manox/baseline",
+                    "state": {},
+                })),
+            ),
+            crate::ahp_store::FoldEffect::Changed
+        );
         assert_eq!(
             book.apply(
                 &crate::ahp_store::work_uri("cap"),
