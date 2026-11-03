@@ -119,7 +119,8 @@ pub struct SessionRowData {
 /// The row's primary status, one glyph in the 16px slot: `Pending` the
 /// amber pixel question mark (every kind shares the glyph — the tooltip
 /// copy carries the difference), `Running` the pixel grid, `Unread` the
-/// filled green completion dot, `Idle` the empty slot. A stopped turn's
+/// frozen green pixel grid (the animation's all-aligned frame, static),
+/// `Idle` the empty slot. A stopped turn's
 /// error is never a list state: it renders as turn-level content inside
 /// the session.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1195,8 +1196,9 @@ fn check_slot(checked: bool) -> impl IntoElement {
 /// The 16px status slot's content, one glyph per state: `Pending` the
 /// amber pixel question mark, `Running` the shared PixelSpinner (the
 /// conversation strip's own glyph, phase-locked so every running row
-/// hops on the same beat), `Unread` the filled green completion dot,
-/// `Idle` nothing.
+/// hops on the same beat), `Unread` the PixelSpinner frozen at its
+/// six-dots-aligned hold frame (attention without churn — the animation
+/// itself stays reserved for `Running`), `Idle` nothing.
 fn status_slot(status: SessionStatus) -> impl IntoElement {
     match status {
         SessionStatus::Pending(_) => pending_mark().into_any_element(),
@@ -1209,10 +1211,9 @@ fn status_slot(status: SessionStatus) -> impl IntoElement {
             // of frames, not vsync.
             .max_fps(30.)
             .into_any_element(),
-        SessionStatus::Unread => div()
-            .size(px(6.5))
-            .rounded_full()
-            .bg(SUCCESS_GREEN)
+        SessionStatus::Unread => PixelSpinner::new()
+            .frozen()
+            .color(SUCCESS_GREEN.into())
             .into_any_element(),
         SessionStatus::Idle => div().into_any_element(),
     }

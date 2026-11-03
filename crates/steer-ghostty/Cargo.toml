@@ -1,0 +1,19 @@
+[package]
+name = "steer-ghostty"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Ghostty-backed terminal surface: libghostty-vt emulation core behind a GPUI element"
+links = "ghostty-vt"
+build = "build.rs"
+
+[lib]
+name = "steer_ghostty"
+path = "src/lib.rs"
+
+[dependencies]
+gpui.workspace = true
+portable-pty.workspace = true
+anyhow.workspace = true
+async-channel.workspace = true
+unicode-width.workspace = true

@@ -20,6 +20,7 @@ members = [
 	"crates/steer-i18n",
 	"crates/steer-agent-chat-ui",
 	"crates/steer-agent-chrome-ui",
+	"crates/steer-ghostty",
 ]
 resolver = "2"
 
@@ -60,6 +61,7 @@ cx-cli = { path = "crates/cx-cli" }
 steer-i18n = { path = "crates/steer-i18n" }
 steer-agent-chat-ui = { path = "crates/steer-agent-chat-ui" }
 steer-agent-chrome-ui = { path = "crates/steer-agent-chrome-ui" }
+steer-ghostty = { path = "crates/steer-ghostty" }
 
 anyhow = "1"
 # The pure-Rust LaTeX math typesetter behind `$$…$$` blocks: a formula becomes
@@ -71,6 +73,7 @@ mathra = "=1.1.1"
 # raster path the svg fence paints. SVG output only — gpui rasterizes.
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 async-channel = "2"
+unicode-width = "0.2"
 async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "process", "io-util", "net"] }

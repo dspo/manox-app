@@ -1,0 +1,28 @@
+name: ghostty-vt cache
+description: >-
+  Restores the built libghostty-vt static library and its build stamp, so the
+  zig build (the one expensive phase of `crates/steer-ghostty`) is paid once per
+  (Ghostty rev, zig identity) instead of on every job of every run.
+
+  Only the artifact and the stamp are cached: the pinned Ghostty sources and the
+  pinned zig toolchain are ~1.1 GB combined (mostly zig caches) and are needed
+  again only when the stamp does not match, i.e. when `build.rs`'s `GHOSTTY_REV`
+  or `ZIG_VERSION` changes. The key below mirrors those constants — bump it in
+  the same commit.
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the ghostty-vt artifact
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/steer-ghostty/lib-static/libghostty-vt.a
+          ~/.cache/steer-ghostty/ghostty-vt.stamp
+        key: ghostty-vt-${{ runner.os }}-${{ runner.arch }}-042b16b6-zig0.17.0
+
+    # The cache step names files; the build script needs the directory. Kept in
+    # the action so every leg points at the same one.
+    - name: Point the build script at the cache
+      shell: bash
+      run: echo "STEER_GHOSTTY_CACHE=${HOME}/.cache/steer-ghostty" >> "${GITHUB_ENV}"
