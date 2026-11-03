@@ -72,8 +72,6 @@ runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题
 
 上游 PR 的 body 或 commit message 点名 dspo/manox-app 需要伴随改动的（「Companion change required in dspo/manox-app」及同类表述），其消费义务落在把锁推进到该发布的那个本仓 PR：**同一 PR 内完成订阅/换道/接线，或在 Assumptions 里显式申报滞留原因**——静默不消费等于上游白修（桌面端撞不到修复）。台账只列**未结清**义务（销账即删行；历史销账记录走 git 历史与 PR 描述，不驻留本文件，禁止「本 PR」类随时腐烂的指代）：
 
-- dspo/manox#840（interaction park 跨 restore 结算）：纯宿主侧，app 零动作（挂此备忘至上游确认无客户端义务）
-
 ## 构建与开发命令
 
 ```bash
