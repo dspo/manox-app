@@ -235,7 +235,7 @@ impl ToolTab for GhosttyTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
-        match steer_ghostty::spawn_ghostty_view(&thread_cwd_or_home(), ghostty_theme(), cx) {
+        match steer_ghostty::spawn_ghostty_view(&thread_cwd_or_home(cx), ghostty_theme(), cx) {
             Ok(view) => {
                 *self.view.lock().unwrap() = Some(view.clone());
                 store.put(&self.id, view);
