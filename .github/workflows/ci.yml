@@ -195,6 +195,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # The libghostty-vt static library + its stamp: without it every job pays
+      # the ~4 min zig build, which is exactly the cost this cache removes.
+      - name: Cache ghostty-vt
+        uses: ./.github/actions/ghostty-vt
+
       # Disk is the constraint that has already broken this pipeline once (ld
       # SIGBUS on a full filesystem), so record the headroom before building.
       - name: Record disk headroom
@@ -241,6 +246,11 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
+
+      # The libghostty-vt static library + its stamp: without it every job pays
+      # the ~4 min zig build, which is exactly the cost this cache removes.
+      - name: Cache ghostty-vt
+        uses: ./.github/actions/ghostty-vt
 
       - name: Record disk headroom
         run: df -h /
@@ -291,6 +301,11 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
+
+      # The libghostty-vt static library + its stamp: without it every job pays
+      # the ~4 min zig build, which is exactly the cost this cache removes.
+      - name: Cache ghostty-vt
+        uses: ./.github/actions/ghostty-vt
 
       # --release inside the script; it also derives Depends from the linked
       # binaries (ldd + dpkg -S), so the package metadata follows the real link
@@ -362,6 +377,11 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
+
+      # The libghostty-vt static library + its stamp: without it every job pays
+      # the ~4 min zig build, which is exactly the cost this cache removes.
+      - name: Cache ghostty-vt
+        uses: ./.github/actions/ghostty-vt
 
       # Builds steer + cx, assembles and ad-hoc signs Steer.app, then creates the
       # compressed image with an /Applications symlink and verifies both the

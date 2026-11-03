@@ -150,6 +150,7 @@ dependencies = [
  "steer-agent-chrome-ui",
  "steer-components",
  "steer-ext-agents",
+ "steer-ghostty",
  "steer-i18n",
  "steer-webview",
  "tempfile",
@@ -11309,6 +11310,17 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "which 7.0.3",
+]
+
+[[package]]
+name = "steer-ghostty"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "gpui-pre",
+ "portable-pty",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
