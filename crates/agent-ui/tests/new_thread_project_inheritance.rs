@@ -1,5 +1,5 @@
 //! FULL-WIRING regression: a thread created FOR a project (the sidebar's
-//! 新建会话 → Steer row hands `start_new_thread` the project directory) must
+//! 新建会话 → Steer row hands `new_container` the project directory) must
 //! carry that directory on the session channel the composer's project chip
 //! reads — the user never picks the folder a second time.
 //!
@@ -121,7 +121,7 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
     let project_path = project.path().to_path_buf();
     let project_string = project_path.to_string_lossy().into_owned();
 
-    // The draft row's picks ARE the create intent's config: `start_new_thread`
+    // The draft row's picks ARE the create intent's config: `new_container`
     // refills an unspoken row under this project, and its row wins over
     // inheritance. Non-default picks (the second model, full access, max
     // effort) make a dropped intent visible in the journal and the chip.
@@ -135,7 +135,7 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
     let mut created = None;
     visual.update(|window, cx| {
         ws.update(cx, |ws, cx| {
-            created = Some(ws.start_new_thread(Some(project_path.clone()), window, cx));
+            created = Some(ws.new_container(Some(project_path.clone()), window, cx));
         });
     });
     assert_eq!(

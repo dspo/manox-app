@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use crate::sidebar_projection::ThreadRow;
+use crate::sidebar_projection::ContainerRow;
 use ahp_types::state::AgentInfo;
 use gpui::{App, Context, Entity};
 use steer_agent_chat_ui::ahp_store::{
@@ -60,7 +60,7 @@ pub(crate) fn ext_and_meta_pinned(
 /// `session/isArchivedChanged` echo on the session channel is the instant
 /// fact, the list snapshot's status bit the fallback. A zero-status fold
 /// entry is the pre-snapshot placeholder and carries no archive fact — it
-/// defers to the summary (the same guard `toggle_archived` flips against).
+/// defers to the summary (the same guard the archived toggle reads).
 pub(crate) fn effective_archived(
     book: &steer_agent_chat_ui::ahp_store::ChannelBook,
     session_id: &str,
@@ -89,11 +89,11 @@ pub(crate) fn merged_row(
     book: &steer_agent_chat_ui::ahp_store::ChannelBook,
     summary: &ahp_types::state::SessionSummary,
     pinned: bool,
-) -> ThreadRow {
+) -> ContainerRow {
     let session_id = steer_agent_chat_ui::ahp_store::id_of(&summary.resource);
     let leaf = crate::ahp_store::leaf(book, session_id);
     let pending_ask = leaf.open_chat_input().is_some();
-    let mut row = ThreadRow::from_summary(summary, pinned, pending_ask);
+    let mut row = ContainerRow::from_summary(summary, pinned, pending_ask);
     let auth = leaf.open_tool_confirmation().is_some();
     if let Some(chat) = leaf.chat.as_ref() {
         // A landed chat fold owns the running bit; a landed session state
@@ -234,56 +234,43 @@ impl SessionMultiplexer {
         }
     }
 
-    /// Flip a session's archived bit through the extension's batch write
-    /// (`x-manox/archivedChanged` on the catalogue root): the host journals
-    /// and persists the decision (the store row, the sidecar) and the next
-    /// summary walk confirms the row's departure. The root ride matters: the
-    /// native `session/isArchivedChanged` resolves its target from the
-    /// session channel, which this client holds only for attached sessions —
-    /// a sidebar archive on any other row was refused by the host's
-    /// subscribed-gate and never landed.
-    pub fn toggle_archived(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        let view = self.store.read(cx);
-        // The live fold outranks the summary row — except a zero-status fold
-        // entry (the pre-snapshot empty_session placeholder), which carries
-        // no archive fact and defers to the summary. Neither source knowing
-        // the id refuses the flip: callers pass live rows, and a dispatch
-        // into the void would only land in the diagnostics deque.
-        let archived = match view.book.sessions.get(session_id) {
-            Some(state) if state.status != 0 => {
-                Some(state.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0)
-            }
-            _ => None,
-        }
-        .or_else(|| {
-            view.book
-                .summaries
-                .values()
-                .find(|summary| {
-                    steer_agent_chat_ui::ahp_store::id_of(&summary.resource) == session_id
-                })
-                .map(|summary| {
-                    summary.status & ahp_types::state::SessionStatus::IsArchived.bits() != 0
-                })
+    /// The container lifecycle forwards (plan A6, D7): the gestures speak
+    /// the store's container faces — stop-all and archive through the ONE
+    /// `x-manox/teardown` command, unarchive through the whole-tree
+    /// `archivedChanged(false)` write. Each confirms with a notify so the
+    /// sidebar re-projects off the store's optimistic state.
+    pub fn stop_container(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, cx| {
+            store.teardown_containers(
+                std::slice::from_ref(&session_id.to_string()),
+                steer_agent_chat_ui::ahp_store::TeardownMode::StopAll,
+                cx,
+            );
         });
-        let Some(archived) = archived else {
-            return;
-        };
-        self.archive_sessions(&[session_id.to_string()], !archived, cx);
+        cx.notify();
     }
 
-    /// Archive (or unarchive) sessions in one write — the sidebar's batch
-    /// selection commits through here, and the row menu's single toggle is
-    /// a batch of one.
-    pub fn archive_sessions(
-        &mut self,
-        session_ids: &[String],
-        archived: bool,
-        cx: &mut Context<Self>,
-    ) {
+    /// Archive containers (the containers' death, plan D7): the teardown
+    /// command's archive mode for the whole batch — ONE call carries every
+    /// captain; the store's optimistic half drops each tree. The gestures
+    /// (row menu, batch bar, `cmd-;`, `/new`, `/exit`) all land here through
+    /// the workspace's confirm-or-direct entry.
+    pub fn archive_containers(&mut self, session_ids: &[String], cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| {
-            store.archive_sessions(session_ids, archived);
-            cx.notify();
+            store.teardown_containers(
+                session_ids,
+                steer_agent_chat_ui::ahp_store::TeardownMode::Archive,
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
+    /// Revive a container's whole tree (the unarchive gesture): the captain
+    /// and its catalogue children ride one `archivedChanged(false)` write.
+    pub fn revive_container(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, _| {
+            store.revive_container(session_id);
         });
         cx.notify();
     }
@@ -308,77 +295,18 @@ impl SessionMultiplexer {
 
     // ── catalogue accessors (the sidebar/model/command faces) ──────────
 
-    /// The sidebar catalogue as projected rows, most recently modified
-    /// first (the host's list order). Archived rows are excluded: the host
-    /// partitions archived rows out of its own `summaries()`, but the client's
-    /// catalogue seed only upserts — a row that ever entered `book.summaries`
-    /// would otherwise resurface on every re-projection. The row's archived
-    /// bit is read live-fold-first (the pin-read pattern), so the
-    /// `session/isArchivedChanged` echo drops it from the sidebar the moment
-    /// it lands, ahead of any list refresh.
-    pub fn thread_list(&self, cx: &App) -> Vec<ThreadRow> {
+    /// The sidebar catalogue as projected container rows, most recently
+    /// modified first (the host's list order). Archived rows are excluded:
+    /// the host partitions archived rows out of its own `summaries()`, but
+    /// the client's catalogue seed only upserts — a row that ever entered
+    /// `book.summaries` would otherwise resurface on every re-projection.
+    /// The row's archived bit is read live-fold-first (the pin-read
+    /// pattern), so the `session/isArchivedChanged` echo drops it from the
+    /// sidebar the moment it lands, ahead of any list refresh.
+    pub fn container_list(&self, cx: &App) -> Vec<ContainerRow> {
         let focused_sid = self.focused.clone();
         let view = self.store.read(cx);
-        let book = &view.book;
-        let mut rows: Vec<ThreadRow> = book
-            .summaries
-            .values()
-            .filter_map(|summary| {
-                let sid = steer_agent_chat_ui::ahp_store::id_of(&summary.resource);
-                // The sidebar is the ACTIVE list: an archived row leaves it
-                // (see `effective_archived` for the read and the doc on this
-                // method for why the filter lives here).
-                if effective_archived(book, sid, summary) {
-                    return None;
-                }
-                // A blank row stays out of the list: an attached session
-                // whose landed fold carries no turns has never been used.
-                // The focused row always shows (a landing thread the user
-                // is typing into must be reachable), and a fold that has
-                // not landed yet is never judged.
-                if focused_sid.as_deref() != Some(sid)
-                    && book.chat_snapshot_landed(sid)
-                    && crate::ahp_store::leaf(book, sid)
-                        .chat
-                        .is_some_and(|c| c.turns.is_empty() && c.active_turn.is_none())
-                {
-                    return None;
-                }
-                // The row pin read: see `ext_and_meta_pinned`.
-                let pinned = ext_and_meta_pinned(book, Some(summary), &thread_uri(sid));
-                let mut row = merged_row(book, summary, pinned);
-                // The host's project field trails a brand-new session (its
-                // store row lands with the first persistence), but the fold's
-                // effective cwd is already live — and it is exactly what the
-                // composer's project chip shows. Group by it so the row never
-                // falls into "Chats" beside a chip naming a project.
-                if row.project.is_none()
-                    && let Some(cwd) = crate::ahp_store::leaf(book, sid).cwd()
-                {
-                    row.project = Some(cwd);
-                }
-                Some(row)
-            })
-            .collect();
-        // The HOST's catalogue order is the sidebar's order (the store's
-        // persisted account: folder sequence → pinned band → rank). A local
-        // `modified_at` sort reshuffled the list on every journal append —
-        // clicking a row marked it read, bumped its mtime, and the row
-        // jumped to the top with everything under the cursor shifting.
-        let rank: std::collections::HashMap<&str, usize> = book
-            .summary_order
-            .iter()
-            .enumerate()
-            .map(|(ix, id)| (id.as_str(), ix))
-            .collect();
-        rows.sort_by_key(|row| rank.get(row.id.as_str()).copied().unwrap_or(usize::MAX));
-        for (ix, row) in rows.iter_mut().enumerate() {
-            // The chrome re-sorts rows by `(pinned, rank)` locally;
-            // carrying the rank lets that sort reproduce exactly this
-            // order.
-            row.rank = ix as i64;
-        }
-        rows
+        container_rows(&view.book, focused_sid.as_deref())
     }
 
     /// The durable project objects (path + user alias), in the host's
@@ -431,7 +359,7 @@ impl SessionMultiplexer {
     }
 
     /// Refresh the sidebar catalogue from the host.
-    pub fn fetch_thread_list(&mut self, cx: &mut Context<Self>) {
+    pub fn fetch_container_list(&mut self, cx: &mut Context<Self>) {
         self.store
             .update(cx, |store, cx| store.refresh_sessions(cx));
     }
@@ -452,6 +380,88 @@ impl SessionMultiplexer {
     pub fn client_id(&self) -> &'static str {
         CLIENT_ID
     }
+}
+
+/// The pure core of [`SessionMultiplexer::container_list`] — the catalogue
+/// walk over the book, testable against a hand-built one. One row per
+/// CONTAINER: the walk's own fold drops a captain's level-1 children before
+/// any rank is assigned.
+pub(crate) fn container_rows(
+    book: &steer_agent_chat_ui::ahp_store::ChannelBook,
+    focused_sid: Option<&str>,
+) -> Vec<ContainerRow> {
+    let mut rows: Vec<ContainerRow> = book
+        .summaries
+        .values()
+        .filter_map(|summary| {
+            let sid = steer_agent_chat_ui::ahp_store::id_of(&summary.resource);
+            // The sidebar is the ACTIVE list: an archived row leaves it
+            // (see `effective_archived` for the read and the doc on this
+            // method for why the filter lives here).
+            if effective_archived(book, sid, summary) {
+                return None;
+            }
+            // A blank row stays out of the list: an attached session
+            // whose landed fold carries no turns has never been used.
+            // The focused row always shows (a landing thread the user
+            // is typing into must be reachable), and a fold that has
+            // not landed yet is never judged.
+            if focused_sid != Some(sid)
+                && book.chat_snapshot_landed(sid)
+                && crate::ahp_store::leaf(book, sid)
+                    .chat
+                    .is_some_and(|c| c.turns.is_empty() && c.active_turn.is_none())
+            {
+                return None;
+            }
+            // The row pin read: see `ext_and_meta_pinned`.
+            let pinned = ext_and_meta_pinned(book, Some(summary), &thread_uri(sid));
+            let mut row = merged_row(book, summary, pinned);
+            // The container fold (plan A3, the bump-safety face): a
+            // captain's level-1 children NEVER render as top-level rows —
+            // post-bump the catalogue returns them (upstream #987 appends
+            // the child rows after the ranked ones) and without this fold
+            // they flood the sidebar. They stay in the book: the roster
+            // surface joins them, whole-tree unarchive reads them. No focus
+            // exception — a child is a child even while foregrounded.
+            if row.is_child() {
+                return None;
+            }
+            // The host's project field trails a brand-new session (its
+            // store row lands with the first persistence), but the fold's
+            // effective cwd is already live — and it is exactly what the
+            // composer's project chip shows. Group by it so the row never
+            // falls into "Chats" beside a chip naming a project.
+            if row.project.is_none()
+                && let Some(cwd) = crate::ahp_store::leaf(book, sid).cwd()
+            {
+                row.project = Some(cwd);
+            }
+            Some(row)
+        })
+        .collect();
+    // The HOST's catalogue order is the sidebar's order (the store's
+    // persisted account: folder sequence → pinned band → rank). A local
+    // `modified_at` sort reshuffled the list on every journal append —
+    // clicking a row marked it read, bumped its mtime, and the row
+    // jumped to the top with everything under the cursor shifting. The
+    // fold above never disturbs it: children ride AFTER the ranked rows
+    // (upstream #987), so dropping them leaves the captains' relative
+    // order — and their compacted ranks — exactly as the host spoke it.
+    let rank: std::collections::HashMap<&str, usize> = book
+        .summary_order
+        .iter()
+        .enumerate()
+        .map(|(ix, id)| (id.as_str(), ix))
+        .collect();
+    rows.sort_by_key(|row| rank.get(row.id.as_str()).copied().unwrap_or(usize::MAX));
+    for (ix, row) in rows.iter_mut().enumerate() {
+        // The chrome re-sorts rows by `(pinned, rank)` locally;
+        // carrying the rank lets that sort reproduce exactly this
+        // order.
+        row.rank = ix as i64;
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -524,6 +534,85 @@ mod row_read_tests {
             Some(&bare),
             "x-manox-thread:/s-2"
         ));
+    }
+
+    /// The container fold over the catalogue walk (plan A3): a `subagent`
+    /// child row NEVER reaches the projected list — not even while
+    /// foregrounded — while captain rows keep the host's `summary_order`
+    /// and take their compacted ranks exactly as before the fold. The
+    /// summaries are hand-built, but the `_meta.x-manox.memberKind` slot is
+    /// the real v0.7.0 wire face (upstream #987's listSessions contract:
+    /// ranked captains first, children appended after) — the fold keeps
+    /// those appended children out of the sidebar.
+    #[test]
+    fn children_fold_out_of_the_catalogue_and_captains_keep_the_host_order() {
+        use crate::sidebar_projection::MemberKind;
+
+        fn summary(id: &str, meta: serde_json::Value) -> ahp_types::state::SessionSummary {
+            let mut json = serde_json::json!({
+                "resource": format!("ahp-session:/{id}"),
+                "provider": "test",
+                "title": format!("row {id}"),
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            });
+            if !meta.is_null() {
+                json["_meta"] = meta;
+            }
+            serde_json::from_value(json).expect("a summary parses")
+        }
+
+        let mut book = ChannelBook::default();
+        // Post-bump catalogue shape: ranked captains first, the captain's
+        // children appended after (upstream #987's listSessions contract).
+        book.seed_summaries(vec![
+            summary(
+                "cap-a",
+                serde_json::json!({ "x-manox": { "memberKind": "captain" } }),
+            ),
+            summary(
+                "cap-b",
+                serde_json::json!({ "x-manox": { "memberKind": "captain" } }),
+            ),
+            summary(
+                "sub-1",
+                serde_json::json!({
+                    "x-manox": { "memberKind": "subagent", "parentSessionId": "cap-a" },
+                }),
+            ),
+            summary(
+                "sub-2",
+                serde_json::json!({
+                    "x-manox": { "memberKind": "subagent", "parentSessionId": "cap-b" },
+                }),
+            ),
+        ]);
+
+        let rows = container_rows(&book, None);
+        let named: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(named, vec!["cap-a", "cap-b"], "children fold out");
+        let kinds: Vec<MemberKind> = rows.iter().map(|r| r.member_kind).collect();
+        assert_eq!(kinds, vec![MemberKind::Captain, MemberKind::Captain]);
+        // The captains' ranks stay the walk's compacted host order.
+        let ranks: Vec<i64> = rows.iter().map(|r| r.rank).collect();
+        assert_eq!(ranks, vec![0, 1]);
+
+        // The fold has no focus exception: a foregrounded child stays out.
+        let rows = container_rows(&book, Some("sub-1"));
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["cap-a", "cap-b"]
+        );
+
+        // The pre-bump world (no member slot anywhere) is untouched: every
+        // row renders top-level.
+        let mut book = ChannelBook::default();
+        book.seed_summaries(vec![summary("s-1", serde_json::Value::Null)]);
+        let rows = container_rows(&book, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rank, 0);
+        assert!(!rows[0].is_child());
     }
 
     #[test]

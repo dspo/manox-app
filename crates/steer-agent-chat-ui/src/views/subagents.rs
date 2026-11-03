@@ -1,9 +1,11 @@
 //! Shared sub-agent observation data.
 //!
-//! The rail's agents section renders these as observe-only rows; the retired
-//! manox harness additionally drilled into a per-child panel, which the pi
-//! harness has no child-thread entities for (the panel was retired with the
-//! manox harness).
+//! The rail's agents section and the crew roster render these as
+//! observe-only rows; the per-child drill-down (the live `SubagentPanel`
+//! tab and the `SubagentStream` main-column page) lives in agent-ui
+//! (`views::subagent_panel` / `workspace::subagent_stream`), subscribed to
+//! the child's own chat channel — this module carries only the shared
+//! labels and the identity-color vocabulary.
 
 use gpui::AnyElement;
 use gpui::prelude::*;

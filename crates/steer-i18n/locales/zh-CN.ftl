@@ -38,6 +38,19 @@ external-session-resume-failed = 恢复外部 agent 失败
 sidebar-archive = 归档
 
 sidebar-unarchive = 取消归档
+
+archive-confirm-title = 归档容器？
+
+archive-confirm-subtitle = 归档会停止下列仍在运行的工作，并级联归档该容器的全部子会话。
+
+archive-confirm-subagent = 子代理：{ $name }
+
+archive-confirm-bash = 后台命令：{ $name }
+
+archive-confirm-ok = 仍要归档
+
+archive-confirm-cancel = 取消
+
 sidebar-multi-select = 多选会话…
 sidebar-selection-count = 已选 { $count } 项
 sidebar-selection-select-all = 全选
@@ -236,6 +249,7 @@ settings-item-skills = 技能
 
 settings-origin-builtin = 内置
 settings-origin-user = 用户
+settings-origin-project = 项目
 settings-origin-plugin = 插件
 
 agents-captain-desc = 主对话智能体。系统提示词由运行时模板与项目指令、技能清单、用户笔记按会话组装。
@@ -732,6 +746,11 @@ message-steer-pending-badge = 待引导
 message-queued-badge = 排队中
 
 message-steered-badge = 已引导
+
+### views/message.rs — agent task card
+
+agent-task-follow-up = 续跑
+
 ### about.rs (About window)
 
 about-title = 关于 Steer

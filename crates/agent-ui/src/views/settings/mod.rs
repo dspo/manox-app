@@ -175,7 +175,11 @@ pub enum SettingsEvent {
 impl EventEmitter<SettingsEvent> for SettingsView {}
 
 impl SettingsView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        rosters_cwd: Option<std::path::PathBuf>,
+    ) -> Self {
         let plugins = cx.new(|cx| PluginManagerView::new(window, cx));
         // Plugin installs and uninstalls change the declared MCP server set
         // AND the agent/skill rosters those plugins ship; both cached lists
@@ -191,10 +195,11 @@ impl SettingsView {
             state.set_readonly(true, cx);
             state
         });
-        // Read the rosters against the foreground thread's cwd: a bundled
-        // app's `current_dir()` is `/`, so the process cwd is never the
-        // session's project layer.
-        let rosters_cwd = crate::chrome_assembly::foreground_cwd();
+        // Read the rosters against the foreground container's cwd (resolved
+        // by the caller — settings never re-reads the workspace, its
+        // constructor runs inside the entry's lease): a bundled app's
+        // `current_dir()` is `/`, so the process cwd is never the session's
+        // project layer.
         Self {
             plugins,
             _plugins_sub,
@@ -220,11 +225,12 @@ impl SettingsView {
     }
 
     /// Re-read the rosters and the Captain prompt when the foreground project
-    /// changed. The scan is UI-thread work (registry + skills + the runtime's
-    /// prompt builder), so an unchanged cwd is a no-op — re-entering Settings
-    /// in the same project must not pay for it again.
-    pub(crate) fn refresh_rosters(&mut self) {
-        let cwd = crate::chrome_assembly::foreground_cwd();
+    /// changed (`cwd` — the caller resolves the foreground container's attrs
+    /// cwd on its own lease; settings must not re-read the workspace). The
+    /// scan is UI-thread work (registry + skills + the runtime's prompt
+    /// builder), so an unchanged cwd is a no-op — re-entering Settings in the
+    /// same project must not pay for it again.
+    pub(crate) fn refresh_rosters(&mut self, cwd: Option<std::path::PathBuf>) {
         if cwd == self.rosters_cwd {
             return;
         }
@@ -739,7 +745,7 @@ fn build_page(
 pub(crate) struct AgentRow {
     pub name: String,
     pub description: String,
-    /// Fluent key of the origin group (内置 / 用户 / 插件).
+    /// Fluent key of the origin group (内置 / 用户 / 项目 / 插件).
     pub origin: &'static str,
     /// The def's pinned model, when it has one.
     pub model: Option<String>,
@@ -774,16 +780,14 @@ fn collect_agents(cwd: Option<&std::path::Path>) -> Vec<AgentRow> {
     manox_harness::ext::subagent::register_defaults(&mut registry);
     manox_agent::agent_defs::register_user_and_plugin(&mut registry, cwd);
     for def in registry.all() {
-        // TODO(dspo/manox#985): the registry stamps each definition's layer
-        // (`AgentSource`) — group on it instead of this name heuristic once
-        // the next tag carries it. Project-layer agents mislabel as 用户
-        // until then.
-        let origin = if def.name.contains('@') {
-            "settings-origin-plugin"
-        } else if def.name == "Explore" || def.name == "Sailor" {
-            "settings-origin-builtin"
-        } else {
-            "settings-origin-user"
+        // The definition's own registration layer (upstream #985's
+        // `AgentSource`) — no name heuristic: a project agent no longer
+        // masquerades as a user file.
+        let origin = match def.source {
+            manox_harness::core::ext_point_agent::AgentSource::Builtin => "settings-origin-builtin",
+            manox_harness::core::ext_point_agent::AgentSource::User => "settings-origin-user",
+            manox_harness::core::ext_point_agent::AgentSource::Project => "settings-origin-project",
+            manox_harness::core::ext_point_agent::AgentSource::Plugin => "settings-origin-plugin",
         };
         rows.push(AgentRow {
             name: def.name.clone(),
@@ -807,12 +811,13 @@ fn collect_agents(cwd: Option<&std::path::Path>) -> Vec<AgentRow> {
     rows
 }
 
-/// The display order of the origin groups (内置 → 用户 → 插件).
+/// The display order of the origin groups (内置 → 用户 → 项目 → 插件).
 fn origin_rank(origin: &str) -> u8 {
     match origin {
         "settings-origin-builtin" => 0,
         "settings-origin-user" => 1,
-        _ => 2,
+        "settings-origin-project" => 2,
+        _ => 3,
     }
 }
 
@@ -908,9 +913,10 @@ mod tests {
     }
 
     #[test]
-    fn origin_rank_orders_builtin_user_plugin() {
+    fn origin_rank_orders_builtin_user_project_plugin() {
         let mut origins = [
             "settings-origin-plugin",
+            "settings-origin-project",
             "settings-origin-user",
             "settings-origin-builtin",
         ];
@@ -920,6 +926,7 @@ mod tests {
             [
                 "settings-origin-builtin",
                 "settings-origin-user",
+                "settings-origin-project",
                 "settings-origin-plugin",
             ]
         );

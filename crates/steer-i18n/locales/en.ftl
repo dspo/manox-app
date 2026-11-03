@@ -38,6 +38,19 @@ external-session-resume-failed = Failed to resume external agent
 sidebar-archive = Archive
 
 sidebar-unarchive = Unarchive
+
+archive-confirm-title = Archive this container?
+
+archive-confirm-subtitle = Archiving stops the work below and cascades the archive to every sub-session of the container.
+
+archive-confirm-subagent = Subagent: { $name }
+
+archive-confirm-bash = Background command: { $name }
+
+archive-confirm-ok = Archive anyway
+
+archive-confirm-cancel = Cancel
+
 sidebar-multi-select = Select sessions…
 sidebar-selection-count = { $count } selected
 sidebar-selection-select-all = Select all
@@ -252,6 +265,7 @@ settings-item-skills = Skills
 
 settings-origin-builtin = Built-in
 settings-origin-user = User
+settings-origin-project = Project
 settings-origin-plugin = Plugin
 
 agents-captain-desc = The lead agent. Its system prompt is assembled per session from the runtime template, project instructions, the skill fold and user notes.
@@ -756,6 +770,11 @@ message-steer-pending-badge = Waiting to steer
 message-queued-badge = Queued
 
 message-steered-badge = Steered
+
+### views/message.rs — agent task card
+
+agent-task-follow-up = Follow-up
+
 ### about.rs (About window)
 
 about-title = About Steer

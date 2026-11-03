@@ -47,10 +47,11 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
 
 manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（dspo/manox#818 删除 manox-protocol）：journal 仍是唯一 durable 权威，宿主把 journal 折叠成 AHP 通道状态，本仓退化为纯 AHP 客户端。规范与映射表唯一事实源在 dspo/manox 的 `docs/ahp-v3-architecture.md`（§G.W3 = 本仓切换、§F.2 = 本仓删除清单）。
 
-- **数据面**：`crates/steer-agent-chat-ui/src/ahp_store.rs`（`AhpStore`：一个 `ahp::Client` 挂宿主进程单例的 in-proc 腿，折叠 root/session/chat/extension 通道，类型化写面）+ `chat_fold.rs`（`ChatState` → 显示词汇）。视图只许读 AhpStore；v2 wire 词汇（`manox_protocol`/`FromClient`/`ClientCall`/`StreamFrame` 一类命名）不得在本仓重现——上游已删除 manox-protocol，这条从此靠评审守，不再有脚本门禁。
+- **数据面**：`crates/steer-agent-chat-ui/src/ahp_store.rs`（`AhpStore`：一个 `ahp::Client` 挂宿主进程单例的 in-proc 腿，折叠 root/session/chat/extension 通道，类型化写面）+ `transcript.rs`（`ChatState` → 转录节点的纯投影）与 `conversation.rs`（投影节点的 keyed 行状态）。视图只许读 AhpStore；v2 wire 词汇（`manox_protocol`/`FromClient`/`ClientCall`/`StreamFrame` 一类命名）不得在本仓重现——上游已删除 manox-protocol，这条从此靠评审守，不再有脚本门禁。
 - **生命周期**：`agent-ui/src/multiplexer.rs` 只管 attach（订阅）/focus（GW5）/create-fork 命令缝；unread 是协议状态（`session/isReadChanged`，AhpStore 折叠），不再有本地镜像；不再有 per-session 线程泵。
 - **客户端 SDK**：crates.io `ahp`/`ahp-types` `=1.0.0` 精确 pin（与上游 workspace 一致）；x-manox 扩展通道的 fold 与声明常量经上游 `manox-ahp::ext`。
-- 已知降级（接 x-manox 通道未建模的部分）：sub-agent 树、UI 本地注释卡不持久、终端走内核 PTY 直连不走 AHP terminal 通道。
+- 已知降级（接 x-manox 通道未建模的部分）：UI 本地注释卡不持久、终端走内核 PTY 直连不走 AHP terminal 通道。
+- unarchive（整树复活，上游 #987 的 parent 边）：数据面就绪且经测（`revive_container`）；UI 入口待归档分区面（挂账——侧栏今日不渲染归档行，分区面落地即销账）。
 
 ### 与 manox 仓的联动开发
 

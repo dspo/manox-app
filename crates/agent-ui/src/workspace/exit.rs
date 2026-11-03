@@ -1,22 +1,22 @@
-//! The `/exit` teardown sequence: stop everything this thread owns, then
-//! archive it and land on a fresh thread — the same end state as the thread
-//! list's archive action, reached through a force path that also works while
-//! a turn is running.
+//! The `/exit` teardown sequence: stop everything this container owns, then
+//! archive it and land on a fresh container — the same end state as the
+//! sidebar's archive action, reached through a force path that also works
+//! while a turn is running.
 //!
 //! The sequence plays as progress notes in the conversation (the
 //! annotation-card face `add_info_message` writes), one beat per action so
-//! the teardown is legible: subagents, the thread's own turn, the right
-//! pane's terminals + CLI-agent tabs + the dock's terminal (their PTY drop
-//! is the process-tree kill), the integrated browser, and the archive
-//! itself. Notes pushed before the switch land on the archived thread's
-//! journal; the closing pair lands on the fresh thread.
+//! the teardown is legible: the subagent observation panels, the right
+//! pane's terminals + CLI-agent tabs + the dock's terminal, the container's
+//! own browser tabs (other containers' tabs survive — the reclaim is keyed,
+//! not a global nuke), and then the landing beat: ONE
+//! container teardown (archive mode — the `x-manox/teardown` command, whose
+//! host waterfall cancels the turn, interrupts the live runs, settles the
+//! background tasks and cascades the archive; the path's optimistic half has
+//! already emptied the container's UI) plus the fresh container through the
+//! unified creation entry. Notes pushed before the switch land on the
+//! archived container's journal; the closing pair lands on the fresh one.
 
 use super::*;
-
-/// The pane kinds whose tab content owns a PTY: the integrated terminal and
-/// the three CLI-agent TUI tabs (claude / codex / copilot). Closing the tab
-/// drops the view, and the view drop tears the process tree down.
-const TERMINAL_TAB_KINDS: [&str; 4] = ["terminal", "claude", "codex", "copilot"];
 
 /// The pause between one teardown beat's announcement and its action — long
 /// enough for the progress notes to read as a sequence, short enough that
@@ -73,7 +73,10 @@ impl Workspace {
                 }
                 beat(cx).await;
             }
-            // ── the thread's own turn ──────────────────────────────────
+            // ── the container's own turn ───────────────────────────────
+            // The turn's cancel rides the teardown command (the ONE path —
+            // `/exit` does not send a parallel turn-cancel write); the
+            // beats only announce what the waterfall does.
             if turn_running {
                 if !foreground_is(&this, cx, &sid) {
                     tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
@@ -84,19 +87,18 @@ impl Workspace {
                 })
                 .ok();
                 beat(cx).await;
-                this.update(cx, |ws, cx| ws.cancel_turn(cx)).ok();
                 this.update(cx, |ws, cx| {
                     ws.note("exit-agent-stopped", &[("name", &title)], cx)
                 })
                 .ok();
                 beat(cx).await;
             }
-            // ── terminal subprocesses (pane tabs + the dock) ───────────
+            // ── terminal subprocesses (the pane tabs + the dock) ─────────
             let has_terminals = this
-                .update(cx, |_ws, cx| {
+                .update(cx, |_, cx| {
                     crate::chrome_assembly::pane_open_kinds(cx)
                         .iter()
-                        .any(|k| TERMINAL_TAB_KINDS.contains(&k.as_str()))
+                        .any(|k| crate::tool_tabs::PTY_TAB_KINDS.contains(&k.as_str()))
                         || crate::chrome_assembly::dock_terminal_live(cx)
                 })
                 .unwrap_or(false);
@@ -108,11 +110,15 @@ impl Workspace {
                 this.update(cx, |ws, cx| ws.note("exit-killing-terminal", &[], cx))
                     .ok();
                 beat(cx).await;
-                // These tab kinds' `close` never re-enters the workspace
+                // The PTY tab kinds' `close` never re-enters the workspace
                 // (store resets + shell-only dock take), so they run inside
-                // the lease.
-                this.update(cx, |_ws, cx| {
-                    for kind in TERMINAL_TAB_KINDS {
+                // the lease. Background external containers are NOT touched:
+                // they are independent containers (D6/D8) with their own 0 号
+                // processes — `/exit` is the outgoing container's death only,
+                // and the app process quitting is the only thing that ends
+                // the survivors, by design.
+                this.update(cx, |_, cx| {
+                    for kind in crate::tool_tabs::PTY_TAB_KINDS {
                         crate::chrome_assembly::close_tool_tabs_of_kind(kind, cx);
                     }
                     crate::chrome_assembly::stop_dock_terminal(cx);
@@ -122,13 +128,13 @@ impl Workspace {
                     .ok();
                 beat(cx).await;
             }
-            // ── the integrated browser ─────────────────────────────────
+            // ── the integrated browser (this container's tabs only) ────
             // Compiled out with the integrated browser on Linux/FreeBSD —
             // there are never any browser tabs to close.
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             {
                 let browser_tabs = this
-                    .update(cx, |ws, _cx| ws.browser_views.len())
+                    .update(cx, |ws, _| ws.container_browser_tabs(&sid).len())
                     .unwrap_or(0);
                 if browser_tabs > 0 {
                     if !foreground_is(&this, cx, &sid) {
@@ -141,42 +147,45 @@ impl Workspace {
                     // A browser tab's `close` re-enters the workspace (it closes
                     // its webview through `Workspace::close_browser_tab`), so the
                     // pane-side close runs OUTSIDE the workspace lease, on the
-                    // bare App; the orphan drain afterwards is lease-local.
+                    // bare App; the orphan drain afterwards is lease-local. The
+                    // leg is container-scoped: the pane belongs to the outgoing
+                    // container (foreground), and the workspace half reclaims
+                    // only the tabs registered under it — other containers'
+                    // browser tabs survive the /exit.
                     cx.update(|cx| {
                         crate::chrome_assembly::close_tool_tabs_of_kind("browser", cx);
                     });
-                    this.update(cx, |ws, cx| ws.close_all_browser_tabs(cx)).ok();
+                    this.update(cx, |ws, cx| ws.close_container_browser_tabs(&sid, cx))
+                        .ok();
                     this.update(cx, |ws, cx| ws.note("exit-browser-closed", &[], cx))
                         .ok();
                     beat(cx).await;
                 }
             }
-            // ── archive + fresh thread ─────────────────────────────────
+            // ── the container teardown + the fresh container ──────────
+            // One teardown (archive mode) through THE container archive
+            // path — the command's host waterfall cancels the turn,
+            // interrupts the live runs, settles the background tasks and
+            // cascades the archive down the parent edges, while the path's
+            // optimistic half (the book drop, the object rows, the sidebar
+            // row, the resource reclaim) has already emptied the container's
+            // UI. The force path needs no confirm dialog: the beats above
+            // ARE the announcement.
             if !foreground_is(&this, cx, &sid) {
                 tracing::warn!("/exit aborted: the foreground thread changed mid-sequence");
                 return;
             }
-            let archived_id = this
-                .update(cx, |ws, cx| {
-                    ws.note("exit-archiving", &[("name", &title)], cx);
-                    ws.archive_active_thread_force(cx)
-                })
-                .unwrap_or(None);
-            // The sidebar's optimistic drop (the same half the row menu's
-            // archive performs): without it the row lingers until the echo
-            // lands — and the fresh-thread landing re-projects the list from
-            // the not-yet-echoed summary in between.
-            if let Some(id) = archived_id.clone() {
-                cx.update(|cx| {
-                    crate::chrome_assembly::drop_sidebar_row(&id, cx);
-                });
-            }
-            // The switch lands on the fresh thread; the closing pair rides it.
-            // The attach is asynchronous (`start_new_thread` returns the
-            // minted id without switching), so the pair is ADDRESSED to that
-            // id — a foreground-targeted note here would journal onto the
-            // thread just archived.
-            let landed = this.update_in(cx, |ws, window, cx| ws.start_new_thread(None, window, cx));
+            this.update(cx, |ws, cx| {
+                ws.note("exit-archiving", &[("name", &title)], cx);
+                ws.archive_containers(std::slice::from_ref(&sid), cx);
+            })
+            .ok();
+            // The switch lands on the fresh container; the closing pair
+            // rides it. The attach is asynchronous (`new_container` returns
+            // the minted id without switching), so the pair is ADDRESSED to
+            // that id — a foreground-targeted note here would journal onto
+            // the container just archived.
+            let landed = this.update_in(cx, |ws, window, cx| ws.new_container(None, window, cx));
             let fresh_sid = match landed {
                 Ok(sid) => sid,
                 Err(_) => {
@@ -235,22 +244,6 @@ impl Workspace {
                 _ => None,
             })
             .collect()
-    }
-
-    /// Archive the active thread WITHOUT the idle gate — the `/exit` force
-    /// path, sharing `archive_thread_now`'s body with the gated command. The
-    /// caller has already cancelled the turn (the host's waterfall settles
-    /// pending verdicts and ask cards), which is the hazard the idle guard in
-    /// `archive_active_thread_if_idle` exists for. Returns the archived
-    /// session id (the caller's sidebar-reconciliation key).
-    fn archive_active_thread_force(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let pair = self.chat.read(cx).store.clone();
-        let Some((_, sid)) = &pair else {
-            return None;
-        };
-        let sid = sid.clone();
-        self.archive_thread_now(&sid, cx);
-        Some(sid)
     }
 }
 

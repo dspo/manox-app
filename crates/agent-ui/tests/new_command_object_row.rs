@@ -138,6 +138,53 @@ async fn new_command_lands_the_conversation_row(cx: &mut TestAppContext) {
         "an unmaterialized conversation never lists in the sidebar"
     );
 
+    // ── the Fresh refill (the /new landing's RefillPolicy::Fresh) ────────
+    // A never-materialized draft preset under the /new landing's inherited
+    // project scope would be the draft refill's candidate if the lookup
+    // ran. `/new`'s landing must mint a fresh sibling instead: the new id
+    // differs from the draft's, and the draft row stays an untouched,
+    // unmaterialized, unarchived draft. The scope is the workspace root
+    // (the boot cwd — the create intent's working directory the first
+    // /new's session channel carries); a draft under THAT project is the
+    // only candidate it could refill, so the assertion is deterministic.
+    let draft_id = uuid::Uuid::new_v4().to_string();
+    let project_scope = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .to_string_lossy()
+        .to_string();
+    objects.create_conversation(&draft_id, Some(project_scope.as_str()));
+    let parsed_again =
+        agent_ui::slash_command::parse("/new").expect("/new is a registered command");
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| {
+            agent_ui::slash_command::dispatch(&parsed_again, ws, window, cx);
+        });
+    });
+    let mut second = None;
+    for _ in 0..PARK_ROUNDS {
+        cx.run_until_parked();
+        let now = cx.update(|cx| ws.read(cx).diagnostic_foreground_session(cx));
+        if let Some(id) = now
+            && id != sid
+        {
+            second = Some(id);
+            break;
+        }
+        std::thread::sleep(PARK_STEP);
+    }
+    let sid2 = second.expect("the second /new must land its fresh session");
+    assert_ne!(
+        sid2, draft_id,
+        "the Fresh policy never refills the preset draft"
+    );
+    let draft = objects
+        .conversation(&draft_id)
+        .expect("the untouched draft row still exists");
+    assert!(
+        draft.last_human_message_at.is_none() && !draft.archived,
+        "the draft was not refilled: still unmaterialized and unarchived"
+    );
+
     manox_agent::thread_store::drop_global_for_test();
     agent_ui::dispatch::clear_globals_for_test();
 }

@@ -191,11 +191,28 @@ impl Workspace {
             })
             .unwrap_or_default()
     }
+
+    /// The FOREGROUND CONTAINER id (the container model's routing face): the
+    /// active external container's row id while one owns the main column, the
+    /// foreground session id (a native container's id, D2) otherwise. The key
+    /// the dock/right stashes, the pane persistence and the spawn-cwd read
+    /// share; `None` only while no session is bound and no external is up.
+    pub fn foreground_container_id(&self, cx: &App) -> Option<String> {
+        if matches!(self.view_mode, ViewMode::ExternalSession) {
+            return self.active_external.clone();
+        }
+        self.chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(_, sid)| sid.clone())
+    }
 }
 mod composer;
 pub mod container;
 mod external;
 pub mod external_sessions;
+mod lifecycle;
 mod right_diff;
 mod subagent;
 mod subagent_stream;
@@ -443,6 +460,20 @@ pub struct Workspace {
     /// [`Self::land_dictation`]).
     pub(crate) speech: Entity<SpeechState>,
     _speech_events: Subscription,
+    /// The per-container resource registry fields (see `resource_registry`):
+    /// the pane-side stash keyed by container id, the live dock/pane owner
+    /// slots, and the CLI tabs' kill handles. Process-lifetime (the
+    /// workspace's own), main-thread by construction.
+    pub(crate) pane_stash: HashMap<String, crate::resource_registry::PaneEntry>,
+    pub(crate) live_dock_owner: Option<String>,
+    pub(crate) live_right_owner: Option<String>,
+    pub(crate) kill_handles: crate::resource_registry::KillHandles,
+    /// The container-death cascade: the workspace subscribes to its own
+    /// [`crate::workspace::container::ContainerEvent`] and tears the dead
+    /// container down (external homes drop the record + reclaim the
+    /// resources; native ids ride the archive paths' explicit teardown —
+    /// a native container's death IS the archive gesture).
+    _died_sub: Option<Subscription>,
 }
 
 /// Top-level rendering mode of the app page. `Settings` and the two
@@ -722,7 +753,8 @@ impl Workspace {
             if running {
                 self.spawn_thinking_ticker(cx);
             } else {
-                self.multiplexer.update(cx, |m, cx| m.fetch_thread_list(cx));
+                self.multiplexer
+                    .update(cx, |m, cx| m.fetch_container_list(cx));
                 self.spawn_git_status_refresh(cx);
                 self.settle_follow_ups(cancelled, cx);
             }
@@ -939,6 +971,11 @@ impl Workspace {
             _rail_updates: rail_updates,
             speech,
             _speech_events: speech_events,
+            pane_stash: HashMap::new(),
+            live_dock_owner: None,
+            live_right_owner: None,
+            kill_handles: HashMap::new(),
+            _died_sub: None,
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
@@ -1046,6 +1083,18 @@ impl Workspace {
             cc.notify();
         });
         ws.observe_conversation(cx);
+        // The death cascade (§2.3): the predicate's flip reaches the ONE
+        // teardown through the workspace's own emission. External containers
+        // tear down here (D8: process exit drops the row and reclaims the
+        // resources); native ids need no subscription leg — a native
+        // container's death IS the archive gesture (D7), and
+        // `archive_containers` runs the teardown for them explicitly.
+        ws._died_sub = Some(cx.subscribe(&cx.entity(), |this, _, ev, cx| {
+            let container::ContainerEvent::Died(id) = ev;
+            if container::ContainerId::is_external_id(id) {
+                this.teardown_container(id, cx);
+            }
+        }));
         // Focus the composer so typing works immediately on the hero screen.
         ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
         ws
@@ -1227,17 +1276,14 @@ impl Workspace {
         self.externals.iter().map(|s| s.id.clone()).collect()
     }
 
-    /// One external container's A1 face — the alive bit, the 0 号-decided
-    /// kind, and the attrs snapshot's cwd. Test-support diagnostic.
+    /// One external container's A1 face — the alive bit and the attrs
+    /// snapshot's cwd. Test-support diagnostic.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_external_container(
-        &self,
-        id: &str,
-    ) -> Option<(bool, Option<container::ContainerKind>, std::path::PathBuf)> {
+    pub fn diagnostic_external_container(&self, id: &str) -> Option<(bool, std::path::PathBuf)> {
         self.externals
             .iter()
             .find(|s| s.id == id)
-            .map(|s| (s.alive, s.kind, s.attrs.cwd.clone()))
+            .map(|s| (s.alive, s.attrs.cwd.clone()))
     }
 
     /// The foreground chat's running sub-agents (the Captain block's sub-agent
@@ -1248,6 +1294,31 @@ impl Workspace {
         cx: &App,
     ) -> Vec<steer_agent_chat_ui::ahp_store::SubagentWorkRow> {
         self.running_subagents(cx)
+    }
+
+    /// The rail's crew observation rows (run id, status, definition name)
+    /// — the attach-time roster rebuild's read face. Test-support
+    /// diagnostic: the restore regression reads these rows back.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_rail_subagent_rows(
+        &self,
+        cx: &App,
+    ) -> Vec<(String, manox_agent::ToolCallStatus, String)> {
+        self.chat_rail(cx).read(cx).diagnostic_subagent_rows()
+    }
+
+    /// The foreground store pair — the book the attach re-binds to.
+    /// Test-support diagnostic: the restore regression seeds its roster
+    /// through the bound store the attach itself selected.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_chat_store(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore>,
+        String,
+    )> {
+        self.chat.read(cx).store.clone()
     }
 
     /// Open one run's sub-agent page by id — the line click's own path.
@@ -1971,9 +2042,16 @@ impl Workspace {
     /// reused so the user's last selection (and any scroll position)
     /// survives re-entry.
     pub fn enter_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The foreground container's attrs cwd, resolved HERE — the entry
+        // already holds the workspace lease, and the settings view must not
+        // re-read the workspace (its constructor and refresh run inside this
+        // update).
+        let rosters_cwd = self
+            .foreground_container_id(cx)
+            .map(|fg| self.container_attrs(&fg, cx).cwd);
         match &self.settings_view {
             None => {
-                let settings = cx.new(|cx| SettingsView::new(window, cx));
+                let settings = cx.new(|cx| SettingsView::new(window, cx, rosters_cwd));
                 let sub = self.subscribe_settings(&settings, window, cx);
                 self.settings_view = Some(settings);
                 self.settings_sub = Some(sub);
@@ -1981,7 +2059,9 @@ impl Workspace {
             // A reused view re-reads the rosters: switching projects between
             // visits must not keep the last foreground project's agent
             // layer.
-            Some(settings) => settings.update(cx, |settings, _| settings.refresh_rosters()),
+            Some(settings) => {
+                settings.update(cx, |settings, _| settings.refresh_rosters(rosters_cwd))
+            }
         }
         // Leaving the external session for Settings drops its ownership:
         // the invariant is `view_mode == ExternalSession` ⟺
