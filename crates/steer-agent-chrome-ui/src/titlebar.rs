@@ -15,7 +15,7 @@
 
 use crate::primitives::{IconButtonState, icon_button};
 use crate::session_list::{SessionStatus, single_line_title};
-use crate::shell::Shell;
+use crate::shell::{SessionRow, Shell};
 use crate::theme::{
     ACCENT, BORDER, CARD_BG, FG, FG_DIM, FG_FAINT, FG_STRONG, LIST_HOVER, SUCCESS_GREEN, icon,
     icons,
@@ -431,8 +431,61 @@ fn session_picker(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) -
         .into_any_element()
 }
 
+/// One picker candidate row's display facts, in display order.
+pub(crate) struct PickerCandidate {
+    pub id: String,
+    pub title: String,
+    pub workspace: String,
+    pub unread: bool,
+}
+
+/// The picker's candidate list over the session snapshot, in display order.
+/// Membership: non-archived rows whose host recency stamp is PRESENT — a
+/// transcript without messages has no recency story, so the focused empty
+/// session and every external row stay out (absence is "not rankable",
+/// never "very old"). Order: the stamp descending, stable — equal stamps
+/// keep the snapshot's order and pinned plays no part (pinning is the
+/// sidebar's own discipline). The query narrows before the stamp rule and
+/// the cap: [`PICKER_LIMIT`] truncates the filtered set, never the raw
+/// snapshot. The snapshot itself is never reordered — the sidebar's order
+/// is the host rank's.
+pub(crate) fn picker_candidates(rows: &[SessionRow], query: &str) -> Vec<PickerCandidate> {
+    let mut candidates: Vec<(i64, PickerCandidate)> = rows
+        .iter()
+        .filter(|s| !s.archived)
+        .filter_map(|s| {
+            // The query matches the one-line face the rows render — the
+            // raw title's hard breaks never match a typed space.
+            let title = single_line_title(&s.title);
+            let matches = query.is_empty()
+                || title.to_lowercase().contains(query)
+                || s.workspace.to_lowercase().contains(query);
+            let stamp = s.last_message_at?;
+            matches.then(|| {
+                (
+                    stamp,
+                    PickerCandidate {
+                        id: s.id.clone(),
+                        title,
+                        workspace: s.workspace.clone(),
+                        unread: matches!(s.status, SessionStatus::Unread),
+                    },
+                )
+            })
+        })
+        .collect();
+    // `sort_by_key` is stable: equal stamps keep the snapshot's order.
+    candidates.sort_by_key(|(stamp, _)| std::cmp::Reverse(*stamp));
+    candidates.truncate(PICKER_LIMIT);
+    candidates
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect()
+}
+
 /// The dropdown body: a search box + the filtered most-recent list (top 10
-/// by update time). **Not positioned** — the shell root mounts it through
+/// by the host's lastMessageAt stamp — see [`picker_candidates`]).
+/// **Not positioned** — the shell root mounts it through
 /// `deferred(anchored(...))` (see `shell.rs`), window-centered under the
 /// titlebar, so it re-opens exactly over its trigger.
 pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
@@ -441,30 +494,10 @@ pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement
     let query = shell
         .picker_query
         .as_ref()
-        .map(|q| q.read(cx).value().trim().to_lowercase());
-    let q = query.unwrap_or_default();
+        .map(|q| q.read(cx).value().trim().to_lowercase())
+        .unwrap_or_default();
 
-    let items: Vec<(String, String, String, bool)> = shell
-        .sessions
-        .iter()
-        .filter_map(|s| {
-            // The query matches the one-line face the rows render — the
-            // raw title's hard breaks never match a typed space.
-            let title = single_line_title(&s.title);
-            (q.is_empty()
-                || title.to_lowercase().contains(&q)
-                || s.workspace.to_lowercase().contains(&q))
-            .then(|| {
-                (
-                    s.id.clone(),
-                    title,
-                    s.workspace.clone(),
-                    matches!(s.status, SessionStatus::Unread),
-                )
-            })
-        })
-        .take(PICKER_LIMIT)
-        .collect();
+    let items = picker_candidates(&shell.sessions, &query);
 
     // Closures in the loop go through the entity handle (a `cx.listener`
     // return value borrows and cannot escape the FnMut).
@@ -472,10 +505,9 @@ pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement
     let rows: Vec<AnyElement> = items
         .iter()
         .map(|it| {
-            let (id, title, workspace, unread) = it;
             let ent = shell_entity.clone();
-            let id = id.clone();
-            let selected = shell.active.as_deref() == Some(id.as_str());
+            let id = it.id.clone();
+            let selected = shell.active.as_deref() == Some(it.id.as_str());
             let id_for_row = id.clone();
             let on_pick = move |_: &ClickEvent, w: &mut Window, cx: &mut App| {
                 let id = id.clone();
@@ -485,7 +517,15 @@ pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement
                     cx.notify();
                 });
             };
-            row(&id_for_row, title, workspace, *unread, selected, on_pick).into_any_element()
+            row(
+                &id_for_row,
+                &it.title,
+                &it.workspace,
+                it.unread,
+                selected,
+                on_pick,
+            )
+            .into_any_element()
         })
         .collect();
 
@@ -607,4 +647,133 @@ fn row(
                 .flex_shrink_0()
                 .child(workspace.to_string()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A thread row with the shape `set_sessions` snapshots carry. `stamp`
+    /// is the host's recency stamp; `None` is a session without messages
+    /// (the focused empty session's shape — external rows ride the same
+    /// absence).
+    fn row(id: &str, stamp: Option<i64>, rank: i64) -> SessionRow {
+        SessionRow {
+            id: id.into(),
+            short_id: id.chars().take(8).collect(),
+            title: id.into(),
+            workspace: "steer".into(),
+            project: Some("/p/steer".into()),
+            status: SessionStatus::Idle,
+            kind: crate::session_list::SessionRowKind::Thread,
+            updated_at: stamp.unwrap_or(0),
+            sort_stamp: stamp.unwrap_or(0),
+            rank,
+            pinned: false,
+            archived: false,
+            tag: None,
+            team_leader: false,
+            last_message_at: stamp,
+        }
+    }
+
+    fn ids(candidates: &[PickerCandidate]) -> Vec<&str> {
+        candidates.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    /// A transcript without messages has no recency story: unstamped rows
+    /// (the focused empty session, external sessions) stay out of the
+    /// picker while the sidebar keeps showing them — the snapshot the
+    /// helper reads is never reordered or filtered in place.
+    #[test]
+    fn unstamped_rows_stay_out_of_the_picker() {
+        let rows = vec![
+            row("focused-empty", None, 0),
+            row("external", None, 1),
+            row("talked", Some(100), 2),
+        ];
+        assert_eq!(ids(&picker_candidates(&rows, "")), vec!["talked"]);
+    }
+
+    /// The rank key is the stamp descending; pinned has no standing in the
+    /// picker (pinning is the sidebar's own discipline), and equal stamps
+    /// keep the snapshot's order (stable sort — no local reshuffle).
+    #[test]
+    fn stamps_rank_descending_and_equal_stamps_keep_the_snapshot_order() {
+        let mut pinned = row("pinned-old", Some(100), 0);
+        pinned.pinned = true;
+        let rows = vec![
+            pinned,
+            row("newer-a", Some(300), 1),
+            row("newer-b", Some(200), 2),
+            row("twin-1", Some(150), 3),
+            row("twin-2", Some(150), 4),
+        ];
+        assert_eq!(
+            ids(&picker_candidates(&rows, "")),
+            vec!["newer-a", "newer-b", "twin-1", "twin-2", "pinned-old"],
+            "the stamp descends, pinning plays no part, twins stay in place"
+        );
+    }
+
+    /// The query narrows before the cap: candidates the term matches are
+    /// not crowded out by newer non-matching rows (a filter-after-truncate
+    /// order would return them empty-handed).
+    #[test]
+    fn the_query_filters_before_the_cap() {
+        let mut rows: Vec<SessionRow> = (0..PICKER_LIMIT)
+            .map(|ix| {
+                let ix = ix as i64;
+                row(&format!("filler-{ix}"), Some(1000 - ix), ix)
+            })
+            .collect();
+        rows.push(row("needle-1", Some(50), 90));
+        rows.push(row("needle-2", Some(40), 91));
+        assert_eq!(
+            ids(&picker_candidates(&rows, "needle")),
+            vec!["needle-1", "needle-2"],
+            "matching rows survive the cap that newer non-matching rows fill"
+        );
+        // The workspace face matches like the sidebar's filter (unchanged).
+        rows[0].workspace = "needle".into();
+        assert!(
+            picker_candidates(&rows, "needle")
+                .iter()
+                .any(|c| c.id == "filler-0")
+        );
+    }
+
+    /// More candidates than the cap truncates to exactly the newest ten —
+    /// the filtered set's head, never a shorter side effect.
+    #[test]
+    fn the_cap_holds_the_newest_ten() {
+        let rows: Vec<SessionRow> = (0..20)
+            .map(|ix| {
+                let ix = ix as i64;
+                row(&format!("r-{ix:02}"), Some(1000 - ix), ix)
+            })
+            .collect();
+        let picked = picker_candidates(&rows, "");
+        assert_eq!(picked.len(), PICKER_LIMIT);
+        assert_eq!(
+            ids(&picked)[0],
+            "r-00",
+            "the newest stamp leads the truncated list"
+        );
+        assert_eq!(
+            ids(&picked)[PICKER_LIMIT - 1],
+            "r-09",
+            "the cut falls after the tenth stamp"
+        );
+    }
+
+    /// An archived row has no picker face (the sidebar's filter already
+    /// drops it; the helper does not rely on that upstream discipline).
+    #[test]
+    fn archived_rows_stay_out_of_the_picker() {
+        let mut gone = row("gone", Some(500), 0);
+        gone.archived = true;
+        let rows = vec![gone, row("live", Some(100), 1)];
+        assert_eq!(ids(&picker_candidates(&rows, "")), vec!["live"]);
+    }
 }

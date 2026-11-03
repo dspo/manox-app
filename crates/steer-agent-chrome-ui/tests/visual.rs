@@ -264,6 +264,7 @@ mod macos {
                     },
                     tag: None,
                     team_leader: false,
+                    last_message_at: None,
                     updated_at: t.updated_at,
                     sort_stamp: t.updated_at,
                     rank: ix as i64,

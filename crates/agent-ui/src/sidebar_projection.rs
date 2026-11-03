@@ -74,6 +74,12 @@ pub struct ContainerRow {
     /// rank lets that sort reproduce the host order exactly — no local
     /// timestamp can reshuffle it. `i64::MAX` (unranked) sorts last.
     pub rank: i64,
+    /// The host's recency stamp (`_meta.manox.lastMessageAt`, unix
+    /// seconds): present iff the transcript holds at least one message —
+    /// absence is "not rankable", never "very old". The session picker
+    /// ranks by it; the sidebar's order ignores it (the host rank owns
+    /// that).
+    pub last_message_at: Option<i64>,
 }
 
 /// The container tree's two memberships (plan D3 — captain 0-level, produced
@@ -171,6 +177,10 @@ impl ContainerRow {
             // Unranked until the multiplexer assigns the host order's
             // position; the default sorts last.
             rank: i64::MAX,
+            last_message_at: summary
+                .meta
+                .as_ref()
+                .and_then(manox_ahp::summary_meta::last_message_at),
         }
     }
 }
@@ -195,6 +205,7 @@ pub fn project_row(item: &ContainerRow) -> SessionRowData {
         archived: item.archived,
         tag: item.tag.clone(),
         team_leader: false,
+        last_message_at: item.last_message_at,
     }
 }
 
@@ -364,6 +375,7 @@ mod tests {
             project: Some("/p/wire".into()),
             tag: None,
             updated_at: 0,
+            last_message_at: None,
         }
     }
 

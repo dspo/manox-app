@@ -868,4 +868,61 @@ mod row_read_tests {
             Some(PendingKind::Ask)
         );
     }
+
+    /// The host's recency stamp (`_meta.manox.lastMessageAt`, #997) rides
+    /// the catalogue row into the merged row: a summary whose meta carries
+    /// the stamp hands it to the row (the picker's rank key), a row without
+    /// the key reads `None` — absence is "not rankable", never "very old".
+    #[test]
+    fn the_recency_stamp_folds_through_the_catalogue_row() {
+        use manox_ahp::summary_meta::set_last_message_at;
+
+        fn summary(stamp: Option<i64>) -> ahp_types::state::SessionSummary {
+            let mut body = serde_json::json!({
+                "resource": "ahp-session:/s-1",
+                "provider": "test",
+                "title": "row",
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            });
+            if let Some(at) = stamp {
+                let mut meta = serde_json::Map::new();
+                set_last_message_at(&mut meta, at);
+                body["_meta"] = serde_json::Value::Object(meta);
+            }
+            serde_json::from_value(body).expect("a summary parses")
+        }
+
+        // The stamped summary seeds the catalogue (the walk / sessionAdded
+        // path), and the merged row reads the stamp off the folded row.
+        let mut book = ChannelBook::default();
+        book.seed_summaries(vec![summary(Some(1_700_000_000))]);
+        let folded = book.summaries.get("s-1").expect("the row folded");
+        assert_eq!(
+            merged_row(&book, folded, false).last_message_at,
+            Some(1_700_000_000)
+        );
+
+        // A summary without the key — no transcript messages, or a producer
+        // predating #997 — reads as absent, not zero.
+        let bare = summary(None);
+        assert_eq!(merged_row(&book, &bare, false).last_message_at, None);
+        // A local placeholder (seed_local_summary's meta: None shape).
+        let none_meta: ahp_types::state::SessionSummary =
+            serde_json::from_value(serde_json::json!({
+                "resource": "ahp-session:/s-2",
+                "provider": "test",
+                "title": "placeholder",
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+            }))
+            .expect("a bare summary parses");
+        assert_eq!(
+            merged_row(&book, &none_meta, false).last_message_at,
+            None,
+            "no meta at all is the same absence"
+        );
+    }
 }
