@@ -651,7 +651,6 @@ fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
                 "Open",
                 "Steer",
                 manox_agent::subagent::ListAgentsTool::NAME,
-                manox_agent::subagent::InterruptAgentTool::NAME,
             ],
         ),
     ]

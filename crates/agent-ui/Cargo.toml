@@ -65,6 +65,7 @@ manox-agent.workspace = true
 steer-i18n.workspace = true
 steer-agent-chat-ui.workspace = true
 steer-agent-chrome-ui.workspace = true
+steer-ghostty.workspace = true
 manox-terminal.workspace = true
 terminal-ui.workspace = true
 steer-components.workspace = true

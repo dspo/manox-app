@@ -23,7 +23,7 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | 根视图 | `steer_agent_chrome_ui::Shell`（壳：38px 工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
 | 侧栏 | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影） |
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
-| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / CLI agents / 编辑器 / 浏览器 / diff——浏览器仅 macOS/Windows，Linux/FreeBSD 编译排除）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
+| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / Ghostty 终端 / CLI agents / 编辑器 / 浏览器 / diff——浏览器仅 macOS/Windows，Linux/FreeBSD 编译排除；Ghostty 走 `steer-ghostty` 的 libghostty-vt 核 + 自绘 GPUI element，tab 标题镜像 OSC title）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-thread 会话由 `RightPaneSession` stash/restore，快照落 threads.db |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台线程 cwd） |
 | Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4）。注入面挂载期间侧栏被 pin：强制可见、titlebar 隐藏开关惰性化——导航是该模式唯一出口，不可被藏到身后；pin 只借用可见性，卸载时还原用户原先的折叠状态 |
 
