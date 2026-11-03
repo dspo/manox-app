@@ -80,6 +80,7 @@ enum Component {
     ToolText,
     ToolShell,
     AskQuestion,
+    CodeBlock,
 }
 
 impl Component {
@@ -90,6 +91,7 @@ impl Component {
         Component::ToolText,
         Component::ToolShell,
         Component::AskQuestion,
+        Component::CodeBlock,
     ];
 
     fn name(self) -> &'static str {
@@ -100,6 +102,7 @@ impl Component {
             Self::ToolText => "Tools — Text",
             Self::ToolShell => "Tools — Shell",
             Self::AskQuestion => "AskUserQuestion",
+            Self::CodeBlock => "Code Block",
         }
     }
 
@@ -140,6 +143,14 @@ impl Component {
                  `< 1/3 >` pager whose next button becomes the submit check on the last \
                  page, and — once submitted — the host's markdown output standing in for \
                  the form."
+            }
+            Self::CodeBlock => {
+                "The transcript's code panel: every fence renders as an editor block — a \
+                 header bar with the language and a copy control, a line-number gutter, a \
+                 non-wrapping highlighted code area that scrolls horizontally, and a \
+                 height cap that scrolls internally on long blocks. Parsed from the fence \
+                 at the upstream markdown plugin point, so streaming and whole-document \
+                 copy are unchanged."
             }
         }
     }
@@ -1285,6 +1296,94 @@ impl Gallery {
         ]
     }
 
+    /// The code block's demos: the editor panel in its shapes — a highlighted
+    /// rust block, a wide line that scrolls under a fixed gutter, a tall block
+    /// that caps and scrolls, the diff and conflict line dispatches, CJK and
+    /// language-less fences, and a whole message reading prose-and-code. Every
+    /// body is a plain markdown document mounted the way a transcript mounts
+    /// one; the copy control in each header is the block's own.
+    fn code_block_rows(
+        &self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        foreground: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = Theme::global(cx);
+        let doc = |id: &'static str, source: String| {
+            static_document(id, source, theme, cx).into_any_element()
+        };
+        vec![
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Rust — the editor panel",
+                "Header bar: the fence's language verbatim on the left, the block's copy \
+                 control on the right (click it — the check flips for a beat). Gutter \
+                 numbers hug the widest count; the code area highlights through the same \
+                 tree-sitter dispatch the rest of the app uses.",
+                doc("code-rust", CODE_RUST.to_string()),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "A wide line scrolls, the gutter holds",
+                "The code area never wraps — a line past the column scrolls horizontally \
+                 under the gutter, which stays pinned. CJK shapes into the same run.",
+                doc("code-wide", CODE_WIDE.to_string()),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "A tall block caps and scrolls",
+                "Past the height cap the body scrolls inside its own panel — the wheel \
+                 goes to the block first, and a scrollbar marks the rest. The gutter \
+                 scrolls with the code, so line N stays line N.",
+                doc("code-tall", tall_rust_block()),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Diff and conflict markers",
+                "A `diff` fence tints added and removed lines; a fence carrying conflict \
+                 markers classifies as a conflict regardless of its language token — the \
+                 four marker lines read as section headers over their sides' washes.",
+                doc("code-diff", format!("{CODE_DIFF}\n\n{CODE_CONFLICT}")),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "CJK, and a fence with no language",
+                "CJK content shapes per line without disturbing the gutter's rhythm, and \
+                 a fence with no info string still gets the panel — gutter, copy, and \
+                 plain (uncolored) code, since there is nothing to highlight against.",
+                doc("code-cjk", format!("{CODE_CJK}\n\n{CODE_BARE}")),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "How a message reads",
+                "One document, prose and code side by side: paragraphs, inline code, two \
+                 languages. The block rides the same streaming parse as the transcript — \
+                 an open fence renders as a panel from its first delta and grows line by \
+                 line.",
+                doc("code-message", CODE_MESSAGE.to_string()),
+            )
+            .into_any_element(),
+        ]
+    }
+
     /// The left rail: one row per component, the selected one tinted.
     fn rail(
         &mut self,
@@ -1356,6 +1455,7 @@ impl Render for Gallery {
             Component::ToolText => self.tool_text_rows(muted, border, foreground, cx),
             Component::ToolShell => self.tool_shell_rows(muted, border, foreground),
             Component::AskQuestion => self.ask_rows(muted, border, foreground, cx),
+            Component::CodeBlock => self.code_block_rows(muted, border, foreground, cx),
         };
 
         let pane = v_flex()
@@ -1452,6 +1552,13 @@ fn footer_note(selected: Component) -> &'static str {
              host then hands the composed markdown back through .output(), which is the \
              shape a replayed transcript mounts."
         }
+        Component::CodeBlock => {
+            "Parsed at the upstream markdown plugin point: the fence is intercepted \
+             whole (an open fence included, so streaming renders from the first delta), \
+             the block's text form is its full Markdown source, and a drag that crosses \
+             the block selects that source. Highlight dispatch, gutter, and copy are \
+             app-side; the panel is one custom block renderer."
+        }
         _ => {
             "Auto-open while streaming, auto-fold one second after the stream ends \
              (AUTO_CLOSE_DELAY). A hand toggle pins the block: nothing automatic moves \
@@ -1499,6 +1606,52 @@ fn ls_line(prefix: &'static str, name: &'static str) -> ShellLine {
             SharedString::from(name),
         ),
     ])
+}
+
+/// The rust demo's source. Chosen to exercise the tree-sitter dispatch the
+/// way a reply does: keywords, a doc comment, a macro, a string, punctuation.
+const CODE_RUST: &str = "```rust\n/// One streaming delta, appended to a persistent document.\npub fn push_str(&mut self, delta: &str, cx: &mut Context<TextViewState>) {\n    // Only the appended suffix re-parses; the prefix keeps its layout.\n    let parsed = parse_delta(delta).unwrap_or_else(|| delta.to_string());\n    self.text.push_str(&parsed);\n    cx.notify();\n}\n```\n";
+
+/// The wide-line demo's source: one line far past the column width, so the
+/// code area scrolls horizontally while the gutter holds.
+const CODE_WIDE: &str = concat!(
+    "```rust\nlet rewrite = Rewrite { instruction: \"把这段说明文字改成更正式的语气，保留全部技术细节，不要引入新的事实，输出为 JSON 并保持原有结构不变\", target: \"crates/steer-components/src/markdown/code_block.rs\", max_length: 4096 };\n",
+    "finish(rewrite);\n```\n",
+);
+
+/// The diff demo's source: a real unified-diff shape, metadata lines included.
+const CODE_DIFF: &str = "```diff\n--- a/crates/steer-components/src/markdown/mod.rs\n+++ b/crates/steer-components/src/markdown/mod.rs\n@@ -12,6 +12,7 @@ pub mod linkify {\n pub mod svg_block {\n     pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;\n+    pub const FENCE_BLOCKS: usize = 4;\n-    pub const DIAGRAM_BLOCKS: usize = 2;\n }\n```\n";
+
+/// The conflict demo's source: the marker pair routes the dispatch.
+const CODE_CONFLICT: &str = "```rust\n<<<<<<< HEAD\nlet mode = Mode::Editor;\n=======\nlet mode = Mode::Panel;\n>>>>>>> feat/code-block\n```\n";
+
+/// The CJK demo's source, then a fence with no info string at all.
+const CODE_CJK: &str = "```python\n# 中文注释：流式增量只重解析追加的后缀。\ndef push_str(self, delta: str) -> str:\n    return f\"已追加 {len(delta)} 个字节\"\n```\n";
+const CODE_BARE: &str =
+    "```\nno info string, no highlighting — but the panel, gutter and copy stay\n```\n";
+
+/// The whole-message demo: prose, inline code, and two fences — the shape a
+/// reply actually carries.
+const CODE_MESSAGE: &str = concat!(
+    "The incremental path only re-parses the appended suffix, so a streaming ",
+    "fence renders as a panel from its first delta:\n\n",
+    "```json\n{\"kind\": \"delta\", \"text\": \"fn main() {\"}\n}\n```\n\n",
+    "and settles when the closing fence arrives. See `ChatDocument::sync` — the ",
+    "`raw`/`linkified` pair decides between `push_str` and a full `set_text`.\n\n",
+    "```rust\nlet appended = self.linkified.as_ref()\n    .filter(|prev| next.starts_with(prev.as_str()));\n```\n",
+);
+
+/// The tall demo's source: generated so the cap and scrollbar have something
+/// to bite — a generated match looks like the code a reply actually emits.
+fn tall_rust_block() -> String {
+    let mut out = String::from("```rust\nmatch event {\n");
+    for ix in 0..32 {
+        out.push_str(&format!(
+            "    Event::Kind{ix:02} {{ payload }} => fold(payload, Acc::from(ix)),\n"
+        ));
+    }
+    out.push_str("    Event::Flush => acc.into_result(),\n}\n```\n");
+    out
 }
 
 /// Raw tool-call structures the copy controls quote — `in` copies the input

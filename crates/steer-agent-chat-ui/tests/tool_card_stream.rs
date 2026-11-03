@@ -26,10 +26,12 @@
 //! (AGENTS.md "出 UI 图"); the fake scheduler clock is advanced between chunks
 //! so the 100 ms publish tick actually fires while the reveal runs.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use ahp_types::actions::StateAction;
 use ahp_types::state::ChatState;
+use ai_elements::ShellSpanKind;
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
     TestAppContext, VisualTestContext, Window, div, px, size,
@@ -37,8 +39,10 @@ use gpui::{
 use manox_agent::MessageAuthor;
 use steer_agent_chat_ui::conversation::{ActivityEntry, ConvItem, ConversationState, ToolCallItem};
 use steer_agent_chat_ui::host::{ChatHostHandle, noop_host};
+use steer_agent_chat_ui::i18n;
 use steer_agent_chat_ui::transcript::{ProjectEnv, no_steered_turns};
 use steer_agent_chat_ui::views::message::MessageItem;
+use steer_agent_chat_ui::views::tool_cards::{LINE_CAP, shell_output_lines};
 use steer_agent_chat_ui::views::tool_stream::PUBLISH_CAP;
 
 /// The recorded output of the crashed session's Bash call
@@ -354,8 +358,8 @@ async fn a_carried_snapshot_is_throttled_mid_stream(cx: &mut TestAppContext) {
 }
 
 /// A settled body past `LINE_CAP` (400 lines): the card keeps the first 400
-/// lines and appends the truncation note; the full text stays authoritative on
-/// the entry (copy/diff paths).
+/// lines and appends the dim truncation note as row 401; the full text stays
+/// authoritative on the entry (copy/diff paths).
 #[gpui::test]
 async fn an_output_past_line_cap_settles_truncated(cx: &mut TestAppContext) {
     let full: String = (0..450)
@@ -371,12 +375,20 @@ async fn an_output_past_line_cap_settles_truncated(cx: &mut TestAppContext) {
     assert_eq!(entry.output, full, "the entry keeps the full text");
     assert_eq!(entry.stream.published(), full);
 
-    // The rendered shell body is the first LINE_CAP lines (the note is added
-    // by the card; the capped prefix is what must stay stable).
-    let rendered: Vec<&str> = entry.stream.published().lines().take(400).collect();
-    let expected: Vec<&str> = full.lines().take(400).collect();
-    assert_eq!(rendered.len(), 400);
-    assert_eq!(rendered, expected);
+    // The body the card actually paints, from the published snapshot: the
+    // capped prefix, then the note row — the full text rides the copy path,
+    // never the body.
+    let body = shell_output_lines(entry.stream.published(), false);
+    assert_eq!(body.len(), LINE_CAP + 1, "capped rows plus the note");
+    for (row, text) in body.iter().zip(full.lines().take(LINE_CAP)) {
+        let (kind, span) = row.spans_ref().first().expect("one span per row");
+        assert_eq!(*kind, ShellSpanKind::Plain);
+        assert_eq!(&**span, text);
+    }
+    let note_row = body.last().expect("the note row");
+    let (kind, note) = note_row.spans_ref().first().expect("one span");
+    assert_eq!(*kind, ShellSpanKind::Dim, "the note rides the dim tier");
+    assert_eq!(note.clone(), i18n::t("tool-output-truncated"));
     assert_card_paints(&mut case.visual);
 }
 
@@ -541,4 +553,224 @@ async fn hostile_content_streams_through_the_card(cx: &mut TestAppContext) {
         assert_eq!(entry.stream.published(), *content);
         assert_card_paints(&mut case.visual);
     }
+}
+
+// --- the fold click, over the production chain --------------------------------
+
+/// A host wired to the harness's conversation — the workspace's real shape
+/// (`entry_toggle` asks the host for the conversation, then flips the fold
+/// authority on it).
+struct HarnessHost(gpui::Entity<ConversationState>);
+
+impl steer_agent_chat_ui::host::ChatHost for HarnessHost {
+    fn conversation(&self, _cx: &gpui::App) -> Option<gpui::Entity<ConversationState>> {
+        Some(self.0.clone())
+    }
+    fn dismiss_ask(&self, _cx: &mut gpui::App) {}
+    fn submit_ask(
+        &self,
+        _replies: Vec<steer_agent_chat_ui::ask_card::AskCardReply>,
+        _cx: &mut gpui::App,
+    ) {
+    }
+    fn submit_input(&self, _window: &mut gpui::Window, _cx: &mut gpui::App) {}
+    fn resolve_tool_confirmation(
+        &self,
+        _auth_id: &str,
+        _option_id: &str,
+        _approved: bool,
+        _cx: &mut gpui::App,
+    ) {
+    }
+    fn fork_session_at(&self, _through_entry_id: &str, _cx: &mut gpui::App) {}
+    fn open_subagent_tab(
+        &self,
+        _id: &str,
+        _subagent_type: &str,
+        _topic: &str,
+        _status: manox_agent::ToolCallStatus,
+        _cx: &mut gpui::App,
+    ) {
+    }
+    fn open_right_diff(&self, _path: Option<String>, _patch: String, _cx: &mut gpui::App) {}
+}
+
+/// The panel-vs-card adjacency: an assistant message whose diff fence renders
+/// the editor panel, directly above a folded tool card. The panel's scroll
+/// overlays must not eat the card header's click.
+#[gpui::test]
+async fn a_panel_above_does_not_eat_a_folded_card_s_click(cx: &mut TestAppContext) {
+    let command = "cargo test";
+    cx.update(|cx| {
+        if !cx.has_global::<gpui_component::Theme>() {
+            gpui_component::init(cx);
+        }
+    });
+
+    let mut chat = empty_chat();
+    fold(&mut chat, &turn_started(command));
+    // The assistant prose opens a markdown part carrying a tall diff fence —
+    // the editor panel — then the tool call lands below the reply.
+    fold(
+        &mut chat,
+        &action(serde_json::json!({
+            "type": "chat/responsePart", "turnId": "t-1",
+            "part": { "kind": "markdown", "id": "md-1", "content": "" }
+        })),
+    );
+    let fence = "-let gone = 1;\n+let here = 2;\n".repeat(12);
+    fold(
+        &mut chat,
+        &action(serde_json::json!({
+            "type": "chat/delta", "turnId": "t-1", "partId": "md-1",
+            "content": format!("改一下:\n\n```diff\n{fence}```\n\n跑一下:\n"),
+        })),
+    );
+    fold(&mut chat, &tool_started(command));
+    fold(&mut chat, &tool_ready(command));
+
+    let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
+    let handle: ChatHostHandle = Arc::new(HarnessHost(conversation.clone()));
+    let host: &'static ChatHostHandle = Box::leak(Box::new(handle));
+    let env = ProjectEnv {
+        role: "test-model",
+        recipient: Box::leak(Box::new(MessageAuthor::Lead)),
+        host,
+        cwd: None,
+        fork_source: false,
+        promoted_confirmation: None,
+        entering_turns: &[],
+        steered_turns: no_steered_turns(),
+    };
+    cx.update(|cx| {
+        conversation.update(cx, |conversation, cx| {
+            let _ = conversation.project(Some(&chat), &env, cx);
+        });
+    });
+    let rows = cx.update(|cx| conversation.read(cx).items().to_vec());
+    assert!(rows.len() >= 3, "user row, assistant row, activity segment");
+
+    let window = cx.open_window(size(px(760.), px(720.)), move |_, _| Mount { rows });
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    pump(&mut visual, 2);
+
+    fold(&mut chat, &tool_completed("ok\n"));
+    cx.update(|cx| {
+        conversation.update(cx, |conversation, cx| {
+            let _ = conversation.project(Some(&chat), &env, cx);
+        });
+    });
+    cx.executor().advance_clock(Duration::from_millis(1400));
+    pump(&mut visual, 6);
+
+    let header = visual
+        .debug_bounds("tc-1-header")
+        .expect("the folded card header paints below the panel");
+    visual.simulate_click(header.center(), gpui::Modifiers::default());
+    pump(&mut visual, 4);
+
+    let expanded = cx.update(|cx| {
+        conversation.read(cx).items().iter().any(|item| {
+            matches!(
+                item.read(cx).kind(),
+                ConvItem::Thinking(t) if t.entries.iter().any(|entry| {
+                    matches!(entry, ActivityEntry::Tool(tool) if !tool.collapsed)
+                })
+            )
+        })
+    });
+    assert!(
+        expanded,
+        "the panel above must not eat the folded card's header click"
+    );
+}
+
+#[gpui::test]
+async fn clicking_a_folded_card_header_flips_the_fold_authority(cx: &mut TestAppContext) {
+    let command = "cargo test";
+    cx.update(|cx| {
+        if !cx.has_global::<gpui_component::Theme>() {
+            gpui_component::init(cx);
+        }
+    });
+
+    let mut chat = empty_chat();
+    fold(&mut chat, &turn_started(command));
+    fold(&mut chat, &tool_started(command));
+    fold(&mut chat, &tool_ready(command));
+
+    let conversation = cx.update(|cx| cx.new(|_| ConversationState::new(MessageAuthor::Lead)));
+    let conversation_for_host = conversation.clone();
+    let handle: ChatHostHandle = Arc::new(HarnessHost(conversation_for_host.clone()));
+    let host: &'static ChatHostHandle = Box::leak(Box::new(handle));
+    let env = ProjectEnv {
+        role: "test-model",
+        recipient: Box::leak(Box::new(MessageAuthor::Lead)),
+        host,
+        cwd: None,
+        fork_source: false,
+        promoted_confirmation: None,
+        entering_turns: &[],
+        steered_turns: no_steered_turns(),
+    };
+    cx.update(|cx| {
+        conversation.update(cx, |conversation, cx| {
+            let _ = conversation.project(Some(&chat), &env, cx);
+        });
+    });
+    let rows = cx.update(|cx| conversation.read(cx).items().to_vec());
+
+    let window = cx.open_window(size(px(760.), px(720.)), move |_, _| Mount { rows });
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    pump(&mut visual, 2);
+
+    // Settle, then let the card's auto-fold fire.
+    fold(&mut chat, &tool_completed("ok\n"));
+    cx.update(|cx| {
+        conversation.update(cx, |conversation, cx| {
+            let _ = conversation.project(Some(&chat), &env, cx);
+        });
+    });
+    cx.executor().advance_clock(Duration::from_millis(1400));
+    pump(&mut visual, 6);
+
+    let collapsed = cx.update(|cx| {
+        conversation.read(cx).items().iter().any(|item| {
+            matches!(
+                item.read(cx).kind(),
+                ConvItem::Thinking(t) if t.entries.iter().any(|entry| {
+                    matches!(entry, ActivityEntry::Tool(tool) if tool.collapsed)
+                })
+            )
+        })
+    });
+    assert!(
+        collapsed,
+        "the settled card has folded (the authority flipped)"
+    );
+
+    // Click the folded card's header over the production chain: on_toggle →
+    // entry_toggle → the conversation flips → the card mirrors.
+    let header = visual
+        .debug_bounds("tc-1-header")
+        .expect("the folded card header paints");
+    visual.simulate_click(header.center(), gpui::Modifiers::default());
+    pump(&mut visual, 4);
+
+    let expanded = cx.update(|cx| {
+        conversation.read(cx).items().iter().any(|item| {
+            matches!(
+                item.read(cx).kind(),
+                ConvItem::Thinking(t) if t.entries.iter().any(|entry| {
+                    matches!(entry, ActivityEntry::Tool(tool) if !tool.collapsed)
+                })
+            )
+        })
+    });
+    assert!(
+        expanded,
+        "clicking the folded header flips the fold authority"
+    );
 }
