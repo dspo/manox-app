@@ -128,8 +128,10 @@ impl ToolTab for TerminalTab {
 // ── ghostty terminal ───────────────────────────────────────────────────────
 
 /// The ghostty-terminal kind: one $SHELL per tab on the libghostty-vt
-/// emulation core (GPUI-drawn from render-state snapshots), same launch
-/// rules as the integrated terminal.
+/// emulation core (GPUI-drawn from render-state snapshots). Unlike the
+/// integrated terminal it takes no `[terminal]` settings: the shell comes from
+/// `$SHELL`, and the surface colors from the chrome palette (see
+/// [`ghostty_theme`]).
 pub struct GhosttyTool;
 
 impl ToolTabFactory for GhosttyTool {
@@ -188,7 +190,7 @@ impl ToolTab for GhosttyTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
-        match steer_ghostty::spawn_ghostty_view(&thread_cwd_or_home(), cx) {
+        match steer_ghostty::spawn_ghostty_view(&thread_cwd_or_home(), ghostty_theme(), cx) {
             Ok(view) => {
                 *self.view.lock().unwrap() = Some(view.clone());
                 store.put(&self.id, view);
@@ -200,13 +202,60 @@ impl ToolTab for GhosttyTab {
         }
     }
 
-    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
-        use gpui::{ParentElement, Styled, div};
+    /// Teardown owns the shell: the pty is shared with the view's watcher
+    /// threads, so dropping the entity alone would leave the process running.
+    fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
+        if let Some(view) = self.view.lock().unwrap().take() {
+            view.update(cx, |view, _cx| view.terminate());
+        }
+        store.reset(self.id());
+    }
+
+    fn render(&self, _window: &mut Window, cx: &App, store: &TabStore) -> AnyElement {
+        use gpui::{ParentElement, Styled, div, px};
         match store.get::<steer_ghostty::GhosttyView>(&self.id) {
-            Some(view) => div().w_full().h_full().child(view).into_any_element(),
+            Some(view) => {
+                // A shell that exited leaves its last frame on screen; without
+                // the footer the tab reads as a hung terminal.
+                let mut body = div()
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(div().w_full().flex_1().min_h_0().child(view.clone()));
+                if view.read(cx).exited() {
+                    body = body.child(
+                        div()
+                            .flex_none()
+                            .px(px(8.))
+                            .py(px(4.))
+                            .text_size(px(11.))
+                            .text_color(FG_DIM)
+                            .child(steer_i18n::t("chrome-ghostty-exited")),
+                    );
+                }
+                body.into_any_element()
+            }
             None => div().w_full().h_full().into_any_element(),
         }
     }
+}
+
+/// The terminal's palette: the chrome surface it sits in, so a light shell
+/// reads as part of the conversation panel rather than a dark inset. The
+/// component owns no colors of its own.
+fn ghostty_theme() -> steer_ghostty::Theme {
+    use steer_agent_chrome_ui::theme::{CARD_BG, FG};
+    steer_ghostty::Theme {
+        fg: rgb(FG),
+        bg: rgb(CARD_BG),
+    }
+}
+
+/// `Rgba` (f32 channels) → the terminal's 8-bit color.
+fn rgb(c: gpui::Rgba) -> steer_ghostty::Rgb {
+    let channel = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    steer_ghostty::Rgb::new(channel(c.r), channel(c.g), channel(c.b))
 }
 
 // ── integrated browser ─────────────────────────────────────────────────────

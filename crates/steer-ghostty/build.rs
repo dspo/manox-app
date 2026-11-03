@@ -2,11 +2,19 @@
 //!
 //! Resolution order, per input:
 //!
-//! - **Ghostty sources**: `GHOSTTY_SRC` (a local checkout — the dev loop, the
-//!   build is zig-incremental) or a pinned upstream tarball downloaded into
-//!   `OUT_DIR` (the CI path; sha256-verified).
+//! - **Ghostty sources**: `GHOSTTY_SRC` (a local checkout — the dev loop, where
+//!   zig's own cache makes each rebuild incremental and *every* build-script
+//!   run re-checks the checkout) or a pinned upstream tarball downloaded into
+//!   the build cache (the CI path; sha256-verified).
 //! - **Zig**: `GHOSTTY_ZIG` → a `zig` on PATH with version ≥ 0.17 (Ghostty's
-//!   own floor) → a pinned Zig toolchain downloaded into `OUT_DIR`.
+//!   own floor) → a pinned Zig toolchain downloaded into the build cache.
+//!
+//! The build cache is `OUT_DIR` by default and `STEER_GHOSTTY_CACHE` when set.
+//! CI points that at a directory `actions/cache` restores, so the zig build is
+//! paid once per (Ghostty rev, zig identity) instead of once per job. A stamp
+//! beside the artifact records what produced it: the fast path is taken only
+//! when both still match, so changing either one rebuilds instead of linking a
+//! library the bindings in `src/sys.rs` were not transcribed against.
 //!
 //! Force a rebuild with `cargo clean -p steer-ghostty`.
 
@@ -22,22 +30,58 @@ const GHOSTTY_TARBALL_SHA256: &str =
 const ZIG_VERSION: &str = "0.17.0";
 const ZIG_MIN: (u32, u32) = (0, 17);
 
+const LIB_NAME: &str = "libghostty-vt.a";
+const STAMP_NAME: &str = "ghostty-vt.stamp";
+
 fn main() {
     println!("cargo:rerun-if-env-changed=GHOSTTY_SRC");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG");
+    println!("cargo:rerun-if-env-changed=STEER_GHOSTTY_CACHE");
     println!("cargo:rerun-if-changed=build.rs");
 
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-    let lib = out.join("lib");
-    if lib.join("libghostty-vt.a").exists() {
-        link(&lib);
+    let cache = cache_dir(&out);
+    // A cache restored by `actions/cache` exists, but a miss (and a fresh local
+    // build with `STEER_GHOSTTY_CACHE` set) does not: every download below
+    // writes here, so the directory has to exist first.
+    std::fs::create_dir_all(&cache).expect("create the ghostty-vt build cache directory");
+    let lib_dir = cache.join("lib");
+
+    // The dev loop edits a checkout in place, which no stamp can observe: every
+    // build-script run reaches zig (whose own cache does the real work).
+    let dev = std::env::var_os("GHOSTTY_SRC");
+    if let Some(src) = &dev {
+        println!("cargo:rerun-if-changed={}", Path::new(src).display());
+    }
+
+    let want = format!("{GHOSTTY_REV}\n{}\n", zig_identity());
+    if dev.is_none() && lib_dir.join(LIB_NAME).exists() && read_stamp(&cache) == want {
+        link(&export_static(&cache));
         return;
     }
 
-    let src = resolve_sources(&out);
-    let zig = resolve_zig(&out);
-    build_libvt(&zig, &src, &out);
-    link(&lib);
+    let src = resolve_sources(&cache);
+    let zig = resolve_zig(&cache);
+    build_libvt(&zig, &src, &cache);
+    let _ = std::fs::write(cache.join(STAMP_NAME), &want);
+    link(&export_static(&cache));
+}
+
+/// The artifact cache: `STEER_GHOSTTY_CACHE` when set (CI restores it), with a
+/// relative value resolved against `OUT_DIR` so a workspace-relative path
+/// works; otherwise `OUT_DIR` itself.
+fn cache_dir(out: &Path) -> PathBuf {
+    match std::env::var_os("STEER_GHOSTTY_CACHE") {
+        Some(p) => {
+            let p = PathBuf::from(p);
+            if p.is_absolute() { p } else { out.join(p) }
+        }
+        None => out.to_path_buf(),
+    }
+}
+
+fn read_stamp(cache: &Path) -> String {
+    std::fs::read_to_string(cache.join(STAMP_NAME)).unwrap_or_default()
 }
 
 fn link(lib: &Path) {
@@ -48,7 +92,27 @@ fn link(lib: &Path) {
     }
 }
 
-fn build_libvt(zig: &Path, src: &Path, out: &Path) {
+/// Export the archive into a directory of its own and hand that to the linker.
+///
+/// `zig build -Demit-lib-vt` writes `libghostty-vt.dylib` beside the archive, and
+/// ld64 resolves a bare `-lghostty-vt` to the dylib when both sit in one search
+/// path. The result is a binary with an `LC_LOAD_DYLIB` on a shared library
+/// nothing bundles: shipped apps fail to launch and test binaries fail to start.
+/// This directory contains only the archive, so `-l` can only mean static.
+fn export_static(cache: &Path) -> PathBuf {
+    let src = cache.join("lib").join(LIB_NAME);
+    let dir = cache.join("lib-static");
+    let dst = dir.join(LIB_NAME);
+    std::fs::create_dir_all(&dir).expect("create lib-static");
+    if std::fs::metadata(&dst).map(|m| m.len()).ok()
+        != std::fs::metadata(&src).map(|m| m.len()).ok()
+    {
+        std::fs::copy(&src, &dst).expect("export libghostty-vt.a");
+    }
+    dir
+}
+
+fn build_libvt(zig: &Path, src: &Path, cache: &Path) {
     let status = Command::new(zig)
         .args([
             "build",
@@ -56,14 +120,14 @@ fn build_libvt(zig: &Path, src: &Path, out: &Path) {
             "-Doptimize=ReleaseFast",
             "--prefix",
         ])
-        .arg(out)
+        .arg(cache)
         .current_dir(src)
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn zig ({}): {e}", zig.display()));
     assert!(status.success(), "zig build -Demit-lib-vt failed");
     assert!(
-        out.join("lib/libghostty-vt.a").exists(),
-        "zig build produced no libghostty-vt.a"
+        cache.join("lib").join(LIB_NAME).exists(),
+        "zig build produced no {LIB_NAME}"
     );
 }
 
@@ -71,7 +135,7 @@ fn build_libvt(zig: &Path, src: &Path, out: &Path) {
 // Ghostty sources
 // ---------------------------------------------------------------------------
 
-fn resolve_sources(out: &Path) -> PathBuf {
+fn resolve_sources(cache: &Path) -> PathBuf {
     if let Some(p) = std::env::var_os("GHOSTTY_SRC") {
         let src = PathBuf::from(p);
         assert!(
@@ -81,28 +145,19 @@ fn resolve_sources(out: &Path) -> PathBuf {
         );
         return src;
     }
-    download_sources(out)
+    download_sources(cache)
 }
 
 /// Download the pinned Ghostty tarball (codeload archive of `GHOSTTY_REV`)
-/// and extract it under `OUT_DIR/ghostty-src`.
-fn download_sources(out: &Path) -> PathBuf {
-    let dir = out.join("ghostty-src");
-    let mut found = None;
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            if e.path().join("build.zig").exists() {
-                found = Some(e.path());
-                break;
-            }
-        }
-    }
-    if let Some(p) = found {
+/// and extract it under `<cache>/ghostty-src`.
+fn download_sources(cache: &Path) -> PathBuf {
+    let dir = cache.join("ghostty-src");
+    if let Some(p) = find_checkout(&dir) {
         return p;
     }
 
     let url = format!("https://codeload.github.com/ghostty-org/ghostty/tar.gz/{GHOSTTY_REV}");
-    let tarball = out.join("ghostty-src.tar.gz");
+    let tarball = cache.join("ghostty-src.tar.gz");
     fetch(&url, &tarball);
     assert_sha256(&tarball, GHOSTTY_TARBALL_SHA256);
     std::fs::create_dir_all(&dir).unwrap();
@@ -111,32 +166,58 @@ fn download_sources(out: &Path) -> PathBuf {
         .arg(&tarball)
         .arg("-C")
         .arg(&dir));
-    std::fs::read_dir(&dir)
-        .unwrap()
+    // The extracted tree is the artifact; the archive only re-verifies the
+    // download, and keeping it would put another 90 MB in the CI cache.
+    let _ = std::fs::remove_file(&tarball);
+    find_checkout(&dir).expect("ghostty tarball extracted but no build.zig found")
+}
+
+fn find_checkout(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
         .flatten()
         .map(|e| e.path())
         .find(|p| p.join("build.zig").exists())
-        .expect("ghostty tarball extracted but no build.zig found")
 }
 
 // ---------------------------------------------------------------------------
 // Zig toolchain
 // ---------------------------------------------------------------------------
 
-fn resolve_zig(out: &Path) -> PathBuf {
+/// The zig identity the stamp records, resolved without side effects so a
+/// cached artifact can be validated before anything is downloaded.
+fn zig_identity() -> String {
     if let Ok(p) = std::env::var("GHOSTTY_ZIG") {
-        return PathBuf::from(p);
+        return format!("env:{p}");
     }
+    if let Some((path, v)) = path_zig() {
+        return format!("path:{}:{}.{}", path.display(), v.0, v.1);
+    }
+    format!("pinned:{ZIG_VERSION}")
+}
+
+/// A `zig` on PATH new enough for Ghostty, if any.
+fn path_zig() -> Option<(PathBuf, (u32, u32))> {
     for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
         let candidate = dir.join("zig");
         if candidate.is_file()
             && let Some(v) = zig_version(&candidate)
             && v >= ZIG_MIN
         {
-            return candidate;
+            return Some((candidate, v));
         }
     }
-    download_zig(out)
+    None
+}
+
+fn resolve_zig(cache: &Path) -> PathBuf {
+    if let Ok(p) = std::env::var("GHOSTTY_ZIG") {
+        return PathBuf::from(p);
+    }
+    if let Some((path, _)) = path_zig() {
+        return path;
+    }
+    download_zig(cache)
 }
 
 fn zig_version(zig: &Path) -> Option<(u32, u32)> {
@@ -168,16 +249,16 @@ fn zig_tarball_id() -> (&'static str, &'static str) {
     }
 }
 
-fn download_zig(out: &Path) -> PathBuf {
+fn download_zig(cache: &Path) -> PathBuf {
     let (id, sha256) = zig_tarball_id();
-    let dir = out.join("zig");
-    let marker = dir.join(format!(".ready-{id}"));
+    let dir = cache.join("zig");
+    let marker = dir.join(format!(".ready-{ZIG_VERSION}-{id}"));
     if marker.exists() {
         return zig_binary(&dir, id);
     }
 
     let url = format!("https://ziglang.org/download/{ZIG_VERSION}/zig-{id}-{ZIG_VERSION}.tar.xz");
-    let tarball = out.join(format!("zig-{id}.tar.xz"));
+    let tarball = cache.join(format!("zig-{id}.tar.xz"));
     fetch(&url, &tarball);
     assert_sha256(&tarball, sha256);
     let _ = std::fs::remove_dir_all(&dir);
@@ -187,6 +268,7 @@ fn download_zig(out: &Path) -> PathBuf {
         .arg(&tarball)
         .arg("-C")
         .arg(&dir));
+    let _ = std::fs::remove_file(&tarball);
     std::fs::write(&marker, b"").unwrap();
     zig_binary(&dir, id)
 }

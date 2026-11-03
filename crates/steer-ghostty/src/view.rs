@@ -3,15 +3,16 @@
 //! libghostty-vt render-state snapshot.
 
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
     App, AppContext as _, BorderStyle, Bounds, Element, ElementId, Entity, FocusHandle, Focusable,
-    GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId,
-    MouseButton, ParentElement, Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString,
-    StrikethroughStyle, Styled, TextAlign, TextRun, UnderlineStyle, Window, fill, outline, point,
-    px, relative, rgba, size,
+    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement, IntoElement,
+    KeyDownEvent, LayoutId, MouseButton, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
+    ShapedLine, SharedString, StrikethroughStyle, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -19,17 +20,53 @@ use crate::input;
 use crate::pty::Pty;
 use crate::terminal::{KeyEncoder, RenderState, Rgb, Terminal};
 
-const FONT_FAMILY: &str = "Menlo";
+/// The cell advance is measured from this face and every glyph is placed on
+/// that grid, so the family must be a monospace one the platform actually has:
+/// a missing family resolves to a proportional fallback and columns drift apart.
+const FONT_FAMILY: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else if cfg!(target_os = "windows") {
+    "Consolas"
+} else {
+    "DejaVu Sans Mono"
+};
 const FONT_SIZE: f32 = 13.0;
 const LINE_HEIGHT: f32 = 1.3;
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
-// Mirror the chrome conversation panel (steer-agent-chrome-ui palette
-// CARD_BG 0xFFFFFF / FG 0x202020): the terminal reads as part of the chat
-// surface, not a dark inset.
-const THEME_FG: Rgb = Rgb::new(0x20, 0x20, 0x20);
-const THEME_BG: Rgb = Rgb::new(0xff, 0xff, 0xff);
-const WINDOW_BG_HEX: u32 = 0xffffffff;
+
+/// The colors the surface adopts. The palette lives in the app chrome, which
+/// this crate cannot depend on, so the embedder supplies its own (the shell
+/// passes the conversation panel's CARD_BG / FG).
+#[derive(Clone, Copy)]
+pub struct Theme {
+    pub fg: Rgb,
+    pub bg: Rgb,
+}
+
+impl Theme {
+    /// Black on white — for embedders with no palette of their own.
+    pub const LIGHT: Self = Self {
+        fg: Rgb::new(0x20, 0x20, 0x20),
+        bg: Rgb::new(0xff, 0xff, 0xff),
+    };
+}
+
+/// `$SHELL` when the environment carries one; otherwise the platform's own
+/// interactive shell (`/bin/zsh` is a macOS fact, not a POSIX one).
+fn default_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh"
+            } else {
+                "/bin/bash"
+            }
+            .to_string()
+        })
+}
 
 /// Events from the terminal world into the view's pump task.
 enum TermEvent {
@@ -57,13 +94,11 @@ impl TermShared {
     fn new(
         cols: u16,
         rows: u16,
+        theme: Theme,
         events: async_channel::Sender<TermEvent>,
     ) -> Result<Self, std::ffi::c_int> {
         let term = Terminal::new(cols, rows)?;
-        term.set_default_colors(
-            Rgb::new(THEME_FG.r, THEME_FG.g, THEME_FG.b),
-            Rgb::new(THEME_BG.r, THEME_BG.g, THEME_BG.b),
-        );
+        term.set_default_colors(theme.fg, theme.bg);
         let rs = RenderState::new()?;
         Ok(Self {
             inner: Mutex::new(InnerState { term, rs }),
@@ -79,6 +114,7 @@ impl TermShared {
 pub struct GhosttyView {
     shared: Arc<TermShared>,
     pty: Arc<Pty>,
+    theme: Theme,
     focus: FocusHandle,
     enc: RefCell<KeyEncoder>,
     /// Grid size the terminal+pty are currently resized to; render-driven.
@@ -105,15 +141,15 @@ impl Focusable for GhosttyView {
 impl GhosttyView {
     /// Spawn a `$SHELL` PTY rooted at `cwd` and return the ready view, with
     /// its output pump already running.
-    pub fn spawn(cwd: &Path, cx: &mut App) -> Result<Entity<Self>, String> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    pub fn spawn(cwd: &Path, theme: Theme, cx: &mut App) -> Result<Entity<Self>, String> {
+        let shell = default_shell();
         let (pty_inner, reader) = Pty::spawn_program(&shell, &[], cwd, INITIAL_COLS, INITIAL_ROWS)
             .map_err(|e| e.to_string())?;
         let pty = Arc::new(pty_inner);
 
         let (events, events_rx) = async_channel::unbounded::<TermEvent>();
         let shared = Arc::new(
-            TermShared::new(INITIAL_COLS, INITIAL_ROWS, events)
+            TermShared::new(INITIAL_COLS, INITIAL_ROWS, theme, events)
                 .map_err(|e| format!("ghostty init failed: {e}"))?,
         );
 
@@ -166,6 +202,7 @@ impl GhosttyView {
             let view = GhosttyView {
                 shared: shared.clone(),
                 pty,
+                theme,
                 focus: cx.focus_handle(),
                 enc: RefCell::new(
                     KeyEncoder::new()
@@ -242,8 +279,23 @@ impl GhosttyView {
         self.live_title.borrow().clone()
     }
 
+    /// Whether the shell has exited (the last frame stays on screen).
     pub fn exited(&self) -> bool {
         self.exited.get()
+    }
+
+    /// Terminate the shell and stop the pump. Idempotent; the tab calls this
+    /// when it closes, because dropping the view alone cannot: both watcher
+    /// threads hold the pty open, so the shell would outlive the tab.
+    pub fn terminate(&self) {
+        self.exited.set(true);
+        self.pty.terminate();
+    }
+
+    /// Put the viewport back on the active area. Called on every keystroke:
+    /// typing while scrolled back must show what the shell answers.
+    fn scroll_to_bottom(&self) {
+        self.shared.inner.lock().unwrap().term.scroll_bottom();
     }
 
     /// Render-driven resize: called from the element's prepaint with the grid
@@ -269,8 +321,29 @@ impl GhosttyView {
             && ks.key == "v"
             && let Some(text) = cx.read_from_clipboard().and_then(|c| c.text())
         {
-            let _ = self.shared.inner.lock().unwrap().term.paste(&text);
+            let pasted = {
+                let inner = self.shared.inner.lock().unwrap();
+                inner.term.paste(&text)
+            };
+            // A rejected paste means the text could inject commands outside
+            // bracketed-paste mode; libghostty's contract is to ask the user and
+            // retry with `allow_unsafe`. There is no confirm surface for the
+            // terminal yet, so the paste is dropped rather than forced through
+            // (see the crate's known gaps).
+            if pasted.is_ok() {
+                self.scroll_to_bottom();
+            }
         }
+    }
+
+    /// Write IME-committed text to the shell. Composition output is normal
+    /// input, not a bracketed paste: the platform already decided it is text.
+    fn commit_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.pty.write(text.as_bytes());
+        self.scroll_to_bottom();
     }
 
     /// Translate one keystroke to the PTY. Returns whether the key was
@@ -291,7 +364,14 @@ impl GhosttyView {
             let inner = self.shared.inner.lock().unwrap();
             let mut enc = self.enc.borrow_mut();
             enc.sync_from_terminal(&inner.term);
-            enc.encode_press(key, gmods, utf8.as_deref())
+            let bytes = enc.encode_press(key, gmods, utf8.as_deref());
+            if !bytes.is_empty() {
+                // A keystroke returns the viewport to the active area, the way
+                // a native terminal does: typing while scrolled back must show
+                // the shell's answer.
+                inner.term.scroll_bottom();
+            }
+            bytes
         };
         if bytes.is_empty() {
             return false;
@@ -335,14 +415,18 @@ impl Render for GhosttyView {
             )
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_wheel))
-            .bg(rgba(WINDOW_BG_HEX))
+            .bg(gpui_color(self.theme.bg))
             .child(GhosttyElement { view: cx.entity() })
     }
 }
 
 /// Convenience: spawn at `cwd`, falling back to home when it does not exist
 /// (the shell cannot start in a deleted directory).
-pub fn spawn_ghostty_view(cwd: &Path, cx: &mut App) -> Result<Entity<GhosttyView>, String> {
+pub fn spawn_ghostty_view(
+    cwd: &Path,
+    theme: Theme,
+    cx: &mut App,
+) -> Result<Entity<GhosttyView>, String> {
     let cwd = if cwd.is_dir() {
         cwd.to_path_buf()
     } else {
@@ -350,7 +434,7 @@ pub fn spawn_ghostty_view(cwd: &Path, cx: &mut App) -> Result<Entity<GhosttyView
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| Path::new(".").to_path_buf())
     };
-    GhosttyView::spawn(&cwd, cx)
+    GhosttyView::spawn(&cwd, theme, cx)
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +443,94 @@ pub fn spawn_ghostty_view(cwd: &Path, cx: &mut App) -> Result<Entity<GhosttyView
 
 struct GhosttyElement {
     view: Entity<GhosttyView>,
+}
+
+/// gpui `InputHandler` for IME composition. The platform has nowhere to send
+/// committed text without one, so CJK input (and every composed sequence)
+/// would never reach the pty; the integrated terminal registers the same
+/// handler for the same reason. Committed text goes to the shell as plain
+/// input; in-flight marked text is not painted (no composition overlay yet).
+struct GhosttyInputHandler {
+    view: Entity<GhosttyView>,
+    /// Cursor bounds from the latest paint — where the candidate window goes.
+    cursor_bounds: Option<Bounds<Pixels>>,
+}
+
+impl InputHandler for GhosttyInputHandler {
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        // Signal "input enabled, caret at 0..0" so the platform engages IME.
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&mut self, _window: &mut Window, _cx: &mut App) -> Option<Range<usize>> {
+        None
+    }
+
+    fn text_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<String> {
+        None
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _replacement_range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.view.update(cx, |view, _cx| view.commit_text(text));
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range_utf16: Option<Range<usize>>,
+        _new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {}
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        self.cursor_bounds
+    }
+
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        false
+    }
+
+    fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+        true
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<usize> {
+        None
+    }
 }
 
 struct CursorPlan {
@@ -376,6 +548,9 @@ struct PrepaintState {
     bg_quads: Vec<(Bounds<Pixels>, gpui::Rgba)>,
     cursor: Option<CursorPlan>,
     cursor_text: Option<(Point<Pixels>, ShapedLine)>,
+    /// The frame's background (the terminal's, not the theme's: a program may
+    /// override it).
+    bg: gpui::Rgba,
 }
 
 fn gpui_color(c: Rgb) -> gpui::Rgba {
@@ -493,6 +668,9 @@ impl Element for GhosttyElement {
         let mut bg_quads: Vec<(Bounds<Pixels>, gpui::Rgba)> = Vec::new();
         let mut cursor: Option<CursorPlan> = None;
         let mut cursor_text: Option<(Point<Pixels>, ShapedLine)> = None;
+        // The surface color: the embedder's background unless the program
+        // overrode it (OSC 11), in which case the frame carries the truth.
+        let theme_bg = gpui_color(self.view.read(cx).theme.bg);
 
         let Some(frame) = frame else {
             return PrepaintState {
@@ -502,6 +680,7 @@ impl Element for GhosttyElement {
                 bg_quads,
                 cursor,
                 cursor_text,
+                bg: theme_bg,
             };
         };
 
@@ -606,7 +785,9 @@ impl Element for GhosttyElement {
                         color: Some(fg.into()),
                     }),
                 };
-                let advance = if wide { cell_w * 2. } else { cell_w };
+                // The run covers `end - x` cells (wide runs: two columns per
+                // cell), so that is the width it must occupy on the grid.
+                let advance = cell_w * (end - x) as f32 * if wide { 2. } else { 1. };
                 let shaped = window.text_system().shape_line(
                     SharedString::from(text.as_str()),
                     px(FONT_SIZE),
@@ -709,6 +890,7 @@ impl Element for GhosttyElement {
             bg_quads,
             cursor,
             cursor_text,
+            bg: default_bg,
         }
     }
 
@@ -722,8 +904,9 @@ impl Element for GhosttyElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Default background.
-        window.paint_quad(fill(prepaint.bounds, rgba(WINDOW_BG_HEX)));
+        // Default background (the frame's, so a program's OSC 11 override and
+        // an unstyled cell agree on what "default" means).
+        window.paint_quad(fill(prepaint.bounds, prepaint.bg));
 
         for (bounds, color) in &prepaint.bg_quads {
             window.paint_quad(fill(*bounds, *color));
@@ -746,5 +929,17 @@ impl Element for GhosttyElement {
         if let Some((pos, shaped)) = &prepaint.cursor_text {
             let _ = shaped.paint(*pos, prepaint.line_h, TextAlign::Left, None, window, cx);
         }
+
+        // Register the IME handler for this frame so composition events land
+        // here, with the candidate window anchored at the cursor.
+        let focus = self.view.read(cx).focus.clone();
+        window.handle_input(
+            &focus,
+            GhosttyInputHandler {
+                view: self.view.clone(),
+                cursor_bounds: prepaint.cursor.as_ref().map(|cur| cur.bounds),
+            },
+            cx,
+        );
     }
 }

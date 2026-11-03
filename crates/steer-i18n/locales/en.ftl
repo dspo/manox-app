@@ -937,6 +937,7 @@ chrome-tab-browser = Browser
 chrome-quick-terminal = Open integrated terminal
 chrome-tab-ghostty = Ghostty terminal
 chrome-quick-ghostty = Open Ghostty terminal
+chrome-ghostty-exited = Process exited
 chrome-quick-browser = Open integrated browser
 chrome-quick-agent = Open { $agent }
 chrome-spawn-failed = Failed to start { $prog }: { $err }
