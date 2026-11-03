@@ -1,9 +1,10 @@
 //! The main-column surface contract.
 //!
 //! Chat is the first intended implementation (steer-agent-chat-ui); the
-//! settings overlay is the second. Full-window terminal / external-session
-//! needs go through **dock maximize**, never through this slot — the main
-//! surface only ever swaps for whole-surface views, not for tools.
+//! settings overlay is the second. A full-window terminal or an external
+//! CLI-agent session is also a whole-surface view: the assembly swaps the
+//! main column for it (`ViewMode::ExternalSession`) — there is no dock
+//! maximize route; the dock is a bottom panel, never a column swap.
 
 use std::sync::Arc;
 

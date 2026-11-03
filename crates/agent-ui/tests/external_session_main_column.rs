@@ -43,6 +43,8 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
                     project: None,
+                    // The fake PTY has no cx session behind it.
+                    handle: None,
                 },
                 view,
                 window,
@@ -83,11 +85,11 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
     })
     .unwrap();
     cx.run_until_parked();
-    // The REAL sidebar-click path: open_thread parks the external session
+    // The REAL sidebar-click path: open_container parks the external session
     // (its first move) and attaches the thread.
     cx.update_window(any, |_, window, cx| {
         ws.update(cx, |ws, cx| {
-            ws.open_thread("park-target".into(), window, cx)
+            ws.open_container("park-target".into(), window, cx)
         });
     })
     .unwrap();

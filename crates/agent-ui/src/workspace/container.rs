@@ -19,9 +19,12 @@
 //! native reads the archived bit (the fold-first read `session_retired`
 //! already performs), external reads the record's alive bit, flipped by the
 //! PTY's child-exit event (D8). A flip raises [`ContainerEvent`] on the
-//! workspace. Nothing consumes the event yet — the teardown cascade
-//! (resource reclaim → sub-session archive → row drop) lands with the
-//! lifecycle PRs.
+//! workspace; the workspace subscribes to its own emission and runs the
+//! teardown ([`Workspace::teardown_container`]) — external containers drop
+//! their record (the sidebar row goes with it) and reclaim every resource
+//! under their key. The native half needs no subscription leg: a native
+//! container's death IS the archive gesture (D7), and the archive paths drop
+//! the row.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -32,42 +35,6 @@ use gpui::EventEmitter;
 use manox_terminal::event::TerminalEvent;
 
 use super::external_sessions::clamp_external_title;
-
-/// Which conversation owns the container — the type vocabulary the 0 号
-/// resource decides (§2.2). The kind IS the capability set: only
-/// [`ContainerKind::Manox`] may own level-1 sub-sessions; the external kinds
-/// own their 0 号 process plus resources.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContainerKind {
-    /// A manox session (the 0 号 is a Captain).
-    Manox,
-    Claude,
-    Codex,
-    Copilot,
-}
-
-impl ContainerKind {
-    /// The kind the external row-id namespace names (`external:{agent}:{uuid}`'s
-    /// agent segment — the id the project menu mints). `None` for a plain
-    /// terminal (`agent == "terminal"`): its 0 号 is a bare shell, not a CLI
-    /// agent, and the kind vocabulary has no shell entry — the container
-    /// still exists, it just carries no agent kind.
-    pub fn from_external_agent(agent_id: &str) -> Option<Self> {
-        match agent_id {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "copilot" => Some(Self::Copilot),
-            _ => None,
-        }
-    }
-
-    /// Whether the kind's 0 号 is an app-spawned process (D8: process exit is
-    /// death, no archive gesture) rather than a manox session (D7: archive is
-    /// death).
-    pub fn is_external(self) -> bool {
-        !matches!(self, Self::Manox)
-    }
-}
 
 /// Container identity (D2): a native container's id IS its captain session
 /// id (one string, shared with the createSession — the native conceptual two
@@ -153,9 +120,9 @@ impl ContainerAttrs {
 }
 
 /// The unified creation entry's payload (§2.2's `create_container(kind,
-/// attrs)`): the kind rides the seed — a native seed IS a
-/// [`ContainerKind::Manox`] container by definition, an external seed's kind
-/// is its 0 号's agent namespace.
+/// attrs)`): a native seed IS a manox container by definition; an external
+/// seed's 0 号 names itself in its row-id's agent segment
+/// (`external:{agent}:{uuid}` — the vocabulary `ContainerId` carries).
 pub enum ContainerSeed<'a> {
     /// A manox conversation container: the native conceptual two steps
     /// (container record + session) fold into ONE `createSession` with the
@@ -166,6 +133,19 @@ pub enum ContainerSeed<'a> {
     /// An external CLI container: the record lands here, the process spawned
     /// before (记录 + spawn 两步 — see `project_menu`'s cascade).
     External(ExternalContainerSeed<'a>),
+}
+
+/// Whether the native half consults the draft refill. The refill is the
+/// sidebar gesture's return-to-draft semantics; `/new`'s landing opts out —
+/// its archive already disposed of the outgoing conversation, and the fresh
+/// sibling must never resurrect a draft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefillPolicy {
+    /// A never-materialized conversation under the same project (or
+    /// project-less) is that project's unfinished draft — return to it.
+    Draft,
+    /// Always mint a fresh sibling; the refill lookup never runs.
+    Fresh,
 }
 
 /// The native create intent — everything downstream of the draft-refill
@@ -180,10 +160,13 @@ pub struct NativeContainerSeed {
     pub access: Option<String>,
     /// The inherited reasoning effort.
     pub effort: Option<String>,
+    /// The draft-refill policy ([`RefillPolicy`]).
+    pub refill: RefillPolicy,
 }
 
 /// The external record seed — the already-spawned PTY's identity and row
-/// face (the project menu's launch payload, unchanged).
+/// face (the project menu's launch payload, plus the CLI agent's kill
+/// handle).
 pub struct ExternalContainerSeed<'a> {
     /// The row-id namespace segment (`external:{agent}:{uuid}`).
     pub agent_id: &'a str,
@@ -201,12 +184,17 @@ pub struct ExternalContainerSeed<'a> {
     /// The spawned terminal (its view occupies the main column while the
     /// session is foreground; dropping it tears the process tree down).
     pub view: gpui::Entity<terminal_ui::TerminalView>,
+    /// The CLI agent's session handle — the owner's independent clone for
+    /// the explicit kill on close (the contract `cx_session` states). `None`
+    /// for plain terminals: their PTY dies with the view drop.
+    pub handle: Option<Arc<steer_ext_agents::SessionHandle>>,
 }
 
 /// The death-predicate flip (§2.3): the container's 0 号 reached its kind's
 /// death — a manox session archived (D7), an external process exited (D8).
-/// Emitted on the [`Workspace`]; the teardown cascade lands with the
-/// lifecycle PRs.
+/// Emitted on the [`Workspace`]; the workspace's own subscription runs the
+/// external teardown on it, and the archive path raises it for the native
+/// ids it retires (the explicit call there is the reclaim, not a duplicate).
 #[derive(Debug)]
 pub enum ContainerEvent {
     /// The container id whose `alive` read flipped to false.
@@ -219,10 +207,11 @@ impl Workspace {
     /// The ONE container creation entry (§2.2 `create_container(kind,
     /// attrs)`). Native folds its conceptual two steps (container record +
     /// session) into one `createSession` — the draft-refill-or-mint decision,
-    /// the object row and the attach all live here, verbatim from the former
-    /// `start_new_thread` body; external lands the record (the spawn already
-    /// happened). Returns the container id — the routing string both homes
-    /// share.
+    /// the object row and the attach all live here; the sidebar's
+    /// `new_container` gesture is the thin wrapper over this entry
+    /// (leave-external + inheritance, then the native seed). External lands
+    /// the record (the spawn already happened). Returns the container id —
+    /// the routing string both homes share.
     pub fn create_container(&mut self, seed: ContainerSeed, cx: &mut Context<Self>) -> String {
         match seed {
             ContainerSeed::Manox(intent) => self.create_native_container(intent, cx),
@@ -242,18 +231,22 @@ impl Workspace {
             model,
             access,
             effort: effort_str,
+            refill,
         } = intent;
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
-        // The draft refill: a never-materialized conversation under the
-        // same project (or project-less) is that project's unfinished
-        // draft — return to it instead of minting a sibling. Its row
-        // already carries the model/access picks the user left there.
-        // The FOREGROUND session and archived rows are excluded: the
-        // landing conversation (created project-less at boot, never
-        // spoken) is itself the latest project-less draft, and a just
-        // archived draft would be resurrected — refilling either would
-        // make "new session" a no-op on the very session it should leave.
+        // The draft refill (the [`RefillPolicy::Draft`] policy): a
+        // never-materialized conversation under the same project (or
+        // project-less) is that project's unfinished draft — return to it
+        // instead of minting a sibling. Its row already carries the
+        // model/access picks the user left there. The FOREGROUND session and
+        // archived rows are excluded: the landing conversation (created
+        // project-less at boot, never spoken) is itself the latest
+        // project-less draft, and a just archived draft would be resurrected
+        // — refilling either would make "new session" a no-op on the very
+        // session it should leave. [`RefillPolicy::Fresh`] skips the lookup:
+        // the caller already disposed of the outgoing conversation (`/new`'s
+        // landing) and the fresh sibling must not resurrect a draft.
         let foreground = self
             .chat
             .read(cx)
@@ -261,15 +254,19 @@ impl Workspace {
             .as_ref()
             .map(|(_, sid)| sid.clone());
         let objects = manox_agent::object_store::ObjectStore::try_global();
-        let refill = objects.as_ref().and_then(|store| {
-            store.latest_draft(
-                project
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .as_deref(),
-            )
-        });
-        let refill = refill.filter(|row| {
+        let refill_row = (refill == RefillPolicy::Draft)
+            .then(|| {
+                objects.as_ref().and_then(|store| {
+                    store.latest_draft(
+                        project
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .as_deref(),
+                    )
+                })
+            })
+            .flatten();
+        let refill = refill_row.filter(|row| {
             !row.archived
                 && foreground.as_deref() != Some(row.id.as_str())
                 && !self.session_retired(cx, &row.id)
@@ -422,8 +419,8 @@ impl Workspace {
             svg,
             project,
             view,
+            handle,
         } = seed;
-        let kind = ContainerKind::from_external_agent(agent_id);
         let id = ContainerId::external(agent_id);
         // The terminal may carry a title already — the program claims it
         // through the PTY as soon as it boots — and that claim beats the
@@ -467,8 +464,8 @@ impl Workspace {
                 project,
                 created_at: chrono::Utc::now().timestamp(),
                 view,
-                kind,
                 attrs,
+                handle,
                 alive: true,
                 _title_sub: title_sub,
             });
@@ -485,9 +482,10 @@ impl Workspace {
     }
 
     /// The external container's death (D8): the 0 号 process exited — flip
-    /// the record's alive bit and raise the event. The record itself stays
-    /// (the sidebar row remains until the lifecycle PR wires the teardown);
-    /// a second exit event after the flip is a no-op.
+    /// the record's alive bit and raise the event. The event drives the
+    /// teardown (the workspace subscribes to its own emission): the record
+    /// and its sidebar row drop, and every resource under the container's
+    /// key is reclaimed. A second exit event after the flip is a no-op.
     fn retire_external_container(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(record) = self.externals.iter_mut().find(|s| s.id == id) else {
             return;
@@ -497,6 +495,61 @@ impl Workspace {
         }
         record.alive = false;
         cx.emit(ContainerEvent::Died(id.to_string()));
+    }
+
+    /// The ONE container teardown (§2.3: predicate flip ⇒ same teardown):
+    /// kill the 0 号's process (external homes — the owner's independent
+    /// handle clone, the cx_session contract), kill every CLI tab the
+    /// container owns (the registry's kill handles), reclaim its browser
+    /// tabs (webview drop + host-route reclaim), and drop its registry
+    /// entries (the stashed dock view and right-pane session — the PTYs die
+    /// with the views). The shell half — the LIVE dock view and pane session,
+    /// when this container owns them — reclaims outside the workspace lease
+    /// (`chrome_assembly::reclaim_container_panes`): closing live tabs
+    /// re-enters the shell, which a leased workspace update must not.
+    ///
+    /// Triggers: `ContainerEvent::Died` (the workspace's own subscription —
+    /// an external container's process exit drops its record and sidebar row
+    /// here) and the explicit close (`close_external_session`, D8: closing a
+    /// container kills its process). Idempotent: a container with nothing
+    /// left under its key tears down to no-ops.
+    pub(crate) fn teardown_container(&mut self, container_id: &str, cx: &mut Context<Self>) {
+        let was_foreground = self.active_external.as_deref() == Some(container_id);
+        // The external record: the owner's kill fires FIRST (the dropped
+        // view's own tear-down then lands on an already-dead child — no
+        // blocking reap on the main thread), then the record goes, sidebar
+        // row included.
+        let handle = self
+            .externals
+            .iter()
+            .find(|s| s.id == container_id)
+            .and_then(|s| s.handle.clone());
+        if let Some(handle) = handle {
+            let _ = handle.kill();
+        }
+        self.externals.retain(|s| s.id != container_id);
+        // The CLI tabs' children (right-pane terminal/CLI tabs, dock included
+        // via their spawn-time owner stamp).
+        self.kill_handles_of_container(container_id);
+        // The browser tabs: webview drop + host-route reclaim, owned tabs
+        // only — other containers' tabs survive. (Compiled out with the
+        // integrated browser on Linux/FreeBSD — no tab ever registers.)
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        self.close_container_browser_tabs(container_id, cx);
+        // The stashed dock view + right-pane session.
+        self.reclaim_stash(container_id);
+        // The durable pane snapshot: a restore source only for a LIVE
+        // container's return — the dead container's registry key must not
+        // outlive it.
+        crate::chrome_assembly::remove_right_pane(container_id);
+        // The live dock/pane half: outside the lease (see above).
+        let dead = container_id.to_string();
+        cx.defer(move |cx| crate::chrome_assembly::reclaim_container_panes(&dead, cx));
+        if was_foreground {
+            self.active_external = None;
+            self.view_mode = super::ViewMode::Workspace;
+        }
+        cx.notify();
     }
 
     /// The ONE death predicate (§2.3). Native: the session is not retired —
@@ -521,38 +574,6 @@ impl Workspace {
                 && !manox_agent::object_store::ObjectStore::try_global()
                     .and_then(|objects| objects.conversation(container_id))
                     .is_some_and(|row| row.archived)
-        }
-    }
-
-    /// The project association, LIVE-read (D10): native consults the
-    /// conversation's object row per call (the belonging is registry state —
-    /// re-binding mid-life is legal and shows up on the next read); external
-    /// reads the record's launch-time project (pure app memory, §2.2). The
-    /// sidebar's removed-projects overlay applies on top of this at
-    /// projection time, exactly as before.
-    pub fn container_project(&self, container_id: &str) -> Option<PathBuf> {
-        if ContainerId::is_external_id(container_id) {
-            self.externals
-                .iter()
-                .find(|s| s.id == container_id)?
-                .project
-                .clone()
-        } else {
-            manox_agent::object_store::ObjectStore::try_global()
-                .and_then(|objects| objects.project_of(container_id))
-                .map(PathBuf::from)
-        }
-    }
-
-    /// The container's kind, read by id: native is always
-    /// [`ContainerKind::Manox`] (the 0 号 is a Captain — the view constructs
-    /// on demand); external resolves through the record (a plain terminal
-    /// carries no kind). An id with no record behind it has no kind.
-    pub fn container_kind(&self, container_id: &str) -> Option<ContainerKind> {
-        if ContainerId::is_external_id(container_id) {
-            self.externals.iter().find(|s| s.id == container_id)?.kind
-        } else {
-            Some(ContainerKind::Manox)
         }
     }
 
@@ -619,34 +640,6 @@ mod tests {
             ContainerId::parse("0197abcd-session"),
             ContainerId::Native("0197abcd-session".into())
         );
-    }
-
-    // ── the kind is the 0 号's namespace (§2.2) ──
-
-    /// The three CLI agents name their kinds; a plain terminal names none
-    /// (its 0 号 is a bare shell) — the container exists but carries no
-    /// agent kind. Manox is never derivable from the external namespace.
-    #[test]
-    fn external_agents_name_their_kind_and_terminals_name_none() {
-        assert_eq!(
-            ContainerKind::from_external_agent("claude"),
-            Some(ContainerKind::Claude)
-        );
-        assert_eq!(
-            ContainerKind::from_external_agent("codex"),
-            Some(ContainerKind::Codex)
-        );
-        assert_eq!(
-            ContainerKind::from_external_agent("copilot"),
-            Some(ContainerKind::Copilot)
-        );
-        assert_eq!(
-            ContainerKind::from_external_agent("terminal"),
-            None,
-            "a plain terminal's 0 号 is a bare shell — no kind"
-        );
-        assert!(!ContainerKind::Manox.is_external());
-        assert!(ContainerKind::Claude.is_external());
     }
 
     // ── attrs capture (D10 snapshot semantics) ──

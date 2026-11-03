@@ -54,7 +54,7 @@ impl Workspace {
     /// background thread's streaming deltas and tool events cannot be
     /// misrouted into the foreground view.
     /// The parked entry is left in `background_threads` (reclaimed on a later
-    /// `open_thread`); self-removal from within the callback would drop the very
+    /// `open_container`); self-removal from within the callback would drop the very
     /// subscription running it.
     pub(super) fn subscribe_background_thread(
         &self,
@@ -100,10 +100,10 @@ impl Workspace {
             .unwrap_or(false)
     }
 
-    /// New thread for the pi harness: no provider reload (registration is
-    /// one-shot; actors await readiness themselves). A project binds at
-    /// construction time — a single session creation, no orphaned session
-    /// file.
+    /// The sidebar's new-container gesture (⌘N, the Steer row, `/new`): read
+    /// the foreground's inherited picks, then hand the intent to the ONE
+    /// creation entry (`container::create_container`). No provider reload —
+    /// registration is one-shot; actors await readiness themselves.
     ///
     /// T6: the double path is deleted. The workspace no longer pre-builds a
     /// local `Thread` and then attaches the AgentServer session to the same
@@ -120,7 +120,7 @@ impl Workspace {
     /// Returns the client-minted session id: the attach lands asynchronously,
     /// so a caller that must address the fresh thread (e.g. `/exit`'s closing
     /// notes) keys on this id instead of the live foreground.
-    pub fn start_new_thread(
+    pub fn new_container(
         &mut self,
         project: Option<PathBuf>,
         window: &mut Window,
@@ -183,6 +183,7 @@ impl Workspace {
                 model,
                 access,
                 effort: effort_str,
+                refill: container::RefillPolicy::Draft,
             }),
             cx,
         );
@@ -509,26 +510,22 @@ impl Workspace {
                 tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
                 Default::default()
             });
-        // Derive the transcript's plan and the sub-agent rows inside one
-        // store read — the display fold's message rows ARE the messages
-        // (L6, mechanical transcription), and cloning the whole transcript
-        // here would copy it on the main thread on every switch.
-        let (plan_from_messages, subagent_rows) = self
+        // The sub-agent observation rows rebuild from the PERSISTENT ROSTER
+        // (the work channel's child-run registry): the roster is the
+        // restore source (plan PR-A4), settled runs included, so the
+        // switch-away-and-back / restart rebuild carries the whole crew.
+        // The transcript-scan path this replaces fed an empty message set —
+        // the sub-agent tree rides the x-manox channels, which no message
+        // scan can see — and so rebuilt nothing (the retired KNOWN
+        // DOWNGRADE).
+        let subagent_rows = self
             .chat
             .read(cx)
             .store
             .as_ref()
-            .map(|_| {
-                // The plan snapshot and the sub-agent tree ride the x-manox
-                // channels (unmodelled on this pass), so the restore starts
-                // from an empty message set. KNOWN DOWNGRADE: switching to a
-                // thread with a proposed plan or live sub-agents rebuilds
-                // those panels empty until their channels repopulate.
-                let msgs: Vec<manox_agent::Message> = Vec::new();
-                (
-                    manox_agent::plan::rebuild_from_messages(&msgs),
-                    manox_agent::subagent_restore::rebuild_from_messages(&msgs),
-                )
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::child_runs_of(&view.book, sid)
             })
             .unwrap_or_else(|| {
                 tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
@@ -688,17 +685,15 @@ impl Workspace {
         self.rearm_goal_ticker(goal_elapsed_live, cx);
         // Cockpit state is per-thread: the outgoing thread's plan,
         // running-tool title, and per-model counter state do not apply to the
-        // incoming one. The execution plan, unlike the proposed-plan review,
-        // IS recoverable: re-derived from the transcript's `UpdatePlan` tool
-        // calls, falling back to the independent sidecar snapshot (the facade
-        // mirrors the persisted copy on every `PlanUpdated` / `Ready`).
-        let restored_plan = plan_from_messages.or_else(|| {
-            self.chat.read(cx).store.clone().and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::plan_snapshot_of(&view.book, &sid)
-                    .cloned()
-                    .and_then(|v| serde_json::from_value::<manox_agent::plan::PlanSnapshot>(v).ok())
-            })
+        // incoming one. The execution plan's restore is the sidecar snapshot
+        // (the transcript-scan leg never had a real input here either — the
+        // plan rides the x-manox plan channel, unmodelled on the transcript
+        // face — and the roster read above replaced the scan outright).
+        let restored_plan = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
+            let view = store.read(cx);
+            crate::ahp_store::plan_snapshot_of(&view.book, &sid)
+                .cloned()
+                .and_then(|v| serde_json::from_value::<manox_agent::plan::PlanSnapshot>(v).ok())
         });
         let rail_leaf = self.chat.read(cx).store.clone();
         self.chat_rail(cx).update(cx, |r, cx| {
@@ -718,9 +713,9 @@ impl Workspace {
             }
             cx.notify();
         });
-        // Recover the settled sub-agent observation rows for the incoming
-        // thread after the rail reset above (a restoring thread has no
-        // messages yet — its rows land with the `HistoryRestored` rebuild).
+        // Recover the crew's observation rows for the incoming thread after
+        // the rail reset above, straight from the persistent roster (live
+        // and settled rows alike — the roster is the restore source).
         self.apply_subagent_rows(subagent_rows, cx);
         // Replay the window's live-only tail (sub-agent child/progress rows, an
         // in-flight tool's streamed output, a live retry notice): the parked
@@ -753,7 +748,7 @@ impl Workspace {
         // A stale attach tail must not steal the main column back: the user
         // may have re-entered an external session, the sub-agent page or
         // Settings while this async attach was landing — the synchronous
-        // leave in open_thread already handled the normal transition. Each
+        // leave in open_container already handled the normal transition. Each
         // of those modes owns a surface the flip would strand (the settings
         // nav's sidebar slot, the terminal, the sub-agent page's poll), so
         // only the conversation is flippable.
@@ -764,110 +759,61 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Archive the active thread and navigate to a fresh empty one. Shared
-    /// by the `/exit` slash command and the `cmd-;` keybinding. No-op while
-    /// a turn is running (a parked thread would strand pending verdicts).
+    /// Archive the active container and navigate to a fresh one. Shared by
+    /// the `cmd-;` keybinding. No-op while a turn is running (a parked
+    /// thread would strand pending verdicts). The archive itself rides the
+    /// confirm-or-direct container entry (plan D7): live dependents confirm
+    /// first; the fresh landing follows the confirmed archive.
     pub(crate) fn archive_current_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.archive_active_thread_if_idle(cx) {
+        let Some((_, sid)) = self.chat_store(cx) else {
+            return;
+        };
+        if self.foreground_running(cx) {
             return;
         }
-        self.start_new_thread(None, window, cx);
+        let landing: super::lifecycle::ArchiveLanding = std::sync::Arc::new(
+            |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+                ws.new_container(None, window, cx);
+            },
+        );
+        self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
     }
 
-    /// The archiving body every path shares: mark the session archived in the
-    /// book (its optimistic half) and persist through the store, which
-    /// refreshes the sidebar list. The GATE is the caller's (the idle check
-    /// for the archive command, none for `/exit`'s force path) and so is the
-    /// sidebar's optimistic row drop (the command drops in place; `/exit`
-    /// drops inside its own sequence).
-    pub(super) fn archive_thread_now(&mut self, sid: &str, cx: &mut Context<Self>) {
-        // The write rides the catalogue root (`x-manox/archivedChanged`),
-        // the one path that reaches the host for EVERY row — attached or
-        // not — and marks the object row's archived bit on the way
-        // (`AhpStore::archive_sessions`). The native
-        // `session/isArchivedChanged` needs the row's session channel and
-        // is refused for the rest: a silently refused archive left the
-        // conversation live and its never-spoken object row a zombie
-        // draft, which `start_new_thread`'s refill then resurrected as a
-        // `createSession` the host could only answer "already exists" — a
-        // dead click on 新建会话, and a `/exit` whose final beat never
-        // landed.
-        self.multiplexer.update(cx, |mux, cx| {
-            mux.archive_sessions(std::slice::from_ref(&sid.to_string()), true, cx);
-        });
-        manox_agent::thread_store_global().with_mut(|s| s.archive_thread(sid, true));
-        // Archive IS the native container's death (D7) — raise the
-        // predicate-flip event. A fold echo (another client archived) keeps
-        // riding the store's own notify; the alive read is the one interface
-        // either way. Nothing consumes the event yet — the teardown cascade
-        // lands with the lifecycle PRs.
-        cx.emit(container::ContainerEvent::Died(sid.to_string()));
-    }
-
-    /// Archive the active thread if it is idle; `false` when a turn is
-    /// running (attaching would park the thread and clear `pending_ask`,
-    /// stranding a user verdict).
-    pub(super) fn archive_active_thread_if_idle(&mut self, cx: &mut Context<Self>) -> bool {
-        if self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).running()
-            })
-            .unwrap_or_else(|| {
-                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
-                Default::default()
-            })
-        {
-            return false;
-        }
-        let id = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(_, sid)| sid.clone())
-            .unwrap_or_else(|| {
-                tracing::debug!("foreground store not bound yet (ahp handshake in flight)");
-                Default::default()
-            });
-        self.archive_thread_now(&id, cx);
-        // The sidebar's optimistic drop (the same half the row menu's archive
-        // performs): the row must leave when the gesture fires, not when the
-        // echo + the next list snapshot catch up.
-        crate::chrome_assembly::drop_sidebar_row(&id, cx);
-        true
-    }
-
-    /// Archive the active thread and open a fresh one that inherits the
+    /// Archive the active container and open a fresh one that inherits the
     /// outgoing thread's project, model, access mode, and reasoning effort —
     /// `/new` starts a clean conversation without dropping the working
-    /// context. No-op while a turn is running (see
-    /// `archive_active_thread_if_idle`).
+    /// context. No-op while a turn is running (a parked thread would strand
+    /// pending verdicts). The archive rides the confirm-or-direct container
+    /// entry (plan D7); the inheriting creation reads the live foreground at
+    /// fire time — the same still-bound state the post-archive read here has
+    /// always seen.
     pub(crate) fn archive_current_thread_inheriting(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.archive_active_thread_if_idle(cx) {
+        let Some((_, sid)) = self.chat_store(cx) else {
+            return;
+        };
+        if self.foreground_running(cx) {
             return;
         }
+        let landing: super::lifecycle::ArchiveLanding = std::sync::Arc::new(
+            |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+                ws.open_inheriting_container(window, cx);
+            },
+        );
+        self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
+    }
+
+    /// The inheriting fresh-container creation `/new` lands after its
+    /// archive. The inheritance reads the live foreground fold and object
+    /// row, which is still the outgoing (just archived) session's at this
+    /// point, and the construction rides the ONE creation entry with the
+    /// [`container::RefillPolicy::Fresh`] policy — the archive already
+    /// disposed of the outgoing conversation, so no draft refill may run.
+    fn open_inheriting_container(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let old = self.chat.read(cx).thread.clone();
-        let cwd = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
-                    .cwd()
-                    .map(std::path::PathBuf::from)
-            })
-            .unwrap_or_else(|| old.read(|t| t.cwd().to_path_buf()));
         let project = self
             .chat
             .read(cx)
@@ -893,64 +839,23 @@ impl Workspace {
                 .access_mode()
                 .map(str::to_string)
         });
-        // U6b③: the inherited state rides the v2 CreateSession intent —
-        // the compat-note create this replaces carried only the cwd, so
-        // the parked model/project/effort/access never reached the
-        // server (the #765 round-2 inheritance defect's shape); the
-        // receipt's minted id attaches through the standard
-        // created-session path.
-        let cwd_str = cwd.to_string_lossy().to_string();
+        // U6b③: the inherited state rides the v2 CreateSession intent — the
+        // compat-note create this replaced carried only the cwd, so the
+        // parked model/project/effort/access never reached the server (the
+        // #765 round-2 inheritance defect's shape). The wire-shaped model
+        // rides the seed; the entry's native half lands the row, the
+        // createSession and the attach.
         let model_str = model.as_ref().map(|m| format!("{}/{}", m.provider, m.id));
-        let ws = cx.weak_entity();
-        let dir_for_store = project.clone();
-        let sid = uuid::Uuid::new_v4().to_string();
-        // The object row, exactly as `start_new_thread` lands it: this
-        // conversation is minted here and never passes through that path.
-        land_conversation_row(
-            &sid,
-            project.as_deref(),
-            model.as_ref().map(|m| m.provider.as_str()),
-            model.as_ref().map(|m| m.id.as_str()),
-            access.as_deref(),
-            effort_str.as_deref(),
+        self.create_container(
+            container::ContainerSeed::Manox(container::NativeContainerSeed {
+                project,
+                model: model_str,
+                access,
+                effort: effort_str,
+                refill: container::RefillPolicy::Fresh,
+            }),
+            cx,
         );
-        let mut config = serde_json::Map::new();
-        if let Some(model) = &model_str {
-            config.insert("model".into(), serde_json::json!(model));
-        }
-        if let Some(access) = &access {
-            config.insert("accessMode".into(), serde_json::json!(access));
-        }
-        if let Some(effort) = &effort_str {
-            config.insert("reasoningEffort".into(), serde_json::json!(effort));
-        }
-        // Same directory rule as `start_new_thread`: the intent's working
-        // directories are the only carrier — bind the inherited cwd so the
-        // fresh thread keeps its project instead of landing directory-less.
-        let cwds = vec![format!("file://{cwd_str}")];
-        let reply = self.with_foreground_store(cx, |store, _| {
-            store.create_session(&sid, cwds, Some(config))
-        });
-        let sid2 = sid.clone();
-        cx.spawn(async move |_, cx| {
-            let failed = match reply {
-                Some(reply) => matches!(reply.recv().await, Ok(Err(_))),
-                None => true,
-            };
-            if failed {
-                tracing::warn!("inheriting create failed");
-                return;
-            }
-            if let Some(dir) = &dir_for_store {
-                let _ = ws.update(cx, |_ws, cx| {
-                    Workspace::register_project_in_store(dir, cx);
-                });
-            }
-            let _ = ws.update_in(cx, |this, window, cx| {
-                this.attach_created_session(&sid2, window, cx);
-            });
-        })
-        .detach();
         let _ = window;
     }
 
@@ -980,16 +885,16 @@ impl Workspace {
         if !running {
             return;
         }
-        self.start_new_thread(project, window, cx);
+        self.new_container(project, window, cx);
     }
 
-    pub fn open_thread(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        // Opening a thread is an implicit park for the external session on
-        // screen (its terminal keeps running) — the conversation returns, and
-        // so does a sub-agent stream page (the run keeps running).
+    pub fn open_container(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Opening a native row is an implicit park for the external session
+        // on screen (its terminal keeps running) — the conversation returns,
+        // and so does a sub-agent stream page (the run keeps running).
         self.leave_external_session();
         self.leave_subagent_stream(cx);
-        self.open_thread_inner(id, true, window, cx);
+        self.open_container_inner(id, true, window, cx);
     }
 
     /// The successor hand-off: the foreground conversation continues under a
@@ -1003,7 +908,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.nav.replace_current(&id);
-        self.open_thread_inner(id, false, window, cx);
+        self.open_container_inner(id, false, window, cx);
     }
 
     /// One step back through the visited-thread history; returns the thread
@@ -1014,7 +919,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let id = self.nav.step_back()?;
-        self.open_thread_inner(id.clone(), false, window, cx);
+        self.open_container_inner(id.clone(), false, window, cx);
         Some(id)
     }
 
@@ -1026,7 +931,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let id = self.nav.step_forward()?;
-        self.open_thread_inner(id.clone(), false, window, cx);
+        self.open_container_inner(id.clone(), false, window, cx);
         Some(id)
     }
 
@@ -1035,7 +940,7 @@ impl Workspace {
         self.nav.avail()
     }
 
-    fn open_thread_inner(
+    fn open_container_inner(
         &mut self,
         id: String,
         record: bool,
@@ -1125,7 +1030,7 @@ impl Workspace {
                     chat.fork_in_flight = false;
                     cx.notify();
                 });
-                this.open_thread(chat_id, window, cx);
+                this.open_container(chat_id, window, cx);
             });
         })
         .detach();

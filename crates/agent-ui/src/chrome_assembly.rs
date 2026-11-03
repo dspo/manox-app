@@ -182,10 +182,10 @@ pub fn dock_terminal_live(cx: &App) -> bool {
 }
 
 /// The archive gesture's shell-side reconciliation: drop the row from the
-/// sidebar now (the same optimistic drop the row menu's archive performs),
-/// instead of waiting for the protocol echo + the next list snapshot. The
-/// workspace-side archive paths (`/exit`, `cmd-;`) have no menu handler to
-/// do this half for them. `false` when no shell is live.
+/// sidebar now (the container teardown path's own optimistic half, at its
+/// shell face), instead of waiting for the protocol echo + the next list
+/// snapshot. The workspace-side archive paths (`/exit`, `cmd-;`) have no
+/// menu handler to do this half for them. `false` when no shell is live.
 pub fn drop_sidebar_row(id: &str, cx: &mut App) -> bool {
     let Some(shell) = shell_handle() else {
         return false;
@@ -253,13 +253,18 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                 crate::browser_host::WorkspaceBrowserHost::install(ws.clone(), cx);
                 // The install lands asynchronously, so a tab restored from
                 // threads.db before it (startup) missed its route registration:
-                // re-register every live view now that the host exists.
+                // re-register every live view now that the host exists. The
+                // owner is the boot foreground container — at this point every
+                // live view belongs to the landing container's restored pane.
                 if let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() {
-                    let ids = ws.read_with(cx, |ws, _| {
-                        ws.browser_views.keys().copied().collect::<Vec<_>>()
+                    let (ids, owner) = ws.read_with(cx, |ws, cx| {
+                        (
+                            ws.browser_views.keys().copied().collect::<Vec<_>>(),
+                            ws.foreground_container_id(cx).unwrap_or_default(),
+                        )
                     });
                     for id in ids {
-                        host.register_ui_tab(id);
+                        host.register_ui_tab(id, owner.clone());
                     }
                 }
             }
@@ -272,31 +277,25 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         Ok(mut slot) => *slot = Some(shell.downgrade()),
         Err(poisoned) => *poisoned.into_inner() = Some(shell.downgrade()),
     }
-    // Per-thread dock state: each visited thread keeps its live panel
+    // Per-container dock state: each visited container keeps its live panel
     // terminal across switches (the right-pane stash semantic — a
     // stashed view keeps its process running; only explicit collapse of the
-    // LIVE dock tears one down).
+    // LIVE dock tears one down). The stash and the live-owner tracking live
+    // in the resource registry (keyed by container id — a native thread id
+    // verbatim, an external row id while one owns the main column), so the
+    // container teardown can reclaim them.
     //
-    // LIFETIME (accepted difference, 2026-09-28): these stashes belong to the
-    // SHELL, so they die with the window — a tray close + reopen leaves the
-    // dock's terminal and the right pane's terminal/CLI tabs gone (browser and
-    // editor tabs come back from `threads.db`). The legacy shell kept the same
-    // state on the (process-lifetime) workspace; the chrome shell has always
-    // scoped it to the window, and this build still keeps strictly more than
-    // the chrome build it replaces (that one also lost the workspace itself —
-    // foreground thread, drafts, parked threads — on every reopen). Moving the
-    // stashes onto the workspace is the contained follow-up that would match
-    // the legacy lifetime; it is not in this retirement's scope.
-    let mut dock_stash: HashMap<String, gpui::AnyView> = HashMap::new();
-    let mut dock_thread: Option<String> = None;
-    // Per-thread right-pane sessions: the open tab set + content store +
-    // active tab + visibility move with the foreground thread (stash on
-    // switch-out, restore on switch-in; a thread with no in-session stash
-    // falls back to its `threads.db` snapshot — the pane's durable account —
-    // and starts on the fresh new-tab page only when
-    // neither exists).
-    let mut right_stash: HashMap<String, steer_agent_chrome_ui::right_pane::RightPaneSession> =
-        HashMap::new();
+    // LIFETIME (registry-scoped, 2026-10-30): the stash outlives the window —
+    // a tray close + reopen keeps the dock's terminal and the right pane's
+    // terminal/CLI tabs (browser and editor tabs come back from the pane
+    // registry). The former shell-owned stashes died with the window; the
+    // registry matches the workspace's process-lifetime instead, which is
+    // what the resources' owner (the container) outlives.
+    // Per-container right-pane sessions: the open tab set + content store +
+    // active tab + visibility move with the foreground container (stash on
+    // switch-out, restore on switch-in; a container with no in-session stash
+    // falls back to its pane-registry snapshot — the pane's durable account —
+    // and starts on the fresh new-tab page only when neither exists).
     // Persist the pane on every change: the shell's own notify is the
     // change signal (tab open/close/activate, visibility, dock), so an
     // upsert here keeps the durable row in step without the pane knowing
@@ -327,7 +326,7 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             })
             .detach();
         }
-        let rows = mux.read(cx).thread_list(cx);
+        let rows = mux.read(cx).container_list(cx);
         let folders = mux.read(cx).project_folders(cx);
         let removed = crate::project_registry::removed_projects();
         let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
@@ -405,40 +404,52 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             }
             cx.notify();
         });
-        refresh_foreground_cwd(&ws, &rows, cx);
-        // The foreground thread id: dock follows it. On a switch, detach the
-        // outgoing view into the stash and restore/spawn the incoming one.
-        let fg = ws
-            .read(cx)
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(_, sid)| sid.clone());
-        if fg != dock_thread && fg.is_some() {
-            let old_id = dock_thread.take();
-            shell.update(cx, |shell, cx| {
-                let taken = shell.take_panel_view(cx);
+        refresh_foreground_project(&ws, &rows, cx);
+        // The foreground CONTAINER id (a native thread id verbatim, an
+        // external row id while one owns the main column): the dock and the
+        // right pane both follow it. On a switch, detach the outgoing
+        // container's views into the workspace's registry stash and
+        // restore/spawn the incoming container's own. The dock and the pane
+        // switch together, so one live-owner pair moves in lockstep (the
+        // container teardown clears them together when its container dies).
+        let fg = ws.read(cx).foreground_container_id(cx);
+        let old_id = ws.read(cx).dock_owner();
+        if fg != old_id && fg.is_some() {
+            // The outgoing views leave the shell first, land under the
+            // outgoing container's key, then the incoming container's own
+            // come back (or the pane falls back to its persisted snapshot /
+            // the fresh new-tab page).
+            let taken = shell.update(cx, |shell, cx| shell.take_panel_view(cx));
+            let outgoing = shell.update(cx, |shell, cx| shell.stash_right_session(cx));
+            ws.update(cx, |ws, _| {
+                ws.set_dock_owner(fg.clone());
+                ws.set_right_owner(fg.clone());
                 if let (Some(old_id), Some(view)) = (&old_id, taken) {
-                    dock_stash.insert(old_id.clone(), view);
+                    ws.stash_dock(old_id, view);
                 }
-                if let Some(view) = fg.as_ref().and_then(|id| dock_stash.remove(id)) {
+                if let Some(old_id) = &old_id
+                    && let Some(session) = outgoing
+                {
+                    ws.stash_right(old_id, session);
+                }
+            });
+            let (dock_in, right_in) = ws.update(cx, |ws, _| {
+                (
+                    fg.as_ref().and_then(|id| ws.take_dock(id)),
+                    fg.as_ref().and_then(|id| ws.take_right(id)),
+                )
+            });
+            shell.update(cx, |shell, cx| {
+                // No stashed terminal: the slot stays empty — the next
+                // expand spawns at the NEW container's attrs cwd via the
+                // surface. The right pane rides the same switch.
+                if let Some(view) = dock_in {
                     shell.set_panel_view(view, cx);
                 }
-                // No stashed terminal: the slot stays empty — the next
-                // expand spawns at the NEW thread's cwd via the surface.
-                // Right pane rides the same switch: stash the outgoing
-                // thread's whole tab session, restore the incoming one
-                // (None → the fresh new-tab page).
-                if let Some(old_id) = &old_id
-                    && let Some(session) = shell.stash_right_session(cx)
-                {
-                    right_stash.insert(old_id.clone(), session);
-                }
-                match fg.as_ref().and_then(|id| right_stash.remove(id)) {
+                match right_in {
                     Some(session) => shell.restore_right_session(session, cx),
                     None => {
-                        // No in-session stash: rebuild from the thread's
+                        // No in-session stash: rebuild from the container's
                         // durable snapshot (browser/editor restore; live
                         // session kinds are dropped — a dead process cannot
                         // be resurrected). The window handle comes from the
@@ -475,12 +486,13 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                                 }
                             }
                             None => {
-                                // Fresh thread: drop any lingering pane state
-                                // to the empty page, COLLAPSED — the pane's
-                                // per-thread memory (stash/durable snapshot)
-                                // restores the thread's own visibility when it
-                                // has one; a thread without one starts with the
-                                // transcript full-width.
+                                // Fresh container: drop any lingering pane
+                                // state to the empty page, COLLAPSED — the
+                                // pane's per-container memory (stash/durable
+                                // snapshot) restores the container's own
+                                // visibility when it has one; a container
+                                // without one starts with the transcript
+                                // full-width.
                                 shell.right.update(cx, |pane, cx| {
                                     pane.new_tab_page(cx);
                                     pane.collapse(cx);
@@ -490,7 +502,6 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
                     }
                 }
             });
-            dock_thread = fg;
         }
     })
     .detach();
@@ -581,27 +592,32 @@ fn shell_config(
                     });
                 }
             })),
-            // The menu's archive toggle is protocol state now
-            // (#870's app half): `session/isArchivedChanged` dispatches on
-            // the session channel, the host journals + persists it and
-            // echoes back, and the summary's IsArchived bit flips for every
-            // client. The current state reads the same official bit (the
-            // v2 store's own partitions are no longer touched from here).
+            // The row menu's archive toggle rides the container lifecycle
+            // (plan A6, D7): a live container goes through the
+            // confirm-or-direct teardown entry (the confirmation lists the
+            // live dependents and the archive lands as the ONE teardown
+            // command), an archived one revives whole-tree. The shell-side
+            // row drop is the path's own optimistic half — the menu does not
+            // pre-drop, or a cancelled confirmation would have already
+            // vanished the row.
             on_archive: Some(Box::new({
-                let mux = mux.clone();
-                move |id, _w, cx| {
-                    mux.update(cx, |mux, cx| {
-                        mux.toggle_archived(id, cx);
+                let ws = ws.clone();
+                move |id, w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.toggle_container_archived(id, w, cx);
+                        cx.notify();
                     });
                 }
             })),
-            // The selection bar's commit: one `x-manox/archivedChanged`
-            // write for every checked row.
+            // The selection bar's commit: the whole checked batch goes
+            // through the same confirm-or-direct container teardown — ONE
+            // teardown command carries every captain.
             on_batch_archive: Some(Box::new({
-                let mux = mux.clone();
-                move |ids, _w, cx| {
-                    mux.update(cx, |mux, cx| {
-                        mux.archive_sessions(ids, true, cx);
+                let ws = ws.clone();
+                move |ids, w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.confirm_archive_containers(ids.to_vec(), None, w, cx);
+                        cx.notify();
                     });
                 }
             })),
@@ -610,12 +626,12 @@ fn shell_config(
             on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
                 manox_agent::thread_store_global().with_mut(|st| st.set_thread_tag(id, tag));
             })),
-            // The workspace's own new-thread path (park + fresh landing).
+            // The workspace's own new-container path (park + fresh landing).
             on_new_session: Some(Box::new({
                 let ws = ws.clone();
                 move |w, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.start_new_thread(None, w, cx);
+                        ws.new_container(None, w, cx);
                         cx.notify();
                     });
                 }
@@ -637,7 +653,7 @@ fn shell_config(
                         if is_external {
                             ws.open_external_session(id, w, cx);
                         } else {
-                            ws.open_thread(id.to_string(), w, cx);
+                            ws.open_container(id.to_string(), w, cx);
                         }
                         cx.notify();
                     });
@@ -806,22 +822,11 @@ impl MainSurface for PendingMain {
     }
 }
 
-/// The foreground thread's cwd, refreshed by the assembly's observer on
-/// every thread switch — the dock surface reads it at open time (a static
-/// because the surface must stay entity-free to ride an `Arc`; the same
-/// pattern as the badge pump's LAST_COUNT). Falls back to $HOME: a terminal
-/// has to spawn SOMEWHERE.
-static FOREGROUND_CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 /// The foreground thread's PROJECT path, or `None` when there is no
 /// foreground row / no project — "open in editor" must not silently open
-/// `$HOME`, so it reads this rather than the cwd fallback above.
+/// `$HOME`, so it reads this rather than a cwd fallback.
 static FOREGROUND_PROJECT: std::sync::Mutex<Option<std::path::PathBuf>> =
     std::sync::Mutex::new(None);
-
-/// The dock surface's read face of the foreground cwd.
-pub fn foreground_cwd() -> Option<std::path::PathBuf> {
-    FOREGROUND_CWD.lock().expect("foreground cwd lock").clone()
-}
 
 /// The foreground thread's project path (read face for the project menu's
 /// no-project fallback — a launch without a directory never silently opens
@@ -836,13 +841,15 @@ pub fn foreground_project() -> Option<std::path::PathBuf> {
 /// The right-pane registry: client-owned presentation state (the home for
 /// pane snapshots after the db retired). Session-lifetime — the
 /// pane layout a process remembers is the pane layout it opened with.
+/// Keys are CONTAINER ids (native thread ids verbatim, external row ids for
+/// the external containers' own panes).
 static PANE_REGISTRY: std::sync::Mutex<Option<HashMap<String, String>>> =
     std::sync::Mutex::new(None);
 
-/// Upsert the current foreground thread's right-pane snapshot into
-/// `threads.db` (the pane's own kind/spec encoding, one row per thread).
+/// Upsert the current foreground container's right-pane snapshot into the
+/// registry (the pane's own kind/spec encoding, one row per container).
 fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
-    let Some(thread_id) = ws.read(cx).chat.read(cx).store.clone().map(|(_, sid)| sid) else {
+    let Some(container) = ws.read(cx).foreground_container_id(cx) else {
         return;
     };
     let (visible, active, tabs) = shell.read(cx).right.read(cx).persisted(cx);
@@ -858,28 +865,63 @@ fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get_or_insert_with(HashMap::new)
-        .insert(thread_id, payload.to_string());
+        .insert(container, payload.to_string());
 }
 
-/// Load a thread's persisted right-pane snapshot (the chrome encoding).
-fn load_right_pane(thread_id: &str) -> Option<String> {
+/// Load a container's persisted right-pane snapshot (the chrome encoding).
+fn load_right_pane(container_id: &str) -> Option<String> {
     PANE_REGISTRY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_ref()
-        .and_then(|map| map.get(thread_id))
+        .and_then(|map| map.get(container_id))
         .cloned()
 }
 
-fn refresh_foreground_cwd(
+/// Remove a container's persisted right-pane snapshot (the teardown's
+/// presentation leg): the snapshot is a restore source for a LIVE
+/// container's return, so a dead container's key must not outlive it.
+pub fn remove_right_pane(container_id: &str) {
+    if let Some(map) = PANE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_mut()
+    {
+        map.remove(container_id);
+    }
+}
+
+/// Plant a pane snapshot verbatim (test-support only): the teardown
+/// regression plants under a container key directly — the production write
+/// (`persist_right_pane`) needs a live shell pane.
+#[cfg(feature = "test-support")]
+pub fn diagnostic_persist_right_pane(container_id: &str, payload: String) {
+    PANE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(container_id.to_string(), payload);
+}
+
+/// The test-support read over [`load_right_pane`] — the teardown regression
+/// proves a dead container's snapshot is gone.
+#[cfg(feature = "test-support")]
+pub fn diagnostic_right_pane_snapshot(container_id: &str) -> Option<String> {
+    load_right_pane(container_id)
+}
+
+/// The foreground thread's PROJECT path, refreshed by the assembly's observer
+/// on every projection — "open in editor" and the project menu's no-project
+/// fallback read it rather than silently opening `$HOME`. (The dock/right
+/// spawn cwd no longer rides a static: it reads the foreground container's
+/// attrs through [`crate::Workspace::container_attrs`] at spawn time.)
+fn refresh_foreground_project(
     ws: &Entity<Workspace>,
-    rows: &[crate::sidebar_projection::ThreadRow],
+    rows: &[crate::sidebar_projection::ContainerRow],
     cx: &App,
 ) {
     // The thread's working directory is its PROJECT path — the wire row's
-    // `project` column, the same source the sidebar groups by. The store's
-    // own cwd records the workspace cwd (home for the embedded build), so
-    // it is only the fallback; a missing row/project lands on home.
+    // `project` column, the same source the sidebar groups by.
     let fg = ws
         .read(cx)
         .chat
@@ -892,17 +934,39 @@ fn refresh_foreground_cwd(
         .and_then(|id| rows.iter().find(|r| &r.id == id))
         .and_then(|r| r.project.clone())
         .filter(|p| !p.is_empty());
-    let cwd = project
-        .clone()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| ".".into())
-        });
-    *FOREGROUND_CWD.lock().expect("foreground cwd lock") = Some(cwd);
     *FOREGROUND_PROJECT.lock().expect("foreground project lock") =
         project.map(std::path::PathBuf::from);
+}
+
+/// The container teardown's shell half: reclaim the LIVE dock view and the
+/// LIVE right-pane session when the dead container owns them. Runs on the
+/// bare App — outside any workspace/window lease (closing live tabs
+/// re-enters the shell, which a leased update must not; the teardown defers
+/// here for exactly that). Also sweeps any stash entries a racing switch
+/// re-created under the dead container's key.
+pub fn reclaim_container_panes(container: &str, cx: &mut App) {
+    let Some(ws) = crate::dispatch::workspace_global() else {
+        return;
+    };
+    // Belt and braces: the observer may have re-stashed under the dead key
+    // between the workspace-side reclaim and this deferred half.
+    ws.update(cx, |ws, _| ws.reclaim_stash(container));
+    let dock_mine = ws.read(cx).dock_owner().as_deref() == Some(container);
+    let right_mine = ws.read(cx).right_owner().as_deref() == Some(container);
+    if dock_mine {
+        ws.update(cx, |ws, _| ws.set_dock_owner(None));
+        stop_dock_terminal(cx);
+    }
+    if right_mine {
+        ws.update(cx, |ws, _| ws.set_right_owner(None));
+        // The PTY kinds' close never re-enters the workspace; the browser
+        // kind's does (its workspace half already reclaimed — the close is a
+        // no-op there) — all fine on the bare App.
+        for kind in crate::tool_tabs::PTY_TAB_KINDS {
+            close_tool_tabs_of_kind(kind, cx);
+        }
+        close_tool_tabs_of_kind("browser", cx);
+    }
 }
 
 /// Wrap a chrome Shell into the window's Root view (the bin mounts this).

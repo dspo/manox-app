@@ -22,6 +22,7 @@
 //! project's header).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
 use steer_agent_chrome_ui::shell::{MAX_EXTERNAL_TITLE_CHARS, SessionRow};
@@ -32,8 +33,9 @@ use super::container;
 /// One live external container (the SessionContainer model's external home —
 /// this record IS the container): the identity pair, the sidebar row's
 /// fields, and the terminal entity that occupies the main column while the
-/// session is foreground. The container face (kind, attrs snapshot, alive
-/// bit) lives beside the row fields; native containers are views over
+/// session is foreground. The container face (attrs snapshot, alive bit)
+/// lives beside the row fields; the 0 号's agent namespace names itself in
+/// the id (`external:{agent}:{uuid}`); native containers are views over
 /// threads and have no record here (see `container`).
 pub(crate) struct ExternalSessionRecord {
     /// `external:{agent_id}:{uuid}` — the manox-app-style row id. It is the
@@ -55,27 +57,28 @@ pub(crate) struct ExternalSessionRecord {
     pub svg: &'static str,
     /// The project directory the session was launched in — the sidebar
     /// group it merges into; `None` → the loose Chats bucket. The
-    /// container's project association for this home (app memory; the live
-    /// read rides `Workspace::container_project`).
+    /// container's project association for this home (pure app memory,
+    /// §2.2 — the projection reads the record field directly).
     pub project: Option<PathBuf>,
     pub created_at: i64,
     pub view: gpui::Entity<terminal_ui::TerminalView>,
+    /// The CLI agent's session handle — the owner's independent clone for
+    /// the explicit kill on close (the promise `cx_session` states). `None`
+    /// for plain terminals: their PTY dies with the view drop.
+    pub handle: Option<Arc<steer_ext_agents::SessionHandle>>,
     /// The terminal's `Title` events → [`Self::label`]. Lives (and dies)
     /// with the record: the session's PTY outlives nothing else.
     pub(super) _title_sub: gpui::Subscription,
     // ── the container face (the A1 upgrade) ──
-    /// The kind the 0 号 decides: the launched CLI agent. `None` for a plain
-    /// terminal — its 0 号 is a bare shell, which the kind vocabulary has no
-    /// entry for.
-    pub kind: Option<container::ContainerKind>,
     /// The creation-time attribute snapshot (D10): the spawn cwd + the
     /// environment at the creation call, frozen — resources spawned later
     /// (A2) inherit this copy.
     pub attrs: container::ContainerAttrs,
     /// The death predicate's external half (D8): true until the PTY's
     /// child-exit event lands. Flipping it raises
-    /// `container::ContainerEvent::Died`; the record itself stays until the
-    /// lifecycle PR wires the teardown.
+    /// `container::ContainerEvent::Died`; the workspace's subscription runs
+    /// the teardown on it — the record and its sidebar row drop, and every
+    /// resource under the container's key is reclaimed.
     pub alive: bool,
 }
 
@@ -89,6 +92,9 @@ pub struct ExternalSessionLaunch<'a> {
     pub label: String,
     pub svg: &'static str,
     pub project: Option<PathBuf>,
+    /// The CLI agent's session handle (the owner's kill clone); `None` for
+    /// plain terminals.
+    pub handle: Option<Arc<steer_ext_agents::SessionHandle>>,
 }
 
 impl Workspace {
@@ -112,6 +118,7 @@ impl Workspace {
                 svg: launch.svg,
                 project: launch.project,
                 view: view.clone(),
+                handle: launch.handle,
             }),
             cx,
         );
@@ -155,17 +162,14 @@ impl Workspace {
         self.externals.iter().any(|s| s.id == id)
     }
 
-    /// Close a session (the sidebar row's 关闭会话): drop the record — the
-    /// dropped `TerminalView` tears the process tree down — and fall back
-    /// to the conversation when it was the one on screen.
+    /// Close a session (the sidebar row's 关闭会话): the ONE container
+    /// teardown — kill the process explicitly (the record's handle clone;
+    /// D8: closing a container kills it, nothing is left to the view-drop's
+    /// timing), drop the record (the row goes with it) and reclaim every
+    /// resource under the container's key. Falls back to the conversation
+    /// when the closed session owned the main column.
     pub fn close_external_session(&mut self, id: &str, cx: &mut gpui::Context<Self>) {
-        let was_active = self.active_external.as_deref() == Some(id);
-        self.externals.retain(|s| s.id != id);
-        if was_active {
-            self.active_external = None;
-            self.view_mode = super::ViewMode::Workspace;
-        }
-        cx.notify();
+        self.teardown_container(id, cx);
     }
 
     /// The external row menu's 重命名 write-back (the shell's host hook):
@@ -238,10 +242,14 @@ impl Workspace {
 
     /// The sidebar rows: one per live session, stamped with the external
     /// kind (brand-mark leading slot, close-session menu on the chrome
-    /// side) and the project grouping key.
+    /// side) and the project grouping key. The `alive` belt (A8): a record
+    /// whose death bit flipped but whose teardown (the event subscription
+    /// → the ONE teardown) has not landed yet projects no row — the
+    /// Died→teardown window stays invisible in the sidebar.
     pub(crate) fn external_session_rows(&self) -> Vec<SessionRow> {
         self.externals
             .iter()
+            .filter(|s| s.alive)
             .map(|s| {
                 let project = s.project.as_ref().map(|p| p.to_string_lossy().to_string());
                 let workspace =

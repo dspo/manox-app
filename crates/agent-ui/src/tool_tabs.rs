@@ -14,9 +14,9 @@
 //! (`WorkspaceBrowserHost::install` binds to a `Workspace`), tracked as the
 //! remaining tranche-4 item.
 //!
-//! All tabs inherit per-thread session state for free: the chrome
-//! `RightPaneSession` stash/restore carries the whole tab set across thread
-//! switches.
+//! All tabs inherit per-container session state for free: the chrome
+//! `RightPaneSession` stash/restore carries the whole tab set across
+//! container switches (keyed by container id in the resource registry).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,15 +37,59 @@ fn next_instance_id(kind: &str) -> String {
     format!("{kind}-{}", INSTANCE.fetch_add(1, Ordering::Relaxed))
 }
 
-/// The foreground thread's working directory (its project path — the wire
-/// row's `project` column, the same source the sidebar groups by), falling
-/// back to the store's cwd, then home.
-pub(crate) fn thread_cwd_or_home() -> std::path::PathBuf {
-    crate::chrome_assembly::foreground_cwd().unwrap_or_else(|| {
-        std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| ".".into())
-    })
+/// The pane tab kinds whose content owns a PTY: the integrated terminal and
+/// the three CLI-agent TUI tabs (claude / codex / copilot). Closing the tab
+/// drops the view (the view drop tears the process tree down); the CLI tabs'
+/// children die by their registered kill handle first.
+pub const PTY_TAB_KINDS: [&str; 4] = ["terminal", "claude", "codex", "copilot"];
+
+/// The FOREGROUND CONTAINER's working directory (D10/D6: resources root at
+/// their owning container's attrs cwd — a native container's session-channel
+/// grant, an external container's spawn snapshot), falling back to home: a
+/// terminal has to spawn SOMEWHERE.
+pub(crate) fn thread_cwd_or_home(cx: &App) -> std::path::PathBuf {
+    thread_attrs_for_spawn(cx).cwd
+}
+
+/// The FOREGROUND CONTAINER's attrs snapshot for a standalone terminal spawn
+/// (D10/D6): the cwd the terminal roots at, and the attrs whose env it
+/// inherits (D11's approved capability — an external container's
+/// creation-time copy; a native container's view re-captures the world at
+/// this read, which is the honest capture the runtime's lack of environment
+/// history leaves). Falls back to home + no overrides: a terminal has to
+/// spawn somewhere.
+pub(crate) fn thread_attrs_for_spawn(cx: &App) -> crate::workspace::container::ContainerAttrs {
+    crate::dispatch::workspace_global()
+        .and_then(|ws| {
+            let fg = ws.read(cx).foreground_container_id(cx)?;
+            Some(ws.read(cx).container_attrs(&fg, cx))
+        })
+        .unwrap_or_else(|| crate::workspace::container::ContainerAttrs {
+            cwd: std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| ".".into()),
+            env: Default::default(),
+        })
+}
+
+/// The standalone PTY spawn's environment layering, as a pure function (the
+/// A7-approved capability's testable core): the container's creation-time
+/// snapshot rides BETWEEN the process-inherited base and the user's
+/// `[terminal].env`. `pty::open` applies the returned slice over the
+/// inherited world with last-entry-wins, so a container value beats the
+/// process base's same-named variable and a settings value beats the
+/// container's — the ORDER of the returned pairs is the authority chain.
+pub(crate) fn layered_env(
+    container: &crate::workspace::container::ContainerAttrs,
+    settings: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = container
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    env.extend(settings.iter().cloned());
+    env
 }
 
 // ── integrated terminal ────────────────────────────────────────────────────
@@ -101,7 +145,8 @@ impl ToolTab for TerminalTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
-        match spawn_standalone_terminal(&thread_cwd_or_home(), cx) {
+        let attrs = thread_attrs_for_spawn(cx);
+        match spawn_standalone_terminal(&attrs.cwd, &attrs, cx) {
             Ok(view) => store.put(&self.id, view),
             Err(e) => store.set_error(
                 &self.id,
@@ -190,7 +235,7 @@ impl ToolTab for GhosttyTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
-        match steer_ghostty::spawn_ghostty_view(&thread_cwd_or_home(), ghostty_theme(), cx) {
+        match steer_ghostty::spawn_ghostty_view(&thread_cwd_or_home(cx), ghostty_theme(), cx) {
             Ok(view) => {
                 *self.view.lock().unwrap() = Some(view.clone());
                 store.put(&self.id, view);
@@ -694,6 +739,18 @@ impl ToolTab for AgentTab {
         brand_icon(self.svg)
     }
 
+    fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
+        // Explicit kill on close (plan A2 — the orphaned-cx-child fix): the
+        // picker registered the child's handle under this tab at spawn; kill
+        // it through the registry rather than leaning on the view drop.
+        if let Some(ws) = crate::dispatch::workspace_global() {
+            ws.update(cx, |ws, _| {
+                ws.kill_handle_for_tab(&self.id);
+            });
+        }
+        store.reset(&self.id);
+    }
+
     fn open(
         &self,
         _window: &mut Window,
@@ -706,6 +763,7 @@ impl ToolTab for AgentTab {
         // picker renders the TUI from then on — one entity for the tab's
         // whole lifetime, so close-tab teardown stays a single drop.
         let picker = cx.new(|_| AgentPicker {
+            tab_id: self.id.clone(),
             agent_id: self.agent_id,
             display: self.display,
             mux: self.mux.clone(),
@@ -730,7 +788,19 @@ fn div_missing() -> gpui::Div {
 
 /// The full cx launch path: registry-pinned agent + the picked endpoint →
 /// `AgentBuilder` (PTY relay) → `Terminal` → `TerminalView`. Dropping the
-/// view tears the child tree down.
+/// view tears the child tree down; the handle is threaded OUT (the right-pane
+/// CLI tab record and the external record keep an independent clone) so a
+/// close can kill explicitly instead of leaning on drop timing — the
+/// contract `steer_ext_agents::cx_session` states.
+pub(crate) struct SpawnedAgentTerminal {
+    pub view: Entity<terminal_ui::TerminalView>,
+    /// The child's session handle — the owner's kill clone.
+    pub handle: Arc<steer_ext_agents::SessionHandle>,
+    /// The REAL external session id (the cx session socket's `<id>.sock`
+    /// filename).
+    pub cx_session_id: String,
+}
+
 pub(crate) fn spawn_agent_terminal(
     agent_id: &str,
     cwd: &std::path::Path,
@@ -738,7 +808,7 @@ pub(crate) fn spawn_agent_terminal(
     model: &str,
     wire: Option<String>,
     cx: &mut App,
-) -> Result<(Entity<terminal_ui::TerminalView>, String), String> {
+) -> Result<SpawnedAgentTerminal, String> {
     let agent = match agent_id {
         "claude" => steer_ext_agents::Agent::Claude,
         "codex" => steer_ext_agents::Agent::Codex,
@@ -766,7 +836,11 @@ pub(crate) fn spawn_agent_terminal(
     let terminal = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, Box::new(source))
         .map_err(|e| e.to_string())?;
     let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-    Ok((terminal_ui::TerminalView::new(proxy, cx), cx_session_id))
+    Ok(SpawnedAgentTerminal {
+        view: terminal_ui::TerminalView::new(proxy, cx),
+        handle,
+        cx_session_id,
+    })
 }
 
 // ── the agent model picker ────────────────────────────────────────────────
@@ -798,12 +872,16 @@ impl From<(String, CascadeEntry)> for PickRow {
 /// cascade's rule — a missing `agents` column means non-cx registration and
 /// stays visible). Picking one spawns the agent under that endpoint and
 /// this entity renders the terminal from then on; a spawn failure stays on
-/// the picker with the error surfaced.
+/// the picker with the error surfaced. The picker holds the spawn's payload
+/// (view + kill handle) — it IS the CLI tab's record.
 struct AgentPicker {
+    /// The tab instance this picker rides — the kill handle's registry key
+    /// (the tab's close kills through it).
+    tab_id: String,
     agent_id: &'static str,
     display: &'static str,
     mux: Entity<crate::multiplexer::SessionMultiplexer>,
-    launched: Option<Entity<terminal_ui::TerminalView>>,
+    launched: Option<SpawnedAgentTerminal>,
     error: Option<String>,
 }
 
@@ -832,11 +910,11 @@ impl gpui::Render for AgentPicker {
         let theme = cx.theme().clone();
 
         // Launched: the terminal IS the tab body from here on.
-        if let Some(view) = self.launched.clone() {
+        if let Some(spawned) = &self.launched {
             return v_flex()
                 .size_full()
                 .p(px(4.))
-                .child(view)
+                .child(spawned.view.clone())
                 .into_any_element();
         }
 
@@ -882,7 +960,7 @@ impl gpui::Render for AgentPicker {
                           _: &gpui::ClickEvent,
                           _w: &mut Window,
                           cx: &mut Context<AgentPicker>| {
-                        let cwd = thread_cwd_or_home();
+                        let cwd = thread_cwd_or_home(cx);
                         match spawn_agent_terminal(
                             agent_id,
                             &cwd,
@@ -891,7 +969,22 @@ impl gpui::Render for AgentPicker {
                             wire.clone(),
                             cx,
                         ) {
-                            Ok((view, _cx_session_id)) => this.launched = Some(view),
+                            Ok(spawned) => {
+                                // The kill handle rides the registry under
+                                // (foreground container, this tab): the
+                                // tab's close and the container teardown
+                                // both kill through it.
+                                if let Some(ws) = crate::dispatch::workspace_global() {
+                                    let container =
+                                        ws.read(cx).foreground_container_id(cx).unwrap_or_default();
+                                    let tab_id = this.tab_id.clone();
+                                    let handle = spawned.handle.clone();
+                                    ws.update(cx, |ws, _| {
+                                        ws.register_kill_handle(&container, &tab_id, handle);
+                                    });
+                                }
+                                this.launched = Some(spawned);
+                            }
                             Err(e) => this.error = Some(e),
                         }
                         let _ = display_name;
@@ -1136,17 +1229,29 @@ impl ToolTab for DiffTab {
 
 /// A standalone PTY spawn (the chrome-example path): the tab owns its
 /// terminal fully; closing the tab drops the view and tears the process
-/// tree down with it.
+/// tree down with it. The PTY inherits the owning container's env snapshot
+/// (D11) layered over the process environment, with the user's
+/// `[terminal].env` (settings) applying last and winning — the same
+/// authority `default_source` gives it, now over a container-inherited base.
 pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
+    attrs: &crate::workspace::container::ContainerAttrs,
     cx: &mut App,
 ) -> Result<Entity<terminal_ui::TerminalView>, String> {
     // An app-owned PTY rooted at `cwd`: the integrated terminal is an
     // app-side surface no agent turn touches, and the shell must land where
     // the caller picked — the foreground thread's project for the dock and
     // right-pane spawns, the cascade's folder for the project menu.
-    let source: Box<dyn manox_terminal::pty_source::PtySource> =
-        manox_terminal::pty::default_source(cwd, 80, 24).map_err(|e| e.to_string())?;
+    // `default_source` reads shell + env from settings alone; this spawn
+    // needs the container's env slice between the process world and the
+    // user's settings, so the source is built directly (`pty::open` is the
+    // public constructor `default_source` wraps).
+    let settings = manox_terminal::settings::load();
+    let env_layer = layered_env(attrs, &settings.env);
+    let source: Box<dyn manox_terminal::pty_source::PtySource> = Box::new(
+        manox_terminal::pty::open(cwd, 80, 24, settings.shell.as_deref(), &env_layer)
+            .map_err(|e| e.to_string())?,
+    );
     let id = format!("chrome-assembly:$SHELL:{}", next_instance_id("pty"));
     let handle = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, source)
         .map_err(|e| e.to_string())?;
@@ -1166,8 +1271,9 @@ fn brand_icon(svg_path: &'static str) -> AnyElement {
 }
 
 /// The bottom dock's terminal surface for the chrome assembly: each spawn
-/// roots at the FOREGROUND thread's cwd (the store's working directory),
-/// so the dock follows the conversation.
+/// roots at the FOREGROUND CONTAINER's attrs cwd (D6 inheritance), so the
+/// dock follows the conversation — or the external session holding the main
+/// column.
 pub struct ThreadTerminalPanelSurface;
 
 impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
@@ -1180,7 +1286,8 @@ impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
     }
 
     fn open(&self, _window: &mut Window, cx: &mut App) -> Result<gpui::AnyView, String> {
-        let view = spawn_standalone_terminal(&thread_cwd_or_home(), cx)?;
+        let attrs = thread_attrs_for_spawn(cx);
+        let view = spawn_standalone_terminal(&attrs.cwd, &attrs, cx)?;
         Ok(gpui::AnyView::from(view))
     }
 }
@@ -1220,4 +1327,65 @@ pub fn registry(
         Arc::new(EditorTool),
         Arc::new(DiffTool::new(ws.clone())),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::container::ContainerAttrs;
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    /// The spawn env's authority chain (A7): `pty::open` applies the returned
+    /// slice over the process-inherited base with last-entry-wins, so the
+    /// ORDER `layered_env` emits is the layering — container snapshot first
+    /// (beats the process base), user settings last (beat the container).
+    #[test]
+    fn layered_env_orders_container_over_process_and_settings_over_container() {
+        let env_of = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<BTreeMap<String, String>>()
+        };
+        let container = ContainerAttrs {
+            cwd: PathBuf::from("/tmp/proj"),
+            env: Arc::new(env_of(&[
+                ("AGENT_HOME", "/container/state"),
+                ("SHARED", "from-container"),
+            ])),
+        };
+        let settings = vec![
+            ("SHARED".to_string(), "from-settings".to_string()),
+            ("EXTRA".to_string(), "settings-only".to_string()),
+        ];
+        let layered = layered_env(&container, &settings);
+        // The container's entries come first — over the process base the
+        // spawner inherits — and the settings' entries after them, so a
+        // same-named key resolves to the settings value.
+        assert_eq!(
+            layered,
+            vec![
+                ("AGENT_HOME".to_string(), "/container/state".to_string()),
+                ("SHARED".to_string(), "from-container".to_string()),
+                ("SHARED".to_string(), "from-settings".to_string()),
+                ("EXTRA".to_string(), "settings-only".to_string()),
+            ],
+            "container snapshot between process base and settings; settings last-wins"
+        );
+    }
+
+    /// An empty container snapshot (a native container before its view ever
+    /// saw an env, or a fallback spawn): the settings ride over the bare
+    /// process base, nothing else is injected.
+    #[test]
+    fn layered_env_with_empty_snapshot_yields_settings_only() {
+        let container = ContainerAttrs {
+            cwd: PathBuf::from("/tmp"),
+            env: Default::default(),
+        };
+        let settings = vec![("MY_FLAG".to_string(), "1".to_string())];
+        assert_eq!(layered_env(&container, &settings), settings);
+        // No settings either: an empty slice — the process base alone.
+        assert!(layered_env(&container, &[]).is_empty());
+    }
 }

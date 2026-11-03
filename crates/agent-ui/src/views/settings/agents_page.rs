@@ -620,8 +620,9 @@ fn prompt_toggle(view: &SettingsView, theme: &Theme, cx: &mut Context<SettingsVi
 /// delegation tools (those are agents, not tools).
 fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
     use manox_agent::tools::{
-        ASK_USER_QUESTION, BASH, BASH_OUTPUT, CREATE_GOAL, EDIT, GET_GOAL, GLOB, GREP, PY, READ,
-        TASK_STOP, UPDATE_GOAL, UPDATE_PLAN, WEB_FETCH, WRITE,
+        ASK_USER_QUESTION, BASH, BASH_OUTPUT, CLIPBOARD_READ, CREATE_GOAL, EDIT, GET_GOAL, GLOB,
+        GREP, OPEN, PY, READ, STEER, TASK_LIST, TASK_STOP, UPDATE_GOAL, UPDATE_PLAN, WEB_FETCH,
+        WRITE,
     };
 
     let mut web = vec![WEB_FETCH];
@@ -639,17 +640,16 @@ fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
         ),
         (
             "agents-tools-group-tasks",
-            // The names without upstream constants stay as literals: exported
-            // from `manox_agent::tools` in dspo/manox#984 (the module's own
-            // single-source rule) and this list follows the next tag.
-            vec!["TaskList", TASK_STOP, GET_GOAL, CREATE_GOAL, UPDATE_GOAL],
+            vec![TASK_LIST, TASK_STOP, GET_GOAL, CREATE_GOAL, UPDATE_GOAL],
         ),
         (
             "agents-tools-group-host",
+            // InterruptAgent is retired (upstream #988): Steer's Abort verb
+            // covers stopping a run, so the host group carries Steer itself.
             vec![
-                "ClipboardRead",
-                "Open",
-                "Steer",
+                CLIPBOARD_READ,
+                OPEN,
+                STEER,
                 manox_agent::subagent::ListAgentsTool::NAME,
             ],
         ),
