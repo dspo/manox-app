@@ -1467,12 +1467,31 @@ impl AhpStore {
             });
             // The events receiver must exist before any subscribe: the
             // extension baselines are pushed while the subscribe is answered.
+            // The drain runs OFF the main thread. On the main thread this loop
+            // competes with the rendering every folded event triggers, and
+            // under a delta flood it falls behind the producer: the client's
+            // bounded subscription buffer overflows and the SDK skips the
+            // overflow silently (`Lagged` => continue) — a state-bearing
+            // action lost there (the elicitation that arms the ask card, a
+            // tool confirmation) is never re-delivered, and the park that
+            // follows the flood silences the channel before anything could
+            // heal it. The unbounded queue below absorbs any burst; the
+            // main-thread pump consumes it at its own pace, losing nothing.
             let mut events = client.events();
-            while let Some(event) = events.recv().await {
-                if event_tx.send(event).await.is_err() {
-                    break;
+            let (closed_tx, closed_rx) = async_channel::bounded::<()>(1);
+            let drain = cx.background_executor().spawn(async move {
+                while let Some(event) = events.recv().await {
+                    if event_tx.send(event).await.is_err() {
+                        break;
+                    }
                 }
-            }
+                let _ = closed_tx.try_send(());
+            });
+            // Holding the drain's handle ties its lifetime to this task: a
+            // store teardown cancels this task, and the dropped handle stops
+            // the drain with it.
+            let _ = closed_rx.recv().await;
+            drop(drain);
             tracing::error!("ahp pump exited (transport closed)");
             let _ = this.update(cx, |store, cx| {
                 store.client = None;
@@ -1482,15 +1501,31 @@ impl AhpStore {
         self._tasks.push(take);
     }
 
-    /// Fold every inbound event; notify once per batch of visible changes.
+    /// Fold every inbound event, one batch per entity pass. A delta flood
+    /// queues thousands of events behind the main thread; a per-event
+    /// `update` paid the re-entry cost for every one of them and starved
+    /// everything else on the thread. Route's per-event notifies coalesce
+    /// into the single effects flush each pass ends with, so batching also
+    /// collapses the observer storm the flood used to schedule.
     fn spawn_pump(
         &mut self,
         event_rx: async_channel::Receiver<ahp::ClientEvent>,
         cx: &mut gpui::Context<Self>,
     ) {
+        const PUMP_BATCH: usize = 256;
         let pump = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             while let Ok(event) = event_rx.recv().await {
-                let outcome = this.update(cx, |store, cx| store.route(event, cx));
+                let mut batch = vec![event];
+                while batch.len() < PUMP_BATCH
+                    && let Ok(next) = event_rx.try_recv()
+                {
+                    batch.push(next);
+                }
+                let outcome = this.update(cx, |store, cx| {
+                    for event in batch {
+                        store.route(event, cx);
+                    }
+                });
                 if outcome.is_err() {
                     break;
                 }
