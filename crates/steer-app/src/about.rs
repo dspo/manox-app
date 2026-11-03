@@ -1,24 +1,21 @@
 //! About window: centered floating dialog with the app icon, the headline
-//! `Steer.app v<version>+<short commit>`, and the provenance block — every
-//! row is a label/value pair laid out on one continuous vertical axis (the
-//! labels right-align onto it, the values left-align off it): the OS (with
-//! the chip's marketing name where the platform reports one), the rustc the
-//! binary was compiled by, and the pinned stacks (manox runtime,
-//! gpui-component, gpui-pre). The OK / Copy action row sits at the bottom;
-//! Copy writes the structured info block (`version::structured_about`), the
-//! full app commit, and one `label: value` line per row to the clipboard and
-//! closes the window; Escape closes as well. Duplicate window detection
-//! keeps a single instance.
+//! `Steer.app v<version>+<short commit>` with the standard copy control riding
+//! beside it, and the provenance block — every row is a label/value pair laid
+//! out on one continuous vertical axis (the labels right-align onto it, the
+//! values left-align off it): the OS (with the chip's marketing name where the
+//! platform reports one), the rustc the binary was compiled by, and the
+//! pinned stacks (manox runtime, gpui-component, gpui-pre). The copy control
+//! writes the structured info block (`version::structured_about`), the full
+//! app commit, and one `label: value` line per row to the clipboard, flashing
+//! its copied state only — the window closes through Escape or the native
+//! title bar. Duplicate window detection keeps a single instance.
 
 use std::sync::Arc;
 
 use gpui::{prelude::*, *};
-use gpui_component::{
-    StyledExt as _, Theme,
-    button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
-};
+use gpui_component::{StyledExt as _, Theme, h_flex, v_flex};
 use manox_agent::version;
+use steer_components::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_button};
 use steer_i18n as i18n;
 
 use crate::pins;
@@ -40,6 +37,9 @@ struct AboutWindow {
     app_icon: Arc<Image>,
     headline: SharedString,
     rows: Vec<InfoRow>,
+    /// Copy controls' copied-feedback state, keyed by each control's
+    /// `ElementId` (see `copy_feedback`).
+    copied: CopiedRegistry,
 }
 
 /// `Steer.app v<version>+<short commit>` — the app's own identity line; the
@@ -57,6 +57,12 @@ fn headline() -> SharedString {
     }
 }
 
+impl CopyFeedbackHost for AboutWindow {
+    fn copied(&mut self) -> &mut CopiedRegistry {
+        &mut self.copied
+    }
+}
+
 impl AboutWindow {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
@@ -67,12 +73,8 @@ impl AboutWindow {
             )),
             headline: headline(),
             rows: provenance_rows(),
+            copied: CopiedRegistry::default(),
         }
-    }
-
-    fn copy_details(&self, window: &mut Window, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(details_block(&self.rows)));
-        window.remove_window();
     }
 }
 
@@ -164,8 +166,21 @@ impl Render for AboutWindow {
         // vertical rule, values left-align off it — every row sits on the
         // same axis, so a scan down either column stays straight. Both
         // columns re-pin their text alignment: the dialog root centers text
-        // (headline, buttons), and the inheritance would otherwise center
-        // every cell inside its column and float it off the axis.
+        // (the headline and its copy control), and the inheritance would
+        // otherwise center every cell inside its column and float it off the
+        // axis.
+
+        // The copy control rides beside the headline: it writes the same
+        // block the retired action-row button did and only flashes its
+        // copied state — closing is Escape / the native title bar's job.
+        let copy_id: ElementId = "about-copy".into();
+        let copy_active = self.copied.is_active(&copy_id);
+        let copy_control = copy_button(
+            copy_id,
+            details_block(&self.rows),
+            copy_active,
+            cx.entity().downgrade(),
+        );
         let keys = v_flex()
             .gap_1p5()
             .items_end()
@@ -201,10 +216,16 @@ impl Render for AboutWindow {
             .items_center()
             .child(gpui::img(self.app_icon.clone()).size_16().flex_none())
             .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.headline.clone()),
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.headline.clone()),
+                    )
+                    .child(copy_control),
             )
             .child(axis);
 
@@ -224,34 +245,8 @@ impl Render for AboutWindow {
             .pt_10()
             .gap_4()
             .text_center()
-            .justify_between()
+            .justify_center()
             .child(details)
-            .child(
-                div()
-                    .id("about-buttons")
-                    .debug_selector(|| "about-buttons".into())
-                    .h_flex()
-                    .w_full()
-                    .gap_1()
-                    .child(
-                        Button::new("about-ok")
-                            .label(i18n::t("about-ok"))
-                            .ghost()
-                            .flex_1()
-                            .on_click(|_ev, window, _cx| {
-                                window.remove_window();
-                            }),
-                    )
-                    .child(
-                        Button::new("about-copy")
-                            .label(i18n::t("about-copy"))
-                            .primary()
-                            .flex_1()
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.copy_details(window, cx);
-                            })),
-                    ),
-            )
     }
 }
 
@@ -386,10 +381,10 @@ mod tests {
     }
 
     /// The dialog is sized once and never resizable, so one more row or a taller
-    /// text style would push the action row off the bottom edge. Measure the
-    /// rendered frame instead of trusting the pixel arithmetic; a provenance
-    /// value too wide for the row shows up here as well, since it wraps and
-    /// makes the block taller.
+    /// text style would clip the centered block against the root's padding.
+    /// Measure the rendered frame instead of trusting the pixel arithmetic; a
+    /// provenance value too wide for the row shows up here as well, since it
+    /// wraps and makes the block taller.
     #[gpui::test]
     fn rows_fit_in_window(cx: &mut TestAppContext) {
         let window_size = size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT));
@@ -403,9 +398,6 @@ mod tests {
         let details = cx
             .debug_bounds("about-details")
             .expect("the provenance block must be laid out");
-        let buttons = cx
-            .debug_bounds("about-buttons")
-            .expect("the action row must be laid out");
         let dialog = cx
             .debug_bounds("about-window")
             .expect("the dialog must be laid out");
@@ -413,9 +405,15 @@ mod tests {
             .debug_bounds("about-axis")
             .expect("the provenance axis must be laid out");
 
+        // The whole centered block (icon, headline + copy control, axis) must
+        // stay inside the root's `p_4` content box on both edges.
         assert!(
-            details.bottom() <= buttons.top(),
-            "provenance rows overlap the actions: {details:?} vs {buttons:?}"
+            details.bottom() <= dialog.bottom() - px(16.),
+            "the provenance block is pushed through the bottom padding: {details:?} vs {dialog:?}"
+        );
+        assert!(
+            details.top() >= dialog.top() + px(16.),
+            "the provenance block is pushed through the top padding: {details:?} vs {dialog:?}"
         );
         // The axis is the dialog's spine: every row hangs on one continuous
         // rule, so it renders taller than one row and narrower than the
@@ -423,12 +421,6 @@ mod tests {
         assert!(
             axis.size.height > px(40.),
             "the axis spans the provenance rows: {axis:?}"
-        );
-        // The action row is pinned to the content box's bottom edge, so this
-        // only fails once the rows above have pushed it through the padding.
-        assert!(
-            buttons.bottom() <= dialog.bottom() - px(16.),
-            "the action row is pushed out of the padded content box: {buttons:?} vs {dialog:?}"
         );
     }
 }

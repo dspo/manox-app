@@ -749,10 +749,6 @@ agent-task-follow-up = 续跑
 
 about-title = 关于 Steer
 
-about-ok = 确定
-
-about-copy = 复制
-
 # Background task status card
 
 

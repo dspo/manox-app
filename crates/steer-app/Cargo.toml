@@ -21,6 +21,9 @@ steer-ext-agents.workspace = true
 supervisor.workspace = true
 
 anyhow.workspace = true
+# The About window mounts the standard copy control (copy_feedback::copy_button)
+# next to its headline.
+steer-components.workspace = true
 steer-i18n.workspace = true
 
 tracing.workspace = true
