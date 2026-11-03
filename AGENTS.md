@@ -19,6 +19,8 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
   steer-agent-chat-ui/     # 会话列的状态机与消息管线（chat crate 依赖面见
                            #   script/check-chat-crate-deps.sh）
   terminal-ui/             # 终端渲染层（TerminalElement/TerminalView；仿真核心在 dspo/manox 的 manox-terminal）
+  steer-ghostty/           # Ghostty 终端面（libghostty-vt 仿真核静态链接在 GPUI element 后；
+                           #   与 terminal-ui 并行的第二步替换目标，见「Ghostty 终端」一节）
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   steer-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
   steer-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
@@ -83,6 +85,13 @@ cargo fmt --all
 ```
 
 Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 系统依赖的**唯一清单**是 `.github/actions/linux-deps/action.yml`（Fedora 侧对应 `.github/actions/linux-deps-fedora/action.yml`，两份声明同一包集合；集成浏览器在 Linux 编译排除，故两份都不含 GTK/WebKitGTK；改一处必须同步另一处）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
+
+**libghostty-vt 的编译期前置（`crates/steer-ghostty`）**：该 crate 的 build script 静态链接 libghostty-vt，源码与工具链不在 Cargo 依赖图里，由三种输入之一提供——
+- **Ghostty 源**：`GHOSTTY_SRC=<本地 checkout>`（开发环，zig 自身 cache 使其增量；每次 build script 都重跑 zig），否则下载 `build.rs` 里 pin 的 rev tarball（sha256 校验）。
+- **zig**：`GHOSTTY_ZIG` → PATH 上 ≥ 0.17 的 `zig` → 下载 pin 的 zig 工具链（sha256 校验）。
+- **产物缓存**：默认落在 `OUT_DIR`，`STEER_GHOSTTY_CACHE` 可改址（CI 经 `.github/actions/ghostty-vt` 恢复 `~/.cache/steer-ghostty`，**key 里的 rev/zig 版本必须与 `build.rs` 同步**）。缓存靠 stamp 判定命中：rev 或 zig 身份变化即重建，不会链到旧静态库。
+
+因此**离线构建**必须预置缓存（或同时给出 `GHOSTTY_SRC` + `GHOSTTY_ZIG`），且解压用到 `curl`/`tar`/`xz`/`sha256sum`（`xz` 已进两份 linux-deps 清单）。换 Ghostty rev 的姿势是改 `build.rs` 的 `GHOSTTY_REV` + 对照 `include/ghostty/vt/*.h` 更新 `src/sys.rs` 的转写。
 
 **Linux 无集成浏览器（编译期排除）**：wry 的 Linux 子 webview 只能经 Xlib 句柄挂载，Wayland 窗口无法承载嵌入式浏览器 —— 集成浏览器在 Linux/FreeBSD 上整体不编译（`#[cfg(not(any(linux, freebsd)))]` 盖住 `browser_host` / `browser_view` / `BrowserTool` / steer-webview 整个 crate，依赖面随 target gate 收紧，wry/WebKitGTK/GTK 不进 Linux 构建），UI 无入口，agent 的 `web_explore_*` 工具经 capability provider 得到干净的「not available」拒绝（剪贴板能力保留在 `capability_host`，全平台）。窗口后端回归 gpui 默认（Wayland 会话原生 Wayland）。已知系统雷区：部分栈（Fedora 44 mutter 50.4 + XWayland 24.1 + ANV 实测）在 Vulkan X11 WSI 的 `AcquireNextImageKHR` 里死锁，活跃重绘的 XWayland/X11 窗口数十秒内冻结 —— 原生 Wayland 路径不受影响；若需在 X11 会话跑，`VK_LOADER_DRIVERS_DISABLE=*`（wgpu 落 Mesa GL）可绕开。托盘受宿主限制：无 StatusNotifierWatcher 的桌面（原生 GNOME）上 `tray::install` 刻意失败，应用保持「关窗即退出」而非隐形驻留。
 

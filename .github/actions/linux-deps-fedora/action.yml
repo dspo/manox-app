@@ -25,3 +25,4 @@ runs:
         libXrandr-devel libxkbcommon-devel libxkbcommon-x11-devel
         libXi-devel libXcursor-devel libXinerama-devel
         wayland-devel
+        xz

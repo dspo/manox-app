@@ -24,7 +24,7 @@ runs:
       with:
         path: /var/cache/apt/archives
         # Bump the version when the package list below changes.
-        key: apt-debs-${{ runner.os }}-v3
+        key: apt-debs-${{ runner.os }}-v4
         restore-keys: apt-debs-${{ runner.os }}-
 
     - name: Install system dependencies
@@ -45,6 +45,9 @@ runs:
           libxcursor-dev
           libxinerama-dev
           libwayland-dev
+          # `tar -xJf` for the pinned zig toolchain that crates/steer-ghostty's
+          # build script extracts (the Fedora twin lists the same tool).
+          xz-utils
         )
 
         # Every install keeps the .debs: they are the next run's cache.

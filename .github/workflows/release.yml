@@ -112,6 +112,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # The libghostty-vt static library + its stamp: a release build needs the
+      # same zig build the ci legs restore, and a release starts on a cold runner.
+      - name: Cache ghostty-vt
+        uses: ./.github/actions/ghostty-vt
+
       # The script builds both binaries itself (--release, explicit --target)
       # and assembles/signs Steer.app from [package.metadata.bundle].
       - name: Bundle Steer.app
@@ -181,6 +186,14 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # The libghostty-vt static library + its stamp: a release build needs the
+      # same zig build the ci legs restore, and a release starts on a cold runner.
+      - name: Cache ghostty-vt
+        uses: ./.github/actions/ghostty-vt
+
+      # --release inside the script; it also derives Depends from the linked
+      # binaries (ldd + dpkg -S), so the package metadata follows the real link
+      # set instead of a hand-kept list.
       - name: Bundle .deb
         run: ./script/bundle-deb
 
