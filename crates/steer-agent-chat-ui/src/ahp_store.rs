@@ -799,6 +799,17 @@ enum DeliverySignal {
     DispatchRecovered,
 }
 
+/// The handshake's retained dial parameters: a re-dial reuses the same
+/// channels, and the fold gate rides along so the retry can open it again (a
+/// gate the pump is already past only fills its one slot, harmlessly).
+#[derive(Clone)]
+struct HandshakeParams {
+    cwd: PathBuf,
+    event_tx: async_channel::Sender<ahp::ClientEvent>,
+    req_tx: async_channel::Sender<CapabilityRequest>,
+    fold_tx: async_channel::Sender<()>,
+}
+
 /// The GPUI-facing store. One per process: the host is a singleton (L11) and
 /// this is its only desktop client.
 pub struct AhpStore {
@@ -873,11 +884,7 @@ pub struct AhpStore {
     queue_head_at: Option<std::time::Instant>,
     /// The handshake's dial parameters, retained so [`Self::retry_handshake`]
     /// can re-run the same spawn after a failure.
-    handshake_params: Option<(
-        PathBuf,
-        async_channel::Sender<ahp::ClientEvent>,
-        async_channel::Sender<CapabilityRequest>,
-    )>,
+    handshake_params: Option<HandshakeParams>,
     /// A handshake (initial or retried) is currently dialing: `retry` must
     /// not stack a second dial on top of a slow one.
     handshaking: bool,
@@ -901,6 +908,10 @@ impl AhpStore {
         let (event_tx, event_rx) = async_channel::unbounded::<ahp::ClientEvent>();
         let (req_tx, req_rx) = async_channel::unbounded::<CapabilityRequest>();
         let (fail_tx, fail_rx) = async_channel::unbounded::<DeliverySignal>();
+        // The fold gate stays shut until the handshake has applied its
+        // snapshots: the drain runs from the moment the client dials, so the
+        // queue holds events that a snapshot applied later would overwrite.
+        let (fold_tx, fold_rx) = async_channel::bounded::<()>(1);
         let mut store = Self {
             book: ChannelBook::default(),
             client: None,
@@ -923,8 +934,16 @@ impl AhpStore {
             delivery_signal_tx: Some(fail_tx),
             _tasks: Vec::new(),
         };
-        store.spawn_handshake(cwd, event_tx, req_tx, cx);
-        store.spawn_pump(event_rx, cx);
+        store.spawn_handshake(
+            HandshakeParams {
+                cwd,
+                event_tx,
+                req_tx,
+                fold_tx,
+            },
+            cx,
+        );
+        store.spawn_pump(event_rx, fold_rx, cx);
         store.spawn_capability_pump(req_rx, cx);
         store.spawn_delivery_failure_pump(fail_rx, cx);
         store
@@ -964,11 +983,11 @@ impl AhpStore {
         if self.client.is_some() || self.handshaking {
             return;
         }
-        let Some((cwd, event_tx, req_tx)) = self.handshake_params.clone() else {
+        let Some(params) = self.handshake_params.clone() else {
             return;
         };
         self.delivery_failure = None;
-        self.spawn_handshake(cwd, event_tx, req_tx, cx);
+        self.spawn_handshake(params, cx);
         cx.notify();
     }
 
@@ -1263,22 +1282,34 @@ impl AhpStore {
         next
     }
 
-    fn spawn_handshake(
-        &mut self,
-        cwd: PathBuf,
-        event_tx: async_channel::Sender<ahp::ClientEvent>,
-        req_tx: async_channel::Sender<CapabilityRequest>,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        self.handshake_params = Some((cwd.clone(), event_tx.clone(), req_tx.clone()));
+    fn spawn_handshake(&mut self, params: HandshakeParams, cx: &mut gpui::Context<Self>) {
+        let HandshakeParams {
+            cwd,
+            event_tx,
+            req_tx,
+            fold_tx,
+        } = params;
+        self.handshake_params = Some(HandshakeParams {
+            cwd: cwd.clone(),
+            event_tx: event_tx.clone(),
+            req_tx: req_tx.clone(),
+            fold_tx: fold_tx.clone(),
+        });
         self.handshaking = true;
         let take = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            let (client, init) = match tokio_wait(move || async move {
+            let (client, init, mut events) = match tokio_wait(move || async move {
                 let runtime = manox_ahp_runtime::ahp::runtime::runtime(cwd);
                 let transport = runtime.inproc();
                 let client = Client::connect(transport, ClientConfig::default())
                     .await
                     .map_err(|err| format!("connect: {err}"))?;
+                // The receiver exists before the first subscribe: `initialize`
+                // below subscribes to the root, and the drain starts as soon as
+                // this dial returns. A broadcast receiver only sees what is
+                // sent after it subscribes, so one created after the
+                // handshake's subscribes would never see the events the host
+                // pushed while answering them.
+                let events = client.events();
                 // Explicit — the SDK's read pump starts here, not in
                 // `Client::connect`; skipping it leaves every request timing
                 // out against a perfectly healthy host.
@@ -1304,11 +1335,13 @@ impl AhpStore {
                     let tx = bridge_tx.clone();
                     async move { answer_via_bridge(tx, method, params).await }
                 });
-                Ok::<(Client, InitializeResult), String>((client, init))
+                Ok::<(Client, InitializeResult, ahp::ClientEventStream), String>((
+                    client, init, events,
+                ))
             })
             .await
             {
-                Ok((client, init)) => (client, init),
+                Ok((client, init, events)) => (client, init, events),
                 Err(err) => {
                     tracing::error!(error = %err, "ahp handshake failed");
                     // The failure must not be silent: every write issued now
@@ -1341,6 +1374,39 @@ impl AhpStore {
             {
                 return;
             }
+            // The drain runs OFF the main thread, and it starts here — before
+            // the replay's subscribes. On the main thread this loop competes
+            // with the rendering every folded event triggers, and under a
+            // delta flood it falls behind the producer: the client's bounded
+            // subscription buffer overflows and the SDK skips the overflow
+            // silently (`Lagged` => continue) — a state-bearing action lost
+            // there (the elicitation that arms the ask card, a tool
+            // confirmation) is never re-delivered, and the park that follows
+            // the flood silences the channel before anything could heal it.
+            // The unbounded queue absorbs any burst; the main-thread pump
+            // consumes it at its own pace, losing nothing.
+            let (closed_tx, closed_rx) = async_channel::bounded::<()>(1);
+            let drain = cx.background_executor().spawn(async move {
+                // Past this many queued events the pump is not keeping up.
+                // The queue never drops (that is the point), so its depth is
+                // the only symptom a flood leaves behind: warn once per
+                // crossing, re-arm below half.
+                const BACKLOG_WARN: usize = 4096;
+                let mut warned = false;
+                while let Some(event) = events.recv().await {
+                    if event_tx.send(event).await.is_err() {
+                        break;
+                    }
+                    let backlog = event_tx.len();
+                    if backlog >= BACKLOG_WARN && !warned {
+                        warned = true;
+                        tracing::warn!(backlog, "ahp event backlog crossed the high-water mark");
+                    } else if backlog < BACKLOG_WARN / 2 {
+                        warned = false;
+                    }
+                }
+                let _ = closed_tx.try_send(());
+            });
             // Replay the pre-connect writes **sequentially**: the landing
             // createSession must complete before its subscribes, and the
             // subscribes before the active-client claim. Concurrent issue
@@ -1465,14 +1531,18 @@ impl AhpStore {
                 }
                 store.refresh_sessions(cx);
             });
-            // The events receiver must exist before any subscribe: the
-            // extension baselines are pushed while the subscribe is answered.
-            let mut events = client.events();
-            while let Some(event) = events.recv().await {
-                if event_tx.send(event).await.is_err() {
-                    break;
-                }
-            }
+            // Open the fold gate: the drain has been forwarding since before
+            // the replay, so the queue holds everything the host pushed while
+            // the handshake landed — in order. Folding starts only now because
+            // a snapshot replaces its channel wholesale: an event folded
+            // before its channel's snapshot would be overwritten by it.
+            let _ = fold_tx.try_send(());
+            // Holding the handle across the wait ties the drain to this task:
+            // a store teardown drops this future, and the handle with it,
+            // which cancels the background task. On this path the drain has
+            // already finished, so the drop below only ends the binding.
+            let _ = closed_rx.recv().await;
+            drop(drain);
             tracing::error!("ahp pump exited (transport closed)");
             let _ = this.update(cx, |store, cx| {
                 store.client = None;
@@ -1482,15 +1552,43 @@ impl AhpStore {
         self._tasks.push(take);
     }
 
-    /// Fold every inbound event; notify once per batch of visible changes.
+    /// Fold every inbound event, one batch per entity pass.
+    ///
+    /// The fold waits for the handshake's open signal: the drain starts before
+    /// the replay's subscribes, so the queue already holds the events the host
+    /// pushed while the handshake landed, and folding them before their
+    /// channel's snapshot would lose them to it (a snapshot replaces its
+    /// channel wholesale).
+    ///
+    /// A delta flood then queues thousands of events behind the main thread; a
+    /// per-event `update` paid the entity re-entry for every one of them and
+    /// starved everything else on the thread, so one pass folds up to 256
+    /// events. Order is preserved either way; `route`'s notifies are coalesced
+    /// per frame by gpui, so the batch buys the re-entry, not the notification.
     fn spawn_pump(
         &mut self,
         event_rx: async_channel::Receiver<ahp::ClientEvent>,
+        fold_rx: async_channel::Receiver<()>,
         cx: &mut gpui::Context<Self>,
     ) {
+        const PUMP_BATCH: usize = 256;
         let pump = cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            // A closed sender (the handshake task died before it could signal)
+            // opens the gate too: folding must never wait on a task that can
+            // no longer wake it.
+            let _ = fold_rx.recv().await;
             while let Ok(event) = event_rx.recv().await {
-                let outcome = this.update(cx, |store, cx| store.route(event, cx));
+                let mut batch = vec![event];
+                while batch.len() < PUMP_BATCH
+                    && let Ok(next) = event_rx.try_recv()
+                {
+                    batch.push(next);
+                }
+                let outcome = this.update(cx, |store, cx| {
+                    for event in batch {
+                        store.route(event, cx);
+                    }
+                });
                 if outcome.is_err() {
                     break;
                 }
@@ -3382,6 +3480,7 @@ fn config_values_of(
 mod tests {
     use super::*;
     use ahp_types::actions::{ChatDeltaAction, ChatTurnCompleteAction, SessionTitleChangedAction};
+    use gpui::AppContext as _;
 
     /// The sub-agent block's read face: the host's background-work subagent
     /// entries project into rows (id + topic + start stamp), every other kind
@@ -5371,5 +5470,69 @@ mod tests {
             AccessMode::FullAccess,
             "the seated value outranks the schema default"
         );
+    }
+
+    /// A catalogue row for the pump test: every field the fold reads, nothing
+    /// it does not.
+    fn summary(session: &str) -> SessionSummary {
+        SessionSummary {
+            provider: String::new(),
+            title: session.to_string(),
+            status: ahp_types::state::SessionStatus::Idle.bits()
+                | ahp_types::state::SessionStatus::IsRead.bits(),
+            activity: None,
+            origin: None,
+            project: None,
+            working_directories: None,
+            annotations: None,
+            resource: session_uri(session),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            modified_at: "2026-01-01T00:00:00Z".to_string(),
+            changes: None,
+            meta: None,
+            chats: None,
+            default_chat: None,
+        }
+    }
+
+    /// The pump's batch path: a burst spanning several passes folds every
+    /// event, in the order the drain forwarded them. Batching exists to pay
+    /// one entity re-entry per pass instead of per event; the failure it must
+    /// never introduce — a dropped or reordered event — is the class the
+    /// drain's move off the main thread exists to end.
+    #[gpui::test]
+    fn the_pump_folds_a_burst_spanning_several_passes_in_order(cx: &mut gpui::TestAppContext) {
+        const BURST: usize = 1_000;
+        let (event_tx, event_rx) = async_channel::unbounded::<ahp::ClientEvent>();
+        let (fold_tx, fold_rx) = async_channel::bounded::<()>(1);
+        let store = cx.update(|cx| cx.new(|_| AhpStore::detached()));
+        cx.update(|cx| {
+            store.update(cx, |store, cx| store.spawn_pump(event_rx, fold_rx, cx));
+        });
+        fold_tx.try_send(()).expect("the gate has room");
+        for i in 0..BURST {
+            let session = format!("s-{i}");
+            event_tx
+                .try_send(ahp::ClientEvent {
+                    channel: session_uri(&session),
+                    event: ahp::SubscriptionEvent::SessionAdded(
+                        ahp_types::notifications::SessionAddedParams {
+                            channel: ROOT_RESOURCE_URI.to_string(),
+                            summary: summary(&session),
+                        },
+                    ),
+                })
+                .expect("the queue is unbounded");
+        }
+        cx.run_until_parked();
+        let (rows, order) = cx.read(|cx| {
+            let store = store.read(cx);
+            (store.book.summaries.len(), store.book.summary_order.clone())
+        });
+        assert_eq!(rows, BURST, "every event of the burst must fold");
+        // A live row seeds at the front (newest first), so the order is the
+        // burst reversed — still one row per event, in the drain's sequence.
+        let expected: Vec<String> = (0..BURST).rev().map(|i| format!("s-{i}")).collect();
+        assert_eq!(order, expected, "the fold keeps the drain's order");
     }
 }
