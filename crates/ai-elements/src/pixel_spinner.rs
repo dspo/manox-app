@@ -12,12 +12,13 @@
 //! keyframe segment is snapped by `steps(6, jump-none)` (grid) or
 //! `steps(4, jump-none)` (ring) exactly as the CSS does; that snap is the
 //! whole look, and `smooth()` trading it for linear interpolation is the
-//! contrast that proves it.
+//! contrast that proves it. `frozen()` renders the hold frame with no clock
+//! at all — for statuses that need attention without churning.
 
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, App, Hsla, IntoElement, ParentElement as _, RenderOnce,
+    Animation, AnimationExt as _, App, Div, Hsla, IntoElement, ParentElement as _, RenderOnce,
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 
@@ -107,6 +108,8 @@ pub struct PixelSpinner {
     synced: bool,
     /// Render cap in frames per second; `None` runs at display refresh.
     max_fps: Option<f32>,
+    /// No clock: render the animation's hold frame statically.
+    frozen: bool,
 }
 
 impl Default for PixelSpinner {
@@ -126,6 +129,7 @@ impl PixelSpinner {
             sharp: false,
             synced: false,
             max_fps: None,
+            frozen: false,
         }
     }
 
@@ -180,11 +184,41 @@ impl PixelSpinner {
         self.sharp = true;
         self
     }
+
+    /// The animation's hold frame, statically: every dot sits in its cell
+    /// (Grid at full brightness — the all-aligned frame; Ring at its rest
+    /// opacity) and no clock is attached, so `speed`/`synced`/`max_fps`/
+    /// `smooth` have nothing to drive. Because the frame is one moment of
+    /// the animation itself, it shares the same geometry constants and can
+    /// never drift from the moving glyph — a status that needs attention
+    /// without churning (the sidebar's Unread mark) freezes it, speaking
+    /// the same static dot-matrix language as that sidebar's pending mark.
+    pub fn frozen(mut self) -> Self {
+        self.frozen = true;
+        self
+    }
 }
 
 impl RenderOnce for PixelSpinner {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let zoom = if self.zoom > 0. { self.zoom } else { 1. };
+        if self.frozen {
+            // No clock: the hold frame, every dot in its cell. Grid freezes
+            // at the full-lit aligned frame; Ring at its rest opacity.
+            let alpha = match self.variant {
+                PixelSpinnerVariant::Grid => 1.,
+                PixelSpinnerVariant::Ring => RING_BASE_ALPHA,
+            };
+            return div()
+                .size(px(FRAME * zoom))
+                .relative()
+                .overflow_hidden()
+                .children((0..6usize).map(|i| {
+                    let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+                    dot(col, row, 0., alpha, self.color, zoom, self.sharp)
+                }))
+                .into_any_element();
+        }
         let rate = if self.speed > 0. { self.speed } else { 1. };
         let native_ms = match self.variant {
             PixelSpinnerVariant::Grid => GRID_PERIOD_MS,
@@ -229,19 +263,27 @@ impl RenderOnce for PixelSpinner {
                                 (0., ring_alpha(u, self.smooth))
                             }
                         };
-                        let mut dot_color = self.color;
-                        dot_color.a *= alpha;
-                        div()
-                            .absolute()
-                            .left(px((GRID_X + col * PITCH) * zoom))
-                            .top(px((GRID_Y + row * PITCH + dy) * zoom))
-                            .size(px(DOT * zoom))
-                            .when(!self.sharp, |dot| dot.rounded_full())
-                            .bg(dot_color)
+                        dot(col, row, dy, alpha, self.color, zoom, self.sharp)
                     }))
                 },
             )
+            .into_any_element()
     }
+}
+
+/// One 2px dot at its grid cell — `dy` offsets it along its travel, `alpha`
+/// scales the color's opacity. The single shape both the animated frame and
+/// the frozen one build from, so the two can't drift apart.
+fn dot(col: f32, row: f32, dy: f32, alpha: f32, color: Hsla, zoom: f32, sharp: bool) -> Div {
+    let mut dot_color = color;
+    dot_color.a *= alpha;
+    div()
+        .absolute()
+        .left(px((GRID_X + col * PITCH) * zoom))
+        .top(px((GRID_Y + row * PITCH + dy) * zoom))
+        .size(px(DOT * zoom))
+        .when(!sharp, |dot| dot.rounded_full())
+        .bg(dot_color)
 }
 
 /// One grid dot's keyframes at cycle phase `u ∈ [0,1)`: rise from `RISE`
