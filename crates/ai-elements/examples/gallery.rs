@@ -557,8 +557,9 @@ impl Gallery {
     }
 
     /// The pixel spinner's demos: the two variants at native size and zoomed
-    /// in, then a slow-motion pass and the linear-timing contrast arm. These
-    /// are time-only demos — nothing to click, the clock runs from mount.
+    /// in, then a slow-motion pass, the linear-timing contrast arm, and the
+    /// frozen hold frame the sidebar's Unread mark uses. These are time-only
+    /// demos — nothing to click, the clock runs from mount.
     fn pixel_spinner_rows(
         &self,
         muted: gpui::Hsla,
@@ -569,6 +570,8 @@ impl Gallery {
         // link blue for working, warning yellow for waiting.
         let accent: gpui::Hsla = gpui::rgb(0x3794ff).into();
         let warning: gpui::Hsla = gpui::rgb(0xcca700).into();
+        // The sidebar's Unread green (steer-agent-chrome-ui SUCCESS_GREEN).
+        let unread_green: gpui::Hsla = gpui::rgb(0x2da44e).into();
 
         vec![
             demo_card(
@@ -655,6 +658,30 @@ impl Gallery {
                         muted,
                         PixelSpinner::new().color(muted).zoom(8.).smooth(),
                         "8× · linear",
+                    )),
+            )
+            .into_any_element(),
+            demo_card(
+                muted,
+                border,
+                foreground,
+                "Frozen — the hold frame",
+                "The Grid animation's all-aligned moment rendered statically: six dots in \
+                 place at full brightness, no clock attached. The sidebar's Unread mark \
+                 freezes it in this green — a status that needs attention without \
+                 churning, the same static dot-matrix language as the pending question \
+                 mark.",
+                h_flex()
+                    .gap_10()
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new().frozen().color(unread_green),
+                        "1× (16 px)",
+                    ))
+                    .child(spinner_cell(
+                        muted,
+                        PixelSpinner::new().frozen().color(unread_green).zoom(8.),
+                        "8× · frozen",
                     )),
             )
             .into_any_element(),
