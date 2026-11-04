@@ -2,13 +2,25 @@ name: ghostty-vt cache
 description: >-
   Restores the built libghostty-vt static library and its build stamp, so the
   zig build (the one expensive phase of `crates/steer-ghostty`) is paid once per
-  (Ghostty rev, zig identity) instead of on every job of every run.
+  (Ghostty rev, zig identity, zig flags) instead of on every job of every run.
 
-  Only the artifact and the stamp are cached: the pinned Ghostty sources and the
-  pinned zig toolchain are ~1.1 GB combined (mostly zig caches) and are needed
-  again only when the stamp does not match, i.e. when `build.rs`'s `GHOSTTY_REV`
-  or `ZIG_VERSION` changes. The key below mirrors those constants — bump it in
-  the same commit.
+  The cached paths are exactly what `build.rs` checks before it short-circuits:
+  `lib/libghostty-vt.a` (the archive the fast path tests, next to the stamp) and
+  `ghostty-vt.stamp`. `lib-static/` is not cached — `export_static()` recreates
+  it from the archive on the fast path. The archive alone is ~12 MB; the rest of
+  `lib/` (xcframework/dylib, ~25 MB) stays out.
+
+  The pinned Ghostty sources and pinned zig toolchain are deliberately not
+  cached: they are ~1.1 GB combined (mostly zig caches) and are needed only when
+  the stamp does not match, i.e. after a `GHOSTTY_REV`/`ZIG_VERSION` bump.
+
+  The key versions two things. The (Ghostty rev, zig identity) part mirrors
+  `GHOSTTY_REV`/`ZIG_VERSION` in `build.rs` and moves with them. The trailing
+  artifact version (`-v3`) must be bumped whenever the cached path set or the
+  artifact's build inputs change — the stamp only records rev + zig identity,
+  so it cannot invalidate an archive produced by different zig flags:
+  `actions/cache` never overwrites an existing key, so without the bump a
+  corrected entry would never be written.
 
 runs:
   using: composite
@@ -17,9 +29,9 @@ runs:
       uses: actions/cache@v4
       with:
         path: |
-          ~/.cache/steer-ghostty/lib-static/libghostty-vt.a
+          ~/.cache/steer-ghostty/lib/libghostty-vt.a
           ~/.cache/steer-ghostty/ghostty-vt.stamp
-        key: ghostty-vt-${{ runner.os }}-${{ runner.arch }}-042b16b6-zig0.17.0
+        key: ghostty-vt-${{ runner.os }}-${{ runner.arch }}-042b16b6-zig0.17.0-v3
 
     # The cache step names files; the build script needs the directory. Kept in
     # the action so every leg points at the same one.

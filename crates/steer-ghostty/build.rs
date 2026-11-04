@@ -118,6 +118,13 @@ fn build_libvt(zig: &Path, src: &Path, cache: &Path) {
             "build",
             "-Demit-lib-vt",
             "-Doptimize=ReleaseFast",
+            // Zig targets the host CPU by default, which bakes the build
+            // machine's features into the archive; it is cached across CI
+            // runners and shipped in the Linux packages, where a CPU without
+            // those features dies with SIGILL. Ghostty's own Linux packaging
+            // passes this flag too (flatpak manifests), and its test builds
+            // resolve `Config.baselineTarget` for the same reason.
+            "-Dcpu=baseline",
             "--prefix",
         ])
         .arg(cache)
