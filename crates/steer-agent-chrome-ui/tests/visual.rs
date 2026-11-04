@@ -264,7 +264,9 @@ mod macos {
                     },
                     tag: None,
                     team_leader: false,
-                    last_message_at: None,
+                    // The picker shot needs rankable rows: a None stamp reads
+                    // "no messages" and drops the row from the panel.
+                    last_message_at: Some(t.updated_at),
                     updated_at: t.updated_at,
                     sort_stamp: t.updated_at,
                     rank: ix as i64,

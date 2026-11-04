@@ -364,7 +364,9 @@ fn load_rows() -> Vec<SessionRow> {
             status: status_of(running, t.has_unread),
             tag: None,
             team_leader: false,
-            last_message_at: None,
+            // The demo picker needs rankable rows: a None stamp reads
+            // "no messages" and drops the row from the panel.
+            last_message_at: Some(t.updated_at),
             updated_at: t.updated_at,
             // Team rows are filtered out above, so every row is its own
             // sort unit (production stamping lives in project_forest).

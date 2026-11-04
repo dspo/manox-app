@@ -64,7 +64,7 @@ manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（d
 script/local-manox.sh on            # git 依赖 → ../manox 本地路径（.cargo/config.toml，已 gitignore）
 script/local-manox.sh off           # 还原纯 git 依赖（CI 形态）
 # 拾取上游新发布（patch off 时）：改 Cargo.toml [workspace.dependencies] 的 tag= 值，
-# 然后 cargo update -p manox-agent（全部 9 依赖随同一 tag 整体移动）
+# 然后 cargo update -p manox-agent（全部 8 依赖随同一 tag 整体移动）
 ```
 
 runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。两仓共享运行时状态根 `~/.manox/`（路径清单见 dspo/manox 仓 AGENTS.md）。
@@ -157,7 +157,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
   双壳构建开关（`--features chrome-shell`）与 `agent-ui::Workspace` 的旧全壳渲染已删净；
   上一个双壳形态留在 tag `dual-shell-final`（计划文档已随退役删除，历史见 git log）。
 - **每 PR 门禁 = `.github/workflows/ci.yml` 的 `checks_pass`**（分支保护只 require 这一条；`no-coauthor.yml` 是第二条、事件集不同不能并入）：`guards`（`cargo fmt --check` + chat crate 依赖不变量）→ 两条并行 verify（linux amd64 `ubuntu-24.04` / macOS arm64 `macos-26`，各自 `clippy -D warnings --all-targets` → 一次 feature-inclusive 全量 `cargo test --features agent-ui/test-support`；`--all-targets` 已把 bin 编过，所以没有单独的 build 步，shipping 二进制由打包腿的 release 构建产出）。本地等价：`cargo fmt --all -- --check`、`./script/check-chat-crate-deps.sh`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets --features agent-ui/test-support`。打包腿（`.deb` / `.dmg`）与 verify **并行**，只在 main 推送、`workflow_dispatch`、PR 带 `ci:package` 标签、或 PR 改到打包面（`script/bundle-*`、两个 linux-deps action、`release.yml`、`ci.yml`、`crates/steer-app/Cargo.toml`）时启用——冷 release 构建不该躺在每个 PR 的必经路上；`.rpm` 只在 `release.yml` 出（Fedora 容器 + glibc baseline）。PR 写清 Test Plan 与 Assumptions。
-- **合并前必须把 manox 依赖 bump 到最新兼容发布**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下确认 Cargo.toml 的 runtime tag 指向当前 release 线（release/0.5 的 v0.5.x，或 main 的下一轨）最新兼容 tag——9 个依赖共用同一 tag，改一处声明 + `cargo update -p manox-agent` 整体移动——重跑全部门禁，并把变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容发布再 bump，或在 PR 中显式声明滞留原因（旧 tag 停留是债务，不是默认状态）。
+- **合并前必须把 manox 依赖 bump 到最新兼容发布**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下确认 Cargo.toml 的 runtime tag 指向当前 release 线（release/0.5 的 v0.5.x，或 main 的下一轨）最新兼容 tag——8 个依赖共用同一 tag，改一处声明 + `cargo update -p manox-agent` 整体移动——重跑全部门禁，并把变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容发布再 bump，或在 PR 中显式声明滞留原因（旧 tag 停留是债务，不是默认状态）。
 - 提交信息不得携带 Co-Authored-By 尾注（CI 强制拒绝）。
 
 ## 项目规则

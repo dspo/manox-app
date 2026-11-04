@@ -869,7 +869,7 @@ mod row_read_tests {
         );
     }
 
-    /// The host's recency stamp (`_meta.manox.lastMessageAt`, #997) rides
+    /// The host's recency stamp (`_meta.x-manox.lastMessageAt`, #997) rides
     /// the catalogue row into the merged row: a summary whose meta carries
     /// the stamp hands it to the row (the picker's rank key), a row without
     /// the key reads `None` — absence is "not rankable", never "very old".

@@ -114,7 +114,7 @@ pub struct SessionRowData {
     /// before the status slot (the row itself does not indent — nesting
     /// shows via the chevron only).
     pub team_leader: bool,
-    /// The host's recency stamp (`_meta.manox.lastMessageAt`, unix
+    /// The host's recency stamp (`_meta.x-manox.lastMessageAt`, unix
     /// seconds): present iff the transcript holds at least one message.
     /// The session picker ranks by it; `None` rows are not rankable and
     /// stay out of the picker. The sidebar ignores it.

@@ -208,3 +208,38 @@ fn group_order_seeds_keys_and_drag_mirrors_to_the_host(cx: &mut TestAppContext) 
         "the drag mirrors the whole order, keyed by project path"
     );
 }
+
+/// The recency stamp survives the chrome hop: `SessionRowData` →
+/// `SessionRow::from_group` → `row_data`. The picker reads `SessionRow`s, so
+/// a dropped field there would empty the panel with every construction-site
+/// test still green.
+#[test]
+fn the_stamp_survives_the_from_group_round_trip() {
+    use steer_agent_chrome_ui::session_list::{SessionGroup, SessionRowData};
+    let data = SessionRowData {
+        id: "s-1".into(),
+        short_id: "abcd1234".into(),
+        title: "row".into(),
+        updated_at: 100,
+        sort_stamp: 100,
+        rank: 0,
+        status: SessionStatus::Idle,
+        kind: SessionRowKind::Thread,
+        pinned: false,
+        archived: false,
+        tag: None,
+        team_leader: false,
+        last_message_at: Some(100),
+    };
+    let carried = SessionRow::from_group(SessionGroup {
+        name: "steer".into(),
+        key: "steer".into(),
+        project: Some("/p/steer".into()),
+        collapsed: false,
+        rows: vec![data],
+        hidden: 0,
+        expanded: false,
+    });
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].last_message_at, Some(100));
+}
