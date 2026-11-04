@@ -770,10 +770,6 @@ agent-task-follow-up = Follow-up
 
 about-title = About Steer
 
-about-ok = OK
-
-about-copy = Copy
-
 # Background task status card
 
 

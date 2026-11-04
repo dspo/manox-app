@@ -11181,6 +11181,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "steer-agent-chrome-ui",
+ "steer-components",
  "steer-ext-agents",
  "steer-i18n",
  "supervisor",
