@@ -879,9 +879,14 @@ impl Element for GhosttyElement {
                         color: Some(fg.into()),
                     }),
                 };
-                // The run covers `end - x` cells (wide runs: two columns per
-                // cell), so that is the width it must occupy on the grid.
-                let advance = cell_w * (end - x) as f32 * if wide { 2. } else { 1. };
+                // gpui's force_width is a per-glyph monospace advance
+                // (apply_force_width_to_layout snaps the i-th reference
+                // glyph to i * force_width), not the run's span: passing
+                // the span would scatter the run's second half past its
+                // end. The per-cell width snaps every glyph half a cell
+                // clear of the last onto its grid slot, pinning
+                // proportional fallback fonts to the grid.
+                let advance = if wide { cell_w * 2. } else { cell_w };
                 let shaped = window.text_system().shape_line(
                     SharedString::from(text.as_str()),
                     px(FONT_SIZE),
