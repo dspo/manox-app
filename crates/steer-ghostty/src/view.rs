@@ -883,8 +883,9 @@ impl Element for GhosttyElement {
                 // (apply_force_width_to_layout snaps the i-th reference
                 // glyph to i * force_width), not the run's span: passing
                 // the span would scatter the run's second half past its
-                // end. The per-cell width keeps every glyph on its grid
-                // slot, proportional fallback fonts included.
+                // end. The per-cell width snaps every glyph half a cell
+                // clear of the last onto its grid slot, pinning
+                // proportional fallback fonts to the grid.
                 let advance = if wide { cell_w * 2. } else { cell_w };
                 let shaped = window.text_system().shape_line(
                     SharedString::from(text.as_str()),
