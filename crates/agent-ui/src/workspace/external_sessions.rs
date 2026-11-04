@@ -285,6 +285,9 @@ impl Workspace {
                     archived: false,
                     tag: None,
                     team_leader: false,
+                    // No host catalogue row, no recency stamp: external
+                    // sessions stay out of the picker's ranked set.
+                    last_message_at: None,
                 }
             })
             .collect()

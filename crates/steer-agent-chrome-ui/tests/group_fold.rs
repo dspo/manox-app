@@ -54,6 +54,7 @@ fn row(id: &str, stamp: i64) -> SessionRow {
         archived: false,
         tag: None,
         team_leader: false,
+        last_message_at: None,
     }
 }
 

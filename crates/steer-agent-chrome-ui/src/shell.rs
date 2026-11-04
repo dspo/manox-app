@@ -63,6 +63,9 @@ pub struct SessionRow {
     /// indent — hierarchy lives in the group header and the leader chevron).
     pub tag: Option<String>,
     pub team_leader: bool,
+    /// The host's recency stamp (see [`SessionRowData::last_message_at`])
+    /// — the session picker's rank key. External rows carry none.
+    pub last_message_at: Option<i64>,
 }
 
 impl SessionRow {
@@ -89,6 +92,7 @@ impl SessionRow {
                 archived: r.archived,
                 tag: r.tag,
                 team_leader: r.team_leader,
+                last_message_at: r.last_message_at,
             })
             .collect()
     }
@@ -107,6 +111,7 @@ impl SessionRow {
             archived: self.archived,
             tag: self.tag.clone(),
             team_leader: self.team_leader,
+            last_message_at: self.last_message_at,
         }
     }
 }

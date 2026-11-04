@@ -59,6 +59,7 @@ fn project_row(id: &str, workspace: &str, project: &str) -> SessionRow {
         archived: false,
         tag: None,
         team_leader: false,
+        last_message_at: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn chats_row(id: &str) -> SessionRow {
         archived: false,
         tag: None,
         team_leader: false,
+        last_message_at: None,
     }
 }
 
@@ -403,6 +405,7 @@ fn external_row_menu_closes_the_session(cx: &mut TestAppContext) {
                 archived: false,
                 tag: None,
                 team_leader: false,
+                last_message_at: None,
             }])
         });
         *slot_for_build.borrow_mut() = Some(shell.clone());

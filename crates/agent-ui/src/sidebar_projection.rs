@@ -74,6 +74,12 @@ pub struct ContainerRow {
     /// rank lets that sort reproduce the host order exactly — no local
     /// timestamp can reshuffle it. `i64::MAX` (unranked) sorts last.
     pub rank: i64,
+    /// The host's recency stamp (`_meta.x-manox.lastMessageAt`, unix
+    /// seconds): present iff the transcript holds at least one message —
+    /// absence is "not rankable", never "very old". The session picker
+    /// ranks by it; the sidebar's order ignores it (the host rank owns
+    /// that).
+    pub last_message_at: Option<i64>,
 }
 
 /// The container tree's two memberships (plan D3 — captain 0-level, produced
@@ -171,6 +177,10 @@ impl ContainerRow {
             // Unranked until the multiplexer assigns the host order's
             // position; the default sorts last.
             rank: i64::MAX,
+            last_message_at: summary
+                .meta
+                .as_ref()
+                .and_then(manox_ahp::summary_meta::last_message_at),
         }
     }
 }
@@ -195,6 +205,7 @@ pub fn project_row(item: &ContainerRow) -> SessionRowData {
         archived: item.archived,
         tag: item.tag.clone(),
         team_leader: false,
+        last_message_at: item.last_message_at,
     }
 }
 
@@ -218,7 +229,9 @@ pub fn derive_status(item: &ContainerRow) -> SessionStatus {
 /// roster feed joins children later through this same shape. Children no
 /// longer indent — the captain's chevron is the only nesting marker, and
 /// the projection re-stamps each child's `sort_stamp` and `rank` to its
-/// captain's so the unit sorts (and survives a pin re-order) as one.
+/// captain's so the unit sorts (and survives a pin re-order) as one; the
+/// recency stamp rides the same restamp, so a child that ever reaches a
+/// recency surface carries its unit's key, not its own.
 /// Orphans (a parent that is missing, archived, or outside the partition)
 /// flatten to top-level rather than vanishing, keeping their own stamp.
 pub fn project_forest(rows: &[ContainerRow]) -> Vec<SessionRowData> {
@@ -234,11 +247,13 @@ pub fn project_forest(rows: &[ContainerRow]) -> Vec<SessionRowData> {
             leader.team_leader = !members.is_empty();
             let unit_stamp = leader.sort_stamp;
             let unit_rank = leader.rank;
+            let unit_recency = leader.last_message_at;
             out.push(leader);
             for m in members {
                 let mut member = project_row(m);
                 member.sort_stamp = unit_stamp;
                 member.rank = unit_rank;
+                member.last_message_at = unit_recency;
                 out.push(member);
             }
         } else {
@@ -364,6 +379,7 @@ mod tests {
             project: Some("/p/wire".into()),
             tag: None,
             updated_at: 0,
+            last_message_at: None,
         }
     }
 
@@ -460,6 +476,56 @@ mod tests {
             "x-manox": { "parentSessionId": "cap-1" },
         }));
         assert!(ContainerRow::from_summary(&parent_only, false, false).is_child());
+    }
+
+    /// The recency stamp rides the whole projection hop: a summary whose
+    /// `_meta` carries the key reads it through [`ContainerRow::from_summary`],
+    /// [`project_row`] hands it to the chrome row, and the forest restamp
+    /// gives a child its captain's unit stamp — a dropped line anywhere in
+    /// that chain would silently empty the picker with every other test
+    /// still green.
+    #[test]
+    fn the_recency_stamp_rides_the_projection_hop() {
+        let summary_with = |meta: serde_json::Value| -> SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "resource": "ahp-session:/s-1",
+                "provider": "test",
+                "title": "row",
+                "status": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "modifiedAt": "2026-01-01T00:00:00Z",
+                "_meta": meta,
+            }))
+            .expect("a summary parses")
+        };
+        use manox_ahp::summary_meta::set_last_message_at;
+        let mut meta = serde_json::Map::new();
+        set_last_message_at(&mut meta, 1_700_000_000);
+        let stamped = ContainerRow::from_summary(
+            &summary_with(serde_json::Value::Object(meta)),
+            false,
+            false,
+        );
+        assert_eq!(stamped.last_message_at, Some(1_700_000_000));
+        assert_eq!(project_row(&stamped).last_message_at, Some(1_700_000_000));
+
+        // A summary without the key reads absent — absence is "not
+        // rankable", never "very old".
+        let bare = ContainerRow::from_summary(&summary_with(serde_json::json!({})), false, false);
+        assert_eq!(bare.last_message_at, None);
+        assert_eq!(project_row(&bare).last_message_at, None);
+
+        // The forest gives a child its captain's unit stamp.
+        let mut captain = row("cap", MemberKind::Captain, None);
+        captain.last_message_at = Some(42);
+        let mut kid = row("kid", MemberKind::Subagent, Some("cap"));
+        kid.last_message_at = Some(7);
+        let out = project_forest(vec![captain, kid].as_slice());
+        assert_eq!(
+            out[1].last_message_at,
+            Some(42),
+            "the child rides the unit's stamp"
+        );
     }
 
     #[test]
