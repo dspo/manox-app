@@ -7,9 +7,12 @@
 //!   foreground/background (this crate owns no palette)
 //! - [`GhosttyView`] — the component: rendering, keyboard/IME input,
 //!   render-driven resize, paste; [`GhosttyView::live_title`] mirrors the
-//!   terminal's OSC title for embedders that show one, and
-//!   [`GhosttyView::terminate`] ends the shell (dropping the view does not:
-//!   the pty is shared with its watcher threads)
+//!   terminal's OSC title, and [`GhosttyView::kill`] ends the process
+//!   (dropping the view kills it too)
+//! - [`TerminalProcess`] / [`ProcessOutput`] — the process abstraction for
+//!   hosts whose process is owned elsewhere (cx sessions implement it; the
+//!   view kills it on drop). The trait itself is gpui-free: it lives in
+//!   `steer-term-process`, re-exported here
 //! - [`terminal`] — the safe wrapper over the C API (terminal state, render
 //!   snapshots, key encoding), for callers that need to go below the view
 //! - [`sys`] — raw FFI bindings (doc-hidden; the transcription reference is
@@ -29,17 +32,24 @@
 //! - a paste libghostty refuses (`GHOSTTY_REJECTED`: the text could inject
 //!   commands outside bracketed-paste mode) is dropped; the
 //!   confirm-then-retry-with-`allow_unsafe` flow has no surface yet;
-//! - no `[terminal]` settings: shell comes from `$SHELL` (no override, no extra
-//!   env), and the font is the platform mono face at a fixed size;
+//! - the `[terminal]` settings face is partial: `shell` and `env` are
+//!   consumed (see [`settings`]), while font / cursor / bell / scrollback /
+//!   osc52 / commands_to_skip_shell stay fixed (the font is the platform
+//!   mono face at a fixed size);
 //! - in-flight IME composition is not painted (committed text is).
 
 mod input;
-mod pty;
+pub use steer_term_process::{ProcessOutput, TerminalProcess};
+pub mod pty;
+pub mod settings;
 pub mod terminal;
 mod view;
 
 #[doc(hidden)]
 pub mod sys;
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 pub use terminal::{Cell, Frame, KeyEncoder, RenderState, Rgb, Terminal};
-pub use view::{GhosttyView, Theme, spawn_ghostty_view};
+pub use view::{GhosttyEvent, GhosttyView, Theme, spawn_ghostty_view};

@@ -61,7 +61,7 @@ pub(crate) struct ExternalSessionRecord {
     /// §2.2 — the projection reads the record field directly).
     pub project: Option<PathBuf>,
     pub created_at: i64,
-    pub view: gpui::Entity<terminal_ui::TerminalView>,
+    pub view: gpui::Entity<steer_ghostty::GhosttyView>,
     /// The CLI agent's session handle — the owner's independent clone for
     /// the explicit kill on close (the promise `cx_session` states). `None`
     /// for plain terminals: their PTY dies with the view drop.
@@ -92,6 +92,9 @@ pub struct ExternalSessionLaunch<'a> {
     pub label: String,
     pub svg: &'static str,
     pub project: Option<PathBuf>,
+    /// The directory the terminal was spawned in: the D10 attrs snapshot's
+    /// cwd until the program claims one via OSC 7.
+    pub cwd: PathBuf,
     /// The CLI agent's session handle (the owner's kill clone); `None` for
     /// plain terminals.
     pub handle: Option<Arc<steer_ext_agents::SessionHandle>>,
@@ -106,7 +109,7 @@ impl Workspace {
     pub fn spawn_external_session(
         &mut self,
         launch: ExternalSessionLaunch<'_>,
-        view: gpui::Entity<terminal_ui::TerminalView>,
+        view: gpui::Entity<steer_ghostty::GhosttyView>,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
@@ -117,6 +120,7 @@ impl Workspace {
                 label: launch.label,
                 svg: launch.svg,
                 project: launch.project,
+                cwd: launch.cwd.clone(),
                 view: view.clone(),
                 handle: launch.handle,
             }),
@@ -297,11 +301,12 @@ pub(super) fn clamp_external_title(raw: &str) -> String {
 /// Focus a session's terminal (the event-path face — open/spawn call this
 /// so the TUI takes keyboard input immediately; `render` may not focus).
 fn focus_terminal(
-    view: &gpui::Entity<terminal_ui::TerminalView>,
+    view: &gpui::Entity<steer_ghostty::GhosttyView>,
     window: &mut gpui::Window,
     cx: &mut gpui::App,
 ) {
-    let handle = view.read(cx).focus_handle();
+    use gpui::Focusable as _;
+    let handle = view.read(cx).focus_handle(cx);
     window.focus(&handle, cx);
 }
 

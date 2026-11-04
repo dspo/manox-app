@@ -32,7 +32,6 @@ use std::sync::Arc;
 
 use super::*;
 use gpui::EventEmitter;
-use manox_terminal::event::TerminalEvent;
 
 use super::external_sessions::clamp_external_title;
 
@@ -181,9 +180,12 @@ pub struct ExternalContainerSeed<'a> {
     /// The project directory the session was launched in — the sidebar group
     /// it merges into; `None` → the loose Chats bucket.
     pub project: Option<PathBuf>,
+    /// The directory the terminal was spawned in: the D10 attrs snapshot's
+    /// cwd until the program claims one via OSC 7.
+    pub cwd: PathBuf,
     /// The spawned terminal (its view occupies the main column while the
-    /// session is foreground; dropping it tears the process tree down).
-    pub view: gpui::Entity<terminal_ui::TerminalView>,
+    /// session is foreground; dropping it kills the process).
+    pub view: gpui::Entity<steer_ghostty::GhosttyView>,
     /// The CLI agent's session handle — the owner's independent clone for
     /// the explicit kill on close (the contract `cx_session` states). `None`
     /// for plain terminals: their PTY dies with the view drop.
@@ -418,6 +420,7 @@ impl Workspace {
             label,
             svg,
             project,
+            cwd,
             view,
             handle,
         } = seed;
@@ -428,32 +431,33 @@ impl Workspace {
         let default_label = label;
         let label = view
             .read(cx)
-            .terminal()
-            .read(cx)
-            .title()
+            .live_title()
             .map(|t| clamp_external_title(&t))
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| default_label.clone());
         // The D10 snapshot: the 0 号's spawn cwd (what the terminal was
-        // rooted at) and the environment as of this call — the record's later
-        // life never re-reads either.
-        let attrs = ContainerAttrs::snapshot(view.read(cx).terminal().read(cx).cwd());
-        // Title events ride the PROXY's gpui event face, never the kernel
-        // handle's broadcast: the proxy pump assumes it is the handle's sole
-        // subscriber (its `Arc::try_unwrap` drops every event otherwise).
-        // The same face carries the death signal (D8): the child's exit
-        // flips the record's alive bit and raises the container event.
-        let proxy = view.read(cx).terminal().clone();
+        // rooted at — the launch cwd, frozen before the program can claim
+        // anything else via OSC 7) and the environment as of this call — the
+        // record's later life never re-reads either.
+        let attrs = ContainerAttrs::snapshot(cwd);
+        // Title and death ride the view's gpui event face: the pump emits
+        // `TitleChanged` on OSC title (`None` = the program released it →
+        // back to the launch label) and `Exited` when the process dies (D8)
+        // — the exit flips the record's alive bit and raises the container
+        // event. The explicit handle kill (teardown_container) is the
+        // owner's close path; the view drop's own kill is the backstop.
         let id_for_sub = id.as_str().to_string();
-        let title_sub = cx.subscribe(&proxy, move |this, _, ev: &TerminalEvent, cx| match ev {
-            TerminalEvent::Title(title) => {
-                this.apply_terminal_title(&id_for_sub, title.clone(), cx);
-            }
-            TerminalEvent::ChildExit(_) | TerminalEvent::Exit => {
-                this.retire_external_container(&id_for_sub, cx);
-            }
-            _ => {}
-        });
+        let title_sub = cx.subscribe(
+            &view,
+            move |this, _, ev: &steer_ghostty::GhosttyEvent, cx| match ev {
+                steer_ghostty::GhosttyEvent::TitleChanged(title) => {
+                    this.apply_terminal_title(&id_for_sub, title.clone(), cx);
+                }
+                steer_ghostty::GhosttyEvent::Exited => {
+                    this.retire_external_container(&id_for_sub, cx);
+                }
+            },
+        );
         self.externals
             .push(super::external_sessions::ExternalSessionRecord {
                 id: id.as_str().to_string(),

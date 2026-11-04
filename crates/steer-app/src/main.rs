@@ -129,12 +129,8 @@ fn main() {
         // placeholder, …) render through its own rust_i18n bundle; keep it on
         // the app's locale.
         gpui_component::set_locale(steer_i18n::current().token());
-        // `terminal` runs its PTY pumps on the shared process-global tokio
-        // runtime; hand it the handle before `manox_terminal::init` builds the store.
-        manox_terminal::runtime::set_runtime(manox_agent::runtime::handle().clone());
+
         agent_ui::slash_command::init(cx);
-        manox_terminal::init();
-        terminal_ui::init(cx);
 
         // Embedded OFL typefaces. Lilex ships only Light/Medium in upright and
         // italic cuts: message body inherits Light, markdown bold/headings and

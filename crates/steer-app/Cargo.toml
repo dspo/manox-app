@@ -18,8 +18,6 @@ agent-ui.workspace = true
 steer-agent-chrome-ui.workspace = true
 manox-agent.workspace = true
 steer-ext-agents.workspace = true
-manox-terminal.workspace = true
-terminal-ui.workspace = true
 supervisor.workspace = true
 
 anyhow.workspace = true

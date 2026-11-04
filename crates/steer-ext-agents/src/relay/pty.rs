@@ -39,19 +39,21 @@ pub(crate) fn spawn_pty(spec: &LaunchSpec, extra_env: &[(&str, String)]) -> Resu
     for arg in &spec.args {
         cmd.arg(arg);
     }
-    // manox is the host terminal for every embedded agent PTY, regardless of how
-    // manox itself was launched. TERM_PROGRAM claims iTerm.app: capability-gating
-    // TUIs (Claude Code's kitty keyboard, synchronized output) whitelist known
-    // terminal identities and degrade on unknown ones. Among the whitelisted
-    // identities, iTerm.app is chosen because the emulator fully backs both of
-    // its progressive features (kitty keyboard via alacritty, sync updates via
-    // vte) — kitty/WezTerm would unlock the keyboard too, but only the iTerm.app
-    // pairing is verified end-to-end here. A GUI launch (Finder/Dock/Spotlight)
-    // carries no TERM/COLORTERM in its environment, and CommandBuilder snapshots
-    // the parent env — so without these fallbacks the agent inherits a
-    // terminal-less environment and TUIs (Claude Code) render monochrome and
-    // skip mouse capture. `env_remove`, `env`, and `extra_env` apply after these
-    // and win, so explicit spec values keep their precedence.
+    // manox is the host terminal for every embedded agent PTY, regardless of
+    // how manox itself was launched. Capability-gating TUIs (Claude Code's
+    // kitty keyboard, synchronized output) whitelist known terminal
+    // identities and degrade on unknown ones, so TERM_PROGRAM claims
+    // iTerm.app: the ghostty view that renders these PTYs implements the
+    // kitty keyboard protocol natively and honors synchronized output, and
+    // the iTerm.app identity is the pairing verified end-to-end. KNOWN GAP:
+    // mouse reporting is not forwarded yet — a TUI that enables mouse
+    // tracking sees its clicks swallowed (the view treats the wheel as
+    // scrollback only) until the mouse-encoder integration lands. A GUI
+    // launch (Finder/Dock/Spotlight) carries no TERM/COLORTERM in its
+    // environment, and CommandBuilder snapshots the parent env — so without
+    // these fallbacks the agent inherits a terminal-less environment and
+    // TUIs render monochrome. `env_remove`, `env`, and `extra_env` apply
+    // after these and win, so explicit spec values keep their precedence.
     cmd.env("TERM_PROGRAM", "iTerm.app");
     cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     if std::env::var_os("TERM").is_none() {

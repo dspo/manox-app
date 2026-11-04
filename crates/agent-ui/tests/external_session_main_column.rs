@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{FakePty, init_harness, open_assembly};
+use common::{init_harness, open_assembly};
 use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 
 #[gpui::test]
@@ -22,20 +22,10 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
     let mut visual = VisualTestContext::from_window(window.into(), cx);
 
     // Launch an external session the way the project menu does.
-    let pty = FakePty::default();
+    let fixture = common::ghostty_fixture(cx);
     let any = window.into();
     cx.update_window(any, |_, window, cx| {
         ws.update(cx, |ws, cx| {
-            let terminal = manox_terminal::Terminal::spawn(
-                "test-ext-pty".into(),
-                std::path::PathBuf::from("/tmp"),
-                80,
-                24,
-                Box::new(pty.clone()),
-            )
-            .expect("fake terminal spawns");
-            let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-            let view = terminal_ui::TerminalView::new(proxy, cx);
             ws.spawn_external_session(
                 agent_ui::workspace::external_sessions::ExternalSessionLaunch {
                     agent_id: "claude",
@@ -45,8 +35,9 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
                     project: None,
                     // The fake PTY has no cx session behind it.
                     handle: None,
+                    cwd: std::path::PathBuf::from("/tmp"),
                 },
-                view,
+                fixture.view.clone(),
                 window,
                 cx,
             );
@@ -136,7 +127,9 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
 
     // THE TUI'S OWN CLAIM: the program writes an OSC 0 title the way
     // Claude Code does — raw bytes on the PTY — and the row follows.
-    pty.emit(b"\x1b]0;\xe2\x9c\xb3 refactoring\x07");
+    fixture
+        .probe
+        .feed_output(b"\x1b]0;\xe2\x9c\xb3 refactoring\x07");
     wait_for_title(cx, &shell, "✳ refactoring");
 
     // THE USER'S RENAME: the row menu's 重命名 editor commits through the
@@ -171,8 +164,14 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
 
     // THE TUI CLAIMS AGAIN (OSC 2 this time — the window-title code): the
     // row keeps following the program through its lifetime.
-    pty.emit(b"\x1b]2;codex plan\x07");
+    fixture.probe.feed_output(b"\x1b]2;codex plan\x07");
     wait_for_title(cx, &shell, "codex plan");
+
+    // THE RESET: an empty OSC 0 title is the program releasing its claim —
+    // the row falls back to the launch label rather than keeping the stale
+    // title (the `Title(None)` face the UI map documents).
+    fixture.probe.feed_output(b"\x1b]0;\x07");
+    wait_for_title(cx, &shell, "Claude Code");
 
     manox_agent::thread_store::drop_global_for_test();
     agent_ui::dispatch::clear_globals_for_test();

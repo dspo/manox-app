@@ -21,6 +21,7 @@ members = [
 	"crates/steer-agent-chat-ui",
 	"crates/steer-agent-chrome-ui",
 	"crates/steer-ghostty",
+	"crates/steer-term-process",
 ]
 resolver = "2"
 
@@ -62,6 +63,7 @@ steer-i18n = { path = "crates/steer-i18n" }
 steer-agent-chat-ui = { path = "crates/steer-agent-chat-ui" }
 steer-agent-chrome-ui = { path = "crates/steer-agent-chrome-ui" }
 steer-ghostty = { path = "crates/steer-ghostty" }
+steer-term-process = { path = "crates/steer-term-process" }
 
 anyhow = "1"
 # The pure-Rust LaTeX math typesetter behind `$$…$$` blocks: a formula becomes

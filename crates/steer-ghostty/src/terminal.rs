@@ -41,6 +41,7 @@ type EffectFn = Box<dyn Fn() + Send>;
 struct Callbacks {
     write_pty: Option<WritePtyFn>,
     on_title: Option<EffectFn>,
+    on_pwd: Option<EffectFn>,
 }
 
 pub struct Terminal {
@@ -78,6 +79,15 @@ unsafe extern "C" fn trampoline_title(_term: sys::GhosttyTerminal, ud: *mut c_vo
     }
 }
 
+extern "C" fn trampoline_pwd(_term: sys::GhosttyTerminal, ud: *mut c_void) {
+    unsafe {
+        let cbs = &*(ud as *const Callbacks);
+        if let Some(f) = cbs.on_pwd.as_ref() {
+            f();
+        }
+    }
+}
+
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Result<Self, c_int> {
         let mut term: sys::GhosttyTerminal = std::ptr::null_mut();
@@ -90,6 +100,7 @@ impl Terminal {
             callbacks: Box::new(Callbacks {
                 write_pty: None,
                 on_title: None,
+                on_pwd: None,
             }),
         };
         let ud = &*this.callbacks as *const Callbacks as *const c_void;
@@ -120,6 +131,18 @@ impl Terminal {
                 self.term,
                 sys::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
                 trampoline_title as sys::GhosttyTerminalEffectFn as *const c_void,
+            );
+        }
+    }
+
+    /// Notify on OSC 7 / OSC 9 pwd changes; read [`Self::pwd`] in the handler.
+    pub fn set_on_pwd(&mut self, f: EffectFn) {
+        self.callbacks.on_pwd = Some(f);
+        unsafe {
+            sys::ghostty_terminal_set(
+                self.term,
+                sys::GHOSTTY_TERMINAL_OPT_PWD_CHANGED,
+                trampoline_pwd as sys::GhosttyTerminalEffectFn as *const c_void,
             );
         }
     }
