@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_ui::workspace::external_sessions::ExternalSessionLaunch;
-use common::FakePty;
 use gpui::{AppContext as _, TestAppContext};
 use steer_ext_agents::SessionHandle;
 
@@ -74,21 +73,10 @@ fn spawn_external(
     window: gpui::AnyWindowHandle,
     handle: Arc<SessionHandle>,
 ) -> String {
-    let pty = FakePty::default();
+    let fixture = common::ghostty_fixture(cx);
     let ws = ws.clone();
-    let pty_for_spawn = pty.clone();
     cx.update_window(window, |_, window, cx| {
         ws.update(cx, |ws, cx| {
-            let terminal = manox_terminal::Terminal::spawn(
-                "exit-survivor-claude".into(),
-                std::path::PathBuf::from("/tmp"),
-                80,
-                24,
-                Box::new(pty_for_spawn),
-            )
-            .expect("fake terminal spawns");
-            let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-            let view = terminal_ui::TerminalView::new(proxy, cx);
             ws.spawn_external_session(
                 ExternalSessionLaunch {
                     agent_id: "claude",
@@ -96,9 +84,10 @@ fn spawn_external(
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
                     project: None,
+                    cwd: std::path::PathBuf::from("/tmp"),
                     handle: Some(handle),
                 },
-                view,
+                fixture.view.clone(),
                 window,
                 cx,
             );

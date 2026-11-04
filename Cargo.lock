@@ -141,7 +141,6 @@ dependencies = [
  "manox-harness",
  "manox-providers",
  "manox-session-core",
- "manox-terminal",
  "open",
  "rust-embed",
  "serde",
@@ -154,7 +153,6 @@ dependencies = [
  "steer-i18n",
  "steer-webview",
  "tempfile",
- "terminal-ui",
  "tokio",
  "tokio-util",
  "toml 0.8.23",
@@ -11229,13 +11227,12 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "manox-agent",
- "manox-terminal",
  "rust-embed",
  "serde_json",
  "steer-agent-chat-ui",
+ "steer-ghostty",
  "steer-i18n",
  "steer-webview",
- "terminal-ui",
 ]
 
 [[package]]
@@ -11252,7 +11249,6 @@ dependencies = [
  "ksni",
  "libc",
  "manox-agent",
- "manox-terminal",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -11260,7 +11256,6 @@ dependencies = [
  "steer-ext-agents",
  "steer-i18n",
  "supervisor",
- "terminal-ui",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
@@ -11298,7 +11293,6 @@ dependencies = [
  "futures-util",
  "libc",
  "manox-providers",
- "manox-terminal",
  "portable-pty",
  "rand 0.8.8",
  "reqwest 0.12.28",
@@ -11306,6 +11300,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "steer-term-process",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -11319,7 +11314,12 @@ dependencies = [
  "anyhow",
  "async-channel",
  "gpui-pre",
+ "libc",
  "portable-pty",
+ "serde",
+ "steer-term-process",
+ "sysinfo 0.39.6",
+ "toml 0.8.23",
  "unicode-width 0.2.2",
 ]
 
@@ -11333,6 +11333,10 @@ dependencies = [
  "tracing",
  "unic-langid",
 ]
+
+[[package]]
+name = "steer-term-process"
+version = "0.2.0"
 
 [[package]]
 name = "steer-webview"

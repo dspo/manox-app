@@ -8,17 +8,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    App, AppContext as _, BorderStyle, Bounds, Element, ElementId, Entity, FocusHandle, Focusable,
-    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement, IntoElement,
-    KeyDownEvent, LayoutId, MouseButton, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
-    ShapedLine, SharedString, StrikethroughStyle, Styled, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
+    App, AppContext as _, BorderStyle, Bounds, Element, ElementId, Entity, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, InputHandler, InspectorElementId, InteractiveElement,
+    IntoElement, KeyDownEvent, LayoutId, MouseButton, ParentElement, Pixels, Point, Render,
+    ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Styled, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::input;
-use crate::pty::Pty;
 use crate::terminal::{KeyEncoder, RenderState, Rgb, Terminal};
+use steer_term_process::{ProcessOutput, TerminalProcess};
 
 /// The cell advance is measured from this face and every glyph is placed on
 /// that grid, so the family must be a monospace one the platform actually has:
@@ -70,11 +70,24 @@ fn default_shell() -> String {
 
 /// Events from the terminal world into the view's pump task.
 enum TermEvent {
-    /// PTY output was folded into the terminal; repaint.
+    /// Process output was folded into the terminal; repaint.
     Wakeup,
     /// OSC title changed; re-read it on the UI thread.
     Title,
+    /// OSC 7 pwd changed; re-read it on the UI thread.
+    Pwd,
     /// Child exited.
+    Exited,
+}
+
+/// What an embedding surface observes. `TitleChanged` carries the OSC title
+/// (`""` when the program reset it); `Exited` fires once per real process
+/// exit — a host-side [`GhosttyView::kill`] does not emit it.
+#[derive(Clone, Debug)]
+pub enum GhosttyEvent {
+    /// The OSC 0/2 title claim; `None` = the program released the title
+    /// (cleared it) — the embedder falls back to its launch label.
+    TitleChanged(Option<String>),
     Exited,
 }
 
@@ -113,7 +126,7 @@ impl TermShared {
 
 pub struct GhosttyView {
     shared: Arc<TermShared>,
-    pty: Arc<Pty>,
+    process: Arc<dyn TerminalProcess>,
     theme: Theme,
     focus: FocusHandle,
     enc: RefCell<KeyEncoder>,
@@ -129,7 +142,17 @@ pub struct GhosttyView {
     focused_once: Cell<bool>,
     /// Live OSC title, mirrored by the pump on the UI thread.
     live_title: RefCell<Option<String>>,
+    /// Live working directory (OSC 7), mirrored by the pump.
+    live_cwd: RefCell<Option<String>>,
     exited: Cell<bool>,
+}
+
+impl Drop for GhosttyView {
+    fn drop(&mut self) {
+        // Same detached sweep as `kill` — close semantics on the drop path
+        // too (the external-session close relies on the drop).
+        self.kill();
+    }
 }
 
 impl Focusable for GhosttyView {
@@ -138,70 +161,115 @@ impl Focusable for GhosttyView {
     }
 }
 
-impl GhosttyView {
-    /// Spawn a `$SHELL` PTY rooted at `cwd` and return the ready view, with
-    /// its output pump already running.
-    pub fn spawn(cwd: &Path, theme: Theme, cx: &mut App) -> Result<Entity<Self>, String> {
-        let shell = default_shell();
-        let (pty_inner, reader) = Pty::spawn_program(&shell, &[], cwd, INITIAL_COLS, INITIAL_ROWS)
-            .map_err(|e| e.to_string())?;
-        let pty = Arc::new(pty_inner);
+impl EventEmitter<GhosttyEvent> for GhosttyView {}
 
+impl GhosttyView {
+    /// Spawn the shell rooted at `cwd` and return the ready view, with its
+    /// output pump already running. The shell is `[terminal].shell` when
+    /// set, otherwise the default user shell running as a login shell
+    /// (`-l`: a Finder-launched app inherits launchd's minimal PATH, and
+    /// the profile scripts are how homebrew etc. reach the terminal) — an
+    /// explicit `[terminal].shell` override is a program, not a login
+    /// shell. `container_env` is the caller's FINAL env slice (agent-ui
+    /// composes it via `layered_env`: container snapshot → `[terminal].env`,
+    /// settings win). Explicit-program processes skip this via
+    /// [`Self::spawn_with`].
+    pub fn spawn_shell(
+        cwd: &Path,
+        container_env: &[(String, String)],
+        theme: Theme,
+        cx: &mut App,
+    ) -> Result<Entity<Self>, String> {
+        let settings = crate::settings::load();
+        // Login treatment is the default shell's: an explicit
+        // `[terminal].shell` override is a program, not a login shell.
+        let login = settings.shell.is_none();
+        let shell = settings.shell.clone().unwrap_or_else(default_shell);
+        // `-l` is a POSIX login convention — pwsh/nu/cmd don't take it, so
+        // the flag is keyed off the shell's own name.
+        let mut args: Vec<&str> = Vec::new();
+        if login
+            && !matches!(
+                std::path::Path::new(&shell)
+                    .file_name()
+                    .and_then(|s| s.to_str()),
+                Some("pwsh") | Some("powershell") | Some("nu") | Some("cmd") | Some("cmd.exe")
+            )
+        {
+            args.push("-l");
+        }
+        let process = crate::pty::Pty::spawn_shell(
+            &shell,
+            &args,
+            cwd,
+            container_env,
+            INITIAL_COLS,
+            INITIAL_ROWS,
+        )
+        .map_err(|e| e.to_string())?;
+        Self::spawn_with(process, theme, cx)
+    }
+
+    /// Adopt an already-running (or lazily-starting) process and return the
+    /// ready view, with its output pump already running.
+    pub fn spawn_with(
+        process: Arc<dyn TerminalProcess>,
+        theme: Theme,
+        cx: &mut App,
+    ) -> Result<Entity<Self>, String> {
         let (events, events_rx) = async_channel::unbounded::<TermEvent>();
         let shared = Arc::new(
             TermShared::new(INITIAL_COLS, INITIAL_ROWS, theme, events)
                 .map_err(|e| format!("ghostty init failed: {e}"))?,
         );
 
-        // Terminal → PTY replies (queries, mode reports) go straight back out.
+        // Terminal → process replies (queries, mode reports) go straight back
+        // out.
         shared.inner.lock().unwrap().term.set_write_pty({
-            let pty = pty.clone();
-            Box::new(move |bytes| pty.write(bytes))
+            let process = process.clone();
+            Box::new(move |bytes| process.write(bytes))
         });
-        // Title changes are marked in the callback and read back under the
-        // lock on the UI thread (no terminal calls inside effect callbacks).
+        // Title/pwd changes are marked in the callbacks and read back under
+        // the lock on the UI thread (no terminal calls inside effect
+        // callbacks).
         shared.inner.lock().unwrap().term.set_on_title({
             let events = shared.events_clone();
             Box::new(move || {
                 let _ = events.send_blocking(TermEvent::Title);
             })
         });
+        shared.inner.lock().unwrap().term.set_on_pwd({
+            let events = shared.events_clone();
+            Box::new(move || {
+                let _ = events.send_blocking(TermEvent::Pwd);
+            })
+        });
 
-        // PTY reader thread: fold bytes into the emulator, then wake the UI.
-        std::thread::spawn({
-            let mut reader = reader;
-            let shared = shared.clone();
-            let events = shared.events_clone();
-            move || {
-                let mut buf = [0u8; 8192];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            shared.inner.lock().unwrap().term.write(&buf[..n]);
-                            if events.send_blocking(TermEvent::Wakeup).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-                let _ = events.send_blocking(TermEvent::Exited);
-            }
-        });
-        // Child exit watcher.
-        std::thread::spawn({
-            let pty = pty.clone();
-            let events = shared.events_clone();
-            move || {
-                let _ = pty.wait();
-                let _ = events.send_blocking(TermEvent::Exited);
-            }
-        });
+        // Output side: fold bytes into the emulator (thread-safe), then wake
+        // the pump; a real exit marks the shared state.
+        let out = ProcessOutput::new(
+            {
+                let shared = shared.clone();
+                let events = shared.events_clone();
+                Arc::new(move |bytes: &[u8]| {
+                    shared.inner.lock().unwrap().term.write(bytes);
+                    let _ = events.send_blocking(TermEvent::Wakeup);
+                })
+            },
+            {
+                let events = shared.events_clone();
+                Arc::new(move |code: Option<u32>| {
+                    let _ = code;
+                    let _ = events.send_blocking(TermEvent::Exited);
+                })
+            },
+        );
+        process.clone().attach(out);
 
         let view = cx.new(|cx| {
             let view = GhosttyView {
                 shared: shared.clone(),
-                pty,
+                process,
                 theme,
                 focus: cx.focus_handle(),
                 enc: RefCell::new(
@@ -213,6 +281,7 @@ impl GhosttyView {
                 key_interceptor: None,
                 focused_once: Cell::new(false),
                 live_title: RefCell::new(None),
+                live_cwd: RefCell::new(None),
                 exited: Cell::new(false),
             };
             view.start_pump(events_rx, cx);
@@ -262,12 +331,28 @@ impl GhosttyView {
         match ev {
             TermEvent::Wakeup => cx.notify(),
             TermEvent::Title => {
-                let title = self.shared.inner.lock().unwrap().term.title();
-                *self.live_title.borrow_mut() = title;
+                // An empty OSC 0 title is a reset, not a claim: fold it to
+                // `None` so embedders fall back to their launch label.
+                let title = self
+                    .shared
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .term
+                    .title()
+                    .filter(|t| !t.is_empty());
+                *self.live_title.borrow_mut() = title.clone();
+                cx.emit(GhosttyEvent::TitleChanged(title));
+                cx.notify();
+            }
+            TermEvent::Pwd => {
+                let pwd = self.shared.inner.lock().unwrap().term.pwd();
+                *self.live_cwd.borrow_mut() = pwd;
                 cx.notify();
             }
             TermEvent::Exited => {
                 self.exited.set(true);
+                cx.emit(GhosttyEvent::Exited);
                 cx.notify();
             }
         }
@@ -279,17 +364,25 @@ impl GhosttyView {
         self.live_title.borrow().clone()
     }
 
-    /// Whether the shell has exited (the last frame stays on screen).
+    /// Whether the process has exited (the last frame stays on screen).
     pub fn exited(&self) -> bool {
         self.exited.get()
     }
 
-    /// Terminate the shell and stop the pump. Idempotent; the tab calls this
-    /// when it closes, because dropping the view alone cannot: both watcher
-    /// threads hold the pty open, so the shell would outlive the tab.
-    pub fn terminate(&self) {
+    /// The process's working directory (OSC 7), when the program reported one.
+    pub fn live_cwd(&self) -> Option<String> {
+        self.live_cwd.borrow().clone()
+    }
+
+    /// Terminate the process and stop the pump. Idempotent; the tab calls
+    /// this when it closes, because dropping the view alone cannot: both
+    /// watcher threads hold the pty open, so the shell would outlive the tab.
+    pub fn kill(&self) {
         self.exited.set(true);
-        self.pty.terminate();
+        // Detached: the sweep blocks for a sysinfo snapshot plus the
+        // SIGTERM grace window — never on the UI thread.
+        let process = Arc::clone(&self.process);
+        std::thread::spawn(move || process.kill());
     }
 
     /// Put the viewport back on the active area. Called on every keystroke:
@@ -310,7 +403,7 @@ impl GhosttyView {
             let inner = self.shared.inner.lock().unwrap();
             let _ = inner.term.resize(cols, rows, cell_w_px, cell_h_px);
         }
-        self.pty.resize(cols, rows);
+        self.process.resize(cols, rows);
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut gpui::Context<Self>) {
@@ -342,7 +435,7 @@ impl GhosttyView {
         if text.is_empty() {
             return;
         }
-        self.pty.write(text.as_bytes());
+        self.process.write(text.as_bytes());
         self.scroll_to_bottom();
     }
 
@@ -376,7 +469,7 @@ impl GhosttyView {
         if bytes.is_empty() {
             return false;
         }
-        self.pty.write(&bytes);
+        self.process.write(&bytes);
         true
     }
 
@@ -434,7 +527,8 @@ pub fn spawn_ghostty_view(
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| Path::new(".").to_path_buf())
     };
-    GhosttyView::spawn(&cwd, theme, cx)
+    let env = crate::settings::load().env;
+    GhosttyView::spawn_shell(&cwd, &env, theme, cx)
 }
 
 // ---------------------------------------------------------------------------

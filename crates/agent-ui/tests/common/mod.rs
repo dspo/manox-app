@@ -528,40 +528,27 @@ pub fn bash_tool_use_message(id: &str) -> Message {
     })])
 }
 
-/// A PTY source that never starts a process; the test drives its OUTPUT side
-/// directly through the shared sender (see the external-session regression
-/// binary for the long form).
-#[derive(Clone, Default)]
-pub struct FakePty {
-    pub event_tx: std::sync::Arc<
-        std::sync::Mutex<Option<async_channel::Sender<manox_terminal::event::TerminalEvent>>>,
-    >,
+/// A ghostty terminal fixture: a deterministic `TestProcess` behind a ready
+/// view. The probe drives both directions — feed output as if the shell
+/// wrote it, mark exit, read what the "user" typed.
+pub struct TerminalFixture {
+    pub view: gpui::Entity<steer_ghostty::GhosttyView>,
+    pub probe: steer_ghostty::test_support::TestProbe,
 }
 
-impl FakePty {
-    pub fn emit(&self, bytes: &[u8]) {
-        self.event_tx
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("pty started")
-            .send_blocking(manox_terminal::event::TerminalEvent::PtyOutput(
-                bytes.to_vec(),
-            ))
-            .expect("event channel open");
-    }
-}
-
-impl manox_terminal::pty_source::PtySource for FakePty {
-    fn start(&mut self, event_tx: async_channel::Sender<manox_terminal::event::TerminalEvent>) {
-        *self.event_tx.lock().unwrap() = Some(event_tx);
-    }
-    fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn resize(&self, _cols: u16, _rows: u16) -> std::io::Result<()> {
-        Ok(())
-    }
+/// Build the fixture. Call before handing `view` to
+/// `spawn_external_session`.
+pub fn ghostty_fixture(cx: &mut TestAppContext) -> TerminalFixture {
+    let (process, probe) = steer_ghostty::test_support::test_process();
+    let view = cx.update(|cx| {
+        steer_ghostty::GhosttyView::spawn_with(
+            std::sync::Arc::new(process) as std::sync::Arc<dyn steer_ghostty::TerminalProcess>,
+            steer_ghostty::Theme::LIGHT,
+            cx,
+        )
+        .expect("ghostty fixture spawns")
+    });
+    TerminalFixture { view, probe }
 }
 
 /// The REAL chrome assembly (shell + sidebar + production select hook)

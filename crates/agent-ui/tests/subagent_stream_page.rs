@@ -144,28 +144,6 @@ fn child_settled(parts: &[&str]) -> ahp_types::state::ChatState {
     )
 }
 
-/// A PTY source that never starts a process: the external session this test
-/// hands the main column to takes the REAL `spawn_external_session` /
-/// `open_external_session` paths.
-#[derive(Clone, Default)]
-struct FakePty {
-    event_tx: std::sync::Arc<
-        std::sync::Mutex<Option<async_channel::Sender<manox_terminal::event::TerminalEvent>>>,
-    >,
-}
-
-impl manox_terminal::pty_source::PtySource for FakePty {
-    fn start(&mut self, event_tx: async_channel::Sender<manox_terminal::event::TerminalEvent>) {
-        *self.event_tx.lock().unwrap() = Some(event_tx);
-    }
-    fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn resize(&self, _cols: u16, _rows: u16) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// The block's lines come from the parent chat's live background work, and a
 /// line's click puts THAT child's transcript in the main column (never the
 /// parent's rows); the page then follows the child's fold on its own store
@@ -310,19 +288,10 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
     // taking the column (the project menu's launch, the sidebar's
     // parked-session row, and any later mode flip) must drop the page — its
     // observer dies with it, so a dropped page follows nothing.
+    let fixture = common::ghostty_fixture(cx);
     let any = window.into();
     cx.update_window(any, |_, window, cx| {
         workspace.update(cx, |ws, cx| {
-            let terminal = manox_terminal::Terminal::spawn(
-                "probe-ext-pty".into(),
-                std::path::PathBuf::from("/tmp"),
-                80,
-                24,
-                Box::new(FakePty::default()),
-            )
-            .expect("fake terminal spawns");
-            let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-            let view = terminal_ui::TerminalView::new(proxy, cx);
             ws.spawn_external_session(
                 agent_ui::workspace::external_sessions::ExternalSessionLaunch {
                     agent_id: "claude",
@@ -330,10 +299,10 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
                     project: None,
-                    // The fake PTY has no cx session behind it.
+                    cwd: std::path::PathBuf::from("/tmp"),
                     handle: None,
                 },
-                view,
+                fixture.view.clone(),
                 window,
                 cx,
             );

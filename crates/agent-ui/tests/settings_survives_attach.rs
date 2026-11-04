@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::{FakePty, init_harness, landing_thread, open_assembly};
+use common::{init_harness, landing_thread, open_assembly};
 use gpui::{AppContext as _, TestAppContext};
 
 #[gpui::test]
@@ -93,19 +93,9 @@ async fn a_stale_attach_never_flips_past_settings_or_an_external_session(cx: &mu
     // Same guard for an external session: foregrounded, then a stale attach
     // lands — the session must keep the column (the exact regression the
     // round-2 review caught).
-    let pty = FakePty::default();
+    let fixture = common::ghostty_fixture(cx);
     cx.update_window(window.into(), |_, window, cx| {
         ws.update(cx, |ws, cx| {
-            let terminal = manox_terminal::Terminal::spawn(
-                "test-ext-pty".into(),
-                std::path::PathBuf::from("/tmp"),
-                80,
-                24,
-                Box::new(pty.clone()),
-            )
-            .expect("fake terminal spawns");
-            let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-            let view = terminal_ui::TerminalView::new(proxy, cx);
             ws.spawn_external_session(
                 agent_ui::workspace::external_sessions::ExternalSessionLaunch {
                     agent_id: "claude",
@@ -113,10 +103,10 @@ async fn a_stale_attach_never_flips_past_settings_or_an_external_session(cx: &mu
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
                     project: None,
-                    // The fake PTY has no cx session behind it.
+                    cwd: std::path::PathBuf::from("/tmp"),
                     handle: None,
                 },
-                view,
+                fixture.view.clone(),
                 window,
                 cx,
             );

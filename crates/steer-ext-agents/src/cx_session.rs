@@ -1,48 +1,44 @@
-//! `PtySource` backed by a `cx::SessionHandle`. This bridge lives in
-//! ext-agents (next to the `SessionHandle` it wraps); the terminal core
-//! itself is consumed from the runtime repo via git dependency.
+//! [`TerminalProcess`] over a `cx::SessionHandle`. This bridge lives in
+//! ext-agents (next to the `SessionHandle` it wraps); the terminal view
+//! itself is `steer_ghostty::GhosttyView`.
 //!
-//! An external agent CLI (claude/codex/copilot) runs under a PTY that cx owns;
-//! this module bridges cx's blocking `SessionHandle::read` / `wait` into the
-//! same `TerminalEvent` channel a local-shell `PtyHandle` emits onto, so the
-//! rendering pipeline is identical for both sources.
+//! An external agent CLI (claude/codex/copilot) runs under a PTY that cx
+//! owns; this module bridges cx's blocking `SessionHandle::read` / `wait`
+//! into the ghostty view's [`ProcessOutput`], so the rendering pipeline is
+//! identical for a local shell and a cx-hosted agent.
 
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
-use async_channel::Sender;
-
-use manox_terminal::event::TerminalEvent;
-use manox_terminal::pty_source::PtySource;
+use steer_term_process::{ProcessOutput, TerminalProcess};
 
 use crate::SessionHandle;
 
-/// A `PtySource` over a shared `cx::SessionHandle`. The handle is held behind
-/// `Arc` so the external-session owner (the workspace's `ExternalSession`)
-/// keeps an independent clone for explicit `kill` on close, while the terminal
-/// render path drives IO through this source.
-pub struct CxSessionSource {
+/// A [`TerminalProcess`] over a shared `cx::SessionHandle`. The handle is
+/// held behind `Arc` so the external-session owner (the workspace's
+/// `ExternalSession`) keeps an independent clone for explicit `kill` on
+/// close, while the terminal render path drives IO through this process.
+pub struct CxProcess {
     handle: Arc<SessionHandle>,
 }
 
-impl CxSessionSource {
+impl CxProcess {
     /// Wrap a shared handle. The caller keeps its own `Arc` clone for the
-    /// external-session close path; this source only borrows the share.
+    /// external-session close path; this process only borrows the share.
     pub fn new(handle: Arc<SessionHandle>) -> Self {
         Self { handle }
     }
 }
 
-impl PtySource for CxSessionSource {
-    fn start(&mut self, event_tx: Sender<TerminalEvent>) {
-        // Reader: blocking `handle.read` → `PtyOutput`. EOF (0 bytes) means the
+impl TerminalProcess for CxProcess {
+    fn attach(self: Arc<Self>, out: ProcessOutput) {
+        // Reader: blocking `handle.read` → `output`. EOF (0 bytes) means the
         // agent closed its stdout / died; `Interrupted` is retried, other
         // errors break. A bare `std::thread` (not `spawn_blocking`) so the
         // tokio pool is never blocked by an unbounded PTY read.
         let reader_handle = Arc::clone(&self.handle);
-        let reader_tx = event_tx.clone();
+        let reader_out = out.clone();
         thread::Builder::new()
             .name("steer-cx-reader".into())
             .spawn(move || {
@@ -50,14 +46,7 @@ impl PtySource for CxSessionSource {
                 loop {
                     match reader_handle.read(&mut buf) {
                         Ok(0) => break,
-                        Ok(n) => {
-                            if reader_tx
-                                .send_blocking(TerminalEvent::PtyOutput(buf[..n].to_vec()))
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
+                        Ok(n) => reader_out.output(&buf[..n]),
                         Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
                     }
@@ -65,39 +54,35 @@ impl PtySource for CxSessionSource {
             })
             .expect("spawn cx reader thread");
 
-        // Waiter: blocking `handle.wait` reaps the child once, then emits
-        // `ChildExit`. `wait` is one-shot (takes the child out of its Mutex),
-        // so exactly one waiter thread exists per session — the source is
-        // constructed once per session and `start` is called once.
+        // Waiter: blocking `handle.wait` reaps the child once, then reports
+        // the exit. `wait` is one-shot (takes the child out of its Mutex),
+        // so exactly one waiter thread exists per session — the process is
+        // constructed once per session and `attach` is called once.
         let waiter_handle = Arc::clone(&self.handle);
         thread::Builder::new()
             .name("steer-cx-wait".into())
             .spawn(move || {
-                let code = match waiter_handle.wait() {
-                    Ok(result) => result.exit_code,
-                    Err(_) => -1,
-                };
-                let _ = event_tx.send_blocking(TerminalEvent::ChildExit(code));
+                let code = waiter_handle
+                    .wait()
+                    .ok()
+                    .map(|result| result.exit_code as u32);
+                out.exited(code);
             })
             .expect("spawn cx waiter thread");
     }
 
-    fn write(&self, bytes: &[u8]) -> io::Result<()> {
+    fn write(&self, bytes: &[u8]) {
         // `write_bytes` — raw, no trailing newline. Keystroke-grade TUI
         // driving (arrow keys, Ctrl+C, paste fragments) rather than line
         // injection; `cx::SessionHandle::write` is the line path.
-        self.handle
-            .write_bytes(bytes)
-            .map_err(|e| io::Error::other(e.to_string()))
+        let _ = self.handle.write_bytes(bytes);
     }
 
-    fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-        self.handle
-            .resize(cols, rows)
-            .map_err(|e| io::Error::other(e.to_string()))
+    fn resize(&self, cols: u16, rows: u16) {
+        let _ = self.handle.resize(cols, rows);
     }
 
-    fn socket_path(&self) -> Option<&Path> {
-        self.handle.socket_path()
+    fn kill(&self) {
+        let _ = self.handle.kill();
     }
 }

@@ -11,8 +11,17 @@ build = "build.rs"
 name = "steer_ghostty"
 path = "src/lib.rs"
 
+[features]
+# The deterministic TestProcess/TestProbe pair for hosts' own tests.
+test-support = []
+
 [dependencies]
 gpui.workspace = true
+libc = "0.2"
+serde.workspace = true
+toml.workspace = true
+steer-term-process.workspace = true
+sysinfo.workspace = true
 portable-pty.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true

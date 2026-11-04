@@ -17,7 +17,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use agent_ui::workspace::container::ContainerEvent;
-use common::FakePty;
 use gpui::{AppContext as _, TestAppContext};
 
 #[gpui::test]
@@ -75,19 +74,9 @@ async fn container_death_flips_on_both_homes(cx: &mut TestAppContext) {
     // ── external: the process exit is death (D8) ──
     // Launch an external session the way the project menu does (the record
     // lands through the unified container entry).
-    let pty = FakePty::default();
+    let fixture = common::ghostty_fixture(cx);
     cx.update_window(window, |_, window, cx| {
         ws.update(cx, |ws, cx| {
-            let terminal = manox_terminal::Terminal::spawn(
-                "test-ext-pty".into(),
-                std::path::PathBuf::from("/tmp"),
-                80,
-                24,
-                Box::new(pty.clone()),
-            )
-            .expect("fake terminal spawns");
-            let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-            let view = terminal_ui::TerminalView::new(proxy, cx);
             ws.spawn_external_session(
                 agent_ui::workspace::external_sessions::ExternalSessionLaunch {
                     agent_id: "claude",
@@ -97,8 +86,9 @@ async fn container_death_flips_on_both_homes(cx: &mut TestAppContext) {
                     project: None,
                     // The fake PTY has no cx session behind it.
                     handle: None,
+                    cwd: std::path::PathBuf::from("/tmp"),
                 },
-                view,
+                fixture.view.clone(),
                 window,
                 cx,
             );
@@ -129,13 +119,7 @@ async fn container_death_flips_on_both_homes(cx: &mut TestAppContext) {
     // The 0 号 exits: the PTY's child-exit event flips the predicate. The
     // bytes cross the kernel pump before the gpui proxy emits, so the flip
     // is polled, not assumed.
-    pty.event_tx
-        .lock()
-        .unwrap()
-        .as_ref()
-        .expect("pty started")
-        .send_blocking(manox_terminal::event::TerminalEvent::ChildExit(0))
-        .expect("event channel open");
+    fixture.probe.exit(Some(0)); /* placeholder */
     let mut flipped = false;
     for _ in 0..250 {
         cx.run_until_parked();

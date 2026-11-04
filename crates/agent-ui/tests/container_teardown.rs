@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_ui::workspace::external_sessions::ExternalSessionLaunch;
-use common::FakePty;
 use gpui::{AppContext as _, TestAppContext};
 use steer_ext_agents::SessionHandle;
 
@@ -77,22 +76,11 @@ fn spawn_external(
     window: gpui::AnyWindowHandle,
     agent_id: &'static str,
     handle: Option<Arc<SessionHandle>>,
-) -> (String, FakePty) {
-    let pty = FakePty::default();
+) -> (String, common::TerminalFixture) {
+    let fixture = common::ghostty_fixture(cx);
     let ws = ws.clone();
-    let pty_for_spawn = pty.clone();
     cx.update_window(window, |_, window, cx| {
         ws.update(cx, |ws, cx| {
-            let terminal = manox_terminal::Terminal::spawn(
-                format!("teardown-{agent_id}"),
-                std::path::PathBuf::from("/tmp"),
-                80,
-                24,
-                Box::new(pty_for_spawn),
-            )
-            .expect("fake terminal spawns");
-            let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-            let view = terminal_ui::TerminalView::new(proxy, cx);
             ws.spawn_external_session(
                 ExternalSessionLaunch {
                     agent_id,
@@ -100,9 +88,10 @@ fn spawn_external(
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
                     project: None,
+                    cwd: std::path::PathBuf::from("/tmp"),
                     handle,
                 },
-                view,
+                fixture.view.clone(),
                 window,
                 cx,
             );
@@ -116,7 +105,7 @@ fn spawn_external(
             .find(|id| id.starts_with(&format!("external:{agent_id}:")))
             .expect("the external container registered")
     });
-    (row, pty)
+    (row, fixture)
 }
 
 /// Poll until `predicate` holds (the teardown beats run across real pumps
@@ -143,7 +132,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
 
     // ── closing an external row kills the child explicitly ──────────────
     let (_dir, cat) = spawn_cat();
-    let (row, _row_pty) = spawn_external(cx, &ws, window, "claude", Some(cat.clone()));
+    let (row, _row_probe) = spawn_external(cx, &ws, window, "claude", Some(cat.clone()));
     cx.update(|cx| ws.update(cx, |ws, cx| ws.close_external_session(&row, cx)));
     wait_until(cx, "the closed external row dropped", |cx| {
         !ws.read_with(cx, |ws, _| ws.is_external_session(&row))
@@ -154,7 +143,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     );
 
     // ── an external death drops the row and reclaims the resources ──────
-    let (row2, row2_pty) = spawn_external(cx, &ws, window, "codex", None);
+    let (row2, row2_probe) = spawn_external(cx, &ws, window, "codex", None);
     // Plant the resources the container would hold: a CLI tab's kill handle
     // (a REAL child, so the reclaim is observable) and a browser route.
     let (_dir2, cat2) = spawn_cat();
@@ -185,14 +174,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     );
     // The 0 号 exits: the death predicate flips and the workspace's own
     // subscription runs the ONE teardown.
-    row2_pty
-        .event_tx
-        .lock()
-        .unwrap()
-        .as_ref()
-        .expect("pty started")
-        .send_blocking(manox_terminal::event::TerminalEvent::ChildExit(0))
-        .expect("event channel open");
+    row2_probe.probe.exit(Some(0));
     wait_until(cx, "the dead external's row dropped", |cx| {
         !ws.read_with(cx, |ws, _| ws.is_external_session(&row2))
     });
@@ -231,7 +213,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     // A FOREIGN container's browser route must survive the /exit — the
     // reclaim is keyed, not a global nuke. (The outgoing side shares its
     // reclaim face with the death path asserted above; this section runs
-    // BEFORE the dock section because a fake TerminalView parked in the
+    // BEFORE the dock section because a fake terminal view parked in the
     // shell is a test-only construct whose presence across the waterfall's
     // simulated-timer beats wedges the hermetic host — the sections stay
     // independent.) The browser asserts ride the integrated browser's
@@ -258,21 +240,8 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     }
 
     // ── the dock/right stash is keyed per container ─────────────────────
-    let fake_dock_view = |cx: &mut TestAppContext| {
-        let pty = FakePty::default();
-        cx.update(|cx| {
-            let terminal = manox_terminal::Terminal::spawn(
-                "stash-dock-pty".into(),
-                std::path::PathBuf::from("/tmp"),
-                80,
-                24,
-                Box::new(pty),
-            )
-            .expect("fake terminal spawns");
-            let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
-            gpui::AnyView::from(terminal_ui::TerminalView::new(proxy, cx))
-        })
-    };
+    let fake_dock_view =
+        |cx: &mut TestAppContext| gpui::AnyView::from(common::ghostty_fixture(cx).view);
     let attach = |cx: &mut TestAppContext,
                   id: &str,
                   ws: &gpui::Entity<agent_ui::Workspace>,

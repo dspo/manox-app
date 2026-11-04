@@ -58,15 +58,10 @@ fn main() {
     });
 }
 
-/// Component-layer / runtime / font / theme init. Order matters: the
-/// terminal's PTY pump needs the shared runtime handle before
-/// `manox_terminal::init` builds its store.
+/// Component-layer / font / theme init.
 fn configure(cx: &mut gpui::App) {
     gpui_component::init(cx);
     steer_i18n::init();
-    manox_terminal::runtime::set_runtime(manox_agent::runtime::handle().clone());
-    manox_terminal::init();
-    terminal_ui::init(cx);
     register_fonts(cx);
 
     // The global component-theme choice belongs to the HOST (the shipped app
@@ -549,7 +544,7 @@ impl ToolTab for TerminalTab {
     }
 
     fn render(&self, _window: &mut Window, _cx: &gpui::App, store: &TabStore) -> gpui::AnyElement {
-        match store.get::<terminal_ui::TerminalView>(&self.id) {
+        match store.get::<steer_ghostty::GhosttyView>(&self.id) {
             Some(view) => div()
                 .w_full()
                 .h_full()
@@ -573,25 +568,21 @@ fn home_cwd() -> std::path::PathBuf {
         .unwrap_or_else(|_| ".".into())
 }
 
-/// Launch a PTY + TerminalView: `None` = the user's shell; `Some(prog)` =
+/// Launch a PTY + GhosttyView: `None` = the user's shell; `Some(prog)` =
 /// an explicit program. Shared by the right-pane tabs and the bottom dock.
 fn spawn_terminal(
     binary: Option<&str>,
     cwd: &std::path::Path,
     cx: &mut gpui::App,
-) -> Result<Entity<terminal_ui::TerminalView>, String> {
-    let prog = binary.unwrap_or("$SHELL");
-    let source: Box<dyn manox_terminal::pty_source::PtySource> = match binary {
-        None => manox_terminal::pty::default_source(cwd, 80, 24),
-        Some(prog) => manox_terminal::pty::open(cwd, 80, 24, Some(prog), &[])
-            .map(|h| Box::new(h) as Box<dyn manox_terminal::pty_source::PtySource>),
+) -> Result<Entity<steer_ghostty::GhosttyView>, String> {
+    match binary {
+        None => steer_ghostty::spawn_ghostty_view(cwd, steer_ghostty::Theme::LIGHT, cx),
+        Some(prog) => {
+            let process = steer_ghostty::pty::Pty::spawn_shell(prog, &[], cwd, &[], 80, 24)
+                .map_err(|e| e.to_string())?;
+            steer_ghostty::GhosttyView::spawn_with(process, steer_ghostty::Theme::LIGHT, cx)
+        }
     }
-    .map_err(|e| e.to_string())?;
-    let id = format!("chrome-shell:{prog}:{}", next_instance_id("pty"));
-    let handle = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, source)
-        .map_err(|e| e.to_string())?;
-    let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(handle, cx));
-    Ok(terminal_ui::TerminalView::new(proxy, cx))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]

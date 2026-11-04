@@ -5,7 +5,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
+
+/// Grace between the SIGTERM pass and the SIGKILL pass of [`Pty::terminate`]:
+/// long enough for editors and TUIs to restore the terminal, short enough
+/// that a close feels immediate.
+const SIGTERM_GRACE: Duration = Duration::from_millis(100);
+
+use steer_term_process::{ProcessOutput, TerminalProcess};
 
 /// Poll cadence of [`Pty::wait`]. The exit watcher sleeps here between
 /// non-blocking reaps so [`Pty::terminate`] can take the child lock promptly;
@@ -14,8 +21,19 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 const REAP_POLL: Duration = Duration::from_millis(50);
 
 pub struct Pty {
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Keystroke/paste bytes land on this queue and a dedicated thread
+    /// drains it — a blocking `write_all` on the UI thread would hold the
+    /// terminal lock and stall against a child that never reads stdin.
+    writer_tx: async_channel::Sender<Vec<u8>>,
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
+    /// Cloned from the child at spawn: the lock-free kill handle
+    /// [`Pty::terminate`] falls back to.
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// The shell's pid, when the platform exposes it: the root of the
+    /// descendant sweep in [`Pty::terminate`].
+    pid: Option<u32>,
+    /// Taken by [`TerminalProcess::attach`] to start the reader thread.
+    reader: Mutex<Option<Box<dyn Read + Send>>>,
     /// `None` once reaped or terminated: this is the handle every kill path
     /// takes, and dropping it is what lets the process go.
     child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
@@ -23,15 +41,16 @@ pub struct Pty {
 }
 
 impl Pty {
-    /// Spawn `shell` on a new pty. Returns the handle plus the blocking
-    /// reader end (hand it to a thread that feeds the emulator).
+    /// Spawn `shell` on a new pty. The reader end is held internally and
+    /// starts with [`TerminalProcess::attach`].
     pub fn spawn_program(
         program: &str,
         args: &[&str],
         cwd: &std::path::Path,
+        env: &[(String, String)],
         cols: u16,
         rows: u16,
-    ) -> anyhow::Result<(Self, Box<dyn Read + Send>)> {
+    ) -> anyhow::Result<Self> {
         let pair = native_pty_system().openpty(PtySize {
             rows,
             cols,
@@ -44,8 +63,16 @@ impl Pty {
             cmd.arg(a);
         }
         cmd.cwd(cwd);
+        // Settings/container pairs ride OVER the process-inherited world
+        // (last-entry-wins against same-named inherited variables).
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // The old core spoofed TERM_PROGRAM=iTerm.app to trick Claude Code
+        // into enabling the kitty keyboard protocol; the ghostty core
+        // implements that protocol natively, so the honest name works.
         cmd.env("TERM_PROGRAM", "Steer");
         let child = pair.slave.spawn_command(cmd)?;
         // Drop the parent-side slave handle so the pty EOFs when the child's
@@ -54,21 +81,51 @@ impl Pty {
 
         let writer = pair.master.take_writer()?;
         let reader = pair.master.try_clone_reader()?;
-        Ok((
-            Self {
-                writer: Arc::new(Mutex::new(writer)),
-                master: Mutex::new(pair.master),
-                child: Mutex::new(Some(child)),
-                closed: AtomicBool::new(false),
-            },
-            reader,
-        ))
+        let killer = Mutex::new(child.clone_killer());
+        let pid = child.process_id();
+        // Writer thread: drain the queue off the caller's thread. The
+        // channel closes when the Pty drops its send-end, ending the thread.
+        let (writer_tx, writer_rx) = async_channel::unbounded::<Vec<u8>>();
+        std::thread::Builder::new()
+            .name("steer-ghostty-writer".into())
+            .spawn(move || {
+                let mut w = writer;
+                while let Ok(bytes) = writer_rx.recv_blocking() {
+                    let _ = w.write_all(&bytes);
+                    let _ = w.flush();
+                }
+            })
+            .expect("spawn ghostty writer thread");
+        Ok(Self {
+            writer_tx,
+            master: Mutex::new(pair.master),
+            reader: Mutex::new(Some(reader)),
+            child: Mutex::new(Some(child)),
+            killer,
+            pid,
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// Spawn `$SHELL` (or any program) at `cwd` — the built-in
+    /// [`TerminalProcess`] for shell tabs.
+    pub fn spawn_shell(
+        program: &str,
+        args: &[&str],
+        cwd: &std::path::Path,
+        env: &[(String, String)],
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<Arc<dyn TerminalProcess>> {
+        Ok(Arc::new(Self::spawn_program(
+            program, args, cwd, env, cols, rows,
+        )?))
     }
 
     pub fn write(&self, bytes: &[u8]) {
-        let mut w = self.writer.lock().unwrap();
-        let _ = w.write_all(bytes);
-        let _ = w.flush();
+        // The queue is unbounded, so this never blocks the UI thread; the
+        // writer thread owns the blocking `write_all`.
+        let _ = self.writer_tx.send_blocking(bytes.to_vec());
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -81,16 +138,52 @@ impl Pty {
         });
     }
 
-    /// Terminate the shell. Idempotent, non-blocking, safe from any thread:
-    /// closing the child is what unblocks the reader (the pty EOFs) and the
-    /// exit watcher. Without this a closed tab leaves the shell — and both of
-    /// its watcher threads — running for the life of the process.
+    /// Terminate the shell. Idempotent and safe from any thread, but
+    /// **blocking**: the sweep costs a sysinfo snapshot plus the SIGTERM
+    /// grace window (~100ms+), so callers must run it off the UI thread
+    /// (`GhosttyView::kill` spawns it detached; the `Pty::Drop` fallback
+    /// blocks whatever thread drops the view). Without a terminate, a closed
+    /// tab leaves the shell — and both of its watcher threads — running for
+    /// the life of the process.
     pub fn terminate(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        let mut child = self.child.lock().unwrap();
-        if let Some(child) = child.as_mut() {
-            let _ = child.kill();
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
         }
+        // Interactive shells give every job its own process group, so one
+        // group signal leaks background jobs (`npm run dev &` would survive
+        // the tab closing). Sweep the shell's whole descendant tree across
+        // their groups, plus the pty's current foreground group:
+        // SIGTERM first — editors and TUIs restore the terminal — then
+        // SIGKILL whatever ignored the grace window.
+        let fg_group = self.master.lock().unwrap().process_group_leader();
+        if let Some(pid) = self.pid {
+            let descendants = descendant_pids(pid);
+            let mut targets: Vec<i32> = descendants.iter().map(|p| *p as i32).collect();
+            targets.push(pid as i32);
+            for t in &targets {
+                unsafe { libc::kill(*t, libc::SIGTERM) };
+            }
+            // The foreground group needs the negative-pgid form — the plain
+            // call would only reach the group leader, not its members.
+            if let Some(group) = fg_group {
+                unsafe { libc::kill(-group, libc::SIGTERM) };
+            }
+            std::thread::sleep(SIGTERM_GRACE);
+            for t in &targets {
+                if alive(*t) {
+                    unsafe { libc::kill(*t, libc::SIGKILL) };
+                }
+            }
+            if let Some(group) = fg_group {
+                unsafe { libc::kill(-group, libc::SIGKILL) };
+            }
+            // The shell's own group: background jobs the sweep's parent
+            // chain cannot see are still members of it.
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        }
+        // Belt and braces regardless of pid visibility: the direct kill
+        // handle lands even when the sweep could not.
+        let _ = self.killer.lock().unwrap().kill();
     }
 
     /// Reap the child, polling so the lock is never held across a blocking
@@ -126,10 +219,106 @@ impl Pty {
     }
 }
 
+/// Every live pid whose parent chain reaches `root` (the shell), from one
+/// sysinfo snapshot.
+fn descendant_pids(root: u32) -> Vec<u32> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let processes = system.processes();
+    let root_pid = Pid::from_u32(root);
+    let parent_of: std::collections::HashMap<Pid, Option<Pid>> =
+        processes.values().map(|p| (p.pid(), p.parent())).collect();
+    let mut out = Vec::new();
+    for &pid in processes.keys() {
+        let mut cur = Some(pid);
+        loop {
+            match cur {
+                Some(p) if p == root_pid => {
+                    out.push(pid.as_u32());
+                    break;
+                }
+                // `parent == self` is a cycle guard, not a hit.
+                Some(p) => cur = parent_of.get(&p).copied().flatten().filter(|n| *n != p),
+                None => break,
+            }
+        }
+    }
+    out
+}
+
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+impl TerminalProcess for Pty {
+    fn attach(self: Arc<Self>, out: ProcessOutput) {
+        // Reader: blocking pty read → folded into the terminal.
+        let this = Arc::clone(&self);
+        let out_for_exit = out.clone();
+        if let Some(mut reader) = self.reader.lock().unwrap().take() {
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => out.output(&buf[..n]),
+                    }
+                }
+            });
+        }
+        // Waiter: `wait` polls (never holds the child lock across a block)
+        // and returns `None` only when the host terminated the process — a
+        // host-side kill is close semantics, not a reportable exit.
+        std::thread::spawn(move || {
+            if let Some(code) = this.wait() {
+                out_for_exit.exited(Some(code));
+            }
+        });
+    }
+
+    fn write(&self, bytes: &[u8]) {
+        Pty::write(self, bytes)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) {
+        Pty::resize(self, cols, rows)
+    }
+
+    fn kill(&self) {
+        Pty::terminate(self)
+    }
+}
+
 impl Drop for Pty {
     fn drop(&mut self) {
         // Belt and braces: a view dropped without `terminate` must not orphan
         // the shell.
         self.terminate();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::descendant_pids;
+
+    /// A spawned child is in the sweep's parent chain — the exact regression
+    /// behind the old core's proctree (a single group signal misses `sleep &
+    ///`, which sits in its own group).
+    #[test]
+    fn a_spawned_child_is_a_descendant() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn the probe child");
+        let pid = child.id();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let found = descendant_pids(std::process::id());
+        assert!(
+            found.contains(&pid),
+            "a spawned child is in the sweep: {found:?}"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

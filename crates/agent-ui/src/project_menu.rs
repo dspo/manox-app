@@ -174,6 +174,7 @@ pub fn group_menu(
                                 project: dir_terminal.clone(),
                                 // A plain shell owns no cx session handle —
                                 // its PTY dies with the view drop.
+                                cwd: cwd.clone(),
                                 handle: None,
                             },
                             view,
@@ -282,6 +283,7 @@ fn spawn_agent_tab(request: &AgentSpawn, window: &mut Window, cx: &mut App) {
                 label: display.to_string(),
                 svg,
                 project,
+                cwd: cwd.clone(),
                 handle: Some(spawned.handle),
             },
             spawned.view,
@@ -299,7 +301,7 @@ fn spawn_agent_tab(request: &AgentSpawn, window: &mut Window, cx: &mut App) {
 fn launch_external(
     ws: &gpui::WeakEntity<Workspace>,
     launch: crate::workspace::external_sessions::ExternalSessionLaunch<'_>,
-    view: Entity<terminal_ui::TerminalView>,
+    view: Entity<steer_ghostty::GhosttyView>,
     window: &mut Window,
     cx: &mut App,
 ) {

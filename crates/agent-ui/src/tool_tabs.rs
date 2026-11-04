@@ -2,9 +2,9 @@
 //! right-pane tabs.
 //!
 //! Kinds shipped here:
-//! - integrated terminal ($SHELL, standalone PTY);
-//! - ghostty terminal ($SHELL on a libghostty-vt emulation core, standalone
-//!   PTY, GPUI-drawn from render-state snapshots);
+//! - ghostty terminal ($SHELL on the libghostty-vt emulation core, standalone
+//!   PTY, GPUI-drawn from render-state snapshots) — the integrated terminal
+//!   since the Ghostty migration;
 //! - CLI agent terminals (claude / codex / copilot via the cx
 //!   `AgentBuilder`): the tab opens on a provider→model MODEL PICKER and
 //!   hands over to the TUI;
@@ -29,7 +29,7 @@ use gpui::{
 use gpui_component::WindowExt as _;
 use steer_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
 use steer_agent_chrome_ui::theme::{FG_DIM, IconAsset, icon, icons};
-use steer_ext_agents::cx_session::CxSessionSource;
+use steer_ext_agents::cx_session::CxProcess;
 
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
 
@@ -41,7 +41,7 @@ fn next_instance_id(kind: &str) -> String {
 /// the three CLI-agent TUI tabs (claude / codex / copilot). Closing the tab
 /// drops the view (the view drop tears the process tree down); the CLI tabs'
 /// children die by their registered kill handle first.
-pub const PTY_TAB_KINDS: [&str; 4] = ["terminal", "claude", "codex", "copilot"];
+pub const PTY_TAB_KINDS: [&str; 4] = ["ghostty", "claude", "codex", "copilot"];
 
 /// The FOREGROUND CONTAINER's working directory (D10/D6: resources root at
 /// their owning container's attrs cwd — a native container's session-channel
@@ -72,10 +72,10 @@ pub(crate) fn thread_attrs_for_spawn(cx: &App) -> crate::workspace::container::C
         })
 }
 
-/// The standalone PTY spawn's environment layering, as a pure function (the
+/// The standalone spawn's environment layering, as a pure function (the
 /// A7-approved capability's testable core): the container's creation-time
 /// snapshot rides BETWEEN the process-inherited base and the user's
-/// `[terminal].env`. `pty::open` applies the returned slice over the
+/// `[terminal].env`. The ghostty spawn applies the returned slice over the
 /// inherited world with last-entry-wins, so a container value beats the
 /// process base's same-named variable and a settings value beats the
 /// container's — the ORDER of the returned pairs is the authority chain.
@@ -92,91 +92,13 @@ pub(crate) fn layered_env(
     env
 }
 
-// ── integrated terminal ────────────────────────────────────────────────────
-
-/// The integrated-terminal kind: one $SHELL per tab, mount-equals-launch.
-pub struct TerminalTool;
-
-impl ToolTabFactory for TerminalTool {
-    fn kind(&self) -> &'static str {
-        "terminal"
-    }
-
-    fn create(&self) -> Arc<dyn ToolTab> {
-        Arc::new(TerminalTab {
-            id: next_instance_id("terminal"),
-        })
-    }
-
-    fn quick_action(&self) -> Option<SharedString> {
-        Some(steer_i18n::t("chrome-quick-terminal").into())
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::TERMINAL, 15.).into_any_element()
-    }
-}
-
-struct TerminalTab {
-    id: String,
-}
-
-impl ToolTab for TerminalTab {
-    fn kind(&self) -> &'static str {
-        "terminal"
-    }
-
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        steer_i18n::t("chrome-tab-terminal").into()
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::TERMINAL, 15.).into_any_element()
-    }
-
-    fn open(
-        &self,
-        _window: &mut Window,
-        cx: &mut App,
-        store: &mut TabStore,
-        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-    ) {
-        let attrs = thread_attrs_for_spawn(cx);
-        match spawn_standalone_terminal(&attrs.cwd, &attrs, cx) {
-            Ok(view) => store.put(&self.id, view),
-            Err(e) => store.set_error(
-                &self.id,
-                steer_i18n::t_str("chrome-spawn-failed", &[("prog", "$SHELL"), ("err", &e)]),
-            ),
-        }
-    }
-
-    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
-        use gpui::{ParentElement, Styled, div, px};
-        match store.get::<terminal_ui::TerminalView>(&self.id) {
-            Some(view) => div()
-                .w_full()
-                .h_full()
-                .flex()
-                .p(px(4.))
-                .child(view)
-                .into_any_element(),
-            None => div().w_full().h_full().into_any_element(),
-        }
-    }
-}
-
 // ── ghostty terminal ───────────────────────────────────────────────────────
 
-/// The ghostty-terminal kind: one $SHELL per tab on the libghostty-vt
-/// emulation core (GPUI-drawn from render-state snapshots). Unlike the
-/// integrated terminal it takes no `[terminal]` settings: the shell comes from
-/// `$SHELL`, and the surface colors from the chrome palette (see
-/// [`ghostty_theme`]).
+/// The ghostty-terminal kind: one shell per tab on the libghostty-vt
+/// emulation core (GPUI-drawn from render-state snapshots). The shell is
+/// `[terminal].shell` or the default user shell (login), env is the
+/// container snapshot layered under `[terminal].env`, and the surface colors
+/// come from the chrome palette (see [`ghostty_theme`]).
 pub struct GhosttyTool;
 
 impl ToolTabFactory for GhosttyTool {
@@ -235,7 +157,13 @@ impl ToolTab for GhosttyTab {
         store: &mut TabStore,
         _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
     ) {
-        match steer_ghostty::spawn_ghostty_view(&thread_cwd_or_home(cx), ghostty_theme(), cx) {
+        let attrs = thread_attrs_for_spawn(cx);
+        match steer_ghostty::GhosttyView::spawn_shell(
+            &attrs.cwd,
+            &layered_env(&attrs, &steer_ghostty::settings::load().env),
+            ghostty_theme(),
+            cx,
+        ) {
             Ok(view) => {
                 *self.view.lock().unwrap() = Some(view.clone());
                 store.put(&self.id, view);
@@ -251,7 +179,7 @@ impl ToolTab for GhosttyTab {
     /// threads, so dropping the entity alone would leave the process running.
     fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
         if let Some(view) = self.view.lock().unwrap().take() {
-            view.update(cx, |view, _cx| view.terminate());
+            view.update(cx, |view, _cx| view.kill());
         }
         store.reset(self.id());
     }
@@ -787,13 +715,13 @@ fn div_missing() -> gpui::Div {
 }
 
 /// The full cx launch path: registry-pinned agent + the picked endpoint →
-/// `AgentBuilder` (PTY relay) → `Terminal` → `TerminalView`. Dropping the
-/// view tears the child tree down; the handle is threaded OUT (the right-pane
-/// CLI tab record and the external record keep an independent clone) so a
-/// close can kill explicitly instead of leaning on drop timing — the
-/// contract `steer_ext_agents::cx_session` states.
+/// `AgentBuilder` (PTY relay) → `CxProcess` → `GhosttyView`. Dropping the
+/// view kills the child; the handle is threaded OUT (the right-pane CLI tab
+/// record and the external record keep an independent clone) so a close can
+/// kill explicitly instead of leaning on drop timing — the contract
+/// `steer_ext_agents::cx_session` states.
 pub(crate) struct SpawnedAgentTerminal {
-    pub view: Entity<terminal_ui::TerminalView>,
+    pub view: Entity<steer_ghostty::GhosttyView>,
     /// The child's session handle — the owner's kill clone.
     pub handle: Arc<steer_ext_agents::SessionHandle>,
     /// The REAL external session id (the cx session socket's `<id>.sock`
@@ -831,13 +759,10 @@ pub(crate) fn spawn_agent_terminal(
         .socket_path()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
         .unwrap_or_default();
-    let id = format!("chrome-assembly:{agent_id}:{}", next_instance_id("agent"));
-    let source = CxSessionSource::new(Arc::clone(&handle));
-    let terminal = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, Box::new(source))
-        .map_err(|e| e.to_string())?;
-    let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(terminal, cx));
+    let process = CxProcess::new(Arc::clone(&handle));
+    let view = steer_ghostty::GhosttyView::spawn_with(Arc::new(process), ghostty_theme(), cx)?;
     Ok(SpawnedAgentTerminal {
-        view: terminal_ui::TerminalView::new(proxy, cx),
+        view,
         handle,
         cx_session_id,
     })
@@ -1237,26 +1162,16 @@ pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
     attrs: &crate::workspace::container::ContainerAttrs,
     cx: &mut App,
-) -> Result<Entity<terminal_ui::TerminalView>, String> {
-    // An app-owned PTY rooted at `cwd`: the integrated terminal is an
-    // app-side surface no agent turn touches, and the shell must land where
-    // the caller picked — the foreground thread's project for the dock and
-    // right-pane spawns, the cascade's folder for the project menu.
-    // `default_source` reads shell + env from settings alone; this spawn
-    // needs the container's env slice between the process world and the
-    // user's settings, so the source is built directly (`pty::open` is the
-    // public constructor `default_source` wraps).
-    let settings = manox_terminal::settings::load();
-    let env_layer = layered_env(attrs, &settings.env);
-    let source: Box<dyn manox_terminal::pty_source::PtySource> = Box::new(
-        manox_terminal::pty::open(cwd, 80, 24, settings.shell.as_deref(), &env_layer)
-            .map_err(|e| e.to_string())?,
-    );
-    let id = format!("chrome-assembly:$SHELL:{}", next_instance_id("pty"));
-    let handle = manox_terminal::Terminal::spawn(id, cwd.to_path_buf(), 80, 24, source)
-        .map_err(|e| e.to_string())?;
-    let proxy = cx.new(|cx| terminal_ui::terminal_proxy::TerminalProxy::new(handle, cx));
-    Ok(terminal_ui::TerminalView::new(proxy, cx))
+) -> Result<Entity<steer_ghostty::GhosttyView>, String> {
+    // An app-owned PTY rooted at `cwd`: the terminal is an app-side surface
+    // no agent turn touches, and the shell must land where the caller
+    // picked — the foreground container's project for the dock and
+    // right-pane spawns, the cascade's folder for the project menu. The
+    // container's env snapshot rides BETWEEN the process world and the
+    // user's `[terminal].env` (the ghostty view does the layering with the
+    // same authority order `layered_env` documents).
+    let env_layer = layered_env(attrs, &steer_ghostty::settings::load().env);
+    steer_ghostty::GhosttyView::spawn_shell(cwd, &env_layer, ghostty_theme(), cx)
 }
 
 /// Brand glyph: the SVG asset rides the app's asset source
@@ -1304,7 +1219,6 @@ pub fn registry(
     vec![
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         Arc::new(BrowserTool::new(ws.clone())),
-        Arc::new(TerminalTool),
         Arc::new(GhosttyTool),
         Arc::new(AgentTool::new(
             "claude",
