@@ -164,15 +164,16 @@ impl Focusable for GhosttyView {
 impl EventEmitter<GhosttyEvent> for GhosttyView {}
 
 impl GhosttyView {
-    /// Spawn a `$SHELL` PTY rooted at `cwd` and return the ready view, with
-    /// its output pump already running.
-    /// Spawn the user's shell rooted at `cwd`. The `[terminal]` settings
-    /// override the shell program and layer their env pairs OVER
-    /// `container_env` (the container's creation snapshot — settings win the
-    /// same-named variable). The shell runs as a login shell (`-l`): a
-    /// Finder-launched app inherits launchd's minimal PATH, and the profile
-    /// scripts are how homebrew etc. reach the terminal. Explicit-program
-    /// processes skip this via [`Self::spawn_with`].
+    /// Spawn the shell rooted at `cwd` and return the ready view, with its
+    /// output pump already running. The shell is `[terminal].shell` when
+    /// set, otherwise the default user shell running as a login shell
+    /// (`-l`: a Finder-launched app inherits launchd's minimal PATH, and
+    /// the profile scripts are how homebrew etc. reach the terminal) — an
+    /// explicit `[terminal].shell` override is a program, not a login
+    /// shell. `container_env` is the caller's FINAL env slice (agent-ui
+    /// composes it via `layered_env`: container snapshot → `[terminal].env`,
+    /// settings win). Explicit-program processes skip this via
+    /// [`Self::spawn_with`].
     pub fn spawn_shell(
         cwd: &Path,
         container_env: &[(String, String)],

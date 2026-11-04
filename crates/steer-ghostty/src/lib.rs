@@ -23,8 +23,8 @@
 //! `STEER_GHOSTTY_CACHE` moves the build cache out of `OUT_DIR` (CI restores
 //! one so the zig build is not paid per job).
 //!
-//! Known gaps (deliberate, tracked for the replacement series — the integrated
-//! `terminal-ui` surface still has them):
+//! Known gaps (deliberate, accepted with the migration — these retire with
+//! the removed manox-terminal stack rather than being re-implemented here):
 //! - no text selection / copy (and therefore no `cmd+c`), no scrollback
 //!   indicator, no search overlay, no vi mode;
 //! - no mouse reporting: TUIs that ask for it (`vim`, `tmux`, `htop`) see the

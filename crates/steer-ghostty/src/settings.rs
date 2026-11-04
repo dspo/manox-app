@@ -32,13 +32,14 @@ pub fn load() -> TerminalSettings {
 }
 
 /// `MANOX_HOME/settings.toml`, falling back to `$HOME/.manox/settings.toml`
-/// — the same resolution `manox_agent::paths` performs, so embedders that
-/// redirect the state root get the redirected settings too.
+/// — the same resolution `manox_agent::paths` performs (an empty
+/// `MANOX_HOME` falls through too), so embedders that redirect the state
+/// root get the redirected settings.
 fn settings_path() -> Option<PathBuf> {
-    let root = match std::env::var_os("MANOX_HOME") {
-        Some(home) => PathBuf::from(home),
-        None => std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".manox"))?,
-    };
+    let root = std::env::var_os("MANOX_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".manox")))?;
     Some(root.join("settings.toml"))
 }
 

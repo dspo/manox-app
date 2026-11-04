@@ -719,7 +719,7 @@ fn div_missing() -> gpui::Div {
 /// view kills the child; the handle is threaded OUT (the right-pane CLI tab
 /// record and the external record keep an independent clone) so a close can
 /// kill explicitly instead of leaning on drop timing — the contract
-/// `steer_ext_agents::cx_process` states.
+/// `steer_ext_agents::cx_session` states.
 pub(crate) struct SpawnedAgentTerminal {
     pub view: Entity<steer_ghostty::GhosttyView>,
     /// The child's session handle — the owner's kill clone.
