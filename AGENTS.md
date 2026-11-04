@@ -4,7 +4,7 @@ Guidance for coding agents working in this repo.（本文件是 manox-app 仓库
 
 ## 项目概述
 
-manox-app（应用品牌 **Steer**，应用侧 crate 一律 steer-* 前缀；仓库名保持 dspo/manox-app）是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端、webview、系统托盘）与 cx 启动器（外部 agent CLI）。agent runtime（harness/agent/session-core/providers/supervisor，外加回流的终端仿真核心 manox-terminal 与 hyperlinks）来自 **dspo/manox**，经 git 依赖（tag 锁发布，见「与 manox 仓的联动开发」）+ 提交的 Cargo.lock 消费。单二进制、单进程。逐文件架构靠读代码获得——本文件只承载不可从代码推导的约束。
+manox-app（应用品牌 **Steer**，应用侧 crate 一律 steer-* 前缀；仓库名保持 dspo/manox-app）是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端、webview、系统托盘）与 cx 启动器（外部 agent CLI）。agent runtime（harness/agent/session-core/providers/supervisor，外加回流本仓消费的 hyperlinks）来自 **dspo/manox**，经 git 依赖（tag 锁发布，见「与 manox 仓的联动开发」）+ 提交的 Cargo.lock 消费。单二进制、单进程。逐文件架构靠读代码获得——本文件只承载不可从代码推导的约束。
 
 ### 代码结构
 
@@ -18,9 +18,10 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
                            #   为目视验收面，装配在 agent-ui::chrome_assembly）
   steer-agent-chat-ui/     # 会话列的状态机与消息管线（chat crate 依赖面见
                            #   script/check-chat-crate-deps.sh）
-  terminal-ui/             # 终端渲染层（TerminalElement/TerminalView；仿真核心在 dspo/manox 的 manox-terminal）
-  steer-ghostty/           # Ghostty 终端面（libghostty-vt 仿真核静态链接在 GPUI element 后；
-                           #   与 terminal-ui 并行的第二步替换目标，见「Ghostty 终端」一节）
+  steer-ghostty/           # 终端面（libghostty-vt 仿真核静态链接在 GPUI element 后；
+                           #   唯一终端实现，见「Ghostty 终端」一节）
+  steer-term-process/      # 终端进程缝（TerminalProcess/ProcessOutput；gpui-free，
+                           #   cx/cx-cli 经 steer-ext-agents 消费而不拉 GUI 栈）
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   steer-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
   steer-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
@@ -30,7 +31,7 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
                            #   chatgpt/vscode launch、probe db）
   cx-cli/                  # cx CLI bin（clap + ratatui TUI + relay + stats + `cx web`）
   steer-ext-agents/        # ext-agent 启动 API、会话管理、IPC relay、
-                           #   cx_session 桥（SessionHandle → PtySource）
+                           #   cx_process 桥（SessionHandle → steer-term-process 的 TerminalProcess）
 ```
 
 组件层边界：`ai-elements` 承载 agent 对话语义（Reasoning、工具、消息流），渲染机械
@@ -43,7 +44,7 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
 **已知限制（实现约束，非产品选择）**：面板行进不了窗口级选区——面板内逐字拖选不可用，跨面板拖选以整块栅栏源码参与选区，块内复制走 header 的 copy 控件；in-band 面的拖选所见即所得。
 **维护提示**：编辑器面板复刻了上游 CodeBlock 的 padding/border/语言角标抑制与滚动约定——gpui-kit 每轮升级须与 in-band 三面（CodeView/ShellView/终端面板）双处核对。两侧性质各有测试钉住（steer-components `code_block_panel`、ai-elements `code_view_selection`）。
 
-上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真核心（manox-terminal）与 hyperlinks 已回流 dspo/manox（同经 git 依赖消费），`CxSessionSource` 桥留在本仓 steer-ext-agents。
+上游 manox 仓的拆分点：tag `pre-manox-app-split`；涉及 runtime/协议/journal 的改动在 dspo/manox 提 PR，本仓经 `cargo update -p <crate>` 拾取。终端仿真已随 Ghostty 迁移退役（上游 manox-terminal 一并退役，见 dspo/manox#996），`CxProcess` 桥留在本仓 steer-ext-agents。
 
 ### 交互协议 v3 = AHP（2026-09-28 切换）
 
@@ -57,7 +58,7 @@ manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（d
 
 ### 与 manox 仓的联动开发
 
-上游走双轨发布（当前线：修复进 `release/0.5` 分支打 `v0.5.x` tag，新特性进 main 打下一轨 tag；以 dspo/manox 的分支与 tag 实存为准，勿按旧轨名 bump）；本仓的 9 个 runtime git 依赖（manox-agent/harness/session-core/providers/supervisor/terminal/hyperlinks/manox-ahp/manox-ahp-runtime）共用同一个 rev/tag 声明。
+上游走双轨发布（当前线：修复进 `release/0.5` 分支打 `v0.5.x` tag，新特性进 main 打下一轨 tag；以 dspo/manox 的分支与 tag 实存为准，勿按旧轨名 bump）；本仓的 8 个 runtime git 依赖（manox-agent/harness/session-core/providers/supervisor/hyperlinks/manox-ahp/manox-ahp-runtime）共用同一个 rev/tag 声明。
 
 ```bash
 script/local-manox.sh on            # git 依赖 → ../manox 本地路径（.cargo/config.toml，已 gitignore）

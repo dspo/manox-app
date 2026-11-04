@@ -660,15 +660,6 @@ vscode-app-launched = Launched VS Code
 
 vscode-app-launch-failed = Failed to launch VS Code
 
-### terminal-ui (overlay status / search)
-
-terminal-starting = Starting…
-
-terminal-search-status = search: { $pattern }  ({ $count ->
-    [one] 1 match
-   *[other] { $count } matches
-})
-
 ### views/title_menu.rs
 
 titlebar-pin = Pin conversation
@@ -951,9 +942,7 @@ chrome-sidebar-overview = Overview
 chrome-sidebar-plugins = Plugins
 chrome-sidebar-mcp = MCP Servers
 chrome-sidebar-skills = Skills
-chrome-tab-terminal = Terminal
 chrome-tab-browser = Browser
-chrome-quick-terminal = Open integrated terminal
 chrome-tab-ghostty = Ghostty terminal
 chrome-quick-ghostty = Open Ghostty terminal
 chrome-ghostty-exited = Process exited

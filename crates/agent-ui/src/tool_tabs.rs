@@ -1193,7 +1193,7 @@ pub struct ThreadTerminalPanelSurface;
 
 impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
     fn title(&self) -> SharedString {
-        steer_i18n::t("chrome-tab-terminal").into()
+        steer_i18n::t("chrome-tab-ghostty").into()
     }
 
     fn icon(&self) -> IconAsset {

@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-banned=("terminal-ui" "steer-webview" "steer-ext-agents")
+banned=("steer-webview" "steer-ext-agents")
 status=0
 for dep in "${banned[@]}"; do
     if cargo tree -p steer-agent-chat-ui -i "$dep" >/dev/null 2>&1; then
