@@ -3,7 +3,7 @@
 #
 # ON  (default): rewrite .cargo/config.toml so the dspo/manox git deps
 #     (agent/harness/session-core/providers/supervisor + manox-ahp +
-#     manox-ahp-runtime + manox-terminal + hyperlinks) resolve from a local
+#     manox-ahp-runtime + hyperlinks) resolve from a local
 #     manox checkout
 #     instead of GitHub — daily two-repo workflow: edits in ../manox are
 #     picked up by the next cargo build, no push needed.
@@ -38,7 +38,6 @@ manox-providers = { path = "$MANOX_DIR/crates/manox-providers" }
 supervisor = { path = "$MANOX_DIR/crates/supervisor" }
 manox-ahp = { path = "$MANOX_DIR/crates/manox-ahp" }
 manox-ahp-runtime = { path = "$MANOX_DIR/crates/manox-ahp-runtime" }
-manox-terminal = { path = "$MANOX_DIR/crates/manox-terminal" }
 hyperlinks = { path = "$MANOX_DIR/crates/hyperlinks" }
 EOF
         echo "local override ON -> $MANOX_DIR"

@@ -13,7 +13,6 @@ members = [
 	"crates/agent-ui",
 	"crates/ai-elements",
 	"crates/steer-app",
-	"crates/terminal-ui",
 	"crates/steer-components",
 	"crates/steer-webview",
 	"crates/steer-webview-macros",
@@ -38,7 +37,6 @@ manox-harness = { git = "https://github.com/dspo/manox.git", tag = "v0.7.2" }
 manox-session-core = { git = "https://github.com/dspo/manox.git", tag = "v0.7.2" }
 manox-providers = { git = "https://github.com/dspo/manox.git", tag = "v0.7.2" }
 supervisor = { git = "https://github.com/dspo/manox.git", tag = "v0.7.2" }
-manox-terminal = { git = "https://github.com/dspo/manox.git", tag = "v0.7.2" }
 hyperlinks = { git = "https://github.com/dspo/manox.git", tag = "v0.7.2" }
 
 # AHP is the v3 interaction protocol; the app is a pure AHP client (official
@@ -52,7 +50,6 @@ manox-ahp-runtime = { git = "https://github.com/dspo/manox.git", tag = "v0.7.2" 
 agent-ui = { path = "crates/agent-ui" }
 steer-app = { path = "crates/steer-app" }
 ai-elements = { path = "crates/ai-elements" }
-terminal-ui = { path = "crates/terminal-ui" }
 steer-components = { path = "crates/steer-components" }
 steer-webview = { path = "crates/steer-webview" }
 steer-webview-macros = { path = "crates/steer-webview-macros" }
@@ -149,13 +146,9 @@ ropey = "2.0.0-beta.1"
 vte = { version = "0.13", default-features = false, features = ["ansi"] }
 log = "0.4"
 
-# alacritty_terminal — Term/Grid/Selection data structures only; its own
-# EventLoop/PTY layer is unused (manox drives portable-pty and feeds bytes
-# to Processor::advance). vte is re-exported by it, keeping one version.
-alacritty_terminal = "0.24"
 portable-pty = "0.9"
 
-# sysinfo — descendant kill on terminal teardown + foreground-process indicator.
+# sysinfo — descendant sweep on terminal teardown.
 sysinfo = "0.39"
 
 # GPUI stack: gpui-pre is Longbridge's weekly repackaged snapshot of zed's

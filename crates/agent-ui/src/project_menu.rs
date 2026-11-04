@@ -169,7 +169,7 @@ pub fn group_menu(
                             ExternalSessionLaunch {
                                 agent_id: "terminal",
                                 cx_session_id: String::new(),
-                                label: steer_i18n::t("chrome-tab-terminal").to_string(),
+                                label: steer_i18n::t("chrome-tab-ghostty").to_string(),
                                 svg: "icons/terminal.svg",
                                 project: dir_terminal.clone(),
                                 // A plain shell owns no cx session handle —
@@ -182,7 +182,7 @@ pub fn group_menu(
                             cx,
                         ),
                         Err(e) => spawn_failed_notification(
-                            &steer_i18n::t("chrome-tab-terminal"),
+                            &steer_i18n::t("chrome-tab-ghostty"),
                             &e,
                             window,
                             cx,

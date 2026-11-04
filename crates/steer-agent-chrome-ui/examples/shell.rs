@@ -480,7 +480,7 @@ impl ToolTabFactory for TerminalKind {
             title: self
                 .display
                 .map(Into::into)
-                .unwrap_or_else(|| steer_i18n::t("chrome-tab-terminal").into()),
+                .unwrap_or_else(|| steer_i18n::t("chrome-tab-ghostty").into()),
             icon_svg: self.icon_svg,
             binary: self.binary,
         })
@@ -489,7 +489,7 @@ impl ToolTabFactory for TerminalKind {
     fn quick_action(&self) -> Option<SharedString> {
         match self.display {
             Some(name) => Some(steer_i18n::t_str("chrome-quick-agent", &[("agent", name)]).into()),
-            None => Some(steer_i18n::t("chrome-quick-terminal").into()),
+            None => Some(steer_i18n::t("chrome-quick-ghostty").into()),
         }
     }
 
@@ -842,7 +842,7 @@ struct TerminalPanel;
 
 impl PanelSurface for TerminalPanel {
     fn title(&self) -> SharedString {
-        steer_i18n::t("chrome-tab-terminal").into()
+        steer_i18n::t("chrome-tab-ghostty").into()
     }
 
     fn icon(&self) -> IconAsset {

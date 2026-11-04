@@ -643,12 +643,6 @@ vscode-app-launched = 已启动 VS Code
 
 vscode-app-launch-failed = 启动 VS Code 失败
 
-### terminal-ui (overlay status / search)
-
-terminal-starting = 正在启动…
-
-terminal-search-status = 搜索：{ $pattern }（{ $count } 处匹配）
-
 ### views/title_menu.rs
 
 titlebar-pin = 置顶会话
@@ -927,9 +921,7 @@ chrome-sidebar-overview = 概览
 chrome-sidebar-plugins = 插件
 chrome-sidebar-mcp = MCP 服务器
 chrome-sidebar-skills = 技能
-chrome-tab-terminal = 终端
 chrome-tab-browser = 浏览器
-chrome-quick-terminal = 打开集成终端
 chrome-tab-ghostty = Ghostty 终端
 chrome-quick-ghostty = 打开 Ghostty 终端
 chrome-ghostty-exited = 进程已退出

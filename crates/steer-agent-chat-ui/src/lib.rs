@@ -10,7 +10,7 @@
 //!
 //! Dependency invariant (the executable definition of the chrome/chat
 //! decoupling): this crate never touches terminals, webviews, or
-//! external-agent wiring — no `terminal-ui`, no `steer-webview`, no
+//! external-agent wiring — no terminal surface, no `steer-webview`, no
 //! `steer-ext-agents` (checked by script/check-chat-crate-deps.sh in CI).
 //! The multiplexer (agent-ui) constructs the store handles through its
 //! agent-ui → chat-crate dependency.
