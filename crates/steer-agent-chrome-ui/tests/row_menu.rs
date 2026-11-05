@@ -868,6 +868,104 @@ fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
     );
 }
 
+/// The membership faces: a row dropped on a group rides the host hook
+/// (project keys attach, the loose key detaches), and a row that carries a
+/// membership builds the 移动到项目… submenu + 移出项目 row into its menu
+/// without the absent hooks promising anything.
+#[gpui::test]
+fn membership_rows_ride_the_host_hooks(cx: &mut TestAppContext) {
+    type GroupLog = Rc<RefCell<Vec<(String, String)>>>;
+    let drop_log: GroupLog = Rc::new(RefCell::new(Vec::new()));
+    let drop_for_config = drop_log.clone();
+    let mut member = sample_row("member-1");
+    member.project = Some("p1".into());
+    member.workspace = "Steer".into();
+    let (mut visual, shell) = mount_with_config(
+        cx,
+        move |main| {
+            let mut config = shell_config(main, Default::default(), Default::default());
+            config.hooks.on_drop_row_to_group = Some(Box::new(move |group, row, _w, _cx| {
+                drop_for_config
+                    .borrow_mut()
+                    .push((group.to_string(), row.to_string()));
+            }));
+            config.hooks.project_list = Some(Box::new(|_| {
+                vec![
+                    ("p1".to_string(), "Steer".to_string()),
+                    ("p2".to_string(), "Anvil".to_string()),
+                ]
+            }));
+            config.hooks.on_remove_row_from_project = Some(Box::new(|_id, _w, _cx| {}));
+            config
+        },
+        vec![member.clone(), sample_row("loose-1")],
+    );
+
+    // The drop face: both destinations land the hook with the exact keys.
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.drop_row_to_group("p2", "member-1", window, cx);
+            s.drop_row_to_group(
+                steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY,
+                "member-1",
+                window,
+                cx,
+            );
+        });
+    });
+    assert_eq!(
+        drop_log.borrow().as_slice(),
+        &[
+            ("p2".to_string(), "member-1".to_string()),
+            ("Chats".to_string(), "member-1".to_string()),
+        ],
+        "the drop lands group key + row id verbatim"
+    );
+
+    // The menu face: a member row's menu builds the membership rows (the
+    // hooks are present, the list is non-empty) and still paints.
+    let row_bounds = visual
+        .debug_bounds("chrome-session-row-member-1")
+        .expect("the member row paints");
+    visual.simulate_mouse_down(
+        row_bounds.center(),
+        MouseButton::Right,
+        Modifiers::default(),
+    );
+    visual.run_until_parked();
+    assert!(
+        shell.read_with(cx, |s, _| s.row_menu_open()),
+        "the member row's menu opens with the membership rows wired"
+    );
+    assert!(
+        visual.debug_bounds("chrome-row-menu").is_some(),
+        "the membership rows' menu paints"
+    );
+    visual.update(|_window, cx| shell.update(cx, |s, cx| s.close_row_menu(cx)));
+
+    // A host without the faces owes no rows: the menu still opens, the
+    // drop is inert (nothing renders, nothing fires).
+    let (mut visual, shell) = mount(cx, Default::default(), vec![member.clone()]);
+    visual.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.drop_row_to_group("p2", "member-1", window, cx)
+        });
+    });
+    let row_bounds = visual
+        .debug_bounds("chrome-session-row-member-1")
+        .expect("the row paints without the faces");
+    visual.simulate_mouse_down(
+        row_bounds.center(),
+        MouseButton::Right,
+        Modifiers::default(),
+    );
+    visual.run_until_parked();
+    assert!(
+        shell.read_with(cx, |s, _| s.row_menu_open()),
+        "the menu opens without the membership faces"
+    );
+}
+
 /// Unix seconds for local noon N days ago (noon survives DST shifts).
 fn stamp_days_ago(days: usize) -> i64 {
     use chrono::TimeZone as _;

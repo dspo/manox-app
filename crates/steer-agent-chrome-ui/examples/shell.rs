@@ -143,10 +143,14 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
         ],
         hooks: HostHooks {
             on_group_order: None,
-            // No registry behind the example — no ＋ and no row-drop face
-            // (the hooks' absence is the contract, not a disabled control).
+            // No registry behind the example — no ＋, no row-drop face and
+            // no membership rows (the hooks' absence is the contract, not a
+            // disabled control).
             on_group_new: None,
             on_drop_row_to_group: None,
+            project_list: None,
+            on_move_row_to_project: None,
+            on_remove_row_from_project: None,
             on_pin: Some(Box::new(|id, _w, _cx| store_toggle_pin(id))),
             on_archive: Some(Box::new(|id, _w, _cx| store_toggle_archived(id))),
             on_batch_archive: Some(Box::new(|ids, _w, _cx| {

@@ -125,14 +125,17 @@ pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
 pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>;
 /// External-session title write-back (row id, new title).
 pub type HookOnSetTitle = Box<dyn Fn(&str, String, &mut Window, &mut App)>;
-/// Host-built group menu (state key, the group's project path when it is a
-/// workspace group, open position) → the menu entity to mount, or `None` to
+/// Host-built group menu (state key, the group's project id when it is a
+/// project group, open position) → the menu entity to mount, or `None` to
 /// open nothing. The chrome supplies the surface (anchor + dismissal); the
 /// content is host semantics — the project actions are not the chrome's to
 /// invent.
 pub type HookOnGroupMenu = Box<
     dyn Fn(&str, Option<&str>, gpui::Point<Pixels>, &mut Window, &mut App) -> Option<MenuEntity>,
 >;
+/// Row-onto-project write-back (row id, project id — the row menu's 移动到
+/// 项目 pick).
+pub type HookOnRowProject = Box<dyn Fn(&str, &str, &mut Window, &mut App)>;
 /// Group-order write-back (the full key list, in the user's drag order). The
 /// host persists it; the chrome never learns where the order lives.
 pub type HookOnGroupOrder = Box<dyn Fn(&[String], &mut App)>;
@@ -217,12 +220,33 @@ pub struct HostHooks {
     /// gesture): the host writes the membership, the next snapshot re-files
     /// the row. Absent → rows are not drag sources at all.
     pub on_drop_row_to_group: Option<HookOnRowGroup>,
+    /// The project list the row menu's 移动到项目… submenu offers: (project
+    /// id, display name) pairs in display order. Absent → the submenu does
+    /// not render.
+    pub project_list: Option<HookQuery<Vec<(String, String)>>>,
+    /// The 移动到项目 pick (row id, project id). Absent → the submenu is
+    /// inert and does not render.
+    pub on_move_row_to_project: Option<HookOnRowProject>,
+    /// The 移出项目 pick (row id): detach from its project — the row falls
+    /// to the loose bucket. Absent → the item does not render.
+    pub on_remove_row_from_project: Option<HookOnId>,
 }
 
 /// Batch-ids callback (the selection bar's archive commit).
 pub type HookOnIds = Box<dyn Fn(&[String], &mut Window, &mut App)>;
 /// Row-onto-group callback (group key, row id — the membership gesture).
 pub type HookOnRowGroup = Box<dyn Fn(&str, &str, &mut Window, &mut App)>;
+
+/// The membership menu rows' payload (bundled — the call would otherwise
+/// arc past clippy's argument ceiling). See [`Shell::membership_menu_rows`].
+struct MembershipMenuRows {
+    row_id: String,
+    member_of: Option<String>,
+    projects: Vec<(String, String)>,
+    can_move: bool,
+    can_remove: bool,
+    shell: gpui::Entity<Shell>,
+}
 
 /// Everything the shell needs from its host at construction.
 pub struct ShellConfig {
@@ -751,18 +775,35 @@ impl Shell {
         let Some(sess) = self.sessions.iter().find(|s| s.id == id) else {
             return;
         };
+        // The row's current membership key (its group's project id) — the
+        // 移出项目 gate and the submenu's own entry filter both read it.
+        let member_of = sess.project.clone();
+        // The host faces for the membership rows, resolved HERE (open_row_menu
+        // holds the shell lease; the menu build must not re-read the shell).
+        let (move_projects, can_move, can_remove) = (
+            self.hooks
+                .project_list
+                .as_ref()
+                .map(|list| list(cx))
+                .unwrap_or_default(),
+            self.hooks.on_move_row_to_project.is_some(),
+            self.hooks.on_remove_row_from_project.is_some(),
+        );
         // The external-session branch: 关闭会话 (the hook reaps the row AND
         // closes its tab), 重命名 (retitle the host record — the row and the
         // main-column titlebar follow) + copy id. No thread semantics on a
         // PTY.
         if let crate::session_list::SessionRowKind::External { .. } = sess.kind {
             let this = cx.entity();
+            let shell = this.clone();
             let this_rename = this.clone();
             let id_close = id.to_string();
             let id_rename = id.to_string();
             let id_copy = id.to_string();
-            let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
-                menu.max_w(gpui::px(220.))
+            let id_row = id.to_string();
+            let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+                let menu = menu
+                    .max_w(gpui::px(220.))
                     .item(
                         PopupMenuItem::new(steer_i18n::t("sidebar-close-external"))
                             .icon(crate::theme::icons::CLOSE)
@@ -784,17 +825,27 @@ impl Shell {
                                     this.begin_title_edit(id_rename.clone(), window, cx);
                                 });
                             }),
-                    )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new(steer_i18n::t("chrome-row-copy-id"))
-                            .icon(crate::theme::icons::COPY)
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    id_copy.clone(),
-                                ));
-                            }),
-                    )
+                    );
+                let menu = Self::membership_menu_rows(
+                    menu,
+                    window,
+                    cx,
+                    MembershipMenuRows {
+                        row_id: id_row,
+                        member_of,
+                        projects: move_projects,
+                        can_move,
+                        can_remove,
+                        shell,
+                    },
+                );
+                menu.separator().item(
+                    PopupMenuItem::new(steer_i18n::t("chrome-row-copy-id"))
+                        .icon(crate::theme::icons::COPY)
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
+                        }),
+                )
             });
             let sub = cx.subscribe(&menu, |this, _menu, _: &gpui::DismissEvent, cx| {
                 this.close_row_menu(cx);
@@ -808,6 +859,7 @@ impl Shell {
         let archived = sess.archived;
         let has_tag = sess.tag.is_some();
         let this = cx.entity();
+        let shell = this.clone();
 
         let id_pin = id.to_string();
         let id_pin2 = id_pin.clone();
@@ -817,13 +869,14 @@ impl Shell {
         let id_tag_clear = id.to_string();
         let id_copy = id.to_string();
         let id_select = id.to_string();
+        let id_row = id.to_string();
         let this_pin = this.clone();
         let this_archive = this.clone();
         let this_select = this.clone();
         let this_tag = this.clone();
         let this_tag2 = this.clone();
 
-        let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
+        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
             let menu = menu
                 .max_w(gpui::px(220.))
                 .item(
@@ -914,6 +967,19 @@ impl Shell {
             } else {
                 menu
             };
+            let menu = Self::membership_menu_rows(
+                menu,
+                window,
+                cx,
+                MembershipMenuRows {
+                    row_id: id_row,
+                    member_of,
+                    projects: move_projects,
+                    can_move,
+                    can_remove,
+                    shell,
+                },
+            );
             menu.separator().item(
                 PopupMenuItem::new(steer_i18n::t("chrome-row-copy-id"))
                     .icon(crate::theme::icons::COPY)
@@ -930,6 +996,83 @@ impl Shell {
         self.row_menu_sub = Some(sub);
         self.row_menu = Some((id.to_string(), anchor, menu));
         cx.notify();
+    }
+
+    /// The row menu's membership rows, shared by both row kinds: 移动到项目…
+    /// (the host's project list, the row's own project dropped) and 移出项目
+    /// (only on a row that currently carries a membership). The host faces
+    /// are resolved by the CALLER — the build runs inside the menu entity's
+    /// context while the shell is leased, so nothing may read the shell
+    /// here; the handle is only for the click closures, which fire after
+    /// the lease ends. Absent faces render nothing, the same contract the
+    /// archive/tag rows keep.
+    fn membership_menu_rows(
+        menu: gpui_component::menu::PopupMenu,
+        window: &mut Window,
+        cx: &mut gpui::Context<gpui_component::menu::PopupMenu>,
+        rows: MembershipMenuRows,
+    ) -> gpui_component::menu::PopupMenu {
+        use gpui_component::menu::PopupMenuItem;
+        let MembershipMenuRows {
+            row_id,
+            member_of,
+            projects,
+            can_move,
+            can_remove,
+            shell,
+        } = rows;
+        let menu = if can_move && !projects.is_empty() {
+            // The submenu builder is an Fn — every capture must be per-call
+            // owned, never moved out of the loop's state.
+            menu.submenu(steer_i18n::t("project-move-to"), window, cx, {
+                let row_id = row_id.clone();
+                let member_of = member_of.clone();
+                let shell = shell.clone();
+                move |submenu, _w, _cx| {
+                    let mut submenu = submenu;
+                    for (project_id, name) in projects.iter() {
+                        if member_of.as_deref() == Some(project_id.as_str()) {
+                            continue;
+                        }
+                        let project_id = project_id.clone();
+                        let name = name.clone();
+                        let this = shell.clone();
+                        let row_id = row_id.clone();
+                        submenu = submenu.item(PopupMenuItem::new(name).on_click(
+                            move |_, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    if let Some(hook) = &this.hooks.on_move_row_to_project {
+                                        hook(&row_id, &project_id, window, cx);
+                                    }
+                                    this.close_row_menu(cx);
+                                });
+                            },
+                        ));
+                    }
+                    submenu
+                }
+            })
+        } else {
+            menu
+        };
+        if can_remove && member_of.is_some() {
+            menu.item(
+                PopupMenuItem::new(steer_i18n::t("project-move-out"))
+                    // The loose-bucket glyph — the destination the pick sends
+                    // the row to.
+                    .icon(crate::theme::icons::CIRCLE)
+                    .on_click(move |_, window, cx| {
+                        shell.update(cx, |this, cx| {
+                            if let Some(hook) = &this.hooks.on_remove_row_from_project {
+                                hook(&row_id, window, cx);
+                            }
+                            this.close_row_menu(cx);
+                        });
+                    }),
+            )
+        } else {
+            menu
+        }
     }
 
     // ── batch selection ───────────────────────────────────────────────

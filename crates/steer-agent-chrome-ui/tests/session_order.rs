@@ -136,9 +136,11 @@ fn newest_session_leads_its_group_in_the_workspace_grouping(cx: &mut TestAppCont
     );
 }
 
-/// The workspace group's state key is its PROJECT PATH (not the display
+/// The workspace group's state key is its PROJECT key (not the display
 /// name), a host-seeded order is respected verbatim, and a drag hands the
-/// full new key list to `on_group_order` for the host to persist.
+/// full new key list to `on_group_order` for the host to persist. Only
+/// project groups participate: a drag against the loose bucket is inert
+/// (it has no position of its own).
 #[gpui::test]
 fn group_order_seeds_keys_and_drag_mirrors_to_the_host(cx: &mut TestAppContext) {
     let slot: Rc<RefCell<Option<gpui::Entity<Shell>>>> = Rc::new(RefCell::new(None));
@@ -193,19 +195,31 @@ fn group_order_seeds_keys_and_drag_mirrors_to_the_host(cx: &mut TestAppContext) 
         assert_eq!(keys, vec!["/p/two", "/p/one", "Chats"]);
     });
 
-    // A drag inserts before the target and hands the FULL key list to the
-    // host — the list the host persists and re-seeds.
+    // Only project groups participate: a drag against the loose bucket (in
+    // either direction) is inert — the hook fires nothing.
     shell.update(cx, |s, cx| {
         s.move_group("/p/one", "Chats", false, cx);
+        s.move_group("Chats", "/p/one", true, cx);
+    });
+    assert!(
+        recorded_for_assert.borrow().is_empty(),
+        "a drag against the loose bucket never commits"
+    );
+
+    // A drag inserts before the target and hands the FULL key list to the
+    // host — the list the host persists and re-seeds (the loose bucket
+    // rides along, trailing).
+    shell.update(cx, |s, cx| {
+        s.move_group("/p/one", "/p/two", true, cx);
     });
     assert_eq!(
         recorded_for_assert.borrow().as_slice(),
         &[vec![
+            "/p/one".to_string(),
             "/p/two".to_string(),
-            "Chats".to_string(),
-            "/p/one".to_string()
+            "Chats".to_string()
         ]],
-        "the drag mirrors the whole order, keyed by project path"
+        "the drag mirrors the whole order, keyed by project key"
     );
 }
 

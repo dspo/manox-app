@@ -891,6 +891,10 @@ project-roots-label = 源文件夹
 # The multi-root group header badge tooltip: every root, one per line.
 project-roots-tooltip = 源文件夹：{$roots}
 
+project-move-out = 移出项目
+
+project-move-to = 移动到项目…
+
 project-root-primary = 主要
 
 project-root-set-primary = 设为主要

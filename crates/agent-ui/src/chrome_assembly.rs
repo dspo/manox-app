@@ -820,9 +820,46 @@ fn shell_config(
             on_new_project: Some(Box::new(|window, cx| {
                 open_project_dialog(None, window, cx);
             })),
-            // The row-drag membership drop (wired with the row-ownership
-            // operations).
-            on_drop_row_to_group: None,
+            // The row-drag membership drop: a project group key attaches the
+            // container to that project, the loose bucket's key detaches.
+            // The notify runs the projection, the next snapshot re-files the
+            // row.
+            on_drop_row_to_group: Some(Box::new({
+                let ws = ws.clone();
+                move |group, row, _w, cx| {
+                    if group == steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY {
+                        crate::projects::remove_membership(row);
+                    } else {
+                        crate::projects::set_membership(row, group);
+                    }
+                    ws.update(cx, |_, cx| cx.notify());
+                }
+            })),
+            // The row menu's 移动到项目… submenu: the registry in display
+            // order.
+            project_list: Some(Box::new(|_cx| {
+                crate::projects::list_projects()
+                    .into_iter()
+                    .map(|project| {
+                        let name = crate::projects::display_name(&project);
+                        (project.id, name)
+                    })
+                    .collect()
+            })),
+            on_move_row_to_project: Some(Box::new({
+                let ws = ws.clone();
+                move |row, project, _w, cx| {
+                    crate::projects::set_membership(row, project);
+                    ws.update(cx, |_, cx| cx.notify());
+                }
+            })),
+            on_remove_row_from_project: Some(Box::new({
+                let ws = ws.clone();
+                move |row, _w, cx| {
+                    crate::projects::remove_membership(row);
+                    ws.update(cx, |_, cx| cx.notify());
+                }
+            })),
         }, // The titlebar's avatar slot wears the app's own mark.
         brand: Some(Arc::new(|| {
             gpui::div()

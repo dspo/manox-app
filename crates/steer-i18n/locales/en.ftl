@@ -913,6 +913,10 @@ project-roots-label = Source folders
 # The multi-root group header badge tooltip: every root, one per line.
 project-roots-tooltip = Source folders: {$roots}
 
+project-move-out = Remove from Project
+
+project-move-to = Move to Project…
+
 project-root-primary = Primary
 
 project-root-set-primary = Set as primary
