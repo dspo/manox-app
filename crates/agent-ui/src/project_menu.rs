@@ -67,6 +67,18 @@ pub fn group_menu(
     let models = crate::model_catalog::rows();
     PopupMenu::build(window, cx, |menu, window, cx| {
         let mut menu = menu.max_w(px(280.));
+        // The Chats bucket is where projects are born: the create dialog
+        // rides this menu only (the sidebar footer is the other entry; a
+        // real project group's menu manages an existing project instead).
+        if project_dir.is_none() {
+            menu = menu.item(
+                PopupMenuItem::new(steer_i18n::t("project-new-menu"))
+                    .icon(Icon::default().path("icons/plus.svg"))
+                    .on_click(move |_, window, cx| {
+                        crate::chrome_assembly::open_project_dialog(None, window, cx);
+                    }),
+            );
+        }
         // 新建会话: Manox flat row + one provider→model cascade per external
         // agent kind — the legacy menu's shape, scoped to this project. The
         // cascades render through the COMPOSER model picker's shared builder

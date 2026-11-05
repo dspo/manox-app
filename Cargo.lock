@@ -142,6 +142,7 @@ dependencies = [
  "manox-providers",
  "manox-session-core",
  "open",
+ "rfd",
  "rust-embed",
  "serde",
  "serde_json",

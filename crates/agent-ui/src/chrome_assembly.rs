@@ -67,6 +67,37 @@ pub fn leave_settings_layout(cx: &mut App) {
     shell.update(cx, |shell, cx| shell.set_sidebar_surface(None, cx));
 }
 
+/// Open the create-project dialog, or the edit variant for `edit_of` — the
+/// sidebar footer's ＋ 新建项目 row and the Chats bucket's menu entry both
+/// land here. The dialog entity is the mounted view; closing it is
+/// [`close_project_dialog`]. A missing project id (deleted meanwhile) opens
+/// nothing.
+pub fn open_project_dialog(edit_of: Option<&str>, window: &mut Window, cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    let dialog: Entity<crate::project_dialog::ProjectDialogState> = match edit_of {
+        None => cx.new(|cx| crate::project_dialog::ProjectDialogState::for_create(window, cx)),
+        Some(id) => {
+            let Some(project) = crate::projects::get_project(id) else {
+                return;
+            };
+            cx.new(|cx| crate::project_dialog::ProjectDialogState::for_edit(project, window, cx))
+        }
+    };
+    let view: gpui::AnyView = dialog.into();
+    shell.update(cx, |shell, cx| shell.set_dialog_surface(Some(view), cx));
+}
+
+/// Close (unmount) the project dialog. The dialog's own dismissals — ✕ /
+/// 取消 / Escape, a successful save, a confirmed removal — route here.
+pub fn close_project_dialog(cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    shell.update(cx, |shell, cx| shell.set_dialog_surface(None, cx));
+}
+
 /// Open (or focus) a host-built tool tab in the live right pane. `false` when
 /// no shell or window is live — the caller's gesture has no surface then.
 pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {
@@ -770,6 +801,12 @@ fn shell_config(
                 move |id, title, _w, cx| {
                     let _ = ws.update(cx, |ws, cx| ws.set_external_title(id, title, cx));
                 }
+            })),
+            // The sidebar footer's ＋ 新建项目 row: open the project dialog.
+            // (The Chats bucket's group menu is the other entry; the
+            // Launcher chip menu joins in Step-3.)
+            on_new_project: Some(Box::new(|window, cx| {
+                open_project_dialog(None, window, cx);
             })),
         },
         // The titlebar's avatar slot wears the app's own mark.

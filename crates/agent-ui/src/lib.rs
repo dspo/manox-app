@@ -26,6 +26,7 @@ pub mod menu;
 pub mod model_catalog;
 pub mod multiplexer;
 pub mod preview_host;
+pub mod project_dialog;
 pub mod project_menu;
 pub mod project_registry;
 pub mod projects;

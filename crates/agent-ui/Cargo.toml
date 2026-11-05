@@ -69,6 +69,10 @@ steer-ghostty.workspace = true
 steer-components.workspace = true
 ai-elements.workspace = true
 open.workspace = true
+# rfd — the project dialog's native multi-select folder picker (the same
+# workspace pin the steer-webview dialog plugin locks; default features are
+# portal-based on Linux, so no GTK enters this crate's Linux build).
+rfd.workspace = true
 
 # steer-ext-agents — spawn external agent CLIs (claude/codex/copilot) and hold
 # the PTY handle for an `ExternalSession`.
