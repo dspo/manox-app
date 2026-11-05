@@ -6,11 +6,11 @@
 //! several projects and a container without a membership falls to the loose
 //! "Chats" bucket.
 //!
-//! Persistence follows the [`crate::project_registry`] shape: the app-owned
-//! keys of the shared `~/.manox/settings.toml`, read-modify-written with the
-//! only-touch-my-keys discipline — every other key (runtime ones included)
-//! survives verbatim, and a corrupt file is replaced rather than allowed to
-//! block the write. The keys:
+//! Persistence lives on the app-owned keys of the shared
+//! `~/.manox/settings.toml`, read-modify-written with the only-touch-my-keys
+//! discipline — every other key (runtime ones included) survives verbatim,
+//! and a corrupt file is replaced rather than allowed to block the write.
+//! The keys:
 //!
 //! - `[[project]]`: one entry per project with nested `[[project.roots]]`
 //!   rows (`path` + `primary`).
@@ -22,8 +22,9 @@
 //! The write face enforces every invariant (roots exist as directories,
 //! dedup + canonicalization, exactly one primary, primary among the roots);
 //! a hand-edited file that lost them is repaired on load, never trusted.
-//! The retired path-overlay keys of `project_registry` are neither read nor
-//! migrated: path grouping has no counterpart in this model.
+//! The retired path-overlay keys of the pre-entity grouping
+//! (`removed_projects` / `project_added` / `project_order`) are neither read
+//! nor migrated: path grouping has no counterpart in this model.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -632,7 +633,7 @@ fn persist(reg: &Registry) {
 
 /// The write half: parse-edit-serialize keeps every other key intact; a
 /// corrupt file is replaced rather than allowed to block the write (the same
-/// recovery the ui_language accessor and `project_registry` use).
+/// recovery the ui_language accessor uses).
 fn persist_at(path: &Path, reg: &Registry) {
     let mut doc: toml::Value = std::fs::read_to_string(path)
         .ok()
