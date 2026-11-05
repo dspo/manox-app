@@ -8,9 +8,11 @@
 //! sidebar's batch-selection mode with two rows checked, `CHROME_PANEL=1` the bottom
 //! dock, `CHROME_PICKER=1` the titlebar session picker with its dropdown
 //! open, `CHROME_PROJECT_DIALOG=1` the modal project dialog over the shell,
-//! `CHROME_LAUNCHER=1` the launcher as the main card's content.
-//! macOS-only: the readback is a Metal texture and the harness's
-//! imports (`VisualTestAppContext`) exist only on that platform.
+//! `CHROME_LAUNCHER=1` the launcher as the main card's content,
+//! `CHROME_PROJECT_GROUPS=1` the sidebar's project groups (two deterministic
+//! heads, the first multi-root). macOS-only: the readback is a Metal texture
+//! and the harness's imports (`VisualTestAppContext`) exist only on that
+//! platform.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -87,6 +89,80 @@ mod macos {
                 shell.update(cx, |shell, _cx| {
                     shell.set_sessions(snapshot_rows());
                 });
+                // CHROME_PROJECT_GROUPS=1: the sidebar's project-group face.
+                // The rows are SYNTHESIZED (the machine's thread store and
+                // its project registry, if any, are never consulted): two
+                // project heads — the first multi-root, so the count badge
+                // and its full-roots tooltip are in the shot — two rows
+                // each, and two loose rows trailing. Fully deterministic.
+                if std::env::var("CHROME_PROJECT_GROUPS").is_ok() {
+                    // The loose bucket's display name rides the same localized
+                    // key the host projection uses (the shot runs in the
+                    // default locale, like the baseline).
+                    let loose = steer_i18n::t("chrome-sidebar-chats").to_string();
+                    let grouped = |(id, title): (&str, &str),
+                                   project: Option<&str>,
+                                   workspace: &str,
+                                   rank: i64| {
+                        SessionRow {
+                            id: id.to_string(),
+                            short_id: "abcd1234".into(),
+                            title: title.to_string(),
+                            workspace: workspace.to_string(),
+                            project: project.map(str::to_string),
+                            status: SessionStatus::Idle,
+                            kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
+                            updated_at: 1_700_000_000 + rank * 60,
+                            sort_stamp: 1_700_000_000 + rank * 60,
+                            rank,
+                            pinned: false,
+                            archived: false,
+                            tag: None,
+                            team_leader: false,
+                            last_message_at: Some(1_700_000_000 + rank * 60),
+                        }
+                    };
+                    shell.update(cx, |shell, _cx| {
+                        shell.set_sessions(vec![
+                            grouped(
+                                ("row-1", "设计定稿：项目实体与新对话入口"),
+                                Some("proj-alpha"),
+                                "Steer.app",
+                                0,
+                            ),
+                            grouped(
+                                ("row-2", "侧栏分组换代"),
+                                Some("proj-alpha"),
+                                "Steer.app",
+                                1,
+                            ),
+                            grouped(
+                                ("row-3", "共享行模型的度量对齐"),
+                                Some("proj-beta"),
+                                "lib",
+                                2,
+                            ),
+                            grouped(("row-4", "码表面 A/B 契约"), Some("proj-beta"), "lib", 3),
+                            grouped(("row-5", "临时调研：拖拽基建"), None, &loose, 4),
+                            grouped(("row-6", "跑门禁"), None, &loose, 5),
+                        ]);
+                        shell.set_folder_heads(vec![
+                            (
+                                "proj-alpha".to_string(),
+                                "Steer.app".to_string(),
+                                vec![
+                                    "/Users/dev/projects/manox".to_string(),
+                                    "/Users/dev/projects/manox-app".to_string(),
+                                ],
+                            ),
+                            (
+                                "proj-beta".to_string(),
+                                "lib".to_string(),
+                                vec!["/Users/dev/projects/lib".to_string()],
+                            ),
+                        ]);
+                    });
+                }
                 if std::env::var("CHROME_PICKER").is_ok() {
                     shell.update(cx, |shell, cx| {
                         shell.toggle_session_picker(window, cx);
@@ -261,7 +337,13 @@ mod macos {
     /// carries — running wins over unread wins over idle. `Pending` has no
     /// store face (it lives on the live fold), so the second row is
     /// synthesized to keep the amber question mark in the shot.
+    ///
+    /// Grouping: the rows carry NO project key — this crate cannot see the
+    /// app's project registry, so the honest baseline face is the
+    /// registry-less machine's: everything in the loose bucket (the
+    /// multi-group face is the `CHROME_PROJECT_GROUPS` shot's business).
     fn snapshot_rows() -> Vec<SessionRow> {
+        let loose = steer_i18n::t("chrome-sidebar-chats").to_string();
         let store = manox_agent::thread_store::global();
         let mut rows: Vec<SessionRow> = store.read(|st| {
             st.summaries()
@@ -277,14 +359,8 @@ mod macos {
                         .clone()
                         .or_else(|| t.title.clone())
                         .unwrap_or_else(|| t.summary.clone()),
-                    workspace: t
-                        .project
-                        .rsplit('/')
-                        .next()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("Chats")
-                        .to_string(),
-                    project: (!t.project.is_empty()).then(|| t.project.clone()),
+                    workspace: loose.clone(),
+                    project: None,
                     kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
                     status: if st.is_running(&t.id) {
                         SessionStatus::Running
