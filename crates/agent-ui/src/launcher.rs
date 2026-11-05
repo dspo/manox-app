@@ -407,15 +407,26 @@ impl LauncherState {
         cx.notify();
     }
 
-    /// 打开其他文件夹…: the native single-select folder picker (the same
-    /// blocking-modal landing the project dialog uses). A cancelled picker is
-    /// a no-op.
+    /// 打开其他文件夹…: the native single-select folder picker, as an ASYNC
+    /// dialog. The panel is a modal loop of its own: spinning it inside the
+    /// click's event dispatch panics the loop, so the panel runs through
+    /// rfd's ModalFuture — dispatched to the main thread after this dispatch
+    /// settles — and the result lands back on the entity. A cancelled picker
+    /// is a no-op.
     fn pick_folder(&mut self, cx: &mut Context<Self>) {
-        let picked = rfd::FileDialog::new().pick_folder();
-        if let Some(dir) = picked {
-            self.target = LauncherTarget::Folder(dir);
-        }
         self.close_project_menu(cx);
+        let this = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await else {
+                return;
+            };
+            let dir = handle.path().to_path_buf();
+            let _ = this.update_in(cx, |state, _window, cx| {
+                state.target = LauncherTarget::Folder(dir);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn close_model_menu(&mut self, cx: &mut Context<Self>) {

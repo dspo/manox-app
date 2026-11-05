@@ -128,17 +128,33 @@ impl ProjectDialogState {
         crate::chrome_assembly::close_project_dialog(cx);
     }
 
-    /// The ＋ 添加文件夹… row: the native multi-select folder picker. The
-    /// blocking call runs the panel's own modal loop on this (main) thread —
-    /// the same landing the steer-webview dialog plugin uses
-    /// (`steer-webview/src/plugins/dialog.rs`). Duplicate picks are silent
-    /// no-ops.
-    pub fn add_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = rfd::FileDialog::new().pick_folders().unwrap_or_default();
-        if absorb_roots(&mut self.roots, &mut self.primary, picked) {
-            self.sync_placeholder(window, cx);
-            cx.notify();
-        }
+    /// The ＋ 添加文件夹… row: the native multi-select folder picker, as an
+    /// ASYNC dialog. The panel is a modal loop of its own: spinning it inside
+    /// the click's event dispatch panics the loop, so the panel runs through
+    /// rfd's ModalFuture — dispatched to the main thread after this dispatch
+    /// settles — and the result lands back on the entity. Duplicate picks are
+    /// silent no-ops.
+    pub fn add_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let Some(handles) = rfd::AsyncFileDialog::new().pick_folders().await else {
+                return;
+            };
+            let picked: Vec<PathBuf> = handles
+                .iter()
+                .map(|handle| handle.path().to_path_buf())
+                .collect();
+            if picked.is_empty() {
+                return;
+            }
+            let _ = this.update_in(cx, |state, window, cx| {
+                if absorb_roots(&mut state.roots, &mut state.primary, picked) {
+                    state.sync_placeholder(window, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Move the primary badge to `path` (list order untouched); the
