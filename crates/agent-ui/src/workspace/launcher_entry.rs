@@ -111,24 +111,34 @@ impl crate::Workspace {
 
     /// The launcher send's flush point (design §3.2): called from the attach
     /// completion, where the foreground store is bound to the fresh session.
-    /// The send leaves ONE executor turn after `attach_thread`'s
-    /// `open_or_create` spawn — that body issues the session/chat subscribes
-    /// this submit must trail on the wire (issued earlier = queued ahead
-    /// during a replay window = transport-ordered otherwise), and a submit
-    /// that outruns them is refused by the host for a chat it has not opened
-    /// yet — the journal never materializes and the message is gone. The
-    /// text rides the ordinary submit path — optimistic bubble and the
-    /// sidebar's seed row included.
+    /// The send is CHAINED onto the fresh chat's own subscribe answer
+    /// (`subscribe_then`) — a strict wire order. The racing alternative
+    /// (dispatching on a separate tokio task, "one executor turn late")
+    /// carried no order guarantee: a submit that lands before the host
+    /// opened the chat is answered not-found and silently lost — the journal
+    /// never materializes and the message is gone. The text rides the
+    /// ordinary submit path — optimistic bubble and the sidebar's seed row
+    /// included.
     pub(crate) fn flush_pending_first_turn(&mut self, cx: &mut Context<Self>) {
         let Some(text) = self.pending_first_turn.take() else {
             return;
         };
-        cx.spawn(async move |this, cx| {
-            let _ = this.update(cx, |this, cx| {
-                this.send_user_turn(text, Vec::new(), SubmitBehavior::Send, cx);
-            });
-        })
-        .detach();
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            tracing::warn!("launcher send dropped: the foreground store is unbound");
+            return;
+        };
+        let ws = cx.weak_entity();
+        store.update(cx, |store, cx| {
+            store.subscribe_then(
+                steer_agent_chat_ui::ahp_store::chat_uri(&sid),
+                move |cx| {
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.send_user_turn(text, Vec::new(), SubmitBehavior::Send, cx);
+                    });
+                },
+                cx,
+            );
+        });
     }
 
     /// The failed create's refund leg (design §6): the staged text returns to

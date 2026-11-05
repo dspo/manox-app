@@ -113,10 +113,11 @@ impl Workspace {
     ///
     /// This is also the launcher send's flush point (design §3.2): the
     /// attach binds the foreground store synchronously, so the staged first
-    /// message is handed to the ordinary submit path right here (one
-    /// executor turn late — see `flush_pending_first_turn`) — and the
-    /// attach tail's mode flip brings the fresh container's column up with
-    /// it.
+    /// message is handed to the ordinary submit path right here — CHAINED
+    /// onto the fresh chat's subscribe answer by the store's
+    /// `subscribe_then` (a strict wire order; the earlier executor-turn
+    /// spacing raced, see `flush_pending_first_turn`) — and the attach
+    /// tail's mode flip brings the fresh container's column up with it.
     pub(super) fn attach_created_session(
         &mut self,
         session_id: &str,
@@ -133,9 +134,8 @@ impl Workspace {
         // gate here would flash the loading page on a race with the create
         // subscription.
         self.attach_thread(thread, true, false, window, cx);
-        // The launcher send's staged text flushes one executor turn after
-        // THIS — trailing open_or_create's subscribe issue on the wire
-        // (design §6).
+        // The launcher send's staged text flushes after THIS — the store
+        // chains it onto the fresh chat's subscribe answer on the wire.
         self.flush_pending_first_turn(cx);
     }
 

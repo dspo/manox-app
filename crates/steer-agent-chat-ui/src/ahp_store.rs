@@ -896,6 +896,10 @@ impl From<ahp::ClientError> for CreateSessionError {
     }
 }
 
+/// The hook a queued `subscribe_then` runs once the replayed subscribe has
+/// been answered and its snapshot folded (see [`AhpStore::subscribe_then`]).
+type SubscribeThenHook = dyn FnOnce(&mut gpui::AsyncApp);
+
 /// A write issued before the handshake, replayed **in order** on connect —
 /// the landing createSession precedes its subscribes, and the subscribes
 /// precede the active-client claim, so the replay awaits each step before
@@ -908,7 +912,12 @@ enum PendingWrite {
         config: Option<serde_json::Map<String, Value>>,
         reply: async_channel::Sender<Result<Value, CreateSessionError>>,
     },
-    Subscribe(String),
+    /// A `subscribe_then` issued before the handshake: the hook rides the
+    /// queue on the variant, so it runs after the replayed subscribe has been
+    /// answered and its snapshot folded — never before the channel is open.
+    /// (The plain `Subscribe` write needs no variant: its connected path
+    /// delegates to `subscribe_then` with a no-op hook.)
+    SubscribeThen(String, Box<SubscribeThenHook>),
     Unsubscribe(String),
     Dispatch(String, Box<StateAction>),
     /// An extension command (`x-manox/*`) issued before the handshake:
@@ -1602,7 +1611,7 @@ impl AhpStore {
                         .await;
                         let _ = reply.send(result).await;
                     }
-                    PendingWrite::Subscribe(uri) => {
+                    PendingWrite::SubscribeThen(uri, then) => {
                         let folded = tokio_wait({
                             let client = client.clone();
                             let uri = uri.clone();
@@ -1621,11 +1630,13 @@ impl AhpStore {
                             }
                         })
                         .await;
-                        // Fold the snapshot the same way the direct path does:
-                        // without it a fresh landing session runs on the
+                        // Fold the snapshot the same way the direct path does
+                        // (without it a fresh landing session runs on the
                         // empty-session fallback whose `config` seat is None,
-                        // and every configChanged merge no-ops (the chip's
-                        // picked model never lands).
+                        // and every configChanged merge no-ops), then run the
+                        // hook in a SEPARATE update — hooks call back into
+                        // the store (the launcher send dispatches its turn),
+                        // and re-entering the held borrow panics.
                         if let Ok(result) = folded
                             && let Some(snapshot) = result.snapshot
                         {
@@ -1636,6 +1647,7 @@ impl AhpStore {
                                 }
                             });
                         }
+                        then(cx);
                     }
                     PendingWrite::Unsubscribe(uri) => {
                         let _ = tokio_wait({
@@ -2337,14 +2349,37 @@ impl AhpStore {
 
     /// Subscribe one channel. The snapshot (state-bearing channels) folds
     /// into the book when the host answers.
+    /// Subscribe one channel. The snapshot (state-bearing channels) folds
+    /// into the book when the host answers.
     pub fn subscribe(&mut self, uri: impl Into<String>, cx: &mut gpui::Context<Self>) {
+        self.subscribe_then(uri, |_| {}, cx);
+    }
+
+    /// Subscribe one channel and run `then` once the host has ANSWERED the
+    /// subscribe — with NO store borrow held (the hook receives the app
+    /// handle only, because hooks call back into the store: the launcher
+    /// send dispatches its turn, and a store update on the hook's path would
+    /// re-enter the borrow). The ordering seam for writes that must trail a
+    /// channel's opening: the racing writes are independent tokio tasks with
+    /// no wire-order guarantee between them, and the launcher send's first
+    /// turn that lands before the host opened the fresh chat is answered
+    /// not-found and silently lost (the session's journal never
+    /// materializes).
+    pub fn subscribe_then(
+        &mut self,
+        uri: impl Into<String>,
+        then: impl FnOnce(&mut gpui::AsyncApp) + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let uri: String = uri.into();
         // A write issued while the pre-connect replay is running queues behind
         // it: racing the landing createSession/subscribe silently loses the
         // first message (the host answers not-found for a session still
-        // being created).
+        // being created). The hook rides the queue on the variant — it runs
+        // after the replayed subscribe has been answered and folded.
         if self.client.is_none() || self.replay_pending {
-            self.pending_writes.push(PendingWrite::Subscribe(uri));
+            self.pending_writes
+                .push(PendingWrite::SubscribeThen(uri, Box::new(then)));
             return;
         }
         let client = self.client.clone().expect("guard above");
@@ -2365,14 +2400,18 @@ impl AhpStore {
                     return;
                 }
             };
-            if let Some(snapshot) = result.snapshot {
-                let _ = this.update(cx, |store, cx| {
+            let _ = this.update(cx, |store, cx| {
+                if let Some(snapshot) = result.snapshot {
                     let uri = snapshot.resource.clone();
                     if store.apply_snapshot_confirmed(&uri, snapshot.state) {
                         cx.notify();
                     }
-                });
-            }
+                }
+            });
+            // The hook runs with NO store borrow held: hooks call back into
+            // the store (the launcher send dispatches its turn), so any
+            // store update on the hook's path would re-enter the borrow.
+            then(cx);
         })
         .detach();
     }
@@ -2837,7 +2876,7 @@ impl AhpStore {
     pub fn diagnostic_queued_subscribes(&self) -> usize {
         self.pending_writes
             .iter()
-            .filter(|write| matches!(write, PendingWrite::Subscribe(_)))
+            .filter(|write| matches!(write, PendingWrite::SubscribeThen(..)))
             .count()
     }
 
