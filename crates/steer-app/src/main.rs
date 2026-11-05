@@ -53,6 +53,41 @@ fn panic_log_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steer-panic"))
 }
 
+/// `io::Write` adapter that discards write/flush errors (`EPIPE`, `EIO`, etc.)
+/// so detached pipes or closed PTYs never cause `tracing-subscriber`'s fallback
+/// `eprintln!` path to panic the process.
+struct IgnoreErrors<W>(W);
+
+impl<W: std::io::Write> std::io::Write for IgnoreErrors<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.0.write(buf) {
+            Ok(n) => Ok(n),
+            Err(_) => Ok(buf.len()),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = self.0.flush();
+        Ok(())
+    }
+}
+
+fn lossy_stderr() -> IgnoreErrors<std::io::Stderr> {
+    IgnoreErrors(std::io::stderr())
+}
+
+fn persist_panic_log_in(dir: &std::path::Path, msg: &str) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("panic.log"))
+        .and_then(|mut f| {
+            use std::io::Write as _;
+            writeln!(f, "{msg}")
+        });
+}
+
 fn main() {
     // Install a panic hook before anything else so a panic anywhere — main
     // thread, gpui foreground task, or a detached tokio worker — surfaces with
@@ -78,22 +113,18 @@ fn main() {
             "panic: {payload}\n  location: {location}\n  thread: {:?}\n{bt}",
             std::thread::current().name().unwrap_or("<unnamed>")
         );
-        eprintln!("{msg}");
-        tracing::error!("{msg}");
-        // Persist every panic to a durable log: launchd swallows stderr, so a
-        // panicking process would otherwise leave no record for diagnosis.
+
+        // Persist every panic to a durable log before touching stderr: launchd
+        // swallows stderr, and a broken stderr pipe must never abort before the
+        // crash record lands on disk.
         // Platform log homes: macOS `~/Library/Logs/Steer`, elsewhere the
         // XDG state dir (`$XDG_STATE_HOME` or `~/.local/state`) + `/steer`.
         let dir = panic_log_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("panic.log"))
-            .and_then(|mut f| {
-                use std::io::Write as _;
-                writeln!(f, "{msg}")
-            });
+        persist_panic_log_in(&dir, &msg);
+
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "{msg}");
+        tracing::error!("{msg}");
     }));
 
     tracing_subscriber::fmt()
@@ -105,8 +136,9 @@ fn main() {
         .with_thread_names(true)
         // stderr: Rust never block-buffers it, so GUI launches (stdout is a
         // pipe) still stream logs live instead of losing the tail in a dead
-        // buffer.
-        .with_writer(std::io::stderr)
+        // buffer. IgnoreErrors absorbs EPIPE/EIO when a parent pipe closes so
+        // tracing-subscriber does not fall back to a panicking eprintln!.
+        .with_writer(lossy_stderr)
         .init();
 
     let app = gpui_platform::application().with_assets(agent_ui::assets::ExtrasAssetSource::new());
@@ -611,4 +643,73 @@ fn build_chatgpt_menu_items() -> Vec<MenuItem> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    struct FailingWriter {
+        kind: Option<std::io::ErrorKind>,
+        written: Vec<u8>,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Some(kind) = self.kind {
+                return Err(std::io::Error::new(kind, "simulated write failure"));
+            }
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if let Some(kind) = self.kind {
+                return Err(std::io::Error::new(kind, "simulated flush failure"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ignore_errors_absorbs_broken_pipe_and_io_errors() {
+        for kind in [std::io::ErrorKind::BrokenPipe, std::io::ErrorKind::Other] {
+            let mut writer = IgnoreErrors(FailingWriter {
+                kind: Some(kind),
+                written: Vec::new(),
+            });
+            let msg = b"bridge: subscribed to the journal feed\n";
+            assert_eq!(writer.write(msg).unwrap(), msg.len());
+            assert!(writer.flush().is_ok());
+        }
+    }
+
+    #[test]
+    fn ignore_errors_forwards_healthy_writes() {
+        let mut writer = IgnoreErrors(FailingWriter {
+            kind: None,
+            written: Vec::new(),
+        });
+        let msg = b"normal log entry\n";
+        assert_eq!(writer.write(msg).unwrap(), msg.len());
+        assert!(writer.flush().is_ok());
+        assert_eq!(writer.0.written, msg);
+    }
+
+    #[test]
+    fn persist_panic_log_records_entry_independently_of_stderr() {
+        let dir = std::env::temp_dir().join(format!("steer-panic-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let entry = "panic: test boom\n  location: src/main.rs:1:1\n  thread: \"tokio-rt-worker\"";
+        persist_panic_log_in(&dir, entry);
+        let saved = std::fs::read_to_string(dir.join("panic.log")).unwrap();
+        assert!(saved.contains(entry));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panic_log_dir_is_non_empty() {
+        assert!(!panic_log_dir().as_os_str().is_empty());
+    }
 }
