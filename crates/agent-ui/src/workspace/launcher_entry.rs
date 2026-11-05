@@ -59,11 +59,15 @@ impl crate::Workspace {
     /// folder rides the create intent; the picks land in its config), stage
     /// the text, and let the attach completion flush it. The mode stays
     /// Launcher until the attach lands — the attach tail flips the column and
-    /// [`Self::flush_pending_first_turn`] sends.
-    pub(crate) fn submit_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
+    /// [`Self::flush_pending_first_turn`] sends. The payload arrives
+    /// pre-extracted (see `LauncherSubmitPayload`): this gesture runs in the
+    /// PressEnter handler's wake, where re-entering the launcher entity
+    /// panics the borrow.
+    pub(crate) fn submit_launcher(
+        &mut self,
+        payload: crate::launcher::LauncherSubmitPayload,
+        cx: &mut Context<Self>,
+    ) {
         // Single flight: the staged text already names the container being
         // minted, and the flush is keyed to its attach. A second submit
         // during the flight would race it (the input cleared on the first
@@ -72,8 +76,13 @@ impl crate::Workspace {
             tracing::warn!("launcher send ignored: a first turn is already in flight");
             return;
         }
-        let (target, model, access, effort) = launcher.read(cx).snapshot();
-        let text = launcher.update(cx, |state, cx| state.take_text(window, cx));
+        let crate::launcher::LauncherSubmitPayload {
+            text,
+            target,
+            model,
+            access,
+            effort,
+        } = payload;
         if text.trim().is_empty() {
             return;
         }

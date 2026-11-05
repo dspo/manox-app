@@ -55,6 +55,20 @@ pub(crate) struct LauncherAgentLaunchPayload {
     pub wire: Option<String>,
 }
 
+/// The launcher send's payload, extracted INSIDE the launcher's own update
+/// and passed outward to the workspace gesture. The extraction must happen
+/// there: the PressEnter subscription fires while the launcher entity is
+/// being updated, and a `launcher.read` after the `ws.update` would re-enter
+/// the held borrow and panic.
+#[derive(Clone, Debug)]
+pub(crate) struct LauncherSubmitPayload {
+    pub text: String,
+    pub target: LauncherTarget,
+    pub model: Option<String>,
+    pub access: Option<String>,
+    pub effort: Option<String>,
+}
+
 /// The launcher's target: the container-to-be's belonging. A project target
 /// resolves through the registry AT USE TIME (the project may be deleted
 /// mid-flight); a folder target is an ad-hoc belonging that never enters the
@@ -164,7 +178,11 @@ impl LauncherState {
                 shift: false,
             } = ev
             {
-                let _ = this.ws.update(cx, |ws, cx| ws.submit_launcher(window, cx));
+                // The payload extracts INSIDE this update; the workspace
+                // gesture runs after — re-entering this entity there panics
+                // the borrow.
+                let payload = this.submit_payload(window, cx);
+                let _ = this.ws.update(cx, |ws, cx| ws.submit_launcher(payload, cx));
             }
         });
         // The default target follows the memory (last used > none) — the
@@ -291,6 +309,25 @@ impl LauncherState {
             Some(access_wire(self.access_full).to_string()),
             self.effort.clone(),
         )
+    }
+
+    /// The send's payload, consumed out of this state — the composer text is
+    /// taken, the picks cloned. See [`LauncherSubmitPayload`] for why the
+    /// extraction lives on this side of the `ws.update`.
+    pub(crate) fn submit_payload(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> LauncherSubmitPayload {
+        let (target, model, access, effort) = self.snapshot();
+        let text = self.take_text(window, cx);
+        LauncherSubmitPayload {
+            text,
+            target,
+            model,
+            access,
+            effort,
+        }
     }
 
     // ── menus ─────────────────────────────────────────────────────────

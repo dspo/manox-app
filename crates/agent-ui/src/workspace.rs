@@ -1268,7 +1268,11 @@ impl Workspace {
     /// gestures no longer take). Test-support.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_launcher_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.submit_launcher(window, cx);
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let payload = launcher.update(cx, |state, cx| state.submit_payload(window, cx));
+        self.submit_launcher(payload, cx);
     }
 
     /// Preset the launcher's picks — the create-intent coverage (picks ride
