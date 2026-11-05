@@ -631,3 +631,423 @@ fn project_row(project: &Project) -> toml::Value {
     );
     toml::Value::Table(table)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(label: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join(label);
+        std::fs::create_dir(&root).expect("mkdir");
+        (dir, root)
+    }
+
+    fn canon(path: &Path) -> PathBuf {
+        path.canonicalize().expect("canonicalize")
+    }
+
+    fn project_at<'a>(reg: &'a Registry, id: &str) -> &'a Project {
+        project(reg, id).expect("project exists")
+    }
+
+    fn primary_flags(reg: &Registry, id: &str) -> Vec<bool> {
+        project_at(reg, id)
+            .roots
+            .iter()
+            .map(|r| r.primary)
+            .collect()
+    }
+
+    fn ids_by_position(reg: &Registry) -> Vec<String> {
+        let mut projects = reg.projects.clone();
+        projects.sort_by_key(|p| p.position);
+        projects.into_iter().map(|p| p.id).collect()
+    }
+
+    /// The parse-edit-serialize cycle: persisted projects, their nested
+    /// root rows and memberships survive a round trip, an `external:` key
+    /// lands quoted, and the unrelated sibling keys are preserved verbatim.
+    #[test]
+    fn persist_preserves_sibling_keys_and_round_trips() {
+        let (dir, root_a) = temp_root("a");
+        let root_b = root_a.parent().expect("parent").join("b");
+        std::fs::create_dir(&root_b).expect("mkdir");
+        let settings = dir.path().join("settings.toml");
+        std::fs::write(&settings, "ui_language = \"zh-CN\"\n\n[host]\nport = 42\n").expect("seed");
+
+        let mut reg = Registry::default();
+        let first = create_in(
+            &mut reg,
+            Some("Steer".into()),
+            vec![root_a.clone(), root_b.clone()],
+            Some(root_b.clone()),
+        )
+        .expect("create");
+        let _second = create_in(&mut reg, None, vec![root_a.clone()], None).expect("create");
+        assert!(set_membership_in(&mut reg, "session-1", &first.id));
+        assert!(set_membership_in(
+            &mut reg,
+            "external:claude:abc",
+            &first.id
+        ));
+        persist_at(&settings, &reg);
+
+        let loaded = load_at(&settings);
+        assert_eq!(loaded.projects, reg.projects);
+        assert_eq!(loaded.membership, reg.membership);
+
+        let raw = std::fs::read_to_string(&settings).expect("read");
+        assert!(raw.contains("[[project]]"));
+        assert!(raw.contains("[[project.roots]]"));
+        assert!(raw.contains("\"external:claude:abc\""), "quoted key");
+        let doc: toml::Value = toml::from_str(&raw).expect("parse");
+        assert_eq!(
+            doc.get("ui_language").and_then(|v| v.as_str()),
+            Some("zh-CN")
+        );
+        assert_eq!(
+            doc.get("host")
+                .and_then(|v| v.get("port"))
+                .and_then(|v| v.as_integer()),
+            Some(42)
+        );
+    }
+
+    /// A hand-edited file is repaired on load: the first root wins the
+    /// primary badge and a rootless entry is dropped as unrepresentable.
+    #[test]
+    fn load_repairs_a_hand_edited_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join("settings.toml");
+        std::fs::write(
+            &settings,
+            "ui_language = \"en-US\"\n\
+             [[project]]\n\
+             id = \"p1\"\n\
+             name = \"X\"\n\
+             name_overridden = true\n\
+             position = 5\n\
+             created_at = 7\n\
+             [[project.roots]]\n\
+             path = \"/somewhere/manox\"\n\
+             primary = true\n\
+             [[project.roots]]\n\
+             path = \"/somewhere/manox-app\"\n\
+             primary = true\n\
+             [[project]]\n\
+             id = \"rootless\"\n\
+             name = \"\"\n\
+             position = 0\n\
+             created_at = 0\n",
+        )
+        .expect("seed");
+        let loaded = load_at(&settings);
+        assert_eq!(loaded.projects.len(), 1, "the rootless entry is dropped");
+        let p = &loaded.projects[0];
+        assert_eq!(p.id, "p1");
+        let flags: Vec<bool> = p.roots.iter().map(|r| r.primary).collect();
+        assert_eq!(flags, vec![true, false], "first root wins the badge");
+    }
+
+    /// Creation refuses missing directories, plain files, and empty root
+    /// sets, leaving nothing behind.
+    #[test]
+    fn create_rejects_missing_directories_and_empty_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("mkdir");
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").expect("write");
+        let mut reg = Registry::default();
+
+        let missing = dir.path().join("absent");
+        assert!(create_in(&mut reg, None, vec![real.clone(), missing.clone()], None).is_err());
+        assert!(reg.projects.is_empty(), "a failed create leaves nothing");
+        assert!(create_in(&mut reg, None, vec![file.clone()], None).is_err());
+        assert!(create_in(&mut reg, None, vec![], None).is_err());
+        assert!(reg.projects.is_empty());
+
+        let project = create_in(&mut reg, None, vec![real], None).expect("create");
+        assert_eq!(project.roots.len(), 1);
+    }
+
+    /// Duplicates collapse to the first occurrence, spellings land on the
+    /// canonical absolute form, nested parent/child roots are both kept,
+    /// and the primary badge lands on the requested root.
+    #[test]
+    fn create_dedups_canonicalizes_and_keeps_nested_roots() {
+        let (_dir, root_a) = temp_root("a");
+        let nested = root_a.join("nested");
+        std::fs::create_dir(&nested).expect("mkdir");
+        let mut reg = Registry::default();
+
+        let project = create_in(
+            &mut reg,
+            None,
+            vec![root_a.clone(), root_a.clone(), nested.clone()],
+            None,
+        )
+        .expect("create");
+        let paths: Vec<PathBuf> = project.roots.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(paths, vec![canon(&root_a), canon(&nested)]);
+        assert_eq!(primary_flags(&reg, &project.id), vec![true, false]);
+
+        // An explicit primary is honored; a blank name is "not customized".
+        let project = create_in(
+            &mut reg,
+            Some("  P  ".into()),
+            vec![root_a.clone(), nested.clone()],
+            Some(nested.clone()),
+        )
+        .expect("create");
+        assert_eq!(project.name, "P");
+        assert!(project.name_overridden);
+        assert_eq!(primary_flags(&reg, &project.id), vec![false, true]);
+
+        // A primary outside the roots is refused.
+        let elsewhere = temp_root("elsewhere").1;
+        assert!(create_in(&mut reg, None, vec![root_a.clone()], Some(elsewhere)).is_err());
+    }
+
+    /// The badge moves and never duplicates: after set_primary and
+    /// set_roots exactly one root is primary, and refusals leave the
+    /// project untouched.
+    #[test]
+    fn set_primary_and_set_roots_keep_exactly_one_primary() {
+        let (dir, a) = temp_root("a");
+        let b = dir.path().join("b");
+        let c = dir.path().join("c");
+        std::fs::create_dir(&b).expect("mkdir");
+        std::fs::create_dir(&c).expect("mkdir");
+        let mut reg = Registry::default();
+        let p =
+            create_in(&mut reg, None, vec![a.clone(), b.clone(), c.clone()], None).expect("create");
+        assert_eq!(primary_flags(&reg, &p.id), vec![true, false, false]);
+
+        set_primary_in(&mut reg, &p.id, &b).expect("set_primary");
+        assert_eq!(primary_flags(&reg, &p.id), vec![false, true, false]);
+
+        let missing = dir.path().join("absent");
+        assert!(set_primary_in(&mut reg, &p.id, &missing).is_err());
+        assert!(
+            set_primary_in(&mut reg, &p.id, &a).is_ok(),
+            "back to a root"
+        );
+        set_primary_in(&mut reg, &p.id, &b).expect("set_primary");
+        assert!(set_primary_in(&mut reg, "no-such-id", &a).is_err());
+        assert_eq!(primary_flags(&reg, &p.id), vec![false, true, false]);
+
+        set_roots_in(&mut reg, &p.id, vec![c.clone(), b.clone()], None).expect("set_roots");
+        assert_eq!(
+            primary_flags(&reg, &p.id),
+            vec![true, false],
+            "primary resets to the first new root"
+        );
+        set_roots_in(&mut reg, &p.id, vec![a.clone(), b.clone()], Some(b.clone()))
+            .expect("set_roots");
+        assert_eq!(primary_flags(&reg, &p.id), vec![false, true]);
+
+        assert!(set_roots_in(&mut reg, &p.id, vec![], None).is_err());
+        assert!(set_roots_in(&mut reg, &p.id, vec![missing], None).is_err());
+        assert_eq!(project_at(&reg, &p.id).roots.len(), 2, "unchanged");
+        assert_eq!(primary_flags(&reg, &p.id), vec![false, true]);
+    }
+
+    /// The display name follows the primary root's basename until the user
+    /// overrides it; clearing the override resumes following.
+    #[test]
+    fn display_name_follows_primary_until_overridden() {
+        let (dir, a) = temp_root("widget");
+        let b = dir.path().join("anvil");
+        std::fs::create_dir(&b).expect("mkdir");
+        let mut reg = Registry::default();
+        let p = create_in(&mut reg, None, vec![a.clone(), b.clone()], None).expect("create");
+        let name = |reg: &Registry| display_name(project_at(reg, &p.id));
+        assert_eq!(name(&reg), "widget");
+
+        set_primary_in(&mut reg, &p.id, &b).expect("set_primary");
+        assert_eq!(name(&reg), "anvil", "uncustomized name follows the root");
+
+        update_name_in(&mut reg, &p.id, Some("Steer".into())).expect("update_name");
+        assert_eq!(name(&reg), "Steer");
+        set_primary_in(&mut reg, &p.id, &a).expect("set_primary");
+        assert_eq!(name(&reg), "Steer", "overridden name does not follow");
+
+        update_name_in(&mut reg, &p.id, Some("   ".into())).expect("update_name");
+        assert!(!project_at(&reg, &p.id).name_overridden, "blank clears");
+        assert_eq!(name(&reg), "widget");
+        update_name_in(&mut reg, &p.id, None).expect("update_name");
+        assert_eq!(name(&reg), "widget");
+        assert!(update_name_in(&mut reg, "ghost", Some("x".into())).is_err());
+    }
+
+    /// Deleting a project removes its memberships with it; other
+    /// projects' memberships survive, and a second delete is a no-op.
+    #[test]
+    fn delete_project_cascades_memberships() {
+        let (_dir_a, a) = temp_root("a");
+        let (_dir_b, b) = temp_root("b");
+        let mut reg = Registry::default();
+        let p1 = create_in(&mut reg, None, vec![a], None).expect("create");
+        let p2 = create_in(&mut reg, None, vec![b], None).expect("create");
+        assert!(set_membership_in(&mut reg, "s1", &p1.id));
+        assert!(set_membership_in(&mut reg, "s2", &p1.id));
+        assert!(set_membership_in(&mut reg, "s3", &p2.id));
+
+        assert!(delete_in(&mut reg, &p1.id));
+        assert!(reg.projects.iter().all(|p| p.id != p1.id));
+        assert!(!reg.membership.contains_key("s1"));
+        assert!(!reg.membership.contains_key("s2"));
+        assert_eq!(
+            reg.membership.get("s3").map(String::as_str),
+            Some(p2.id.as_str())
+        );
+        assert!(!delete_in(&mut reg, &p1.id), "second delete is a no-op");
+    }
+
+    /// The listed ids take positions 0..n in order, unknown ids are
+    /// ignored, and unlisted projects trail in their previous relative
+    /// order — so positions stay a permutation of 0..n.
+    #[test]
+    fn reorder_rewrites_positions_zero_to_n() {
+        let (dir, a) = temp_root("a");
+        let b = dir.path().join("b");
+        let c = dir.path().join("c");
+        let d = dir.path().join("d");
+        for root in [&b, &c, &d] {
+            std::fs::create_dir(root).expect("mkdir");
+        }
+        let mut reg = Registry::default();
+        let p1 = create_in(&mut reg, None, vec![a.clone()], None).expect("create");
+        let p2 = create_in(&mut reg, None, vec![b.clone()], None).expect("create");
+        let p3 = create_in(&mut reg, None, vec![c.clone()], None).expect("create");
+        let p4 = create_in(&mut reg, None, vec![d.clone()], None).expect("create");
+        // Pre-insertion: newest first before any manual order.
+        assert_eq!(
+            ids_by_position(&reg),
+            vec![p4.id.clone(), p3.id.clone(), p2.id.clone(), p1.id.clone()]
+        );
+
+        reorder_in(&mut reg, &[p1.id.clone(), p2.id.clone()]);
+        assert_eq!(
+            positions_of(&reg),
+            vec![
+                (0, p1.id.clone()),
+                (1, p2.id.clone()),
+                (2, p4.id.clone()),
+                (3, p3.id.clone())
+            ],
+            "listed ids take 0..n, unlisted trail by old position"
+        );
+
+        // Unknown ids are ignored; the unlisted keep their relative order.
+        reorder_in(
+            &mut reg,
+            &["ghost".to_string(), p3.id.clone(), p1.id.clone()],
+        );
+        assert_eq!(
+            positions_of(&reg),
+            vec![
+                (0, p3.id.clone()),
+                (1, p1.id.clone()),
+                (2, p2.id.clone()),
+                (3, p4.id.clone())
+            ]
+        );
+    }
+
+    fn positions_of(reg: &Registry) -> Vec<(i64, String)> {
+        let mut projects = reg.projects.clone();
+        projects.sort_by_key(|p| p.position);
+        projects.into_iter().map(|p| (p.position, p.id)).collect()
+    }
+
+    /// Membership CRUD: re-pointing, sorted reads, idempotent removal, and
+    /// the batch prune.
+    #[test]
+    fn membership_crud() {
+        let (_dir_a, a) = temp_root("a");
+        let (_dir_b, b) = temp_root("b");
+        let mut reg = Registry::default();
+        let p1 = create_in(&mut reg, None, vec![a], None).expect("create");
+        let p2 = create_in(&mut reg, None, vec![b], None).expect("create");
+
+        assert!(
+            !set_membership_in(&mut reg, "s1", "ghost"),
+            "no membership to a nonexistent project"
+        );
+        assert!(set_membership_in(&mut reg, "s1", &p1.id));
+        assert!(!set_membership_in(&mut reg, "s1", &p1.id), "same value");
+        assert!(set_membership_in(&mut reg, "s1", &p2.id), "re-pointing");
+        assert!(set_membership_in(&mut reg, "external:codex:u", &p1.id));
+        assert!(set_membership_in(&mut reg, "aaa-first", &p1.id));
+        assert_eq!(
+            containers_in(&reg, &p1.id),
+            vec!["aaa-first".to_string(), "external:codex:u".to_string()],
+            "container id order"
+        );
+
+        assert!(remove_membership_in(&mut reg, "external:codex:u"));
+        assert!(
+            !remove_membership_in(&mut reg, "external:codex:u"),
+            "idempotent"
+        );
+        assert!(prune_in(
+            &mut reg,
+            &[
+                "s1".to_string(),
+                "aaa-first".to_string(),
+                "absent".to_string()
+            ]
+        ));
+        assert!(!prune_in(&mut reg, &["absent".to_string()]), "nothing left");
+        assert!(reg.membership.is_empty());
+    }
+
+    /// The whole stack through the public API against a redirected
+    /// settings file: a create lands on disk, survives a cache drop (the
+    /// restart shape), and leaves sibling keys intact. The only test
+    /// touching the process-wide statics; it restores them before returning.
+    #[test]
+    fn pub_api_persists_and_reloads_across_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join("settings.toml");
+        std::fs::write(&settings, "ui_language = \"zh-CN\"\n\n[host]\nport = 42\n").expect("seed");
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).expect("mkdir");
+
+        *TEST_SETTINGS_FILE.lock().expect("lock") = Some(settings.clone());
+        *REGISTRY.lock().expect("lock") = None;
+
+        let project = create_project(Some("Steer".into()), vec![root], None).expect("create");
+        set_membership("session-1", &project.id);
+        assert_eq!(
+            membership_of("session-1").as_deref(),
+            Some(project.id.as_str())
+        );
+
+        // The cache drops (the restart shape); the file alone answers.
+        *REGISTRY.lock().expect("lock") = None;
+        let loaded = list_projects();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, project.id);
+        assert_eq!(loaded[0].roots, project.roots);
+        assert_eq!(
+            membership_of("session-1").as_deref(),
+            Some(project.id.as_str())
+        );
+        let doc: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("parse");
+        assert_eq!(
+            doc.get("ui_language").and_then(|v| v.as_str()),
+            Some("zh-CN")
+        );
+
+        delete_project(&project.id);
+        assert!(membership_of("session-1").is_none(), "cascade");
+
+        *TEST_SETTINGS_FILE.lock().expect("lock") = None;
+        *REGISTRY.lock().expect("lock") = None;
+    }
+}
