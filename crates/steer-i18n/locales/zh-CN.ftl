@@ -15,10 +15,6 @@ sidebar-section-projects = 项目
 
 sidebar-section-conversations = 对话
 
-sidebar-new-session-label = 新建会话
-
-sidebar-new-session-steer = Steer
-
 sidebar-new-terminal = 新建终端
 
 sidebar-remove-project = 移除项目
@@ -615,8 +611,6 @@ exit-archiving = 正在归档 { $name }……
 
 exit-archived = 会话已归档。
 
-exit-bye = 拜拜！
-
 menu-settings = Settings…
 
 menu-quit = 退出
@@ -923,6 +917,22 @@ project-remove-confirm-ok = 移除
 
 # 保存失败（理论少见：picker 只给现存目录）的行内红字提示，不弹窗。
 project-error-save = 保存失败：{$err}
+
+# Launcher（新对话发射台，设计 §3）
+launcher-heading = 新对话
+
+launcher-project-none = 无项目
+
+launcher-open-folder = 打开其他文件夹…
+
+launcher-action-heading = 或直接打开
+
+launcher-action-terminal = Ghostty 终端
+
+launcher-action-unavailable = 未检测到 {$prog}
+
+# 组菜单的入口项（agent 级联已退役——Launcher 动作行是唯一 agent 启动面）
+project-new-conversation = 新建对话
 
 ## steer-agent-chrome-ui（应用壳：侧栏/标题栏/页签/底部面板）
 

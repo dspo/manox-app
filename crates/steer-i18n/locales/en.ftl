@@ -15,10 +15,6 @@ sidebar-section-projects = Projects
 
 sidebar-section-conversations = Conversations
 
-sidebar-new-session-label = New session
-
-sidebar-new-session-steer = Steer
-
 sidebar-new-terminal = New Terminal
 
 sidebar-remove-project = Remove Project
@@ -632,8 +628,6 @@ exit-archiving = Archiving { $name }...
 
 exit-archived = The thread is archived.
 
-exit-bye = ByeBye!
-
 menu-settings = Settings…
 
 menu-quit = Quit
@@ -946,6 +940,23 @@ project-remove-confirm-ok = Remove
 # The inline red line for a failed save (rare: the picker only yields
 # existing directories) — no popup.
 project-error-save = Couldn't save: {$err}
+
+# Launcher (the new-conversation launch pad, design §3)
+launcher-heading = New conversation
+
+launcher-project-none = No project
+
+launcher-open-folder = Open Other Folder…
+
+launcher-action-heading = Or open directly
+
+launcher-action-terminal = Ghostty Terminal
+
+launcher-action-unavailable = { $prog } not detected
+
+# The group menu's entry item (the per-agent cascades retired — the
+# launcher's action row is the one agent launch face).
+project-new-conversation = New Conversation
 
 ## steer-agent-chrome-ui (app shell: sidebar / toolbar / tabs / bottom dock)
 

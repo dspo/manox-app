@@ -7,7 +7,8 @@
 //! (no PTY/webview — those need a real window), `CHROME_SELECT=1` the
 //! sidebar's batch-selection mode with two rows checked, `CHROME_PANEL=1` the bottom
 //! dock, `CHROME_PICKER=1` the titlebar session picker with its dropdown
-//! open, `CHROME_PROJECT_DIALOG=1` the modal project dialog over the shell.
+//! open, `CHROME_PROJECT_DIALOG=1` the modal project dialog over the shell,
+//! `CHROME_LAUNCHER=1` the launcher as the main card's content.
 //! macOS-only: the readback is a Metal texture and the harness's
 //! imports (`VisualTestAppContext`) exist only on that platform.
 
@@ -70,7 +71,17 @@ mod macos {
         let mut shell_slot = None;
         let handle = cx
             .open_offscreen_window(size(px(1280.), px(820.)), |window, cx| {
-                let main: AnyView = cx.new(ChatPreviewStub::new).into();
+                // CHROME_LAUNCHER=1 swaps the main card for the launcher (the
+                // real component with static props — a project target, a
+                // full-access switch, the terminal pill live and the Codex pill
+                // grayed with its unavailable tooltip; the gestures are
+                // agent-ui's, not the shot's).
+                let launcher = std::env::var("CHROME_LAUNCHER").is_ok();
+                let main: AnyView = if launcher {
+                    cx.new(|cx| LauncherPreview::new(window, cx)).into()
+                } else {
+                    cx.new(ChatPreviewStub::new).into()
+                };
                 let shell = cx.new(|cx| Shell::new(shell_config(main), window, cx));
                 shell_slot = Some(shell.clone());
                 shell.update(cx, |shell, _cx| {
@@ -93,6 +104,7 @@ mod macos {
                         cx.notify();
                     });
                 }
+
                 // CHROME_SELECT=1: the sidebar's batch-selection mode with the
                 // first two thread rows checked — the check circles, the
                 // accent stroke and the bottom action bar.
@@ -698,6 +710,97 @@ mod macos {
                 on_cancel: noop_cancel,
                 on_confirm: noop,
                 on_remove: None,
+            }
+        }
+    }
+
+    /// The launcher shot's static host: a real [`steer_agent_chrome_ui::
+    /// Launcher`] with fixed props — a project target chip, a picked model +
+    /// full-access switch, the composer with seeded text, the terminal pill
+    /// live and the Codex pill grayed with its unavailable tooltip (the
+    /// point-graying face needs a verdict to render). The gestures and the
+    /// target/pick state are agent-ui's launcher state machine; the shot
+    /// accepts the page's chrome.
+    struct LauncherPreview {
+        input: gpui::Entity<gpui_component::input::TextareaState>,
+    }
+
+    impl LauncherPreview {
+        fn new(window: &mut gpui::Window, cx: &mut gpui::App) -> Self {
+            let input = cx.new(|cx| {
+                gpui_component::input::TextareaState::new(window, cx)
+                    .auto_grow(4, 12)
+                    .submit_on_enter(true)
+                    .placeholder(steer_i18n::t("workspace-input-placeholder"))
+            });
+            Self { input }
+        }
+    }
+
+    impl gpui::Render for LauncherPreview {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let noop: steer_agent_chrome_ui::session_list::OnUnit = std::rc::Rc::new(|_, _, _| {});
+            let noop_root: steer_agent_chrome_ui::session_list::OnWindowApp =
+                std::rc::Rc::new(|_, _| {});
+            let noop_access: steer_agent_chrome_ui::launcher::OnAccessPick =
+                std::rc::Rc::new(|_, _, _| {});
+            steer_agent_chrome_ui::Launcher {
+                project_label: "Steer.app".into(),
+                project_menu_open: false,
+                project_menu: None,
+                input: self.input.clone(),
+                model_label: "Test · T Model 2 · max".into(),
+                model_menu_open: false,
+                model_menu: None,
+                access_full: true,
+                on_project_chip: noop_root.clone(),
+                on_model_pick: noop_root,
+                on_access_pick: noop_access,
+                actions: vec![
+                    steer_agent_chrome_ui::LauncherAction {
+                        id: "terminal",
+                        icon: steer_agent_chrome_ui::theme::icons::TERMINAL,
+                        label: steer_i18n::t("launcher-action-terminal").into(),
+                        enabled: true,
+                        unavailable: None,
+                        cascade: None,
+                        on_click: noop.clone(),
+                    },
+                    steer_agent_chrome_ui::LauncherAction {
+                        id: "claude",
+                        icon: steer_agent_chrome_ui::theme::IconAsset("icons/claude.svg"),
+                        label: "Claude Code".into(),
+                        enabled: true,
+                        unavailable: None,
+                        cascade: None,
+                        on_click: noop.clone(),
+                    },
+                    steer_agent_chrome_ui::LauncherAction {
+                        id: "codex",
+                        icon: steer_agent_chrome_ui::theme::IconAsset("icons/codex.svg"),
+                        label: "Codex".into(),
+                        enabled: false,
+                        unavailable: Some(
+                            steer_i18n::t_str("launcher-action-unavailable", &[("prog", "Codex")])
+                                .into(),
+                        ),
+                        cascade: None,
+                        on_click: noop.clone(),
+                    },
+                    steer_agent_chrome_ui::LauncherAction {
+                        id: "copilot",
+                        icon: steer_agent_chrome_ui::theme::IconAsset("icons/githubcopilot.svg"),
+                        label: "GitHub Copilot".into(),
+                        enabled: true,
+                        unavailable: None,
+                        cascade: None,
+                        on_click: noop,
+                    },
+                ],
             }
         }
     }
