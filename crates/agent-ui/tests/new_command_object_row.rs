@@ -1,29 +1,22 @@
-//! FULL-WIRING regression: `/new` mints a conversation and must land its
-//! object row, exactly as the sidebar's 新建会话 path does.
-//!
-//! The regression class: `/new` sent `createSession` but never wrote the
-//! conversation's row, so the fresh thread had no object behind it while
-//! every picker kept addressing it. Picking a folder then died on the spot —
-//! `ObjectStore::bump` asserts on a config write for a conversation the
-//! store has never seen, and in a debug build that assert is an `abort()`.
+//! FULL-WIRING regression for the create path's object row. The premise
+//! moved with the launcher flip (design §3.3): `/new` itself mints NOTHING —
+//! it archives the outgoing conversation and lands the launcher — so the
+//! regression class ("a create that skips its row leaves every picker
+//! addressing an id the store has never seen") now lives on the launcher's
+//! ⏎ send, the one remaining native mint: its row must land at creation,
+//! unmaterialized and unlisted, exactly as the old paths owed.
 //!
 //! Own test binary: the harness initializes process-global singletons (see
 //! `tests/common/mod.rs` — one `#[gpui::test]` per binary), and this one
 //! dials the REAL in-proc host, so the store's state root must be hermetic.
 #![cfg(feature = "test-support")]
 
-use agent_ui::Workspace;
-use gpui::{TestAppContext, VisualTestContext, px, size};
-use gpui_component::Root;
-use steer_agent_chrome_ui::register_fonts;
+mod common;
 
-/// The real-host create/attach round-trip completes on the tokio runtime and
-/// only then wakes the gpui side; poll instead of a single `run_until_parked`.
-const PARK_ROUNDS: usize = 100;
-const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(50);
+use gpui::TestAppContext;
 
 #[gpui::test]
-async fn new_command_lands_the_conversation_row(cx: &mut TestAppContext) {
+async fn new_command_lands_nothing_and_the_send_lands_the_row(cx: &mut TestAppContext) {
     // Hermetic HOME: the real host boots against a throwaway state root, not
     // the developer's ~/.manox. `manox_agent::init` installs the object store
     // under that root, so the row this test reads is the test's own.
@@ -39,152 +32,46 @@ async fn new_command_lands_the_conversation_row(cx: &mut TestAppContext) {
     });
     cx.background_executor.allow_parking();
 
-    let registry = std::sync::Arc::new(manox_harness::ProviderRegistry::new());
-    registry
-        .register_provider(
-            "test-anthropic",
-            manox_harness::ProviderConfig {
-                name: Some("Test".into()),
-                base_url: Some("https://example.invalid".into()),
-                api: Some(manox_harness::provider_registry::Api::AnthropicMessages),
-                models: vec![manox_harness::provider_registry::ProviderModelConfig {
-                    id: "t-model".into(),
-                    name: "T Model".into(),
-                    reasoning: false,
-                    input: vec![],
-                    context_window: 8_192,
-                    max_tokens: 1_024,
-                    cost: Default::default(),
-                    api: None,
-                    base_url: None,
-                    metadata: Default::default(),
-                }],
-                ..Default::default()
-            },
-        )
-        .expect("register");
-    manox_agent::provider_glue::install_for_test(registry);
-
-    let ws_cell: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let (ws_for_build,) = (ws_cell.clone(),);
-    cx.update(gpui_component::init);
-    cx.update(|cx| {
-        steer_i18n::init();
-        // The slash registry is app-startup state (`main` calls this before
-        // any workspace exists); without it `/new` parses to nothing.
-        agent_ui::slash_command::init(cx);
-    });
-    let window = cx.open_window(size(px(1_280.), px(820.)), move |window, cx| {
-        register_fonts(cx);
-        let shell = agent_ui::chrome_assembly::mount(window, cx);
-        let ws = agent_ui::dispatch::workspace_global().expect("assembly workspace");
-        *ws_for_build.borrow_mut() = Some(ws);
-        Root::new(shell, window, cx)
-    });
-    cx.run_until_parked();
-    let ws = ws_cell.borrow().clone().expect("workspace captured");
-    let mut visual = VisualTestContext::from_window(window.into(), cx);
-
-    for _ in 0..PARK_ROUNDS {
-        cx.run_until_parked();
-        if cx.update(|cx| ws.read(cx).diagnostic_ahp_connected(cx)) {
-            break;
-        }
-        std::thread::sleep(PARK_STEP);
-    }
-    cx.run_until_parked();
-
-    let before = cx
-        .update(|cx| ws.read(cx).diagnostic_foreground_session(cx))
-        .expect("the landing session must be foreground before /new");
-
-    let parsed = agent_ui::slash_command::parse("/new").expect("/new is a registered command");
-    visual.update(|window, cx| {
-        ws.update(cx, |ws, cx| {
-            agent_ui::slash_command::dispatch(&parsed, ws, window, cx);
-        });
-    });
-
-    // `/new` mints its id client-side and the create lands asynchronously, so
-    // poll for the foreground to move off the landing session.
-    let mut landed = None;
-    for _ in 0..PARK_ROUNDS {
-        cx.run_until_parked();
-        let now = cx.update(|cx| ws.read(cx).diagnostic_foreground_session(cx));
-        if let Some(id) = now
-            && id != before
-        {
-            landed = Some(id);
-            break;
-        }
-        std::thread::sleep(PARK_STEP);
-    }
-    let sid = landed.expect("the /new thread must bind a foreground session");
-
-    // The row is the conversation's object: it must exist the moment the
-    // thread does, without waiting for the first message (nothing else writes
-    // one for this id — `set_draft` targets the outgoing thread).
+    let (ws, window) = common::full_wiring_boot(cx);
+    let before = common::foreground_session(cx, &ws).expect("the landing session is bound");
     let objects = manox_agent::object_store::ObjectStore::try_global().expect("object store");
+    let rows_before = objects.list_conversations().len();
+
+    // `/new` archives the outgoing conversation and lands the launcher — no
+    // mint, no new row, foreground pinned.
+    common::run_slash(cx, &ws, window, "/new");
+    assert!(
+        common::wait_launcher(cx, &ws),
+        "/new lands the launcher without minting"
+    );
+    assert_eq!(
+        common::foreground_session(cx, &ws).as_deref(),
+        Some(before.as_str()),
+        "/new mints nothing"
+    );
+    assert_eq!(
+        objects.list_conversations().len(),
+        rows_before,
+        "/new must not land an object row — it no longer creates anything"
+    );
+
+    // The launcher's ⏎ send is the create: its object row must exist the
+    // moment the thread does, without waiting for the first message (nothing
+    // else writes one for this id).
+    common::launcher_send(cx, &ws, window, "the first message");
+    let sid = common::wait_foreground_moved(cx, &ws, &before)
+        .expect("the launcher send must bind a fresh foreground session");
     let row = objects
         .conversation(&sid)
-        .expect("the /new create path must land the conversation's object row");
+        .expect("the launcher create path must land the conversation's object row");
     assert!(
-        row.last_human_message_at.is_none(),
-        "a fresh conversation has not happened yet"
+        !row.archived,
+        "the created conversation's row starts unarchived"
     );
     assert!(
         objects.list_conversations().iter().all(|r| r.id != sid),
         "an unmaterialized conversation never lists in the sidebar"
     );
 
-    // ── the Fresh refill (the /new landing's RefillPolicy::Fresh) ────────
-    // A never-materialized draft preset under the /new landing's inherited
-    // project scope would be the draft refill's candidate if the lookup
-    // ran. `/new`'s landing must mint a fresh sibling instead: the new id
-    // differs from the draft's, and the draft row stays an untouched,
-    // unmaterialized, unarchived draft. The scope is the workspace root
-    // (the boot cwd — the create intent's working directory the first
-    // /new's session channel carries); a draft under THAT project is the
-    // only candidate it could refill, so the assertion is deterministic.
-    let draft_id = uuid::Uuid::new_v4().to_string();
-    let project_scope = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .to_string_lossy()
-        .to_string();
-    objects.create_conversation(&draft_id, Some(project_scope.as_str()));
-    let parsed_again =
-        agent_ui::slash_command::parse("/new").expect("/new is a registered command");
-    visual.update(|window, cx| {
-        ws.update(cx, |ws, cx| {
-            agent_ui::slash_command::dispatch(&parsed_again, ws, window, cx);
-        });
-    });
-    let mut second = None;
-    for _ in 0..PARK_ROUNDS {
-        cx.run_until_parked();
-        let now = cx.update(|cx| ws.read(cx).diagnostic_foreground_session(cx));
-        if let Some(id) = now
-            && id != sid
-        {
-            second = Some(id);
-            break;
-        }
-        std::thread::sleep(PARK_STEP);
-    }
-    let sid2 = second.expect("the second /new must land its fresh session");
-    assert_ne!(
-        sid2, draft_id,
-        "the Fresh policy never refills the preset draft"
-    );
-    let draft = objects
-        .conversation(&draft_id)
-        .expect("the untouched draft row still exists");
-    assert!(
-        draft.last_human_message_at.is_none() && !draft.archived,
-        "the draft was not refilled: still unmaterialized and unarchived"
-    );
-
-    manox_agent::thread_store::drop_global_for_test();
-    agent_ui::dispatch::clear_globals_for_test();
+    common::full_wiring_teardown(cx);
 }

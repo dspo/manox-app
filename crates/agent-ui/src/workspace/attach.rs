@@ -100,105 +100,23 @@ impl Workspace {
             .unwrap_or(false)
     }
 
-    /// The sidebar's new-container gesture (⌘N, the Steer row, `/new`): read
-    /// the foreground's inherited picks, then hand the intent to the ONE
-    /// creation entry (`container::create_container`). No provider reload —
-    /// registration is one-shot; actors await readiness themselves.
-    ///
-    /// T6: the double path is deleted. The workspace no longer pre-builds a
-    /// local `Thread` and then attaches the AgentServer session to the same
-    /// id (two `Thread::new_*` calls on one id, both racing to materialize the
-    /// session file). It now sends the §D.2 `CreateSession` intent (the full
-    /// `{cwd, project?, initial_model?}` so the server owns creation) and,
-    /// when the server's `{session_id}` receipt lands, binds a detached
-    /// rendering mirror to that server-minted id and opens the follow stream.
-    /// Creation happens exactly once — on the server. The construction
-    /// itself is the container entry's native half
-    /// (`container::create_container`): the object row and folded
-    /// createSession.
-    ///
-    /// Returns the client-minted session id: the attach lands asynchronously,
-    /// so a caller that must address the fresh thread keys on this id.
-    pub fn new_container(
-        &mut self,
-        project: Option<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> String {
-        // New-session intent returns the main column to the conversation
-        // (an on-screen external session parks, still running; the sub-agent
-        // stream page is a view of a run the parent still owns).
-        self.leave_external_session();
-        self.leave_subagent_stream(cx);
-        // The park/draft bookkeeping is identical to `attach_thread`'s switch
-        // arm, but there is no outgoing-thread double-bind to preserve: the
-        // outgoing thread is detached on the park, the incoming id is unknown
-        // until the receipt.
-        //
-        // Inheritance (L8/L9): the foreground session's wire identity is the
-        // projection store — `model` key carries `{provider, modelId}` and
-        // `project` the bound folder. The legacy thread mirror is only a
-        // pre-snapshot fallback (the #765 round-2 repro: reading the mirror
-        // alone lost model AND project on every new thread).
-        //
-        // The inherited *project* is the conversation's belonging, read from
-        // its object row — not its working directory. A project-less
-        // conversation runs in a temporary workspace of its own, and
-        // inheriting that path would file the new thread under a directory
-        // the user never chose.
-        let inherited = self.chat.read(cx).store.clone().map(|(store, sid)| {
-            let view = store.read(cx);
-            let leaf = crate::ahp_store::leaf(&view.book, &sid);
-            // Inheritance reads the EXPLICIT values only (no
-            // `access_mode_or_default`): a seat-less source has nothing
-            // worth pinning into the child, and the child then lands on
-            // the host default — the same value display falls back to, so
-            // inheritance and display cannot diverge unless the host
-            // default itself changes between them.
-            (
-                manox_agent::object_store::ObjectStore::try_global()
-                    .and_then(|objects| objects.project_of(&sid)),
-                leaf.model_id().map(str::to_string),
-                leaf.access_mode().map(str::to_string),
-                leaf.reasoning_effort().map(str::to_string),
-            )
-        });
-        let inherited_project = project.or_else(|| {
-            inherited
-                .as_ref()
-                .and_then(|(p, _, _, _)| p.clone())
-                .map(PathBuf::from)
-        });
-        let project = inherited_project;
-        let model = inherited.as_ref().and_then(|(_, m, _, _)| m.clone());
-        let access = inherited.as_ref().and_then(|(_, _, a, _)| a.clone());
-        let effort_str = inherited.as_ref().and_then(|(_, _, _, e)| e.clone());
-        // The construction is the container entry's native half (§2.2): the
-        // object row, the folded createSession and the async attach all live
-        // in `create_container`.
-        let sid = self.create_container(
-            container::ContainerSeed::Manox(container::NativeContainerSeed {
-                project,
-                model,
-                access,
-                effort: effort_str,
-            }),
-            cx,
-        );
-        let _ = window;
-        sid
-    }
-
-    /// Attach the workspace to a freshly created session (whose id the server
-    /// minted): reuse the standard switch bookkeeping (`attach_thread` parks
-    /// the outgoing thread, restores drafts/queues) against a thread handle
-    /// for the new id, then re-open — `open_or_create(reopen = true)`
+    /// Attach the workspace to a freshly created session (whose id the
+    /// server minted): reuse the standard switch bookkeeping (`attach_thread`
+    /// parks the outgoing thread, restores drafts/queues) against a thread
+    /// handle for the new id, then re-open — `open_or_create(reopen = true)`
     /// idempotently re-runs `OpenSession` and binds the follow stream that
     /// the create intent already opened. U6b②: the handle is ALWAYS the
     /// detached *rendering mirror* (a landing thread, no engine — the
     /// server owns the transcript, so no second actor ever races the
     /// session file); the former live_thread/load_thread store reads were
     /// the U6 dual source and are gone.
+    ///
+    /// This is also the launcher send's flush point (design §3.2): the
+    /// attach binds the foreground store synchronously, so the staged first
+    /// message is handed to the ordinary submit path right here (one
+    /// executor turn late — see `flush_pending_first_turn`) — and the
+    /// attach tail's mode flip brings the fresh container's column up with
+    /// it.
     pub(super) fn attach_created_session(
         &mut self,
         session_id: &str,
@@ -215,9 +133,9 @@ impl Workspace {
         // gate here would flash the loading page on a race with the create
         // subscription.
         self.attach_thread(thread, true, false, window, cx);
-        // The launcher send's staged text flushes NOW — the one reliable
-        // point where the fresh session is bound and its create write is
-        // already ahead on the store's FIFO (design §6).
+        // The launcher send's staged text flushes one executor turn after
+        // THIS — trailing open_or_create's subscribe issue on the wire
+        // (design §6).
         self.flush_pending_first_turn(cx);
     }
 
@@ -761,11 +679,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Archive the active container and navigate to a fresh one. Shared by
-    /// the `cmd-;` keybinding. No-op while a turn is running (a parked
-    /// thread would strand pending verdicts). The archive itself rides the
+    /// Archive the active container and land on the launcher. Shared by the
+    /// `cmd-;` keybinding. No-op while a turn is running (a parked thread
+    /// would strand pending verdicts). The archive itself rides the
     /// confirm-or-direct container entry (plan D7): live dependents confirm
-    /// first; the fresh landing follows the confirmed archive.
+    /// first; the launcher lands after the confirmed archive — the landing
+    /// mints nothing (design §3.3).
     pub(crate) fn archive_current_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((_, sid)) = self.chat_store(cx) else {
             return;
@@ -775,20 +694,20 @@ impl Workspace {
         }
         let landing: super::lifecycle::ArchiveLanding = std::sync::Arc::new(
             |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
-                ws.new_container(None, window, cx);
+                ws.enter_launcher(None, window, cx);
             },
         );
         self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
     }
 
-    /// Archive the active container and open a fresh one that inherits the
-    /// outgoing thread's project, model, access mode, and reasoning effort —
-    /// `/new` starts a clean conversation without dropping the working
-    /// context. No-op while a turn is running (a parked thread would strand
-    /// pending verdicts). The archive rides the confirm-or-direct container
-    /// entry (plan D7); the inheriting creation reads the live foreground at
-    /// fire time — the same still-bound state the post-archive read here has
-    /// always seen.
+    /// Archive the active container and land on the launcher with the
+    /// outgoing conversation's project preselected — `/new` starts a clean
+    /// slate without dropping the working context. No-op while a turn is
+    /// running (a parked thread would strand pending verdicts). The archive
+    /// rides the confirm-or-direct container entry (plan D7); the
+    /// preselection reads the live foreground at fire time — the same
+    /// still-bound state the post-archive read here has always seen. The
+    /// landing mints nothing (design §3.3); the composer's send is the mint.
     pub(crate) fn archive_current_thread_inheriting(
         &mut self,
         window: &mut Window,
@@ -802,69 +721,33 @@ impl Workspace {
         }
         let landing: super::lifecycle::ArchiveLanding = std::sync::Arc::new(
             |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
-                ws.open_inheriting_container(window, cx);
+                // The inherited *project* is the conversation's belonging,
+                // read from its object row — not its working directory. A
+                // project-less conversation runs in a temporary workspace of
+                // its own, and inheriting that path would file the next
+                // thread under a directory the user never chose.
+                let project = ws
+                    .chat
+                    .read(cx)
+                    .store
+                    .clone()
+                    .and_then(|(_, sid)| {
+                        manox_agent::object_store::ObjectStore::try_global()
+                            .and_then(|objects| objects.project_of(&sid))
+                    })
+                    .map(PathBuf::from);
+                ws.enter_launcher(project, window, cx);
             },
         );
         self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
     }
 
-    /// The inheriting fresh-container creation `/new` lands after its
-    /// archive. The inheritance reads the live foreground fold and object
-    /// row, which is still the outgoing (just archived) session's at this
-    /// point, and the construction rides the ONE creation entry.
-    fn open_inheriting_container(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let old = self.chat.read(cx).thread.clone();
-        let project = self
-            .chat
-            .read(cx)
-            .store
-            .clone()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, &sid)
-                    .cwd()
-                    .map(std::path::PathBuf::from)
-            })
-            .or_else(|| old.read(|t| t.project().cloned()));
-        let model = old.read(|t| t.model().cloned());
-        let effort_str = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
-            let view = store.read(cx);
-            crate::ahp_store::leaf(&view.book, &sid)
-                .reasoning_effort()
-                .map(str::to_string)
-        });
-        let access = self.chat.read(cx).store.clone().and_then(|(store, sid)| {
-            let view = store.read(cx);
-            crate::ahp_store::leaf(&view.book, &sid)
-                .access_mode()
-                .map(str::to_string)
-        });
-        // U6b③: the inherited state rides the v2 CreateSession intent — the
-        // compat-note create this replaced carried only the cwd, so the
-        // parked model/project/effort/access never reached the server (the
-        // #765 round-2 inheritance defect's shape). The wire-shaped model
-        // rides the seed; the entry's native half lands the row, the
-        // createSession and the attach.
-        let model_str = model.as_ref().map(|m| format!("{}/{}", m.provider, m.id));
-        self.create_container(
-            container::ContainerSeed::Manox(container::NativeContainerSeed {
-                project,
-                model: model_str,
-                access,
-                effort: effort_str,
-            }),
-            cx,
-        );
-        let _ = window;
-    }
-
     /// Park the active thread into the background (preserving its run + event
-    /// subscriptions) and open a fresh empty thread in the same project — the
-    /// explicit "background this task, switch to a new one" gesture, bound to
-    /// `ctrl-b`. No-op when the active thread is idle so the shortcut can't
-    /// spam empty threads. `attach_thread` does the actual parking: a running
-    /// thread is moved into `background_threads` with a terminal-`Stop`/`Error`
-    /// subscription that flips its sidebar row to idle + unread when it lands.
+    /// subscriptions) and open the launcher — the explicit "background this
+    /// task, start something new" gesture, bound to `ctrl-b`. No-op when the
+    /// active thread is idle so the shortcut can't spam empty pads. The
+    /// launcher opens with the parked thread's project preselected; the next
+    /// send from it mints the fresh container.
     pub(super) fn background_current_thread(
         &mut self,
         window: &mut Window,
@@ -884,7 +767,7 @@ impl Workspace {
         if !running {
             return;
         }
-        self.new_container(project, window, cx);
+        self.enter_launcher(project, window, cx);
     }
 
     pub fn open_container(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {

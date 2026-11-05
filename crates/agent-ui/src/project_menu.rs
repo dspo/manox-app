@@ -1,18 +1,19 @@
 //! The project group's action menu — the sidebar feature the legacy shell
-//! carried (retired with it in the 2026-09-28 single-shell switch): launch
-//! agents, a terminal or the editor IN the project directory, and remove the
-//! project from the sidebar.
+//! carried (retired with it in the 2026-09-28 single-shell switch): open the
+//! launcher in the project directory, launch a terminal or the editor IN it,
+//! and remove the project from the sidebar.
 //!
 //! The chrome (steer-agent-chrome-ui) supplies only the menu SURFACE — the
 //! header's ellipsis button / right-click and the anchored mount; this module
 //! is the host half that builds the content. Every action targets the group's
 //! project directory:
 //!
-//! - 新建会话: a Manox thread bound to the project, or a provider→model
-//!   cascade per external CLI agent (the same cx launch path the right
-//!   pane's agent tabs use, rooted at the project instead of the foreground
-//!   thread's cwd);
-//! - 新建终端: a plain shell PTY in the project;
+//! - 新建对话: the LAUNCHER with this project preselected (design §3.3 — the
+//!   per-agent cascades retired from the menu; the launcher's action row is
+//!   the one agent launch face, D8');
+//! - 新建终端: a plain shell PTY in the project (the launcher's terminal pill
+//!   is the second entry into the same path — a shortcut that needs no
+//!   composer context, so it stays direct);
 //! - VS Code: the settings-injected launch (no launch-time choice);
 //! - 移除项目: the client-side overlay in [`crate::project_registry`] — the
 //!   group dissolves and its threads fall back to the loose "Chats" bucket.
@@ -29,7 +30,6 @@ use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 
 use crate::Workspace;
-use crate::views::model_cascade::{build_model_menu, launch_wire_key};
 use crate::workspace::external_sessions::ExternalSessionLaunch;
 
 /// Build the project group's menu. `project` is the group's directory
@@ -50,11 +50,9 @@ pub fn group_menu(
     // workspace handle and the project directory, never the caller's
     // borrows.
     let ws = ws.clone();
-    let ws_menu = ws.clone();
     let ws_terminal = ws.clone();
-    let dir_steer = project_dir.clone();
+    let dir_launcher = project_dir.clone();
     let dir_terminal = project_dir.clone();
-    let dir_cascade = project_dir.clone();
     let dir_remove = project_dir.clone();
     // VS Code: the settings-injected launch, opening the project directory.
     // For the no-project bucket the foreground project backs the launch —
@@ -62,14 +60,11 @@ pub fn group_menu(
     let vscode_target = project_dir.clone().or_else(|| {
         crate::chrome_assembly::foreground_project().filter(|p| !p.as_os_str().is_empty())
     });
-    // The registry snapshot is collected ONCE for all three agent cascades
-    // (per-agent submenu builders only clone).
-    let models = crate::model_catalog::rows();
-    PopupMenu::build(window, cx, |menu, window, cx| {
+    PopupMenu::build(window, cx, |menu, _window, _cx| {
         let mut menu = menu.max_w(px(280.));
         // The Chats bucket is where projects are born: the create dialog
-        // rides this menu only (the sidebar footer is the other entry; a
-        // real project group's menu manages an existing project instead).
+        // rides this menu only (the sidebar footer is the other entry; the
+        // launcher chip menu joins them).
         if project_dir.is_none() {
             menu = menu.item(
                 PopupMenuItem::new(steer_i18n::t("project-new-menu"))
@@ -79,88 +74,21 @@ pub fn group_menu(
                     }),
             );
         }
-        // 新建会话: Manox flat row + one provider→model cascade per external
-        // agent kind — the legacy menu's shape, scoped to this project. The
-        // cascades render through the COMPOSER model picker's shared builder
-        // (provider display-name submenus, wire-tag rows), so every model
-        // picker in the app looks and picks the same.
-        menu = menu.submenu_with_icon(
-            Some(Icon::default().path("icons/plus.svg")),
-            steer_i18n::t("sidebar-new-session-label"),
-            window,
-            cx,
-            move |submenu, window, cx| {
-                let mut submenu = submenu;
-                let ws_steer = ws_menu.clone();
-                let dir_new = dir_steer.clone();
-                submenu = submenu.item(
-                    PopupMenuItem::new(steer_i18n::t("sidebar-new-session-steer"))
-                        .icon(Icon::default().path("icons/steer.svg"))
-                        .on_click(move |_, window, cx| {
-                            new_thread_at(&ws_steer, dir_new.clone(), window, cx);
-                        }),
-                );
-                for (agent_id, display, svg) in EXTERNAL_AGENTS {
-                    let dir_agent = dir_cascade.clone();
-                    let ws_agent = ws_menu.clone();
-                    let agent_models = models.clone();
-                    submenu = submenu.submenu_with_icon(
-                        Some(Icon::default().path(svg)),
-                        display,
-                        window,
-                        cx,
-                        move |sub, window, cx| {
-                            let dir_agent = dir_agent.clone();
-                            let ws_cascade = ws_agent.clone();
-                            // Per-agent visibility (the registration-time
-                            // effective_agents column): a row the agent
-                            // cannot run never enters the cascade —
-                            // clicking it could only ever toast. Premise:
-                            // the agents column is populated by every
-                            // registration path that feeds this menu —
-                            // the cx yaml registry stamps effective_agents,
-                            // and a row registered WITHOUT the key reads as
-                            // an empty column and silently drops out of
-                            // every agent submenu (bare `register_provider`
-                            // rows must not rely on that fallback).
-                            let agent_models = agent_models
-                                .iter()
-                                .filter(|r| r.agents.iter().any(|a| a == agent_id))
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            build_model_menu(
-                                sub,
-                                agent_models,
-                                move |row, window, cx| {
-                                    spawn_agent_tab(
-                                        &AgentSpawn {
-                                            ws: &ws_cascade,
-                                            agent: (agent_id, display, svg),
-                                            // The launch args are the cx
-                                            // CONFIG identity: the provider
-                                            // by config name (display names
-                                            // never resolve) and the model
-                                            // by its CONFIG-level id — the
-                                            // registry's parsed id (suffix
-                                            // stripped) is a different
-                                            // vocabulary and never matches.
-                                            provider: row.cx_name.clone(),
-                                            model: row.config_id.clone(),
-                                            wire: launch_wire_key(&row.api),
-                                            dir: dir_agent.clone(),
-                                        },
-                                        window,
-                                        cx,
-                                    );
-                                },
-                                window,
-                                cx,
-                            )
-                        },
-                    );
-                }
-                submenu
-            },
+        // 新建对话: the launcher with this group's project preselected (the
+        // bare ⌘N launcher resolves its own default). No container is minted
+        // here — the composer's send is the mint.
+        menu = menu.item(
+            PopupMenuItem::new(steer_i18n::t("project-new-conversation"))
+                .icon(Icon::default().path("icons/steer.svg"))
+                .on_click({
+                    let ws = ws.clone();
+                    move |_, window, cx| {
+                        let _ = ws.update(cx, |ws, cx| {
+                            ws.enter_launcher(dir_launcher.clone(), window, cx);
+                            cx.notify();
+                        });
+                    }
+                }),
         );
         // 新建终端: a plain shell PTY rooted at the project.
         menu = menu.item(
@@ -212,7 +140,8 @@ pub fn group_menu(
         // write dissolves the group on the next projection (the store's
         // folder registry has no AHP-side grouping voice, but it is written
         // on every bind, so it leaves too); notifying the workspace runs the
-        // projection now.
+        // projection now. (Step-4 reworks this row onto the project
+        // entity's delete semantics.)
         if let Some(dir_remove) = dir_remove {
             let ws_remove = ws.clone();
             menu = menu.separator().item(
@@ -230,89 +159,13 @@ pub fn group_menu(
     })
 }
 
-/// The external CLI agents the cascade offers, in menu order (the same trio
-/// the right pane's agent tabs register).
-const EXTERNAL_AGENTS: [(&str, &str, &str); 3] = [
-    ("claude", "Claude Code", "icons/claude.svg"),
-    ("codex", "Codex", "icons/codex.svg"),
-    ("copilot", "GitHub Copilot", "icons/githubcopilot.svg"),
-];
-
-/// A Manox thread bound to `dir` (inheritance and the create-session intent
-/// live in the workspace). The click's own `&mut Window` rides through — a
-/// `window_global().update` here re-enters the window the click dispatch
-/// already holds leased and fails as "window not found". Re-registering a
-/// removed path rides the workspace's own bind seam
-/// ([`crate::workspace::Workspace`]'s project registration) — launching
-/// into a folder is the re-registration.
-fn new_thread_at(
-    ws: &gpui::WeakEntity<Workspace>,
-    dir: Option<PathBuf>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let _ = ws.update(cx, |ws, cx| {
-        ws.new_container(dir.clone(), window, cx);
-        cx.notify();
-    });
-}
-
-/// One cascade pick's spawn request (bundled — the call would otherwise
-/// arc past clippy's argument ceiling).
-struct AgentSpawn<'a> {
-    ws: &'a gpui::WeakEntity<Workspace>,
-    /// The `EXTERNAL_AGENTS` row (id, display, icon).
-    agent: (&'static str, &'static str, &'static str),
-    provider: String,
-    model: String,
-    wire: Option<String>,
-    dir: Option<PathBuf>,
-}
-
-/// Spawn the agent CLI under the picked endpoint, rooted at the project
-/// (falling back to the host's cwd rules), and register it as an external
-/// session — the TUI comes up IN THE MAIN COLUMN, its row in the sidebar.
-/// The child's session handle rides the launch into the record: the owner's
-/// independent kill clone for the close (D8). A spawn failure notifies
-/// instead of opening anything.
-fn spawn_agent_tab(request: &AgentSpawn, window: &mut Window, cx: &mut App) {
-    let (agent_id, display, svg) = request.agent;
-    let project = request.dir.clone();
-    let cwd = request.dir.clone().unwrap_or_else(|| fallback_cwd(cx));
-    match crate::tool_tabs::spawn_agent_terminal(
-        agent_id,
-        &cwd,
-        &request.provider,
-        &request.model,
-        request.wire.clone(),
-        cx,
-    ) {
-        Ok(spawned) => launch_external(
-            request.ws,
-            ExternalSessionLaunch {
-                agent_id,
-                cx_session_id: spawned.cx_session_id,
-                label: display.to_string(),
-                svg,
-                project,
-                cwd: cwd.clone(),
-                handle: Some(spawned.handle),
-            },
-            spawned.view,
-            window,
-            cx,
-        ),
-        Err(e) => spawn_failed_notification(display, &e, window, cx),
-    }
-}
-
 /// Register a spawned terminal as an external session and bring it up —
 /// FOCUSED — in the MAIN column (the shell wraps the main column —
 /// terminal/TUI sessions live there, not in the right pane). The sidebar
 /// row rides the workspace's own projection.
 fn launch_external(
     ws: &gpui::WeakEntity<Workspace>,
-    launch: crate::workspace::external_sessions::ExternalSessionLaunch<'_>,
+    launch: ExternalSessionLaunch<'_>,
     view: Entity<steer_ghostty::GhosttyView>,
     window: &mut Window,
     cx: &mut App,
@@ -323,7 +176,7 @@ fn launch_external(
 }
 
 /// The failure notice names the program that failed to start — the terminal
-/// row passes its localized name, an agent row its display name.
+/// row passes its localized name.
 fn spawn_failed_notification(prog: &str, error: &str, window: &mut Window, cx: &mut App) {
     window.push_notification(
         Notification::error(steer_i18n::t_str(

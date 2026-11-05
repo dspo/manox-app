@@ -3,9 +3,7 @@
 //! death event — the external container dies when its PTY child exits (D8),
 //! the native container dies when its session archives (D7). The creation
 //! paths land through the unified `create_container` entry (the external
-//! spawn here, the native `/exit` re-mint below); the deep draft-refill and
-//! already-exists equivalences stay with their own binaries
-//! (`new_thread_project_inheritance`, `zombie_draft_exit`).
+//! spawn here, the native landing below).
 //!
 //! Own test binary: the harness initializes process-global singletons (see
 //! `tests/common/mod.rs` — one `#[gpui::test]` per binary).
@@ -49,22 +47,14 @@ async fn container_death_flips_on_both_homes(cx: &mut TestAppContext) {
         cx.update(|cx| ws.read(cx).container_alive(&landing, cx)),
         "a never-archived session reads alive"
     );
-    // `/exit` archives the landing and mints a fresh container through the
-    // unified entry; the archived session's predicate flips.
-    let after_exit = common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
-        .expect("/exit lands a fresh conversation");
-    assert_ne!(
-        after_exit, landing,
-        "/exit must not reopen the archived one"
-    );
+    // `/exit` archives the landing and lands the launcher (design §3.3 —
+    // no fresh sibling is minted); the archived session's predicate flips.
+    common::run_slash(cx, &ws, window, "/exit");
+    assert!(common::wait_launcher(cx, &ws), "/exit lands the launcher");
     cx.run_until_parked();
     assert!(
         !cx.update(|cx| ws.read(cx).container_alive(&landing, cx)),
         "the archived session reads dead"
-    );
-    assert!(
-        cx.update(|cx| ws.read(cx).container_alive(&after_exit, cx)),
-        "the fresh container reads alive"
     );
     assert!(
         died.borrow().iter().any(|id| id == &landing),

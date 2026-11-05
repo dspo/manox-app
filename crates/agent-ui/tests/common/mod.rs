@@ -125,7 +125,11 @@ pub fn open_workspace_at(
         gpui_component::Root::new(workspace, window, cx)
     });
     cx.run_until_parked();
-    (window, cell.borrow().clone().expect("workspace captured"))
+    let workspace = cell.borrow().clone().expect("workspace captured");
+    // Boot lands the launcher (the 2026-11 new-entry flip); the layout
+    // probes paint the conversation column.
+    cx.update(|cx| workspace.update(cx, |ws, cx| ws.focus_conversation(cx)));
+    (window, workspace)
 }
 
 // ── full-wiring harness (real in-proc host, production chrome assembly) ──
@@ -200,19 +204,69 @@ pub fn full_wiring_boot_shell(
     (ws, window.into(), shell)
 }
 
-/// The Steer row's own gesture: 新建会话 on the workspace, returning the
-/// minted (or refilled) session id.
-pub fn new_container(
+/// Enter the launcher with `project` preset (the group menu's 新建对话 shape).
+/// Nothing is minted — the landing is a mode flip.
+pub fn enter_launcher(
     cx: &mut TestAppContext,
     ws: &Entity<Workspace>,
     window: gpui::AnyWindowHandle,
     project: Option<std::path::PathBuf>,
-) -> String {
-    let ws = ws.clone();
+) {
     cx.update_window(window, move |_, window, cx| {
-        ws.update(cx, |ws, cx| ws.new_container(project.clone(), window, cx))
+        ws.update(cx, |ws, cx| ws.enter_launcher(project.clone(), window, cx))
     })
     .expect("the full-wiring window is live")
+}
+
+/// The launcher's ⏎ gesture: type `text` into the composer and submit — the
+/// workspace's only remaining native-mint path. The attach lands
+/// asynchronously; callers poll [`foreground_session`].
+pub fn launcher_send(
+    cx: &mut TestAppContext,
+    ws: &Entity<Workspace>,
+    window: gpui::AnyWindowHandle,
+    text: &str,
+) {
+    cx.update_window(window, move |_, window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.diagnostic_launcher_type(text, window, cx);
+            ws.diagnostic_launcher_submit(window, cx);
+        })
+    })
+    .expect("the full-wiring window is live")
+}
+
+/// Poll until the launcher owns the main column (the /new and /exit landings
+/// flip the mode WITHOUT moving the foreground — a foreground-move poll would
+/// time out on them by design).
+pub fn wait_launcher(cx: &mut TestAppContext, ws: &Entity<Workspace>) -> bool {
+    for _ in 0..PARK_ROUNDS {
+        cx.run_until_parked();
+        if cx.update(|cx| ws.read(cx).diagnostic_view_mode_is_launcher()) {
+            return true;
+        }
+        std::thread::sleep(PARK_STEP);
+    }
+    false
+}
+
+/// Dispatch `line` through the live slash registry without waiting for a
+/// foreground move (the launcher landings keep the foreground pinned; poll
+/// [`wait_launcher`] / [`wait_foreground_moved`] as the command implies).
+pub fn run_slash(
+    cx: &mut TestAppContext,
+    ws: &Entity<Workspace>,
+    window: gpui::AnyWindowHandle,
+    line: &str,
+) {
+    let parsed = agent_ui::slash_command::parse(line).unwrap_or_else(|| panic!("{line} parses"));
+    cx.update_window(window, |_, window, cx| {
+        let ws = ws.clone();
+        ws.update(cx, |ws, cx| {
+            agent_ui::slash_command::dispatch(&parsed, ws, window, cx);
+        });
+    })
+    .expect("the full-wiring window is live");
 }
 
 /// Tear down the process globals `full_wiring_boot` installed.

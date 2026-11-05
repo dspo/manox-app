@@ -657,12 +657,14 @@ fn shell_config(
             on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
                 manox_agent::thread_store_global().with_mut(|st| st.set_thread_tag(id, tag));
             })),
-            // The workspace's own new-container path (park + fresh landing).
+            // The New button / ⌘N lands the LAUNCHER (design §3.3) — the
+            // pre-container launch pad. Nothing is minted here; repeated New
+            // is idempotent (focus the composer).
             on_new_session: Some(Box::new({
                 let ws = ws.clone();
                 move |w, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.new_container(None, w, cx);
+                        ws.enter_launcher(None, w, cx);
                         cx.notify();
                     });
                 }

@@ -224,8 +224,8 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         let foreign_route = ws.update(cx, |ws, cx| {
             ws.diagnostic_register_browser_route(foreign, cx)
         });
-        common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
-            .expect("/exit lands a fresh conversation");
+        common::run_slash(cx, &ws, window, "/exit");
+        assert!(common::wait_launcher(cx, &ws), "/exit lands the launcher");
         assert!(
             ws.read_with(cx, |ws, _| ws
                 .diagnostic_container_browser_tabs(foreign)
@@ -235,8 +235,8 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
-        common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
-            .expect("/exit lands a fresh conversation");
+        common::run_slash(cx, &ws, window, "/exit");
+        assert!(common::wait_launcher(cx, &ws), "/exit lands the launcher");
     }
 
     // ── the dock/right stash is keyed per container ─────────────────────
