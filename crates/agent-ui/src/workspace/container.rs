@@ -153,8 +153,10 @@ pub struct NativeContainerSeed {
 }
 
 /// The external record seed — the already-spawned PTY's identity and row
-/// face (the project menu's launch payload, plus the CLI agent's kill
-/// handle).
+/// face (the launch payload, plus the CLI agent's kill handle). The
+/// container's project grouping does not ride the seed: membership is
+/// written by the launch site (the launcher's gestures and the project
+/// menu's terminal row key on the returned container id).
 pub struct ExternalContainerSeed<'a> {
     /// The row-id namespace segment (`external:{agent}:{uuid}`).
     pub agent_id: &'a str,
@@ -166,9 +168,6 @@ pub struct ExternalContainerSeed<'a> {
     /// name).
     pub label: String,
     pub svg: &'static str,
-    /// The project directory the session was launched in — the sidebar group
-    /// it merges into; `None` → the loose Chats bucket.
-    pub project: Option<PathBuf>,
     /// The directory the terminal was spawned in: the D10 attrs snapshot's
     /// cwd until the program claims one via OSC 7.
     pub cwd: PathBuf,
@@ -328,7 +327,6 @@ impl Workspace {
             cx_session_id,
             label,
             svg,
-            project,
             cwd,
             view,
             handle,
@@ -374,7 +372,6 @@ impl Workspace {
                 default_label,
                 label,
                 svg,
-                project,
                 created_at: chrono::Utc::now().timestamp(),
                 view,
                 attrs,

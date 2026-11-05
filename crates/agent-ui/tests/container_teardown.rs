@@ -87,7 +87,6 @@ fn spawn_external(
                     cx_session_id: String::new(),
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
-                    project: None,
                     cwd: std::path::PathBuf::from("/tmp"),
                     handle,
                 },

@@ -32,7 +32,6 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
                     cx_session_id: "cx-session-1234".into(),
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
-                    project: None,
                     // The fake PTY has no cx session behind it.
                     handle: None,
                     cwd: std::path::PathBuf::from("/tmp"),

@@ -910,6 +910,8 @@ project-name-label = Name
 project-name-placeholder = Project name
 
 project-roots-label = Source folders
+# The multi-root group header badge tooltip: every root, one per line.
+project-roots-tooltip = Source folders: {$roots}
 
 project-root-primary = Primary
 

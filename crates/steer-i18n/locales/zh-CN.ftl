@@ -888,6 +888,8 @@ project-name-label = 名称
 project-name-placeholder = 项目名称
 
 project-roots-label = 源文件夹
+# The multi-root group header badge tooltip: every root, one per line.
+project-roots-tooltip = 源文件夹：{$roots}
 
 project-root-primary = 主要
 

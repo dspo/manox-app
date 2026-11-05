@@ -235,6 +235,7 @@ fn the_stamp_survives_the_from_group_round_trip() {
         name: "steer".into(),
         key: "steer".into(),
         project: Some("/p/steer".into()),
+        roots: Vec::new(),
         collapsed: false,
         rows: vec![data],
         hidden: 0,

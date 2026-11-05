@@ -73,7 +73,6 @@ async fn container_death_flips_on_both_homes(cx: &mut TestAppContext) {
                     cx_session_id: "cx-session-1234".into(),
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
-                    project: None,
                     // The fake PTY has no cx session behind it.
                     handle: None,
                     cwd: std::path::PathBuf::from("/tmp"),

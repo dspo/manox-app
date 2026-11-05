@@ -540,6 +540,7 @@ fn pinning_a_leader_keeps_its_members_contiguous(cx: &mut TestAppContext) {
         key: "Chats".into(),
         collapsed: false,
         project: None,
+        roots: Vec::new(),
         hidden: 0,
         expanded: false,
         rows: vec![
@@ -626,6 +627,7 @@ fn time_grouping_buckets_collapse_and_reject_reorder(cx: &mut TestAppContext) {
         key: "Chats".into(),
         collapsed: false,
         project: None,
+        roots: Vec::new(),
         hidden: 0,
         expanded: false,
         rows: vec![
@@ -741,6 +743,7 @@ fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
         key: "proj".into(),
         collapsed: false,
         project: None,
+        roots: Vec::new(),
         hidden: 0,
         expanded: false,
         rows: vec![
