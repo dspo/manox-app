@@ -156,6 +156,9 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                 manox_agent::thread_store::global().with_mut(|s| s.set_thread_tag(id, tag));
             })),
             on_new_session: None,
+            // The example has no project registry behind it — no footer row
+            // (the hook's absence is the contract, not a disabled control).
+            on_new_project: None,
             on_select: Some(Box::new({
                 let titles = titles.clone();
                 move |id, _w, cx| {

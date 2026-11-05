@@ -203,6 +203,11 @@ pub struct HostHooks {
     /// host retitles its record — the sidebar row and the main-column
     /// titlebar both read it. Absent → the item fires nothing.
     pub on_set_external_title: Option<HookOnSetTitle>,
+    /// Open the create-project dialog (the sidebar footer's ＋ 新建项目
+    /// row). The host owns the dialog entity; absent → the footer row does
+    /// not render at all (a host without a project surface owes no fake
+    /// affordance).
+    pub on_new_project: Option<HookOnUnit>,
 }
 
 /// Batch-ids callback (the selection bar's archive commit).
@@ -324,6 +329,10 @@ pub struct Shell {
     /// nav in the sidebar, detail in the main card). `None` is the normal
     /// conversation face.
     pub sidebar_surface: Option<gpui::AnyView>,
+    /// Host-injected modal dialog (the project dialog's state machine rides
+    /// here). Rendered as a dimmed full-window overlay with the view centered
+    /// in a card; the view itself owns its dismissal. `None` = no dialog.
+    pub dialog_surface: Option<gpui::AnyView>,
     /// The app brand mark factory (the titlebar avatar slot's content).
     brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
     /// Sidebar grouping mode (the sort button's toggle).
@@ -372,6 +381,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// Mount/unmount the modal dialog overlay (the host-side seam of the
+    /// project dialog; the view carries its own state and dismissal).
+    pub fn set_dialog_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        let changed = self.dialog_surface.is_some() != surface.is_some();
+        self.dialog_surface = surface;
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let right = cx.new(|_| RightPane::new(config.tool_kinds));
         let panel = config.panel_surface.map(|surface| PanelSlot {
@@ -407,6 +426,7 @@ impl Shell {
             sidebar_pinned_was: true,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
             sidebar_surface: None,
+            dialog_surface: None,
             brand: config.brand,
             grouping: SidebarGrouping::default(),
             sidebar_filter_open: false,
@@ -507,6 +527,14 @@ impl Shell {
     /// in the user's editor. No-op without a host face.
     pub fn open_editor(&mut self, window: &mut Window, cx: &mut App) {
         if let Some(hook) = &self.hooks.on_open_editor {
+            hook(window, cx);
+        }
+    }
+
+    /// The sidebar footer's ＋ 新建项目 row: open the host's project dialog.
+    /// No-op without a host face (the row does not render there either).
+    pub fn new_project(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(hook) = &self.hooks.on_new_project {
             hook(window, cx);
         }
     }
@@ -1613,6 +1641,8 @@ impl Shell {
 impl gpui::Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let picker_open = self.session_picker_open;
+        // The modal dialog surface (the host-owned project dialog).
+        let dialog = self.dialog_surface.clone();
         // Row-menu anchor snapshot (mounted on the deferred layer in window
         // space).
         let row_menu = self
@@ -1724,6 +1754,24 @@ impl gpui::Render for Shell {
                         .offset(gpui::point(px(0.), px(4.)))
                         .child(titlebar::picker_panel(self, cx)),
                 ))
+            })
+            // The modal dialog: a full-window dimmed overlay with the view
+            // centered in a card. The card occludes (no click-through to the
+            // shell beneath); dismissal is the view's own business (the
+            // project dialog's ✕ / 取消 / Escape) — the chrome invents no
+            // backdrop-click semantics.
+            .when_some(dialog, |this, surface| {
+                this.child(
+                    div()
+                        .id("dialog-overlay")
+                        .absolute()
+                        .inset_0()
+                        .bg(crate::theme::DIALOG_SCRIM)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(div().id("dialog-card").occlude().child(surface)),
+                )
             })
             // Row menu (kebab / right-click): an anchored floating layer;
             // PopupMenu handles its own focus and outside-click dismissal.
@@ -1913,6 +1961,16 @@ impl Shell {
             this.new_session(w, cx);
             cx.notify();
         });
+        // The footer's project entry rides the host hook; a host without the
+        // face gets no row at all (same contract as the group menu's None).
+        let on_new_project = self.hooks.on_new_project.is_some().then(|| {
+            let cb = cx.listener(|this, _: &ClickEvent, w, cx| {
+                this.new_project(w, cx);
+                cx.notify();
+            });
+            let cb: crate::session_list::OnUnit = std::rc::Rc::new(move |e, w, cx| cb(e, w, cx));
+            cb
+        });
         let on_hover_row = cx.listener(|this, (id, entered): &(String, bool), _w, cx| {
             // A leave retracts only its OWN row: crossing directly from one
             // row into the next delivers the new row's enter and the old
@@ -2025,6 +2083,7 @@ impl Shell {
                 on_select: std::rc::Rc::new(move |id, w, cx| on_select(id, w, cx)),
                 on_toggle_group: std::rc::Rc::new(move |name, w, cx| on_toggle_group(name, w, cx)),
                 on_new: std::rc::Rc::new(move |e, w, cx| on_new(e, w, cx)),
+                on_new_project,
                 on_hover_row: std::rc::Rc::new(move |id, entered, w, cx| {
                     on_hover_row(&(id.clone(), entered), w, cx)
                 }),

@@ -902,6 +902,51 @@ plugins-notice-plugin-enabled = Plugin enabled. Restart steer to load its tools,
 
 plugins-notice-plugin-disabled = Plugin disabled. Restart steer to unload runtime registries loaded at startup.
 
+### agent-ui project_dialog.rs (the create/edit-project dialog, design §2.4;
+### a blank name follows the primary folder's basename until overridden)
+
+project-create-title = Create Project
+
+project-edit-title = Edit Project
+
+project-name-label = Name
+
+# The name field's fallback placeholder while no primary folder exists; with
+# one, the placeholder is its basename.
+project-name-placeholder = Project name
+
+project-roots-label = Source folders
+
+project-root-primary = Primary
+
+project-root-set-primary = Set as primary
+
+project-root-add = Add folder…
+
+project-cancel = Cancel
+
+project-create-confirm = Create Project
+
+project-save = Save
+
+project-remove = Remove Project
+
+# The sidebar footer's standing entry row.
+project-new-footer = New Project
+
+# The Chats-bucket group menu's entry item.
+project-new-menu = New Project…
+
+project-remove-confirm-title = Remove this project?
+
+project-remove-confirm-body = The project is deleted and its conversations return to Chats. The conversations themselves are untouched.
+
+project-remove-confirm-ok = Remove
+
+# The inline red line for a failed save (rare: the picker only yields
+# existing directories) — no popup.
+project-error-save = Couldn't save: {$err}
+
 ## steer-agent-chrome-ui (app shell: sidebar / toolbar / tabs / bottom dock)
 
 chrome-sessions-title = Sessions

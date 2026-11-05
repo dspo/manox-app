@@ -7,7 +7,8 @@
 //! (no PTY/webview — those need a real window), `CHROME_SELECT=1` the
 //! sidebar's batch-selection mode with two rows checked, `CHROME_PANEL=1` the bottom
 //! dock, `CHROME_PICKER=1` the titlebar session picker with its dropdown
-//! open. macOS-only: the readback is a Metal texture and the harness's
+//! open, `CHROME_PROJECT_DIALOG=1` the modal project dialog over the shell.
+//! macOS-only: the readback is a Metal texture and the harness's
 //! imports (`VisualTestAppContext`) exist only on that platform.
 
 #[cfg(not(target_os = "macos"))]
@@ -78,6 +79,17 @@ mod macos {
                 if std::env::var("CHROME_PICKER").is_ok() {
                     shell.update(cx, |shell, cx| {
                         shell.toggle_session_picker(window, cx);
+                        cx.notify();
+                    });
+                }
+                // CHROME_PROJECT_DIALOG=1: the modal project dialog over the
+                // shell (the real ProjectDialog component in the real overlay
+                // slot, with static props — the agent-ui state machine is the
+                // unit tests' business, not the shot's).
+                if std::env::var("CHROME_PROJECT_DIALOG").is_ok() {
+                    shell.update(cx, |shell, cx| {
+                        let preview = cx.new(|cx| ProjectDialogPreview::new(window, cx));
+                        shell.set_dialog_surface(Some(preview.into()), cx);
                         cx.notify();
                     });
                 }
@@ -219,6 +231,13 @@ mod macos {
                     back: true,
                     forward: false,
                 })),
+                // The dialog shot lights the footer's new-project row too (a
+                // no-op hook — the row's presence is the acceptance face; the
+                // open action is the state machine's, not the shot's).
+                on_new_project: std::env::var("CHROME_PROJECT_DIALOG").is_ok().then(|| {
+                    Box::new(|_w: &mut gpui::Window, _cx: &mut gpui::App| {})
+                        as steer_agent_chrome_ui::shell::HookOnUnit
+                }),
                 ..Default::default()
             },
         }
@@ -625,6 +644,63 @@ mod macos {
     //
     // A PTY in the harness trips gpui's leak detection and a wry subview never
     // reads back offscreen, so the shot exercises the tab chrome only.
+
+    /// The project-dialog shot's static host: a real [`ProjectDialog`] with
+    /// fixed props (two roots, one primary) and inert callbacks — the form's
+    /// layout, the badge/row chrome and the shell's overlay slot are the
+    /// acceptance face; the state machine behind the real dialog is
+    /// agent-ui's unit tests.
+    struct ProjectDialogPreview {
+        name: gpui::Entity<gpui_component::input::InputState>,
+    }
+
+    impl ProjectDialogPreview {
+        fn new(window: &mut gpui::Window, cx: &mut gpui::App) -> Self {
+            let name = cx.new(|cx| {
+                gpui_component::input::InputState::new(window, cx)
+                    .placeholder(steer_i18n::t("project-name-placeholder"))
+            });
+            Self { name }
+        }
+    }
+
+    impl gpui::Render for ProjectDialogPreview {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let noop: steer_agent_chrome_ui::session_list::OnUnit = std::rc::Rc::new(|_, _, _| {});
+            let noop_root: steer_agent_chrome_ui::project_dialog::OnRootPath =
+                std::rc::Rc::new(|_, _, _| {});
+            let noop_cancel: steer_agent_chrome_ui::session_list::OnWindowApp =
+                std::rc::Rc::new(|_, _| {});
+            steer_agent_chrome_ui::ProjectDialog {
+                edit: false,
+                name_input: self.name.clone(),
+                roots: vec![
+                    steer_agent_chrome_ui::ProjectRootRow {
+                        path: "/Users/dev/projects/manox".into(),
+                        label: "manox".into(),
+                        primary: true,
+                    },
+                    steer_agent_chrome_ui::ProjectRootRow {
+                        path: "/Users/dev/projects/manox-app".into(),
+                        label: "manox-app".into(),
+                        primary: false,
+                    },
+                ],
+                error: None,
+                confirm_disabled: false,
+                on_add_folder: noop.clone(),
+                on_set_primary: noop_root.clone(),
+                on_remove_root: noop_root,
+                on_cancel: noop_cancel,
+                on_confirm: noop,
+                on_remove: None,
+            }
+        }
+    }
 
     struct DummyKind;
 

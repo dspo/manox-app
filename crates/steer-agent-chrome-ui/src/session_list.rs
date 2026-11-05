@@ -316,6 +316,9 @@ pub struct SessionList {
     pub on_selection_archive: OnUnit,
     /// The action bar's 取消 (leave selection mode with nothing archived).
     pub on_selection_cancel: OnUnit,
+    /// The sidebar footer's ＋ 新建项目 row (the host opens the project
+    /// dialog). `None` → the row does not render at all.
+    pub on_new_project: Option<OnUnit>,
 }
 
 impl RenderOnce for SessionList {
@@ -393,6 +396,9 @@ impl RenderOnce for SessionList {
                     ),
             )
             .child(customizations(&self.customizations))
+            .when_some(self.on_new_project.clone(), |this, on_new_project| {
+                this.child(new_project_footer(on_new_project))
+            })
             .when_some(self.selection.clone(), |this, selection| {
                 this.child(selection_bar(
                     selection.len(),
@@ -1452,6 +1458,32 @@ fn absolute_stamp(epoch: i64) -> String {
         .single()
         .map(|t| t.format("%m-%d %H:%M").to_string())
         .unwrap_or_default()
+}
+
+/// The sidebar footer's ＋ 新建项目 row: the standing create-project entry,
+/// styled like the Customizations rows but a REAL control (lit at rest,
+/// hover wash, no unimplemented tooltip). Lives under the Customizations
+/// block — the bottom-most slot that survives every mode (filtering shrinks
+/// the list above it, never the footer).
+fn new_project_footer(on_new: OnUnit) -> impl IntoElement {
+    div()
+        .id("sidebar-new-project")
+        .debug_selector(|| "chrome-sidebar-new-project".into())
+        .on_click(move |e, w, cx| on_new(e, w, cx))
+        .w_full()
+        .mx(px(14.))
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .py(px(3.))
+        .px(px(6.))
+        .text_size(px(12.))
+        .flex_shrink_0()
+        .text_color(FG_DIM)
+        .cursor_pointer()
+        .hover(|style| style.text_color(FG).bg(LIST_HOVER))
+        .child(icon(icons::ADD, 13.))
+        .child(steer_i18n::t("project-new-footer"))
 }
 
 /// The bottom Customizations block.
