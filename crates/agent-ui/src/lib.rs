@@ -28,6 +28,7 @@ pub mod multiplexer;
 pub mod preview_host;
 pub mod project_menu;
 pub mod project_registry;
+pub mod projects;
 /// The registry's working faces are crate-internal; only the test-support
 /// diagnostics are externally visible (the integration regressions read it).
 pub mod resource_registry;
