@@ -1490,6 +1490,7 @@ fn collect_new_provider_operation(
         apikey_source,
         models: ProviderModels::Inline(BTreeMap::new()),
         endpoints,
+        headers: BTreeMap::new(),
         env: BTreeMap::new(),
     };
 
@@ -2850,6 +2851,7 @@ mod tests {
                 apikey_source: Some("literal:test".into()),
                 models: ProviderModels::Inline(BTreeMap::new()),
                 endpoints: BTreeMap::new(),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             }],
             agents: vec![
@@ -2939,6 +2941,7 @@ mod tests {
                         ProviderEndpointSpec::Url("https://example.com/v1".into()),
                     ),
                 ]),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             }],
             agents: default_agent_configs(),
@@ -3616,6 +3619,7 @@ agents:
                     "responses".into(),
                     ProviderEndpointSpec::Url("https://example.com".into()),
                 )]),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             }],
             agents: default_agent_configs(),
@@ -3927,6 +3931,7 @@ agents:
                 "anthropic".into(),
                 ProviderEndpointSpec::Url("https://example.com".into()),
             )]),
+            headers: BTreeMap::new(),
             env: provider_env,
         };
         let config = CxConfig {
@@ -3956,6 +3961,7 @@ agents:
             apikey_source: Some("literal:old".into()),
             models: ProviderModels::Inline(BTreeMap::new()),
             endpoints: BTreeMap::new(),
+            headers: BTreeMap::new(),
             env: BTreeMap::new(),
         }];
         let incoming = vec![ProviderConfig {
@@ -3963,6 +3969,7 @@ agents:
             apikey_source: Some("literal:new".into()),
             models: ProviderModels::Inline(BTreeMap::new()),
             endpoints: BTreeMap::new(),
+            headers: BTreeMap::new(),
             env: BTreeMap::new(),
         }];
         let merged = merge_providers(&existing, &incoming);
@@ -3977,6 +3984,7 @@ agents:
             apikey_source: None,
             models: ProviderModels::Inline(BTreeMap::new()),
             endpoints: BTreeMap::new(),
+            headers: BTreeMap::new(),
             env: BTreeMap::new(),
         }];
         let incoming = vec![ProviderConfig {
@@ -3984,6 +3992,7 @@ agents:
             apikey_source: None,
             models: ProviderModels::Inline(BTreeMap::new()),
             endpoints: BTreeMap::new(),
+            headers: BTreeMap::new(),
             env: BTreeMap::new(),
         }];
         let merged = merge_providers(&existing, &incoming);
@@ -3998,6 +4007,7 @@ agents:
                 apikey_source: Some("literal:a".into()),
                 models: ProviderModels::Inline(BTreeMap::new()),
                 endpoints: BTreeMap::new(),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             },
             ProviderConfig {
@@ -4005,6 +4015,7 @@ agents:
                 apikey_source: Some("literal:old".into()),
                 models: ProviderModels::Inline(BTreeMap::new()),
                 endpoints: BTreeMap::new(),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             },
             ProviderConfig {
@@ -4012,6 +4023,7 @@ agents:
                 apikey_source: Some("literal:c".into()),
                 models: ProviderModels::Inline(BTreeMap::new()),
                 endpoints: BTreeMap::new(),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             },
         ];
@@ -4021,6 +4033,7 @@ agents:
                 apikey_source: Some("literal:new".into()),
                 models: ProviderModels::Inline(BTreeMap::new()),
                 endpoints: BTreeMap::new(),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             },
             ProviderConfig {
@@ -4028,6 +4041,7 @@ agents:
                 apikey_source: Some("literal:d".into()),
                 models: ProviderModels::Inline(BTreeMap::new()),
                 endpoints: BTreeMap::new(),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             },
         ];
@@ -4183,6 +4197,7 @@ agents:
                 "anthropic".into(),
                 ProviderEndpointSpec::Url("https://example.com/anthropic".into()),
             )]),
+            headers: BTreeMap::new(),
             env: BTreeMap::new(),
         };
 
@@ -4288,6 +4303,7 @@ agents:
                     "anthropic".into(),
                     ProviderEndpointSpec::Url("https://example.com/anthropic".into()),
                 )]),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             }],
             agents: default_agent_configs(),

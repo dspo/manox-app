@@ -149,6 +149,9 @@ struct ProviderForm {
     apikey_kind: ApiKeySourceKind,
     apikey_value: Entity<InputState>,
     endpoints: Vec<EndpointForm>,
+    /// Preserved verbatim from the YAML: the form has no editor for
+    /// provider-level `headers:` yet, so a save must never strip them.
+    headers: BTreeMap<String, String>,
     env: Vec<KvForm>,
     /// `models:` is a remote URL string instead of inline definitions.
     remote_models: bool,
@@ -166,6 +169,9 @@ struct EndpointForm {
     agents: Vec<String>,
     /// Empty = unset (null in YAML), else `api_key` / `bearer_token`.
     copilot_auth: SharedString,
+    /// Preserved verbatim from the YAML; rendered into the endpoint spec
+    /// on save. No editor yet.
+    headers: BTreeMap<String, String>,
 }
 
 struct KvForm {
@@ -356,6 +362,7 @@ impl ModelsPanelState {
                 apikey_source: None,
                 models: ProviderModels::Inline(BTreeMap::new()),
                 endpoints: BTreeMap::new(),
+                headers: BTreeMap::new(),
                 env: BTreeMap::new(),
             },
             window,
@@ -401,6 +408,7 @@ impl ModelsPanelState {
                 url: new_input(window, cx, "", Some(i18n::t("settings-models-ph-url"))),
                 agents: Vec::new(),
                 copilot_auth: SharedString::default(),
+                headers: BTreeMap::new(),
             });
         }
     }
@@ -522,13 +530,15 @@ impl ModelsPanelState {
                 } else {
                     None
                 };
-                let spec = if e.agents.is_empty() && copilot_auth.is_none() {
+                let spec = if e.agents.is_empty() && copilot_auth.is_none() && e.headers.is_empty()
+                {
                     ProviderEndpointSpec::Url(url)
                 } else {
                     ProviderEndpointSpec::Detailed(ProviderEndpointDetail {
                         url,
                         agents: e.agents.clone(),
                         copilot_auth,
+                        headers: e.headers.clone(),
                     })
                 };
                 endpoints.insert(wire, spec);
@@ -605,6 +615,7 @@ impl ModelsPanelState {
                 apikey_source,
                 models,
                 endpoints,
+                headers: p.headers.clone(),
                 env,
             });
         }
@@ -763,14 +774,15 @@ impl ProviderForm {
             .endpoints
             .into_iter()
             .map(|(wire_api, spec)| {
-                let (url, agents, copilot_auth) = match spec {
-                    ProviderEndpointSpec::Url(url) => (url, Vec::new(), None),
+                let (url, agents, copilot_auth, headers) = match spec {
+                    ProviderEndpointSpec::Url(url) => (url, Vec::new(), None, BTreeMap::new()),
                     // Nested allow-lists get the same legacy cleanup as the
                     // top-level `agents:` section.
                     ProviderEndpointSpec::Detailed(detail) => (
                         detail.url,
                         normalize_agent_ids(&detail.agents),
                         detail.copilot_auth,
+                        detail.headers,
                     ),
                 };
                 EndpointForm {
@@ -779,6 +791,7 @@ impl ProviderForm {
                     url: new_input(window, cx, &url, Some(i18n::t("settings-models-ph-url"))),
                     agents,
                     copilot_auth: SharedString::from(copilot_auth.unwrap_or_default()),
+                    headers,
                 }
             })
             .collect();
@@ -852,6 +865,7 @@ impl ProviderForm {
                 Some(SharedString::from(kind_placeholder(apikey_kind))),
             ),
             endpoints,
+            headers: config.headers,
             env,
             remote_models,
             remote_url,
