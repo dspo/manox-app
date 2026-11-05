@@ -452,6 +452,15 @@ impl Workspace {
         // container's return — the dead container's registry key must not
         // outlive it.
         crate::chrome_assembly::remove_right_pane(container_id);
+        // The membership prune rides the ONE teardown: an EXTERNAL
+        // container's death detaches it from its project (the record is gone
+        // for good — the process model has no revival to keep the fact
+        // for). Native ids keep their membership: the archive gesture is
+        // reversible (unarchive revives the whole tree into its group), so
+        // the grouping fact must survive the archive.
+        if ContainerId::is_external_id(container_id) {
+            crate::projects::remove_membership(container_id);
+        }
         // The live dock/pane half: outside the lease (see above).
         let dead = container_id.to_string();
         cx.defer(move |cx| crate::chrome_assembly::reclaim_container_panes(&dead, cx));

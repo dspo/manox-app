@@ -435,6 +435,16 @@ pub fn prune_memberships(container_ids: &[String]) {
     }
 }
 
+/// Copy a container's membership onto another (the fork seam: a fork is a
+/// prefix copy of its source, so its grouping follows the source's project,
+/// never the wire cwd). A source without a membership leaves the target
+/// loose.
+pub fn inherit_membership(from_container: &str, to_container: &str) {
+    if let Some(project_id) = membership_of(from_container) {
+        set_membership(to_container, &project_id);
+    }
+}
+
 fn set_membership_in(reg: &mut Registry, container_id: &str, project_id: &str) -> bool {
     if project(reg, project_id).is_none() {
         return false;
@@ -1110,6 +1120,22 @@ mod tests {
         assert_eq!(
             membership_of("session-1").as_deref(),
             Some(project.id.as_str())
+        );
+
+        // The fork seam's copy face: inheritance lands the source's
+        // project; a loose source leaves the target alone.
+        set_membership("session-2", &project.id);
+        inherit_membership("session-2", "fork-1");
+        assert_eq!(
+            membership_of("fork-1").as_deref(),
+            Some(project.id.as_str()),
+            "the fork carries its source's project"
+        );
+        inherit_membership("loose-source", "fork-2");
+        assert_eq!(
+            membership_of("fork-2"),
+            None,
+            "a loose source inherits nothing"
         );
 
         // The launcher memory: the create stamped the last-created record

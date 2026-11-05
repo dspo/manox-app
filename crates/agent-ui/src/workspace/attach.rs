@@ -866,8 +866,9 @@ impl Workspace {
     pub(crate) fn fork_session_at(&mut self, through_entry_id: &str, cx: &mut Context<Self>) {
         // The source is read exactly where the row's anchor was stamped
         // (`fork_source`): an entry id is only addressable within the session
-        // it was replayed from.
-        let Some(_source_session_id) = self.fork_source_session(cx) else {
+        // it was replayed from. The id is also the membership source — the
+        // fork's grouping follows its origin.
+        let Some(source_session_id) = self.fork_source_session(cx) else {
             tracing::warn!("fork: no session bound, ignoring");
             return;
         };
@@ -907,6 +908,10 @@ impl Workspace {
                 return;
             }
             tracing::info!(session_id = %chat_id, "fork landed");
+            // The fork is a prefix copy of its source: the grouping follows
+            // the origin's project (membership inheritance), never the wire
+            // cwd. A loose source leaves the child loose.
+            crate::projects::inherit_membership(&source_session_id, &chat_id);
             let _ = ws.update_in(cx, |this, window, cx| {
                 this.chat.update(cx, |chat, cx| {
                     chat.fork_in_flight = false;
